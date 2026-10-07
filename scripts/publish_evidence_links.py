@@ -332,18 +332,41 @@ def verified_preparation_cancelled_tasks(bundle: dict, agent_id: str) -> set[str
         preparation_receipts_match_sessions,
     )
     projected = evidence_bundle_for_agent(bundle, agent_id)
-    matches = [task for task in projected.get("tasks", []) if task.get("agent_id") == agent_id
-               or agent_id in ((task.get("logs") or {}).get("tree") or {})]
+    matches = []
+    for task in projected.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        task_logs = task.get("logs")
+        task_tree = task_logs.get("tree") if isinstance(task_logs, dict) else None
+        if task.get("agent_id") == agent_id or (
+            isinstance(task_tree, dict) and agent_id in task_tree
+        ):
+            matches.append(task)
     if len(matches) != 1:
         return set()
-    logs = matches[0].get("logs") or {}
+    invalid_receipt = "invalid exact pre-action browser cancellation receipt"
+    logs = matches[0].get("logs")
+    if logs is None:
+        return set()
+    if not isinstance(logs, dict):
+        raise SystemExit(invalid_receipt)
     capture = logs.get("browser_preparation_cancellation_receipt")
     if capture is None:
         return set()
-    cleanup = logs.get("cloud_cleanup_evidence") or {}
-    provider = logs.get("cloud_provider_cleanup") or {}
-    tree = logs.get("tree") or {}
-    transcript = tree.get(agent_id, {}).get("messages") if agent_id in tree else logs.get("messages")
+    cleanup = logs.get("cloud_cleanup_evidence", {})
+    provider = logs.get("cloud_provider_cleanup", {})
+    tree = logs.get("tree", {})
+    if not all(isinstance(value, dict) for value in (cleanup, provider, tree)):
+        raise SystemExit(invalid_receipt)
+    if agent_id in tree:
+        node = tree[agent_id]
+        if not isinstance(node, dict):
+            raise SystemExit(invalid_receipt)
+        transcript = node.get("messages")
+    else:
+        transcript = logs.get("messages")
+    if not isinstance(transcript, list):
+        raise SystemExit(invalid_receipt)
     expected = preparation_cancelled_task_receipts(transcript, agent_id)
     receipts = capture.get("receipts") if isinstance(capture, dict) else None
     task_map = capture.get("task_ids_by_agent") if isinstance(capture, dict) else None
@@ -365,23 +388,33 @@ def verified_preparation_cancelled_tasks(bundle: dict, agent_id: str) -> set[str
         )
     )
     for phase in ("after", "final"):
-        snapshot = cleanup.get(phase) or {}
+        snapshot = cleanup.get(phase, {})
+        if not isinstance(snapshot, dict):
+            raise SystemExit(invalid_receipt)
+        snapshot_ids = snapshot.get("tree_agent_ids", [])
+        if not isinstance(snapshot_ids, list) or not all(
+            isinstance(value, str) for value in snapshot_ids
+        ):
+            raise SystemExit(invalid_receipt)
         valid = valid and snapshot.get("root_exists") is True and snapshot.get("root_deleted") is True and (
-            sorted(snapshot.get("tree_agent_ids") or []) == sorted(tree_ids or [])
+            sorted(snapshot_ids) == sorted(tree_ids or [])
             and preparation_receipts_match_sessions(expected, snapshot)
         )
-    native = provider.get("provider_receipts") or []
+    native = provider.get("provider_receipts", [])
+    if not isinstance(native, list):
+        raise SystemExit(invalid_receipt)
     closed_handles = {
         (row["provider"], row["session_id"])
         for row in native
         if isinstance(row, dict)
         and isinstance(row.get("provider"), str) and isinstance(row.get("session_id"), str)
+        and type(row.get("status")) is int
         and row.get("status") in {200, 201, 204, 404}
     }
     for receipt in expected.values():
         valid = valid and (receipt["provider"], receipt["session_id"]) in closed_handles
     if not valid:
-        raise SystemExit("invalid exact pre-action browser cancellation receipt")
+        raise SystemExit(invalid_receipt)
     return set(expected)
 
 

@@ -486,6 +486,43 @@ for poison in ("native-close", "foreign-owner", "unknown-phase", "unidentified-a
     else:
         raise AssertionError(f"preparation cancellation accepted {poison}")
 
+# A missing root entry uses the original root transcript; a present malformed
+# entry must never borrow it. All nested cancellation containers fail explicitly.
+with_tree = copy.deepcopy(preparation_bundle)
+with_tree["tasks"][0]["logs"]["tree"] = {agent: {"messages": preparation_messages}}
+assert mod.verified_preparation_cancelled_tasks(with_tree, agent) == {"preparation-task"}
+without_root = copy.deepcopy(preparation_bundle)
+without_root["tasks"][0]["logs"]["tree"] = {"other-root": {"messages": []}}
+assert mod.verified_preparation_cancelled_tasks(without_root, agent) == {"preparation-task"}
+malformed_failures = []
+for boundary in ("tree", "tree-root", "cleanup", "provider", "after", "final", "tree-ids", "native-receipts"):
+    for malformed in ([], ["malformed"], "malformed", False, 1):
+        poisoned = copy.deepcopy(preparation_bundle)
+        plogs = poisoned["tasks"][0]["logs"]
+        if boundary == "tree":
+            plogs["tree"] = malformed
+        elif boundary == "tree-root":
+            plogs["tree"] = {agent: malformed}
+        elif boundary == "cleanup":
+            plogs["cloud_cleanup_evidence"] = malformed
+        elif boundary == "provider":
+            plogs["cloud_provider_cleanup"] = malformed
+        elif boundary in ("after", "final"):
+            plogs["cloud_cleanup_evidence"][boundary] = malformed
+        elif boundary == "tree-ids":
+            plogs["cloud_cleanup_evidence"]["final"]["tree_agent_ids"] = malformed
+        else:
+            plogs["cloud_provider_cleanup"]["provider_receipts"] = malformed
+        try:
+            mod.verified_preparation_cancelled_tasks(poisoned, agent)
+        except SystemExit as error:
+            assert str(error) == "invalid exact pre-action browser cancellation receipt"
+        except Exception as error:
+            malformed_failures.append((boundary, repr(malformed), type(error).__name__))
+        else:
+            malformed_failures.append((boundary, repr(malformed), "accepted malformed evidence"))
+assert not malformed_failures, malformed_failures
+
 for changed in ("before", "after", "final"):
     poisoned = copy.deepcopy(bundle)
     poisoned["tasks"][0]["logs"]["cloud_cleanup_evidence"][changed]["browser_sessions"] = [

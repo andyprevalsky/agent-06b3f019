@@ -145,6 +145,33 @@ assertions. This establishes source qualification; the original missing
 durable evidence and zero acceptance credit remain unchanged, and the case
 stays open pending a real unchanged live before/after outcome.
 
+### Publisher shape validation follow-up
+
+PR1440 review found that a malformed captured tree, present root node, cleanup
+snapshot, or provider receipt container could raise an incidental Python error;
+falsey malformed trees could also fall back to root messages. The existing
+publisher control now freezes 40 malformed shapes across eight boundaries,
+alongside valid present-root and absent-root transcript controls. Before the
+repair, 24 of those cases failed their explicit rejection assertion. The same
+command and test bytes pass after checking container types before access and
+permitting root-log fallback only when the requested node is absent. Exact tree,
+session, provider-close, and terminal assertions remain required.
+
+The unchanged command is
+`bash scripts/tests/publish_evidence_links_browser_validation.test.sh`.
+Immutable RED/GREEN logs and source/test hashes are retained privately under
+`.context/registry-checkpoint-deploy.private/review2-publisher-shape-repair.private/`.
+Independent review is pending; these checks make no provider calls and grant no
+credit to the original run. This case remains open.
+
+The local golden repositories support explicit shape checks, rather than a
+Rose-specific cancellation contract: Hermes `_read_json` in
+`gateway/lifecycle_ledger.py` accepts only dictionaries; Claude Code
+`src/utils/json.ts` checks `Array.isArray` before array edits; OpenClaw
+`src/config/validation-plugin-config.ts` checks records and arrays before nested
+access; Codex uses typed `serde_json::from_value` in its unified-exec controls.
+None is an exact analogue of Rose's task-scoped receipt or native-close proof.
+
 ## Human feedback
 
 The user permits ordinary terminal failure and early cancellation when honest
