@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import ssl
 import time
 import uuid
 from contextlib import aclosing
@@ -105,9 +106,11 @@ _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 _STALL_TOKEN_COOLDOWN_S = 10 * 60
 
-# Errors from claude_auth that mean "try the waterfall next" — as long as
+# Provider errors that mean "try the next route" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
+# TLS record alerts can escape httpx as raw SSLError while reading headers.
 _FALL_THROUGH_ERRORS = (
+    ssl.SSLError,
     RoseInvalidRequest,
     RoseStallError,
     RoseServerError,

@@ -13,6 +13,7 @@ Covers the units that aren't already exercised end-to-end via llm.blackbox.py:
 import asyncio
 import json
 import os
+import ssl
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -4663,6 +4664,102 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert meta.data.get("gpt_token_error") == "rate_limit"
 
 
+async def test_client_raw_tls_failure_before_headers_uses_funded_fallback():
+    """The captured raw TLS alert must fall through before any output is exposed."""
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    completed = (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"funded fallback"}\n\n'
+        'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":2,"total_tokens":4}}}\n\n'
+    )
+
+    def handler(request):
+        if request.url.host == "chatgpt.com":
+            seen["codex"] += 1
+            raise failure
+        if str(request.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(200, text=completed, headers={"Content-Type": "text/event-stream"})
+        if request.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            raise AssertionError("funded fallback must complete before the waterfall")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}):
+        chunks = await _drain(
+            RoseClient(openrouter_key="offline-fake").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "unchanged request"}],
+                gpt_auth=gpt_auth_from_token("offline-token", "offline-account"),
+                call_site="test-raw-tls-before-headers",
+                dump_context=False,
+            )
+        )
+    assert seen == {"codex": 1, "openai": 1, "openrouter": 0}, seen
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "funded fallback"
+    metadata = [chunk.data for chunk in chunks if chunk.kind == "metadata"]
+    assert len(metadata) == 1, metadata
+    assert metadata[0]["actual_model"].endswith("-openai")
+    assert metadata[0]["gpt_token_error"] == "server_error"
+
+
+async def test_client_raw_tls_failure_after_output_preserves_error_without_replay():
+    """A TLS alert after productive output must keep the same error and stop."""
+    from helpers import httpx_capture
+
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+    closed = []
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+            raise failure
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handler(request):
+        if request.url.host == "chatgpt.com":
+            seen["codex"] += 1
+            return httpx.Response(200, stream=InterruptedStream(), headers={"Content-Type": "text/event-stream"})
+        if str(request.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            raise AssertionError("productive output must not switch to the funded route")
+        if request.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            raise AssertionError("productive output must not switch to the waterfall")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    chunks = []
+    # The capture harness buffers response bodies. Use the real httpx streaming
+    # context over an offline transport to preserve the productive-output boundary.
+    with patch.object(httpx.AsyncClient, "__init__", httpx_capture._original_init or httpx.AsyncClient.__init__):
+        streaming_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
+    with patch.dict(
+        os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}
+    ), patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+        async with streaming_client:
+            try:
+                async for chunk in RoseClient(openrouter_key="offline-fake").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "unchanged request"}],
+                    gpt_auth=gpt_auth_from_token("offline-token", "offline-account"),
+                    call_site="test-raw-tls-after-output",
+                    dump_context=False,
+                ):
+                    chunks.append(chunk)
+            except ssl.SSLError as error:
+                assert error is failure
+            else:
+                raise AssertionError("the original TLS alert must reach the caller")
+    assert seen == {"codex": 1, "openai": 0, "openrouter": 0}, seen
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "partial"
+    assert closed == [True], closed
+
+
 async def test_client_codex_404_falls_through_to_waterfall():
     """Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
     fail the whole complete() call. It must raise RoseServerError (in
@@ -7999,6 +8096,12 @@ async def run_all_tests():
     await r.record_async(
         "codex_404_falls_through_to_waterfall",
         test_client_codex_404_falls_through_to_waterfall,
+    )
+    await r.record_async(
+        "raw_tls_before_headers_uses_funded_fallback", test_client_raw_tls_failure_before_headers_uses_funded_fallback
+    )
+    await r.record_async(
+        "raw_tls_after_output_does_not_replay", test_client_raw_tls_failure_after_output_preserves_error_without_replay
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall
