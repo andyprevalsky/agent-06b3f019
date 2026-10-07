@@ -467,8 +467,11 @@ expected text the UI never renders; capture that exact predicate before changing
 timeouts. The existing publisher browser-validation blackbox owns these cases.
 
 PR #1299's completed original acceptance required **ten consecutive slices
-of ten distinct daily/Polar benchmarks**. The new five width-fifty LIVE runs
-follow Eval Suite's Current width-fifty LIVE acceptance instructions. Each benchmark must execute meaningful
+of ten distinct daily/Polar benchmarks**. The current five consecutive width-fifty
+LIVE runs follow Eval Suite's Current width-fifty LIVE acceptance instructions:
+1,200 seconds per task and 3,600 seconds from the first uncached image invocation
+through original evidence and exact resource closure. The following 1,800-second
+deadline describes the completed width-ten campaign. Each benchmark must execute meaningful
 real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
 owned resources within one 1,800-second allocation-to-finish deadline. Normally
 expect more than three LLM calls when sensible; chat, early terminal results and
