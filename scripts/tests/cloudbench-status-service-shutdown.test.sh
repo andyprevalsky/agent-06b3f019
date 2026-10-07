@@ -52,8 +52,21 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
-import pytest
+try:
+    import pytest
+except ModuleNotFoundError:
+    # The offline controller image carries no pytest. The control uses it only
+    # to skip itself off root Linux, so stand in for that one call.
+    class Skipped(Exception):
+        pass
+
+    def skip(reason):
+        raise Skipped(reason)
+
+    skip.Exception = Skipped
+    pytest = types.SimpleNamespace(skip=skip)
 
 root = Path(sys.argv[1])
 source = root / 'agents/benchmarks/cloudbench_dependency_sync_test.py'
