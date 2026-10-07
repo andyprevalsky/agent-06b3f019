@@ -59,3 +59,31 @@ weaken selection, behavioral assertions or coverage requirements.
 Adding owning cases to a permanent suite requires updating its declared wrapper
 count. A green subprocess result and an obsolete count assertion describe a
 registration failure, not a failed runtime behavior.
+
+## October 6 recurrence: growing selection and diagnostic cardinality
+
+The final `9d617bc3` covered benchmark aggregate failed in 196.466 seconds.
+Its unchanged dependency selector returned zero, then the wrapper rejected it
+at the retained `"48 passed"` assertion after new owning cases enlarged the
+selection. The other failure was a fixture-discovery mismatch documented in
+the October 1 merged benchmark identity case. The four paid Blue Bottle judges
+and unchanged passing cases remain valid component evidence; the original
+aggregate remains failed.
+
+The same two registered families, selected through the actual `run_all_tests`
+and `BlackboxResult` path under coverage, reproduced both failures in 42.213
+seconds. After the narrow registration repairs, the identical selector passed
+both families in 43.372 seconds. The dependency subprocess still uses the same
+`-k` expression and zero-exit assertion, and all selected behavioral assertions
+are unchanged. Its observed count is printed as diagnostic output instead of
+being a second acceptance condition. Pytest's no-collection exit remains a
+failure. This removes the recurring need to update a count whenever the owning
+suite grows.
+
+The private selector executes no paid judge and records original native births
+and terminal absence. Final acceptance composes the original failed aggregate's
+unchanged passing cases with these corrected covered families and the normal
+coverage report at the unchanged 80% threshold. It does not claim an exact-head
+whole-domain cache pass or replace the original failed record. Archive searches
+were `missing required positional arguments tmp_path monkeypatch blackbox` and
+`pytest parameterized fixtures native benchmark runner stale cardinality`.

@@ -104,3 +104,28 @@ It adds no new stage or subprocess and preserves the group's 60-second guard.
 Private evidence is under
 `.context/acceptance/proof118-task-identity-rca/`; the original failed affected
 aggregate remains failed, and subsequent coverage completion is separate.
+
+## October 6 recurrence: pytest fixture discovery in the benchmark registry
+
+The final `9d617bc3` covered benchmark registry discovered
+`test_evaluated_wrapper_completion_publishes_once_before_owner_release` but
+called it with no arguments. Its required `tmp_path`, `monkeypatch` and six
+parameterized `path` variants therefore never reached their assertions. The
+same owning variants already passed the normal compact pytest route. This is a
+test-discovery boundary mismatch, not a failed publication or cleanup behavior.
+
+The unchanged actual registry reproduced this TypeError alongside the stale
+dependency count failure in 42.213 seconds. Discovery now detects required
+parameters and delegates those cases to pytest through the existing owned
+benchmark command helper. Pytest supplies fixtures and runs all six original
+variants; the helper retains native process-group drain and the existing owning
+domain guard. Parameterless functions and the existing asynchronous route keep
+their original execution paths. The owning test function, its parameters and
+assertions are byte-identical.
+
+The same two covered registered families passed in 43.372 seconds; all six
+callback variants ran through normal pytest and their original native owner
+was absent afterward. The original whole-domain failure remains archived and
+unchanged paid judges are retained separately. No new stage, runtime timeout,
+model call or publication behavior is introduced. The final source-bound
+coverage composition is recorded separately from this causal pair.
