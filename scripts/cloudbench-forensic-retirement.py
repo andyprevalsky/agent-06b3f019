@@ -991,6 +991,60 @@ def object_file_from_bytes(data: bytes):
     return json.loads(data)
 
 
+def verify_normal_primary_capture(
+    run: Path, out: Path, row: dict, original: dict, audit: Path,
+    provenance: dict, mode: str, worker_ids: set[str], contracts: tuple[dict, dict],
+) -> str:
+    """Retain normal retirement history only with its original complete capture.
+
+    The status producer's stopped-stack manifest and the ordinary result/source
+    validator remain authoritative. This never repairs an absent ACK or gives a
+    failed cohort benchmark credit.
+    """
+    runtime, result = contracts
+    assert out.parent == run
+    machine, token = row["machine_id"], row["run_token"]
+    clone = original["clone_name"]
+    assert original["version"] == "1" and original["source"] == "fresh-clone"
+    assert re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", clone)
+    assert re.fullmatch(r"[0-9a-f]+", original["source_machine_id"])
+    assert fields(audit / "fresh" / clone) == original
+    for directory in (audit / "expected-fresh", audit / "by-machine-id"):
+        assert directory.is_dir() and directory.resolve(strict=True) == directory
+    assert fields(audit / "expected-fresh" / clone) == {
+        "clone_name": clone, "source_machine_id": original["source_machine_id"]}
+    assert regular_bytes(audit / "by-machine-id" / machine, 256).decode().strip() == clone
+    assert regular_bytes(out / ".cid", 256).decode().split() == ["clone", machine]
+    assert not (out / "runtime-evidence.pending").exists()
+    assert not (out / "runtime-evidence.pending").is_symlink()
+    workers = out / "worker-runtime-evidence"
+    captured_workers = set()
+    if workers.exists() or workers.is_symlink():
+        assert workers.is_dir() and workers.resolve(strict=True) == workers
+        for directory in workers.iterdir():
+            assert directory.is_dir() and directory.resolve(strict=True) == directory
+            captured_workers.add(directory.name)
+    # The existing worker verifier below still checks each capture and native
+    # disposition. No unindexed worker may disappear behind a retired primary.
+    assert captured_workers == worker_ids
+    capture = out / "remote-logs/runtime-evidence"
+    manifest_bytes = regular_bytes(capture / "manifest.json", 1048576)
+    manifest = json.loads(manifest_bytes)
+    assert manifest == runtime["runtime_evidence_context_manifest"](capture, token, machine)
+    info = {"bytes": len(manifest_bytes), "sha256": hashlib.sha256(manifest_bytes).hexdigest()}
+    assert row["files"]["normal-primary/manifest.json"] == info
+    for name, capture_info in manifest["files"].items():
+        assert row["files"]["repo/.context/cloudbench/" + name] == capture_info
+    canonical = regular_bytes(out / "cloudbench-run.json", 64 * 1024 * 1024)
+    assert canonical == regular_bytes(capture / "run.json", 64 * 1024 * 1024)
+    document = json.loads(canonical)
+    assert not result["validate_run_document"](
+        document, [row["task"]], expected_execution_provenance=provenance,
+        expected_world_model_mode=mode)
+    assert document["tasks"][0]["benchmark_status"] in ("PASSED", "FAILED")
+    return info["sha256"]
+
+
 def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
            machines_path: Path, volumes_path: Path, *,
            archive_only: bool = False) -> dict[str, object]:
@@ -1043,7 +1097,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     assert clone_dir.is_dir() and not clone_dir.is_symlink()
     fresh = [fields(path) for path in fresh_dir.iterdir()]
     clones = [fields(path) for path in clone_dir.iterdir()]
-    assert len(fresh) >= len(clones) >= len(rows)
+    assert len(fresh) >= max(len(clones), len(rows))
     allocated = [row for row in fresh if row.get("volume_id")]
     assert len({row["volume_id"] for row in allocated}) == len(allocated)
     by_machine = {row["machine_id"]: row for row in fresh if row.get("machine_id")}
@@ -1086,7 +1140,32 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         unadmitted.append(volume)
     assert len(set(unadmitted)) == len(unadmitted)
     retired_workers = [row for row in normal_workers.values() if row["disposition"] != "owned"]
-    assert len(fresh) == len(clones) + len(unallocated) + len(retired_workers)
+    retired_primaries = {
+        machine: original for machine, original in by_machine.items()
+        if machine in primary_ids and original["disposition"] != "owned"}
+    assert len(fresh) == len(clones) + len(unallocated) + len(retired_workers) + len(retired_primaries)
+    native_machines = object_file(machines_path, 128 * 1024 * 1024)
+    native_volumes = object_file(volumes_path, 128 * 1024 * 1024)
+    assert isinstance(native_machines, list) and isinstance(native_volumes, list)
+    by_native_machine = {row["id"]: row for row in native_machines}
+    by_native_volume = {row["id"]: row for row in native_volumes}
+    assert len(by_native_machine) == len(native_machines) and len(by_native_volume) == len(native_volumes)
+    terminal_primary_volumes = set()
+    primary_hashes = []
+    primary_workers = {machine: set() for machine in retired_primaries}
+    for machine, original in by_machine.items():
+        if original.get("source_machine_id") in primary_workers:
+            primary_workers[original["source_machine_id"]].add(machine)
+    contracts = None
+    if retired_primaries:
+        contracts = (runpy.run_path(str(Path(__file__).with_name("cloudbench-status-server.py"))),
+                     runpy.run_path(str(Path(__file__).with_name("cloudbench_result.py"))))
+        provenance = object_file(run / "execution-provenance.json")
+        matrix = object_file(run / "execution-task-matrix.json")
+        assert not contracts[1]["_PROVENANCE_MODULE"].validate_task_matrix_binding(provenance, matrix)
+        assert matrix["tasks"] == [
+            {"name": task["name"], "world_model_mode": "simulate" if task["mode"] == "SIM" else "real"}
+            for task in tasks]
     expected_members: dict[str, dict] = {}
     expected_total = 0
     incomplete = 0
@@ -1103,9 +1182,19 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         original = by_machine[machine]
         assert original["fleet_owner_token"] == owner
         assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
-        assert original["volume_id"] == volume and original["disposition"] == "owned"
-        clone = by_clone[original["clone_name"]]
-        assert clone == {"name": original["clone_name"], "id": machine, "volume_id": volume}
+        assert original["volume_id"] == volume
+        if original["disposition"] == "owned":
+            assert by_clone[original["clone_name"]] == {
+                "name": original["clone_name"], "id": machine, "volume_id": volume}
+        else:
+            assert original["disposition"] in ("destroyed-verified-absent", "destroyed-provider-retained")
+            assert original["clone_name"] not in by_clone and machine not in by_native_machine
+            if volume in by_native_volume:
+                terminal = by_native_volume[volume]
+                assert original["disposition"] == "destroyed-provider-retained"
+                assert terminal["state"] in ("pending_destroy", "destroyed")
+                assert terminal.get("attached_machine_id") in (None, "")
+                terminal_primary_volumes.add(volume)
         out = run / name
         assert out.is_dir() and not out.is_symlink()
         assert regular_bytes(out / ".cid", 256).decode().split()[-1] == machine
@@ -1122,6 +1211,11 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             assert canonical == regular_bytes(
                 out / "remote-logs/runtime-evidence/run.json", 64 * 1024 * 1024)
             assert isinstance(json.loads(canonical), dict)
+        if machine in retired_primaries:
+            assert contracts is not None and row["services_status"] == "stopped"
+            primary_hashes.append(verify_normal_primary_capture(
+                run, out, row, original, audit, provenance,
+                matrix["tasks"][index]["world_model_mode"], primary_workers[machine], contracts))
         files = row["files"]
         missing = row["missing"]
         assert isinstance(files, dict) and isinstance(missing, list)
@@ -1360,7 +1454,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     active_volumes = {row["id"] for row in volumes}
     if not archive_only:
         assert not active_machines.intersection(by_machine)
-        assert not active_volumes.intersection(row["volume_id"] for row in allocated)
+        assert not active_volumes.intersection(row["volume_id"] for row in allocated) - terminal_primary_volumes
         assert not {row.get("name") for row in machines + volumes}.intersection(unallocated)
     return {"schema": ("cloudbench-forensic-archive-verified-v1" if archive_only
                        else "cloudbench-forensic-retirement-verified-v1"),
@@ -1369,6 +1463,10 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             "incomplete_tasks": incomplete, "unadmitted_clones": len(unadmitted),
             "unstarted_workers": len(unstarted_workers),
             "started_workers": len(started_workers),
+            **({"normal_primary_captures": len(retired_primaries),
+                "normal_primary_manifest_sha256": sorted(primary_hashes),
+                "execution_provenance_sha256": hashlib.sha256(regular_bytes(
+                    run / "execution-provenance.json", 1048576)).hexdigest()} if retired_primaries else {}),
             **({"normal_worker_captures": len(normal_workers),
                 "normal_worker_manifest_sha256": sorted(normal_worker_hashes)} if normal_workers else {}),
             "unallocated_attempts": len(unallocated),

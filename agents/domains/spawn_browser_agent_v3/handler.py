@@ -4305,6 +4305,7 @@ async def _emit_browser_task_terminal_for_fe(
     browser_url: Optional[str],
     title: str = "Browser Session Closed",
     message: str = "Browser session closed",
+    preparation_cancellation: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
 
@@ -4334,7 +4335,10 @@ async def _emit_browser_task_terminal_for_fe(
             action_type="task_complete",
             tool_call_id=tool_call_id or str(uuid_module.uuid4()),
             is_completion_message=True,
-            extra_metadata={"excludeFromModel": True},
+            extra_metadata={
+                "excludeFromModel": True,
+                **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
+            },
         )
 
 
@@ -4359,6 +4363,7 @@ def _schedule_browser_cleanup(
     playwright_driver_pid: Optional[int],
     tool_call_id: Optional[str] = None,
     emit_task_terminal: bool = True,
+    preparation_cancellation: Optional[Dict[str, Any]] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -4429,6 +4434,7 @@ def _schedule_browser_cleanup(
                     browser_url=browser_url,
                     title="Browser Session Closed",
                     message="Browser session closed after teardown",
+                    preparation_cancellation=preparation_cancellation,
                 )
             if dom_service:
                 try:
@@ -5978,6 +5984,48 @@ async def _publish_browser_session_metadata_message(
     raise RuntimeError("Backend did not acknowledge required browser session metadata after 3 attempts")
 
 
+class _BrowserSessionPreparationCancelled(asyncio.CancelledError):
+    def __init__(self, session_data: Optional[Dict[str, Any]]):
+        super().__init__()
+        self.session_data = session_data
+
+
+async def _init_browser_session_preserving_owner(
+    config: Any, user_id: str, agent_id: str, start_url: str, *, task_id: Optional[str]
+) -> Dict[str, Any]:
+    """Join the same bounded init request before cancellation releases its owner.
+
+    Cancellation can arrive after backend allocation and before its credential
+    preparation response. Keep that HTTP operation alive to recover the exact
+    returned handle; never replay an ambiguously completed session creation.
+    """
+    owned_init = asyncio.create_task(
+        init_browser_session(config, user_id, agent_id, start_url, task_id=task_id)
+    )
+    try:
+        return await asyncio.shield(owned_init)
+    except asyncio.CancelledError:
+        while not owned_init.done():
+            try:
+                await asyncio.shield(owned_init)
+            except asyncio.CancelledError:
+                if owned_init.cancelled():
+                    break
+            except Exception:
+                break
+        session_data = None
+        try:
+            session_data = owned_init.result()
+        except (asyncio.CancelledError, Exception) as init_error:
+            logger.warning(
+                "Cancelled browser preparation has no acknowledged session owner",
+                agent_id=agent_id,
+                task_id=task_id,
+                error_type=type(init_error).__name__,
+            )
+        raise _BrowserSessionPreparationCancelled(session_data) from None
+
+
 async def _spawn_browser_agent_activity_v3_real(
     user_id: str,
     agent_id: str,
@@ -6249,6 +6297,7 @@ async def _spawn_browser_agent_activity_v3_real(
     session_auth_options: Optional[Dict[str, Any]] = None
     session_credential_ref: Optional[Dict[str, Any]] = None
     browser_session_metadata: Dict[str, Any] = {}
+    preparation_cancellation: Optional[Dict[str, Any]] = None
 
     # Decouple the Temporal heartbeat from the browser event loop. A
     # bot-challenge can freeze CDP for 90-260s (agent 9ec05898), and concurrent
@@ -6498,7 +6547,7 @@ async def _spawn_browser_agent_activity_v3_real(
             _transient_init_attempts = 0
 
             while True:
-                session_data = await init_browser_session(
+                session_data = await _init_browser_session_preserving_owner(
                     config,
                     user_id,
                     agent_id,
@@ -10312,8 +10361,35 @@ Based on this feedback, I need to continue working on the task and address the i
             "best_effort_response": best_effort_response,
         }
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         logger.info("\U0001f534 Browser agent activity cancelled (paused)")
+
+        if isinstance(cancellation, _BrowserSessionPreparationCancelled):
+            prepared = cancellation.session_data
+            if (
+                isinstance(prepared, dict)
+                and isinstance(prepared.get("task_id"), str)
+                and (task_id is None or prepared["task_id"] == task_id)
+                and isinstance(prepared.get("session_id"), str)
+                and prepared["session_id"]
+            ):
+                task_id = prepared["task_id"]
+                session_id = prepared["session_id"]
+                browser_url = prepared.get("debug_url")
+                browser_session_metadata = prepared.get("browser_session_metadata") or {}
+                provider = browser_session_metadata.get("provider")
+                if provider in {"kernel", "steel", "browser-use"}:
+                    preparation_cancellation = {
+                        "version": 1,
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "tool_call_id": tool_call_id,
+                        "session_id": session_id,
+                        "provider": provider,
+                        "phase": "initial_session_preparation",
+                        "init_acknowledged": True,
+                        "task_actions_started": False,
+                    }
 
         if dom_service:
             with contextlib.suppress(Exception):
@@ -10474,6 +10550,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 await browser_download_persister.close()
         _schedule_browser_cleanup(
             agent_id=agent_id,
+            preparation_cancellation=preparation_cancellation,
             task_id=task_id,
             user_id=user_id,
             browser_url=browser_url,

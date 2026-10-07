@@ -51,6 +51,10 @@ the checkout unchanged before and after. A negative control without the
 mutation fails with "ValueError not raised", so the test still proves the
 check. No production code changed.
 
+`main` independently landed the same private-copy isolation together with
+`test_adjacent_provenance_inverse_preserves_shared_source`, which fails if the
+fixture writes the shared source. The merge into PR #1417 keeps that version.
+
 ## Human feedback
 
 None recorded.

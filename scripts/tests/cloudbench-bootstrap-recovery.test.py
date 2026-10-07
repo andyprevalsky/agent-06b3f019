@@ -552,29 +552,33 @@ class BootstrapRecoveryTest(unittest.TestCase):
         self.assertFalse((out / "guest-bootstrap.confirmed").exists())
 
     def test_adjacent_provenance_validator_must_match_the_bound_ref(self):
-        # Concurrent deploy gates read the checkout's validator; mutate a private copy.
-        private = self.base / "private-scripts"
-        write(
-            private / "cloudbench-prestack-recovery.py",
-            (ROOT / "cloudbench-prestack-recovery.py").read_bytes(),
+        isolated = self.base / "adjacent-validator"
+        isolated.mkdir()
+        owner = isolated / "cloudbench-prestack-recovery.py"
+        owner.write_bytes((ROOT / owner.name).read_bytes())
+        helper = isolated / "cloudbench_execution_provenance.py"
+        helper.write_bytes(
+            (ROOT / helper.name).read_bytes() + b"\n# mismatched local validator\n"
         )
-        write(
-            private / "cloudbench_execution_provenance.py",
-            (ROOT / "cloudbench_execution_provenance.py").read_bytes()
-            + b"\n# mismatched local validator\n",
-        )
-        private_spec = importlib.util.spec_from_file_location(
-            "bootstrap_recovery_private", private / "cloudbench-prestack-recovery.py"
-        )
-        assert private_spec and private_spec.loader
-        private_recovery = importlib.util.module_from_spec(private_spec)
-        private_spec.loader.exec_module(private_recovery)
+        spec = importlib.util.spec_from_file_location("isolated_recovery_inverse", owner)
+        assert spec and spec.loader
+        isolated_recovery = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(isolated_recovery)
         with self.assertRaisesRegex(ValueError, "local provenance validator differs"):
-            private_recovery.bound_recipe(
-                private_recovery.fields(self.registry / "meta"),
-                self.config,
-                self.provenance,
+            isolated_recovery.bound_recipe(
+                recovery.fields(self.registry / "meta"), self.config, self.provenance
             )
+
+    def test_adjacent_provenance_inverse_preserves_shared_source(self):
+        shared = (ROOT / "cloudbench_execution_provenance.py").resolve()
+        original_write = Path.write_bytes
+
+        def isolated_write(path, data):
+            self.assertNotEqual(path.resolve(), shared, "inverse fixture writes shared source")
+            return original_write(path, data)
+
+        with patch.object(Path, "write_bytes", isolated_write):
+            self.test_adjacent_provenance_validator_must_match_the_bound_ref()
 
     def test_absent_packed_provenance_document_is_explicit(self):
         mutant = copy.deepcopy(self.config)

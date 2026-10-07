@@ -40,6 +40,11 @@ Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
 
+Before an image-build-to-fleet measurement, complete CLAUDE.md's **Fresh clone
+setup (Andy’s Mac)** dependency reuse and actual backend seed-cache import check
+before recording the image clock. The image-only publisher needs no backend
+dependency check.
+
 An explicitly requested uncached image measurement uses
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
 The selected checkout supplies the Dockerfile and Fly config. Its receipt records
