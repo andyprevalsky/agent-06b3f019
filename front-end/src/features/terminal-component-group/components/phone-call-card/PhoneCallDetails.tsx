@@ -6,10 +6,24 @@ import { RecordingPlayer } from './RecordingPlayer';
  * the recording player, summary, extracted structured data, and transcript
  * (each conditionally based on what the call metadata contains).
  */
-export function PhoneCallDetails({ phoneCall }: { phoneCall: PhoneCallMetadata }) {
+export function PhoneCallDetails({
+  phoneCall,
+  agentId,
+}: {
+  phoneCall: PhoneCallMetadata;
+  agentId?: string | null;
+}) {
+  const canResolveRecording = Boolean(phoneCall.callId || phoneCall.recordingUrl);
+
   return (
     <div className="border-t p-3 space-y-3">
-      {phoneCall.recordingUrl && <RecordingPlayer recordingUrl={phoneCall.recordingUrl} />}
+      {canResolveRecording && (
+        <RecordingPlayer
+          agentId={agentId}
+          callId={phoneCall.callId}
+          recordingUrl={phoneCall.recordingUrl}
+        />
+      )}
 
       {phoneCall.summary && (
         <DetailSection label="Summary">

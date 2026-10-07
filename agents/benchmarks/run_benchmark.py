@@ -102,6 +102,7 @@ from benchmarks.phone_callee import (
     PhoneCalleeSession,
     callee_check_failures,
     missing_call_findings,
+    phone_recording_playback_failures,
     phone_search_text,
     resolve_callee_prompt,
 )
@@ -1888,8 +1889,11 @@ async def _evaluate_phone_call_task(
     task: BenchmarkTask,
     data: dict,
     callee: PhoneCalleeSession,
+    *,
+    base_url: str,
+    agent_id: str,
 ) -> tuple[bool, str | None]:
-    """Two-sided phone verification: agent-side findings + callee-side analysis."""
+    """Two-sided phone verification: agent-side findings + callee-side analysis + FE playback."""
     pinned_findings = _flatten_pinned_call_findings(task.pinned_facts)
     expected_findings = [*(task.expected_call_findings or []), *pinned_findings]
     missing = missing_call_findings(expected_findings, phone_search_text(data))
@@ -1906,6 +1910,14 @@ async def _evaluate_phone_call_task(
         failures = callee_check_failures(task.callee_checks, structured)
         if failures:
             return False, "callee-side checks failed: " + "; ".join(failures)
+    playback_failures = await phone_recording_playback_failures(
+        data,
+        base_url=base_url,
+        agent_id=agent_id,
+        headers=await _api_headers(),
+    )
+    if playback_failures:
+        return False, "FE phone recording playback failed: " + "; ".join(playback_failures)
     return True, None
 
 
@@ -13674,7 +13686,13 @@ async def _run_single_task_as_run_user(
                 passed = False
                 failure_reason = grep_reason
         if phone_callee is not None and passed:
-            phone_passed, phone_reason = await _evaluate_phone_call_task(task, data, phone_callee)
+            phone_passed, phone_reason = await _evaluate_phone_call_task(
+                task,
+                data,
+                phone_callee,
+                base_url=base_url,
+                agent_id=agent_id,
+            )
             if not phone_passed:
                 passed = False
                 failure_reason = phone_reason

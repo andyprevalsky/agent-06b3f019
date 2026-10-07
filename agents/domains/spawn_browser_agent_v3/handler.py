@@ -10662,9 +10662,22 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
     )
 
 
-async def _request_browser_write_approval_until_paused(workflow_instance: Any, **approval_kwargs):
+def _browser_resume_was_paused(workflow_instance: Any, pause_sequence: Optional[int] = None) -> bool:
+    return workflow_instance.is_paused or (
+        pause_sequence is not None
+        and getattr(workflow_instance, "_pause_signal_sequence", 0) != pause_sequence
+    )
+
+
+class _BrowserPaymentResumeAbandoned(Exception):
+    """An interrupted payment approval no longer authorizes another card mint."""
+
+
+async def _request_browser_write_approval_until_paused(
+    workflow_instance: Any, *, pause_sequence: int, **approval_kwargs
+):
     """End an exact deferred browser resume on PAUSE without inventing rejection."""
-    if workflow_instance.is_paused:
+    if _browser_resume_was_paused(workflow_instance, pause_sequence) and not approval_kwargs.get("resume_request"):
         return None
     from tools.request_user_approval import request_user_approval_direct
 
@@ -10672,16 +10685,18 @@ async def _request_browser_write_approval_until_paused(workflow_instance: Any, *
         request_user_approval_direct(workflow_instance, **approval_kwargs, close_on_cancel=True)
     )
     # cutover-class: primitive — joined companion of the handoff-aware approval wait
-    pause = asyncio.create_task(workflow.wait_condition(lambda: workflow_instance.is_paused))
+    pause = asyncio.create_task(
+        workflow.wait_condition(lambda: _browser_resume_was_paused(workflow_instance, pause_sequence))
+    )
     try:
         await asyncio.wait({approval, pause}, return_when=asyncio.FIRST_COMPLETED)
-        if workflow_instance.is_paused and not approval.done():
+        if _browser_resume_was_paused(workflow_instance, pause_sequence) and not approval.done():
             approval.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await approval
             return None
         response = await approval
-        return None if workflow_instance.is_paused else response
+        return None if _browser_resume_was_paused(workflow_instance, pause_sequence) else response
     finally:
         for owned in (approval, pause):
             if not owned.done():
@@ -10759,6 +10774,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         # (continue_as_new). Its chip is still open; resume from the parked
         # state instead of starting a new browser task.
         resume_hint = take_tool_resume(workflow_instance, tool_call_id)
+        auth_pause_sequence = (resume_hint or {}).get(
+            "auth_pause_signal_sequence", getattr(workflow_instance, "_pause_signal_sequence", 0)
+        )
 
         logger.info(
             "Browser agent starting (v3)",
@@ -10830,7 +10848,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     },
                 )
 
-            def park_browser_approval(phase: str) -> Callable[[Dict[str, str]], bool]:
+            def park_browser_approval(phase: str, pause_sequence: int) -> Callable[[Dict[str, str]], bool]:
                 # The approval branches only read the card refs from the prior
                 # resume state; the paused result carries everything else.
                 def park(approval: Dict[str, str]) -> bool:
@@ -10839,6 +10857,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         _payment_resume_fields(write_lock_resume_state),
                         parked_result=result,
                         approval=approval,
+                        approval_pause_signal_sequence=pause_sequence,
                     )
 
                 return park
@@ -10990,21 +11009,24 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     continue
 
                 if result and result.get("status") == "awaiting_write_approval":
+                    write_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
+                    if reentered_pause:
+                        write_pause_sequence = (resume_hint or {}).get(
+                            "approval_pause_signal_sequence", write_pause_sequence
+                        )
                     logger.info(
                         "Browser agent needs write lock approval",
                         approval_type=result.get("approval_type"),
                         url=result.get("current_url"),
                     )
 
-                    from tools.request_user_approval import (
-                        UserRejectedError,
-                        request_user_approval_direct,
-                    )
+                    from tools.request_user_approval import UserRejectedError
 
                     try:
                         approval_resume, parked_approval = parked_approval, None
                         approval_response = await _request_browser_write_approval_until_paused(
                             workflow_instance,
+                            pause_sequence=write_pause_sequence,
                             question=result["question"],
                             metadata={
                                 "toolApproval": True,
@@ -11013,7 +11035,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
-                            park=park_browser_approval("write_approval"),
+                            park=park_browser_approval("write_approval", write_pause_sequence),
                             resume_request=approval_resume,
                         )
                         if approval_response is None:
@@ -11097,7 +11119,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             },
                         )
-                        if workflow_instance.is_paused:
+                        if (
+                            workflow_instance.is_paused
+                            or getattr(workflow_instance, "_pause_signal_sequence", 0) != write_pause_sequence
+                        ):
                             yield _browser_abandoned_resume_event(
                                 result.get("task_id") or known_task_id,
                                 "Browser paused before resuming the approved action.",
@@ -11127,11 +11152,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_user_approval import (
-                        request_user_approval_direct,
-                        request_user_attention_direct,
-                    )
+                    from tools.request_user_approval import request_user_attention_direct
 
+                    payment_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
+                    if reentered_pause:
+                        payment_pause_sequence = (resume_hint or {}).get(
+                            "approval_pause_signal_sequence", payment_pause_sequence
+                        )
                     logger.info(
                         "Browser payment approval started",
                         agent_id=workflow_instance.agent_id,
@@ -11183,8 +11210,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # approval. Reuse still applies at mint; this only restores the
                     # approval UX / benchmark contract.
                     approval_resume, parked_approval = parked_approval, None
-                    approval_response = await request_user_approval_direct(
+                    approval_response = await _request_browser_write_approval_until_paused(
                         workflow_instance,
+                        pause_sequence=payment_pause_sequence,
                         question=build_payment_question(payment_payload),
                         metadata={
                             "toolApproval": True,
@@ -11197,9 +11225,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             "reusablePurchase": bool(lookup_result.get("reusable")),
                         },
-                        park=park_browser_approval("payment_approval"),
+                        park=park_browser_approval("payment_approval", payment_pause_sequence),
                         resume_request=approval_resume,
                     )
+                    if approval_response is None:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting payment approval.",
+                        )
+                        return
                     logger.info(
                         "Browser payment approval granted",
                         agent_id=workflow_instance.agent_id,
@@ -11217,6 +11251,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         if world_model_mode != "real":
                             activity_args.append(world_model_mode)
                         while True:
+                            if _browser_resume_was_paused(workflow_instance, payment_pause_sequence):
+                                raise _BrowserPaymentResumeAbandoned
                             minted_card = await workflow.execute_activity(
                                 "mint_purchase_card_activity",
                                 args=activity_args,
@@ -11661,6 +11697,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         },
                     )
+                    if _browser_resume_was_paused(workflow_instance, payment_pause_sequence):
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused before resuming the approved payment.",
+                        )
+                        return
 
                     continue
 
@@ -11715,6 +11757,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         return
 
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting authentication assistance.",
+                        )
+                        return
                     workflow_instance.is_paused = True
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
@@ -11724,6 +11772,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             lambda request_id=request_id: (
                                 request_id in getattr(workflow_instance, "_signal_responses", {})
                                 or not workflow_instance.is_paused
+                                or getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence
                             ),
                             workflow_instance,
                             workflow_mod=workflow,
@@ -11736,9 +11785,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "auth_assistance",
                             _payment_resume_fields(write_lock_resume_state),
                             parked_result=result,
+                            auth_pause_signal_sequence=auth_pause_sequence,
                         ):
                             raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
                         raise
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting authentication assistance.",
+                        )
+                        return
                     user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
@@ -11791,6 +11847,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         },
                     )
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused before resuming authentication assistance.",
+                        )
+                        return
 
                     continue
 
@@ -11870,6 +11932,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
+        except _BrowserPaymentResumeAbandoned:
+            yield _browser_abandoned_resume_event(
+                result.get("task_id") or known_task_id,
+                "Browser paused before resuming the approved payment.",
+            )
         except GenerationHandoffRequested as exc:
             if not exc.parked:
                 yield ToolEvent(

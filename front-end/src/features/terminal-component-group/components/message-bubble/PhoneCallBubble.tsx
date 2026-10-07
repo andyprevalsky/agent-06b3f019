@@ -1,7 +1,7 @@
 /**
  * call_phone_number tool → PhoneCallCard.
  */
-import type { Message } from '../../hooks';
+import { useAgentContext, type Message } from '../../hooks';
 import type { PhoneCallMetadata } from '../../types';
 import { PhoneCallCard } from '../PhoneCallCard';
 
@@ -11,6 +11,7 @@ interface PhoneCallBubbleProps {
 }
 
 export function PhoneCallBubble({ message, onTypingComplete }: PhoneCallBubbleProps) {
+  const { selectedAgentId } = useAgentContext();
   const toolStatus = ((message.metadata?.toolStatus as string | undefined) || 'IN_PROGRESS') as
     'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   const phoneCallMetadata = message.metadata?.phoneCall as PhoneCallMetadata | undefined;
@@ -35,6 +36,7 @@ export function PhoneCallBubble({ message, onTypingComplete }: PhoneCallBubblePr
       <PhoneCallCard
         phoneCall={phoneCall}
         toolStatus={toolStatus}
+        agentId={selectedAgentId}
         onTypingComplete={onTypingComplete}
       />
     </div>

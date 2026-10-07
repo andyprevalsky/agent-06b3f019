@@ -19,11 +19,13 @@ import {
 } from '../../providers/toolSideEffects';
 import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
 import {
+  agentIdForCallId,
   agentIdFromOperationKey,
   archiveVapiJson,
   archiveVapiPollResult,
   buildVapiPollExchange,
 } from './archive';
+import { rewriteEndedCallRecordingUrl } from './recordings';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
@@ -272,12 +274,13 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
 
   const result = (await response.json()) as Record<string, unknown>;
   await archiveVapiPollResult(callId, result, exchange);
+  const rewritten = rewriteEndedCallRecordingUrl(result, callId, await agentIdForCallId(callId));
   log.info('Vapi call poll response', {
     callId,
-    status: String(result.status),
-    duration: String(result.duration),
-    endedReason: String(result.endedReason),
-    fullResponse: logJson(result),
+    status: String(rewritten.status),
+    duration: String(rewritten.duration),
+    endedReason: String(rewritten.endedReason),
+    fullResponse: logJson(rewritten),
   });
-  return result;
+  return rewritten;
 }
