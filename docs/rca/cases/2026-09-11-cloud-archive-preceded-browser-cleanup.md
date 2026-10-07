@@ -1351,3 +1351,13 @@ They share identity-bound cancellation; Rose's existing approval service supplie
 the actual decision-preservation protocol used here. Independent root review and
 fresh exact-head review3 remain required. No model/provider calls, C9 mutation,
 production rollout, fresh whole-suite execution or LIVE50 acceptance is claimed.
+
+
+Independent root qualification on `18fa07250` read the complete production,
+permanent-test and archive diff, verified every original author RED/GREEN log
+hash and unchanged source/test bytes, and repeated five existing registered
+payment-mint/write/auth owning controls: PASS in 1.238 seconds. The private
+`root-payment-mint-boundary-independent-review.safe.json` receipt has SHA-256
+`68475694d94869a4a208e58022cd49cf07133f034842feabf750efb9700d43e7`.
+The author proof remains immutable. Fresh exact-head review3 and production
+rollout remain required; this source qualification gives no LIVE50 credit.
