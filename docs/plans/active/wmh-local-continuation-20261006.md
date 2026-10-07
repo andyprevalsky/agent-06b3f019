@@ -259,10 +259,31 @@ and binding took 241.62 seconds with a 38.74 GB peak footprint. The actual nativ
 service then missed the unchanged 180-second startup bound and its owned parent
 and child retired cleanly. A public-API-only ASCII JSONL republication passed 27 native checks and the complete
 owning WMH blackbox, preserving decoded records, vectors, raw source identities,
-model/prompt settings and the original immutable artifacts. The full conversion is
-running; a new ASCII source dataset is published but the model pointer remains
-on the original artifact until official validation and all 100 bindings pass.
-Full-scale startup improvement and live prediction conformance remain unproven.
+model/prompt settings and the original immutable artifacts. The full conversion passed official validation, exact ordered record/vector
+comparison and all 100 conformance bindings. The new serving artifact is
+`grounded-world-model-a41208d8c48f810b60d1`, manifest
+`ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b`.
+Conversion took 1,688.83 seconds (including original Unicode validation),
+with a 38.92 GB peak footprint. Cold service startup passed in 172.24 seconds
+under the unchanged 180-second bound; its health identity matches the bound
+100-case suite. The first live prediction conformance run at concurrency eight
+scored 0.84828 mean fidelity and 0.59140 content accuracy, above the unchanged
+0.70/0.25 floors, but failed the 100-success requirement with 99 successful
+calls. Case 83 encountered a raw TLS record-read error before response headers;
+it escaped the provider's pre-output fallback classifier and became HTTP 500.
+The owning real-HTTP-context test reproduces that error and passes after adding
+`ssl.SSLError` to the shared pre-output classifier. Its streaming inverse keeps
+the exact error after partial output without replay. Independent review approved
+this small fix; the underlying TLS record failure remains unexplained. Fresh
+cold startup passed in 161.72 seconds and the full 100-case rerun passed with
+zero prediction errors, mean fidelity 0.87569 and content accuracy 0.61843.
+Score variation between runs is not attributed causally to the TLS fix.
+Live same-world concurrency also passed using four unchanged archived actions:
+four overlapping provider calls, three stale-state rebases, four unique commits,
+and two exact duplicate receipts, with own-lineage exclusion and at most five
+unique retrieved traces. The proof's session retired cleanly. This does not
+qualify eight-way or 10k concurrent live execution. Benchmark, viewer and
+production acceptance remain unproven.
 Native launch settings now survive cloud boot, SSH and refresh, build/serve
 pools agree, and setup supports both GNU and macOS checksum tools; their owning
 red/green fixtures passed. Full cloud native runtime provisioning, authenticated
@@ -271,9 +292,13 @@ The local workspace-env suite also passed after its hermetic fixture resolved
 the host timeout executable before clearing PATH, preserving the 60-second bound.
 Preliminary backend coverage passed 186 blackbox domains and 255 unit files;
 frontend and agents coverage passed. The live credential and Amplitude gates
-passed, while chat-router failover remains red because the first response ends
-in an unused query before its required goal/mode. Its separate schema proposal
-is unapplied. Final frozen-source deploy gates remain required.
+passed. The unchanged chat-router failover gate subsequently passed in 7.555
+seconds on one Modal response with the exact original request. The historical
+Morph timeout remains evidence of output/provider variability, without proving
+a causal schema fix. Its separate schema proposal is unapplied. Test-only hooks
+now preserve actual run/transcript/HTTPS dump evidence before fixture cleanup.
+All seven owned processes and local fixture rows were removed; the isolated
+database remains. Final frozen-source deploy gates remain required.
 
 The 97 remote checksum exclusions remain an open corpus gap. A bounded audit
 verified their manifests and reproduced a current two-PUT ciphertext/metadata

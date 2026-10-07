@@ -11,9 +11,9 @@ import re
 from pathlib import Path
 import shutil
 import signal
-import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import uuid
 
@@ -30,6 +30,78 @@ assert len(set(package_runner_versions))==1, 'requires npm/npx from the same pac
 """
 
 
+def _private_json(path: Path, value: object) -> None:
+    with os.fdopen(
+        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w"
+    ) as handle:
+        json.dump(value, handle, indent=2)
+        handle.write("\n")
+
+
+def _cleanup_command(snapshot: Path, args: list[str], *, stdout=None):
+    """Retain exact lifecycle diagnostics without recording environment values."""
+    record = {"args": args}
+    try:
+        kwargs = (
+            {"capture_output": True, "text": True}
+            if stdout is None
+            else {"stdout": stdout, "stderr": subprocess.PIPE, "text": True}
+        )
+        result = subprocess.run(args, **kwargs)
+        record.update(
+            returncode=result.returncode, stdout=result.stdout, stderr=result.stderr
+        )
+        return result
+    except (OSError, subprocess.SubprocessError) as error:
+        record.update(error=type(error).__name__, detail=str(error))
+        raise
+    finally:
+        with os.fdopen(
+            os.open(
+                snapshot / "cleanup-commands.jsonl",
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            ),
+            "a",
+        ) as handle:
+            handle.write(json.dumps(record) + "\n")
+
+
+def _inventory_archive(snapshot: Path, archive_path: Path) -> None:
+    """Hash archived regular bytes; never extract paths or follow links."""
+    archive_digest = hashlib.sha256()
+    with archive_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            archive_digest.update(chunk)
+    rows = []
+    nonregular = 0
+    with tarfile.open(archive_path, mode="r|") as archive:
+        for member in archive:
+            if not member.isfile():
+                nonregular += 1
+                continue
+            digest = hashlib.sha256()
+            size = 0
+            with archive.extractfile(member) as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    size += len(chunk)
+                    digest.update(chunk)
+            if size != member.size:
+                raise RuntimeError("archived fixture member was incomplete")
+            rows.append(
+                {"name": member.name, "size": size, "sha256": digest.hexdigest()}
+            )
+    _private_json(
+        snapshot / "fixture-tmp.inventory.json",
+        {
+            "archive_sha256": archive_digest.hexdigest(),
+            "archive_bytes": archive_path.stat().st_size,
+            "regular_files": rows,
+            "nonregular_members": nonregular,
+        },
+    )
+
+
 def retire_owned_container(
     snapshot: Path, name: str, owner: str, image_id: str
 ) -> bool:
@@ -38,10 +110,9 @@ def retire_owned_container(
     if cidfile.is_file() and not re.fullmatch(r"[0-9a-f]{64}", identity):
         return False
     format_value = '{{.Id}}\n{{.Name}}\n{{index .Config.Labels "org.rose.controller-test-owner"}}\n{{.Image}}\n{{json .Mounts}}'
-    result = subprocess.run(
+    result = _cleanup_command(
+        snapshot,
         ["docker", "inspect", identity, "--format", format_value],
-        capture_output=True,
-        text=True,
     )
     if result.returncode:
         return result.returncode == 1 and any(
@@ -67,6 +138,11 @@ def retire_owned_container(
     expected = [
         ("scripts", "/repo/scripts", False),
         ("agents/benchmarks", "/repo/agents/benchmarks", False),
+        (
+            "agents/providers/rose/pools.py",
+            "/repo/agents/providers/rose/pools.py",
+            False,
+        ),
     ]
     if len(mounts) != len(expected) or not all(
         any(
@@ -82,50 +158,36 @@ def retire_owned_container(
     evidence_ok = False
     removed = False
     try:
-        stopped = subprocess.run(
+        stopped = _cleanup_command(
+            snapshot,
             ["docker", "stop", "--time", "30", fields[0]],
-            capture_output=True,
-            text=True,
         )
         if stopped.returncode:
             raise subprocess.CalledProcessError(stopped.returncode, stopped.args)
-        archive = snapshot / "fixture-tmp"
-        archive.mkdir(mode=0o700, exist_ok=True)
-        exported = subprocess.run(
-            ["docker", "cp", fields[0] + ":/tmp/.", str(archive)],
-            capture_output=True,
-            text=True,
-        )
+        # Docker's host extraction preserves guest directory modes before
+        # creating their children. Keep the exact stream instead, including
+        # restrictive files and links, without applying guest paths or modes.
+        archive_path = snapshot / "fixture-tmp.tar"
+        with os.fdopen(
+            os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+        ) as archive:
+            exported = _cleanup_command(
+                snapshot, ["docker", "cp", fields[0] + ":/tmp/.", "-"], stdout=archive
+            )
         if exported.returncode == 0:
-            # Fixture diagnostics stay private; never follow exported symlinks.
-            for directory, directories, files in os.walk(archive, followlinks=False):
-                Path(directory).chmod(0o700)
-                directories[:] = [
-                    item
-                    for item in directories
-                    if not (Path(directory) / item).is_symlink()
-                ]
-                for item in files:
-                    path = Path(directory) / item
-                    if stat.S_ISREG(path.lstat().st_mode):
-                        path.chmod(0o600)
+            _inventory_archive(snapshot, archive_path)
         evidence_ok = stopped.returncode == 0 and exported.returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, tarfile.TarError, subprocess.SubprocessError):
         evidence_ok = False
     finally:
         # A failed export must not leave this exact verified owner behind.
         try:
             removed = (
-                subprocess.run(
-                    ["docker", "rm", fields[0]], capture_output=True, text=True
-                ).returncode
-                == 0
+                _cleanup_command(snapshot, ["docker", "rm", fields[0]]).returncode == 0
             )
         except (OSError, subprocess.SubprocessError):
             removed = False
-    gone = subprocess.run(
-        ["docker", "inspect", fields[0]], capture_output=True, text=True
-    )
+    gone = _cleanup_command(snapshot, ["docker", "inspect", fields[0]])
     return (
         evidence_ok
         and removed
@@ -245,6 +307,10 @@ def main() -> int:
             "seed_cache_path",
         )
     ]
+    registry = "agents/providers/rose/pools.py"
+    if not (root / registry).is_file():
+        raise RuntimeError("authoritative Rose pool registry is missing")
+    files.append(registry)
     hashes = {}
     for name in files:
         source = root / name
@@ -269,6 +335,9 @@ def main() -> int:
     command = [
         "docker",
         "run",
+        # Match host process semantics: the fixture must be an ordinary PID,
+        # and detached descendants need a real subreaper after parent exit.
+        "--init",
         "--network",
         "none",
         "--cpus",
@@ -285,6 +354,8 @@ def main() -> int:
         f"{snapshot / 'scripts'}:/repo/scripts:ro",
         "-v",
         f"{snapshot / 'agents/benchmarks'}:/repo/agents/benchmarks:ro",
+        "-v",
+        f"{snapshot / registry}:/repo/{registry}:ro",
         "--env",
         "TMPDIR=/tmp",
         "--env",

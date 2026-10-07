@@ -6,10 +6,13 @@ import contextlib
 import io
 import os
 import json
+import hashlib
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -86,10 +89,13 @@ class ContainerOwnership(unittest.TestCase):
         foreign_mount=False,
         foreign_image=False,
         writable_mount=False,
+        foreign_registry_mount=False,
+        writable_registry_mount=False,
         extra_mount=False,
         cid=True,
         export_failure=False,
         export_exception=False,
+        invalid_archive=False,
         stop_failure=False,
     ):
         with tempfile.TemporaryDirectory() as temporary:
@@ -108,12 +114,21 @@ class ContainerOwnership(unittest.TestCase):
                 for relative, destination, writable in [
                     ("scripts", "/repo/scripts", False),
                     ("agents/benchmarks", "/repo/agents/benchmarks", False),
+                    (
+                        "agents/providers/rose/pools.py",
+                        "/repo/agents/providers/rose/pools.py",
+                        False,
+                    ),
                 ]
             ]
             if foreign_mount:
                 mounts[0]["Source"] = str(root / "foreign-source")
             if writable_mount:
                 mounts[0]["RW"] = True
+            if foreign_registry_mount:
+                mounts[2]["Source"] = str(root / "foreign-registry.py")
+            if writable_registry_mount:
+                mounts[2]["RW"] = True
             if extra_mount:
                 mounts.append(
                     {"Source": str(root / "extra"), "Destination": "/extra", "RW": True}
@@ -132,7 +147,29 @@ class ContainerOwnership(unittest.TestCase):
                     if export_exception:
                         raise OSError("controlled export exception")
                     if not export_failure:
-                        (root / "fixture-tmp" / "retained.log").write_text("private")
+                        if args[-1] == "-":
+                            if invalid_archive:
+                                _kwargs["stdout"].write(b"incomplete tar stream")
+                                return subprocess.CompletedProcess(args, 0, None, "")
+                            with tarfile.open(
+                                fileobj=_kwargs["stdout"], mode="w|"
+                            ) as archive:
+                                directory = tarfile.TarInfo("restrictive")
+                                directory.type = tarfile.DIRTYPE
+                                directory.mode = 0o500
+                                archive.addfile(directory)
+                                member = tarfile.TarInfo("restrictive/retained.log")
+                                member.size = len(b"private")
+                                member.mode = 0o400
+                                archive.addfile(member, io.BytesIO(b"private"))
+                                link = tarfile.TarInfo("external-link")
+                                link.type = tarfile.SYMTYPE
+                                link.linkname = "/etc/passwd"
+                                archive.addfile(link)
+                        else:
+                            (root / "fixture-tmp" / "retained.log").write_text(
+                                "private"
+                            )
                     return subprocess.CompletedProcess(
                         args, int(export_failure), "", "controlled export failure"
                     )
@@ -161,10 +198,35 @@ class ContainerOwnership(unittest.TestCase):
                     root, "owned-name", "owned-label", image
                 )
             if result:
-                self.assertEqual((root / "fixture-tmp").stat().st_mode & 0o777, 0o700)
+                self.assertEqual(root.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(
-                    (root / "fixture-tmp" / "retained.log").stat().st_mode & 0o777,
+                    (root / "fixture-tmp.tar").stat().st_mode & 0o777,
                     0o600,
+                )
+                inventory = json.loads(
+                    (root / "fixture-tmp.inventory.json").read_text()
+                )
+                self.assertEqual(
+                    inventory["regular_files"],
+                    [
+                        {
+                            "name": "restrictive/retained.log",
+                            "size": 7,
+                            "sha256": hashlib.sha256(b"private").hexdigest(),
+                        }
+                    ],
+                )
+                self.assertEqual(
+                    inventory["archive_sha256"],
+                    hashlib.sha256((root / "fixture-tmp.tar").read_bytes()).hexdigest(),
+                )
+                self.assertFalse((root / "restrictive").exists())
+                self.assertFalse((root / "external-link").exists())
+                self.assertEqual(
+                    (root / "cleanup-commands.jsonl").stat().st_mode & 0o777, 0o600
+                )
+                self.assertEqual(
+                    (root / "fixture-tmp.inventory.json").stat().st_mode & 0o777, 0o600
                 )
             return result, calls, identity
 
@@ -176,6 +238,7 @@ class ContainerOwnership(unittest.TestCase):
             [call[1] for call in calls], ["inspect", "stop", "cp", "rm", "inspect"]
         )
         self.assertEqual(calls[2][2], identity + ":/tmp/.")
+        self.assertEqual(calls[2][-1], "-")
         self.assertEqual(calls[3], ["docker", "rm", identity])
 
     def test_foreign_identity_or_nonsealed_mounts_are_never_mutated(self):
@@ -184,6 +247,8 @@ class ContainerOwnership(unittest.TestCase):
             {"foreign_mount": True},
             {"foreign_image": True},
             {"writable_mount": True},
+            {"foreign_registry_mount": True},
+            {"writable_registry_mount": True},
             {"extra_mount": True},
         ):
             with self.subTest(settings=settings):
@@ -192,7 +257,11 @@ class ContainerOwnership(unittest.TestCase):
                 self.assertFalse(any(call[1] in ("stop", "cp", "rm") for call in calls))
 
     def test_export_failure_still_removes_exact_owner_and_fails_evidence(self):
-        for settings in ({"export_failure": True}, {"export_exception": True}):
+        for settings in (
+            {"export_failure": True},
+            {"export_exception": True},
+            {"invalid_archive": True},
+        ):
             with self.subTest(settings=settings):
                 result, calls, identity = self.check_retirement(**settings)
                 self.assertFalse(result)
@@ -211,6 +280,146 @@ class ContainerOwnership(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(calls[0][2], "owned-name")
 
+    @unittest.skipUnless(
+        sys.platform == "darwin"
+        or os.environ.get("CLOUDBENCH_TEST_LINUX_EXPORT_REAL") == "1",
+        "Mac exporter boundary; explicit flag enables the bounded Docker proof elsewhere",
+    )
+    def test_real_restrictive_linux_export_keeps_complete_bytes_and_retires_owner(self):
+        repo = Path(__file__).resolve().parents[2]
+        recipe_sha = hashlib.sha256(
+            (repo / "scripts/tests/cloudbench-controller-linux.Dockerfile").read_bytes()
+        ).hexdigest()
+        image = "rose-cloudbench-controller-tests:" + recipe_sha[:16]
+        image_id = subprocess.check_output(
+            ["docker", "image", "inspect", image, "--format", "{{.Id}}"], text=True
+        ).strip()
+        label = subprocess.check_output(
+            [
+                "docker",
+                "image",
+                "inspect",
+                image_id,
+                "--format",
+                '{{index .Config.Labels "org.rose.controller-recipe-sha256"}}',
+            ],
+            text=True,
+        ).strip()
+        self.assertEqual(label, recipe_sha)
+        parent = repo / ".context/cloudbench-controller-tests"
+        parent.mkdir(parents=True, exist_ok=True)
+        snapshot = Path(tempfile.mkdtemp(prefix="export-proof-", dir=parent))
+        owner = snapshot.name.replace("-", "")
+        name = "rose-controller-export-proof-" + owner
+        command = [
+            "docker",
+            "run",
+            "--detach",
+            "--network",
+            "none",
+            "--name",
+            name,
+            "--label",
+            "org.rose.controller-test-owner=" + owner,
+            "--cidfile",
+            str(snapshot / "container.cid"),
+        ]
+        for relative, destination in (
+            ("scripts", "/repo/scripts"),
+            ("agents/benchmarks", "/repo/agents/benchmarks"),
+            ("agents/providers/rose/pools.py", "/repo/agents/providers/rose/pools.py"),
+        ):
+            target = snapshot / relative
+            if target.suffix == ".py":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(repo / relative, target)
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+            command.extend(["-v", str(target) + ":" + destination + ":ro"])
+        command.extend(
+            [
+                "--entrypoint",
+                "/bin/bash",
+                image_id,
+                "-lc",
+                "mkdir -p /tmp/restrictive/nested; printf '%s' preserved > /tmp/restrictive/nested/result; chmod 0500 /tmp/restrictive; chmod 0400 /tmp/restrictive/nested/result; ln -s /etc/passwd /tmp/external-link; touch /tmp/export-ready; exec sleep infinity",
+            ]
+        )
+        native_run = subprocess.run
+        try:
+            identity = subprocess.check_output(command, text=True).strip()
+            subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    identity,
+                    "bash",
+                    "-lc",
+                    "for i in {1..100}; do test -f /tmp/export-ready && exit 0; sleep .05; done; exit 1",
+                ],
+                check=True,
+                timeout=10,
+            )
+            calls = []
+            native_run = subprocess.run
+
+            def capture(args, **kwargs):
+                result = native_run(args, **kwargs)
+                if args[0] == "docker":
+                    calls.append(
+                        {
+                            "args": args,
+                            "returncode": result.returncode,
+                            "stdout": result.stdout,
+                            "stderr": result.stderr,
+                        }
+                    )
+                    (snapshot / "actual-cleanup-calls.json").write_text(
+                        json.dumps(calls, indent=2) + "\n"
+                    )
+                return result
+
+            with patch.object(runner.subprocess, "run", side_effect=capture):
+                retired = runner.retire_owned_container(snapshot, name, owner, image_id)
+            print("Actual restrictive export proof: " + str(snapshot), flush=True)
+            self.assertTrue(retired, json.dumps(calls))
+            self.assertEqual(
+                (snapshot / "fixture-tmp.tar").stat().st_mode & 0o777, 0o600
+            )
+            inventory = json.loads(
+                (snapshot / "fixture-tmp.inventory.json").read_text()
+            )
+            member = next(
+                row
+                for row in inventory["regular_files"]
+                if row["name"].endswith("restrictive/nested/result")
+            )
+            self.assertEqual(member["sha256"], hashlib.sha256(b"preserved").hexdigest())
+            self.assertFalse(
+                any(
+                    row["name"].endswith("external-link")
+                    for row in inventory["regular_files"]
+                )
+            )
+            self.assertFalse((snapshot / "restrictive").exists())
+            gone = native_run(
+                ["docker", "inspect", identity], capture_output=True, text=True
+            )
+            self.assertEqual(gone.returncode, 1)
+            self.assertIn("no such", gone.stderr.lower())
+        finally:
+            cidfile = snapshot / "container.cid"
+            if cidfile.is_file():
+                exact = cidfile.read_text().strip()
+                exists = native_run(
+                    ["docker", "inspect", exact], capture_output=True, text=True
+                )
+                if exists.returncode == 0:
+                    self.assertTrue(
+                        runner.retire_owned_container(snapshot, name, owner, image_id),
+                        "exact test owner cleanup failed",
+                    )
+
     def check_dispatch(self, *, cancelled=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -219,6 +428,12 @@ class ContainerOwnership(unittest.TestCase):
             (tests / "cloudbench-controller-linux.Dockerfile").write_text(
                 "FROM fixture\n"
             )
+            actual_registry = (
+                Path(__file__).resolve().parents[2] / "agents/providers/rose/pools.py"
+            )
+            registry = root / "agents/providers/rose/pools.py"
+            registry.parent.mkdir(parents=True)
+            shutil.copy2(actual_registry, registry)
             calls = []
             tool_commands = []
             lifecycle = []
@@ -298,14 +513,28 @@ class ContainerOwnership(unittest.TestCase):
             self.assertNotIn("http://inherited.invalid", command)
             self.assertEqual(retirement.call_args.args[3], image)
             self.assertNotIn("--rm", command)
+            self.assertIn("--init", command)
             self.assertIn("TMPDIR=/tmp", command)
             mounts = [
                 command[index + 1]
                 for index, value in enumerate(command)
                 if value == "-v"
             ]
-            self.assertEqual(len(mounts), 2)
+            self.assertEqual(len(mounts), 3)
             self.assertTrue(all(value.endswith(":ro") for value in mounts))
+            registry_mount = next(
+                value
+                for value in mounts
+                if value.endswith(":/repo/agents/providers/rose/pools.py:ro")
+            )
+            staged_registry = Path(registry_mount.split(":", 1)[0])
+            self.assertEqual(staged_registry.read_bytes(), actual_registry.read_bytes())
+            snapshot = staged_registry.parents[3]
+            source_receipt = json.loads((snapshot / "source.json").read_text())
+            self.assertEqual(
+                source_receipt["source_file_sha256"]["agents/providers/rose/pools.py"],
+                hashlib.sha256(actual_registry.read_bytes()).hexdigest(),
+            )
             self.assertTrue(
                 any(args[1] == "run" and "--rm" in args for args in tool_commands)
             )

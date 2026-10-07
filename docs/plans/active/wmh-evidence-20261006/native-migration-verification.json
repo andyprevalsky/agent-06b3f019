@@ -13,6 +13,22 @@
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-jsonl-final-green.log",
       "sha256": "2c14b158c6954bed8f662db6fc5a2600cce1e6fa26e9cc0e072cef26bd1c2a44"
     },
+    ".context/native-ascii-publication-receipt.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-publication-receipt.json",
+      "sha256": "63e34dc706d759e6672288047bb03a08f0219328942b8f074ca87bc568482dff"
+    },
+    ".context/native-ascii-rag-publication-observation.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-rag-publication-observation.json",
+      "sha256": "314a2f05d7a28694be4c41ab70ec8881eb03e39e87675baee0c87e81f53d52fe"
+    },
+    ".context/native-ascii-resource-observations.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-resource-observations.json",
+      "sha256": "edffea591e418b2eb27fa678f896500af550cda3ad5598fea00da7f47d9edcf7"
+    },
+    ".context/native-full-ascii.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-ascii.log",
+      "sha256": "4877f7ed6815b454e4affcea411949111b9662298dd8732536f94372303d6d1b"
+    },
     ".context/native-full-bind.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-bind.log",
       "sha256": "674794a3dfab95bb32648e81729036494e3082aa1f828717e69bb14bf7933621"
@@ -23,7 +39,7 @@
     },
     ".context/native-full-startup.json": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-startup.json",
-      "sha256": "68b43e7577dd95d9e1f7d3e82158810196e09795bae99a9a991b116045061ad4"
+      "sha256": "b35eb6b7dda9679b5811c1c7c28b4d626288e8e58caa04c5835d7c529a243d1c"
     },
     ".context/native-launch-cloud-green.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-launch-cloud-green.log",
@@ -96,12 +112,30 @@
   },
   "engine_selection": "WMH_ENGINE=experiential",
   "full_native_load": {
+    "ascii_service_startup": {
+      "health": {
+        "engine": "experiential",
+        "protocol": "text-world-model-v3",
+        "status": "ok",
+        "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+        "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+        "world_model_name": "rose-archive"
+      },
+      "health_timeout_seconds": 180,
+      "model_name": "rose-archive",
+      "parent_birth": "Tue Oct  6 17:58:50 2026",
+      "parent_pid": 31548,
+      "ready_seconds": 161.71782770904247,
+      "started_at": 1791334730.941191,
+      "status": "ready",
+      "url": "http://127.0.0.1:56006"
+    },
     "bind_maximum_rss_bytes": 17551622144,
     "bind_peak_footprint_bytes": 38737181560,
     "bind_system_seconds": 39.17,
     "bind_user_seconds": 143.03,
     "bind_wall_seconds": 241.62,
-    "next": "Public-API-only equivalent ASCII JSONL republication; full-scale startup improvement unproven.",
+    "next": "Run 100 live cases with unchanged thresholds and the actual same-root parallel proof.",
     "service_startup": {
       "elapsed_seconds": 180.69639304094017,
       "exit_code": 143,
@@ -114,11 +148,114 @@
       "status": "startup-timeout",
       "url": "http://127.0.0.1:56006"
     },
-    "status": "startup_gate_failed"
+    "status": "ascii_startup_and_100_live_predictions_passed"
   },
   "fundraiser": "pending",
   "integrated_main": "fda5cc0e7b2108f058def26c0e1726093702f19d",
-  "live_conformance": "pending",
+  "live_conformance": {
+    "by_category": {
+      "auth_approval": {
+        "content_accuracy": 1.0,
+        "examples": 1,
+        "mean_score": 1.0
+      },
+      "browser": {
+        "content_accuracy": 0.7565104444135164,
+        "examples": 42,
+        "mean_score": 0.9513020888827034
+      },
+      "code": {
+        "content_accuracy": 0.7832099727308142,
+        "examples": 2,
+        "mean_score": 0.9566419945461628
+      },
+      "explore": {
+        "content_accuracy": 0.43907147224416876,
+        "examples": 7,
+        "mean_score": 0.8592428658774052
+      },
+      "for_each": {
+        "content_accuracy": 1.0,
+        "examples": 1,
+        "mean_score": 1.0
+      },
+      "grep": {
+        "content_accuracy": 0.2193546047775907,
+        "examples": 3,
+        "mean_score": 0.7772042542888515
+      },
+      "message": {
+        "content_accuracy": 0.5836883749239197,
+        "examples": 2,
+        "mean_score": 0.916737674984784
+      },
+      "payment": {
+        "content_accuracy": 0.9807692307692307,
+        "examples": 1,
+        "mean_score": 0.9961538461538462
+      },
+      "tool": {
+        "content_accuracy": 0.5042951181268989,
+        "examples": 40,
+        "mean_score": 0.7908590236253799
+      },
+      "vapi": {
+        "content_accuracy": 0.45132743362831856,
+        "examples": 1,
+        "mean_score": 0.8902654867256636
+      }
+    },
+    "cold_start_ready_seconds": 161.71782770904247,
+    "concurrency": 8,
+    "dimensions": {
+      "artifact_refs": 0.81,
+      "content_accuracy": 0.6184270087019259,
+      "error_behavior": 0.95,
+      "schema_validity": 1.0,
+      "state_transition_correctness": 1.0
+    },
+    "elapsed_seconds": 255.48,
+    "exact_model_identity_verified_by": "fresh health preflight and suite bindings; public result redactor masks SHA",
+    "examples": 100,
+    "mean_score": 0.8756854017403856,
+    "min_content_accuracy": 0.25,
+    "min_mean_score": 0.7,
+    "native_world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "native_world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "prediction_errors": 0,
+    "qualification": "Thresholds and call count passed; aggregate score variation is not a causal TLS-fix performance claim.",
+    "schema": "rose.wmh_prediction_conformance.v1",
+    "source_head": "efdabc408eeb50643fdcc76e6b591758347b102b",
+    "status": "passed",
+    "successful_calls": 100,
+    "world_model": "rose-archive"
+  },
+  "live_conformance_initial_failure": {
+    "concurrency": 8,
+    "content_accuracy": 0.5914038631692994,
+    "examples": 100,
+    "failure": {
+      "actual_exception": "SSLV3_ALERT_BAD_RECORD_MAC",
+      "case_index": 83,
+      "first_bad_boundary": "Raw ssl.SSLError while reading response headers bypasses pre-output provider fallback classification",
+      "native_http_status": 500,
+      "native_session": "726d3ad5d0a445309ab992a7cedc1426",
+      "provider_output_before_failure": false,
+      "root_agent_id": "e0cbfbcb-ea98-4a76-a398-40b8f8acb802",
+      "rose_request_id": "a9b752dfce18",
+      "underlying_tls_cause": "unresolved"
+    },
+    "manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "mean_score": 0.8482807726338605,
+    "min_content_accuracy": 0.25,
+    "min_mean_score": 0.7,
+    "model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "original_result_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.json",
+    "prediction_errors": 1,
+    "rerun": "pending after owning pre-output fallback fix and fresh cold startup",
+    "status": "failed",
+    "successful_calls": 99
+  },
   "logs": {
     "native-artifact-match-green.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-artifact-match-green.log",
@@ -148,9 +285,41 @@
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-evaluator-red.log",
       "sha256": "3e631e357e70f43ba129545ceee18c3db159fcc7d197fac06ba087ade421af6e"
     },
+    "native-first-live-conformance/native-full-serve.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-full-serve.log",
+      "sha256": "40d6e2995035b36e0491649da443f7cb6d478c0a49efed70ade76b6b4b0c1285"
+    },
+    "native-first-live-conformance/native-full-startup.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-full-startup.json",
+      "sha256": "8f6585f848f33ba9abf13a2d0cf9e4f1bc58fe1cb594a15000feaeedb961349a"
+    },
+    "native-first-live-conformance/native-live-conformance.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.json",
+      "sha256": "08d38e99e975668341748cb38685fa0c2a30e6b0cce24b49b74feb80c7790eb6"
+    },
+    "native-first-live-conformance/native-live-conformance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-first-live-conformance/native-live-conformance.log",
+      "sha256": "b262f16f41eaae8281939cf6049526d1da12af87372cb930908fd340e851a4a7"
+    },
     "native-focused-acceptance.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-focused-acceptance.log",
       "sha256": "9c6f346e014c03718e1d9497d23fb6c9201a77571bc78f3276b1ddac594910ff"
+    },
+    "native-live-conformance.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-conformance.json",
+      "sha256": "0892828d39e8b0c641e1b7a9ca5c67255d46823fa3a72d6221a3f827a3fbdecf"
+    },
+    "native-live-conformance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-conformance.log",
+      "sha256": "7ccd89c2e6d393d0fb0cf5358a420a609d8632cd7e46a44651f279538921e40c"
+    },
+    "native-live-parallel-proof.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-parallel-proof.json",
+      "sha256": "17757ee5be615428452440e04227bc4cdfa61f4ee3bee1a191fa4591ac3a58e2"
+    },
+    "native-live-parallel-proof.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-live-parallel-proof.log",
+      "sha256": "5c3d8a87e38b2fbe8a2ed19c4a4f1ed7b60b1f093a83bcc9936be85cb3411ab9"
     },
     "native-provider-cache-final.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-provider-cache-final.log",
@@ -163,6 +332,22 @@
     "native-snapshot-read-red.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-snapshot-read-red.log",
       "sha256": "e727a3ba5e28411015c89a6608b00f7c607641146545a630e13338872b3bf390"
+    },
+    "native-tls-owning-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-owning-green.log",
+      "sha256": "0789a2f6de877c32ec807047fbc234c40d2e0f573de55591d5e18d9cf066fd48"
+    },
+    "native-tls-owning-red-stream.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-owning-red-stream.log",
+      "sha256": "eeb4d0b33b54f9648918ffd363622b8ac578ace2cdbd282fd12f749b5eb04ac1"
+    },
+    "native-tls-rose-blackbox-full.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-rose-blackbox-full.log",
+      "sha256": "7aa34f6cadf13964f5e2e4b0bedbd77a509d5ca5fb4ecdff5eedca81fc73bb2d"
+    },
+    "native-tls-wmh-blackbox.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-tls-wmh-blackbox.log",
+      "sha256": "915ff80d7d9210da243afb437459c097567816dae5c6e4ef7e19795d1363c295"
     },
     "native-trace-green.log": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-trace-green.log",
@@ -180,15 +365,46 @@
   "merged_head": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
   "native_ascii_republication": {
     "child_pid": 41252,
+    "conformance_binding": {
+      "all_bound": true,
+      "examples": 100,
+      "manifest_matches": true,
+      "model_matches": true,
+      "requested_examples": 100,
+      "status": "passed"
+    },
     "embedding_calls": 0,
-    "new_model_pointer_promoted": false,
-    "original_model_pointer_preserved": true,
+    "model": {
+      "adapter_contract": "rose-native-canonical-export-v1",
+      "observations": 179150,
+      "pool": "rose-1-ultra",
+      "pool_sha256": "b784005066c6d0ac3355d8915619ecf4288f8a3ad9e8dd51b17d9cb1d3bf9af8",
+      "republished_from_world_model_id": "grounded-world-model-f66ba7ebaf70116fd423",
+      "storage_encoding": "ascii-jsonl-v1",
+      "trajectories": 12510,
+      "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
+      "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+      "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b"
+    },
+    "new_model_pointer_promoted": true,
+    "original_artifacts_preserved": true,
+    "original_model_pointer_backup_preserved": true,
+    "original_pointer_backup_path": ".context/native-unicode-original/model-pointer.json",
     "original_record_reimport": false,
     "owner_pid": 41233,
+    "published_rag_artifact": "trace-rag-71aa4160d086e717b2dd",
     "published_source_artifact": "rose-real-traces-11e55f652486f0bea4bd",
     "published_source_bytes": 3092573958,
     "published_source_sha256": "c01eada41595d286325c2e5eed7f296d61c0778dffd56f0ac98f3b8256c24d87",
-    "status": "running"
+    "qualification": "Equivalent immutable publication; conversion includes original Unicode validation. Fresh full-corpus cold startup and all100 live predictions passed; shared-world proof and fundraiser pending.",
+    "status": "passed",
+    "timing": {
+      "maximum_rss_bytes": 16347693056,
+      "peak_footprint_bytes": 38917015632,
+      "system_seconds": 167.72,
+      "user_seconds": 685.43,
+      "wall_seconds": 1688.83
+    }
   },
   "native_cache_identity": {
     "candidate_envelope_timestamp_ignored": true,
@@ -215,8 +431,44 @@
     "world_model_manifest_sha256": "12363c2cad83895433d07794faeeae0c7ef4bd4e567ae30e1167a08f97c1b143"
   },
   "parallel_boundary": {
+    "actual_full_corpus_proof": {
+      "committed_revisions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "exact_receipt_replays": 2,
+      "example_indices": [
+        14,
+        20,
+        26,
+        34
+      ],
+      "finished_at": 1791335298.800506,
+      "health": {
+        "engine": "experiential",
+        "protocol": "text-world-model-v3",
+        "status": "ok",
+        "world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+        "world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+        "world_model_name": "rose-archive"
+      },
+      "peak_provider_overlap": 4,
+      "rebased_actions": 3,
+      "schema": "rose.native_live_parallel_proof.v1",
+      "session_id": "ab83f6c40e8d4a70ae3a4127927778e8",
+      "session_retirement_status": 200,
+      "source_root": "308c7437-b205-45ca-aa47-0a9c6a5c5f0a",
+      "started_at": 1791335162.108886,
+      "status": "passed",
+      "step_deadline_seconds": 600,
+      "suite_sha256": "b26c9381950dd9708f92dacb940ab4d26c2e6a1b126881f742298268d701b379",
+      "unique_actions": 4
+    },
     "committed_effects": 8,
     "overlapping_calls": 8,
+    "qualification": "Four real archived operations against one served full-corpus world: provider overlap4, three stale-state rebases, four unique commits, two exact duplicate receipts, own lineage excluded, top5 unique traces; no eight-way or10k live claim.",
     "ten_thousand_agent_load_verified": false,
     "worst_case_predictions": 36
   },
@@ -225,7 +477,7 @@
   "scoped_artifact_reads": {
     "dataset": 1,
     "fresh_load_revalidates": true,
-    "full_corpus_startup_verified": false,
+    "full_corpus_startup_verified": true,
     "rag": 1,
     "snapshot_released": true,
     "world_model": 1
@@ -243,6 +495,16 @@
     "native_checks": 27,
     "provider_checks": 52,
     "wmh_blackbox_all_passed": true
+  },
+  "tls_fallback_fix": {
+    "behavior": "Raw TLS error before output uses existing next provider route; after output preserves exact original error without replay",
+    "deadlines_changed": false,
+    "freedom_changed": false,
+    "independent_review": "deploy_failover_diagnosis: approved minimal shared pre-output classification; no lower-layer same-token replay",
+    "owning_green": "native-tls-owning-green.log",
+    "owning_red": "native-tls-owning-red-stream.log",
+    "source": "agents/providers/rose/client.py",
+    "tls_settings_changed": false
   },
   "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
   "version": "0.7.158",
