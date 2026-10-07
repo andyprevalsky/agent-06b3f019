@@ -155,7 +155,7 @@ def verify_stopped_provider_archive(
     assert helper["validate_provider_receipt"](receipt, provider, stopped_sha)
 
 
-def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes]) -> None:
+def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes], *, config_preserved: bool = False) -> None:
     """Verify the original pre-service endpoint without inventing a runtime receipt."""
     token, machine, volume = (row[key] for key in ("run_token", "machine_id", "volume_id"))
     ack = f"cloudbench-driver-clean-{token}.ack"
@@ -179,7 +179,13 @@ def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes
     assert capture["proof_credit"] == 0
     assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
     assert receipt["owner"] == meta["fleet_owner_token"] and receipt["proof_credit"] == 0
-    assert receipt["capture_complete"] is True and receipt["restored_original_config"] is True
+    assert receipt["capture_complete"] is True
+    if config_preserved:
+        assert receipt["capture_mode"] == "authenticated-terminal-read"
+        assert receipt["original_config_unchanged"] is True
+        assert receipt["before_config_sha256"] == receipt["after_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+    else:
+        assert receipt["restored_original_config"] is True
     assert receipt["original_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
     for proof in (capture, receipt):
         assert proof["archive_bytes"] == len(raw)

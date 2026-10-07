@@ -691,6 +691,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
+       "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -785,6 +786,7 @@ SEALED_MACHINE_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sealed-
 [ -f "$SEALED_MACHINE_RETIREMENT_HELPER" ] \
     || SEALED_MACHINE_RETIREMENT_HELPER="$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py"
 RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
+STARTUP_FAILURE_ARCHIVE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-startup-failure-archive.py"
 # An exact owner created before this collector was snapshotted can still be
 # recovered with the committed controller helper. Its admission/run identity
 # and the guest's immutable manifest are verified again below.
@@ -6936,7 +6938,63 @@ if pool_dir is not None and pool_dir.exists():
         pool_ids.add(machine_id)
         volume_ids.add(volume_id)
 
+retired_sources: dict[str, str] = {}
+
+
+def retired_source(machine_id: str) -> str:
+    """Bind retained history to the original exact native terminal receipt."""
+    if machine_id in retired_sources:
+        return retired_sources[machine_id]
+    if (
+        audit is None
+        or any(not plain_directory(audit / name) for name in
+               ("fresh", "expected-fresh", "by-machine-id"))
+        or audit_meta.get("fleet_owner_token") != owner
+        or audit_meta.get("run_id") != run_id
+        or audit_meta.get("app") != expected_app
+        or not safe_machine.fullmatch(machine_id)
+    ):
+        raise ValueError("unbound retired stale-owner audit")
+    index = audit / "by-machine-id" / machine_id
+    if not regular_file(index) or index.stat().st_size > 65_536:
+        raise ValueError("missing exact retired stale-owner index")
+    names = index.read_text(encoding="utf-8").splitlines()
+    if len(names) != 1 or not safe_key.fullmatch(names[0]) or not names[0].startswith("cloudbench-"):
+        raise ValueError("noncanonical retired stale-owner index")
+    clone_name = names[0]
+    expected = fields(audit / "expected-fresh" / clone_name,
+                      allowed={"clone_name", "source_machine_id"})
+    allowed = {"version", "fleet_owner_token", "run_id", "app", "clone_name",
+               "source", "source_machine_id", "machine_id", "volume_id", "disposition"}
+    fresh = fields(audit / "fresh" / clone_name, allowed=allowed)
+    source_id = expected.get("source_machine_id", "")
+    volume_id = fresh.get("volume_id", "")
+    if (
+        set(expected) != {"clone_name", "source_machine_id"}
+        or expected["clone_name"] != clone_name
+        or not safe_machine.fullmatch(source_id)
+        or set(fresh) != allowed
+        or fresh["version"] != "1"
+        or fresh["fleet_owner_token"] != owner
+        or fresh["run_id"] != run_id
+        or fresh["app"] != expected_app
+        or fresh["clone_name"] != clone_name
+        or fresh["source"] != "fresh-clone"
+        or fresh["source_machine_id"] != source_id
+        or fresh["machine_id"] != machine_id
+        or not safe_volume.fullmatch(volume_id)
+        or volume_id in volume_ids
+        or fresh["disposition"] not in
+           {"destroyed-verified-absent", "destroyed-provider-retained"}
+    ):
+        raise ValueError("unproven retired stale-owner native identity")
+    volume_ids.add(volume_id)
+    retired_sources[machine_id] = source_id
+    return source_id
+
+
 output_by_machine: dict[str, tuple[str, Path, int]] = {}
+retired_outputs: dict[str, tuple[str, Path, int]] = {}
 for candidate in run_dir.iterdir():
     if not plain_directory(candidate):
         continue
@@ -6951,8 +7009,17 @@ for candidate in run_dir.iterdir():
     machine_id = cid_parts[1]
     if (cid_parts[0] == "pool") != (machine_id in pool_ids):
         raise ValueError("stale-owner machine kind does not match owner audit")
-    if machine_id not in machine_records or machine_id in output_by_machine:
+    if machine_id in output_by_machine or machine_id in retired_outputs:
         raise ValueError("stale-owner output does not map one-to-one to registry")
+    if machine_id not in machine_records:
+        source_id = retired_source(machine_id)
+        # A fresh worker's source is another recorded allocation. It cannot
+        # masquerade as an original primary output, even after both retired.
+        source_index = audit / "by-machine-id" / source_id
+        if (source_id in machine_records or source_index.exists() or source_index.is_symlink()):
+            raise ValueError("retired worker cannot become a stale-owner primary")
+        retired_outputs[machine_id] = (candidate.name, candidate, 0)
+        continue
     port_path = candidate / "status-proxy.port"
     if not regular_file(port_path):
         # A provider-rejected post-config start never reaches proxy attach.
@@ -7006,11 +7073,26 @@ for candidate in run_dir.iterdir():
             raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
 
+if retired_outputs:
+    root_sources = {retired_sources[machine_id] for machine_id in retired_outputs}
+    for machine_id, (clone_name, _) in machine_records.items():
+        if machine_id not in output_by_machine or machine_id in pool_ids:
+            continue
+        expected = fields(audit / "expected-fresh" / clone_name,
+                          allowed={"clone_name", "source_machine_id"})
+        if expected.get("clone_name") != clone_name or not safe_machine.fullmatch(expected.get("source_machine_id", "")):
+            raise ValueError("unbound stale-owner primary source intent")
+        root_sources.add(expected["source_machine_id"])
+    if len(root_sources) != 1:
+        raise ValueError("mismatched retired stale-owner primary sources")
+
+original_outputs = {**output_by_machine, **retired_outputs}
 output_machine_by_path = {
     output: machine_id
-    for machine_id, (_, output, _) in output_by_machine.items()
+    for machine_id, (_, output, _) in original_outputs.items()
 }
 worker_by_machine: dict[str, tuple[str, Path, int, str]] = {}
+retired_workers: set[str] = set()
 for candidate in run_dir.iterdir():
     if not plain_directory(candidate):
         continue
@@ -7023,15 +7105,22 @@ for candidate in run_dir.iterdir():
     payload = worker_ledger.read_text(encoding="utf-8")
     if len(payload.encode()) > 65_536:
         raise ValueError("oversized stale-owner worker mapping")
-    bench, output, preferred_port = output_by_machine[primary_id]
+    bench, output, preferred_port = original_outputs[primary_id]
     for machine_id in payload.splitlines():
         if (
             not safe_machine.fullmatch(machine_id)
-            or machine_id not in machine_records
-            or machine_id in output_by_machine
+            or machine_id in original_outputs
             or machine_id in worker_by_machine
+            or machine_id in retired_workers
         ):
             raise ValueError("ambiguous stale-owner worker mapping")
+        if machine_id not in machine_records:
+            if retired_source(machine_id) != primary_id:
+                raise ValueError("retired stale-owner worker has a foreign primary")
+            retired_workers.add(machine_id)
+            continue
+        if primary_id in retired_outputs:
+            raise ValueError("active stale-owner worker has a retired primary")
         worker_by_machine[machine_id] = (
             bench,
             output,
@@ -7461,7 +7550,7 @@ start_data_plane_proxy() {
 }
 
 claim_recovery_status_proxy_ports() {  # <output-file> <count> <preferred-start>
-    local output="$1" count="$2" preferred="$3"
+    local output="$1" count="$2" preferred="${3:-0}"
     local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
     python3 "$AUTOSCALER_PORT_LEASE_HELPER" claim-batch \
         --root "$root" --owner-pid "$$" \
@@ -8086,6 +8175,65 @@ PY
     [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
 }
 
+fleet_recovery_capture_startup_failure() {  # <registry> <output> <machine> <guest-token>
+    local registry="$1" output="$2" machine="$3" guest_token="$4"
+    local base attempt remote log archive config saved_archive saved_config result
+    base="$output/failed-startup-runtime-archive"
+    log="$output/failed-startup-runtime-archive.log"
+    [ -f "$STARTUP_FAILURE_ARCHIVE_HELPER" ] \
+        && python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" eligible --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" >> "$log" 2>&1 \
+        || return 1
+    [ ! -L "$base" ] && mkdir -p "$base" && chmod 700 "$base" || return 1
+    attempt="$(mktemp -d "$base/attempt.XXXXXX")" || return 1
+    config="$attempt/original-native-config.json"
+    if ! machine_config_exact_read "$machine" > "$config"; then return 1; fi
+    if [ -f "$base/verified.json" ] && [ ! -L "$base/verified.json" ]; then
+        result="$(python3 - "$base/verified.json" "$base" <<'PY'
+import json, sys
+from pathlib import Path
+base = Path(sys.argv[2])
+row = json.loads(Path(sys.argv[1]).read_text())
+for key in ('archive_path', 'config_path'):
+    path = Path(row[key])
+    assert path.resolve(strict=True) == path and path.is_relative_to(base)
+print(row['archive_path'], row['config_path'], sep='\t')
+PY
+)" || return 1
+        IFS=$'\t' read -r saved_archive saved_config <<< "$result"
+        cmp -s "$saved_config" "$config" || return 1
+        python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" verify --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" \
+            --archive "$saved_archive" --config "$saved_config" --config-after "$config" > "$attempt/verified.json" 2>> "$log" \
+            && cmp -s "$attempt/verified.json" "$base/verified.json"
+        return $?
+    fi
+    [ ! -e "$base/verified.json" ] && [ ! -L "$base/verified.json" ] || return 1
+    remote="/tmp/cloudbench-startup-archive-$guest_token-$$-$RANDOM"
+    archive="$attempt/originals.tar.gz"
+    if ! fly_with_timeout 30 ssh console -a "$APP" --machine "$machine" \
+            -C "mkdir -m 700 '$remote'" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp put -a "$APP" --machine "$machine" \
+            "$STARTUP_FAILURE_ARCHIVE_HELPER" "$remote/cloudbench-startup-failure-archive.py" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp put -a "$APP" --machine "$machine" \
+            "$GUEST_RECOVERY_HELPER" "$remote/cloudbench-guest-recovery.py" >> "$log" 2>&1 \
+        || ! fly_with_timeout 300 ssh console -a "$APP" --machine "$machine" \
+            -C "python3 -B '$remote/cloudbench-startup-failure-archive.py' capture --machine '$machine' --run-token '$guest_token' --archive '$remote/originals.tar.gz'" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$machine" \
+            "$remote/originals.tar.gz" "$archive" >> "$log" 2>&1 \
+        || ! machine_config_exact_read "$machine" > "$attempt/after-native-config.json" \
+        || ! cmp -s "$config" "$attempt/after-native-config.json" \
+        || ! python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" verify --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" \
+            --archive "$archive" --config "$config" --config-after "$attempt/after-native-config.json" \
+            --receipt "$base/verified.json" > "$attempt/verified.json" 2>> "$log"; then
+        return 1
+    fi
+    # Original pending ownership remains diagnostic evidence. This separate
+    # durable receipt can satisfy only failed-owner retention recovery.
+    echo "✅ rejected startup originals preserved for exact zero-credit cleanup"
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local _capture_details=""
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
@@ -8393,6 +8541,11 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             output="${recovery_outputs[$recovery_index]}"
             [ -f "$output/runtime-evidence.pending" ] || continue
             [ ! -e "$output/remote-logs/runtime-evidence" ] || continue
+            if [ ! -e "$output/post-config-start.accepted" ] \
+                && fleet_recovery_capture_startup_failure "$registry" "$output" \
+                    "${recovery_machine_ids[$recovery_index]}" "${recovery_guest_tokens[$recovery_index]}"; then
+                continue
+            fi
             # Exact recovery may have stopped this guest after the original
             # plan was read. A stopped guest cannot serve a sealed capture;
             # retain its evidence latch for the original-volume archive.
@@ -9252,6 +9405,12 @@ PY
         return 1
     fi
     while IFS=$'\t' read -r index out machine bench mode; do
+        if [ -f "$out/failed-startup-runtime-archive/verified.json" ] \
+            && fleet_recovery_capture_startup_failure "$registry" "$out" "$machine" "$FLEET_OWNER_TOKEN-$index"; then
+            cloudbench_validate_worker_evidence_coverage "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
+                || status=1
+            continue
+        fi
         CHILD_OUT[$index]="$out"
         CHILD_MACHINE[$index]="$machine"
         if ! cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
@@ -9381,7 +9540,8 @@ PY
         && { [ ! -f "$forensic_manifest" ] || [ -L "$forensic_manifest" ] \
              || [ -e "$registry/guest-cleanup-unconfirmed" ]; }; then
         for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
-            if [ -f "$_evidence_output/post-config-start.accepted" ] \
+            if { [ -f "$_evidence_output/post-config-start.accepted" ] \
+                 || [ -f "$_evidence_output/runtime-evidence.owner.json" ]; } \
                 && [ -f "$_evidence_output/runtime-evidence.pending" ]; then
                 needs_guest_recovery=1
                 break
@@ -13870,6 +14030,10 @@ for b in benches:
                "world_model_mode": default_mode, "infra_usd": None}
     row.setdefault("world_model_mode", default_mode)
     directory = Path(fleet) / name
+    if (row.get("status") in ("queued", "starting", "running")
+            and (directory / "benchmark-child.finished").is_file()
+            and not (directory / "cloudbench-run.json").is_file()):
+        row["status"] = "error"
     if (directory / "bench-e2e.finished-epoch").exists():
         row["lifecycle_stage"] = "released"
     elif (directory / "guest-shutdown.confirmed").exists() or (directory / "benchmark-child.finished").exists():

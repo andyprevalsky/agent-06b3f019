@@ -1017,10 +1017,28 @@ group; queued/startup rows need the original run timestamp, and genuine evaluate
 PASS/FAIL appears before teardown. Follow actual controller status even if a card
 or observation is stale. Retry transient observations with the original owner;
 do not restart a healthy run or reject microscopic intermediate timings. Stage
-handoffs must remain usable for their consumer. An early primary retirement
+handoffs must remain usable for their consumer. A rejected native start request
+is a warning while the existing current-run guest log and live data-plane proxy
+prove that the configured guest booted; a foreign, dead or unreadable guest still
+fails startup. A finished child without a benchmark result publishes an explicit
+infrastructure error in its original group immediately, without inventing an
+evaluation or agent archive. The existing compact deploy suite covers both
+startup admission and terminal placeholder publication. An early primary retirement
 receipt covers only that exact sealed scope; collector completion alone does
 not prove native release. Keep the original owner running through final native
-audit, and never rewrite PID birth records to force cleanup. Freeze sensible generous stage
+audit, and never rewrite PID birth records to force cleanup. Recovery keeps
+completed task outputs as history and reconnects only current allocations; retain
+the exact native retirement audit instead of deleting old outputs to match a
+shrinking registry. After the original CLI exits, use a verified current CLI for
+the documented exact-owner recovery while preserving its original guest source,
+owner and private evidence. Recovery's local proxy lease adapter represents an
+absent preferred port as numeric zero; an explicit nonempty preference retains
+the allocator's validation. A real started startup rejection can retain an exact
+runtime owner without local start acceptance; its supported zero-credit archive
+preserves actual originals and config before native reaping. It never supplies a
+task result or completed-execution seal. Artifact console commands name an
+executable explicitly; use `python3 -B` instead of a shell environment-assignment
+prefix to suppress bytecode during read-only capture. Freeze sensible generous stage
 targets from comparable historical LIVE timings, excluding cache-assisted cold
 measurements, and report observed stage p95 plus image-start-to-full-release E2E.
 These fixed stage targets are generous operational targets, not measured p95
