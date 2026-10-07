@@ -41,6 +41,7 @@ def observe(directory, controller_status=None):
         0,
     )
     outcomes = Counter()
+    task_controller_warnings = []
     stages = {
         "queued": "preflight",
         "starting": "startup",
@@ -59,6 +60,14 @@ def observe(directory, controller_status=None):
             invalid_rows = True
             continue
         task = directory / name
+        try:
+            child_exit = int((task / "benchmark-child.finished").read_text().strip())
+        except (OSError, ValueError):
+            child_exit = None
+        # The child supervisor preserves ordinary benchmark exits 0/1. A
+        # different exit needs diagnosis while healthy siblings keep running.
+        if child_exit is not None and child_exit not in (0, 1):
+            task_controller_warnings.append({"task": name, "exit_code": child_exit})
         status = row.get("status", "queued")
         status = status if isinstance(status, str) else "queued"
         outcomes[status] += 1
@@ -101,6 +110,7 @@ def observe(directory, controller_status=None):
         "run_id": directory.name,
         "occupancy": occupancy,
         "task_outcomes": dict(outcomes),
+        "task_controller_warnings": task_controller_warnings,
         "card_age_s": round(age, 1) if age is not None else None,
         "controller_terminal": exit_code is not None,
         "controller_exit_code": exit_code,
@@ -108,11 +118,15 @@ def observe(directory, controller_status=None):
         "cleanup_status": lifecycle.get("status") if lifecycle_terminal else "unknown",
         "observation_warning": "invalid task rows; inspect this exact owner"
         if invalid_rows
+        else "task controller exit needs inspection; continue healthy siblings"
+        if task_controller_warnings
         else "missing or stale progress; inspect this exact owner"
         if age is None or age > 60
         else None,
         "next_action": "inspect_terminal_and_owned_resources"
         if exit_code is not None or lifecycle_terminal
+        else "inspect_task_warnings_and_continue"
+        if task_controller_warnings
         else "observe_again",
     }
 

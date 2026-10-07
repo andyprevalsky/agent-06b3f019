@@ -50,6 +50,31 @@ def test_fleet_monitor_terminal_task_is_not_controller_completion(tmp_path: Path
     assert "MUST_NOT_PRINT" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("child_exit", [0, 1, 125, 143])
+def test_fleet_monitor_surfaces_abnormal_child_exit_without_rejecting_outcomes(
+    tmp_path: Path, child_exit: int
+):
+    write(
+        tmp_path,
+        "report-card.json",
+        {"per_task": [
+            {"name": "task-a", "status": "failed", "lifecycle_stage": "teardown"},
+            {"name": "task-b", "status": "running", "lifecycle_stage": "running"},
+        ]},
+    )
+    task = tmp_path / "task-a"
+    task.mkdir()
+    (task / "benchmark-child.finished").write_text(f"{child_exit}\n")
+    result = observe(tmp_path)
+    warnings = result.get("task_controller_warnings", [])
+    assert result["next_action"] == ("inspect_task_warnings_and_continue" if child_exit > 1 else "observe_again")
+    assert warnings == ([{"task": "task-a", "exit_code": child_exit}] if child_exit > 1 else [])
+    assert result["controller_terminal"] is False
+    assert result["task_outcomes"] == {"failed": 1, "running": 1}
+    assert result["occupancy"]["teardown"] == result["occupancy"]["running"] == 1
+    assert result["occupancy"]["rejected"] == 0
+
+
 def test_fleet_monitor_checks_terminal_receipt_even_when_card_is_stale(tmp_path: Path):
     card = write(
         tmp_path,

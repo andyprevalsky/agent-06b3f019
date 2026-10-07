@@ -174,3 +174,41 @@ rejected, earns zero campaign credit, and retains its original receipts; fresh
 ordinary fifty-task LIVE outcomes and exact cleanup still require independent
 proof. The user required supported CLI execution, broad outcome checks, exact
 owner cleanup and compact regression coverage.
+
+## Recurrence: child controller failure stayed hidden behind teardown occupancy
+
+Original Control9 (`20261007-185005-80376`, source `9a55d781`) had an IMAX
+child-supervisor exit125 by 19:22:11 UTC. Its original collector had reported
+missing guest cleanup acknowledgement, but the ordinary monitor continued to
+report teardown with no warning and `next_action=observe_again`. The full run
+later failed its one-hour gate. That result remains rejected; this operator
+repair does not repair the underlying worker cleanup or certify resource release.
+
+Archive searches were `fleet monitor hides abnormal child controller exit` and
+`teardown child finished missing cleanup acknowledgement`. This is a recurrence
+of the monitor's terminal-observation contract. The September29 stack-receipt
+case is a relative with a separate cleanup first-bad boundary. Here the path is
+child supervisor's atomic exit marker → monitor's existence-only stage read →
+operator receives teardown occupancy without the available abnormal exit. The
+earlier controls covered the parent terminal handle and ordinary task FAIL, but
+not a terminal child while healthy siblings continued.
+
+Read the existing tiny child marker as well as its existence. Exits0/1 remain
+ordinary task outcomes; another exit is disclosed as a task-controller warning
+with instructions to inspect it while healthy siblings continue. This changes
+no grading, occupancy, timing, cancellation, ownership or acceptance criterion.
+No private log, transcript or request content is printed. Final parent/lifecycle
+inspection still takes priority over an intermediate warning.
+
+The existing deploy-owned `cloudbench_monitor_test.py` now exercises exits0/1
+and the original cleanup/cancellation exits125/143 through `scripts/run-bench`.
+The identical test bytes failed on `d03b9eb8c` because both abnormal exits still
+returned `observe_again`; after the repair, the four cases passed in0.28s.
+The complete existing module passed13 controls in3.96s, and independent review
+passed the same13 in4.05s. A read-only comparison on the original C9 directory
+confirmed unchanged outcomes, occupancy and lifecycle/controller fields while
+disclosing all three abnormal children. Tests already run in the compact normal
+deploy wrapper's `fleet_monitor` selection; there is no new paid or long gate.
+Source/test/log hash bindings and the independent receipt are private under
+`.context/monitor-rca.private/`. No LIVE50 or production-deployment credit follows
+from this warning-only repair.
