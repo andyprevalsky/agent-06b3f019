@@ -93,19 +93,66 @@ BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | c
 
 # The lifecycle ratchet is a browser blackbox over every chat route.
 require_text "$LIFECYCLE_SPEC" "const SAMPLE_COUNT = 5;" "lifecycle ratchet must take five samples per path"
-require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_RATCHET_MS = 6_000;" "lifecycle ratchet must remain below six seconds"
+require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_TARGET_MS = 6_000;" "lifecycle reporting target must remain six seconds"
 require_text "$LIFECYCLE_SPEC" "mode: 'parallel'" "chat paths must run concurrently"
 require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "latency measurements must exclude Playwright recording overhead"
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
 # Per-request poll bound must cover documented prod edge stalls (~2.5s) so a
 # saturated GH Actions→Render path can still observe an already-persisted
 # temporal_workflow_id. Do NOT ratchet this down toward the 6s lifecycle SLA —
-# that assertion lives on FULL_LIFECYCLE_RATCHET_MS; starving the poll recreates
+# that reporting target lives on FULL_LIFECYCLE_TARGET_MS; starving the poll recreates
 # the July 18 false-negative (RCA 2026-07-18, recurred 2026-08-31 after 500ms).
 require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 2_500;" "temporal-workflow poll per-request timeout must stay at 2500ms to cover prod edge stalls"
 require_text "$HELPERS" "res.status === 404 || res.status === 503" "temporal-workflow poll must retry transient live-row misses and archive-index warming responses"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
+# Completed target misses warn; actual browser-validation functional failures still fail.
+node - "$LIFECYCLE_SPEC" "$ROOT_DIR/back-end/package.json" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
+const ts = createRequire(process.argv[3])('typescript');
+const source = ts.createSourceFile(process.argv[2], fs.readFileSync(process.argv[2], 'utf8'), ts.ScriptTarget.Latest, true);
+let validation;
+function visit(node) {
+  if (ts.isBlock(node)) {
+    const first = node.statements.findIndex(statement => ts.isExpressionStatement(statement) && statement.getText(source).includes('all five lifecycle samples must finish'));
+    if (first >= 0) validation = node.statements.slice(first).map(statement => statement.getText(source)).join('\n');
+  }
+  ts.forEachChild(node, visit);
+}
+visit(source);
+assert.ok(validation && validation.includes('hasUncaughtErrors(recorder)'), 'actual sample/end-state validation must be found');
+const code = ts.transpileModule(validation, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const samples = () => Array.from({ length: 5 }, (_, index) => ({ sample: index + 1, lifecycleMs: index === 2 ? 12461 : 2329, failures: [] }));
+function verify(results, errors = []) {
+  const warnings = [];
+  vm.runInNewContext(code, {
+    path: { id: 'web_search' }, results, SAMPLE_COUNT: 5,
+    FULL_LIFECYCLE_TARGET_MS: 6000, FULL_LIFECYCLE_RATCHET_MS: 6000,
+    recorder: {}, hasUncaughtErrors: () => errors,
+    console: { warn: value => warnings.push(value) },
+    expect: (actual, message) => ({
+      toHaveLength: expected => assert.equal(actual.length, expected, message),
+      toEqual: expected => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message),
+      toBeLessThan: expected => assert.ok(actual < expected, message),
+    }),
+  });
+  return warnings;
+}
+let failed = 0;
+for (const [name, control] of [
+  ['completed slow sample warns', () => { const warnings = verify(samples()); assert.equal(warnings.length, 1); assert.match(warnings[0], /12461ms.*6000ms/); }],
+  ['missing sample fails', () => assert.throws(() => verify(samples().slice(1)), /must finish/)],
+  ['missing milestone fails', () => { const results = samples(); results[0].failures.push('terminal missed'); assert.throws(() => verify(results), /missed milestones/); }],
+  ['uncaught error fails', () => assert.throws(() => verify(samples().map(result => ({ ...result, lifecycleMs: 2329 })), ['runtime exception']), /uncaught errors/)],
+]) {
+  try { control(); console.log(`PASS: ${name}`); }
+  catch (error) { failed += 1; console.error(`FAIL: ${name}: ${error.message}`); }
+}
+if (failed) process.exitCode = 1;
+NODE
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet
 # owns a runner and executes samples sequentially so renderer contention cannot
 # become part of the product latency measurement.

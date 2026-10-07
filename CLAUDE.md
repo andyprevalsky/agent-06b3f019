@@ -1194,6 +1194,8 @@ Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inve
 
 A strict cohort with that live inventory owner performs the existing complete canonical fixture GET once before admitting controllers. Each controller verifies the private receipt against the live parent/publisher births, sealed cohort membership, committed source, schema/PG/cache token, runner code and storage scope identifiers. An invalid advertised receipt fails closed; it does not fall back to repeated downloads. Standalone fleets keep their full GET. Every guest still performs its actual fixture download, exact sidecar checks and database restore; this host receipt does not replace them.
 
+The cohort host helper works with system Python without installing optional dotenv packages. It uses the existing startup budget, retries unavailable process observations, and drains only its owned GET session on cancellation before publishing proof. Follow the campaign's printed summary and private seed-preflight log; a slow healthy GET is not a reason to restart. The normal `campaign_inventory` deploy gate covers selector precedence, cancellation, exited-leader cleanup and late cancellation during hashing.
+
 For this explicitly requested 50-copy cached stress run, use the command-scoped
 Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
 Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient

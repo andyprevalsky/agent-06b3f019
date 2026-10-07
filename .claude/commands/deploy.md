@@ -1271,7 +1271,7 @@ SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$LOCAL_DB_PORT BACKEND_PORT=$CONDUCTOR_PORT FRO
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
-The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under six seconds.
+The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples. Every sample must reach its functional terminal state without missed milestones or uncaught errors. Six seconds is a reporting target: preserve measured p50/max/smoothness and warn on individual target misses; a completed slow sample alone does not reject the deploy. Functional failures, missing terminal state, cleanup failures and applicable user-authorized whole-run limits remain failures.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 

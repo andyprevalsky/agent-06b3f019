@@ -178,11 +178,12 @@ raise SystemExit(2)
 '''
 
 
-def run_case(controller, healthy, inverse=None):
+def run_case(controller, healthy, inverse=None, absence_transition=None):
     with tempfile.TemporaryDirectory() as temporary:
         base = Path(temporary).resolve()
         registry, run = fixture(base, healthy, inverse)
         write(base / "fake.py", FAKE)
+        original_native = json.loads((base / "native.json").read_text())["machines"][MIDS[healthy]]
         if inverse in ("intent-before", "intent-reused", "tombstone-reused", "tombstone-listed"):
             helper = ROOT / "scripts/cloudbench-sealed-machine-retirement.py"
             common = ["--registry", str(registry), "--machine-id", MIDS[healthy], "--app", APP]
@@ -261,6 +262,39 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
             again = subprocess.run([BASH, str(base / "control.sh")], env=env, capture_output=True, text=True, timeout=60)
             assert again.returncode == 1
             assert json.loads((base / "native.json").read_text())["journal"] == state["journal"]
+            if absence_transition:
+                # The ordinary wrapper verifies CURRENT native endpoint state
+                # independently of the historical receipt's description.
+                state = json.loads((base / "native.json").read_text())
+                historical_bytes = receipt.read_bytes()
+                if absence_transition == "destroyed-to-not-found":
+                    state.pop("tombstones", None)
+                else:
+                    tombstone = dict(original_native, state="destroyed")
+                    if absence_transition == "not-found-to-reused-destroyed":
+                        tombstone["instance_id"] = "foreign-reused-instance"
+                    elif absence_transition == "destroyed-to-live":
+                        tombstone["state"] = "started"
+                    elif absence_transition == "destroyed-to-unknown":
+                        tombstone["state"] = "starting"
+                    state["tombstones"] = {MIDS[healthy]: tombstone}
+                    if absence_transition == "not-found-to-listed-destroyed":
+                        state["machines"][MIDS[healthy]] = tombstone
+                    elif absence_transition == "not-found-to-missing-config":
+                        del tombstone["config"]
+                write(base / "native.json", state)
+                prefix = script.rsplit('recover_exact_stale_fleet_owner "$FIXTURE_OWNER"', 1)[0]
+                verify_script = prefix + '\nfleet_recovery_verify_retired_sealed_machine ' + ' '.join(shlex.quote(x) for x in (str(registry), MIDS[healthy], VOLS[healthy])) + '\n'
+                checked = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=60)
+                accepted = absence_transition in ("destroyed-to-not-found", "not-found-to-destroyed")
+                assert checked.returncode == (0 if accepted else 1), checked.stderr
+                assert receipt.read_bytes() == historical_bytes
+                assert json.loads((base / "native.json").read_text())["journal"] == state["journal"]
+                if accepted:
+                    current = "exact-native-not-found" if absence_transition == "destroyed-to-not-found" else "exact-native-destroyed-unlisted"
+                    warning = "SEALED_RETIREMENT_ABSENCE_TRANSITION=" + r["machine_absence"] + "->" + current
+                    assert warning in checked.stderr, "missing diagnostic for " + absence_transition
+                return {"transition": absence_transition, "accepted": accepted, "native_proof_required": True, "receipt_unchanged": True, "provider_mutations": 0, "proof_credit": 0}
             # Crash after destroy but before receipt publication: the durable
             # intent must resume without another provider mutation. This is the
             # same verifier used by ordinary recovery's reconnect loop.
@@ -286,12 +320,18 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
         return {"healthy_ordinal": healthy, "inverse": inverse, "exit": completed.returncode, "machine_only_retired": len(state["journal"]), "volumes_retained": len(state["volumes"]), "full_ledger_unchanged": True, "latches_unchanged": True, "proof_credit": 0}
 
 
+def run_absence_kind_controls(controller=ROOT / "scripts/run-bench-fleet"):
+    cases = ("destroyed-to-not-found", "not-found-to-destroyed", "not-found-to-reused-destroyed", "not-found-to-listed-destroyed", "not-found-to-missing-config", "destroyed-to-live", "destroyed-to-unknown")
+    return [run_case(controller, 0, "tombstone" if reason.startswith("destroyed-") else None, reason) for reason in cases]
+
+
 def run_recurrence(controller=ROOT / "scripts/run-bench-fleet"):
     outcomes = [run_case(controller, h) for h in (0, 1)]
     outcomes += [run_case(controller, 0, reason) for reason in ("intent-before", "intent-reused", "reconnect-runtime-failure", "reconnect-guest-failure", "live", "owner-live", "foreign", "reused", "corrupt", "symlink", "config-change")]
     outcomes.append(run_case(controller, 0, "large-inventory"))
     outcomes.append(run_case(controller, 0, "over-bound-inventory"))
     outcomes += [run_case(controller, 0, reason) for reason in ("tombstone", "tombstone-reused", "tombstone-listed", "two-sealed")]
+    outcomes += run_absence_kind_controls(controller)
     helper = runpy.run_path(str(ROOT / "scripts/cloudbench-sealed-machine-retirement.py"))
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary).resolve() / "over-bound.json"

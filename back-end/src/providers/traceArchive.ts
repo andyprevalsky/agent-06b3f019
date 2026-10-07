@@ -8,6 +8,7 @@ import {
 import {
   type ArtifactCreation,
   getS3Client,
+  isExistingObjectError,
   putLocal,
   putR2,
   resetS3Client,
@@ -184,19 +185,6 @@ export function isMissingObjectError(error: unknown): boolean {
     response.$metadata?.httpStatusCode === 404 ||
     response.name === 'NoSuchKey' ||
     response.name === 'NotFound'
-  );
-}
-
-function isExistingObjectError(error: unknown): boolean {
-  const response = error as {
-    code?: string;
-    name?: string;
-    $metadata?: { httpStatusCode?: number };
-  };
-  return (
-    response?.code === 'EEXIST' ||
-    response?.name === 'PreconditionFailed' ||
-    response?.$metadata?.httpStatusCode === 412
   );
 }
 

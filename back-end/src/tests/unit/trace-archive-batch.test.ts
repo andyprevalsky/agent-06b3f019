@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { boundedBatchValidation } from './trace-archive-batch-validation';
+import { runArchiveCreationControls } from './trace-archive-creation-controls';
 import assert from 'node:assert';
 import { S3Client } from '@aws-sdk/client-s3';
 import {
@@ -7,13 +8,11 @@ import {
   archiveJson,
   storePlainArtifact,
   archiveBytes,
-  readArchivedArtifact,
 } from '../../providers/traceArchive';
 import { prisma } from '../../providers/database';
 import {
   inspectFinalizedManifest,
   writeFinalizationMarker,
-  writePublicManifest,
 } from '../../providers/traceArchiveManifest';
 import {
   storeWorkerArtifacts,
@@ -410,71 +409,6 @@ async function startRetriesAfterLostLeasePreserveFinalization(
   }
 }
 
-async function conditionalCreationDistinguishesExistingObjectsFromFailure() {
-  for (const encrypted of [false, true]) {
-    objects.clear();
-    const rootAgentId = 'offline-create-errors-' + encrypted;
-    const create = () =>
-      encrypted
-        ? archiveJson({
-            rootAgentId,
-            objectPath: 'manifest.json.gz.enc',
-            value: { original: true },
-            createOnly: true,
-          })
-        : writePublicManifest(rootAgentId, [], undefined, { createOnly: true });
-    assert(await create());
-    const accepted = new Map(objects);
-    assert.strictEqual(await create(), null, 'an existing object is an intentional no-op');
-    assert.deepStrictEqual(
-      objects,
-      accepted,
-      'a precondition rejection must preserve stored bytes'
-    );
-    objects.clear();
-    onManifestWrite = async () => {
-      throw new Error('offline create transport refused');
-    };
-    try {
-      await assert.rejects(create(), /offline create transport refused/);
-      assert.strictEqual(objects.size, 0);
-      assert.strictEqual(activePuts, 0);
-    } finally {
-      onManifestWrite = undefined;
-    }
-  }
-}
-
-async function conditionalEncryptedCreationRetriesAcceptedBodySidecar() {
-  objects.clear();
-  const rootAgentId = 'offline-create-sidecar-retry';
-  const objectPath = 'manifest.json.gz.enc';
-  const bodyKey = 'trace-archive/' + rootAgentId + '/' + objectPath;
-  let bodyWrites = 0;
-  let sidecarWrites = 0;
-  onManifestWrite = async (key) => {
-    if (key === bodyKey) bodyWrites++;
-    if (key === bodyKey + '.meta.json' && ++sidecarWrites === 1)
-      throw new Error('offline retryable sidecar failure after body acceptance');
-  };
-  const value = { finalized: false, fixture: 'accepted body and matching sidecar' };
-  try {
-    assert(await archiveJson({ rootAgentId, objectPath, value, createOnly: true }));
-    const stored = await readArchivedArtifact({ rootAgentId, objectPath });
-    assert(stored, 'the acknowledged pair must be readable through the ordinary archive reader');
-    assert.deepStrictEqual(JSON.parse(decryptAndValidateArtifact(stored).toString()), value);
-    assert.strictEqual(
-      bodyWrites,
-      1,
-      'sidecar retries must retain the acknowledged encrypted body'
-    );
-    assert.strictEqual(sidecarWrites, 2);
-    assert.strictEqual(activePuts, 0);
-  } finally {
-    onManifestWrite = undefined;
-  }
-}
-
 async function destructiveChangesRemainRejected() {
   for (const mode of ['removal', 'malformed'] as const) {
     objects.clear();
@@ -590,14 +524,15 @@ async function main(): Promise<void> {
         await test('start retries after native lease loss preserve final ' + target, () =>
           startRetriesAfterLostLeasePreserveFinalization(target)
         );
-      await test(
-        'conditional creation preserves existing objects and rejects exhausted storage failures',
-        conditionalCreationDistinguishesExistingObjectsFromFailure
-      );
-      await test(
-        'conditional encrypted creation retries an accepted body sidecar into a readable pair',
-        conditionalEncryptedCreationRetriesAcceptedBodySidecar
-      );
+      await runArchiveCreationControls(test, {
+        objects,
+        sender,
+        interleavingSend,
+        setWriteHook: (hook) => {
+          onManifestWrite = hook;
+        },
+        getActivePuts: () => activePuts,
+      });
     } finally {
       onPublicWrite = undefined;
       sender.send = originalSend;

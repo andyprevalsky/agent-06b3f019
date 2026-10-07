@@ -557,7 +557,7 @@ def main() -> int:
                             )
                             with log.open("w") as stream:
                                 log.chmod(0o600)
-                                result = subprocess.run(
+                                result = subprocess.Popen(
                                     [
                                         sys.executable,
                                         str(
@@ -574,8 +574,27 @@ def main() -> int:
                                     cwd=root,
                                     stdout=stream,
                                     stderr=subprocess.STDOUT,
-                                    check=False,
                                 )
+                                # Keep the original campaign cancellation and
+                                # inventory authority live while its owned GET
+                                # runs. The helper drains its exact child session.
+                                interrupted = False
+                                try:
+                                    while result.poll() is None:
+                                        if not interrupted and (
+                                            stop_signal
+                                            or inventory_process.poll() is not None
+                                        ):
+                                            result.terminate()
+                                            interrupted = True
+                                        try:
+                                            result.wait(timeout=0.2)
+                                        except subprocess.TimeoutExpired:
+                                            pass
+                                finally:
+                                    if result.poll() is None:
+                                        result.terminate()
+                                        result.wait()
                             if result.returncode:
                                 raise ValueError("canonical fixture preflight failed")
                             current_cohort["_seed_proof"] = (

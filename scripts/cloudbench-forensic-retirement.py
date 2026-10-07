@@ -6,7 +6,9 @@ The caller supplies two fresh, successful native provider inventories.
 """
 
 import argparse
+import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -112,12 +114,13 @@ def verify_failed_stack_provider_archive(
     verify_stopped_provider_archive(
         out, row, owner, run_id,
         hashlib.sha256(originals["repo/.context/cloudbench/logs/backend.log"]).hexdigest(),
+        original_backend=originals["repo/.context/cloudbench/logs/backend.log"],
     )
 
 
 def verify_stopped_provider_archive(
     out: Path, row: dict[str, object], owner: str, run_id: str,
-    original_backend_sha256: str,
+    original_backend_sha256: str, *, original_backend: bytes | None = None,
 ) -> None:
     """A stopped guest still owns every provider session in its original log."""
     helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
@@ -125,9 +128,18 @@ def verify_stopped_provider_archive(
     stopped = object_file(out / "guest-cleanup.machine-stopped.json")
     receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
     assert provider["kind"] == "provider-active-exact-manifest"
-    assert hashlib.sha256(
-        regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024)
-    ).hexdigest() == original_backend_sha256
+    backend = regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024)
+    if hashlib.sha256(backend).hexdigest() != original_backend_sha256:
+        assert original_backend is not None and original_backend.startswith(backend)
+        assert hashlib.sha256(original_backend).hexdigest() == original_backend_sha256
+        before = helper["ANSI"].sub("", backend.decode("utf-8"))
+        after = helper["ANSI"].sub("", original_backend.decode("utf-8"))
+        tail = helper["ANSI"].sub("", original_backend[len(backend):].decode("utf-8"))
+        assert helper["collect_session_evidence"](after) == helper["collect_session_evidence"](before)
+        assert helper["parse_active_root_agent"](after) == helper["parse_active_root_agent"](before)
+        assert after.count("[HTTP] POST /api/agents -> 201") == before.count("[HTTP] POST /api/agents -> 201")
+        assert helper["collect_session_evidence"](tail) == ({"kernel": [], "steel": []}, 0, 0)
+        assert helper["payment_mutation_count"](tail) == 0
     args = argparse.Namespace(
         owner=owner, fleet_run_id=run_id, bench=row["task"],
         machine_id=row["machine_id"], output_dir=str(out),
@@ -141,6 +153,58 @@ def verify_stopped_provider_archive(
     assert provider == helper["active_provider_manifest"](args)
     stopped_sha = helper["validate_stopped_machine_proof"](args, provider)
     assert helper["validate_provider_receipt"](receipt, provider, stopped_sha)
+
+
+def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes]) -> None:
+    """Verify the original pre-service endpoint without inventing a runtime receipt."""
+    token, machine, volume = (row[key] for key in ("run_token", "machine_id", "volume_id"))
+    ack = f"cloudbench-driver-clean-{token}.ack"
+    absent = {
+        "cloudbench-driver.pid", "repo/.context/cloudbench/services.json",
+        "repo/.context/cloudbench/stack.log", "repo/.context/cloudbench/run.json",
+        "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log",
+    }
+    assert row["services_status"] is None and row["runtime_evidence_complete"] is False
+    assert absent <= set(row["missing"]) and absent.isdisjoint(originals)
+    assert originals["cloudbench-driver.state"] == b"exited\n"
+    assert originals[ack] == (token + "\n").encode()
+    assert originals["bench.log"].splitlines()[0] == ("RUNSTAMP-" + token).encode()
+    config_bytes = originals["original-native-config.json"]
+    config = json.loads(config_bytes)
+    capture = json.loads(originals["original-capture-manifest.json"])
+    receipt = json.loads(originals["original-capture-receipt.json"])
+    raw = originals["original-volume-capture.tar.gz"]
+    assert capture["machine_id"] == capture["source_machine_id"] == machine
+    assert capture["source_volume_id"] == volume and capture["run_token"] == token
+    assert capture["proof_credit"] == 0
+    assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
+    assert receipt["owner"] == meta["fleet_owner_token"] and receipt["proof_credit"] == 0
+    assert receipt["capture_complete"] is True and receipt["restored_original_config"] is True
+    assert receipt["original_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+    for proof in (capture, receipt):
+        assert proof["archive_bytes"] == len(raw)
+        assert proof["archive_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert capture["missing"] == row["missing"]
+    captured = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        for member in archive:
+            assert member.isfile() and safe_name(member.name) and member.name not in captured
+            assert member.size <= 64 * 1024 * 1024
+            stream = archive.extractfile(member)
+            assert stream is not None
+            data = stream.read(member.size + 1)
+            assert len(data) == member.size and originals[member.name] == data
+            captured[member.name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    assert captured == capture["files"] and absent.isdisjoint(captured)
+    assert config["env"]["CLOUDBENCH_RUN_TOKEN"] == token
+    assert config["env"]["CLOUDBENCH_FRESH_VOLUME"] == "1"
+    assert config["env"]["BENCH_TASKS_B64"] == base64.b64encode(row["task"].encode()).decode()
+    assert config["init"]["cmd"] == ["bash", "/cloudbench-boot.sh"]
+    assert isinstance(config["mounts"], list) and len(config["mounts"]) == 1
+    assert config["mounts"][0]["volume"] == volume and config["mounts"][0]["path"] == "/data"
+    source = runpy.run_path(str(Path(__file__).with_name("cloudbench-prestack-recovery.py")))
+    _, _, fingerprint = source["native_recipe"](meta, config)
+    assert "before-stack-launch" in source["trusted_source_review_policy"]().get(fingerprint, [])
 
 
 def safe_name(name: str) -> bool:
@@ -261,6 +325,7 @@ def verify_prestart_evidence(
 def verify_pool_worker_evidence(
     registry: Path, run: Path, meta: dict, audit: Path, tasks: list, rows: list,
     machines_path: Path, volumes_path: Path, *, allow_unallocated: bool = False,
+    fresh_names: set[str] | None = None,
 ):
     """Apply the same exact worker capture contract to sealed and interrupted primaries."""
     owner = meta["fleet_owner_token"]
@@ -277,6 +342,11 @@ def verify_pool_worker_evidence(
     assert names == {path.name for path in expected_fresh.iterdir()}
     clone_names = {path.name for path in clones.iterdir()}
     assert clone_names <= names
+    subset = fresh_names is not None
+    if subset:
+        assert fresh_names <= names
+        names = fresh_names
+        clone_names &= names
     machines = object_file(machines_path, 128 * 1024 * 1024)
     volumes = object_file(volumes_path, 128 * 1024 * 1024)
     assert isinstance(machines, list) and isinstance(volumes, list)
@@ -320,7 +390,8 @@ def verify_pool_worker_evidence(
             assert name not in clone_names
         assert regular_bytes(by_machine / machine, 256).decode().strip() == name
         fresh_records[machine] = original
-    assert {path.name for path in by_machine.iterdir()} == set(fresh_records)
+    indexed = {path.name for path in by_machine.iterdir()}
+    assert set(fresh_records) <= indexed if subset else indexed == set(fresh_records)
     for machine, original in fresh_records.items():
         assert original["source_machine_id"] in {row["machine_id"] for row in rows}
         if original["disposition"] == "owned":
@@ -970,7 +1041,21 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     allocated = [row for row in fresh if row.get("volume_id")]
     assert len({row["volume_id"] for row in allocated}) == len(allocated)
     by_machine = {row["machine_id"]: row for row in fresh if row.get("machine_id")}
-    assert len(by_machine) == len(rows) + len(unstarted_workers) + len(started_workers)
+    assert len(by_machine) == sum(bool(row.get("machine_id")) for row in fresh)
+    primary_ids = {row["machine_id"] for row in rows}
+    legacy_workers = {row["machine_id"] for row in unstarted_workers + started_workers}
+    normal_worker_names = {
+        row["clone_name"] for row in fresh
+        if row.get("machine_id") and row["machine_id"] not in primary_ids | legacy_workers
+    }
+    normal_workers = {}
+    normal_worker_hashes = []
+    if normal_worker_names:
+        normal_workers, normal_worker_hashes, _, _, _ = verify_pool_worker_evidence(
+            registry, run, meta, audit, tasks, rows, machines_path, volumes_path,
+            fresh_names=normal_worker_names,
+        )
+    assert set(by_machine) == primary_ids | legacy_workers | set(normal_workers)
     by_clone = {row["name"]: row for row in clones}
     assert len(by_clone) == len(clones)
     unadmitted = []
@@ -994,7 +1079,8 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         assert by_clone[name] == {"name": name, "volume_id": volume}
         unadmitted.append(volume)
     assert len(set(unadmitted)) == len(unadmitted)
-    assert len(fresh) == len(clones) + len(unallocated)
+    retired_workers = [row for row in normal_workers.values() if row["disposition"] != "owned"]
+    assert len(fresh) == len(clones) + len(unallocated) + len(retired_workers)
     expected_members: dict[str, dict] = {}
     expected_total = 0
     incomplete = 0
@@ -1039,7 +1125,11 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
                      "repo/.context/cloudbench/stack.log",
                      "repo/.context/cloudbench/logs/backend.log",
                      "repo/.context/cloudbench/logs/worker.log"}
-        assert mandatory <= set(files)
+        if row["services_status"] is None:
+            assert "bench.log" in files and mandatory - {"bench.log"} <= set(missing)
+            assert not row["runtime_evidence_complete"]
+        else:
+            assert mandatory <= set(files)
         assert f"cloudbench-driver-clean-{token}.ack" in files or f"cloudbench-driver-clean-{token}.ack" in missing
         assert "repo/.context/cloudbench/run.json" in files or "repo/.context/cloudbench/run.json" in missing
         complete = row["runtime_evidence_complete"]
@@ -1132,6 +1222,37 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             assert member not in expected_members
             expected_members[member] = info
             expected_total += info["bytes"]
+    normal_rows = manifest.get("normal_workers", [])
+    assert isinstance(normal_rows, list)
+    assert {row["machine_id"] for row in normal_rows} == set(normal_workers)
+    assert len(normal_rows) == len(normal_workers)
+    for worker in normal_rows:
+        machine = worker["machine_id"]
+        original = normal_workers[machine]
+        parent = primary_by_machine[original["source_machine_id"]]
+        assert worker["primary_machine_id"] == parent["machine_id"]
+        assert worker["task"] == parent["task"] and worker["run_token"] == parent["run_token"]
+        assert worker["volume_id"] == original["volume_id"] and worker["proof_credit"] == 0
+        base = run / parent["task"] / "worker-runtime-evidence" / machine
+        capture_manifest = object_file(base / "capture/manifest.json")
+        required_capture = {"capture/" + name for name in capture_manifest["files"]}
+        assert {"owner.json", "capture/manifest.json"} | required_capture <= set(worker["files"])
+        for relative, info in worker["files"].items():
+            assert safe_name(relative)
+            data = regular_bytes(base / relative, 64 * 1024 * 1024)
+            assert info == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            member = f"_normal_workers/{machine}/{relative}"
+            assert member not in expected_members
+            expected_members[member] = info
+            expected_total += info["bytes"]
+    preserved = manifest.get("preserved_files", {})
+    assert isinstance(preserved, dict)
+    for member, info in preserved.items():
+        assert safe_name(member) and member.startswith("_") and member not in expected_members
+        assert type(info["bytes"]) is int and 0 <= info["bytes"] <= 512 * 1024 * 1024
+        assert re.fullmatch(r"[0-9a-f]{64}", info["sha256"])
+        expected_members[member] = info
+        expected_total += info["bytes"]
     assert expected_total == manifest["uncompressed_bytes"]
     assert archive_path.stat().st_size == manifest["archive_bytes"]
     assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
@@ -1140,6 +1261,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     archived_unstarted = {}
     archived_started = {}
     archived_absence = {}
+    phase_originals = {row["task"]: {} for row in rows if row["services_status"] in {None, "failed"}}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_members and member.name not in seen
@@ -1149,11 +1271,18 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             assert stream is not None
             digest = hashlib.sha256()
             left = member.size
+            task_name, relative = member.name.split("/", 1)
+            if task_name in phase_originals:
+                phase_originals[task_name][relative] = b""
             while left:
                 block = stream.read(min(left, 65536))
                 assert block
                 digest.update(block)
                 left -= len(block)
+                task_name, relative = member.name.split("/", 1)
+                if task_name in phase_originals:
+                    assert member.size <= 64 * 1024 * 1024
+                    phase_originals[task_name][relative] = phase_originals[task_name].get(relative, b"") + block
                 if member.name.endswith("/repo/.context/cloudbench/services.json"):
                     assert member.size <= 1048576
                     task_name = member.name.split("/", 1)[0]
@@ -1173,6 +1302,12 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             seen.add(member.name)
     assert seen == set(expected_members)
     for row in rows:
+        if row["services_status"] is None:
+            verify_pre_service_archive(meta, row, phase_originals[row["task"]])
+            continue
+        if row["services_status"] == "failed":
+            verify_failed_stack_provider_archive(
+                run / row["task"], row, owner, meta["run_id"], phase_originals[row["task"]])
         services = json.loads(archived_services[row["task"]])
         assert services["status"] == row["services_status"]
         worker_count = services["env"]["worker_processes"]
@@ -1226,6 +1361,8 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             "incomplete_tasks": incomplete, "unadmitted_clones": len(unadmitted),
             "unstarted_workers": len(unstarted_workers),
             "started_workers": len(started_workers),
+            **({"normal_worker_captures": len(normal_workers),
+                "normal_worker_manifest_sha256": sorted(normal_worker_hashes)} if normal_workers else {}),
             "unallocated_attempts": len(unallocated),
             "files": len(seen),
             "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}

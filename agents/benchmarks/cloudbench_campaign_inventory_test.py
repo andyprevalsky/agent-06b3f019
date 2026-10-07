@@ -295,6 +295,242 @@ def seed_fixture(tmp_path, monkeypatch):
     return root, module, server, thread, calls, body
 
 
+def test_campaign_inventory_seed_preflight_without_optional_dotenv(tmp_path, monkeypatch):
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    try:
+        (root / "back-end/.env").write_text(
+            "# local selector control\nR2_ACCOUNT_ID = 'file-account'\n"
+            'R2_BUCKET_TRACE_ARCHIVE="file-bucket"\nR2_ACCESS_KEY_ID=file-key\n'
+        )
+        for key in ("R2_ACCOUNT_ID", "R2_BUCKET_TRACE_ARCHIVE", "R2_ACCESS_KEY_ID"):
+            monkeypatch.delenv(key)
+        # -S is the supported system-Python situation: no optional site packages.
+        script = (
+            "import json,runpy,sys;from pathlib import Path;"
+            "m=runpy.run_path(sys.argv[1]);r=Path(sys.argv[2]);"
+            "print(json.dumps(m['fixture'](r,r/'scripts')))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", script, str(root / "scripts/cloudbench-campaign-seed.py"), str(root)],
+            capture_output=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, "system Python cannot bind the owned canonical fixture"
+        expected = {
+            "R2_ACCOUNT_ID": "file-account",
+            "R2_ENDPOINT": os.environ["R2_ENDPOINT"],
+            "R2_BUCKET_TRACE_ARCHIVE": "file-bucket",
+            "R2_ACCESS_KEY_ID": "file-key",
+        }
+        assert json.loads(result.stdout)["selector_sha256"] == module.digest(
+            json.dumps(expected, sort_keys=True).encode()
+        )
+        assert calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_honors_existing_deadline_before_get(tmp_path, monkeypatch):
+    import time
+
+    root, _module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    directory = root / "standalone"
+    directory.mkdir()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "scripts/cloudbench-campaign-seed.py"),
+                "standalone",
+                "--root",
+                str(root),
+                "--out-dir",
+                str(directory),
+                "--deadline",
+                str(time.time() - 1),
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        assert result.returncode != 0, "expired owner budget still performed and accepted a full GET"
+        assert calls == [] and not list(directory.glob("seed-probe-*"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_campaign_cancellation_drains_get(tmp_path, monkeypatch):
+    import signal
+    import time
+
+    root, _module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    process = None
+    try:
+        binary = root / "bin"
+        binary.mkdir()
+        fly = binary / "flyctl"
+        fly.write_text('#!/usr/bin/env bash\nprintf "[]\\n"\n')
+        fly.chmod(0o700)
+        monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+        helper = root / "scripts/cloudbench-seed-get.sh"
+        helper.write_text('#!/usr/bin/env bash\nexec "' + sys.executable + '" "$1/scripts/blocked-get.py" "$3"\n')
+        (root / "scripts/blocked-get.py").write_text(
+            "import json,os,subprocess,sys,time\nfrom pathlib import Path\n"
+            "root=Path(__file__).parents[1]\n"
+            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'])\n"
+            "(root/'get-started.json').write_text(json.dumps({'pid':os.getpid(),'child':child.pid}))\n"
+            "try:\n"
+            " while not (root/'release-get').exists(): time.sleep(0.1)\n"
+            " Path(sys.argv[1]).write_bytes(b'complete-offline-fixture')\n"
+            "finally:\n child.terminate();child.wait()\n"
+        )
+        (root / "scripts/run-bench").write_text('#!/usr/bin/env bash\ntouch "$PWD/unexpected-child"\n')
+        command = [
+            sys.executable,
+            str(root / "scripts/run-bench-campaign.py"),
+            "--root",
+            str(root),
+            "--runs",
+            "2",
+            "--concurrency",
+            "2",
+            "--task",
+            "local-fixture-control",
+            "--forward-arg=--strict-barrier",
+        ]
+        with (root / "campaign.private.log").open("wb") as log:
+            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            guard = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+            while not (root / "get-started.json").exists():
+                assert process.poll() is None and time.monotonic() < guard, "blocked owning GET did not start"
+                time.sleep(0.1)
+            owned = json.loads((root / "get-started.json").read_text())
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=15)
+                joined = True
+            except subprocess.TimeoutExpired:
+                joined = False
+            assert joined, "campaign cancellation did not interrupt its owned full GET"
+        summary = json.loads(next((root / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+        assert process.returncode == 143 and summary["status"] == "cancelled"
+        assert not (root / "unexpected-child").exists()
+        assert not list(root.glob(".context/benchmarks/campaigns/*/startup-cohorts/*/seed-proof.private.json"))
+        assert not list(root.glob(".context/benchmarks/campaigns/*/startup-cohorts/*/seed-probe-*"))
+        assert not (Path(summary["shared_inventory"]["directory"]) / "owner").exists()
+        for pid in (owned["pid"], owned["child"], summary["shared_inventory"]["publisher_pid"]):
+            native = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+            assert not native.stdout.strip() or native.stdout.strip().startswith("Z"), (
+                "owned helper retained live resources"
+            )
+        assert calls == []
+    finally:
+        (root / "release-get").touch()
+        if process is not None and process.poll() is None:
+            try:
+                process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=60)
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_exited_get_leader_drains_owned_descendant(tmp_path, monkeypatch):
+    import signal
+    import time
+
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    directory = root / "standalone"
+    directory.mkdir()
+    started = root / "owned-get-child.json"
+    (root / "scripts/cloudbench-seed-get.sh").write_text(
+        '#!/usr/bin/env bash\nexec "' + sys.executable + '" "$1/scripts/orphan-get.py" "$3"\n'
+    )
+    (root / "scripts/orphan-get.py").write_text(
+        "import json,subprocess,sys\nfrom pathlib import Path\n"
+        "root=Path(__file__).parents[1]\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)'])\n"
+        "stamp=' '.join(subprocess.check_output(['ps','-p',str(child.pid),'-o','lstart='],text=True).split())\n"
+        "(root/'owned-get-child.json').write_text(json.dumps({'pid':child.pid,'birth':stamp}))\n"
+        "Path(sys.argv[1]).write_bytes(b'complete-owned-fixture')\n"
+        "# Exit the GET leader while its exact owned descendant is still live.\n"
+    )
+    try:
+        transfer = module.get(root, root / "scripts", {"token": "owned-fixture"}, directory, time.time() + 60)
+        owned = json.loads(started.read_text())
+        state = subprocess.run(
+            ["ps", "-p", str(owned["pid"]), "-o", "stat="], capture_output=True, text=True
+        ).stdout.strip()
+        assert transfer["exit_code"] == 0 and transfer["bytes"] == len(b"complete-owned-fixture")
+        assert not state or state.startswith("Z"), "exited GET leader retained a live owned descendant"
+        assert not list(directory.glob("seed-probe-*")) and calls == []
+    finally:
+        # RED must also release its fixture without signaling a reused PID.
+        if started.is_file():
+            owned = json.loads(started.read_text())
+            if module._identity._process_start_matches(owned["pid"], owned["birth"]):
+                try:
+                    os.kill(owned["pid"], signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = subprocess.run(
+                        ["ps", "-p", str(owned["pid"]), "-o", "stat="], capture_output=True, text=True
+                    ).stdout.strip()
+                    if not state or state.startswith("Z"):
+                        break
+                    time.sleep(0.05)
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_campaign_inventory_seed_preflight_late_hash_cancellation_refuses_proof(tmp_path, monkeypatch):
+    import hashlib
+    import signal
+    import time
+
+    import pytest
+
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    directory = root / "standalone"
+    directory.mkdir()
+    (root / "scripts/cloudbench-seed-get.sh").write_text('printf complete-owned-fixture > "$3"\n')
+    original = hashlib.sha256
+    cancelled = []
+
+    class CancelDuringHash:
+        def __init__(self):
+            self.inner = original()
+
+        def update(self, chunk):
+            if not cancelled:
+                cancelled.append(True)
+                os.kill(os.getpid(), signal.SIGTERM)
+            self.inner.update(chunk)
+
+        def hexdigest(self):
+            return self.inner.hexdigest()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module.hashlib, "sha256", CancelDuringHash)
+            with pytest.raises(ValueError, match="cancel"):
+                module.get(root, root / "scripts", {"token": "owned-fixture"}, directory, time.time() + 60)
+        assert cancelled and not list(directory.glob("seed-probe-*"))
+        assert not (directory / "seed-proof.private.json").exists() and calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_campaign_inventory_seed_preflight_full_get_once_for_exact_50_and_standalone(tmp_path, monkeypatch):
     root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
     try:
@@ -611,9 +847,7 @@ def test_campaign_inventory_seed_preflight_preserves_parent_toolchain_path_for_b
         assert result.returncode == 0, "resolved Node/npm PATH did not survive in fleet parent"
 
 
-def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_consume(
-    tmp_path, monkeypatch
-):
+def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_consume(tmp_path, monkeypatch):
     import fcntl
     import importlib.util
     import time
@@ -634,20 +868,14 @@ def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_co
         "parent_pid": str(os.getpid()),
         "parent_start": module.birth(os.getpid()),
     }
-    (inventory / "owner").write_text(
-        "".join(f"{key}={value}\n" for key, value in authority.items())
-    )
-    (barrier / "manifest.json").write_text(
-        json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid()}})
-    )
+    (inventory / "owner").write_text("".join(f"{key}={value}\n" for key, value in authority.items()))
+    (barrier / "manifest.json").write_text(json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid()}}))
     normalize = next(
         line
         for line in (ROOT / "scripts/run-bench-fleet").read_text().splitlines()
         if line.startswith('CLOUDBENCH_GUEST_PG_MAJOR="${')
     )
-    spec = importlib.util.spec_from_file_location(
-        "native_seed_token", root / "agents/benchmarks/seed_cache_path.py"
-    )
+    spec = importlib.util.spec_from_file_location("native_seed_token", root / "agents/benchmarks/seed_cache_path.py")
     seed = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(seed)
     try:
@@ -666,9 +894,7 @@ def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_co
                 text=True,
             )
             payload = json.loads(proof.read_text())
-            assert payload["fixture"]["pg_major"] == fleet_pg, (
-                "parent proof disagrees with fleet PG-major default"
-            )
+            assert payload["fixture"]["pg_major"] == fleet_pg, "parent proof disagrees with fleet PG-major default"
             assert payload["fixture"]["token"] == seed.seed_cache_token(
                 root / "back-end/prisma/schema.prisma", fleet_pg
             )

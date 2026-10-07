@@ -12,6 +12,7 @@ import re
 import runpy
 import shlex
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -298,6 +299,12 @@ print(json.dumps({'machine_id':machine,'run_token':token,'driver_state':driver,'
             assert set(receipt) == set(intent) | {"machine_absence", "volume_retained", "verified_epoch"}
             assert all(receipt[k] == value for k, value in intent.items())
             assert receipt["machine_absence"] in ("exact-native-not-found", "exact-native-destroyed-unlisted") and receipt["volume_retained"] is True
+            # The receipt describes the original observation. The caller has
+            # just verified the current native endpoint; a destroyed tombstone
+            # may later become exact not-found without invalidating ownership.
+            # Expose a difference without making history an extra release gate.
+            if receipt["machine_absence"] != args.native_absence_kind:
+                print("SEALED_RETIREMENT_ABSENCE_TRANSITION=" + receipt["machine_absence"] + "->" + args.native_absence_kind, file=sys.stderr)
         print(json.dumps({"machine_id": args.machine_id, "volume_id": expected["volume_id"], "proof_credit": 0, "full_release": False}))
 
 

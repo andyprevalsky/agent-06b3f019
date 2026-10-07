@@ -266,9 +266,7 @@ RECIPE_PATHS = (
 )
 
 
-def bound_recipe(
-    meta: dict[str, str], config: dict, provenance: dict
-) -> tuple[str, str, str]:
+def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
     if (
         not isinstance(config, dict)
         or not isinstance(config.get("env"), dict)
@@ -323,14 +321,6 @@ def bound_recipe(
         return result.stdout
 
     expected = {path: sha(blob(path)) for path in RECIPE_PATHS}
-    if (
-        provenance.get("git_head") != ref
-        or provenance.get("git_exit_code") != 0
-        or provenance.get("tracked_change_exit_code") != 0
-        or provenance.get("tracked_changed_paths") != []
-        or provenance.get("source_file_sha256") != expected
-    ):
-        raise ValueError("captured checkout differs from the bound clean source")
     injected = {}
     for item in config.get("files", []):
         if (
@@ -448,6 +438,27 @@ def bound_recipe(
         sha(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()),
         source_fingerprint,
     )
+
+
+def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[str, str, str]:
+    result = native_recipe(meta, config)
+    ref = result[0]
+    expected = {}
+    for path in RECIPE_PATHS:
+        blob = subprocess.run(["git", "-C", meta["workspace_root"], "show", f"{ref}:{path}"],
+                              capture_output=True, timeout=15)
+        if blob.returncode or len(blob.stdout) > 67108864:
+            raise ValueError("bound source blob is unavailable")
+        expected[path] = sha(blob.stdout)
+    if (
+        provenance.get("git_head") != ref
+        or provenance.get("git_exit_code") != 0
+        or provenance.get("tracked_change_exit_code") != 0
+        or provenance.get("tracked_changed_paths") != []
+        or provenance.get("source_file_sha256") != expected
+    ):
+        raise ValueError("captured checkout differs from the bound clean source")
+    return result
 
 
 def verify_bootstrap_current(

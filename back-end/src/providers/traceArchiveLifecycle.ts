@@ -367,7 +367,9 @@ async function writeStartManifest(
       await ownership.reconcile();
       return;
     }
-    const refs = uniqueArtifacts(excludeControlArtifacts(await listArchivedObjects(agentId)));
+    const refs = uniqueArtifacts(
+      excludeControlArtifacts(await listArchivedObjects(agentId, { throwOnError: true }))
+    );
     const manifestValue = buildManifestValue({
       rootAgentId: agentId,
       refs,
