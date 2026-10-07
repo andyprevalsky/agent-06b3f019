@@ -10991,7 +10991,12 @@ exit "$retirement_status"
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS if late_native else 10)
+        # large-catalog writes 10k ordinal files with per-file fsync. That is
+        # real fixture I/O, not a synthetic hang, so it inherits the shared
+        # host guard used by late-native birth observation.
+        stdout, stderr = process.communicate(
+            timeout=FIXTURE_HOST_GUARD_SECONDS if late_native or fault == "large-catalog" else 10
+        )
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
