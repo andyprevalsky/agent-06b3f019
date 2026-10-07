@@ -60,10 +60,15 @@ function detectorCostCents(model: string, promptTokens: number, completionTokens
   return (promptTokens * 0.075 + completionTokens * 0.4) / 1000;
 }
 
+export type DetectorCompletionStream = typeof createStreamingCompletion;
+
 /** Fails safe to "still on hold": an outage must not re-enter on hold music. */
-export const detectLiveHuman: HumanDetector = async (input) => {
+async function detectWith(
+  streamCompletion: DetectorCompletionStream,
+  input: HumanDetectorInput
+): Promise<HumanDetection> {
   try {
-    const stream = await createStreamingCompletion({
+    const stream = await streamCompletion({
       model: HUMAN_DETECTOR_MODEL,
       messages: buildHumanDetectorMessages(input),
       max_tokens: 150,
@@ -129,4 +134,11 @@ export const detectLiveHuman: HumanDetector = async (input) => {
       reason: `detector_error: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-};
+}
+
+export const createHumanDetector =
+  (streamCompletion: DetectorCompletionStream): HumanDetector =>
+  (input) =>
+    detectWith(streamCompletion, input);
+
+export const detectLiveHuman: HumanDetector = createHumanDetector(createStreamingCompletion);

@@ -4,6 +4,11 @@
  * failure handling, the kill switch, and the real human detector.
  */
 import assert from 'node:assert/strict';
+import type {
+  DetectorCompletionStream,
+  HumanDetection,
+} from '../../domains/vapi/holdDetectorService';
+import type { CompletionChunk } from '../../providers/rose/types';
 import { parseHoldTwiml, waitFor } from './phone-hold.fixtures';
 import {
   AEROPLAN_AD,
@@ -267,6 +272,61 @@ async function testResumeFailureStaysOnHold(): Promise<void> {
   assert.equal(session.segments.length, 1);
 }
 
+/** A detector outage or malformed answer keeps the call parked, even on a real greeting. */
+async function testDetectorFailureStaysOnHold(): Promise<void> {
+  const answer =
+    (content: string): DetectorCompletionStream =>
+    async () =>
+      (async function* (): AsyncGenerator<CompletionChunk> {
+        yield {
+          choices: [{ index: 0, delta: { content } }],
+          requested_model: 'rose-labs/rose-1-mini',
+          actual_model: 'rose-labs/rose-1-mini',
+          pool_name: 'rose-1-mini',
+          pool_size: 1,
+        };
+      })();
+  const failures: Array<[string, DetectorCompletionStream, RegExp]> = [
+    [
+      'stream error',
+      async () => {
+        throw new Error('rose stream unavailable');
+      },
+      /rose stream unavailable/,
+    ],
+    ['non-JSON answer', answer('A live agent has joined.'), /JSON/],
+    ['schema-invalid answer', answer('{"live_human":"yes","reason":"greeting"}'), /live_human/],
+  ];
+  for (const [label, stream, cause] of failures) {
+    const placed = await placeCall();
+    await park(placed);
+    const vapiCreates = h.upstream.vapiCreates().length;
+    const detect = h.liveDetector.createHumanDetector(stream);
+    const detections: HumanDetection[] = [];
+    const outcome = await h.holdService.handleHoldUtterance(
+      resolveConfig(),
+      placed.session.id,
+      REP_GREETING,
+      async (input) => {
+        const detection = await detect(input);
+        detections.push(detection);
+        return detection;
+      }
+    );
+    assert.equal(outcome, 'hold', label);
+    assert.equal(detections.length, 1, label);
+    assert.equal(detections[0].live_human, false, label);
+    assert.match(detections[0].reason, /^detector_error: /, label);
+    assert.match(detections[0].reason, cause, label);
+    const session = await loadSession(placed.session.id);
+    assert.equal(session.state, 'on_hold', label);
+    assert.equal(session.holds[0].endedAt, undefined, `${label}: the hold stays open`);
+    assert.equal(session.holds[0].utterances.length, 1, `${label}: the utterance is kept`);
+    assert.equal(session.segments.length, 1, `${label}: no resume segment`);
+    assert.equal(h.upstream.vapiCreates().length, vapiCreates, `${label}: Vapi is not redialed`);
+  }
+}
+
 async function testKillSwitchPlacesDirectVapiCall(): Promise<void> {
   process.env.PHONE_HOLD_ENABLED = '0';
   try {
@@ -323,6 +383,7 @@ export const EDGE_CASES: Array<[string, () => Promise<void>]> = [
   ['failures: placement errors end the session', testPlacementFailuresEndTheSession],
   ['failures: park redirect error keeps call connected', testParkFailureKeepsTheCallConnected],
   ['failures: resume error stays on hold', testResumeFailureStaysOnHold],
+  ['failures: detector error stays on hold', testDetectorFailureStaysOnHold],
   ['kill switch: direct Vapi call', testKillSwitchPlacesDirectVapiCall],
   ['live detector: recorded Air Canada queue audio', testLiveDetectorOnRecordedQueueAudio],
 ];
