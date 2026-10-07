@@ -1252,6 +1252,10 @@ except CatalogError as exc:
     print(f"catalog preflight failed: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
+# The shell compares this with -gt and adds start-barrier and teardown
+# allowances to it, so it must stay far below Bash's 64-bit integer limit.
+MAX_TIMEOUT_SECONDS = 2**31 - 1
+
 for row in rows:
     world_model_mode = str(row.get("world_model_mode") or "").lower()
     browser_required = row.get("requires_browser_agent")
@@ -1261,7 +1265,11 @@ for row in rows:
     timeout_seconds = row.get("timeout_seconds")
     if timeout_seconds is None:
         timeout_seconds = 0
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds < 0:
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 0 <= timeout_seconds <= MAX_TIMEOUT_SECONDS
+    ):
         print(f"invalid timeout_seconds for {row['name']}", file=sys.stderr)
         raise SystemExit(1)
     print(("simulate" if world_model_mode == "simulate" else "real")

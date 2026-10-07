@@ -1342,6 +1342,43 @@ done
     assert "DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)" in fleet
 
 
+def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    benchmarks = tmp_path / "agents" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    shutil.copy(TASKS_JSON.with_name("polar_tasks.json"), benchmarks / "polar_tasks.json")
+    tasks = json.loads(TASKS_JSON.read_text())
+
+    def preflight(timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+        for task in tasks:
+            if task["name"] == "phone-call-hold-queue":
+                task["timeout_seconds"] = timeout_seconds
+        (benchmarks / "tasks.json").write_text(json.dumps(tasks))
+        script = f"""set -euo pipefail
+ROOT_DIR={shlex.quote(str(tmp_path))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+{catalog_fn}
+_catalog_modes_for_batch phone-call-hold-queue
+"""
+        return subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60
+        )
+
+    accepted = preflight(2**31 - 1)
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}"]
+    # Beyond Bash's integer range `-gt` errors out, and near it the barrier
+    # allowance added to the budget wraps negative; neither may reach the shell.
+    for timeout_seconds in (2**63, 2**63 - 1):
+        rejected = preflight(timeout_seconds)
+        assert rejected.returncode == 1, rejected.stdout
+        assert "invalid timeout_seconds for phone-call-hold-queue" in rejected.stderr
+        assert rejected.stdout == ""
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
