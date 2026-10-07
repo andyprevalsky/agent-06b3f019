@@ -206,12 +206,36 @@ The unchanged lane rerun at 22:00 on HEAD `e93e406e5` (runtime identical to
   the stall is confined to the busy shared cardholder. This supports the
   exclusive-cardholder remedy below.
 
+### Recurrence on 2026-10-07
+
+`/deploy` Step 6a for PR #1363 (deploy run `20261005-172101-47407`, HEAD
+`4a14f9783`, stack `1791405163-92172-18662`) failed `agent-payment-abandonment`
+(agent `cba71b08-839b-4ab6-ab05-b82d3cedc21b`) the same way. The other three
+lifecycle tasks passed, and the same four-task lane passed in this deploy on
+2026-10-06 with 4396 released. The branch does not touch the mint, cleanup or
+reclaim code.
+
+- Transfer `owt_…d6d22` (card `card_d7608e33491511fdeec32b5d`, $43.96 mint, 4396
+  transferred) was created at 20:48:29. `close_card` succeeded at 20:48:38. The
+  card was never charged. Six release reads through 20:49:40 and seven
+  stale-lease retries from 20:51:01 to 21:08:00 all returned `consumed`,
+  `released_cents=0`: 48 reads over 20.5 minutes, with no provider error, retry
+  or throttle and no recovery created.
+- No read-only provider ledger read was taken, so this run cannot say whether
+  another consumer was on the shared cardholder. No other AgentCard lane was
+  running on this host.
+- The stack was stopped at 21:09:24 because the host disk was nearly full. The
+  purchase was last seen `HELD` with funding `RECLAIMING`; nothing is retrying
+  the release now, and its Stripe test-mode hold was not refunded by our
+  reconciler.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
   `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
   `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
-  `card_0d8d820f72e50b35fd394b93`) to AgentCard with the ledger reads.
+  `card_0d8d820f72e50b35fd394b93`; `owt_…d6d22`, card
+  `card_d7608e33491511fdeec32b5d`) to AgentCard with the ledger reads.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
@@ -226,7 +250,6 @@ When a benchmark waits on a third-party ledger, its failure has to print that
 ledger's rows next to ours. "Expected VOIDED, got HELD" points at our
 reconciler. The provider rows show the card closed and the provider never
 releasing it.
-
 
 ## Retained original financial gate, October 6
 
