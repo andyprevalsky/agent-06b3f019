@@ -81,6 +81,20 @@ export function extractWords(root: Node): WordItem[] {
 
     const element = node as HTMLElement;
     const tagName = element.tagName.toLowerCase();
+    if (tagName === 'img') {
+      const src = element.getAttribute('src') || '';
+      const alt = element.getAttribute('alt') || '';
+      if (!src) return;
+      out.push({
+        word: alt,
+        isWord: true,
+        isImage: true,
+        src,
+        alt,
+        ...formatting,
+      });
+      return;
+    }
     const withInline = applyInlineFormatting(tagName, element, formatting);
     const withBlock = applyBlockFormatting(tagName, withInline, allocBlockIndex);
 

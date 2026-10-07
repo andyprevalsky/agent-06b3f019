@@ -5,7 +5,7 @@
  *  - Plain text rendering
  *  - Escape-sequence normalization (\n, \t, \*, etc.)
  *  - breaks=true + shouldAnimate=false path (ReactMarkdown + remarkBreaks)
- *  - FadeInMarkdown path: static + animated
+ *  - FadeInMarkdown path: animated (static non-breaks now uses ReactMarkdown)
  *  - Headings, lists (ul/ol), code blocks, fenced code, inline code
  *  - Links, bold/italic, blockquotes
  *  - className passthrough
@@ -101,10 +101,25 @@ describe('MarkdownText', () => {
     });
   });
 
-  it('passes className to FadeInMarkdown when not in breaks mode', async () => {
+  it('passes className on the static ReactMarkdown path', async () => {
     const { container } = render(<MarkdownText text="hello" className="my-prose" />);
     await waitFor(() => {
       expect(container.querySelector('.my-prose')).not.toBeNull();
+    });
+  });
+
+  it('keeps markdown photos on the animated FadeInMarkdown path', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={'![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'}
+        shouldAnimate={true}
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
     });
   });
 
@@ -134,6 +149,22 @@ describe('MarkdownText', () => {
       expect(container.querySelector('strong')).not.toBeNull();
       expect(container.querySelector('code')).not.toBeNull();
       expect(container.querySelector('a')).not.toBeNull();
+    });
+  });
+
+  it('renders markdown photos on the default static path used by FYI attention bubbles', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={
+          'Cyber Racoon interior:\n\n![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'
+        }
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
     });
   });
 

@@ -82,6 +82,30 @@ function renderWordSpan(
   isLastWord: boolean,
   onLastWordComplete: () => void,
 ): React.ReactNode {
+  if (item.isImage && item.src) {
+    const image = (
+      <img
+        key={`word-${idx}`}
+        src={item.src}
+        alt={item.alt || ''}
+        className="max-w-full h-auto rounded-lg my-2"
+      />
+    );
+    if (!animate) return image;
+    const delay = BASE_DELAY_SECONDS + currentWordIndex * perWordDelay;
+    return (
+      <motion.span
+        key={`word-${idx}`}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay, duration: FADE_DURATION_SECONDS, ease: 'easeOut' }}
+        onAnimationComplete={isLastWord ? onLastWordComplete : undefined}
+        className="block"
+      >
+        <img src={item.src} alt={item.alt || ''} className="max-w-full h-auto rounded-lg my-2" />
+      </motion.span>
+    );
+  }
   if (animate) {
     const delay = BASE_DELAY_SECONDS + currentWordIndex * perWordDelay;
     return (
