@@ -11109,7 +11109,7 @@ exit "$retirement_status"
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS if late_native else 10)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
