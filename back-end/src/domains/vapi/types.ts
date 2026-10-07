@@ -65,6 +65,7 @@ export interface PhoneCallSessionRecord {
   holds: PhoneHoldPeriod[];
   endedReason: string | null;
   endedAt: Date | null;
+  version: number;
   createdAt: Date;
   updatedAt: Date;
 }

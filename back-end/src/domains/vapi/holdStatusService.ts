@@ -43,7 +43,9 @@ export function withFinalSegments(
   return session.segments.map((segment, index) => {
     const call = calls[index] ?? {};
     const cached = segment.final !== undefined && segment.final !== null;
-    return !cached && segmentAnalysisReady(call) ? { ...segment, final: call } : segment;
+    return !cached && call.id === segment.vapiCallId && segmentAnalysisReady(call)
+      ? { ...segment, final: call }
+      : segment;
   });
 }
 
@@ -58,20 +60,26 @@ function endedReasonForTwilioStatus(status: string, state: PhoneCallSessionState
 /** Twilio status callback (or a reconcile poll) reporting the call's terminal status. */
 export async function handleTwilioCallStatus(sessionId: string, callStatus: string): Promise<void> {
   if (!TERMINAL_TWILIO_STATUSES.has(callStatus)) return;
-  const session = await repo.findPhoneCallSession(sessionId);
-  if (session === null || session.state === 'ended') return;
   const now = new Date();
-  const hold = openHold(session);
-  const reason = session.endedReason ?? endedReasonForTwilioStatus(callStatus, session.state);
-  await repo.transitionPhoneCallSession(sessionId, LIVE_STATES, {
-    state: 'ended',
-    endedAt: now,
-    ...(reason !== null ? { endedReason: reason } : {}),
-    ...(hold !== undefined
-      ? { holds: [...session.holds.slice(0, -1), { ...hold, endedAt: now.toISOString() }] }
-      : {}),
+  const ended = await repo.mutatePhoneCallSession(sessionId, (session) => {
+    if (!LIVE_STATES.includes(session.state)) return null;
+    const hold = openHold(session);
+    const reason = session.endedReason ?? endedReasonForTwilioStatus(callStatus, session.state);
+    return {
+      state: 'ended',
+      endedAt: now,
+      ...(reason !== null ? { endedReason: reason } : {}),
+      ...(hold !== undefined
+        ? { holds: [...session.holds.slice(0, -1), { ...hold, endedAt: now.toISOString() }] }
+        : {}),
+    };
   });
-  log.info('Hold-capable call ended', { session_id: sessionId, twilio_status: callStatus, reason });
+  if (ended === null) return;
+  log.info('Hold-capable call ended', {
+    session_id: sessionId,
+    twilio_status: callStatus,
+    reason: ended.endedReason,
+  });
 }
 
 /** Hard ceiling on one hold: hang up instead of holding forever. */
@@ -94,15 +102,15 @@ export async function getHoldCallStatus(
   let session = await repo.findPhoneCallSessionByRootVapiCallId(rootVapiCallId);
   if (session === null) return null;
   const calls = await fetchSegmentCalls(session);
-  const segments = withFinalSegments(session, calls);
-  // Segments are only appended while reconnecting, so a compare-and-set on
-  // any other state cannot drop a newly appended segment.
-  if (
-    session.state !== 'reconnecting' &&
-    segments.some((segment, index) => segment !== session?.segments[index])
-  ) {
-    session =
-      (await repo.transitionPhoneCallSession(session.id, [session.state], { segments })) ?? session;
+  if (withFinalSegments(session, calls).some((segment, i) => segment !== session?.segments[i])) {
+    // Re-derived from the latest row: a segment appended after `calls` was
+    // fetched has no fetched call and is kept as is.
+    const cached = await repo.mutatePhoneCallSession(session.id, (current) => {
+      if (current.state === 'reconnecting') return null;
+      const segments = withFinalSegments(current, calls);
+      return segments.some((segment, i) => segment !== current.segments[i]) ? { segments } : null;
+    });
+    session = cached ?? session;
   }
   const last = calls[calls.length - 1] ?? {};
   if (

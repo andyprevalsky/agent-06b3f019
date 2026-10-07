@@ -142,18 +142,20 @@ export async function parkCallOnHold(
     streamConnects: 0,
     utterances: [],
   };
-  const parked = await repo.transitionPhoneCallSession(sessionId, ['connected'], {
-    state: 'on_hold',
-    holds: [...session.holds, hold],
-  });
+  const parked = await repo.mutatePhoneCallSession(sessionId, (current) =>
+    current.state === 'connected' && current.activeVapiCallId === session.activeVapiCallId
+      ? { state: 'on_hold', holds: [...current.holds, hold] }
+      : null
+  );
   if (parked === null) return 'You are on hold. Wait silently.';
   try {
     await redirectTwilioCall(config, session.twilioCallSid, buildHoldTwiml(config, sessionId));
   } catch (error) {
-    await repo.transitionPhoneCallSession(sessionId, ['on_hold'], {
-      state: 'connected',
-      holds: session.holds,
-    });
+    await repo.mutatePhoneCallSession(sessionId, (current) =>
+      current.state === 'on_hold' && openHold(current)?.startedAt === hold.startedAt
+        ? { state: 'connected', holds: current.holds.slice(0, -1) }
+        : null
+    );
     log.error('Failed to park call on hold', { session_id: sessionId, error: errorMessage(error) });
     return 'Could not put the call on hold. Keep listening on the line.';
   }
@@ -192,12 +194,14 @@ export async function handleHoldUtterance(
     liveHuman: detection.live_human,
     reason: detection.reason,
   };
-  const updatedHold = {
-    ...hold,
-    utterances: [...hold.utterances, utterance].slice(-HOLD_UTTERANCE_LIMIT),
-  };
-  const recorded = await repo.transitionPhoneCallSession(sessionId, ['on_hold'], {
-    holds: [...session.holds.slice(0, -1), updatedHold],
+  const recorded = await repo.mutatePhoneCallSession(sessionId, (current) => {
+    const open = openHold(current);
+    if (current.state !== 'on_hold' || open?.startedAt !== hold.startedAt) return null;
+    const updatedHold = {
+      ...open,
+      utterances: [...open.utterances, utterance].slice(-HOLD_UTTERANCE_LIMIT),
+    };
+    return { holds: [...current.holds.slice(0, -1), updatedHold] };
   });
   if (recorded === null) return 'ignored';
   if (!detection.live_human) return 'hold';
@@ -212,31 +216,39 @@ export async function resumeFromHold(
 ): Promise<boolean> {
   const hold = openHold(session);
   if (hold === undefined || session.twilioCallSid === null) return false;
-  const closedHold = { ...hold, endedAt: new Date().toISOString(), humanUtterance };
-  const holds = [...session.holds.slice(0, -1), closedHold];
-  const reconnecting = await repo.transitionPhoneCallSession(session.id, ['on_hold'], {
-    state: 'reconnecting',
-    holds,
+  const endedAt = new Date().toISOString();
+  const reconnecting = await repo.mutatePhoneCallSession(session.id, (current) => {
+    const open = openHold(current);
+    if (current.state !== 'on_hold' || open?.startedAt !== hold.startedAt) return null;
+    return {
+      state: 'reconnecting',
+      holds: [...current.holds.slice(0, -1), { ...open, endedAt, humanUtterance }],
+    };
   });
   if (reconnecting === null) return false;
+  const closedHold = reconnecting.holds[reconnecting.holds.length - 1];
   try {
     const calls = await fetchSegmentCalls(reconnecting);
     const assistant = buildResumedAssistant(
       session.assistantConfig,
-      renderPriorConversation(calls, holds),
+      renderPriorConversation(calls, reconnecting.holds),
       closedHold,
       humanUtterance
     );
     const segment = await createBypassSegment(session, assistant);
     await redirectTwilioCall(config, session.twilioCallSid, segment.twiml);
-    await repo.transitionPhoneCallSession(session.id, ['reconnecting'], {
-      state: 'connected',
-      activeVapiCallId: segment.id,
-      segments: [
-        ...withFinalSegments(reconnecting, calls),
-        { vapiCallId: segment.id, startedAt: new Date().toISOString() },
-      ],
-    });
+    await repo.mutatePhoneCallSession(session.id, (current) =>
+      current.state === 'reconnecting'
+        ? {
+            state: 'connected',
+            activeVapiCallId: segment.id,
+            segments: [
+              ...withFinalSegments(current, calls),
+              { vapiCallId: segment.id, startedAt: new Date().toISOString() },
+            ],
+          }
+        : null
+    );
     log.info('Call resumed from hold', { session_id: session.id, vapi_call_id: segment.id });
     return true;
   } catch (error) {
@@ -244,9 +256,16 @@ export async function resumeFromHold(
       session_id: session.id,
       error: errorMessage(error),
     });
-    await repo.transitionPhoneCallSession(session.id, ['reconnecting'], {
-      state: 'on_hold',
-      holds: session.holds,
+    await repo.mutatePhoneCallSession(session.id, (current) => {
+      const closed = current.holds[current.holds.length - 1];
+      if (current.state !== 'reconnecting' || closed === undefined) return null;
+      const reopened: PhoneHoldPeriod = {
+        startedAt: closed.startedAt,
+        heard: closed.heard,
+        streamConnects: closed.streamConnects,
+        utterances: closed.utterances,
+      };
+      return { state: 'on_hold', holds: [...current.holds.slice(0, -1), reopened] };
     });
     return false;
   }
@@ -279,8 +298,11 @@ export async function holdReconnectTwiml(
     await handleTwilioCallStatus(sessionId, 'completed');
     return HANGUP_TWIML;
   }
-  await repo.transitionPhoneCallSession(sessionId, ['on_hold'], {
-    holds: [...session.holds.slice(0, -1), { ...hold, streamConnects }],
+  await repo.mutatePhoneCallSession(sessionId, (current) => {
+    const open = openHold(current);
+    if (current.state !== 'on_hold' || open?.startedAt !== hold.startedAt) return null;
+    const counted = { ...open, streamConnects: open.streamConnects + 1 };
+    return { holds: [...current.holds.slice(0, -1), counted] };
   });
   return buildHoldTwiml(config, sessionId);
 }

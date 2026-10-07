@@ -23,12 +23,20 @@ interface InjectedFailure {
   body: string;
 }
 
+interface InjectedInterleave {
+  method: string;
+  pathPattern: RegExp;
+  action: () => Promise<void>;
+}
+
 /** Vapi `/call` and Twilio `Calls` endpoints, enough for the hold lifecycle. */
 export class FakeUpstream {
   readonly requests: RecordedRequest[] = [];
   readonly vapiCalls = new Map<string, Json>();
   readonly twilioStatuses = new Map<string, string>();
   private readonly failures: InjectedFailure[] = [];
+  private readonly interleaves: InjectedInterleave[] = [];
+  readonly interleaveErrors: unknown[] = [];
   private server: http.Server | null = null;
   url = '';
 
@@ -43,9 +51,18 @@ export class FakeUpstream {
           body: Buffer.concat(chunks).toString('utf8'),
         };
         this.requests.push(recorded);
-        const [status, body] = this.respond(recorded);
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(body));
+        void this.interleave(recorded).then(
+          () => {
+            const [status, body] = this.respond(recorded);
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(body));
+          },
+          (error: unknown) => {
+            this.interleaveErrors.push(error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'racing writer failed' }));
+          }
+        );
       });
     });
     await new Promise<void>((resolve) => this.server?.listen(0, '127.0.0.1', resolve));
@@ -60,6 +77,20 @@ export class FakeUpstream {
   /** The next request matching method + path pattern gets this error response. */
   failNext(method: string, pathPattern: RegExp, status: number, body = 'injected failure'): void {
     this.failures.push({ method, pathPattern, status, body });
+  }
+
+  /** The next matching request is answered only after `action` finishes (a racing writer). */
+  beforeNext(method: string, pathPattern: RegExp, action: () => Promise<void>): void {
+    this.interleaves.push({ method, pathPattern, action });
+  }
+
+  private async interleave(request: RecordedRequest): Promise<void> {
+    const index = this.interleaves.findIndex(
+      (entry) => entry.method === request.method && entry.pathPattern.test(request.path)
+    );
+    if (index < 0) return;
+    const [entry] = this.interleaves.splice(index, 1);
+    await entry.action();
   }
 
   vapiCreates(): Json[] {

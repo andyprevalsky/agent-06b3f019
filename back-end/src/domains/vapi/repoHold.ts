@@ -37,6 +37,7 @@ function toUpdateData(
   patch: PhoneCallSessionPatch
 ): Prisma.PhoneCallSessionUpdateManyMutationInput {
   return {
+    version: { increment: 1 },
     ...(patch.rootVapiCallId !== undefined ? { rootVapiCallId: patch.rootVapiCallId } : {}),
     ...(patch.activeVapiCallId !== undefined ? { activeVapiCallId: patch.activeVapiCallId } : {}),
     ...(patch.twilioCallSid !== undefined ? { twilioCallSid: patch.twilioCallSid } : {}),
@@ -124,9 +125,9 @@ export async function recordHoldDetectorUsage(input: {
 }
 
 /**
- * Compare-and-set on `state`: applies the patch only while the session is in
- * one of `from`. Returns the updated record, or null when another request
- * (a webhook retry, a racing listener) already moved it on.
+ * Compare-and-set on `state` for patches that do not depend on what was read
+ * (a state move, an ended reason). Returns the updated record, or null when
+ * another request (a webhook retry, a racing listener) already moved it on.
  */
 export async function transitionPhoneCallSession(
   id: string,
@@ -139,4 +140,31 @@ export async function transitionPhoneCallSession(
   });
   if (result.count === 0) return null;
   return findPhoneCallSession(id);
+}
+
+const MUTATE_ATTEMPTS = 5;
+
+/**
+ * Read-modify-write for patches built from the current row (`segments`,
+ * `holds`): `mutate` derives the patch from a fresh read, or returns null to
+ * leave the session alone. The write lands only if no other write happened
+ * since that read; otherwise it is re-derived from the newer row, so a racing
+ * writer's change is never overwritten by a stale copy.
+ */
+export async function mutatePhoneCallSession(
+  id: string,
+  mutate: (session: PhoneCallSessionRecord) => PhoneCallSessionPatch | null
+): Promise<PhoneCallSessionRecord | null> {
+  for (let attempt = 0; attempt < MUTATE_ATTEMPTS; attempt++) {
+    const session = await findPhoneCallSession(id);
+    if (session === null) return null;
+    const patch = mutate(session);
+    if (patch === null) return null;
+    const result = await prisma.phoneCallSession.updateMany({
+      where: { id, version: session.version },
+      data: toUpdateData(patch),
+    });
+    if (result.count === 1) return findPhoneCallSession(id);
+  }
+  throw new Error(`Phone call session ${id} kept changing across ${MUTATE_ATTEMPTS} writes`);
 }

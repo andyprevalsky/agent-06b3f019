@@ -16,6 +16,7 @@ CREATE TABLE "PhoneCallSession" (
     "holds" JSONB NOT NULL DEFAULT '[]',
     "endedReason" TEXT,
     "endedAt" TIMESTAMP(3),
+    "version" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

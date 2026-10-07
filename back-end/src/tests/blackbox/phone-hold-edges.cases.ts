@@ -132,6 +132,52 @@ async function testLostStatusCallbackReconcilesFromTwilio(): Promise<void> {
   );
 }
 
+async function testStatusPollKeepsSegmentAppendedMidPoll(): Promise<void> {
+  const placed = await placeCall();
+  const config = resolveConfig();
+  h.upstream.vapiCalls.set(
+    placed.callId,
+    endedVapiSegment(placed.callId, { analysis: { summary: 'Reached the queue.' } })
+  );
+  // While the poll fetches the first segment, the call parks and resumes into a second.
+  h.upstream.beforeNext('GET', new RegExp(`^/call/${placed.callId}$`), async () => {
+    await park(placed);
+    const parked = await loadSession(placed.session.id);
+    assert.equal(await h.holdService.resumeFromHold(config, parked, REP_GREETING), true);
+  });
+  await h.service.getCallStatus(placed.callId);
+  assert.deepEqual(h.upstream.interleaveErrors, []);
+  const session = await loadSession(placed.session.id);
+  assert.equal(session.state, 'connected');
+  assert.equal(session.segments.length, 2, 'the poll keeps the segment appended while it ran');
+  assert.equal(session.segments[1].vapiCallId, session.activeVapiCallId);
+  assert.ok(session.segments[0].final, 'the poll still caches the ended segment');
+}
+
+async function testUtteranceKeepsStreamReconnectMidDetection(): Promise<void> {
+  const placed = await placeCall();
+  const { redirectUrl } = parseHoldTwiml(await park(placed));
+  const sid = placed.session.twilioCallSid ?? '';
+  const outcome = await h.holdService.handleHoldUtterance(
+    resolveConfig(),
+    placed.session.id,
+    AEROPLAN_AD,
+    async () => {
+      // The stream drops and Twilio reconnects it while the detector is still deciding.
+      await postForm(redirectUrl, { CallSid: sid });
+      return { live_human: false, reason: 'hold audio' };
+    }
+  );
+  assert.equal(outcome, 'hold');
+  const [hold] = (await loadSession(placed.session.id)).holds;
+  assert.equal(hold.streamConnects, 1, 'the reconnect counted during detection is kept');
+  assert.deepEqual(
+    hold.utterances.map((utterance) => utterance.text),
+    [AEROPLAN_AD],
+    'the utterance is still recorded'
+  );
+}
+
 function statusCode(error: unknown): number | undefined {
   return (error as { statusCode?: number }).statusCode;
 }
@@ -247,6 +293,14 @@ export const EDGE_CASES: Array<[string, () => Promise<void>]> = [
   ['ceiling: hold ends at max duration', testHoldEndsAtMaxDuration],
   ['status callback: Twilio status mapping', testTwilioStatusMapping],
   ['status: lost callback reconciles from Twilio', testLostStatusCallbackReconcilesFromTwilio],
+  [
+    'race: status poll keeps a segment appended mid-poll',
+    testStatusPollKeepsSegmentAppendedMidPoll,
+  ],
+  [
+    'race: utterance keeps a stream reconnect mid-detection',
+    testUtteranceKeepsStreamReconnectMidDetection,
+  ],
   ['failures: placement errors end the session', testPlacementFailuresEndTheSession],
   ['failures: park redirect error keeps call connected', testParkFailureKeepsTheCallConnected],
   ['failures: resume error stays on hold', testResumeFailureStaysOnHold],

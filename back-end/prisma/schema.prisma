@@ -335,6 +335,8 @@ model PhoneCallSession {
   holds            Json      @default("[]")
   endedReason      String?
   endedAt          DateTime?
+  /// Bumped on every write; read-modify-write callers compare-and-set on it.
+  version          Int       @default(0)
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
