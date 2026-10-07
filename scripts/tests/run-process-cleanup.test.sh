@@ -225,6 +225,65 @@ if run_wait_owned_agent_shutdown "$current_pid" "" 1; then
   exit 1
 fi
 assert_alive "$current_pid" "live worker with unknown birth is not signalled"
+
+# A live supervisor remains owned when one post-signal identity read is empty.
+# Join its actual graceful exit; do not treat a failed observation as release.
+drain_ready="$TMP_ROOT/drain-ready"
+drain_release="$TMP_ROOT/drain-release"
+drain_signals="$TMP_ROOT/drain-signals"
+python3 - "$drain_ready" "$drain_release" "$drain_signals" <<'PY' &
+from pathlib import Path
+import signal
+import sys
+import time
+
+ready, release, signals = map(Path, sys.argv[1:])
+def stop(_signum, _frame):
+    if signals.exists():
+        raise SystemExit(0)
+    with signals.open("a") as handle:
+        handle.write("TERM\n")
+signal.signal(signal.SIGTERM, stop)
+ready.touch()
+while not release.exists():
+    time.sleep(0.05)
+PY
+drain_pid=$!
+PIDS+=("$drain_pid")
+drain_ready_deadline=$((SECONDS + 10))
+while [ ! -f "$drain_ready" ] && [ "$SECONDS" -lt "$drain_ready_deadline" ]; do
+  kill -0 "$drain_pid" 2>/dev/null || { echo "FAIL: drain fixture exited before readiness" >&2; exit 1; }
+  sleep 0.1
+done
+[ -f "$drain_ready" ] || { echo "FAIL: drain fixture did not become ready" >&2; exit 1; }
+drain_birth="$(cloudbench_pid_start_time "$drain_pid")"
+if run_wait_owned_agent_shutdown "$drain_pid" "foreign:$drain_birth" 10; then
+  echo "FAIL: a foreign worker birth was accepted" >&2; exit 1
+fi
+assert_alive "$drain_pid" "foreign birth leaves a live supervisor untouched"
+[ ! -f "$drain_signals" ] || { echo "FAIL: foreign birth signalled the supervisor" >&2; exit 1; }
+
+eval "$(declare -f cloudbench_pid_start_time_like | sed '1s/cloudbench_pid_start_time_like/drain_original_start_time_like/')"
+cloudbench_pid_start_time_like() {
+  if [ "$1" = "$drain_pid" ] && [ "${RUN_AGENT_SIGNALLED_IDENTITY:-}" = "$drain_pid:$drain_birth" ]; then
+    if [ ! -f "$TMP_ROOT/drain-empty-observation" ]; then
+      touch "$TMP_ROOT/drain-empty-observation"
+      return 0
+    fi
+    touch "$drain_release"
+  fi
+  drain_original_start_time_like "$@"
+}
+run_wait_owned_agent_shutdown "$drain_pid" "$drain_birth" 10 || {
+  echo "FAIL: owned supervisor did not finish after a transient read" >&2; exit 1;
+}
+[ -f "$drain_release" ] || { echo "FAIL: empty identity read was mistaken for exit" >&2; exit 1; }
+wait "$drain_pid" || { echo "FAIL: drained supervisor exited unsuccessfully" >&2; exit 1; }
+[ "$(cat "$drain_signals")" = TERM ] || { echo "FAIL: drain must send exactly one graceful signal" >&2; exit 1; }
+unset -f cloudbench_pid_start_time_like
+eval "$(declare -f drain_original_start_time_like | sed '1s/drain_original_start_time_like/cloudbench_pid_start_time_like/')"
+unset -f drain_original_start_time_like
+echo "PASS: transient identity read joins the exact supervisor without a second signal"
 # ── Service-kill patterns stop at argument boundaries ──
 #
 # pgrep -f matches its regex anywhere in argv. An unbounded

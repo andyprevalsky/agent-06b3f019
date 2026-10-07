@@ -334,8 +334,13 @@ Review the complete rejected slice together: the fleet waits for every child
 before aggregating results. Batch independent infrastructure repairs and their
 owning regression checks before freezing the source for a fresh streak.
 For shell process ownership, capture births with `cloudbench_pid_start_time`;
-its reader uses the same whitespace normalization. Raw `ps lstart` pads
-single-digit days and can otherwise reject the live owner during cancellation.
+read them with `cloudbench_pid_start_time_like` for the recorded format. Linux
+uses the stable boot ID and process start tick; raw `ps lstart` can move after a
+VM clock step. The shared reader also normalizes legacy macOS day spacing.
+After signalling a supervisor, an empty observation with a still-live PID means
+keep joining within the existing shutdown budget, not successful release. The
+existing `cloudbench-pid-identity` and `run-process-cleanup` deploy controls cover
+these boundaries without adding per-step timing gates.
 If archive finalization reports `TimeoutError`, inspect the last
 `browser_archive_observation`, exact `cloud_cleanup_evidence` session snapshots,
 and worker cancellation timestamps before blaming recording upload. The
