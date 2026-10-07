@@ -389,6 +389,11 @@ session. Its existing FE-only cleanup terminal can carry a positive
 that receipt to exact owned inventory and native provider closure. Started or
 unknown-phase tasks still owe their playable recording. Missing action markers
 alone prove no exception, and missing original receipts must never be backfilled.
+An initial HTTP transport disconnect is separate from caller cancellation. The
+backend init route keeps the same allocation operation owned and closes its exact
+returned session if the response closes before `writableFinished`; normal response
+completion keeps the session. Failed close retains the existing terminal retry
+owner. It creates no preparation receipt or recording exception.
 The durable publisher checks these proofs; never synthesize a recording or waive
 its check to grant a slice credit. If the provider replay exists but the FINISHED
 recording message is missing, inspect `Failed to save browser action message` in
