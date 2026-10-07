@@ -344,6 +344,20 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
         self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
 
+    def test_status_shutdown_skips_pytest_native_branch_without_pytest(self):
+        source = Path(__file__).with_name(
+            "cloudbench-status-service-shutdown.test.sh"
+        ).read_text()
+        probe = "python3 -c 'import pytest'"
+        skip = (
+            "SKIP: native cache parent permissions "
+            "(offline controller image has no pytest)"
+        )
+        self.assertIn(probe, source)
+        self.assertIn(skip, source)
+        self.assertLess(source.index(probe), source.index("\nimport pytest"))
+        self.assertLess(source.index("\nimport pytest"), source.index(skip))
+
     def test_linux_unpinned_host_uses_offline_controller_image(self):
         self.assertEqual(
             self.check_dispatch(platform="linux", native_preflight=False),

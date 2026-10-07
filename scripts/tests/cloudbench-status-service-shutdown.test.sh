@@ -44,6 +44,8 @@ PY_COHORT_OWNER
 
 # Reuse the permanent cache-parent permission controls in this root Linux
 # namespace; derive their cases from the actual pytest decorator.
+# The offline controller image has no pytest; skip this native-only branch.
+if python3 -c 'import pytest' >/dev/null 2>&1; then
 python3 - "$ROOT" <<'PY_CACHE_PARENT'
 import ast
 import os
@@ -79,6 +81,9 @@ for state in cases:
         shutil.rmtree(scope)
 print('PASS: native checkout cache parent permissions in all permanent states')
 PY_CACHE_PARENT
+else
+    echo "SKIP: native cache parent permissions (offline controller image has no pytest)"
+fi
 
 # Exercise the actual server at the create-before-write boundary. A killed
 # writer and concurrent readers must never expose a partial generation.
