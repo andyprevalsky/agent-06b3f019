@@ -1282,3 +1282,12 @@ C9 image/source remains immutable. No model/provider calls, task definitions,
 evaluators, timeouts, archive readiness assertions or benchmark outcomes change.
 Independent parent review and final exact-head automated review remain required;
 this note gives no fresh whole-suite, production rollout or LIVE50 credit.
+
+Independent parent qualification on `2617cfb6f` read the complete production,
+permanent-test and archive diff, verified all original RED/GREEN log hashes and
+unchanged source/test bindings, and repeated four existing write/payment/auth
+owning controls: PASS in 2.141 seconds, with stable source and zero provider calls.
+The receipt `root-parked-approval-independent-review.safe.json` has SHA-256
+`632560727f529e34af2332ee115fbfce3aa2d132f5867fbadd5f143abfd8c6c3`.
+The author proof remains immutable. Exact-head automated review and production
+rollout remain separate mandatory gates; this qualification adds no LIVE50 credit.
