@@ -281,6 +281,18 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
         ("graphql", {"data": {"app": {"image": []}}}),
         ("auth", None),
         ("auth", []),
+        ("manifest", {"layers": None}),
+        ("manifest", {"layers": 42}),
+        ("manifest", {"layers": False}),
+        ("manifest", {"layers": {}}),
+        ("manifest", {"manifests": None}),
+        ("manifest", {"manifests": 42}),
+        ("manifest", {"manifests": {}}),
+        ("manifest", {"annotations": None}),
+        ("manifest", {"annotations": []}),
+        ("manifest", {"annotations": 7}),
+        ("manifest", {"layers": [{"annotations": []}]}),
+        ("manifest", {"manifests": [{"annotations": None}]}),
     ],
 )
 def test_cold_image_registry_main_invalid_provider_payload_retains_private_failure_receipt(
@@ -316,7 +328,12 @@ def test_cold_image_registry_main_invalid_provider_payload_retains_private_failu
     def response(method, path, _body):
         if method == "POST":
             assert path == "/graphql"
-            return 200, json.dumps(payload).encode(), {}
+            metadata = (
+                {"data": {"app": {"image": {"digest": "sha256:" + "d" * 64, "manifest": payload}}}}
+                if phase == "manifest"
+                else payload
+            )
+            return 200, json.dumps(metadata).encode(), {}
         assert (method, path) == ("GET", tag_path)
         return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
 

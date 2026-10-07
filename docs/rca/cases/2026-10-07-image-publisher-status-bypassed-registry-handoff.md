@@ -219,6 +219,18 @@ inverse cases preserve exit 74 and the receipt. The owning suite passed 74 tests
 the unchanged malformed-provider command failed before those guards and passed
 afterward. This adds no provider or model verification lane.
 
+The next exact-head automated review found the same receipt contract at nested
+manifest fields: non-list `layers` or `manifests` and non-object `annotations`
+could raise untyped exceptions during byte reconstruction. Four explicit guards
+now reject those shapes as `HandoffError`, including nested descriptor
+annotations. The existing private-receipt regression adds twelve inverse
+payloads without a new verification lane. Its unchanged command produced ten
+failures and ten passes on the reviewed source in 14.10 seconds, then all twenty
+passed after the guards in 13.50 seconds. Every case preserves exit 74, no
+manifest PUT, a mode-600 receipt, private request captures and no leaked provider
+body. Healthy reconstruction and the exact original digest contract remain
+covered by the existing owning suite.
+
 The missing-blob settle reproduction command is
 `python3 -m pytest 'agents/benchmarks/cloudbench_image_cli_test.py::test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_digest[missing-blobs-settle]' -q`.
 It failed on unchanged production `749019f97` with

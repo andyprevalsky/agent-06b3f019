@@ -67,10 +67,14 @@ def ordered_manifest(value, kind="manifest"):
         if key in ("config", "subject"):
             item = ordered_manifest(item, "descriptor")
         elif key in ("layers", "manifests"):
+            if not isinstance(item, list):
+                raise HandoffError("Image metadata descriptor list is malformed")
             item = [ordered_manifest(entry, "descriptor") for entry in item]
         elif key == "platform":
             item = ordered_manifest(item, "platform")
         elif key == "annotations":
+            if not isinstance(item, dict):
+                raise HandoffError("Image metadata manifest has malformed annotations")
             item = dict(sorted(item.items()))
         result[key] = item
     return result
