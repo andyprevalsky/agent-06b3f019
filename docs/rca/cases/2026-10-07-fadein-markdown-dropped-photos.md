@@ -8,11 +8,11 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: front-end/src/features/terminal-component-group/components/MarkdownText.tsx — static FYI/tool/plan bubbles used FadeInMarkdown, whose extractWords walk keeps only text nodes and silently drops <img>
 symptoms:
-  - I can't display images in this chat
-  - This chat has no image display
-  - Show me photos of both places
-  - U can show photos
   - FadeInMarkdown
+  - extractWords
+  - markdown photo dropped
+  - shouldAnimate=false
+  - caption without img
 tags:
   - markdown
   - photos
@@ -28,15 +28,7 @@ status: fixed
 
 ## Problem
 
-Prod agent `3be856d5-e4fe-4eb5-b30e-ea99d44793fe` (Mac app, title "Embarcadero Gaming Cafe") finished a cafe search, then the user asked **four times** to see photos of Cyber Racoon and Euphnet. Chat answered with send_message_to_user FYI bubbles:
-
-- "I can't display images here."
-- "I can't show images in this chat."
-- "This chat has no image display."
-
-The user replied "U can show photos" and later set `photos_shown: list[file_pointer]`.
-
-Those FYI bubbles render through `AttentionMessage` → `MarkdownText` with `shouldAnimate=false`. The default MarkdownText path sent that text through FadeInMarkdown. `extractWords` walks the rendered DOM and keeps only text nodes, so a markdown photo (`![alt](url)`) becomes a caption with no `<img>`. Local repro on the buggy path: `MarkdownText` of `![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)` produced `img=null` and only the caption text "Cyber Racoon interior:".
+Discovered while investigating agent `3be856d5-e4fe-4eb5-b30e-ea99d44793fe`. That incident's first-bad is the chat router choosing `direct_answer` and refusing (case `2026-10-07-chat-router-pointer-as-satisfaction`). This case is the sibling display bug: FYI bubbles render through `AttentionMessage` → `MarkdownText` with `shouldAnimate=false`. The default path sent that text through FadeInMarkdown. `extractWords` walks the rendered DOM and keeps only text nodes, so a markdown photo (`![alt](url)`) becomes a caption with no `<img>`. Local repro on the buggy path: `MarkdownText` of `![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)` produced `img=null` and only the caption text "Cyber Racoon interior:". The prod refusal turns never emitted markdown photos, so fixing this renderer does not close that incident.
 
 **Archive searches:** `photo display image broken`, `image attachment photo render display`, `can't display images chat photos file_pointer`, `web_fetch image file_pointer show photos user`. No prior case on this renderer boundary. Relative of SMS/attachment file_pointer cases, not a recurrence.
 
@@ -53,7 +45,7 @@ Those FYI bubbles render through `AttentionMessage` → `MarkdownText` with `sho
 
 Sibling failures of the same gap: tables, raw HTML, and any other non-text markdown node on the default static path.
 
-Related but separate: chat routed "show me photos" to `direct_answer` and the generator refused instead of `start_superintelligence` (file_pointer / browser capture). That is a prompt-contract gap and is not this display fix.
+Related but separate: chat routed "show me photos" to `direct_answer` and the generator refused instead of `start_superintelligence`. That incident lives in `2026-10-07-chat-router-pointer-as-satisfaction` and remains open.
 
 ## Solution
 
