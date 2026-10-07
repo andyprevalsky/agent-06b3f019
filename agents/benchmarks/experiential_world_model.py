@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from collections import deque
@@ -43,6 +44,7 @@ from benchmarks.wmh_execution_policy import (
 from benchmarks.wmh_execution_policy import (
     execution_policy as select_execution_policy,
 )
+from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, parse_distribution, select_outcome
 from utils.world_model_observation import effective_world_model_content
 
 CANONICAL_INPUT_SCHEMA = {
@@ -155,6 +157,7 @@ class NativeSession:
     closed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     receipts: dict = field(default_factory=dict)
+    sampling_draws: dict = field(default_factory=dict)
     retirement: asyncio.Task | None = None
 
 
@@ -181,6 +184,7 @@ class ParallelWorldModel:
         load_retirement=None,
         execution_policy=DEFAULT_EXECUTION_POLICY,
         execution_identity=None,
+        sample_uniform=None,
     ):
         self.complete = complete
         self.retriever = retriever
@@ -190,6 +194,7 @@ class ParallelWorldModel:
         self.capabilities = capabilities or ModelCapabilities(supports_tools=False, maximum_output_tokens=16384)
         self.token_counter = Utf8UpperBoundTokenCounter()
         self.execution_policy = select_execution_policy(execution_policy)
+        self.sample_uniform = sample_uniform or secrets.SystemRandom().random
         if execution_policy != DEFAULT_EXECUTION_POLICY and execution_identity is None:
             raise ValueError("Activated WMH policy requires a verified artifact-bound execution identity")
         self.execution_identity = (
@@ -250,7 +255,21 @@ class ParallelWorldModel:
             else:
                 if len(session.receipts) >= self.maximum_steps:
                     raise ValueError("Native session step capacity reached")
-                operation = asyncio.create_task(self._step(session, action, candidate))
+                draw = None
+                if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                    prior = session.sampling_draws.get(key)
+                    if prior is not None:
+                        if prior[0] != identity:
+                            raise ValueError("Invocation reused for a different action")
+                        draw = prior[1]
+                    else:
+                        if len(session.sampling_draws) >= self.maximum_steps:
+                            raise ValueError("Native session sampling capacity reached")
+                        draw = self.sample_uniform()
+                        if type(draw) not in (int, float) or not 0 <= draw < 1:
+                            raise ValueError("Outcome draw must be a finite number in [0, 1)")
+                        session.sampling_draws[key] = (identity, draw)
+                operation = asyncio.create_task(self._step(session, action, candidate, draw))
                 session.receipts[key] = (identity, operation)
 
                 def completed(task):
@@ -264,11 +283,11 @@ class ParallelWorldModel:
         # A lost HTTP response must not cancel an already admitted prediction.
         return deepcopy(await asyncio.shield(operation))
 
-    async def _step(self, session, action, candidate):
+    async def _step(self, session, action, candidate, draw):
         async with asyncio.timeout(600):
-            return await self._step_with_rebase(session, action, candidate)
+            return await self._step_with_rebase(session, action, candidate, draw)
 
-    async def _step_with_rebase(self, session, action, candidate):
+    async def _step_with_rebase(self, session, action, candidate, draw):
         call = candidate.tool_calls[0]
         intervals = []
         # The enclosing 600-second budget bounds rebases. A fixed attempt count
@@ -315,6 +334,7 @@ class ParallelWorldModel:
             demos = prepared.matches
             # Only malformed protocol is repaired here; semantic outcomes are not graded.
             original = request
+            selection = None
             for repair in range(2):
                 try:
                     context = self.capabilities.context_window_tokens
@@ -328,11 +348,12 @@ class ParallelWorldModel:
                     request_payload = request.model_dump(mode="json")
                     request_sha256 = sha256_json(request_payload)
                     started = time.time_ns() // 1_000_000
+                    prediction_id = uuid.uuid4().hex
                     response = None
                     failure = None
                     try:
                         if self.complete_scoped:
-                            response = await self.complete_scoped(session.id, uuid.uuid4().hex, request)
+                            response = await self.complete_scoped(session.id, prediction_id, request)
                         else:
                             response = await self.complete(request)
                     except BaseException as exc:
@@ -346,6 +367,7 @@ class ParallelWorldModel:
                             "request_sha256": request_sha256,
                             "state_retries": attempt,
                             "protocol_repair": repair,
+                            "prediction_id": prediction_id,
                         }
                         record = {
                             "schema": "rose.wmh_native_prediction.v1",
@@ -364,6 +386,46 @@ class ParallelWorldModel:
                         if self.record_prediction:
                             await asyncio.to_thread(self.record_prediction, record)
                     raw = response["content"] if isinstance(response, dict) else response
+                    if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                        try:
+                            distribution = parse_distribution(
+                                raw, base_state=base, expected_call_ids=tuple(c.call_id for c in candidate.tool_calls)
+                            )
+                        except (ValueError, TypeError, KeyError) as exc:
+                            raise TextWorldModelProtocolError(str(exc)) from exc
+                        # Every proposed branch must satisfy the pinned native
+                        # transition contract before any random selection.
+                        for outcome in distribution["outcomes"]:
+                            proposed = parse_world_model_transition(
+                                AssistantAction(content=json.dumps(outcome["transition"], allow_nan=False))
+                            )
+                            validate_transition_action(proposed, candidate)
+                        selected, selection = select_outcome(distribution, draw)
+                        raw = json.dumps(selected, allow_nan=False)
+                        selection.update(
+                            prediction_id=prediction_id,
+                            request_sha256=request_sha256,
+                            snapshot_revision=revision,
+                        )
+                        # The caller receives the selected receipt. Counterfactual
+                        # descriptions stay in the private prediction/audit log.
+                        interval["outcome_selection"] = {
+                            key: deepcopy(value) for key, value in selection.items() if key != "outcomes"
+                        }
+                        if self.record_prediction:
+                            # A proposal record is not a commit receipt. The final
+                            # history/retirement receipt establishes the commit.
+                            await asyncio.to_thread(
+                                self.record_prediction,
+                                {
+                                    "schema": "rose.wmh_outcome_selection.v1",
+                                    "session_id": session.id,
+                                    "call_id": call.call_id,
+                                    "status": "validated_proposal",
+                                    "selection": deepcopy(selection),
+                                    "execution_identity": deepcopy(self.execution_identity),
+                                },
+                            )
                     transition = parse_world_model_transition(AssistantAction(content=raw))
                     validate_transition_action(transition, candidate)
                     try:
@@ -376,7 +438,23 @@ class ParallelWorldModel:
                 except TextWorldModelProtocolError as exc:
                     if repair:
                         raise
-                    request = retry_world_model_request(original, candidate, str(exc))
+                    if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                        correction = ModelMessage(
+                            role="user",
+                            content=(
+                                f"The previous simulator distribution was invalid: {exc}. "
+                                "Return a complete replacement outcome distribution with exactly the keys "
+                                "in the system contract, using the original evidence and unchanged action. "
+                                "Include complete tool results and valid state_patch arrays for every outcome. "
+                                "Use finite probabilities that sum to 1. This is format feedback only; "
+                                "do not increase success probabilities to pass validation. "
+                                f"Every outcome's call_id values must be exactly {[c.call_id for c in candidate.tool_calls]}, "
+                                "in that order."
+                            ),
+                        )
+                        request = original.model_copy(update={"messages": (*original.messages, correction)})
+                    else:
+                        request = retry_world_model_request(original, candidate, str(exc))
             result = transition.tool_results[0]
             observation = {
                 "content": result.content,
@@ -392,6 +470,9 @@ class ParallelWorldModel:
             }
             if isinstance(response, dict):
                 observation["metadata"]["actual_model"] = response.get("actual_model")
+            if selection is not None:
+                observation["metadata"]["prediction_protocol"] = DISTRIBUTION_PROTOCOL
+                observation["metadata"]["outcome_selection"] = deepcopy(interval["outcome_selection"])
 
             def preview(text):
                 return text[:500] if isinstance(text, str) else json.dumps(text, ensure_ascii=False)[:500]
@@ -419,12 +500,15 @@ class ParallelWorldModel:
                 ],
                 "state_retries": attempt,
             }
+            if selection is not None:
+                audit["outcome_selection"] = deepcopy(selection)
             async with session.lock:
                 if session.closed:
                     raise ValueError("Native world session ended before commit")
                 # The predictor reads the whole state and history. Disjoint writes
                 # do not prove independence: both can depend on a shared balance.
                 if session.revision != revision:
+                    interval["discarded_due_to_revision"] = session.revision
                     continue
                 if len(session.history) >= self.maximum_steps:
                     raise ValueError("Native session step capacity reached")
@@ -503,6 +587,7 @@ class ParallelWorldModel:
         if session.scope:
             self.scopes.pop(session.scope, None)
         session.receipts.clear()
+        session.sampling_draws.clear()
         session.messages = ()
         session.initial_context = {}
         session.state = {}

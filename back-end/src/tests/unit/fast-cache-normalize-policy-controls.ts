@@ -49,6 +49,26 @@ export function testRegisteredWmhExecutionPolicy(): void {
       assert.strictEqual(version, String(i + 1));
       return { policy, version, digest };
     });
+    const outcomesSource = readFileSync(
+      join(__dirname, '../../../../agents/benchmarks/wmh_outcomes.py'),
+      'utf8'
+    );
+    const distributionText = outcomesSource.match(/DISTRIBUTION_TEXT = "{3}([\s\S]*?)"{3}/);
+    assert.ok(distributionText, 'canonical distribution text must remain available');
+    const distributionPolicy = constant('OUTCOME_DISTRIBUTION_POLICY');
+    const distributionVersion = constant('OUTCOME_DISTRIBUTION_VERSION');
+    const distributionDigest = constant('OUTCOME_DISTRIBUTION_SHA256');
+    assert.strictEqual(distributionPolicy, 'rose-outcome-distribution-v1');
+    assert.strictEqual(distributionVersion, '1');
+    assert.strictEqual(
+      createHash('sha256').update(distributionText[1], 'utf8').digest('hex'),
+      distributionDigest
+    );
+    policies.push({
+      policy: distributionPolicy,
+      version: distributionVersion,
+      digest: distributionDigest,
+    });
 
     process.env.BENCHMARK_WORLD_MODEL_MODE = 'real';
     process.env.WMH_MODEL_NAME = 'rose archive/v2';

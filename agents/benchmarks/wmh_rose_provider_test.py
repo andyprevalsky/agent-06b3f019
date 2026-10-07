@@ -313,6 +313,215 @@ def test_native_protocol_uses_same_rose_transport_and_retains_actual_model(monke
     assert fake.calls[0]["messages"][1]["content"] == json.dumps(request)
 
 
+def outcome_fixture():
+    return {
+        "schema": "rose.wmh_outcome_distribution.v1",
+        "outcomes": [
+            {
+                "id": "observed_route",
+                "probability": 0.7,
+                "description": "Contact route observed",
+                "tool_results": [{"call_id": "call-1", "content": "route found", "is_error": False}],
+                "state_patch": [],
+            },
+            {
+                "id": "submitted_form",
+                "probability": 0.25,
+                "description": "Inquiry submitted",
+                "tool_results": [{"call_id": "call-1", "content": "submission confirmed", "is_error": False}],
+                "state_patch": [{"op": "add", "path": "/receipts/-", "value": "new"}],
+            },
+            {
+                "id": "provider_unavailable",
+                "probability": 0.05,
+                "description": "Browser connection failed",
+                "tool_results": [{"call_id": "call-1", "content": "connection failed", "is_error": True}],
+                "state_patch": [],
+            },
+        ],
+    }
+
+
+def outcome_request():
+    return {
+        "task": {"instruction": "Inspect public contact"},
+        "environment_state": {"receipts": ["prior"], "private_company": None},
+        "candidate_response": {"tool_calls": [{"call_id": "call-1"}]},
+    }
+
+
+def test_distribution_categorical_sampling_matches_supplied_mass_and_zero_probability_boundaries():
+    from collections import Counter
+
+    from benchmarks.wmh_outcomes import parse_distribution, select_outcome
+
+    request = outcome_request()
+    distribution = parse_distribution(
+        json.dumps(outcome_fixture()), base_state=request["environment_state"], expected_call_ids=("call-1",)
+    )
+    counts = Counter(select_outcome(distribution, (i + 0.5) / 100)[1]["selected_outcome_id"] for i in range(100))
+    assert counts == {"observed_route": 70, "submitted_form": 25, "provider_unavailable": 5}
+    assert select_outcome(distribution, 0.7)[1]["selected_outcome_id"] == "submitted_form"
+    assert request["environment_state"] == {"receipts": ["prior"], "private_company": None}
+    payload = outcome_fixture()
+    for outcome, probability in zip(payload["outcomes"], (0, 1, 0)):
+        outcome["probability"] = probability
+    certain = parse_distribution(
+        json.dumps(payload), base_state=request["environment_state"], expected_call_ids=("call-1",)
+    )
+    assert select_outcome(certain, 0)[1]["selected_outcome_id"] == "submitted_form"
+    assert select_outcome(certain, 0.999999)[1]["selected_outcome_id"] == "submitted_form"
+
+
+def test_distribution_state_patch_has_explicit_pointer_and_list_semantics():
+    from copy import deepcopy
+
+    from benchmarks.wmh_outcomes import apply_state_patch
+
+    base = {"a/b": {"~name": ["old", {"fact": None}]}, "unrelated": {"private": "retained"}}
+    before = deepcopy(base)
+    patch = [
+        {"op": "add", "path": "/a~1b/~0name/-", "value": "new"},
+        {"op": "replace", "path": "/a~1b/~0name/1/fact", "value": "established"},
+        {"op": "remove", "path": "/a~1b/~0name/0"},
+    ]
+    result = apply_state_patch(base, patch)
+    assert result == {"a/b": {"~name": [{"fact": "established"}, "new"]}, "unrelated": {"private": "retained"}}
+    assert base == before
+    for invalid in (
+        [{"op": "add", "path": "", "value": {}}],
+        [{"op": "add", "path": "/missing/child", "value": True}],
+        [{"op": "replace", "path": "/a~1b/~0name/-", "value": True}],
+        [{"op": "remove", "path": "/a~1b/~0name/2"}],
+        [{"op": "remove", "path": "/missing"}],
+        [{"op": "remove", "path": "/bad~2escape"}],
+    ):
+        with pytest.raises(ValueError):
+            apply_state_patch(base, invalid)
+        assert base == before
+
+
+@pytest.mark.parametrize(
+    "failure", ["negative", "boolean", "nan", "large_integer", "sum", "duplicate", "call", "blank", "patch"]
+)
+def test_distribution_rejects_invalid_unchosen_branches(failure):
+    from benchmarks.wmh_outcomes import parse_distribution
+
+    payload = outcome_fixture()
+    outcome = payload["outcomes"][-1]
+    if failure == "negative":
+        outcome["probability"] = -0.1
+    elif failure == "boolean":
+        outcome["probability"] = True
+    elif failure == "nan":
+        outcome["probability"] = float("nan")
+    elif failure == "large_integer":
+        outcome["probability"] = 10**999
+    elif failure == "sum":
+        outcome["probability"] = 0.01
+    elif failure == "duplicate":
+        outcome["id"] = payload["outcomes"][0]["id"]
+    elif failure == "call":
+        outcome["tool_results"][0]["call_id"] = "wrong-call"
+    elif failure == "blank":
+        outcome["tool_results"][0]["content"] = '{"output":"","is_error":false}'
+    else:
+        outcome["state_patch"] = [{"op": "remove", "path": "/nonexistent"}]
+    with pytest.raises(ValueError):
+        parse_distribution(
+            json.dumps(payload), base_state=outcome_request()["environment_state"], expected_call_ids=("call-1",)
+        )
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_distribution_is_validated_before_cache_write_and_on_cached_response(monkeypatch, valid):
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    payload = outcome_fixture()
+    if not valid:
+        payload["outcomes"][-1]["state_patch"] = [{"op": "remove", "path": "/nonexistent"}]
+    text = json.dumps(payload)
+    messages = [{"role": "user", "content": json.dumps(outcome_request())}]
+
+    async def stream(self, **kwargs):
+        yield StreamChunk(kind="content", data={"text": text})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 5})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", stream)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+
+    async def read_stream():
+        seen = []
+        if valid:
+            async for chunk in client._complete_impl(call_site="wmh_world_model_distribution_v1", messages=messages):
+                seen.append(chunk)
+        else:
+            with pytest.raises(wmh_rose_provider._WMHInvalidPrediction, match="target"):
+                async for chunk in client._complete_impl(
+                    call_site="wmh_world_model_distribution_v1", messages=messages
+                ):
+                    seen.append(chunk)
+        assert any(chunk.kind == "done" for chunk in seen) is valid
+
+    asyncio.run(read_stream())
+    fake = _FakeRoseClient(_canned_response(content=text, prompt=10, completion=5, token_used=None))
+    usage = RoseUsageAccumulator()
+    provider = RoseWMHProvider(client=fake, protocol=DISTRIBUTION_PROTOCOL, usage=usage)
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+    arguments = ("distribution system", [Message(role="user", content=messages[0]["content"])])
+    if valid:
+        result = provider.complete(*arguments)
+        assert result.text == text and result.actual_model == "claude-haiku-4-5-claude"
+    else:
+        with pytest.raises(wmh_rose_provider._WMHInvalidPrediction, match="target"):
+            provider.complete(*arguments)
+    assert fake.calls[0]["call_site"] == "wmh_world_model_distribution_v1"
+    assert usage.snapshot().calls == 1
+
+
+def test_distribution_cache_keys_bind_exact_action_state_and_policy():
+    from copy import deepcopy
+
+    from benchmarks.wmh_execution_policy import execution_policy
+
+    cache = wmh_rose_provider._WMHFastCacheContext(
+        enabled=True, goal="DEMO FIXTURE ONLY distribution", write_enabled=True
+    )
+    request = outcome_request()
+    request["environment_state"]["timestamp_ms"] = 50
+    request["candidate_response"]["tool_calls"][0]["arguments"] = {"timestamp_ms": 10}
+
+    def key(payload, *, site="wmh_world_model_distribution_v1", system=None):
+        return cache.llm_key(
+            site,
+            {
+                "messages": [
+                    {"role": "system", "content": system or execution_policy("rose-outcome-distribution-v1").text},
+                    {"role": "user", "content": json.dumps(payload)},
+                ]
+            },
+        )
+
+    original = key(request)
+    changed = deepcopy(request)
+    changed["candidate_response"]["tool_calls"][0]["arguments"]["timestamp_ms"] = 99
+    assert key(changed) == original
+    changed["candidate_response"]["tool_calls"][0]["call_id"] = "other-call"
+    assert key(changed) != original
+    changed = deepcopy(request)
+    changed["environment_state"]["timestamp_ms"] = 99
+    assert key(changed) != original
+    assert key(request, site="wmh_world_model_v3") != original
+    assert key(request, system="old single-transition contract") != original
+
+
 def test_native_cache_fingerprint_changes_only_current_action_timestamp():
     original = {
         "messages": [

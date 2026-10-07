@@ -48,6 +48,203 @@ class Retriever:
         return ()
 
 
+def distribution_reply(request, *, probability=0.05):
+    evidence = json.loads(request.messages[1].content)
+    call_id = evidence["candidate_response"]["tool_calls"][0]["call_id"]
+    return json.dumps(
+        {
+            "schema": "rose.wmh_outcome_distribution.v1",
+            "outcomes": [
+                {
+                    "id": "missing_route",
+                    "probability": 1 - probability,
+                    "description": "No suitable contact route observed",
+                    "tool_results": [{"call_id": call_id, "content": "no route", "is_error": False}],
+                    "state_patch": [{"op": "add", "path": "/unselected", "value": True}],
+                },
+                {
+                    "id": "inquiry_submitted",
+                    "probability": probability,
+                    "description": "Official form submitted with a confirmation",
+                    "tool_results": [{"call_id": call_id, "content": "submission confirmed", "is_error": False}],
+                    "state_patch": [{"op": "add", "path": "/receipts/-", "value": call_id}],
+                },
+            ],
+        }
+    )
+
+
+def distribution_model(complete, **kwargs):
+    from benchmarks.wmh_execution_policy import execution_identity
+
+    policy = "rose-outcome-distribution-v1"
+    return ParallelWorldModel(
+        complete,
+        Retriever(),
+        execution_policy=policy,
+        execution_identity=execution_identity(policy, "artifact-a", "a" * 64),
+        **kwargs,
+    )
+
+
+def test_distribution_samples_once_commits_only_selected_branch_and_retains_full_state():
+    async def run():
+        requests, records, draws = [], [], []
+
+        def draw():
+            draws.append(0.975)
+            return draws[-1]
+
+        async def complete(request):
+            requests.append(request)
+            return distribution_reply(request)
+
+        model = distribution_model(complete, sample_uniform=draw, record_prediction=records.append)
+        seed = {"private_facts": {"company": None}, "receipts": ["prior"], "funds_cents": 0}
+        session = model.new_session("Submit an inquiry; do not invent company facts", seed, "root")
+        result = await model.step(session.id, action(1), "inv-1")
+        retry = deepcopy(action(1))
+        retry["arguments"]["timestamp_ms"] = 99
+        assert await model.step(session.id, retry, "inv-1") == result
+        assert len(draws) == len(requests) == 1 and session.revision == 1
+        assert session.state == {**seed, "receipts": ["prior", "call-1"]}
+        assert result["content"] == "submission confirmed"
+        selection = result["metadata"]["outcome_selection"]
+        assert selection["selected_outcome_id"] == "inquiry_submitted"
+        assert selection["probability"] == 0.05 and selection["draw"] == 0.975
+        assert selection["snapshot_revision"] == 0
+        predictions = [r for r in records if r["schema"] == "rose.wmh_native_prediction.v1"]
+        decisions = [r for r in records if r["schema"] == "rose.wmh_outcome_selection.v1"]
+        assert len(predictions) == len(decisions) == 1
+        assert {k: v for k, v in decisions[0]["selection"].items() if k != "outcomes"} == selection
+        assert predictions[0]["prediction_id"] == selection["prediction_id"]
+        assert predictions[0]["request_sha256"] == selection["request_sha256"]
+        assert session.history[0]["observation"]["metadata"]["outcome_selection"] == selection
+        assert {k: v for k, v in model.audit[-1]["outcome_selection"].items() if k != "outcomes"} == selection
+        assert "outcomes" not in selection
+        from utils.world_model_observation import world_model_observation_to_tool_result
+
+        assert "No suitable contact route observed" not in json.dumps(
+            world_model_observation_to_tool_result(result, simulated=True)
+        )
+        assert all("unselected" not in m.model_dump_json() for m in session.messages)
+
+    asyncio.run(run())
+
+
+def test_distribution_protocol_repair_and_failed_invocation_retry_keep_the_same_draw():
+    async def run():
+        requests, draws = [], []
+
+        def draw():
+            draws.append(0.975)
+            return draws[-1]
+
+        async def complete(request):
+            requests.append(request)
+            if len(requests) == 1:
+                raise RuntimeError("transport failed")
+            if len(requests) == 2:
+                return distribution_reply(request, probability=2)
+            return distribution_reply(request)
+
+        model = distribution_model(complete, sample_uniform=draw)
+        session = model.new_session("Submit", {"receipts": []}, "root")
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await model.step(session.id, action(1), "inv")
+        assert session.revision == 0
+        result = await model.step(session.id, action(1), "inv")
+        assert result["content"] == "submission confirmed" and draws == [0.975]
+        assert len(requests) == 3
+        assert "distribution" in requests[-1].messages[-1].content
+        assert "terminal false" not in requests[-1].messages[-1].content
+        assert session.state == {"receipts": ["call-1"]}
+
+    asyncio.run(run())
+
+
+def test_distribution_rebases_concurrent_predictions_without_rerolling_or_losing_effects():
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests, records, draws = [], [], []
+
+        def draw():
+            draws.append(0.975)
+            return draws[-1]
+
+        async def complete(request):
+            requests.append(request)
+            if len(requests) == 2:
+                entered.set()
+            await release.wait()
+            evidence = json.loads(request.messages[1].content)
+            payload = json.loads(distribution_reply(request))
+            payload["outcomes"][1]["state_patch"].append(
+                {"op": "replace", "path": "/funds_cents", "value": evidence["environment_state"]["funds_cents"] + 7}
+            )
+            return json.dumps(payload)
+
+        model = distribution_model(complete, sample_uniform=draw, record_prediction=records.append)
+        session = model.new_session("Perform both operations", {"funds_cents": 0, "receipts": []}, "root")
+        work = [asyncio.create_task(model.step(session.id, action(n), f"inv-{n}")) for n in (1, 2)]
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*work), 2)
+        assert len(requests) == 3 and len(draws) == 2
+        assert session.state["funds_cents"] == 14
+        assert set(session.state["receipts"]) == {"call-1", "call-2"}
+        assert "unselected" not in session.state and session.revision == 2
+        selections = [r["selection"] for r in records if r["schema"] == "rose.wmh_outcome_selection.v1"]
+        assert sorted(s["snapshot_revision"] for s in selections) == [0, 0, 1]
+        assert all(s["draw"] == 0.975 for s in selections)
+        assert {r["metadata"]["snapshot_revision"] for r in results} == {0, 1}
+
+    asyncio.run(run())
+
+
+def test_distribution_invalid_unselected_branch_never_commits_and_retirement_fences_late_result():
+    async def run():
+        requests = []
+
+        async def invalid(request):
+            requests.append(request)
+            payload = json.loads(distribution_reply(request))
+            payload["outcomes"][0]["state_patch"] = [{"op": "remove", "path": "/missing"}]
+            return json.dumps(payload)
+
+        model = distribution_model(invalid, sample_uniform=lambda: 0.975)
+        seed = {"receipts": [], "private_fact": None}
+        session = model.new_session("Submit", seed, "invalid-root")
+        with pytest.raises(ValueError, match="target"):
+            await model.step(session.id, action(1), "invalid-inv")
+        assert len(requests) == 2 and session.revision == 0 and session.state == seed
+        assert session.messages == session.history == () and not model.audit
+
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def late(request):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                pass
+            return distribution_reply(request)
+
+        model = distribution_model(late, sample_uniform=lambda: 0.975)
+        session = model.new_session("Submit", seed, "closed-root")
+        task = asyncio.create_task(model.step(session.id, action(1), "late-inv"))
+        await asyncio.wait_for(entered.wait(), 2)
+        receipt = await model.end_session(session.id)
+        with pytest.raises(ValueError, match="ended before commit"):
+            await task
+        assert receipt["state"] == seed and receipt["history"] == [] and receipt["revision"] == 0
+        assert session.id not in model.sessions
+        with pytest.raises(ValueError, match="retired"):
+            model.new_session("Submit again", seed, "closed-root")
+
+    asyncio.run(run())
+
+
 def test_parallel_predictions_merge_disjoint_mutations_and_deduplicate_retries():
     async def run():
         entered = asyncio.Event()

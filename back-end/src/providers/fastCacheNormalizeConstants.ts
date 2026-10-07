@@ -1,7 +1,7 @@
 export const CACHE_KEY_VERSION = 'v42';
 
 // Immutable registry metadata mirrors benchmarks/wmh_execution_policy.py.
-// The full policy text remains in the Python registry; owning tests check its SHA.
+// The full policy text remains in Python; owning tests check its SHA.
 const WMH_PUBLIC_AFFORDANCES_POLICY = 'rose-virtual-public-affordances-v1';
 const WMH_PUBLIC_AFFORDANCES_VERSION = '1';
 const WMH_PUBLIC_AFFORDANCES_SHA256 =
@@ -14,6 +14,10 @@ const WMH_EXECUTION_POLICIES = new Map([
   [
     'rose-virtual-public-affordances-v2',
     { version: '2', sha256: '5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4' },
+  ],
+  [
+    'rose-outcome-distribution-v1',
+    { version: '1', sha256: '650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70' },
   ],
 ]);
 

@@ -145,7 +145,7 @@ def serve_native(name, root, pool, port):
     policy = execution_policy(os.environ.get("WMH_EXECUTION_POLICY", DEFAULT_EXECUTION_POLICY))
     python = native_python()
     token = secrets.token_urlsafe(32)
-    provider = RoseWMHProvider(pool=pool, protocol="text-world-model-v3")
+    provider = RoseWMHProvider(pool=pool, protocol=policy.response_protocol)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)

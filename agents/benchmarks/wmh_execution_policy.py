@@ -1,7 +1,7 @@
 """Immutable Rose execution overlays, separate from native artifact identity.
 
-This module is shared by Python 3.11 and 3.12 and imports only the standard
-library. Changing any text requires a new immutable registered version.
+This module is shared by Python 3.11 and 3.12. Changing any text requires a new
+immutable registered version.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, DISTRIBUTION_TEXT
 
 BASE_PROTOCOL_VERSION = "text-world-model-v3"
 BASE_PROTOCOL_SHA256 = "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122"
@@ -43,6 +45,10 @@ Access to a private service, or a request to search it, does not establish its p
 
 An authorized new virtual send, submission or document may use established facts and clearly marked blanks. Plausible replies, introductions or investor decisions causally following a new authorized action may be simulated, with correct timing, matching receipts and consistent state changes. Do not backdate new effects into private history or imply they occurred without the initiating action. A public route or inquiry alone establishes neither investor interest, a financing commitment nor settled proceeds."""
 )
+OUTCOME_DISTRIBUTION_POLICY = "rose-outcome-distribution-v1"
+OUTCOME_DISTRIBUTION_VERSION = "1"
+OUTCOME_DISTRIBUTION_SHA256 = "650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70"
+OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256 = "9bc7c6e255737d202741cc50334bf06bf8428180cf90ae8c1cf32361e86f86b2"
 
 
 def text_sha256(text: str) -> str:
@@ -55,15 +61,19 @@ class ExecutionPolicy:
     version: str
     text: str
     effective_system_sha256: str
+    response_protocol: str = BASE_PROTOCOL_VERSION
 
     def metadata(self) -> dict:
-        return {
+        metadata = {
             "policy_id": self.name,
             "policy_version": self.version,
             "policy_sha256": text_sha256(self.text),
             "base_system_sha256": BASE_SYSTEM_SHA256,
             "effective_system_sha256": self.effective_system_sha256,
         }
+        if self.response_protocol != BASE_PROTOCOL_VERSION:
+            metadata["prediction_protocol"] = self.response_protocol
+        return metadata
 
     def apply(self, request):
         message = request.messages[0]
@@ -98,6 +108,13 @@ _POLICIES = {
         PUBLIC_AFFORDANCES_V2_TEXT,
         PUBLIC_AFFORDANCES_V2_EFFECTIVE_SYSTEM_SHA256,
     ),
+    OUTCOME_DISTRIBUTION_POLICY: ExecutionPolicy(
+        OUTCOME_DISTRIBUTION_POLICY,
+        OUTCOME_DISTRIBUTION_VERSION,
+        DISTRIBUTION_TEXT,
+        OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256,
+        DISTRIBUTION_PROTOCOL,
+    ),
 }
 _IMMUTABLE_IDENTITIES = {
     DEFAULT_EXECUTION_POLICY: ("1", text_sha256(""), BASE_SYSTEM_SHA256),
@@ -110,6 +127,11 @@ _IMMUTABLE_IDENTITIES = {
         PUBLIC_AFFORDANCES_V2_VERSION,
         PUBLIC_AFFORDANCES_V2_SHA256,
         PUBLIC_AFFORDANCES_V2_EFFECTIVE_SYSTEM_SHA256,
+    ),
+    OUTCOME_DISTRIBUTION_POLICY: (
+        OUTCOME_DISTRIBUTION_VERSION,
+        OUTCOME_DISTRIBUTION_SHA256,
+        OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256,
     ),
 }
 
@@ -126,6 +148,8 @@ def execution_policy(name: str = DEFAULT_EXECUTION_POLICY) -> ExecutionPolicy:
             policy.effective_system_sha256,
         )
         != _IMMUTABLE_IDENTITIES[name]
+        or policy.response_protocol
+        != (DISTRIBUTION_PROTOCOL if name == OUTCOME_DISTRIBUTION_POLICY else BASE_PROTOCOL_VERSION)
     ):
         raise ValueError("WMH execution policy changed without a new version")
     return policy

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import structlog
 
+from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, parse_distribution
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
@@ -96,6 +97,12 @@ _HISTORY_MARKER = "\n\nINTERACTION HISTORY:\n"
 _ROOT_OBJECTIVE_MARKER = "ROOT OBJECTIVE:\n"
 _DELEGATION_MARKER = "\n\nCURRENT DELEGATION:\n"
 _ACTION_TIMESTAMP_RE = re.compile(r'("timestamp_ms"\s*:\s*)\d+')
+_NATIVE_WMH_PROTOCOLS = {"text-world-model-v3", DISTRIBUTION_PROTOCOL}
+_WMH_CALL_SITES = {
+    "legacy": "wmh_world_model",
+    "text-world-model-v3": "wmh_world_model_v3",
+    DISTRIBUTION_PROTOCOL: "wmh_world_model_distribution_v1",
+}
 
 
 def _wmh_cache_key_material(request: object) -> object:
@@ -151,10 +158,10 @@ class _WMHFastCacheContext(FastCacheContext):
         return bool(self.enabled and self.write_enabled)
 
     def llm_key(self, call_site: str, messages: object = None) -> str:
-        if call_site in {"wmh_world_model", "wmh_world_model_v3"}:
+        if call_site in _WMH_CALL_SITES.values():
             messages = _wmh_cache_key_material(messages)
         if (
-            call_site == "wmh_world_model_v3"
+            call_site in {"wmh_world_model_v3", "wmh_world_model_distribution_v1"}
             and isinstance(messages, dict)
             and isinstance(messages.get("messages"), list)
         ):
@@ -195,6 +202,52 @@ def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
     return None
 
 
+def _native_environment_state(messages: list[dict]) -> dict | None:
+    """Read the exact state bound to the native candidate, without a fallback.
+
+    A missing, malformed or ambiguous request cannot supply an empty base state
+    for a distribution's patches. Returning ``None`` lets the prediction
+    boundary retain its normal rejection/metering behavior.
+    """
+    state = None
+    found = False
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        try:
+            evidence = json.loads(message["content"])
+        except (ValueError, TypeError, KeyError):
+            continue
+        if not isinstance(evidence, dict) or "candidate_response" not in evidence:
+            continue
+        if found or not isinstance(evidence["candidate_response"], dict):
+            return None
+        found = True
+        candidate_state = evidence.get("environment_state")
+        if not isinstance(candidate_state, dict):
+            return None
+        try:
+            json.dumps(candidate_state, allow_nan=False)
+        except (ValueError, TypeError):
+            return None
+        state = candidate_state
+    return state
+
+
+def _prediction_call_ids(messages: list[dict], protocol: str) -> tuple[str, ...] | None:
+    if protocol == "text-world-model-v3":
+        return _native_call_ids(messages)
+    if protocol != DISTRIBUTION_PROTOCOL:
+        return None
+    try:
+        call_ids = _native_call_ids(messages)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not call_ids or any(not isinstance(call_id, str) or not call_id for call_id in call_ids):
+        return None
+    return call_ids
+
+
 def _require_wmh_prediction(
     content: str,
     usage: dict,
@@ -202,11 +255,23 @@ def _require_wmh_prediction(
     *,
     protocol: str = "legacy",
     expected_call_ids: tuple[str, ...] | None = None,
+    base_state: dict | None = None,
 ) -> None:
     from helpers.world_model_runtime import parse_world_model_prediction
 
     reason = "empty visible content" if not content.strip() else None
-    if reason is None and protocol == "text-world-model-v3":
+    if reason is None and protocol == DISTRIBUTION_PROTOCOL:
+        try:
+            if base_state is None:
+                raise ValueError("Missing or malformed native environment state")
+            if expected_call_ids is None:
+                raise ValueError("Missing native candidate call IDs")
+            # Validate every possible result, including branches that will not
+            # be sampled. No invalid branch may enter the shared response cache.
+            parse_distribution(content, base_state=base_state, expected_call_ids=expected_call_ids)
+        except (ValueError, TypeError, KeyError) as exc:
+            reason = str(exc)
+    elif reason is None and protocol == "text-world-model-v3":
         raw = content.strip()
         if raw.startswith("```") and raw.endswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -253,8 +318,8 @@ class _WMHCacheSafeRoseClient(RoseClient):
 
     async def _complete_impl(self, **kwargs):
         call_site = kwargs.get("call_site")
-        is_wmh = call_site in {"wmh_world_model", "wmh_world_model_v3"}
-        protocol = "text-world-model-v3" if call_site == "wmh_world_model_v3" else "legacy"
+        is_wmh = call_site in _WMH_CALL_SITES.values()
+        protocol = next((name for name, site in _WMH_CALL_SITES.items() if site == call_site), "legacy")
         content_parts = []
         usage = {}
         actual_model = ""
@@ -274,8 +339,9 @@ class _WMHCacheSafeRoseClient(RoseClient):
                         usage,
                         actual_model,
                         protocol=protocol,
-                        expected_call_ids=_native_call_ids(kwargs.get("messages", []))
-                        if protocol == "text-world-model-v3"
+                        expected_call_ids=_prediction_call_ids(kwargs.get("messages", []), protocol),
+                        base_state=_native_environment_state(kwargs.get("messages", []))
+                        if protocol == DISTRIBUTION_PROTOCOL
                         else None,
                     )
             if is_wmh and chunk.kind == "usage":
@@ -459,7 +525,7 @@ class RoseWMHProvider:
         protocol: str = "legacy",
     ) -> None:
         self._pool: "PoolName" = pool
-        if protocol not in {"legacy", "text-world-model-v3"}:
+        if protocol not in _WMH_CALL_SITES:
             raise ValueError("Unknown world-model protocol")
         self._protocol = protocol
         self._user_id = _resolve_user_id(user_id)
@@ -651,7 +717,7 @@ class RoseWMHProvider:
                 max_tokens=max_tokens,
                 claude_auth=claude_auth,
                 gpt_auth=gpt_auth,
-                call_site="wmh_world_model_v3" if self._protocol == "text-world-model-v3" else "wmh_world_model",
+                call_site=_WMH_CALL_SITES[self._protocol],
                 dump_context=False,
             )
         except _WMHInvalidPrediction as exc:
@@ -670,11 +736,12 @@ class RoseWMHProvider:
             usage,
             response.actual_model or "",
             protocol=self._protocol,
-            expected_call_ids=_native_call_ids(rose_messages) if self._protocol == "text-world-model-v3" else None,
+            expected_call_ids=_prediction_call_ids(rose_messages, self._protocol),
+            base_state=_native_environment_state(rose_messages) if self._protocol == DISTRIBUTION_PROTOCOL else None,
         )
 
-        completion_type = _NativeCompletion if self._protocol == "text-world-model-v3" else Completion
-        extra = {"actual_model": response.actual_model or ""} if self._protocol == "text-world-model-v3" else {}
+        completion_type = _NativeCompletion if self._protocol in _NATIVE_WMH_PROTOCOLS else Completion
+        extra = {"actual_model": response.actual_model or ""} if self._protocol in _NATIVE_WMH_PROTOCOLS else {}
         return completion_type(
             text=response.content,
             usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),

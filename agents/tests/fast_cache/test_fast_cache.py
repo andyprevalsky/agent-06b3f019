@@ -4472,6 +4472,7 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
     for policy, version, digest in (
         ("rose-virtual-public-affordances-v1", "1", "49d9d1f0430a5d8e"),
         ("rose-virtual-public-affordances-v2", "2", "5dd9924e9a1ff4c5"),
+        ("rose-outcome-distribution-v1", "1", "650945bf68ee4ba6"),
     ):
         monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
         scope = normalize.world_model_cache_scope()
