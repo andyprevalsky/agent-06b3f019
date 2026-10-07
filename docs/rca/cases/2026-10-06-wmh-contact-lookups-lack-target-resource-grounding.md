@@ -5,8 +5,8 @@ title: WMH simulation policy and accumulated context suppress plausible public f
 surface: harness
 component: serve-world-model prediction and archive retrieval
 classification: unresolved
-problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: WMH explore/browser predicts unavailable forms; controlled simulation-policy and compound-context effects reproduced, production repair remains unproven
+problem_class: uncaptured-user-preference
+first_bad_boundary: WMH public-world generation lacks the user-specified policy for plausible unseen affordances; controlled policy/context effects reproduced, production repair remains unproven
 symptoms:
   - I could not verify an official founder pitch-submission form
   - No verified Founders Fund investment-contact route was found
@@ -285,7 +285,77 @@ open diagnosis; no production repair or fundraiser recovery is claimed.
 
 ## Solution
 
-No production prediction prompt, model selection, corpus artifact, seed,
+### Native continuation and same-route policy control
+
+The complete native migration and artifact rebuild did not resolve this
+outcome. Native run `f5e4f83d-386a-4af1-84f5-7745216b6f27`, root
+`29064cc2-3266-4605-8e63-eda79e48a0cc`, failed at the authorized diagnostic
+limit with $0 raised. At the captured revision-42 snapshot, eight distinct
+public-investor browser call IDs had 51 completed prediction responses with
+no positive route or send. Those include stale/retried predictions; they are
+not 51 terminal browser tasks or a final whole-run count. The exact native
+Conviction browser prediction contains the full root/delegated goals,
+state/history and five retrieved real examples; its user input is 210,974
+characters, SHA256
+`f8a575bb7f7da386de310516832d197a296cfca53c1f7a9ef4ea451cf03fa80d`.
+The original upstream system is 1,716 characters, SHA256
+`acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce`.
+
+Three original and three append-only candidate calls all used the captured
+`openai/gpt-6-sol` model on the same funded route, the actual Rose WMH
+provider path and native parser. Removing only the added system paragraphs
+makes their collected requests byte-equivalent. Originals produced 0/3
+routes/submissions; candidates produced 3/3 plausible forms and one inquiry
+each. All six retained existing company facts, approvals and zero funds,
+with empty commitments, instruments and wires. The measured six-call span
+was 104.787 seconds; completed-call metering was $0.423856.
+Both arms deliberately bypassed credential leasing to hold the original
+funded route constant. Earlier normal-pool trials routed every original to
+OpenRouter and every candidate to GPT auth, so those six trials are
+confounded and excluded from policy-only causal evidence.
+
+This supports a policy effect for this specific captured native invocation;
+it does not establish the fundraiser outcome or universal correctness.
+The original v3 contract allows a legitimate no-route virtual page; these
+controls do not prove a contradictory pair of runtime requirements or model
+incapability. The general problem is an uncaptured simulation convention:
+the user's expected treatment of unseen public affordances, scoped prior
+observations, unknown private facts and completed effects was under-specified.
+Six candidate-only negative controls subsequently passed: two explicit page
+absences, two forms with required unknown legal facts, and two recorded HTTP
+503 submission failures. All six reported no inquiry, preserved those scoped
+constraints and existing private/funding state, and passed the native parser
+on the original funded model. They change declared state/action constraints;
+they are not original-input paired comparisons. The measured call span was
+50.129 seconds and completed-call metering was $0.271156. The initial analyzer
+mistakenly rejected a recorded form POST URL already supplied in observed
+state; correcting that narrow allowed-evidence set made its audit pass without
+changing outputs or making new calls. Both audits remain preserved.
+See `docs/plans/active/wmh-evidence-20261006/native-form-policy-negative-review.json`.
+The exact tested six-paragraph
+candidate and outputs are in
+`docs/plans/active/wmh-evidence-20261006/native-form-policy-controlled-review.json`.
+The candidate remains unapplied. A versioned execution-policy proposal must
+preserve the immutable upstream artifact identity and separately bind the
+effective system text in health, predictions, cache and conformance before
+approval or a new full benchmark.
+
+The Step 5b class is the simulator's unencoded public/private generation and
+scoped-observation convention. The next deeper attempt was a mechanical rule
+that derives every unseen virtual environment fact from arbitrary task/tool
+schemas and sparse JSON state. It is not coherent: sparse observations permit
+several valid worlds, so middleware must still select a generation policy,
+overwrite scoped observations or guarantee affordances/effects. Fetching more
+real pages does not define novel virtual pages, and deleting prior failures
+would discard legitimate observations. The current model already receives the
+whole goal and can generate forms under the policy-only control. The proposed
+general contract therefore belongs at the existing generation boundary,
+without firm-specific routes, success guarantees or injected planner turns.
+This is a bounded design argument for the current native architecture, not
+proof that no future symbolic simulator or other non-prompt architecture
+could solve the class.
+
+No production prediction prompt, model selection, seed,
 evaluator, or timeout was changed. Full evidence remains locally under
 `.context/wmh-failing-*`, `.context/wmh-screenshot-replay/`, and
 `.context/wmh-contact-{direct-replay-pinned,goal-only,first-party-control}/`;
@@ -319,3 +389,30 @@ valid; improved submissions alone do not define simulator correctness.
 ## Reusable lesson
 
 Define the simulator’s policy for unseen environment facts and preserve exact delegated goals when isolating prompt, accumulated-context, and model effects.
+
+### Local implementation verification on October 7
+
+The user explicitly authorized local prompt changes until deployment and held
+deployment. The reviewed immutable public-affordances policy is applied locally.
+Native31/provider59 owning checks, the registered WMH blackbox,24 backend cache
+controls and102 benchmark retirement/cost controls pass. The first unchanged,
+policy-bound100-case live suite was99successful plus one pre-header TLS failure;
+its fidelity0.8518956/content0.589478 met aggregate floors, but the required
+100-success gate failed. Exact current captures independently reproduced all99
+scores and dimensions, validated all100 request hashes, excluded573 older
+captures, and found no target transitions among retrieved demonstrations.
+This open-loop suite had no declared protected private/financing fields, so it
+provides no direct proof for unknown Rose facts; the six separate negative
+controls retain that bounded evidence. Ten raw-tool cases retained zero demos.
+
+The TLS failure escaped the waterfall's existing connect/read classifier;
+raw SSL was already classified on the direct-auth path. A minimal classifier
+addition made three identical actual-MockTransport owning failures pass and
+kept partial output terminal. All213 registered offline Rose checks passed.
+No model order, retry count, deadlines, output caps or network settings changed.
+The external origin of the TLS alert remains unproved. All100 conformance
+sessions then produced joined retirement receipts and both exact process owners
+retired. A fresh full100 run and exact fundraiser replay remain required; no
+benchmark success or production repair is claimed. The original failed report
+is preserved in `native-policy-first-conformance-review.json` beside the
+existing handoff evidence.

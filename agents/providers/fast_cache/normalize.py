@@ -791,7 +791,14 @@ def world_model_cache_scope() -> str:
     if mode != "simulate":
         return ""
     model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME") or "rose-archive"
-    return f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}:"
+    scope = f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}"
+    policy_name = os.environ.get("WMH_EXECUTION_POLICY", "upstream")
+    if policy_name != "upstream":
+        from benchmarks.wmh_execution_policy import execution_policy
+
+        policy = execution_policy(policy_name)
+        scope += f".policy.{policy.name}.{policy.version}.{policy.metadata()['policy_sha256'][:16]}"
+    return scope + ":"
 
 
 def build_key(kind: str, goal: str, detail: str) -> str:
@@ -1078,9 +1085,7 @@ OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 # ---------------------------------------------------------------------------
 
 _DEMO_TAG = "DEMO"
-GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = (
-    "Please work through my Google account in this order."
-)
+GOOGLE_OAUTH_DEMO_PROMPT_PREFIX = "Please work through my Google account in this order."
 GOOGLE_OAUTH_DEMO_GOAL_HASH = "dd6b2b7bbe5256a1"
 
 

@@ -26,7 +26,8 @@ from benchmarks.build_experiential_world_model import (
     model_snapshot,
     redact_archive,
 )
-from benchmarks.experiential_world_model import ParallelWorldModel, RoseNativeRetriever
+from benchmarks.experiential_world_model import ParallelWorldModel, RetiredWorldModelScope, RoseNativeRetriever
+from benchmarks.wmh_execution_policy import DEFAULT_EXECUTION_POLICY, execution_identity, execution_policy
 
 
 class _ReadSnapshot(ArtifactStore):
@@ -125,6 +126,8 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
                 payload.get("task"), payload.get("seed_state") or {}, payload.get("session_scope_id")
             )
             return {"session_id": session.id}
+        except RetiredWorldModelScope as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -157,10 +160,9 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
 
     @app.delete("/world_models/{model_name}/sessions/{session_id}")
     async def end_session(model_name: str, session_id: str):
-        if model_name != name or session_id not in model.sessions:
+        if model_name != name or (session_id not in model.sessions and session_id not in model.retired):
             raise HTTPException(404, "Unknown session")
-        await model.end_session(session_id)
-        return {"ended": session_id}
+        return await model.end_session(session_id)
 
     @app.get("/retrieval_audit")
     def audit():
@@ -192,8 +194,16 @@ def main():
     parser.add_argument("--pool", default="rose-1-ultra")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--provider-url", required=True)
+    parser.add_argument("--execution-policy", default=os.environ.get("WMH_EXECUTION_POLICY", DEFAULT_EXECUTION_POLICY))
     args = parser.parse_args()
+    policy = execution_policy(args.execution_policy)
     artifact, retriever = load_native(args.root, args.name, args.pool, os.environ["WMH_ROSE_POOL_SHA256"])
+    effective_identity = execution_identity(
+        policy.name,
+        artifact.world_model_id,
+        retriever.world_model_manifest_sha256,
+        base_protocol_sha256=artifact.prompt_sha256,
+    )
     # Both services bind loopback. Credentials never leave the existing provider.
     client = httpx.AsyncClient(
         base_url=args.provider_url,
@@ -202,18 +212,29 @@ def main():
         trust_env=False,
     )
 
-    async def complete(request):
+    async def complete_scoped(session_id, prediction_id, request):
         response = await client.post(
             "/complete",
             json={
                 "messages": [m.model_dump(mode="json", exclude_none=True) for m in request.messages],
                 "maximum_output_tokens": request.maximum_output_tokens,
+                "session_id": session_id,
+                "prediction_id": prediction_id,
+                "execution_identity": effective_identity,
             },
         )
         if response.status_code == 422:
             detail = response.json().get("detail")
             if isinstance(detail, dict) and detail.get("kind") == "invalid_prediction":
                 raise TextWorldModelProtocolError(detail["reason"])
+        response.raise_for_status()
+        result = response.json()
+        if result.get("execution_identity") != effective_identity:
+            raise ValueError("Provider bridge returned a different execution identity")
+        return result
+
+    async def retire_provider(session_id):
+        response = await client.post(f"/sessions/{session_id}/retire")
         response.raise_for_status()
         return response.json()
 
@@ -229,8 +250,25 @@ def main():
         )
         atomic_json(Path(args.root) / "native-predictions" / record["session_id"] / (uuid.uuid4().hex + ".json"), safe)
 
+    def record_retirement(receipt):
+        path = Path(args.root) / "native-retirements" / (receipt["session_id"] + ".json")
+        atomic_json(path, receipt)
+        return path
+
+    def load_retirement(path):
+        return json.loads(path.read_text())
+
     model = ParallelWorldModel(
-        complete, retriever, capabilities=model_capabilities(), record_prediction=record_prediction
+        None,
+        retriever,
+        capabilities=model_capabilities(),
+        record_prediction=record_prediction,
+        complete_scoped=complete_scoped,
+        retire_provider=retire_provider,
+        record_retirement=record_retirement,
+        load_retirement=load_retirement,
+        execution_policy=policy.name,
+        execution_identity=effective_identity,
     )
     app = create_app(
         args.name,
@@ -240,6 +278,7 @@ def main():
         identity={
             "world_model_id": artifact.world_model_id,
             "world_model_manifest_sha256": retriever.world_model_manifest_sha256,
+            "execution_identity": effective_identity,
         },
     )
     uvicorn.run(app, host="127.0.0.1", port=args.port, timeout_graceful_shutdown=10)

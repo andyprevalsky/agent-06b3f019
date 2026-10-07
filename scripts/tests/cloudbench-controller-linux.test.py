@@ -420,13 +420,17 @@ class ContainerOwnership(unittest.TestCase):
                         "exact test owner cleanup failed",
                     )
 
-    def check_dispatch(self, *, cancelled=False):
+    def check_dispatch(self, *, cancelled=False, fixture=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
             tests.mkdir(parents=True)
             (tests / "cloudbench-controller-linux.Dockerfile").write_text(
                 "FROM fixture\n"
+            )
+            selected = fixture or "scripts/tests/cloudbench-multi-workstream.test.sh"
+            shutil.copy2(
+                Path(__file__).resolve().parents[2] / selected, root / selected
             )
             actual_registry = (
                 Path(__file__).resolve().parents[2] / "agents/providers/rose/pools.py"
@@ -478,7 +482,11 @@ class ContainerOwnership(unittest.TestCase):
                     str(tests / "run-cloudbench-controller-linux.py"),
                 ),
                 patch.object(runner.sys, "platform", "darwin"),
-                patch.object(runner.sys, "argv", ["runner"]),
+                patch.object(
+                    runner.sys,
+                    "argv",
+                    ["runner", *(["--fixture", fixture] if fixture else [])],
+                ),
                 patch.dict(
                     os.environ,
                     {
@@ -488,7 +496,9 @@ class ContainerOwnership(unittest.TestCase):
                     clear=True,
                 ),
                 patch.object(runner.subprocess, "run", side_effect=docker),
-                patch.object(runner.subprocess, "check_output", return_value=""),
+                patch.object(
+                    runner.subprocess, "check_output", return_value=selected + "\n"
+                ),
                 patch.object(runner.subprocess, "Popen", side_effect=Process),
                 patch.object(
                     runner, "retire_owned_container", side_effect=retire
@@ -502,6 +512,7 @@ class ContainerOwnership(unittest.TestCase):
                 else:
                     self.assertEqual(runner.main(), 0)
             command = calls[0]
+            self.assertEqual(command[-1], "bash /repo/" + selected)
             self.assertEqual(
                 retirement.call_args.args[1], command[command.index("--name") + 1]
             )
@@ -531,6 +542,11 @@ class ContainerOwnership(unittest.TestCase):
             self.assertEqual(staged_registry.read_bytes(), actual_registry.read_bytes())
             snapshot = staged_registry.parents[3]
             source_receipt = json.loads((snapshot / "source.json").read_text())
+            self.assertEqual(source_receipt["fixture"], selected)
+            self.assertEqual(
+                source_receipt["source_file_sha256"][selected],
+                hashlib.sha256((root / selected).read_bytes()).hexdigest(),
+            )
             self.assertEqual(
                 source_receipt["source_file_sha256"]["agents/providers/rose/pools.py"],
                 hashlib.sha256(actual_registry.read_bytes()).hexdigest(),
@@ -542,6 +558,104 @@ class ContainerOwnership(unittest.TestCase):
 
     def test_dispatch_uses_native_storage_and_keeps_inherited_proxies(self):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
+
+    def test_selected_status_fixture_uses_exact_verified_snapshot_and_retirement(self):
+        self.assertEqual(
+            self.check_dispatch(
+                fixture="scripts/tests/cloudbench-status-service-shutdown.test.sh"
+            ),
+            ["join", "retire"],
+        )
+
+    def test_linux_dispatch_executes_only_the_selected_registered_fixture(self):
+        for fixture in (
+            "scripts/tests/cloudbench-multi-workstream.test.sh",
+            "scripts/tests/cloudbench-status-service-shutdown.test.sh",
+        ):
+            with (
+                self.subTest(fixture=fixture),
+                patch.object(runner.sys, "platform", "linux"),
+                patch.object(runner.sys, "argv", ["runner", "--fixture", fixture]),
+                patch.object(runner.subprocess, "run") as tool_check,
+                patch.object(
+                    runner.os, "execvp", side_effect=SystemExit(0)
+                ) as execution,
+            ):
+                with self.assertRaises(SystemExit) as exited:
+                    runner.main()
+                self.assertEqual(exited.exception.code, 0)
+                self.assertEqual(
+                    tool_check.call_args.args[0],
+                    [sys.executable, "-c", runner.TOOL_CHECK],
+                )
+                execution.assert_called_once_with(
+                    "bash", ["bash", str(Path(__file__).resolve().parents[2] / fixture)]
+                )
+
+    def test_unregistered_fixture_is_rejected_before_native_or_container_launch(self):
+        with (
+            patch.object(
+                runner.sys, "argv", ["runner", "--fixture", "scripts/foreign.sh"]
+            ),
+            patch.object(runner.subprocess, "run") as native,
+            patch.object(runner.subprocess, "Popen") as container,
+            patch.object(runner.os, "execvp") as execution,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit) as exited:
+                runner.main()
+            self.assertEqual(exited.exception.code, 2)
+            native.assert_not_called()
+            container.assert_not_called()
+            execution.assert_not_called()
+
+    def check_status_fixture_dispatch(self, *argv):
+        root = Path(__file__).resolve().parents[2]
+        source = (
+            root / "scripts/tests/cloudbench-status-service-shutdown.test.sh"
+        ).read_text()
+        prefix = source.split("\nfail() {", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary)
+            (binary / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n")
+            arguments = binary / "arguments"
+            (binary / "python3").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$@" > "$DISPATCH_ARGUMENTS"\n'
+            )
+            for name in ("uname", "python3"):
+                (binary / name).chmod(0o700)
+            result = subprocess.run(
+                ["bash", "-c", prefix, "status-fixture", *argv],
+                env={
+                    **os.environ,
+                    "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                    "CLOUDBENCH_ROOT_UNDER_TEST": str(root),
+                    "DISPATCH_ARGUMENTS": str(arguments),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(arguments.is_file(), "non-Linux fixture did not dispatch")
+            self.assertEqual(
+                arguments.read_text().splitlines(),
+                [
+                    str(root / "scripts/tests/run-cloudbench-controller-linux.py"),
+                    "--fixture",
+                    "scripts/tests/cloudbench-status-service-shutdown.test.sh",
+                ],
+            )
+
+    def test_status_fixture_dispatches_to_the_closed_linux_selector(self):
+        self.check_status_fixture_dispatch()
+
+    def test_status_fixture_arguments_cannot_replace_its_exact_owning_suite(self):
+        self.check_status_fixture_dispatch(
+            "--fixture",
+            "scripts/tests/cloudbench-multi-workstream.test.sh",
+            "--check-only",
+        )
 
     def test_cancellation_joins_owned_client_before_export_retirement(self):
         self.assertEqual(

@@ -305,8 +305,110 @@ verified their manifests and reproduced a current two-PUT ciphertext/metadata
 publisher race at the real S3 command boundary. This does not establish that the
 same schedule caused every historical failure or recover their starting fixtures.
 Repair alternatives and exact probes are in `remote-checksum-exclusion-review.json`.
-No native benchmark, viewer acceptance or production rollout has passed yet.
-The new model remains gitignored and must be rebuilt locally.
+The latest exact native fundraiser run is
+`f5e4f83d-386a-4af1-84f5-7745216b6f27`, root
+`29064cc2-3266-4605-8e63-eda79e48a0cc`, on `b0c4d185a`. It failed at the
+authorized 1,800-second diagnostic limit with $0 raised. Its saved report
+listed $16.215 WMH cost and $0.85 task cost. Native predictions continued
+after root pause and archive: existing completed-provider logs total
+$19.376132 over 334 calls. That is logged usage priced by the existing
+accumulator, not an invoice or complete accounting of failed partial streams.
+The final observed session snapshot was revision 50; later request snapshots
+prove further activity, but no final post-shutdown state receipt exists.
+All resources owned by this run have now retired. The portable exact-run hash,
+late commits, usage cutoffs and cleanup audit are in
+`wmh-evidence-20261006/native-fundraiser-timeout-cleanup-review.json`.
+
+Actual Chrome inspection opened the durable root transcript and all eight
+children, expanded browser results, and verified the clean simulated Claude
+Code completion row. Interrupted child rows remain visibly unfinished. This
+is verified transcript replay; simulate mode allocated no browser/code film
+session. The viewer receipt and durable link are in
+`wmh-evidence-20261006/native-fundraiser-viewer-review.json`. Approval evidence
+separately selects the latest LLM call across the entire root/child tree;
+the original publisher manifest selected a root-only dump.
+
+The native system prompt still suppresses forms in the exact captured
+Conviction call. A diagnostic-only six-paragraph public-world policy append,
+holding the full 210,974-character input and actual `openai/gpt-6-sol` route
+constant, produced 3/3 virtual inquiries versus 0/3 on the original system.
+All six responses passed the native parser and retained $0 funding, empty
+commitments/instruments/wires, existing company facts and pending approvals.
+Credentials were deliberately held on the original funded route in both
+arms; this does not reproduce normal leased routing. See
+`wmh-evidence-20261006/native-form-policy-controlled-review.json`.
+The user subsequently authorized local prompt changes without a separate approval until deployment. The exact reviewed policy was applied locally on October 7; deployment remains explicitly on hold.
+Six candidate-only negative controls also passed: two explicit observed
+pages with no route, two forms requiring unknown legal facts, and two
+recorded HTTP 503 attempts with no persisted effect. All used the same funded
+model and retained private facts, approvals and zero funds. Their measured
+call span was 50.129 seconds and metering was $0.271156. One initial analyzer
+scope mismatch was corrected to allow the explicitly observed form POST URL;
+its failed audit is preserved and no model responses were edited or retried.
+See `wmh-evidence-20261006/native-form-policy-negative-review.json`.
+These single-call controls do not establish fundraiser acceptance.
+
+Current main `a3585a7bd` was integrated at `f647c1c8b`. Focused Google-source,
+grep-budget, backend TypeScript and cloud-init tests passed. Native retirement
+now has owning red/green proofs that join actual provider cleanup before
+freezing state and usage, fence stale root retries, preserve lost-response
+deduplication and retain parallel inference. Benchmark retirement integration
+passed 79 owning cleanup/wall-clock tests, plus 22 initial-state/cost tests
+and the actual HTTP client receipt regression. Simultaneous executions of
+one cached catalog task now own separate root/session metadata. Failed joins
+produce durable ERROR results with explicitly unsettled cost, retain the
+original error, and still attempt independent exact-root cleanup. The original
+failed fundraiser report remains unchanged; a new live run must prove joined
+retirement at the actual timeout. Final frozen-source deploy checks remain
+required.
+The broader normal test runner exposed five outdated controller fixtures.
+Their unchanged owning cases first reproduced the failures; test-only repairs
+passed seven configurations, independently repeated in 4.29 seconds. Actual
+controller code, bounds, registry safety and existing worker/absence assertions
+remain unchanged. This focused result does not erase the broader failed run
+or qualify the final deploy snapshot.
+The complete compact benchmark live-results selection then passed 273 cases
+in 109.61 seconds. The status-service shutdown fixture now dispatches from
+Mac to the existing verified Linux container, preserving actual `/proc`
+ownership checks and the original Linux fixture body; its full owning suite
+and 16 dispatcher controls passed, with both owned containers exported and
+retired. A separate terminal-capacity fixture now follows current main's
+intentional settlement of unused demand, while keeping pending-work and
+malformed-capacity failure controls and preserving a failed child's exit code.
+These are test infrastructure/fixture repairs, not changes to fleet runtime
+or benchmark outcome criteria.
+
+The October 7 user instruction authorizes local implementation of the exact six-paragraph addition
+and its selection/system assembly in the reviewed candidate patch SHA256
+`930865b2738b3344b452a6e7258109686eb17bc373e2f43b30378b7693fd3218`.
+Its independent review cleared request preservation, versioned identity,
+cache parity and unchanged policy-text hashes. Full native conformance and
+fundraiser acceptance must be repeated on the locally applied policy. The new
+policy does not inherit the earlier baseline's 100-case pass.
+
+A later evidence refresh saw production Hub upload HTTP 500 and visibility
+read HTTP 503. Read-only Render logs traced both to AWS S3 SDK `InternalError`,
+while exact SQL lock queries succeeded. The existing run subsequently verified
+through the registered publisher, all nine root/child views returned 200,
+and the actual latest Lux dump returned 200. No production restart, source or
+environment change was made. This was an observed transient storage fault for
+these requests; it does not prove a global outage or loss of the saved run.
+No production rollout has occurred. The model remains gitignored and must be
+rebuilt locally; full native cloud provisioning remains unqualified.
+
+
+Local application verification (October 7): native31/provider59 owning checks,
+24 backend cache controls, the registered WMH blackbox, and102 focused benchmark
+retirement/cost controls passed. The first policy-bound100-case live suite
+failed99/100: mean fidelity0.8518956 and content accuracy0.589478 meet unchanged
+aggregate floors, but one raw TLS exception escaped the existing waterfall
+connect/read classifier before response headers. This is a transport failure,
+not a modeled rejection. The failed report is retained. All100 exact sessions
+produced joined retirement receipts and both serving processes retired. A
+minimal raw-SSL classifier correction reproduced3 owning failures and made
+those same3 controls pass, including no replay after partial output. A fresh
+full100-case run is required; no fundraiser success or deployment is claimed.
+See `wmh-evidence-20261006/native-policy-first-conformance-review.json`.
 
 1. Read `CLAUDE.md`, `docs/testing.md`, and
    `agents/benchmarks/README.md` (World-model refresh conformance). Set up the
@@ -336,7 +438,7 @@ The new model remains gitignored and must be rebuilt locally.
 6. Repair and independently verify the Rose FE replay in the viewing context
    the user actually uses. Publish a durable run link and verify rendered
    messages; do not claim success from an admin-only view.
-7. When the benchmark and affected tests pass, use the repo's `/deploy`
+7. Deployment is currently held by explicit user instruction. When the user resumes deployment and the benchmark and affected tests pass, use the repo's `/deploy`
    workflow for review, merge, production rollout, and post-deploy gates. Keep
    the final report explicit about the commit, model artifact, corpus coverage,
    inference scores, benchmark outcome, FE replay, and production state.

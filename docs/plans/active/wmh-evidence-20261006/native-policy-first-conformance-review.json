@@ -1,0 +1,104 @@
+{
+  "recorded_at_utc": "2026-10-07T15:33:00.006315+00:00",
+  "scope": "Local applied public-affordances policy; full100unchanged real-trace suite. Failed result retained. Deployment held.",
+  "report_sha256": "385b43f18d85a951978908ba62b2a03c901eb858b4877191b36ac112ed013593",
+  "status": "failed",
+  "examples": 100,
+  "prediction_errors": 1,
+  "mean_score": 0.851895599578659,
+  "dimensions": {
+    "artifact_refs": 0.76,
+    "content_accuracy": 0.589477997893291,
+    "error_behavior": 0.93,
+    "schema_validity": 0.99,
+    "state_transition_correctness": 0.99
+  },
+  "by_category": {
+    "auth_approval": {
+      "content_accuracy": 1.0,
+      "examples": 1,
+      "mean_score": 1.0
+    },
+    "browser": {
+      "content_accuracy": 0.7038553145735192,
+      "examples": 42,
+      "mean_score": 0.9407710629147039
+    },
+    "code": {
+      "content_accuracy": 0.729431721798134,
+      "examples": 2,
+      "mean_score": 0.9458863443596268
+    },
+    "explore": {
+      "content_accuracy": 0.36588884966820556,
+      "examples": 7,
+      "mean_score": 0.8160349127907839
+    },
+    "for_each": {
+      "content_accuracy": 1.0,
+      "examples": 1,
+      "mean_score": 1.0
+    },
+    "grep": {
+      "content_accuracy": 0.10076179023962134,
+      "examples": 3,
+      "mean_score": 0.5534856913812577
+    },
+    "message": {
+      "content_accuracy": 0.5746984225177854,
+      "examples": 2,
+      "mean_score": 0.914939684503557
+    },
+    "payment": {
+      "content_accuracy": 0.9807692307692307,
+      "examples": 1,
+      "mean_score": 0.9961538461538462
+    },
+    "tool": {
+      "content_accuracy": 0.5126858535300062,
+      "examples": 40,
+      "mean_score": 0.7675371707060014
+    },
+    "vapi": {
+      "content_accuracy": 0.42590559824368823,
+      "examples": 1,
+      "mean_score": 0.8851811196487376
+    }
+  },
+  "native_execution_identity": {
+    "base_protocol_sha256": "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122",
+    "base_protocol_version": "text-world-model-v3",
+    "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+    "base_world_model_id": "grounded-world-model-a41208d8c48f810b60d1",
+    "base_world_model_manifest_sha256": "ba1d5bd5c061a57615f9a6a7bfe7154923128d95db7216f8f524e60d613e2b6b",
+    "effective_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+    "execution_sha256": "6db30ce3489b2d492af88afc22c0589036ec0eca70faa685c440a5152ee960f9",
+    "policy_id": "rose-virtual-public-affordances-v1",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "policy_version": "1",
+    "schema": "rose.wmh_native_execution.v1"
+  },
+  "failure": {
+    "index": 46,
+    "category": "grep",
+    "tool": "web_fetch",
+    "native_session_id": "316b54d3a8b74d14b401cb4b71fc1de5",
+    "native_capture_sha256": "8f9b070cccc29646d35485818edcf4ce9e2029149aeab1f1fdb266ce850dbae4",
+    "observed_first_failed_boundary": "Raw ssl.SSLError SSLV3_ALERT_BAD_RECORD_MAC during OpenRouter response-header read, before SSE parsing or protocol validation. Existing waterfall classifier did not include rawSSL.",
+    "external_tls_origin": "Unproved; no Freedom or network configuration changes.",
+    "fix": "Include ssl.SSLError in existing waterfall connect/read classifier; same existing model order, single attempt per member, fixed output cap and deadlines.",
+    "controls": "Owning3red->3green; before-header safe existing fallback, partial output no replay, all members fail typed errors/cause retained. Full registered Rose suite pending at recording."
+  },
+  "cleanup": {
+    "joined_exact_sessions": 100,
+    "parent_pid": 89302,
+    "child_pid": 89489,
+    "both_absent": true,
+    "owner_exit_code": 143
+  },
+  "limits": [
+    "No fundraiser acceptance or route-improvement claim from this open-loop suite.",
+    "Aggregate/content floors satisfied but1prediction error fails mandatory100success gate.",
+    "Native metrics compared with unpaired baseline do not establish a semantic regression or improvement."
+  ]
+}

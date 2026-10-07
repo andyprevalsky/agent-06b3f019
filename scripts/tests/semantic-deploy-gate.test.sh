@@ -355,10 +355,26 @@ require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
-# /descend is part of the deploy orchestration surface. Keep its two user gates,
-# parallel deploy handoff, sorting, and rendered response contract cemented.
-bash "$DESCEND_COMMAND_TEST"
-bash "$AUTO_RCA_WORKFLOW_TEST"
+# /descend is part of the deploy orchestration surface. Its behavior and the
+# auto-RCA lifecycle have independent owners; this suite checks their wiring.
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/descend-command.test.sh' "/deploy must run the descend behavior owner"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/auto-rca-workflow.test.sh' "/deploy must run the auto-RCA behavior owner"
+python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("deploy_workflow_owners", sys.argv[1])
+registry = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = registry
+spec.loader.exec_module(registry)
+for name, command in (
+    ("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
+    ("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
+):
+    owners = [gate for gate in registry.GATES if gate.name == name or gate.command == command]
+    if len(owners) != 1 or owners[0].name != name or owners[0].command != command:
+        raise SystemExit(f"FAIL: {name} must have exactly one registered behavior owner")
+PY
 node --test "$PROD_SESSION_TEST"
 
 # Local semantic workers follow measured host capacity (RCA

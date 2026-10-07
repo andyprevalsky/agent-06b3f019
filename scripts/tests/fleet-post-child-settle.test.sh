@@ -3,8 +3,9 @@
 # idle the paid primary for the full finalization budget (~86 min) waiting for
 # worker capacity that cannot arrive any more (the primary tears its stack down
 # when the bench ends). Once nothing is in flight and the post-child grace has
-# elapsed it must settle with the same fail-closed verdict the deadline branch
-# would reach. In-flight provisioners (worker-*.pending) still get their budget.
+# elapsed it must settle owned work. A finished task cannot use unallocated
+# demand; in-flight provisioners (worker-*.pending) still get their budget and
+# invalid capacity observations still fail closed.
 # The function under test is extracted from run-bench-fleet so this cannot drift.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -35,18 +36,18 @@ new_case() {
     rm -f "$out/autoscaler.failed" "$out/autoscaler.completed-after-child"
 }
 
-# 1. Nothing in flight, capacity short → settle after the grace, fail closed.
+# 1. Nothing in flight, terminal demand unallocated → settle without new workers.
 AUTOSCALER_FINALIZATION_WAIT_SECONDS=600
 CLOUDBENCH_POST_CHILD_SETTLE_SECONDS=1
 new_case short 1
 SECONDS=0
 rc=0; complete_autoscaler_after_child || rc=$?
-[ "$rc" -eq 1 ] || fail "short capacity must fail closed (rc=$rc)"
+[ "$rc" -eq 0 ] || fail "settled terminal demand must complete (rc=$rc)"
 [ "$SECONDS" -lt 30 ] || fail "settle took ${SECONDS}s; must not wait the finalization budget"
-grep -q "worker capacity below desired: 0/1" "$out/autoscaler.failed" \
-    || fail "expected the capacity verdict, got: $(cat "$out/autoscaler.failed" 2>/dev/null)"
-[ ! -e "$out/autoscaler.completed-after-child" ] || fail "short capacity must not publish completion"
-echo "✅ post-child short capacity settles in ${SECONDS}s with the fail-closed verdict"
+[ ! -e "$out/autoscaler.failed" ] || fail "unallocated terminal demand must not reject the finished task"
+[ -e "$out/autoscaler.completed-after-child" ] || fail "settled terminal capacity must publish completion"
+[ "$(cat "$out/autoscaler.completed-after-child")" = "0" ] || fail "completion must preserve the actual child exit code"
+echo "✅ post-child unallocated terminal demand settles in ${SECONDS}s"
 
 # 2. A provisioner still in flight keeps its budget (no early settle).
 AUTOSCALER_FINALIZATION_WAIT_SECONDS=3
@@ -67,3 +68,24 @@ complete_autoscaler_after_child || fail "settled capacity must complete"
 [ -e "$out/autoscaler.completed-after-child" ] || fail "completion proof missing"
 [ "$SECONDS" -lt 30 ] || fail "settled capacity must complete immediately (took ${SECONDS}s)"
 echo "✅ settled capacity publishes autoscaler.completed-after-child"
+
+# 4. A malformed desired-capacity observation is still a hard failure.
+new_case malformed unknown
+SECONDS=0
+rc=0; complete_autoscaler_after_child || rc=$?
+[ "$rc" -eq 1 ] || fail "malformed capacity must fail closed (rc=$rc)"
+grep -q "autoscaler never observed valid desired capacity" "$out/autoscaler.failed" \
+    || fail "malformed capacity must retain its explicit failure verdict"
+[ ! -e "$out/autoscaler.completed-after-child" ] || fail "malformed capacity must not publish completion"
+[ "$SECONDS" -lt 30 ] || fail "malformed capacity must fail promptly (took ${SECONDS}s)"
+echo "✅ malformed desired capacity fails closed without completion"
+
+# 5. Settled infrastructure preserves a failed child's independent exit code.
+new_case failed-child 1
+printf '17\n' > "$out/benchmark-child.finished"
+SECONDS=0
+complete_autoscaler_after_child || fail "settled infrastructure must retain the finished child result"
+[ "$(cat "$out/autoscaler.completed-after-child")" = "17" ] || fail "completion must not replace a failed child exit code"
+[ ! -e "$out/autoscaler.failed" ] || fail "a benchmark failure is not an infrastructure failure"
+[ "$SECONDS" -lt 30 ] || fail "failed-child settlement must not wait the finalization budget"
+echo "✅ settled infrastructure preserves the failed child exit code"

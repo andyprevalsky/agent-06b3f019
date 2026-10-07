@@ -305,6 +305,178 @@ def test_cancelled_http_caller_keeps_receipt_and_close_prevents_late_commit():
     asyncio.run(run())
 
 
+def test_served_retirement_joins_provider_freezes_receipt_and_fences_root_scope():
+    import httpx
+
+    from benchmarks.serve_experiential_world_model import create_app
+
+    async def run():
+        entered = {n: asyncio.Event() for n in (1, 2)}
+        release = {n: asyncio.Event() for n in (1, 2)}
+        cleanup_entered = asyncio.Event()
+        cleanup_release = asyncio.Event()
+        cleanup_done = asyncio.Event()
+        provider_tasks = {}
+        usage = {"calls": 0}
+
+        async def provider(request, n):
+            entered[n].set()
+            try:
+                await release[n].wait()
+            except asyncio.CancelledError:
+                cleanup_entered.set()
+                await cleanup_release.wait()
+                cleanup_done.set()
+                raise
+            usage["calls"] += 1
+            return reply(request, {"seed": n, "observed": True})
+
+        async def complete(request):
+            e = json.loads(request.messages[1].content)
+            n = int(e["candidate_response"]["tool_calls"][0]["call_id"].split("-")[1])
+            task = asyncio.create_task(provider(request, n))
+            provider_tasks[n] = task
+            return await asyncio.shield(task)
+
+        model = ParallelWorldModel(complete, Retriever())
+        a = model.new_session("Root A", {"seed": 1}, "root-a")
+        b = model.new_session("Root B", {"seed": 2}, "root-b")
+
+        async def retire_provider(session_id):
+            n = 1 if session_id == a.id else 2
+            task = provider_tasks[n]
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return {"session_id": session_id, "join_verified": True, "usage": deepcopy(usage)}
+
+        model.retire_provider = retire_provider
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app("rose", model)), base_url="http://wmh"
+        ) as http:
+            calls = [
+                asyncio.create_task(http.post(f"/world_models/rose/sessions/{s.id}/step", json={"action": action(n)}))
+                for n, s in ((1, a), (2, b))
+            ]
+            retirement = None
+            try:
+                await asyncio.wait_for(entered[1].wait(), 2)
+                await asyncio.wait_for(entered[2].wait(), 2)
+                retirement = asyncio.create_task(http.delete(f"/world_models/rose/sessions/{a.id}"))
+                await asyncio.sleep(0.05)
+                assert not retirement.done(), "DELETE returned before provider cleanup joined"
+                await asyncio.wait_for(cleanup_entered.wait(), 2)
+                assert not cleanup_done.is_set() and not calls[1].done()
+                cleanup_release.set()
+                receipt = (await asyncio.wait_for(retirement, 2)).json()
+                assert receipt == {
+                    "ended": a.id,
+                    "engine": "experiential",
+                    "session_scope_id": "root-a",
+                    "session_id": a.id,
+                    "revision": 0,
+                    "state": {"seed": 1},
+                    "history": [],
+                    "usage": {"calls": 0},
+                    "join_verified": True,
+                }
+                assert cleanup_done.is_set()
+                assert (
+                    await http.post(
+                        "/world_models/rose/sessions",
+                        json={"task": "Stale worker", "seed_state": {}, "session_scope_id": "root-a"},
+                    )
+                ).status_code == 409
+                assert (
+                    await http.post(f"/world_models/rose/sessions/{a.id}/step", json={"action": action(1)})
+                ).status_code == 404
+                release[2].set()
+                assert (await asyncio.wait_for(calls[1], 2)).status_code == 200
+                assert b.revision == 1 and b.state == {"seed": 2, "observed": True}
+                assert (await http.delete(f"/world_models/rose/sessions/{a.id}")).json() == receipt
+                assert usage["calls"] == 1 and a.revision == 0
+            finally:
+                cleanup_release.set()
+                for event in release.values():
+                    event.set()
+                await asyncio.gather(*calls, *([retirement] if retirement else []), return_exceptions=True)
+                await asyncio.gather(*provider_tasks.values(), return_exceptions=True)
+                await model.close()
+
+    asyncio.run(run())
+
+
+def test_retirement_persists_once_checks_frozen_identity_and_bounds_fences(tmp_path):
+    from benchmarks.build_experiential_world_model import atomic_json
+
+    async def run():
+        publications = []
+
+        async def complete(request):
+            return reply(request, {"seed": {"unchanged": True}, "submitted": True})
+
+        def publish(receipt):
+            path = tmp_path / f"{receipt['session_id']}.json"
+            atomic_json(path, receipt)
+            publications.append(path)
+            return path
+
+        model = ParallelWorldModel(
+            complete,
+            Retriever(),
+            maximum_sessions=1,
+            record_retirement=publish,
+            load_retirement=lambda path: json.loads(path.read_text()),
+        )
+        session = model.new_session("Original root", {"seed": {"unchanged": True}}, "root")
+        await model.step(session.id, action(1))
+        before = deepcopy(session.history)
+        first = await model.end_session(session.id)
+        assert first["revision"] == 1 and first["state"]["submitted"] is True
+        assert first["history"] == list(before) and first["join_verified"] is True
+        first["state"]["submitted"] = False
+        second = await model.end_session(session.id)
+        assert second["state"]["submitted"] is True and len(publications) == 1
+        assert not model.sessions and not session.history and not session.state
+        assert len(model.closed_scopes) == len(model.retired) == 1
+        with pytest.raises(ValueError, match="capacity"):
+            model.new_session("Another root", {}, "other")
+        modified = json.loads(publications[0].read_text())
+        modified["revision"] = 99
+        atomic_json(publications[0], modified)
+        with pytest.raises(RuntimeError, match="changed after publication"):
+            await model.end_session(session.id)
+        assert len(publications) == 1
+
+    asyncio.run(run())
+
+
+def test_retirement_rejects_wrong_provider_join_and_keeps_admission_closed():
+    async def run():
+        async def complete(request):
+            return reply(request, {})
+
+        calls = 0
+
+        async def retire(session_id):
+            nonlocal calls
+            calls += 1
+            return {"session_id": "wrong" if calls == 1 else session_id, "join_verified": True, "usage": {"calls": 0}}
+
+        model = ParallelWorldModel(complete, Retriever(), retire_provider=retire)
+        session = model.new_session("Root", {}, "root")
+        with pytest.raises(RuntimeError, match="exact session join"):
+            await model.end_session(session.id)
+        assert session.closed and not model.retired
+        with pytest.raises(ValueError, match="retired"):
+            model.new_session("Stale", {}, "root")
+        with pytest.raises(ValueError, match="closed"):
+            await model.step(session.id, action(1))
+        assert (await model.end_session(session.id))["join_verified"] is True and calls == 2
+
+    asyncio.run(run())
+
+
 def test_call_identity_and_invocation_reuse_are_validated():
     a = action(1)
     a["arguments"]["tool_call_id"] = ""
@@ -1035,5 +1207,95 @@ def test_native_http_boundary_shares_root_world_and_keeps_retry_receipts():
             assert state["state"] == {"known": True, "call-1": True, "call-2": True} and len(state["history"]) == 2
             assert (await http.delete(f"/world_models/rose/sessions/{first}")).status_code == 200
             assert not model.sessions
+
+    asyncio.run(run())
+
+
+def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair():
+    import httpx
+    from exp.simulation.engines.text.prompt import WORLD_MODEL_TEXT_SYSTEM_PROMPT
+
+    from benchmarks.serve_experiential_world_model import create_app
+    from benchmarks.wmh_execution_policy import PUBLIC_AFFORDANCES_TEXT, execution_identity, execution_policy
+
+    async def run():
+        requests = []
+        records = []
+        identity = execution_identity("rose-virtual-public-affordances-v1", "artifact-a", "a" * 64)
+
+        async def complete(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return "invalid JSON"
+            # This fixture verifies plumbing only, not model-semantic behavior.
+            return reply(request, {"unknown_product": None, "funds_cents": 0}, "missing required product field")
+
+        with pytest.raises(ValueError, match="artifact-bound execution identity"):
+            ParallelWorldModel(complete, Retriever(), execution_policy="rose-virtual-public-affordances-v1")
+        assert requests == []
+        model = ParallelWorldModel(
+            complete,
+            Retriever(),
+            execution_policy="rose-virtual-public-affordances-v1",
+            execution_identity=identity,
+            record_prediction=records.append,
+        )
+        session = model.new_session("full root goal", {"unknown_product": None, "funds_cents": 0}, "root")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app("test", model, identity={"execution_identity": identity})),
+            base_url="http://fixture",
+        ) as client:
+            health = (await client.get("/healthz")).json()
+            result = await model.step(session.id, action(1), "invocation")
+            receipt = await model.end_session(session.id)
+        expected = WORLD_MODEL_TEXT_SYSTEM_PROMPT + "\n\n" + PUBLIC_AFFORDANCES_TEXT
+        assert len(requests) == 2 and all(r.messages[0].content == expected for r in requests)
+        assert len({r["request_sha256"] for r in records}) == 2
+        # An overlay must be counted before packing/admission, not appended after it.
+        from exp.common.models import ModelCapabilities
+        from exp.simulation.engines.text.tokens import Utf8UpperBoundTokenCounter
+        from exp.simulation.world_model.runtime import WorldModelCapacityError
+
+        baseline_request = requests[0].model_copy(
+            update={
+                "messages": (
+                    requests[0].messages[0].model_copy(update={"content": WORLD_MODEL_TEXT_SYSTEM_PROMPT}),
+                    *requests[0].messages[1:],
+                )
+            }
+        )
+        capacity = Utf8UpperBoundTokenCounter().count(baseline_request) + baseline_request.maximum_output_tokens
+        rejected_calls = []
+
+        async def forbidden(request):
+            rejected_calls.append(request)
+            return reply(request, {})
+
+        bounded = ParallelWorldModel(
+            forbidden,
+            Retriever(),
+            capabilities=ModelCapabilities(maximum_output_tokens=16384, context_window_tokens=capacity),
+            execution_policy="rose-virtual-public-affordances-v1",
+            execution_identity=identity,
+        )
+        bounded_session = bounded.new_session("full root goal", {"unknown_product": None, "funds_cents": 0}, "root")
+        with pytest.raises(WorldModelCapacityError):
+            await bounded.step(bounded_session.id, action(1), "invocation")
+        assert rejected_calls == []
+        assert json.loads(requests[0].messages[1].content)["candidate_response"] == action_from_canonical(
+            action(1)
+        ).model_dump(mode="json", exclude_none=True)
+        assert (
+            health["execution_identity"]
+            == result["metadata"]["execution_identity"]
+            == receipt["execution_identity"]
+            == identity
+        )
+        assert all(r["execution_identity"] == identity for r in records)
+        assert model.audit[-1]["execution_identity"] == identity
+        assert receipt["state"] == {"unknown_product": None, "funds_cents": 0}
+        assert all(r["request"]["messages"][0]["content"] == expected for r in records)
+        with pytest.raises(ValueError, match="Unknown WMH execution policy"):
+            execution_policy("unknown")
 
     asyncio.run(run())

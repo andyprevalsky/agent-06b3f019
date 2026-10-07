@@ -616,15 +616,24 @@ elif name == 'rsync':
     for relative in ("node_modules", "back-end/node_modules", "front-end/node_modules", "agents/venv"):
         actual, expected = (repo / relative).stat(), (donor / relative).stat()
         assert (actual.st_uid, actual.st_gid, actual.st_mode & 0o7777) == (
-            expected.st_uid, expected.st_gid, expected.st_mode & 0o7777
+            expected.st_uid,
+            expected.st_gid,
+            expected.st_mode & 0o7777,
         ), f"hydrated {relative} changed donor root access"
     state_root = repo / ".cloudbench-deps-overlays"
     if state_root.exists():
         assert state_root.stat().st_mode & 0o777 == 0o700
         assert all(owner.stat().st_mode & 0o777 == 0o600 for owner in state_root.glob("*/owner"))
     frontend = subprocess.run(
-        ["node", "-e", "const {createRequire}=require('node:module'); const r=createRequire(process.argv[1]); if(r('frontend-fixture')!=='frontend-ready')process.exit(1);", str(repo / "front-end/package.json")],
-        capture_output=True, text=True, timeout=10,
+        [
+            "node",
+            "-e",
+            "const {createRequire}=require('node:module'); const r=createRequire(process.argv[1]); if(r('frontend-fixture')!=='frontend-ready')process.exit(1);",
+            str(repo / "front-end/package.json"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert frontend.returncode == 0, frontend.stderr
     mounted = [args for name, args in operations if name == "mount"]
@@ -5567,7 +5576,6 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     """
     worker = WORKER_SCRIPT.read_text()
     fleet = fleet_source_text()
-    token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert 'FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"' in worker
@@ -5586,7 +5594,10 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     assert "rm -f /tmp/rbw.env" in provision
 
 
-def test_autoscaled_worker_restores_primary_clone_before_applying_patch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fresh_volumes,simulate", [(0, 0), (1, 0), (1, 1)])
+def test_autoscaled_worker_restores_primary_clone_before_applying_patch(
+    tmp_path: Path, fresh_volumes: int, simulate: int
+) -> None:
     """A worker clone inherits the primary's already-patched tracked files.
 
     The exact-ref helper deliberately skips a large reset when HEAD already
@@ -5596,7 +5607,7 @@ def test_autoscaled_worker_restores_primary_clone_before_applying_patch(tmp_path
     """
 
     worker = WORKER_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
+    fleet = fleet_source_text()
     token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     fetch = 'bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF"'
@@ -14895,6 +14906,22 @@ fi
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def _stale_pre_volume_registry_helpers(fleet: str) -> str:
+    """Execute the actual registry helpers without unrelated inventory startup."""
+    return "".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "machine_status_exact_read() {",
+            "registry_resolve_name() {",
+            "registry_machine_details() {",
+            "registry_record_is_stale_pre_volume_id() {",
+            "registry_retire_absent_stale_pre_volume_records() {",
+            "reap_registry_clones() {",
+        )
+    )
+
+
 def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
     tmp_path: Path,
 ) -> None:
@@ -14905,9 +14932,7 @@ def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
     clone-data volumes. Attached neighbors and other volume names are not
     ownership candidates and must remain untouched."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _stale_pre_volume_registry_helpers(fleet)
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("b" * 32)
     clones = registry / "clones"
@@ -14975,9 +15000,7 @@ def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proo
     """A live exact name, an unattached clone-data volume, or malformed volume
     inventory each invalidates the legacy-record absence proof."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _stale_pre_volume_registry_helpers(fleet)
     cases = (
         (
             "live-name",
@@ -17024,15 +17047,16 @@ def test_cloud_task_contract_checks_use_the_resolved_agent_interpreter() -> None
     succeeded with the virtualenv.
     """
     driver = DRIVER_SCRIPT.read_text()
-    guest_check_start = driver.index("# Guest-checkout tasks")
-    guest_check_end = driver.index("if [ -n \"$FRONTEND_SUPABASE_URL\" ]", guest_check_start)
+    guest_check_start = driver.index('GUEST_AUTH_PYTHON="$REPO_DIR/agents/venv/bin/python"')
+    guest_check_end = driver.index('if [ -n "$FRONTEND_SUPABASE_URL" ]', guest_check_start)
     guest_check = driver[guest_check_start:guest_check_end]
 
-    assert '"$TASK_GATE_PYTHON" -c' in guest_check
-    assert 'PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}"' in guest_check
+    assert 'if [ ! -x "$GUEST_AUTH_PYTHON" ]; then' in guest_check
+    assert '"$GUEST_AUTH_PYTHON" -c' in guest_check
+    assert 'cd "$REPO_DIR/agents" || exit 1' in guest_check
     assert "python3 -c" not in guest_check
     assert "else 10" in guest_check
-    assert 'FATAL: guest-checkout task contract check failed' in guest_check
+    assert "FATAL: saved-browser-auth fixture resolution failed" in guest_check
 
 
 def test_cloud_isolated_stack_provides_frontend_build_identity(tmp_path: Path) -> None:
@@ -18824,6 +18848,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
             f"""set -uo pipefail
 FLEET_DIR="$FD"
 RUN_ID=test-run
+FLEET_CONTROLLER_STARTED_EPOCH=1791331914
 BENCHES=(alpha beta)
 CATALOG_MODES=(real simulate)
 SIM_ON_CSV=
@@ -18838,6 +18863,7 @@ write_startup_card "healing warm snapshot (dep trees)"
     )
     assert result.returncode == 0, result.stderr
     card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
+    assert card["timestamp"] == "2026-10-07T00:11:54+00:00"
     assert card["status"] == "starting"
     assert "healing warm snapshot" in card["phase"]
     assert card["summary"]["total"] == 2

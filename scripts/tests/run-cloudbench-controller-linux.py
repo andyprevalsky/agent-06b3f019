@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the unchanged controller fixture on Linux; Mac uses an offline container."""
+"""Run a registered controller fixture on Linux; Mac uses an offline container."""
 
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ import sys
 import tarfile
 import tempfile
 import uuid
+
+FIXTURES = (
+    "scripts/tests/cloudbench-multi-workstream.test.sh",
+    "scripts/tests/cloudbench-status-service-shutdown.test.sh",
+)
 
 
 TOOL_CHECK = """import re,shutil,subprocess,sys
@@ -202,9 +207,10 @@ def retire_owned_container(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--fixture", choices=FIXTURES, default=FIXTURES[0])
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    fixture = "scripts/tests/cloudbench-multi-workstream.test.sh"
+    fixture = args.fixture
     if sys.platform == "linux":
         subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
         if args.check_only:
@@ -323,7 +329,10 @@ def main() -> int:
         if hashlib.sha256(source.read_bytes()).hexdigest() != hashes[name]:
             raise RuntimeError("controller source changed during snapshot")
     (snapshot / "source.json").write_text(
-        json.dumps({"image_id": image_id, "source_file_sha256": hashes}, indent=2)
+        json.dumps(
+            {"image_id": image_id, "fixture": fixture, "source_file_sha256": hashes},
+            indent=2,
+        )
         + "\n"
     )
     (snapshot / "fixture-tmp").mkdir(mode=0o700)

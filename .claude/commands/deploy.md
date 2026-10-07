@@ -488,6 +488,7 @@ their assertions or test counts:
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `bash scripts/tests/descend-command.test.sh`,
+`bash scripts/tests/auto-rca-workflow.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
@@ -518,6 +519,10 @@ suites assert that their own command still appears here, which is how a gate
 cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
 asserts this list and the `GATES` registry match exactly in both directions, so
 adding a gate without documenting it here fails the build.
+
+The descend and auto-RCA gates own their behavioral fixtures. The semantic
+deploy gate verifies their registration and documented commands without
+recursively executing them, so each runs once in the complete registry.
 
 The compact benchmark gates above run on every deploy, including deploys
 without cloud-runner changes. They exercise the canonical CLI dispatch (including
@@ -701,7 +706,8 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
-# Native Linux with ripgrep: driver ownership reads /proc.
+# Native Linux with ripgrep: driver ownership reads /proc; Mac automatically
+# dispatches this exact fixture to the same verified offline Linux container.
 bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh

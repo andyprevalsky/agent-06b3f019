@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -61,10 +62,11 @@ def build_native(source_root, root, name, pool="rose-1-ultra", *, bind_only=Fals
     )
 
 
-def build_provider_bridge(provider, token):
+def build_provider_bridge(provider, token, *, execution_policy=None):
     from fastapi import FastAPI, Header, HTTPException
     from wmh.providers.base import Message
 
+    from benchmarks.wmh_execution_policy import validate_execution_identity
     from benchmarks.wmh_rose_provider import _WMHInvalidPrediction
 
     app = FastAPI()
@@ -79,7 +81,7 @@ def build_provider_bridge(provider, token):
         return provider._usage.snapshot()
 
     @app.post("/complete")
-    def complete(payload: dict, x_rose_provider_token: str | None = Header(default=None)):
+    async def complete(payload: dict, x_rose_provider_token: str | None = Header(default=None)):
         authorize(x_rose_provider_token)
         messages = payload.get("messages")
         if (
@@ -91,19 +93,45 @@ def build_provider_bridge(provider, token):
             raise HTTPException(422, "Expected native system/user messages")
         if payload.get("maximum_output_tokens") != 16384:
             raise HTTPException(422, "Unexpected world-model output budget")
+        session_id = payload.get("session_id")
+        prediction_id = payload.get("prediction_id")
+        if any(
+            not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value)
+            for value in (session_id, prediction_id)
+        ):
+            raise HTTPException(422, "Native completion requires exact session/prediction identity")
         try:
-            result = provider.complete(
+            if execution_policy is not None:
+                validate_execution_identity(
+                    payload.get("execution_identity"), execution_policy, system=messages[0]["content"]
+                )
+            result = await provider.complete_scoped(
+                session_id,
+                prediction_id,
                 messages[0]["content"],
                 [Message(role=m["role"], content=m["content"]) for m in messages[1:]],
                 max_tokens=16384,
             )
         except _WMHInvalidPrediction as exc:
             raise HTTPException(422, {"kind": "invalid_prediction", "reason": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return {
             "content": result.text,
             "actual_model": getattr(result, "actual_model", None),
             "usage": result.usage.model_dump(),
+            "execution_identity": payload.get("execution_identity") if execution_policy is not None else None,
         }
+
+    @app.post("/sessions/{session_id}/retire")
+    async def retire(session_id: str, x_rose_provider_token: str | None = Header(default=None)):
+        authorize(x_rose_provider_token)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", session_id):
+            raise HTTPException(422, "Invalid native session identity")
+        try:
+            return await provider.retire_scope(session_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     return app
 
@@ -111,8 +139,10 @@ def build_provider_bridge(provider, token):
 def serve_native(name, root, pool, port):
     import uvicorn
 
+    from benchmarks.wmh_execution_policy import DEFAULT_EXECUTION_POLICY, execution_policy
     from benchmarks.wmh_rose_provider import RoseWMHProvider
 
+    policy = execution_policy(os.environ.get("WMH_EXECUTION_POLICY", DEFAULT_EXECUTION_POLICY))
     python = native_python()
     token = secrets.token_urlsafe(32)
     provider = RoseWMHProvider(pool=pool, protocol="text-world-model-v3")
@@ -121,7 +151,10 @@ def serve_native(name, root, pool, port):
     listener.listen(128)
     bridge_port = listener.getsockname()[1]
     config = uvicorn.Config(
-        build_provider_bridge(provider, token), host="127.0.0.1", log_level="warning", timeout_graceful_shutdown=10
+        build_provider_bridge(provider, token, execution_policy=policy.name),
+        host="127.0.0.1",
+        log_level="warning",
+        timeout_graceful_shutdown=10,
     )
 
     class OwnedServer(uvicorn.Server):
@@ -137,7 +170,12 @@ def serve_native(name, root, pool, port):
                     signal.signal(sig, handler)
 
     server = OwnedServer(config)
-    env = {**os.environ, "WMH_PROVIDER_BRIDGE_TOKEN": token, "WMH_ROSE_POOL_SHA256": pool_sha256(pool)}
+    env = {
+        **os.environ,
+        "WMH_PROVIDER_BRIDGE_TOKEN": token,
+        "WMH_ROSE_POOL_SHA256": pool_sha256(pool),
+        "WMH_EXECUTION_POLICY": policy.name,
+    }
     child = subprocess.Popen(
         [
             python,

@@ -103,7 +103,7 @@ def test_native_cache_identity_preserves_correlated_call_ids():
 
     cache = _WMHFastCacheContext(enabled=True, goal="DEMO FIXTURE ONLY native cache", write_enabled=True)
 
-    def key(call_id, timestamp, state_clock=30, history_clock=40):
+    def key(call_id, timestamp, state_clock=30, history_clock=40, system="Native protocol"):
         payload = {
             "environment_state": {"timestamp_ms": state_clock},
             "visible_history": [{"timestamp_ms": history_clock}],
@@ -128,7 +128,7 @@ def test_native_cache_identity_preserves_correlated_call_ids():
             "wmh_world_model_v3",
             {
                 "messages": [
-                    {"role": "system", "content": "Native protocol"},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(payload)},
                 ]
             },
@@ -140,6 +140,12 @@ def test_native_cache_identity_preserves_correlated_call_ids():
     assert key(first, 10) != key(second, 10), "Native cached results are correlated to exact call IDs"
     assert key(first, 10) != key(first, 10, state_clock=31)
     assert key(first, 10) != key(first, 10, history_clock=41)
+    from benchmarks.wmh_execution_policy import PUBLIC_AFFORDANCES_TEXT
+
+    assert key(first, 10) != key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT)
+    assert key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT) == key(
+        first, 20, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT
+    )
 
 
 @pytest.mark.parametrize("matching", [False, True])
@@ -150,9 +156,13 @@ def test_native_conformance_requires_exact_served_artifact_identity(tmp_path, ma
         predictions = 0
 
         async def model_identity(self, name):
+            from benchmarks.wmh_execution_policy import execution_identity
+
+            artifact_id = "artifact-a" if matching else "artifact-b"
             return {
-                "world_model_id": "artifact-a" if matching else "artifact-b",
+                "world_model_id": artifact_id,
                 "world_model_manifest_sha256": "a" * 64,
+                "execution_identity": execution_identity("upstream", artifact_id, "a" * 64),
             }
 
         async def start_session(self, *args, **kwargs):
@@ -342,6 +352,186 @@ def test_native_provider_bridge_rejects_unauthorized_calls_and_exposes_safe_usag
     assert response.status_code == 200 and response.json()["calls"] == 0
 
 
+def test_native_provider_retirement_joins_actual_cleanup_and_preserves_other_scope(monkeypatch):
+    import httpx
+
+    from benchmarks.experiential_bridge import build_provider_bridge
+
+    entered = {name: threading.Event() for name in ("a", "b")}
+    release = {name: threading.Event() for name in ("a", "b")}
+    cleanup_entered = threading.Event()
+    cleanup_release = threading.Event()
+    cleanup_done = threading.Event()
+    finished = {name: threading.Event() for name in ("a", "b")}
+    collect_calls = {name: 0 for name in ("a", "b")}
+
+    class Client:
+        async def collect(self, **kwargs):
+            call = json.loads(kwargs["messages"][1]["content"])["candidate_response"]["tool_calls"][0]["call_id"]
+            collect_calls[call] += 1
+            entered[call].set()
+            try:
+                try:
+                    while not release[call].is_set():
+                        await asyncio.sleep(0.001)
+                except asyncio.CancelledError:
+                    cleanup_entered.set()
+                    while not cleanup_release.is_set():
+                        await asyncio.sleep(0.001)
+                    cleanup_done.set()
+                    raise
+                return RoseResponse(
+                    content=json.dumps(
+                        {
+                            "message": "",
+                            "tool_results": [{"call_id": call, "content": "completed", "is_error": False}],
+                            "state": {},
+                            "terminal": False,
+                        }
+                    ),
+                    actual_model="openai/gpt-6-sol",
+                    usage={"prompt_tokens": 1, "completion_tokens": 1},
+                )
+            finally:
+                finished[call].set()
+
+    provider = RoseWMHProvider(client=Client(), usage=RoseUsageAccumulator(), protocol="text-world-model-v3")
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+
+    async def wait(event):
+        async with asyncio.timeout(3):
+            while not event.is_set():
+                await asyncio.sleep(0.001)
+
+    def payload(call):
+        return {
+            "session_id": f"scope-{call}",
+            "prediction_id": f"prediction-{call}",
+            "messages": [
+                {"role": "system", "content": "Simulate"},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"task": {"instruction": "Inspect"}, "candidate_response": {"tool_calls": [{"call_id": call}]}}
+                    ),
+                },
+            ],
+            "maximum_output_tokens": 16384,
+        }
+
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=build_provider_bridge(provider, "private-test-token")),
+            base_url="http://bridge",
+            headers={"X-Rose-Provider-Token": "private-test-token"},
+        ) as http:
+            calls = [asyncio.create_task(http.post("/complete", json=payload(name))) for name in ("a", "b")]
+            retirement = None
+            try:
+                await wait(entered["a"])
+                await wait(entered["b"])
+                calls[1].cancel()
+                await asyncio.gather(calls[1], return_exceptions=True)
+                calls[1] = asyncio.create_task(http.post("/complete", json=payload("b")))
+                changed = payload("b")
+                changed["messages"][0]["content"] = "Different request"
+                assert (await http.post("/complete", json=changed)).status_code == 409
+                assert collect_calls == {"a": 1, "b": 1}
+                retirement = asyncio.create_task(http.post("/sessions/scope-a/retire"))
+                await asyncio.sleep(0.05)
+                assert not retirement.done(), "Retirement acknowledged before actual provider cleanup joined"
+                await wait(cleanup_entered)
+                assert not cleanup_done.is_set() and not finished["b"].is_set()
+                cleanup_release.set()
+                receipt = (await asyncio.wait_for(retirement, 3)).json()
+                assert receipt["join_verified"] is True and receipt["session_id"] == "scope-a"
+                assert cleanup_done.is_set() and receipt["usage"]["calls"] == 0
+                assert not finished["b"].is_set()
+                assert (await http.post("/complete", json=payload("a"))).status_code == 409
+                assert (await http.post("/sessions/scope-a/retire")).json() == receipt
+                release["b"].set()
+                assert (await asyncio.wait_for(calls[1], 3)).status_code == 200
+                assert provider._usage.snapshot().calls == 1
+                assert receipt["usage"]["calls"] == 0
+            finally:
+                cleanup_release.set()
+                for event in release.values():
+                    event.set()
+                await asyncio.gather(*calls, *([retirement] if retirement else []), return_exceptions=True)
+                await wait(finished["a"])
+                await wait(finished["b"])
+
+    asyncio.run(run())
+
+
+def test_failed_provider_join_keeps_compact_fence_and_retry_joins_cleanup(monkeypatch):
+    entered = threading.Event()
+    cleanup_entered = threading.Event()
+    cleanup_release = threading.Event()
+    cleanup_done = threading.Event()
+    cleanups = []
+
+    class Client:
+        async def collect(self, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleanups.append(True)
+                cleanup_entered.set()
+                while not cleanup_release.is_set():
+                    await asyncio.sleep(0.001)
+                cleanup_done.set()
+
+    provider = RoseWMHProvider(client=Client(), usage=RoseUsageAccumulator(), protocol="text-world-model-v3")
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+    monkeypatch.setattr(wmh_rose_provider, "_WMH_NATIVE_JOIN_TIMEOUT_SECONDS", 0.02)
+
+    async def wait(event):
+        async with asyncio.timeout(3):
+            while not event.is_set():
+                await asyncio.sleep(0.001)
+
+    async def run():
+        call = asyncio.create_task(
+            provider.complete_scoped(
+                "scope", "prediction", "System", [Message(role="user", content="Evidence")], max_tokens=16384
+            )
+        )
+        try:
+            await wait(entered)
+            with pytest.raises(RuntimeError, match="did not join"):
+                await provider.retire_scope("scope")
+            await wait(cleanup_entered)
+            assert not cleanup_done.is_set() and "scope" in provider._native_closed_scopes
+            assert "scope" not in provider._native_retirements
+            with pytest.raises(ValueError, match="retired"):
+                await provider.complete_scoped(
+                    "scope", "stale", "System", [Message(role="user", content="Evidence")], max_tokens=16384
+                )
+            with pytest.raises(RuntimeError, match="did not join"):
+                await provider.retire_scope("scope")
+            assert cleanups == [True] and not cleanup_done.is_set()
+            cleanup_release.set()
+            receipt = await provider.retire_scope("scope")
+            assert receipt["join_verified"] is True and cleanup_done.is_set() and receipt["usage"]["calls"] == 0
+            assert cleanups == [True]
+        finally:
+            cleanup_release.set()
+            await asyncio.gather(call, return_exceptions=True)
+            await provider.retire_scope("scope")
+
+    asyncio.run(run())
+
+
 def test_native_wrong_call_result_is_rejected_before_cache_done(monkeypatch):
     from providers.rose import RoseClient
     from providers.rose.types import StreamChunk
@@ -439,7 +629,7 @@ def test_native_provider_bridge_returns_typed_protocol_feedback():
     class Provider:
         _usage = RoseUsageAccumulator()
 
-        def complete(self, *args, **kwargs):
+        async def complete_scoped(self, *args, **kwargs):
             raise wmh_rose_provider._WMHInvalidPrediction("bad native JSON", {}, "test")
 
     with TestClient(build_provider_bridge(Provider(), "test-token")) as http:
@@ -447,6 +637,8 @@ def test_native_provider_bridge_returns_typed_protocol_feedback():
             "/complete",
             headers={"X-Rose-Provider-Token": "test-token"},
             json={
+                "session_id": "scope-test",
+                "prediction_id": "prediction-test",
                 "messages": [{"role": "system", "content": "system"}, {"role": "user", "content": "evidence"}],
                 "maximum_output_tokens": 16384,
             },
@@ -1127,3 +1319,123 @@ def test_complete_records_zero_cost_for_direct_claude(monkeypatch):
 def test_provider_defaults_to_global_accumulator():
     provider = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()))
     assert provider._usage is wmh_rose_provider.GLOBAL_ROSE_USAGE
+
+
+@pytest.mark.parametrize("served_policy", ["upstream", "rose-virtual-public-affordances-v1"])
+def test_native_conformance_rejects_unexpected_execution_policy_before_inference(tmp_path, served_policy):
+    from benchmarks.wmh_execution_policy import bind_execution_suite, execution_identity
+    from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
+
+    class Client:
+        predictions = 0
+
+        async def model_identity(self, name):
+            return {
+                "world_model_id": "artifact-a",
+                "world_model_manifest_sha256": "a" * 64,
+                "execution_identity": execution_identity(served_policy, "artifact-a", "a" * 64),
+            }
+
+        async def start_session(self, *args, **kwargs):
+            self.predictions += 1
+            return "session"
+
+        async def step(self, *args, **kwargs):
+            return {"content": "exact", "is_error": False, "metadata": {}}
+
+    path = tmp_path / "suite.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "rose.wmh_conformance_suite.v1",
+                "status": "passed",
+                "requested_examples": 1,
+                "native_world_model_id": "artifact-a",
+                "native_world_model_manifest_sha256": "a" * 64,
+                "examples": [
+                    {
+                        "task": "root",
+                        "action": {
+                            "category": "browser",
+                            "name": "spawn_browser_agent",
+                            "arguments": {},
+                            "tool_call_id": "call",
+                        },
+                        "observation": {"category": "browser", "content": "exact"},
+                    }
+                ],
+            }
+        )
+    )
+    base_bytes = path.read_bytes()
+    expected = "rose-virtual-public-affordances-v1"
+    with pytest.raises(ValueError, match="execution-bound"):
+        asyncio.run(
+            evaluate_world_model_conformance_suite(
+                path, world_model_name="test", client=Client(), execution_policy=expected
+            )
+        )
+    bound_path = tmp_path / "bound.json"
+    bound = bind_execution_suite(path, bound_path, expected)
+    assert path.read_bytes() == base_bytes
+    assert bound["examples"] == json.loads(base_bytes)["examples"]
+    path = bound_path
+    client = Client()
+    if served_policy != expected:
+        with pytest.raises(ValueError, match="execution identity"):
+            asyncio.run(
+                evaluate_world_model_conformance_suite(
+                    path, world_model_name="test", client=client, execution_policy=expected
+                )
+            )
+        assert client.predictions == 0
+    else:
+        report = asyncio.run(
+            evaluate_world_model_conformance_suite(
+                path, world_model_name="test", client=client, execution_policy=expected
+            )
+        )
+        assert report["native_execution_identity"] == execution_identity(expected, "artifact-a", "a" * 64)
+        assert report["status"] == "passed" and client.predictions == 1
+
+
+@pytest.mark.parametrize("descriptor_kind", ["missing", "altered", "wrong_system"])
+def test_provider_bridge_rejects_unbound_execution_before_provider_dispatch(descriptor_kind):
+    import httpx
+
+    from benchmarks.experiential_bridge import build_provider_bridge
+    from benchmarks.wmh_execution_policy import execution_identity
+
+    class Provider:
+        calls = 0
+
+        async def complete_scoped(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("Invalid policy must not dispatch")
+
+    async def run():
+        identity = execution_identity("rose-virtual-public-affordances-v1", "artifact-a", "a" * 64)
+        if descriptor_kind == "missing":
+            identity = None
+        elif descriptor_kind == "altered":
+            identity["policy_version"] = "unapproved"
+        provider = Provider()
+        app = build_provider_bridge(provider, "fixture-token", execution_policy="rose-virtual-public-affordances-v1")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            response = await client.post(
+                "/complete",
+                headers={"X-Rose-Provider-Token": "fixture-token"},
+                json={
+                    "messages": [
+                        {"role": "system", "content": "unreviewed system override"},
+                        {"role": "user", "content": "{}"},
+                    ],
+                    "maximum_output_tokens": 16384,
+                    "session_id": "session",
+                    "prediction_id": "prediction",
+                    "execution_identity": identity,
+                },
+            )
+        assert response.status_code == 409 and provider.calls == 0
+
+    asyncio.run(run())

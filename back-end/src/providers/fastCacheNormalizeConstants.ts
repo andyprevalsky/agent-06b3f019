@@ -1,5 +1,12 @@
 export const CACHE_KEY_VERSION = 'v42';
 
+// Immutable registry metadata mirrors benchmarks/wmh_execution_policy.py.
+// The full policy text remains in the Python registry; owning tests check its SHA.
+const WMH_PUBLIC_AFFORDANCES_POLICY = 'rose-virtual-public-affordances-v1';
+const WMH_PUBLIC_AFFORDANCES_VERSION = '1';
+const WMH_PUBLIC_AFFORDANCES_SHA256 =
+  '49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79';
+
 /**
  * Cache-key namespace segment for world-model-simulated runs (mirror of
  * agents/providers/fast_cache/normalize.py:world_model_cache_scope — keep in
@@ -12,7 +19,15 @@ export function worldModelCacheScope(): string {
   const mode = (process.env.BENCHMARK_WORLD_MODEL_MODE || 'real').trim().toLowerCase() || 'real';
   if (mode !== 'simulate') return '';
   const model = process.env.WMH_MODEL_NAME || process.env.WORLD_MODEL_NAME || 'rose-archive';
-  return `sim.${model.replace(/[^A-Za-z0-9._-]/g, '-')}:`;
+  let scope = `sim.${model.replace(/[^A-Za-z0-9._-]/g, '-')}`;
+  const policy = process.env.WMH_EXECUTION_POLICY ?? 'upstream';
+  if (policy !== 'upstream') {
+    if (policy !== WMH_PUBLIC_AFFORDANCES_POLICY) {
+      throw new Error('Unknown WMH execution policy; choose an immutable registered version');
+    }
+    scope += `.policy.${policy}.${WMH_PUBLIC_AFFORDANCES_VERSION}.${WMH_PUBLIC_AFFORDANCES_SHA256.slice(0, 16)}`;
+  }
+  return `${scope}:`;
 }
 
 export type CacheKind =

@@ -200,6 +200,15 @@ if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]
     echo "Invalid WMH_CONTEXT_TOKENS: expected a positive integer or unset" >&2
     exit 2
 fi
+WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
+case "$WMH_EXECUTION_POLICY" in
+    upstream|rose-virtual-public-affordances-v1) ;;
+    *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
+esac
+if [ "$WMH_ENGINE" != experiential ] && [ "$WMH_EXECUTION_POLICY" != upstream ]; then
+    echo "WMH_EXECUTION_POLICY requires WMH_ENGINE=experiential" >&2
+    exit 2
+fi
 # End world-model launch configuration.
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
@@ -2811,7 +2820,7 @@ chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/n
 mkdir -p '$REMOTE_WMH'
 chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
 cd '$REMOTE_REPO/agents'
-gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_ENGINE='$WMH_ENGINE' WMH_ROSE_POOL='$WMH_ROSE_POOL' WMH_CONTEXT_TOKENS='$WMH_CONTEXT_TOKENS' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_MAX_STEPS='$WMH_REFRESH_MAX_STEPS' WMH_MAX_STEPS_PER_BUNDLE='$WMH_REFRESH_MAX_STEPS_PER_BUNDLE' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \\
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_ENGINE='$WMH_ENGINE' WMH_ROSE_POOL='$WMH_ROSE_POOL' WMH_CONTEXT_TOKENS='$WMH_CONTEXT_TOKENS' WMH_EXECUTION_POLICY='$WMH_EXECUTION_POLICY' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_MAX_STEPS='$WMH_REFRESH_MAX_STEPS' WMH_MAX_STEPS_PER_BUNDLE='$WMH_REFRESH_MAX_STEPS_PER_BUNDLE' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' WMH_CONFORMANCE_EXAMPLES=100 WMH_REQUIRE_CONFORMANCE=1 \\
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
@@ -4010,6 +4019,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "WMH_ENGINE=$WMH_ENGINE"
         --env "WMH_ROSE_POOL=$WMH_ROSE_POOL"
         --env "WMH_CONTEXT_TOKENS=$WMH_CONTEXT_TOKENS"
+        --env "WMH_EXECUTION_POLICY=$WMH_EXECUTION_POLICY"
         --env "BENCH_TASKS_B64=$TASKS_CSV_B64"
         --env "BENCH_MAX_CONCURRENCY=$BENCH_MAX_CONCURRENCY"
         --env "BENCH_SIMULATE=$BENCH_SIMULATE"
@@ -4453,6 +4463,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export WMH_ENGINE=$(printf '%q' "$WMH_ENGINE")"
     echo "export WMH_ROSE_POOL=$(printf '%q' "$WMH_ROSE_POOL")"
     echo "export WMH_CONTEXT_TOKENS=$(printf '%q' "$WMH_CONTEXT_TOKENS")"
+    echo "export WMH_EXECUTION_POLICY=$(printf '%q' "$WMH_EXECUTION_POLICY")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
     echo "export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")"
     echo "export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")"

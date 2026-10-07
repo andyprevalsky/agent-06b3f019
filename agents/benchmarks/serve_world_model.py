@@ -579,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.engine != "experiential" and os.environ.get("WMH_EXECUTION_POLICY", "upstream") != "upstream":
+        parser.error("WMH_EXECUTION_POLICY requires --engine experiential")
     if args.engine == "experiential":
         from benchmarks.experiential_bridge import serve_native
 

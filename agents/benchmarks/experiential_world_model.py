@@ -36,6 +36,13 @@ from exp.simulation.retrieval.embedding import default_rag_embedder, embed_rag_t
 from exp.simulation.retrieval.transitions import render_rag_key
 from exp.simulation.world_model.runtime import PreparedGroundedWorldModelCall, WorldModelCapacityError
 
+from benchmarks.wmh_execution_policy import (
+    DEFAULT_EXECUTION_POLICY,
+    validate_execution_identity,
+)
+from benchmarks.wmh_execution_policy import (
+    execution_policy as select_execution_policy,
+)
 from utils.world_model_observation import effective_world_model_content
 
 CANONICAL_INPUT_SCHEMA = {
@@ -148,6 +155,11 @@ class NativeSession:
     closed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     receipts: dict = field(default_factory=dict)
+    retirement: asyncio.Task | None = None
+
+
+class RetiredWorldModelScope(ValueError):
+    """A stale worker cannot reopen a retired root's world as an empty session."""
 
 
 class ParallelWorldModel:
@@ -163,6 +175,12 @@ class ParallelWorldModel:
         maximum_steps=4096,
         capabilities=None,
         record_prediction=None,
+        complete_scoped=None,
+        retire_provider=None,
+        record_retirement=None,
+        load_retirement=None,
+        execution_policy=DEFAULT_EXECUTION_POLICY,
+        execution_identity=None,
     ):
         self.complete = complete
         self.retriever = retriever
@@ -171,18 +189,38 @@ class ParallelWorldModel:
         self.maximum_steps = maximum_steps
         self.capabilities = capabilities or ModelCapabilities(supports_tools=False, maximum_output_tokens=16384)
         self.token_counter = Utf8UpperBoundTokenCounter()
+        self.execution_policy = select_execution_policy(execution_policy)
+        if execution_policy != DEFAULT_EXECUTION_POLICY and execution_identity is None:
+            raise ValueError("Activated WMH policy requires a verified artifact-bound execution identity")
+        self.execution_identity = (
+            validate_execution_identity(execution_identity, execution_policy)
+            if execution_identity is not None
+            else None
+        )
         self.record_prediction = record_prediction
+        self.complete_scoped = complete_scoped
+        self.retire_provider = retire_provider
+        if (record_retirement is None) != (load_retirement is None):
+            raise ValueError("Native retirement persistence requires both writer and loader")
+        self.record_retirement = record_retirement
+        self.load_retirement = load_retirement
         self.sessions = {}
         self.scopes = {}
+        self.retired = {}
+        self.closed_scopes = set()
         self.audit = deque(maxlen=4096)
         self.retrieval_calls = 0
 
     def new_session(self, task: str, seed_state: dict, scope: str | None = None) -> NativeSession:
+        if scope is not None and (not isinstance(scope, str) or not scope.strip() or len(scope) > 128):
+            raise ValueError("Native session scope must be a nonempty bounded identity")
+        if scope and scope in self.closed_scopes:
+            raise RetiredWorldModelScope("Native root scope is retired; an explicit new generation is required")
         if scope and scope in self.scopes:
             return self.sessions[self.scopes[scope]]
         if not isinstance(task, str) or not task.strip() or not isinstance(seed_state, dict):
             raise ValueError("Session requires its root task and JSON initial state")
-        if len(self.sessions) >= self.maximum_sessions:
+        if len(self.sessions) + len(self.retired) >= self.maximum_sessions:
             raise ValueError("Native session capacity reached")
         session = NativeSession(uuid.uuid4().hex, task, deepcopy(seed_state), deepcopy(seed_state), scope)
         structured = seed_state.get("structured") if isinstance(seed_state.get("structured"), dict) else seed_state
@@ -268,6 +306,8 @@ class ParallelWorldModel:
                 maximum_output_tokens=16384,
                 state=base,
             )
+            # The public packer preserves this system message and counts it.
+            request = self.execution_policy.apply(request)
             prepared = PreparedGroundedWorldModelCall(request=request, matches=demos, action=candidate).fit_context(
                 self.capabilities, self.token_counter
             )
@@ -285,11 +325,16 @@ class ParallelWorldModel:
                         raise WorldModelCapacityError(
                             "Required world-model task, state and history exceed declared context capacity"
                         )
+                    request_payload = request.model_dump(mode="json")
+                    request_sha256 = sha256_json(request_payload)
                     started = time.time_ns() // 1_000_000
                     response = None
                     failure = None
                     try:
-                        response = await self.complete(request)
+                        if self.complete_scoped:
+                            response = await self.complete_scoped(session.id, uuid.uuid4().hex, request)
+                        else:
+                            response = await self.complete(request)
                     except BaseException as exc:
                         failure = exc
                         raise
@@ -298,6 +343,7 @@ class ParallelWorldModel:
                             "started_at_ms": started,
                             "finished_at_ms": time.time_ns() // 1_000_000,
                             "snapshot_revision": revision,
+                            "request_sha256": request_sha256,
                             "state_retries": attempt,
                             "protocol_repair": repair,
                         }
@@ -306,7 +352,8 @@ class ParallelWorldModel:
                             "session_id": session.id,
                             "call_id": call.call_id,
                             **interval,
-                            "request": request.model_dump(mode="json"),
+                            "request": request_payload,
+                            "execution_identity": deepcopy(self.execution_identity),
                         }
                         if failure is not None:
                             interval["error_type"] = type(failure).__name__
@@ -337,6 +384,7 @@ class ParallelWorldModel:
                 "reward": None,
                 "metadata": {
                     "protocol": "text-world-model-v3",
+                    "execution_identity": deepcopy(self.execution_identity),
                     "snapshot_revision": revision,
                     "state_retries": attempt,
                     "prediction_attempts": deepcopy(intervals),
@@ -354,6 +402,7 @@ class ParallelWorldModel:
                 "session_id": session.id,
                 "action": {"name": call.name, "arguments": preview(call.arguments)},
                 "snapshot_revision": revision,
+                "execution_identity": deepcopy(self.execution_identity),
                 "demos": [
                     {
                         "source": "real_world_archive",
@@ -401,16 +450,64 @@ class ParallelWorldModel:
         raise AssertionError("Unreachable state retry boundary")
 
     async def end_session(self, session_id):
+        if session_id in self.retired:
+            stored = self.retired[session_id]
+            receipt = await asyncio.to_thread(self.load_retirement, stored[0]) if self.load_retirement else stored[0]
+            if sha256_json(receipt) != stored[1]:
+                raise RuntimeError("Native frozen retirement receipt changed after publication")
+            return deepcopy(receipt)
         session = self.sessions[session_id]
         async with session.lock:
             session.closed = True
-            self.sessions.pop(session_id)
             if session.scope:
-                self.scopes.pop(session.scope, None)
-            tasks = [item[1] for item in session.receipts.values() if not item[1].done()]
+                self.closed_scopes.add(session.scope)
+            closing = session.retirement
+            if closing is None or (closing.done() and (closing.cancelled() or closing.exception() is not None)):
+                session.retirement = asyncio.create_task(self._retire_session(session))
+            closing = session.retirement
+        return deepcopy(await asyncio.shield(closing))
+
+    async def _retire_session(self, session):
+        tasks = [item[1] for item in session.receipts.values() if not item[1].done()]
         for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+            if not task.cancelling():
+                task.cancel()
+        usage = None
+        if self.retire_provider:
+            provider = await self.retire_provider(session.id)
+            if provider.get("session_id") != session.id or provider.get("join_verified") is not True:
+                raise RuntimeError("Native provider retirement did not verify the exact session join")
+            usage = provider.get("usage")
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=10)
+            if pending:
+                raise RuntimeError("Native session operations did not join during retirement")
+            await asyncio.gather(*tasks, return_exceptions=True)
+        receipt = {
+            "ended": session.id,
+            "engine": "experiential",
+            "session_scope_id": session.scope,
+            "session_id": session.id,
+            "revision": session.revision,
+            "state": deepcopy(session.state),
+            "history": deepcopy(list(session.history)),
+            "usage": deepcopy(usage),
+            "join_verified": True,
+        }
+        if self.execution_identity is not None:
+            receipt["execution_identity"] = deepcopy(self.execution_identity)
+        stored = await asyncio.to_thread(self.record_retirement, receipt) if self.record_retirement else receipt
+        # Publication is synchronous on this loop after all owned work has joined.
+        self.retired[session.id] = (stored, sha256_json(receipt))
+        self.sessions.pop(session.id, None)
+        if session.scope:
+            self.scopes.pop(session.scope, None)
+        session.receipts.clear()
+        session.messages = ()
+        session.initial_context = {}
+        session.state = {}
+        session.history = ()
+        return receipt
 
     async def close(self):
         for session_id in list(self.sessions):

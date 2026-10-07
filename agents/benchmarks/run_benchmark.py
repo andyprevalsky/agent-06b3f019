@@ -30,9 +30,10 @@ Auto-debug mode:
 import argparse
 import asyncio
 import contextvars
+import copy
 import csv
-import hashlib
 import fcntl
+import hashlib
 import inspect
 import ipaddress
 import json
@@ -538,8 +539,7 @@ def _apply_benchmark_env_overrides(tasks: List[BenchmarkTask]) -> None:
         value = normalized
     else:
         raise ValueError(
-            "BENCHMARK_APPROVAL_HANDLING_OVERRIDE must be one of "
-            "none/auto_approve/ignore/prompt_user/count_only"
+            "BENCHMARK_APPROVAL_HANDLING_OVERRIDE must be one of none/auto_approve/ignore/prompt_user/count_only"
         )
     for task in tasks:
         task.approval_handling = value
@@ -2496,6 +2496,122 @@ def _wmh_initial_state_evidence(task: BenchmarkTask) -> dict | None:
     }
 
 
+async def _retire_owned_native_world(task: BenchmarkTask, agent_id: str | None = None) -> dict | None:
+    """Join this execution's admitted predictions before freezing its outcome.
+
+    Benchmark-owned seed -> exact native session retirement -> provider join
+                         -> final state/usage receipt -> evaluation/archive
+    Explicitly supplied sessions belong to the caller and are never retired here.
+    """
+    owned = getattr(task, "_wmh_owned_session", None)
+    if not owned or owned["engine"] != "experiential":
+        return None
+    if agent_id and agent_id != owned["root_agent_id"]:
+        error = RuntimeError("Native world retirement root does not match this benchmark execution")
+        task._wmh_retirement_error = _native_world_retirement_error_details(owned, error)
+        raise error
+    receipt = getattr(task, "_wmh_retirement_receipt", None)
+    if receipt is not None:
+        return receipt
+    operation = getattr(task, "_wmh_retirement_operation", None)
+    if operation is None:
+
+        async def retire():
+            receipt = await WMHHttpClient(owned["base_url"]).end_session(owned["model_name"], owned["session_id"])
+            if (
+                receipt.get("engine") != "experiential"
+                or receipt.get("join_verified") is not True
+                or receipt.get("ended") != owned["session_id"]
+                or receipt.get("session_id") != owned["session_id"]
+                or receipt.get("session_scope_id") != owned["root_agent_id"]
+                or type(receipt.get("revision")) is not int
+                or receipt["revision"] < 0
+                or not isinstance(receipt.get("state"), dict)
+                or not isinstance(receipt.get("history"), list)
+                or not isinstance(receipt.get("usage"), dict)
+            ):
+                raise RuntimeError("Native world retirement did not prove the exact owned provider join")
+            task._wmh_retirement_receipt = receipt
+            return receipt
+
+        operation = asyncio.create_task(retire())
+        task._wmh_retirement_operation = operation
+    try:
+        return await asyncio.shield(operation)
+    except Exception as exc:
+        task._wmh_retirement_error = _native_world_retirement_error_details(owned, exc)
+        raise
+
+
+def _native_world_retirement_error_details(owned: dict, error: Exception) -> dict:
+    return {
+        "type": type(error).__name__,
+        "message": str(error),
+        "session_id": owned.get("session_id"),
+        "session_scope_id": owned.get("root_agent_id"),
+        "join_verified": False,
+        "cost_verified": False,
+    }
+
+
+def _native_world_retirement_diagnostics(task: BenchmarkTask, logs: dict | None, error=None) -> dict:
+    """Keep actual retirement evidence even when independent log collection fails."""
+    logs = logs if isinstance(logs, dict) else {}
+    if getattr(task, "_wmh_retirement_receipt", None) is not None:
+        logs["wmh_retirement"] = task._wmh_retirement_receipt
+    if getattr(task, "_wmh_retirement_error", None) is not None:
+        logs["wmh_retirement_error"] = task._wmh_retirement_error
+        logs["benchmark_cost_placeholder"] = {"cost_cents": 0, "settled": False}
+    if error is not None and getattr(task, "_wmh_owned_session", None):
+        logs["benchmark_execution_error"] = {"type": type(error).__name__, "message": str(error)}
+    if getattr(task, "_wmh_agent_admission", None) is not None:
+        logs["wmh_agent_admission"] = task._wmh_agent_admission
+    return logs
+
+
+def _native_world_retirement_failure_reason(task: BenchmarkTask) -> str:
+    error = getattr(task, "_wmh_retirement_error", None)
+    if not error:
+        return ""
+    return f" | Native WMH retirement failed: {error['type']}: {error['message']} (join and cost unverified)"
+
+
+def _recover_owned_native_admission_root(task: BenchmarkTask, agent_id: str) -> str:
+    """Recover only the UUID this execution seeded before its backend POST."""
+    owned = getattr(task, "_wmh_owned_session", None)
+    if agent_id or not owned or owned["engine"] != "experiential":
+        return agent_id
+    root = owned["root_agent_id"]
+    if getattr(task, "_wmh_agent_admission", None) is None:
+        task._wmh_agent_admission = {"root_agent_id": root, "creation_confirmed": False}
+    return root
+
+
+async def _delete_owned_native_admission_root(base_url: str, task: BenchmarkTask, agent_id: str) -> bool:
+    """A missing create response does not prove creation or verified deletion."""
+    admission = getattr(task, "_wmh_agent_admission", None)
+    if admission and admission["root_agent_id"] != agent_id:
+        raise RuntimeError("Native admission cleanup root does not match this benchmark execution")
+    try:
+        await delete_agent(base_url, agent_id)
+    except Exception as exc:
+        if not admission:
+            raise
+        admission["cleanup_observation"] = "unverified"
+        admission["cleanup_error"] = {"type": type(exc).__name__, "message": str(exc)}
+        try:
+            await get_agent(base_url, agent_id)
+        except AgentNotFoundError:
+            admission["cleanup_observation"] = "not_found"
+            return False
+        except Exception as observed:
+            admission["observation_error"] = {"type": type(observed).__name__, "message": str(observed)}
+        raise
+    if admission:
+        admission["cleanup_observation"] = "deleted"
+    return True
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -2570,6 +2686,13 @@ async def create_agent(
         )
         body["agent_id"] = expected_agent_id
         task._wmh_seeded_session_id = session_id
+        task._wmh_owned_session = {
+            "base_url": base,
+            "model_name": model_name,
+            "session_id": session_id,
+            "root_agent_id": expected_agent_id,
+            "engine": os.environ.get("WMH_ENGINE", "legacy"),
+        }
         print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
 
     # A task may narrow the user context its agent sees. Used when a real user's
@@ -2604,6 +2727,8 @@ async def create_agent(
         agent_id = data["agent_id"]
         if expected_agent_id is not None and agent_id != expected_agent_id:
             raise RuntimeError(f"{task.name}: backend returned agent_id {agent_id}, expected {expected_agent_id}")
+        if expected_agent_id is not None:
+            task._wmh_agent_admission = {"root_agent_id": agent_id, "creation_confirmed": True}
         if source_override == "SMS":
             if not _is_local_base_url(base_url):
                 raise RuntimeError(
@@ -10678,9 +10803,7 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     # cuts without a marker: a 17k grep result lost the one line its judge had
     # to ground on (grep-agent-trajectories-code-tool-status).
     for text_cap in (None, SINGLE_TURN_TEXT_CAP):
-        evidence = _apply_compact_benchmark_state(
-            build_single_turn_evidence(data, text_cap=text_cap), compact_state
-        )
+        evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data, text_cap=text_cap), compact_state)
         evidence = _append_structured_output_evidence(evidence, data)
         if not single_turn_evidence_exceeds_budget(evidence):
             return evidence
@@ -13050,6 +13173,15 @@ async def run_single_task(
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    # Repeated catalog selections share a template. Keep native lifecycle
+    # ownership on this execution while preserving caller configuration/provenance.
+    task = copy.copy(task)
+    task._wmh_seeded_session_id = None
+    task._wmh_owned_session = None
+    task._wmh_retirement_receipt = None
+    task._wmh_retirement_operation = None
+    task._wmh_retirement_error = None
+    task._wmh_agent_admission = None
     # The SMS supervisor is not a Temporal agent — it is an in-backend tool loop
     # woken by an inbound text. It gets its own driver; everything around this
     # call (selection, concurrency, history, run records) is unchanged.
@@ -13070,17 +13202,23 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     with _benchmark_run_user_scope(_run_user_id_override_for_task(task, base_url)):
-        return await _run_single_task_as_run_user(
-            base_url,
-            task,
-            keep_failed_agents,
-            checkpoint_source_index,
-            checkpoint_source_boundary,
-            checkpoint_source_out,
-            checkpoint_tree_out,
-            on_agent_created,
-            on_task_evaluated,
-        )
+        try:
+            return await _run_single_task_as_run_user(
+                base_url,
+                task,
+                keep_failed_agents,
+                checkpoint_source_index,
+                checkpoint_source_boundary,
+                checkpoint_source_out,
+                checkpoint_tree_out,
+                on_agent_created,
+                on_task_evaluated,
+            )
+        finally:
+            # An already reported failed join must not replace its original
+            # execution error or abandon the independently owned cleanup path.
+            if getattr(task, "_wmh_retirement_error", None) is None:
+                await _retire_owned_native_world(task)
 
 
 def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Optional[str]:
@@ -13455,12 +13593,15 @@ async def _run_single_task_as_run_user(
             try:
                 if await pause_agent(base_url, agent_id):
                     print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+                    await _retire_owned_native_world(task, agent_id)
                     data = await _refresh_agent_after_pause_for_browser_terminal(base_url, agent_id, data)
                     # Wait for Session Cancelled (task_complete+task_id) before
                     # freezing the transcript into the durable hub archive.
                     data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
+
+        await _retire_owned_native_world(task, agent_id)
 
         # Get final agent data
         agent = data.get("agent", {})
@@ -13782,6 +13923,7 @@ async def _run_single_task_as_run_user(
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        logs = _native_world_retirement_diagnostics(task, logs)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
         # Keep hydrated Claude Code transcripts in the run JSON so durable FE
@@ -13928,11 +14070,16 @@ async def _run_single_task_as_run_user(
 
         return result
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as e:
         duration = time.time() - start
         interrupt_cleanup_started = _begin_interrupt_cleanup() if cloud_batch_cleanup.contract() is None else False
         cancelled_agent_deleted = False
+        agent_id = _recover_owned_native_admission_root(task, agent_id)
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
+        try:
+            await _retire_owned_native_world(task, agent_id)
+        except Exception:
+            pass  # Unproven join is retained below; independent cleanup still owns its resources.
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -13978,35 +14125,40 @@ async def _run_single_task_as_run_user(
             if interrupt_cleanup_started:
                 if not _should_delete_cancelled_agent(keep_failed_agents):
                     raise RuntimeError("owner-requested benchmark teardown cannot retain the cancelled agent")
-                await delete_agent(base_url, agent_id)
-                cancelled_agent_deleted = True
-                print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                cancelled_agent_deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                print(
+                    f"    🗑  {'Deleted cancelled agent' if cancelled_agent_deleted else 'Observed absent root'} {agent_id[:12]}"
+                )
             else:
                 try:
                     if _should_delete_cancelled_agent(keep_failed_agents):
-                        await delete_agent(base_url, agent_id)
-                        cancelled_agent_deleted = True
-                        print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                        cancelled_agent_deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                        print(
+                            f"    🗑  {'Deleted cancelled agent' if cancelled_agent_deleted else 'Observed absent root'} {agent_id[:12]}"
+                        )
                     else:
                         print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
                 except Exception:
                     print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
         interrupt_cleanup_ready = interrupt_cleanup_started
         print(
-            f"    Interrupt cleanup evidence: agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
+            f"    Interrupt cleanup evidence: root_target_known={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
+        logs = _native_world_retirement_diagnostics(task, logs, e)
+        retirement_failed = getattr(task, "_wmh_retirement_error", None) is not None
         return TaskResult(
             name=task.name,
             passed=False,
             agent_id=agent_id,
-            status=status,
-            benchmark_status="CANCELLED",
+            status="ERROR" if retirement_failed else status,
+            benchmark_status="ERROR" if retirement_failed else "CANCELLED",
             progress_score=progress_score,
             duration_seconds=round(duration, 1),
             cost_cents=0,
             message_count=len(messages),
             failure_reason=(
                 "Benchmark interrupted; prod logs were collected before shutdown"
+                + _native_world_retirement_failure_reason(task)
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
             ),
             logs=logs,
@@ -14018,6 +14170,11 @@ async def _run_single_task_as_run_user(
     except Exception as e:
         duration = time.time() - start
         print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
+        agent_id = _recover_owned_native_admission_root(task, agent_id)
+        try:
+            await _retire_owned_native_world(task, agent_id)
+        except Exception:
+            pass  # Evidence/archive/agent cleanup must continue after an unproven native join.
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -14037,6 +14194,7 @@ async def _run_single_task_as_run_user(
                 benchmark_status="ERROR",
                 failure_reason=str(e),
             )
+        logs = _native_world_retirement_diagnostics(task, logs, e)
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -14049,6 +14207,7 @@ async def _run_single_task_as_run_user(
             message_count=0,
             failure_reason=(
                 f"{e}"
+                + _native_world_retirement_failure_reason(task)
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
@@ -14068,8 +14227,8 @@ async def _run_single_task_as_run_user(
             await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
                 if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
-                    await delete_agent(base_url, agent_id)
-                    print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
+                    deleted = await _delete_owned_native_admission_root(base_url, task, agent_id)
+                    print(f"    🗑  {'Deleted orphaned agent' if deleted else 'Observed absent root'} {agent_id[:12]}")
                 else:
                     print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
             except Exception:

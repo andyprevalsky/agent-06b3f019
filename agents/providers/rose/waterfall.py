@@ -19,6 +19,7 @@ OpenRouter today, so a single transport path is sufficient.
 from __future__ import annotations
 
 import asyncio
+import ssl
 from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
 
 import httpx
@@ -395,5 +396,5 @@ async def _stream_one_step(
                 idle_timeout_s=idle_timeout_s,
             ):
                 yield chunk
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, ssl.SSLError) as exc:
         raise RoseError(f"OpenRouter {model} connect/read error: {exc}") from exc

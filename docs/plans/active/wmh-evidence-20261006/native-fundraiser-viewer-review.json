@@ -1,0 +1,535 @@
+{
+  "artifacts": {
+    "a16z-bottom.ax.txt": {
+      "bytes": 12548,
+      "sha256": "0333bc4b21e87f1b4d63855ef6de9791c4770dd7d773231e5dc8f7a21be4440d"
+    },
+    "a16z-bottom.png": {
+      "bytes": 142451,
+      "sha256": "5e3aa0b00d5895fb208644546d263343a4d5635155fcd1c65dc4f05bd7addd72"
+    },
+    "a16z-top.ax.txt": {
+      "bytes": 11787,
+      "sha256": "e5beaa14110f0683ae5d7a6f61f0718b3d6d6da6389f7b1d903ef3c8b80776ca"
+    },
+    "a16z-top.png": {
+      "bytes": 182660,
+      "sha256": "5d29cda58c5956dca6c5eb10750a99ee03f9606432fce094f8842eaafc223b9a"
+    },
+    "amplify-bottom.ax.txt": {
+      "bytes": 12922,
+      "sha256": "baa0776ae9a089954cf2aa87aa42053a478a8fad8a65331f0f43fcde51383bc6"
+    },
+    "amplify-bottom.png": {
+      "bytes": 155795,
+      "sha256": "0557a5b99707707b1a2d481adc9e2c41ef612304bbaa17db45e53dbdd2a78925"
+    },
+    "amplify-terminal.ax.txt": {
+      "bytes": 12410,
+      "sha256": "4d8be9087050c8af6b054e314a4237c37d6937be2786487f5f099bfe466ee55c"
+    },
+    "amplify-terminal.png": {
+      "bytes": 174536,
+      "sha256": "0df492db77673107ffbbf97834aa72977c0b6928d82b4259bf6355df2b497dbc"
+    },
+    "child-first.ax.txt": {
+      "bytes": 8825,
+      "sha256": "c31be14e7cec3b5ae937ef220786e15f910691f8a9731efb716e7cdeab22b1d6"
+    },
+    "child-first.png": {
+      "bytes": 182649,
+      "sha256": "e3bae0817d6c86ff2cc66a85c8bf3148bc9ae13ede1fbb70c302f0fb3db3720c"
+    },
+    "conviction-bottom.ax.txt": {
+      "bytes": 10287,
+      "sha256": "0404cb02cfb2280df6ef207a3f859b7b84c8a2a4db034276b9b72a78804a1eb8"
+    },
+    "conviction-bottom.png": {
+      "bytes": 163410,
+      "sha256": "0a287c97372a9bf4fbd76357fa0ddc4f6d0c88b7744d93835bd14715e59bb425"
+    },
+    "conviction-top.ax.txt": {
+      "bytes": 9381,
+      "sha256": "7c7f2b571d1f6ace293a41ec4f7906e0ebd423ceef2ad0a4088b4b401b59d825"
+    },
+    "conviction-top.png": {
+      "bytes": 182786,
+      "sha256": "7fe50714b5a8efbae3f931dfdedc8632bbe60b7d3d310f7517b4e80ce19c24f8"
+    },
+    "khosla-bottom.ax.txt": {
+      "bytes": 10545,
+      "sha256": "8181d1e592a79a217b3d17c74334486782f22ebc932d6d112dc9a696a71b45d3"
+    },
+    "khosla-bottom.png": {
+      "bytes": 135165,
+      "sha256": "f61d448863f27416e47e2f31fe5e964c17dcb9a8d6437be633fcd16f1f546d82"
+    },
+    "khosla-top.ax.txt": {
+      "bytes": 10133,
+      "sha256": "01645bcddbb614247a830f22e2373b17a42d71af2d4fbb47a9e6fca4384d7af9"
+    },
+    "khosla-top.png": {
+      "bytes": 182819,
+      "sha256": "9e5f63a8f0469a8557b025c268ae2b228737354c859e8625cdd6dd4951f5d688"
+    },
+    "lux-bottom.ax.txt": {
+      "bytes": 11845,
+      "sha256": "45d381cf15f90c97bd9b13c4e6dbbc73e8df2e79bc04295091cea2bbb7d02291"
+    },
+    "lux-bottom.png": {
+      "bytes": 161679,
+      "sha256": "e32258ad0cdac5a1d8fb92f986a1f829d2ee220070f572138606370070324046"
+    },
+    "lux-top.ax.txt": {
+      "bytes": 10476,
+      "sha256": "f0617316b73a296e966953e7a4b8766b003667813dc3d7797afb74ffd9c5b5cd"
+    },
+    "lux-top.png": {
+      "bytes": 182583,
+      "sha256": "858c79defcd653ab4411cd4498ba4f5851a1e620db2d47ed0434ba41073fc67e"
+    },
+    "madrona-bottom.ax.txt": {
+      "bytes": 10058,
+      "sha256": "7decef71e2eb6ade8671cbef164a025b387f6074f49653e1f93f4d199a587153"
+    },
+    "madrona-bottom.png": {
+      "bytes": 150348,
+      "sha256": "45978806ad7426dacb268a73b76700d3f67e0692bcde80cc1f1d829e5d7f69e4"
+    },
+    "madrona-top.ax.txt": {
+      "bytes": 11971,
+      "sha256": "2a8a4e96987e6b94ae6f9891f9917c2a5cbcb1230d382a0d31099b4250b9afe9"
+    },
+    "madrona-top.png": {
+      "bytes": 165000,
+      "sha256": "316c4a32670334d9f4f57e2a7cebd39f861da6d4d8e930a71bb651f169f4099e"
+    },
+    "narrative-bottom.ax.txt": {
+      "bytes": 10934,
+      "sha256": "1706e58a48e3a822196b8b32da0b16f6f2f9a78e78b2f33d37369b413aa6398a"
+    },
+    "narrative-bottom.png": {
+      "bytes": 146130,
+      "sha256": "1bd90bc3a95d36da8c135298d0da48dc3e1013c07999a65c9473bc16a1785d21"
+    },
+    "narrative-code-row.ax.txt": {
+      "bytes": 11453,
+      "sha256": "c300397487951d6b11fbe34fbf68e8dc8072b3f658f3fe1f778ec06c512c12d4"
+    },
+    "narrative-code-row.png": {
+      "bytes": 175582,
+      "sha256": "d6380605ce0cc049c91d566068a78dc7b3752e0d480e68c64642d951ea6e2a9e"
+    },
+    "narrative-top.ax.txt": {
+      "bytes": 12388,
+      "sha256": "21a1a17d2fe872a90d06da9364e9be600335e626c3cc15d44d956facb99ee416"
+    },
+    "narrative-top.png": {
+      "bytes": 174406,
+      "sha256": "f5944d1258685e690ee006aeaaaa26d26f919fedb455c80a3ef046d4619cd422"
+    },
+    "radical-bottom.ax.txt": {
+      "bytes": 9893,
+      "sha256": "2322d4f30732729c80afd553edd6719924a6d4fe236d2539050df8f1f96ce58a"
+    },
+    "radical-bottom.png": {
+      "bytes": 163419,
+      "sha256": "b39ac0eebf8fcd10d89a4d9395a0a181239e66adc48dbdbcf193f58814994362"
+    },
+    "radical-top.ax.txt": {
+      "bytes": 12766,
+      "sha256": "708f3dbaa39ec02188ff4166f5d41616e0c6488b71d33a3ff4057610f8fec4ab"
+    },
+    "radical-top.png": {
+      "bytes": 175572,
+      "sha256": "7e6ff8f6a3c995f97b514e7010938425785e61627ea25863fff52047c65f065a"
+    },
+    "root-brex-detail.ax.txt": {
+      "bytes": 2951,
+      "sha256": "c5f01af694de4004a52faa4356003fac9d51b38e554ea77aaaef8bccdd7afc34"
+    },
+    "root-brex-detail.png": {
+      "bytes": 166180,
+      "sha256": "c2061295faa64505eaf34e0156e2aa9ff9bd03dd5a32631f10022d1eed8bfcd9"
+    },
+    "root-browser-detail.ax.txt": {
+      "bytes": 2530,
+      "sha256": "0041bd9f4caa509adb0a1250cf5888cfe2e59f59dd0e07212f82c63ab361d527"
+    },
+    "root-browser-detail.png": {
+      "bytes": 160492,
+      "sha256": "e2aafc1c1dfe7aaf244f32843f66a759cdd88de2707e1582f0e45f24ba5b6ad9"
+    },
+    "root-final.ax.txt": {
+      "bytes": 14032,
+      "sha256": "b56fd23ee3a8361509a6890eeab28397496769190f98981c010d195d2aaa82a6"
+    },
+    "root-final.png": {
+      "bytes": 138589,
+      "sha256": "56b085abcc27bc33f03da9817e22fd070bf8bc590698aabe14508846dcbc83dd"
+    },
+    "root-initial.ax.txt": {
+      "bytes": 12945,
+      "sha256": "10a883132fb7387cb03823b7c8a640b13a4af5b180397cfbeb1430a26d50fdf5"
+    },
+    "root-initial.png": {
+      "bytes": 167676,
+      "sha256": "3c793c95a4a7383ba1320631a1a9d134de4c03cc36a9ba54a1adf86fae2ef2b7"
+    },
+    "root-terminal-rows.ax.txt": {
+      "bytes": 1930,
+      "sha256": "08cd479df8079c43e54892ff2b2534d9d54379cc09b5141b707410db6fe51383"
+    },
+    "root-terminal-rows.png": {
+      "bytes": 143751,
+      "sha256": "bc742af0704c1a4cf809693020fe692e78ff7fbc2590d59ffd6dffbb1e0460ee"
+    }
+  },
+  "captured_at_utc": "2026-10-07T01:55:30.390048+00:00",
+  "children": [
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "adebbce9-886f-4b59-89fc-2ae73966eb1c",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Amplify Partners",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "49db3ae9-fb2b-4dd1-89a5-d562bfcc1cb3",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "90457f53-eb5f-446f-af1d-68b5ad58e655",
+          "task_id": null,
+          "title": "Browser agent",
+          "tool_status": "IN_PROGRESS"
+        }
+      ],
+      "message_count": 26,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "d5757259-3319-41b0-9973-ae6ac428769c",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Andreessen Horowitz",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "276cf9da-25c4-44ea-85ee-00fda556c205",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "08e69ce0-06dd-4677-8fea-86b23f37ffc3",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "8e85daa9-b845-47bd-9b63-27a233659efa",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "a155e1e8-fa1b-453e-b0bc-ae2471ec6ec4",
+          "task_id": null,
+          "title": "Browser agent",
+          "tool_status": "IN_PROGRESS"
+        }
+      ],
+      "message_count": 88,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "abe5959f-1f76-41cb-8b54-c85b01fcf4bb",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Khosla Ventures",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "6dd5b9a7-dac2-4f78-9504-37ef8d23eb90",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        }
+      ],
+      "message_count": 21,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "90afb9da-1d05-4cab-8435-c62d7f4c7fa1",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Conviction",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "b5dfc365-e234-4e42-aee9-8645602ede5e",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "0db6ad9f-41ea-499c-ab30-9df37bfd765a",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        }
+      ],
+      "message_count": 27,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "47f0cc4f-29cb-4f7a-9156-303be628306a",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Radical Ventures",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "44307730-6fcd-4156-9ccd-f2de0bf6dd5d",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        },
+        {
+          "simulated": true,
+          "taskId": "4df52ede-5fe7-48b5-bb9d-a2869942402f",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "ERROR"
+        },
+        {
+          "simulated": true,
+          "taskId": "dc935998-5ddb-4b3f-b2da-132d73c476bc",
+          "task_id": null,
+          "title": "Browser agent",
+          "tool_status": "IN_PROGRESS"
+        }
+      ],
+      "message_count": 22,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "666e8df9-e3e6-476b-aebd-1bfd55171471",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Lux Capital",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "5ccbf71e-e434-4bd5-9a22-f45ed51d3cc8",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "ERROR"
+        },
+        {
+          "simulated": true,
+          "taskId": "9da5e4db-c7a0-46be-81bb-840daf1df13c",
+          "task_id": null,
+          "title": "Browser agent",
+          "tool_status": "IN_PROGRESS"
+        }
+      ],
+      "message_count": 26,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "a298cc7d-f2b0-4847-aaf6-ca4d11a3b246",
+      "archive_status": "PAUSED",
+      "code_events": [],
+      "investor_or_component": "Madrona",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "a34162a0-84d4-44da-a32b-60e3735d7b24",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "ERROR"
+        }
+      ],
+      "message_count": 18,
+      "structured_output": null
+    },
+    {
+      "actual_ui_transcript_opened": true,
+      "agent_id": "3e0ed9c2-d1bf-40da-9626-58a9e298db6b",
+      "archive_status": "COMPLETED",
+      "code_events": [
+        {
+          "simulated": true,
+          "title": "Code agent",
+          "tool_status": "IN_PROGRESS"
+        },
+        {
+          "simulated": true,
+          "title": "✓ Task Completed",
+          "tool_status": "FINISHED"
+        }
+      ],
+      "investor_or_component": "Narrative",
+      "latest_simulated_browser_events": [
+        {
+          "simulated": true,
+          "taskId": "ca6a3a41-32a6-460c-b5f7-d3a1c83b1be1",
+          "task_id": null,
+          "title": "Browser automation complete",
+          "tool_status": "FINISHED"
+        }
+      ],
+      "message_count": 18,
+      "structured_output": {
+        "caveats": [
+          "The Google Doc is a working draft, not an approved investor presentation or independent evidence of its operational claims.",
+          "Documents not shown in the reviewed folder could exist elsewhere; the folder review was not an exhaustive search of company records.",
+          "LinkedIn details were supported by public indexing, not independently confirmed through full direct page access, and may be stale.",
+          "The Brex figures reflect an available September 28, 2026 account-data snapshot, not an independently refreshed October 7 statement or all company accounts.",
+          "Approved offering terms, signed commitments, and investor proceeds were not verified in the reviewed materials; the $5 million figure is a proposed raise."
+        ],
+        "diligence_index": [
+          {
+            "document_or_question": "Formation and governance records: confirm legal name, jurisdiction, signing authority, and Tamara Chayo’s and Andy Prevalsky’s titles.",
+            "priority": "P0",
+            "status_and_source": "Not established by the working outline or reviewed folder; the outline’s titles conflict with Andy’s publicly indexed profile. https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit; https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26; https://www.linkedin.com/in/andyprevalsky"
+          },
+          {
+            "document_or_question": "Current cap table, stock ledger, and prior financing instruments.",
+            "priority": "P0",
+            "status_and_source": "Not shown in the reviewed folder. https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26"
+          },
+          {
+            "document_or_question": "Counsel-reviewed financing instrument, corporate approvals, valuation, and terms for the proposed $5 million raise.",
+            "priority": "P0",
+            "status_and_source": "Approved terms and signed instruments were not established by the working outline or reviewed folder. https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit; https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26"
+          },
+          {
+            "document_or_question": "Product documentation and independent demonstrations or evaluations of model and agent capabilities.",
+            "priority": "P1",
+            "status_and_source": "Website displays and the working outline do not validate performance. https://www.roselabs.ai; https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit"
+          },
+          {
+            "document_or_question": "Customer contracts, invoices, revenue records, deployment and retention metrics, and approved forecasts.",
+            "priority": "P1",
+            "status_and_source": "Not substantiated in the working outline; financials and projections were not shown in the reviewed folder. https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit; https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26"
+          },
+          {
+            "document_or_question": "Final investor deck and data-room index; dated financial statements and reconciliation of any claimed commitments or proceeds.",
+            "priority": "P1",
+            "status_and_source": "Deck and index were not shown in the reviewed folder. Available Brex views showed no incoming or pending transfers, subject to the snapshot limitation. https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26; https://dashboard.brex.com/"
+          }
+        ],
+        "evidence_table": [
+          {
+            "claim": "Proposed AI-agent/model direction",
+            "evidence_or_limitation": "Described in an authenticated working investor outline; the draft does not substantiate performance, customers, deployments, or revenue.",
+            "source": "https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit; linked in gmail:rose-investor-materials-20260919"
+          },
+          {
+            "claim": "Public product positioning",
+            "evidence_or_limitation": "The website displays rose-labs/rose-1-ultra, Safe Writes, a download link, and a sample goal to raise $1 million. Page content does not verify functionality or fundraising.",
+            "source": "https://www.roselabs.ai"
+          },
+          {
+            "claim": "Public company description",
+            "evidence_or_limitation": "The publicly indexed listing describes Rose Labs as ‘Creating Artificial Life’ and lists a 2025 founding year; it is not a corporate record.",
+            "source": "https://www.linkedin.com/company/roselabs"
+          },
+          {
+            "claim": "Leadership titles unresolved",
+            "evidence_or_limitation": "The working outline labels Tamara Chayo CEO and Andy Prevalsky CTO; Andy’s publicly indexed profile lists Founder/CEO. Neither establishes approved investor-facing titles.",
+            "source": "https://docs.google.com/document/d/1RoseLabsInvestorOutline26/edit; https://www.linkedin.com/in/andyprevalsky"
+          },
+          {
+            "claim": "Fundraising documentation unverified",
+            "evidence_or_limitation": "The reviewed folder contained the working outline but did not show a finalized deck, financials or projections, cap table, incorporation documents, financing instruments, data-room index, or signed investor commitments.",
+            "source": "https://drive.google.com/drive/u/0/folders/1RoseLabsInvestorMaterials26"
+          },
+          {
+            "claim": "Reviewed account displayed $0",
+            "evidence_or_limitation": "The available account-data snapshot dated September 28, 2026 showed $0.00 available and current in the primary USD account. Reviewed activity showed no incoming deposit or wire, and no pending transfers were visible. No newer balance-refresh timestamp was established.",
+            "source": "Authenticated Rose Labs account views at https://dashboard.brex.com/"
+          }
+        ],
+        "investor_narrative": "Rose Labs describes an AI-agent/model direction in a working investor outline. Its public website displays the rose-labs/rose-1-ultra identifier, Safe Writes, a download link, and an example fundraising goal. Those displays do not verify product capabilities or traction. The outline labels Tamara Chayo CEO and Andy Prevalsky CTO, while Andy’s publicly indexed LinkedIn profile lists him as Founder/CEO; titles need confirmation before publication. The proposed $5 million raise is a target, not a verified commitment or approved offering. The reviewed folder did not show finalized fundraising or legal materials, and the outline does not substantiate revenue, customers, deployments, performance, or forecasts. An available September 28, 2026 Brex snapshot showed $0 available and current in the reviewed primary USD account, with no incoming or pending transfers visible in the reviewed views. It is not a current statement or a picture of all company finances."
+      }
+    }
+  ],
+  "durable_fe_url": "https://www.roselabs.ai/?agent-id=29064cc2-3266-4605-8e63-eda79e48a0cc#benchmark-share=f5e4f83d-386a-4af1-84f5-7745216b6f27.1793929641.0d6c34bfb7b11db196f3b67ff04e47fbd010dba8edecfd8ccfcc9969a90bd393",
+  "last_llm_https": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/29064cc2-3266-4605-8e63-eda79e48a0cc/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261007%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261007T014726Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=a3856e22dd50bc32bbb3ae21088355afe77c0d9fb0f1be4fd14ecb16ef2fe4cc",
+  "observed_root_goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
+  "observed_root_ui": [
+    "Read-only benchmark recording",
+    "Sub Agents completed successfully — 1 agent",
+    "Delegating Sub Agents — 7 agents",
+    "seven paused child cards",
+    "Rose has stopped, send a new message to continue"
+  ],
+  "recording_boundary": {
+    "actual_claude_code_sessions_uploaded": 0,
+    "allocated_browser_sessions_before": [],
+    "allocated_browser_sessions_final": [],
+    "code_row_render": "Claude Code Completed Successfully row is visually clean in narrative-code-row.png; no duplicate error/completion text observed in that row",
+    "real_browser_recording_playback_performed": false,
+    "reason": "Whole-boundary WMH simulation: completed/failed browser result text is replayable; no actual browser session or real film allocated. Incomplete simulated requests remain visible at cutoff.",
+    "simulated_claude_code_completion_visible": true
+  },
+  "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+  "root_browser_details_opened": [
+    "document repository review completed, no records changed",
+    "Brex baseline result: $0.00 available/current, $0.00 verified proceeds, September 28 snapshot limitation"
+  ],
+  "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+  "source_head": "b0c4d185a03318222dba5e4c60f654a69fc12cfb",
+  "source_sha256": {
+    ".context/native-fundraiser-published/29064cc2-3266-4605-8e63-eda79e48a0cc/manifest.json": "d4c922d7667981a8dc6a754951cd0f223224b0892cc3264cdccc3fdc78c68376",
+    ".llm-dumps/29064cc2-3266-4605-8e63-eda79e48a0cc/1791336263155-3d47203607d6-dag_param_populator.json": "517abef2cbe081c85be5e35ca76c7751bc783ea0840120452287c582127bda40",
+    "agents/benchmarks/cloud_batch_cleanup.py": "9bd4f4801fd396bbf232da6df297948da7c2b01a1fb3bd9fab936fb25e260176",
+    "agents/benchmarks/results.py": "918c726adcb24c6a5e2a726c31129a32cbba6aef6b5583884017f8b6c423120c",
+    "agents/benchmarks/run_benchmark.py": "8746881bf60fe8414baaca6734fa525478204d5b15612fbad369edc0f88ec246",
+    "agents/benchmarks/runs/20261007_014630_f5e4f83d-386a-4af1-84f5-7745216b6f27_raise-5m-rose-labs-brex.json": "c2ca9e988eaa7898dd3888e63cb29912b8aa9e9266b4255044b1badc1c8ba4dc",
+    "scripts/publish_evidence_links.py": "15d163d164e3b2e5d7f461ecf39521548d7489499cc63b0cb1cb8da49d18d90d"
+  },
+  "status_diagnosis": {
+    "benchmark_status": "FAILED",
+    "explanation": "TaskResult.status and stop_metadata snapshot the agent before final cleanup; benchmark_status separately stores FAILED. Final archive refresh stores PAUSED tree lifecycle after stop; cleanup verifies deleted/sealed tree without rewriting the original evaluator verdict.",
+    "failure_reason": "Timeout after 1801s (dynamic cap=1800s) | Investigate: python agents/benchmarks/agent_latency.py 29064cc2-3266-4605-8e63-eda79e48a0cc | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+    "final_tree_root_status": "PAUSED",
+    "root_deleted": true,
+    "snapshot_agent_status": "ACTIVE",
+    "snapshot_stop_metadata_status": "ACTIVE",
+    "source_citations": [
+      "agents/benchmarks/results.py:83",
+      "agents/benchmarks/run_benchmark.py:13779",
+      "agents/benchmarks/run_benchmark.py:13802",
+      "agents/benchmarks/run_benchmark.py:6123",
+      "agents/benchmarks/cloud_batch_cleanup.py:73"
+    ],
+    "tree_sealed": true,
+    "unsealed_final": []
+  },
+  "ui_limits": [
+    "Paused children retain pending Exploring / Browser agent / Checking rows at cutoff. Root and all seven show stopped footer.",
+    "a16z retains Call in progress followed by activity Heartbeat timeout; this transcript row is not proof of a current call.",
+    "Archive root chips show $0.00 per child; use run/provider accounting, not chip labels, for cost.",
+    "No final completed investor structured result for paused children; no verified fundraising success inferred."
+  ],
+  "viewer": "actual Google Chrome via documented node_repl / @oai/sky Computer Use; new Rose tab, existing tabs preserved"
+}

@@ -37,7 +37,10 @@ class RunningGate:
 
 
 GATES = (
-    Gate("cloudbench-controller-linux", ("python3", "scripts/tests/cloudbench-controller-linux.test.py")),
+    Gate(
+        "cloudbench-controller-linux",
+        ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
+    ),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh")),
     Gate(
@@ -54,8 +57,14 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
-    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
-    Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
+    Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
+    Gate(
+        "benchmark-live-results",
+        ("python3", "scripts/tests/benchmark-live-results.test.py"),
+    ),
+    Gate(
+        "cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")
+    ),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -121,8 +130,13 @@ GATES = (
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"),
     ),
-    Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
-    Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
+    Gate(
+        "wait-for-code-review",
+        ("python3", "scripts/tests/wait-for-code-review.test.py"),
+    ),
+    Gate(
+        "deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")
+    ),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
     Gate(
         "deploy-structural-runner",
@@ -189,7 +203,10 @@ def _terminate(running: Sequence[RunningGate], signum: int) -> None:
 def _stop_running(running: Sequence[RunningGate]) -> None:
     _terminate(running, signal.SIGTERM)
     deadline = time.monotonic() + SIGNAL_GRACE_SECONDS
-    while any(item.process.poll() is None for item in running) and time.monotonic() < deadline:
+    while (
+        any(item.process.poll() is None for item in running)
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.02)
     _terminate(running, signal.SIGKILL)
     for item in running:
@@ -211,7 +228,10 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
         received_signal = received_signal or signum
         _terminate(running, signum)
 
-    previous_handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)}
+    previous_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    }
     for signum in previous_handlers:
         signal.signal(signum, forward)
 
@@ -240,7 +260,9 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
                         )
                     )
 
-                completed = [item for item in running if item.process.poll() is not None]
+                completed = [
+                    item for item in running if item.process.poll() is not None
+                ]
                 if not completed:
                     time.sleep(0.02)
                     continue
@@ -255,7 +277,9 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
             if not received_signal:
                 for gate in gates:
                     exit_code, duration, rendered = results[gate.name]
-                    print(f"\n== {gate.name}: exit={exit_code} duration={duration:.2f}s ==")
+                    print(
+                        f"\n== {gate.name}: exit={exit_code} duration={duration:.2f}s =="
+                    )
                     if rendered:
                         print(rendered, end="" if rendered.endswith("\n") else "\n")
     finally:

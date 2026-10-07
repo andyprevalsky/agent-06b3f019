@@ -1,0 +1,309 @@
+{
+  "acceptance_remains_failed_open": true,
+  "archive": {
+    "path": "agents/benchmarks/runs/20261007_014630_f5e4f83d-386a-4af1-84f5-7745216b6f27_raise-5m-rose-labs-brex.json",
+    "result": {
+      "audit_revision": 47,
+      "cleanup_errors": [],
+      "failure_reason": "Timeout after 1801s (dynamic cap=1800s) | Investigate: python agents/benchmarks/agent_latency.py 29064cc2-3266-4605-8e63-eda79e48a0cc | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "passed": false,
+      "root_deleted": true,
+      "status": "ACTIVE",
+      "tree_agent_count": 9,
+      "unsealed_agents": []
+    },
+    "sha256": "c2ca9e988eaa7898dd3888e63cb29912b8aa9e9266b4255044b1badc1c8ba4dc",
+    "written_at_utc": "2026-10-07T01:46:30.711855+00:00"
+  },
+  "bounded_diagnosis": "Exact root pause and archive seal/delete occurred while native operations stayed admitted; three later commits and new rebase predictions are observed. No native session DELETE exists in the owning run access log or benchmark pause/finalize path. Source shielding explains continued operation but wire-level cancellation delivery was not separately captured. This is lifecycle integration, separate from semantic no-contact outcomes.",
+  "full_model_loads": 0,
+  "late_bound_commits": [
+    {
+      "agent_id": "666e8df9-e3e6-476b-aebd-1bfd55171471",
+      "call_id": "call_Bsuu4LJGMhauS2UYs3vtAFFD",
+      "committed_revision": 48,
+      "prediction_intervals": [
+        {
+          "finished_at_ms": 1791337597443,
+          "protocol_repair": 0,
+          "snapshot_revision": 46,
+          "started_at_ms": 1791337533107,
+          "state_retries": 0
+        },
+        {
+          "finished_at_ms": 1791337641405,
+          "protocol_repair": 0,
+          "snapshot_revision": 47,
+          "started_at_ms": 1791337597779,
+          "state_retries": 1
+        }
+      ],
+      "receipts": [
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/c07f65c52638439c88d1b18fb669f694.json",
+          "sha256": "49d3c1881ccd918c9c07704140bd17696af9bcb619b94af34c6ec812ae924d34"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/b90be3313b2248398737b8e1425d2c09.json",
+          "sha256": "fd7fa104eee3af93ee81b92fd831502b8f7111b6be321b47ac710aab162897e7"
+        }
+      ],
+      "state_retries": 1,
+      "tool": "rose.browser.spawn_browser_agent"
+    },
+    {
+      "agent_id": "666e8df9-e3e6-476b-aebd-1bfd55171471",
+      "call_id": "call_oVxbjYKYhdbeiilTv4IJLYuV",
+      "committed_revision": 49,
+      "prediction_intervals": [
+        {
+          "finished_at_ms": 1791337599056,
+          "protocol_repair": 0,
+          "snapshot_revision": 46,
+          "started_at_ms": 1791337533078,
+          "state_retries": 0
+        },
+        {
+          "finished_at_ms": 1791337643297,
+          "protocol_repair": 0,
+          "snapshot_revision": 47,
+          "started_at_ms": 1791337599261,
+          "state_retries": 1
+        },
+        {
+          "finished_at_ms": 1791337684990,
+          "protocol_repair": 0,
+          "snapshot_revision": 48,
+          "started_at_ms": 1791337643638,
+          "state_retries": 2
+        }
+      ],
+      "receipts": [
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/7ccd4271f7bb4cbbae6738a7cdc639d5.json",
+          "sha256": "4d784d423c761ad3eaf86df80028296c70256ea269c0b5b7a4cee8cd083cd928"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/6dc70a35c5ae432fb89e8584293de277.json",
+          "sha256": "e7be10b33b52b16f848d47985df98ff66c35b908965c56a7a8a1e7142185c37e"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/a8170d8aec0744bcbba4aaf5abdc192f.json",
+          "sha256": "fe8c1798371388e68d486b0f09abd2975fb1ed65ebb8787903cc4991763591d8"
+        }
+      ],
+      "state_retries": 2,
+      "tool": "rose.explore.spawn_explore_agent"
+    },
+    {
+      "agent_id": "adebbce9-886f-4b59-89fc-2ae73966eb1c",
+      "call_id": "call_lKvMcnNrNN9RFMHrVwv3KXCa",
+      "committed_revision": 50,
+      "prediction_intervals": [
+        {
+          "finished_at_ms": 1791337506397,
+          "protocol_repair": 0,
+          "snapshot_revision": 44,
+          "started_at_ms": 1791337473700,
+          "state_retries": 0
+        },
+        {
+          "finished_at_ms": 1791337546137,
+          "protocol_repair": 0,
+          "snapshot_revision": 45,
+          "started_at_ms": 1791337506692,
+          "state_retries": 1
+        },
+        {
+          "finished_at_ms": 1791337606831,
+          "protocol_repair": 0,
+          "snapshot_revision": 46,
+          "started_at_ms": 1791337546423,
+          "state_retries": 2
+        },
+        {
+          "finished_at_ms": 1791337657332,
+          "protocol_repair": 0,
+          "snapshot_revision": 47,
+          "started_at_ms": 1791337607052,
+          "state_retries": 3
+        },
+        {
+          "finished_at_ms": 1791337695300,
+          "protocol_repair": 0,
+          "snapshot_revision": 48,
+          "started_at_ms": 1791337658039,
+          "state_retries": 4
+        },
+        {
+          "finished_at_ms": 1791337724508,
+          "protocol_repair": 0,
+          "snapshot_revision": 49,
+          "started_at_ms": 1791337695459,
+          "state_retries": 5
+        }
+      ],
+      "receipts": [
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/66ac5b43a8614eca9732c0e2e73f0592.json",
+          "sha256": "117548ba1eab76bb3e4445884ba9385a1d006f2c89f4759155f785c1fac96109"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/4eac366030f1485b9fc3aa89e05d9bee.json",
+          "sha256": "7200ca726f2b449d8dcbb64656ddb8b6f192cfeaa3462861715dfc3c94f0e903"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/d9d5bb85c5014c2aac60c1d5cda21610.json",
+          "sha256": "dc4e4779b40c79d4bf307d28d67375b2004969aa0004febe8f3c57dbe540cf03"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/cd7eae6da93043568eb51710dcb8e185.json",
+          "sha256": "a9246aa804ab8356fa94e0676055cc185902d007c574862f16f8da76ca987cfd"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/6be8e7d558e648e492eacc882e5f91cc.json",
+          "sha256": "72a04b01daeffbfe2c15142fdd22e61da926c321ca452cde973db187f21462d7"
+        },
+        {
+          "path": ".context/world-model-native/native-predictions/a392f54882e84d24ad259260b6966cf5/b536feaf88164f9694b997942c813bc8.json",
+          "sha256": "9f1c6ca9e1bf58307f2759a339ae27f61101ce59be144dca56fa3c91e016132d"
+        }
+      ],
+      "state_retries": 5,
+      "tool": "rose.explore.spawn_explore_agent"
+    }
+  ],
+  "lifecycle_findings": [
+    {
+      "behavior": "Pause root by backend POST only; no WMH DELETE/close or provider join.",
+      "source": "agents/benchmarks/run_benchmark.py:3765"
+    },
+    {
+      "behavior": "Persist PAUSED and signal workflow; children observe root pause via pull/signals.",
+      "source": "back-end/src/domains/agents/agentControlService.ts:32"
+    },
+    {
+      "behavior": "Pause marks tree state and cascades child pause; no native session retirement.",
+      "source": "agents/workflows/agent_workflow.py:1312"
+    },
+    {
+      "behavior": "Admitted task is shielded from HTTP waiter cancellation; keeps rebasing until commit/600-second deadline/session close.",
+      "source": "agents/benchmarks/experiential_world_model.py:227"
+    },
+    {
+      "behavior": "Explicit end_session closes admission for this session, cancels and joins owned operations; removes scope mapping.",
+      "source": "agents/benchmarks/experiential_world_model.py:404"
+    },
+    {
+      "behavior": "Synchronous FastAPI provider endpoint runs completion in a worker thread; cancellation of native HTTP await alone does not establish provider retirement.",
+      "source": "agents/benchmarks/experiential_bridge.py:84"
+    }
+  ],
+  "native_attempts": {
+    "distinct_call_ids_with_first_provider_start_after_pause": [],
+    "error_types": {
+      "CancelledError": 4,
+      "HTTPStatusError": 30,
+      "TextWorldModelProtocolError": 1,
+      "response": 329
+    },
+    "finished_after_archive": 39,
+    "max_snapshot_revision": 52,
+    "proof_limit": "Provider start is not necessarily admission time. Snapshot revision52 proves at least52commits via the unchanged revision-only-on-commit implementation; no bound final world snapshot at52 was captured.",
+    "started_after_archive": 29,
+    "total_receipts": 364
+  },
+  "native_session_delete_access_log_matches": [],
+  "next_owning_regression": {
+    "fix_proposal": "Connect root-owned simulation lifecycle to native session/provider operation retirement before diagnostic archive/accounting finalization. Keep transient HTTP-disconnect shielding; lifecycle ownership must explicitly cancel it. Final usage snapshot follows joined work, not just paused agent rows.",
+    "implementation_authorized_now": false,
+    "owners": [
+      "existing test_cancelled_http_caller_keeps_receipt_and_close_prevents_late_commit",
+      "existing provider-bridge owning boundary tests",
+      "benchmark timeout/finalize owning boundary"
+    ],
+    "required_admission_guard": "Reject late stale-worker retry against retired root generation without reopening a fresh empty world. Resume must use an explicit valid generation/state rule.",
+    "required_bridge_guard": "Prove provider completion itself joins/cancels; native DELETE alone must not masquerade as stopping synchronous bridge work.",
+    "scenario": "Start overlapping real served steps using a controlled blocking completion; cancel HTTP waiter/pause and seal root through actual owning cleanup path; explicitly retire only its native session and bridge operations; attempt stale retry; release blocked completion; prove no rebase/provider dispatch/commit after retirement and stable final usage before archive. Preserve lost-response retry/idempotency and overlapping inference before retirement."
+  },
+  "pause_signal_received_at_utc": "2026-10-07T01:45:57.636966Z",
+  "provider_calls_made": 0,
+  "provider_usage_log_review": {
+    "first_local": "2026-10-06 18:15:52",
+    "last_local": "2026-10-06 18:51:05",
+    "limitations": [
+      "Provider usage logger/accounting, not an independently settled vendor invoice.",
+      "Subscription paths report zero usage/cost for many real calls; reported input does not equal complete model prompt tokens.",
+      "Failed/cancelled partial-output requests without usage receipts may not be represented.",
+      "Archived report WMH $16.215 is a prior process snapshot, not final spend."
+    ],
+    "path": ".context/native-fundraiser-inspection/final-provider-usage-log-audit.json",
+    "post_cutoffs": {
+      "after_archive_second": {
+        "calls": 36,
+        "cost_usd": "2.923016",
+        "cutoff_local": "2026-10-06 18:46:30",
+        "output_tokens": 292280,
+        "precision": "Strict comparison of whole-second logged timestamps, distinct from subsecond operation intervals."
+      },
+      "after_pause_second": {
+        "calls": 40,
+        "cost_usd": "3.227430",
+        "cutoff_local": "2026-10-06 18:45:57",
+        "output_tokens": 322719,
+        "precision": "Strict comparison of whole-second logged timestamps, distinct from subsecond operation intervals."
+      },
+      "after_terminal_snapshot_second": {
+        "calls": 5,
+        "cost_usd": "0.448270",
+        "cutoff_local": "2026-10-06 18:49:34",
+        "output_tokens": 44824,
+        "precision": "Strict comparison of whole-second logged timestamps, distinct from subsecond operation intervals."
+      }
+    },
+    "sha256": "869ba279f8276b02de9aee6997272973e83a6f9521dcba33adf76d5045f4d5d1",
+    "verified_totals": {
+      "calls": 334,
+      "cost_usd": "19.376132",
+      "input_tokens": 981,
+      "output_tokens": 1956504
+    }
+  },
+  "read_only": true,
+  "reviewed_at": "2026-10-07T01:57:34.501419+00:00",
+  "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+  "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+  "schema": "rose.native_fundraiser_timeout_cleanup_review.v1",
+  "service_cleanup": {
+    "absence_independently_rechecked_in_this_review": false,
+    "parent_reported_no_listener_ports": [
+      56200,
+      56201,
+      56206
+    ],
+    "parent_reported_owned_processes_absent": [
+      650,
+      878,
+      4787,
+      4976,
+      4275,
+      4316,
+      45113
+    ],
+    "receipt": ".context/benchmarks/1791335468-650-82561/local-stack-cleanup.status",
+    "state": "clean"
+  },
+  "session_id": "a392f54882e84d24ad259260b6966cf5",
+  "terminal_snapshot": {
+    "captured_at_utc": "2026-10-07T01:49:34.132330+00:00",
+    "path": ".context/native-fundraiser-inspection/terminal-before-service-cleanup.json",
+    "revision": 50,
+    "sha256": "159c143cf737ba02951297ea0a8668d3318f1b06dbde1d52504e171fae47ff39",
+    "usage": {
+      "calls": 329,
+      "input_tokens": 966,
+      "output_tokens": 1911680,
+      "total_cost_usd": 18.927861999999994
+    }
+  }
+}

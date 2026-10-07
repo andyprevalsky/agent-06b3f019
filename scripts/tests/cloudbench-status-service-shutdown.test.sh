@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="${CLOUDBENCH_ROOT_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+if [ "$(uname -s)" != "Linux" ]; then
+    exec python3 "$ROOT/scripts/tests/run-cloudbench-controller-linux.py" \
+        --fixture scripts/tests/cloudbench-status-service-shutdown.test.sh
+fi
 
 fail() {
     echo "FAIL: $*" >&2

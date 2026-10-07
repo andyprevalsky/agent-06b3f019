@@ -1,5 +1,28 @@
 {
   "branch": "codex/wmh-experiential-parallel-20261006",
+  "cloud_controller_fixture_repair": {
+    "additional_current_main_fixture": "fleet-post-child isolated fixture expected obsolete terminalcapacity rejection; currentmain a849df3f12 intentionally settles unused terminaldemand. Test-onlyfix preservesinflight3sec/malformedfailure/actualchildexit17; runtimeunchanged.",
+    "final_formatting_lint_and_source_qualification": "focused four-file AST/assertion preservation plus Ruff lint/format PASS; final all-source deploy qualification pending",
+    "independent_root_result": "7 passed,703 deselected in4.29seconds",
+    "local_receipt_hashes": {
+      ".context/native-benchmark-live-results-post-fix.log": "34d6e2304cf99c5daa34fd033a2698f31d36c46927e95978f6266de8ee17d21d",
+      ".context/native-cloud-lifecycle-five-proof.json": "cd949b142e30b1bada154acda5ae48413d852cc58f4f2428b68cdb229d952f6e",
+      ".context/native-controller-final-format-proof.json": "adfaad8822d1166056122b13dd3372c731690d25408f53ba5bd96593f148286a",
+      ".context/native-fleet-post-child-fixture-diagnosis.json": "900b4021356e1033164c25df150ef8f1d7db856d45de0488882b59a975e44b63"
+    },
+    "post_fix_compact_owning_gate": "273passed859deselected109.61seconds; all actual selected benchmark-live-results cases passed",
+    "receipt": ".context/native-cloud-lifecycle-five-proof.json",
+    "scope": "test-only; runtime controller/bounds/oldworker and absence safety assertions unchanged",
+    "status": "five owning cases reproduced failures and passed seven configurations; broad run red retained"
+  },
+  "cloud_status_shutdown_dispatch": {
+    "qualification": "focused owning proof, not full factory or production deployment credit",
+    "receipt": ".context/native-status-shutdown-final-proof.json",
+    "receipt_sha256": "62ee40b316d5f4d979e456dcd5da2ecda0200adb9719b971c8eb3cfc07d1448f",
+    "resources": "fullstatus and restrictiveexporter exactowner/image/3readonlymounts verified, exported, stopped/removed and independently absent",
+    "scope": "testinfra only; originalLinuxfixture body and productionstatus ownership unchanged",
+    "status": "full actual Linux shutdown suite passed via standard Mac entry; dispatcher16passed34.861s"
+  },
   "continuation_receipts": {
     ".context/native-ascii-conversion-owner.json": {
       "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-conversion-owner.json",
@@ -111,6 +134,82 @@
     }
   },
   "engine_selection": "WMH_ENGINE=experiential",
+  "execution_policy_proposal": {
+    "approval_id": "wmh-policy-20261007",
+    "candidate_patch_sha256": "930865b2738b3344b452a6e7258109686eb17bc373e2f43b30378b7693fd3218",
+    "candidate_sources": "16files108hunks ignored copies; no policy active-source edit",
+    "capacity_limit": "unchanged publicpacker counts appended system tokens; optionaldemo admission may differ at capacity",
+    "design_sha256": "ad32e32eaafd05d60bb6d29ec1d3a58c9beddcb92b0efd3727616f6d10fb53f8",
+    "independent_review_sha256": "d613a29d01f86bfdda2625042ed950eb9f10d824c8cd6bb693367f39d249824e",
+    "offline_checks": "31native58provider3Pythoncache24TScache75independentparity; onecanonical realchildtest required",
+    "open": "candidate100conformance,unchangedfull fundraiser,newjoined timeout receipt,viewer and frozen-source deploy acceptance",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "status": "unapplied; required snapshot approval pending"
+  },
+  "form_policy_diagnostics": {
+    "accepted_counts": {
+      "candidate": {
+        "sent": 3,
+        "trials": 3
+      },
+      "original": {
+        "sent": 0,
+        "trials": 3
+      }
+    },
+    "actual_model": "openai/gpt-6-sol",
+    "benchmark_outcome_not_inferred_from_control": true,
+    "candidate_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+    "captured_call": "Conviction whole browser spawn",
+    "limits": [
+      "Six independent samples of one captured Conviction tool invocation; full fundraiser, other sites, missing routes, required unknown private fields and error cases are not validated by this set.",
+      "Credential leasing is bypassed in both arms to hold the funded route constant. This does not reproduce preceding failed GPTAuth attempts or normal leased production routing.",
+      "No extra model calls, replacement retries, production prompt changes or artifact loads. Native public parser used for all actual outputs.",
+      "DEMO response-cache read/write disabled inside collect; provider prefix caching and funded waterfall left unchanged.",
+      "Each call is an independent counterfactual from the same captured state; no real browser, email or form operation ran, and no new Hub benchmark/continuation was generated.",
+      "The three candidate forms used already established identities and simple name/email/message/company/website fields; unknown required private-company-field blockers and real unavailable routes remain untested."
+    ],
+    "metered_cost_usd": 0.423856,
+    "native_parser_valid": 6,
+    "negative_controls": {
+      "actual_call_phase_wall_seconds": 50.129,
+      "actual_model": "openai/gpt-6-sol",
+      "case_results": {
+        "observed_absence": {
+          "passed": 2,
+          "trials": 2
+        },
+        "recorded_submission_service_error": {
+          "passed": 2,
+          "trials": 2
+        },
+        "unknown_private_required_fields": {
+          "passed": 2,
+          "trials": 2
+        }
+      },
+      "constraint_pass_count": 6,
+      "initial_analyzer_scope_mismatch_preserved": {
+        "correction": "Service-error evidence may list the exact POST endpoint already supplied by observed_public_pages[url].forms[0].action; this is a recorded response source, not an alternate navigation or new operation. Exact-page-only source scope remains unchanged in absence and required-private-fields cases.",
+        "initial_analyzer_sha256": "d2869d2b66d0c3eb1bc79ea7ec4b3b8a611c7114384013ba7dc69b3835b32b4f",
+        "initial_review_sha256": "63955a6cb37e7baac95a69b7f20be267f6b0745b38ae4a62138bfc270868aa79",
+        "model_calls_after_correction": 0,
+        "model_responses_modified": false
+      },
+      "limits": [
+        "Candidate-only diagnostics modify declared state/action constraints; not exact original-input or original-policy paired comparisons.",
+        "Two samples per explicit case on the captured funded route; does not validate all site, privacy, error or full fundraiser trajectories.",
+        "All virtual effects remain simulation. No real form, messaging, browser, investment or funds movement occurred.",
+        "No replacement model calls or production source/policy edits. DEMO response-cache reads/writes disabled, provider prefix cache remains normal."
+      ],
+      "metered_cost_usd": 0.271156,
+      "review": "native-form-policy-negative-review.json",
+      "trial_count": 6
+    },
+    "policy_applied": false,
+    "review": "native-form-policy-controlled-review.json",
+    "same_full_request_except_system_append": true
+  },
   "full_native_load": {
     "ascii_service_startup": {
       "health": {
@@ -150,8 +249,54 @@
     },
     "status": "ascii_startup_and_100_live_predictions_passed"
   },
-  "fundraiser": "pending",
-  "integrated_main": "fda5cc0e7b2108f058def26c0e1726093702f19d",
+  "fundraiser": {
+    "latest_native_run": {
+      "acceptance": "failed; new retirement code and candidate policy have not yet been exercised by the full fundraiser",
+      "all_owned_stack_resources_retired": true,
+      "authorized_timeout_seconds": 1800,
+      "cost_limits": "Logged completed usage with existing model pricing is not an invoice; partial failures may omit usage. Report-card cost was frozen before native provider work stopped.",
+      "lifecycle_review": "native-fundraiser-timeout-cleanup-review.json",
+      "logged_completed_provider_usage": {
+        "calls": 334,
+        "cost_usd": "19.376132",
+        "input_tokens": 981,
+        "output_tokens": 1956504
+      },
+      "passed": false,
+      "raised_cents": 0,
+      "reported_task_cost_usd": 0.85,
+      "reported_wmh_cost_usd": 16.215,
+      "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+      "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+      "saved_run": {
+        "path": "agents/benchmarks/runs/20261007_014630_f5e4f83d-386a-4af1-84f5-7745216b6f27_raise-5m-rose-labs-brex.json",
+        "result": {
+          "audit_revision": 47,
+          "cleanup_errors": [],
+          "failure_reason": "Timeout after 1801s (dynamic cap=1800s) | Investigate: python agents/benchmarks/agent_latency.py 29064cc2-3266-4605-8e63-eda79e48a0cc | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+          "passed": false,
+          "root_deleted": true,
+          "status": "ACTIVE",
+          "tree_agent_count": 9,
+          "unsealed_agents": []
+        },
+        "sha256": "c2ca9e988eaa7898dd3888e63cb29912b8aa9e9266b4255044b1badc1c8ba4dc",
+        "written_at_utc": "2026-10-07T01:46:30.711855+00:00"
+      },
+      "session_id": "a392f54882e84d24ad259260b6966cf5",
+      "source_head": "b0c4d185a03318222dba5e4c60f654a69fc12cfb"
+    },
+    "prior_statement": "pending"
+  },
+  "hub_evidence_availability": {
+    "diagnosis_sha256": "c8c866b961775940b10864e3c608ed1c8502cdb9c628dfca75af1fcb6feee308",
+    "existing_Render_only_observation": "live a3585a7bd since01:19UTC; not a WMH production deployment result",
+    "observed_failure": "exactPOST500/GETvisibility503 from S3SDKInternalError; SQLlocksucceeded",
+    "recovery": "registeredpublisherPASS,all9views200,actual latestLuxdump200; no productionmutation",
+    "restored_verification_sha256": "bcf179535e4ae975becd5dae3f98c3bc9841edf00096648102155d3736aaef8b"
+  },
+  "integrated_main": "a3585a7bdb424f16ebd4a997b223d4b058bcfa91",
+  "latest_integration_head": "f647c1c8be39a54ba1f97747fbd2a5456c69f431",
   "live_conformance": {
     "by_category": {
       "auth_approval": {
@@ -421,6 +566,32 @@
     "provisioning_auth_memory_artifact_transfer": "still requires qualification before native cloud use",
     "status": "owning tests passed"
   },
+  "native_joined_retirement": {
+    "behavior": "exact benchmark-owned native root closes admission, joins actual native/provider tasks, freezes state/history/revision/shared-provider usage before evaluator/cost/archive; transient waiter loss preserves admitted operation",
+    "failure": "durable ERROR retains original/retirement exceptions, marks numeric0cost unsettled, skips evaluator/settled-cost credit, independently attempts exact-root/archive/fixture cleanup",
+    "first_bad_boundary": "benchmark finalization treated root pause/archive as native provider retirement",
+    "focused_checks": {
+      "actual_http_client_receipt": 1,
+      "benchmark_cleanup_wallclock": 79,
+      "initial_state_cost": 22,
+      "native": 30,
+      "provider": 54
+    },
+    "live_parallel_limit": "four actual concurrent baseline predictions already passed; no candidate live8way/10k claim",
+    "local_receipts": {
+      ".context/native-benchmark-retirement-final-proof.json": "ea871261e12560b0d9a19f2fc488ce9dc80ecc2f6efcd23adc085571cc15f553",
+      ".context/native-lifecycle-fix-design.json": "f78c138b12b58d6bb3ce53bb02f251b1faa484f850463fb321c4c8b34a097988",
+      ".context/native-retirement-initial-state-cost-final.log": "14ce38f755c5d198b8eb21cdcf81a93920b72c71c8e962ee016146c55441c8b0",
+      ".context/native-retirement-runtime-client-final.log": "fc4efa05ec8ff7ed11c8f5fb2578bb82b5de5a8d34ed02c3e116981f5db95c2e"
+    },
+    "original_failure": "native admitted predictions/rebases continued after root pause and archive; original saved report has an earlier usage cutoff",
+    "original_run": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+    "ownership": "cached BenchmarkTask shallow-copied per execution; caller-owned native sessions never automatically retired; admission recovery only exact generated seed-root UUID",
+    "retirement_limits": "compact admission fences bounded16384/failclosed; ordinary resumable UI pause is not retirement; no nativecloud8GiB qualification",
+    "source_snapshot_limit": "counts refer to documented owning receipts before formatting; final source qualification still required",
+    "status": "implemented; focused owning checks passed; new live timeout proof and final frozen-source deploy checks pending",
+    "usage_limit": "frozen usage is shared provider process aggregate, not per-root billing"
+  },
   "original_native_build": {
     "bound_original_cases": 100,
     "encoding": "native canonical Unicode JSONL",
@@ -508,5 +679,45 @@
   },
   "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",
   "version": "0.7.158",
-  "viewer_replay": "pending"
+  "viewer_replay": {
+    "latest_native_run": {
+      "actual_root_and_all_children_opened": true,
+      "durable_fe_url": "https://www.roselabs.ai/?agent-id=29064cc2-3266-4605-8e63-eda79e48a0cc#benchmark-share=f5e4f83d-386a-4af1-84f5-7745216b6f27.1793929641.0d6c34bfb7b11db196f3b67ff04e47fbd010dba8edecfd8ccfcc9969a90bd393",
+      "limits": "Actual browser transcript replay, including interrupted child rows; no allocated browser/code film playback. Its recorded dump link was root-only; approval evidence separately selects the entire trajectory latest call.",
+      "receipt": "native-fundraiser-viewer-review.json",
+      "recording_boundary": {
+        "actual_claude_code_sessions_uploaded": 0,
+        "allocated_browser_sessions_before": [],
+        "allocated_browser_sessions_final": [],
+        "code_row_render": "Claude Code Completed Successfully row is visually clean in narrative-code-row.png; no duplicate error/completion text observed in that row",
+        "real_browser_recording_playback_performed": false,
+        "reason": "Whole-boundary WMH simulation: completed/failed browser result text is replayable; no actual browser session or real film allocated. Incomplete simulated requests remain visible at cutoff.",
+        "simulated_claude_code_completion_visible": true
+      },
+      "root_agent_id": "29064cc2-3266-4605-8e63-eda79e48a0cc",
+      "run_id": "f5e4f83d-386a-4af1-84f5-7745216b6f27",
+      "simulated_code_chip_observed_clean": true
+    },
+    "prior_statement": "pending"
+  },
+  "local_policy_implementation_20261007": {
+    "user_authorized_local_prompt_changes_until_deployment": true,
+    "deployment_explicitly_held": true,
+    "policy_id": "rose-virtual-public-affordances-v1",
+    "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+    "native_owning_passed": 31,
+    "provider_owning_passed": 59,
+    "registered_wmh_blackbox": "PASS",
+    "backend_cache_controls_passed": 24,
+    "benchmark_retirement_controls_passed": 102,
+    "registered_rose_offline_passed": 213,
+    "first_policy_live100": "FAILED99+1pre-headerTLSerror; report retained",
+    "first_live100_mean_fidelity": 0.851895599578659,
+    "first_live100_content_accuracy": 0.589477997893291,
+    "tls_fix": "Only add raw ssl.SSLError to existing waterfall connect/read classifier, preserving existing next-model and partial-output guards; owning3red->3green",
+    "second_full100": "in progress; no acceptance claim",
+    "exact_fundraiser_rerun": "not started; waits matching full100success",
+    "native_cloud_qualification": "still unqualified",
+    "production": "no rollout"
+  }
 }

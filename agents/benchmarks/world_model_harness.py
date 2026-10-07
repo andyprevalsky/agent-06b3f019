@@ -32,8 +32,6 @@ from typing import Any, Awaitable, Callable, Iterable, Iterator, Optional
 
 import httpx
 
-from utils.world_model_observation import normalize_world_model_observation
-
 from helpers.context_scope import is_internal_subagent_message
 from helpers.trace_archive import (
     archive_backend_is_r2,
@@ -49,6 +47,7 @@ from helpers.trace_archive import (
 from helpers.trace_archive import (
     list_archive_bundle_ids as list_backend_archive_bundle_ids,
 )
+from utils.world_model_observation import normalize_world_model_observation
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOCAL_ARCHIVE_ROOT = _REPO_ROOT / ".context" / "trace-archive"
@@ -345,9 +344,7 @@ def bundle_world_model_mode(root_agent_id: str) -> str:
         return "unknown"
     manifest_value = manifest.get("world_model_mode")
     manifest_mode = (
-        manifest_value.strip().lower()
-        if isinstance(manifest_value, str) and manifest_value.strip()
-        else None
+        manifest_value.strip().lower() if isinstance(manifest_value, str) and manifest_value.strip() else None
     )
     try:
         start = read_archive_json(root_agent_id, "db/start.fixture.json.gz.enc")
@@ -357,20 +354,16 @@ def bundle_world_model_mode(root_agent_id: str) -> str:
         return "unknown"
     rows = start.get("rows") if isinstance(start.get("rows"), dict) else {}
     agents = rows.get("Agent") if isinstance(rows, dict) else []
-    root = next(
-        (
-            row
-            for row in agents
-            if isinstance(row, dict) and row.get("id") == root_agent_id
-        ),
-        {},
-    ) if isinstance(agents, list) else {}
-    fixture_value = root.get("worldModelMode") if isinstance(root, dict) else None
-    fixture_mode = (
-        fixture_value.strip().lower()
-        if isinstance(fixture_value, str) and fixture_value.strip()
-        else None
+    root = (
+        next(
+            (row for row in agents if isinstance(row, dict) and row.get("id") == root_agent_id),
+            {},
+        )
+        if isinstance(agents, list)
+        else {}
     )
+    fixture_value = root.get("worldModelMode") if isinstance(root, dict) else None
+    fixture_mode = fixture_value.strip().lower() if isinstance(fixture_value, str) and fixture_value.strip() else None
     reported = [mode for mode in (manifest_mode, fixture_mode) if mode is not None]
     for mode in reported:
         if mode not in _REAL_WORLD_MODEL_MODES:
@@ -507,25 +500,30 @@ def _is_transient_archive_error(exc: Exception) -> bool:
     code = str(error.get("Code") or "") if isinstance(error, dict) else ""
     status = int(metadata.get("HTTPStatusCode") or 0) if isinstance(metadata, dict) else 0
     text = f"{type(exc).__name__}: {exc}".lower()
-    return status in {429, 500, 502, 503, 504} or code.lower() in {
-        "internalerror",
-        "requesttimeout",
-        "serviceunavailable",
-        "slowdown",
-        "throttling",
-        "throttlingexception",
-    } or any(
-        marker in text
-        for marker in (
-            "connection reset",
-            "incomplete read",
-            "incompleteread",
-            "read timeout",
-            "reduce your concurrent request rate",
-            "responsestreamingerror",
-            "service unavailable",
-            "temporarily unavailable",
-            "too many requests",
+    return (
+        status in {429, 500, 502, 503, 504}
+        or code.lower()
+        in {
+            "internalerror",
+            "requesttimeout",
+            "serviceunavailable",
+            "slowdown",
+            "throttling",
+            "throttlingexception",
+        }
+        or any(
+            marker in text
+            for marker in (
+                "connection reset",
+                "incomplete read",
+                "incompleteread",
+                "read timeout",
+                "reduce your concurrent request rate",
+                "responsestreamingerror",
+                "service unavailable",
+                "temporarily unavailable",
+                "too many requests",
+            )
         )
     )
 
@@ -568,9 +566,7 @@ def prescreen_bundle_artifacts(root_agent_id: str) -> tuple[bool, str]:
     for required in _CORPUS_REQUIRED_ARTIFACTS:
         if required not in present:
             return False, f"missing:{required}"
-    if _CORPUS_RESULT_ARTIFACT not in present and not any(
-        path.startswith(_CORPUS_RESULT_PREFIXES) for path in paths
-    ):
+    if _CORPUS_RESULT_ARTIFACT not in present and not any(path.startswith(_CORPUS_RESULT_PREFIXES) for path in paths):
         return False, "no-result-artifacts"
     return True, "artifacts-present"
 
@@ -591,11 +587,7 @@ def bundle_corpus_eligibility(root_agent_id: str) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"manifest-unreadable:{type(exc).__name__}"
     manifest_value = manifest.get("world_model_mode")
-    mode = (
-        manifest_value.strip().lower()
-        if isinstance(manifest_value, str) and manifest_value.strip()
-        else "real"
-    )
+    mode = manifest_value.strip().lower() if isinstance(manifest_value, str) and manifest_value.strip() else "real"
     if mode not in _REAL_WORLD_MODEL_MODES:
         return False, f"simulated-run:{mode}"
     if _manifest_legacy_marker(manifest):
@@ -716,11 +708,7 @@ def select_corpus_bundles(
         int(os.environ.get(_WMH_SCREEN_BATCH_SIZE_ENV, "5000") or "5000"),
     )
     while position < len(ordered) and (limit == 0 or len(selected) < limit):
-        batch_size = (
-            min(screen_batch_size, len(ordered) - position)
-            if limit == 0
-            else max(limit - len(selected), 1)
-        )
+        batch_size = min(screen_batch_size, len(ordered) - position) if limit == 0 else max(limit - len(selected), 1)
         batch = ordered[position : position + batch_size]
         position += len(batch)
         eligible, batch_excluded, batch_hits = _screen_candidates(batch, cache, now_ms)
@@ -816,11 +804,7 @@ def _drop_secret_fields(value: Any) -> Any:
     """Remove secret-shaped fields from portable public evaluation artifacts."""
 
     if isinstance(value, dict):
-        return {
-            key: _drop_secret_fields(inner)
-            for key, inner in value.items()
-            if not _SECRET_KEY_RE.search(str(key))
-        }
+        return {key: _drop_secret_fields(inner) for key, inner in value.items() if not _SECRET_KEY_RE.search(str(key))}
     if isinstance(value, list):
         return [_drop_secret_fields(inner) for inner in value]
     return value
@@ -1322,11 +1306,7 @@ def _row_timestamp_ms(row: JsonObject) -> int | None:
 def _compact_browser_state(value: Any, redaction_mode: str) -> JsonObject:
     if not isinstance(value, dict):
         return {}
-    state = {
-        key: inner
-        for key, inner in value.items()
-        if key not in {"frame", "screenshot", "website_frame"}
-    }
+    state = {key: inner for key, inner in value.items() if key not in {"frame", "screenshot", "website_frame"}}
     dom_tree = state.get("dom_tree")
     if isinstance(dom_tree, str) and len(dom_tree) > 24_000:
         state["dom_tree"] = dom_tree[:24_000] + "\n[truncated]"
@@ -1403,12 +1383,8 @@ def _transitions_from_browser_observations(
                     if action_key not in seen_actions and browser_state:
                         seen_actions.add(action_key)
                         grounded_task_ids.add(task_id)
-                        artifact_ref = (
-                            path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
-                        )
-                        action_result = (
-                            entry.get("result") if isinstance(entry.get("result"), dict) else {}
-                        )
+                        artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
+                        action_result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
                         observation_payload = _maybe_redact(
                             {
                                 "browser_state": browser_state,
@@ -1526,11 +1502,7 @@ def _assistant_tool_arguments(call: JsonObject) -> JsonObject:
     excluded_keys = {"tool", "name", "tool_call_id", "id", "arguments", "function"}
     if function:
         excluded_keys.add("type")
-    return {
-        key: value
-        for key, value in call.items()
-        if key not in excluded_keys
-    }
+    return {key: value for key, value in call.items() if key not in excluded_keys}
 
 
 def _assistant_tool_name(call: JsonObject) -> str:
@@ -1719,9 +1691,7 @@ def _latest_message_fixture_terminal_indices(messages: list[JsonObject]) -> dict
         if key is None:
             continue
         incumbent = latest.get(key)
-        if incumbent is None or (_row_timestamp_ms(row) or 0) > (
-            _row_timestamp_ms(messages[incumbent]) or 0
-        ):
+        if incumbent is None or (_row_timestamp_ms(row) or 0) > (_row_timestamp_ms(messages[incumbent]) or 0):
             latest[key] = index
     return latest
 
@@ -2003,9 +1973,7 @@ def load_grounded_transitions(
         skip_browser_task_ids=grounded_task_ids,
     )
     partial_messages = (
-        []
-        if has_end_fixture
-        else _transitions_from_llm_message_history(root_agent_id, redaction_mode, initial_state)
+        [] if has_end_fixture else _transitions_from_llm_message_history(root_agent_id, redaction_mode, initial_state)
     )
     # Explicit/provider and rich browser artifacts are more authoritative than
     # their UI Message projection. Keep the projection for every other tool.
@@ -2192,6 +2160,7 @@ def _bundle_signature(root_agent_id: str) -> JsonObject:
     artifacts: list[JsonObject] = []
     plaintext_bytes = 0
     ciphertext_bytes = 0
+
     # Metadata-only reads: the signature is a digest over the sidecar fields, so
     # downloading every ciphertext (screenshots, DB fixtures) was pure waste.
     def _metadata_or_orphan(path: str) -> JsonObject | None:
@@ -2379,9 +2348,7 @@ def build_world_model_from_otel_jsonl(
         embedder=embedder,
     )
     index_serialization = (
-        normalize_world_model_index_records(model_root)
-        if (model_root / "index" / "steps.jsonl").exists()
-        else None
+        normalize_world_model_index_records(model_root) if (model_root / "index" / "steps.jsonl").exists() else None
     )
     metrics = getattr(result, "metrics", None)
     if hasattr(metrics, "model_dump"):
@@ -2582,9 +2549,7 @@ def refresh_world_model_index(
             embed_pool.shutdown()
 
         if row != indexed_steps:
-            raise RuntimeError(
-                f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}"
-            )
+            raise RuntimeError(f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}")
         if matrix is not None:
             matrix.flush()
             del matrix
@@ -2816,9 +2781,7 @@ def _iter_canonical_otel_examples(trace_file: str | Path) -> Iterator[tuple[Json
                 if action.get("schema") != "rose.canonical_action.v1":
                     raise ValueError(f"line {action_line}: unknown action schema {action.get('schema')!r}")
                 if observation.get("schema") != "rose.canonical_observation.v1":
-                    raise ValueError(
-                        f"line {line_number}: unknown observation schema {observation.get('schema')!r}"
-                    )
+                    raise ValueError(f"line {line_number}: unknown observation schema {observation.get('schema')!r}")
                 if not isinstance(action.get("name"), str) or not action["name"]:
                     raise ValueError(f"line {action_line}: action name is empty")
                 if not isinstance(action.get("arguments"), dict):
@@ -2833,9 +2796,7 @@ def _iter_canonical_otel_examples(trace_file: str | Path) -> Iterator[tuple[Json
                 if metadata.get("world_model_simulated") is True:
                     raise ValueError(f"line {line_number}: simulated observation entered the real corpus")
                 root_agent_id = str(
-                    attributes.get("rose.root_agent_id")
-                    or action_attributes.get("rose.root_agent_id")
-                    or ""
+                    attributes.get("rose.root_agent_id") or action_attributes.get("rose.root_agent_id") or ""
                 )
                 if not root_agent_id:
                     raise ValueError(f"line {line_number}: root trajectory id is missing")
@@ -2850,17 +2811,20 @@ def _iter_canonical_otel_examples(trace_file: str | Path) -> Iterator[tuple[Json
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
-            yield {
-                "fingerprint": fingerprint,
-                "root_agent_id": root_agent_id,
-                "tool_name": action["name"],
-                "category": str(action.get("category") or "tool"),
-                "task": str(action_attributes.get("gen_ai.prompt") or ""),
-                "state_before": state_before,
-                "scratchpad": str(action_attributes.get("wmh.state.scratchpad") or ""),
-                "action": action,
-                "observation": observation,
-            }, None
+            yield (
+                {
+                    "fingerprint": fingerprint,
+                    "root_agent_id": root_agent_id,
+                    "tool_name": action["name"],
+                    "category": str(action.get("category") or "tool"),
+                    "task": str(action_attributes.get("gen_ai.prompt") or ""),
+                    "state_before": state_before,
+                    "scratchpad": str(action_attributes.get("wmh.state.scratchpad") or ""),
+                    "action": action,
+                    "observation": observation,
+                },
+                None,
+            )
     for (_trace_id, _span_id), (_, line_number) in pending.items():
         yield None, f"line {line_number}: action has no matching observation span"
 
@@ -3289,9 +3253,7 @@ def _export_bundle_worker(job: tuple[str, str, str, str, int]) -> tuple[str, int
                     return (
                         root_agent_id,
                         0,
-                        "filtered:unknown-mode"
-                        if mode == "unknown"
-                        else f"filtered:simulated-run:{mode}",
+                        "filtered:unknown-mode" if mode == "unknown" else f"filtered:simulated-run:{mode}",
                     )
                 transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
                 if not transitions:
@@ -3317,13 +3279,10 @@ def _export_bundle_worker(job: tuple[str, str, str, str, int]) -> tuple[str, int
                     bundle_steps = sum(
                         1
                         for line in exported
-                        if line.strip()
-                        and str(json.loads(line).get("name") or "").startswith("execute_tool ")
+                        if line.strip() and str(json.loads(line).get("name") or "").startswith("execute_tool ")
                     )
                 session = _build_replay_session(root_agent_id, split_name, transitions=transitions)
-            session_path.write_text(
-                json.dumps(session, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+            session_path.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             return root_agent_id, bundle_steps, None
         except Exception as exc:
             for stale in (otel_path, session_path):
@@ -3574,9 +3533,7 @@ def update_world_model_for_simulation(
         session_path = session_dir / f"{root_agent_id}.session.json"
         previous = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
         previous_sha = previous.get("sha256") if isinstance(previous, dict) else None
-        previous_export_schema = (
-            previous.get("export_schema_version") if isinstance(previous, dict) else None
-        )
+        previous_export_schema = previous.get("export_schema_version") if isinstance(previous, dict) else None
         if (
             force
             or previous_sha != signature["sha256"]
@@ -4005,7 +3962,7 @@ class WMHHttpClient:
             data = response.json()
         if data.get("world_model_name") != world_model:
             raise ValueError("Served native world model identity names another model")
-        return {key: data.get(key) for key in ("world_model_id", "world_model_manifest_sha256")}
+        return {key: data.get(key) for key in ("world_model_id", "world_model_manifest_sha256", "execution_identity")}
 
     async def start_session(
         self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None
@@ -4052,6 +4009,7 @@ async def evaluate_world_model_conformance_suite(
     min_mean_score: float = 0.7,
     min_content_accuracy: float = 0.25,
     client: Any | None = None,
+    execution_policy: str = "upstream",
 ) -> JsonObject:
     """Replay the static 100-case suite against a served model and score it.
 
@@ -4090,18 +4048,32 @@ async def evaluate_world_model_conformance_suite(
         }
         if not all(isinstance(value, str) and value for value in expected_identity.values()):
             raise ValueError("Native conformance suite has incomplete artifact identity")
+        from benchmarks.wmh_execution_policy import execution_identity
+
+        expected_execution = execution_identity(
+            execution_policy, expected_identity["world_model_id"], expected_identity["world_model_manifest_sha256"]
+        )
+        suite_execution = payload.get("native_execution_identity")
+        if execution_policy != "upstream" and suite_execution is None:
+            raise ValueError("Activated native policy requires an execution-bound conformance suite")
+        if suite_execution is not None and suite_execution != expected_execution:
+            raise ValueError("Conformance suite execution identity differs from the explicit expectation")
         identity_reader = getattr(client, "model_identity", None)
+        expected_identity["execution_identity"] = expected_execution
         if identity_reader is None or await identity_reader(world_model_name) != expected_identity:
-            raise ValueError("Served native artifact identity differs from the bound conformance suite")
-        bound_identity = {"native_world_model_id": expected_identity["world_model_id"],
-                          "native_world_model_manifest_sha256": expected_identity["world_model_manifest_sha256"]}
+            raise ValueError(
+                "Served native artifact or execution identity differs from the bound conformance expectation"
+            )
+        bound_identity = {
+            "native_world_model_id": expected_identity["world_model_id"],
+            "native_world_model_manifest_sha256": expected_identity["world_model_manifest_sha256"],
+            "native_execution_identity": expected_execution,
+        }
     semaphore = asyncio.Semaphore(concurrency)
 
     async def score_example(index: int, example: JsonObject) -> JsonObject:
         action_raw = example.get("action") if isinstance(example.get("action"), dict) else {}
-        observation_raw = (
-            example.get("observation") if isinstance(example.get("observation"), dict) else {}
-        )
+        observation_raw = example.get("observation") if isinstance(example.get("observation"), dict) else {}
         action = CanonicalAction(
             category=str(action_raw.get("category") or "tool"),
             name=str(action_raw.get("name") or ""),
@@ -4110,11 +4082,7 @@ async def evaluate_world_model_conformance_suite(
             span_id=str(action_raw.get("span_id") or "") or None,
             tool_call_id=str(action_raw.get("tool_call_id") or "") or None,
             artifact_refs=list(action_raw.get("artifact_refs") or []),
-            timestamp_ms=(
-                action_raw.get("timestamp_ms")
-                if isinstance(action_raw.get("timestamp_ms"), int)
-                else None
-            ),
+            timestamp_ms=(action_raw.get("timestamp_ms") if isinstance(action_raw.get("timestamp_ms"), int) else None),
         )
         actual = CanonicalObservation(
             category=str(observation_raw.get("category") or "tool_result"),
@@ -4123,9 +4091,7 @@ async def evaluate_world_model_conformance_suite(
             metadata=dict(observation_raw.get("metadata") or {}),
             artifact_refs=list(observation_raw.get("artifact_refs") or []),
             timestamp_ms=(
-                observation_raw.get("timestamp_ms")
-                if isinstance(observation_raw.get("timestamp_ms"), int)
-                else None
+                observation_raw.get("timestamp_ms") if isinstance(observation_raw.get("timestamp_ms"), int) else None
             ),
         )
         if not action.name:
@@ -4163,9 +4129,7 @@ async def evaluate_world_model_conformance_suite(
             "critique": critique,
         }
 
-    scored = await asyncio.gather(
-        *(score_example(index, example) for index, example in enumerate(examples))
-    )
+    scored = await asyncio.gather(*(score_example(index, example) for index, example in enumerate(examples)))
     score_count = len(scored)
     mean_score = sum(float(item.get("score") or 0) for item in scored) / score_count
     dimension_means = {
@@ -4183,11 +4147,9 @@ async def evaluate_world_model_conformance_suite(
         category_items = [item for item in scored if str(item.get("category") or "tool") == category]
         by_category[category] = {
             "examples": len(category_items),
-            "mean_score": sum(float(item.get("score") or 0) for item in category_items)
-            / len(category_items),
+            "mean_score": sum(float(item.get("score") or 0) for item in category_items) / len(category_items),
             "content_accuracy": sum(
-                float((item.get("dimensions") or {}).get("content_accuracy") or 0)
-                for item in category_items
+                float((item.get("dimensions") or {}).get("content_accuracy") or 0) for item in category_items
             )
             / len(category_items),
         }
@@ -4216,6 +4178,9 @@ async def evaluate_world_model_conformance_suite(
         "results": scored,
     }
     public_report = _drop_secret_fields(_redact(report))
+    # These fields came from exact verified expectations, never from arbitrary
+    # observation text. Keep their nonsecret digests usable after redaction.
+    public_report.update(bound_identity)
     if public_json_has_secret(public_report):
         raise ValueError("WMH prediction conformance report contains unredacted secret-looking content")
     if output_path is not None:

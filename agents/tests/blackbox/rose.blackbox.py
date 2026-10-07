@@ -3909,6 +3909,144 @@ async def test_waterfall_falls_through_then_succeeds():
     assert efforts == ["low", "low"]
 
 
+def _offline_waterfall_streaming_client(handler):
+    from helpers import httpx_capture
+
+    # The capture harness buffers bodies. Keep the real HTTP streaming boundary
+    # over an offline transport so header and partial-output failures stay distinct.
+    with patch.object(httpx.AsyncClient, "__init__", httpx_capture._original_init or httpx.AsyncClient.__init__):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
+
+
+async def test_waterfall_raw_tls_failure_before_headers_uses_existing_next_model():
+    spec = get_pool("rose-1-ultra")
+    messages = [{"role": "system", "content": "unchanged rules"}, {"role": "user", "content": "unchanged request"}]
+    completed = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "existing fallback"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}},
+            ]
+        )
+    )
+
+    # The handled read-error control and captured raw TLS alert must take the
+    # same bounded next-model path, with one attempt per unchanged pool member.
+    for failure in (
+        httpx.ReadError("offline header read failed"),
+        ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac"),
+    ):
+        bodies = []
+
+        def handler(request):
+            assert request.url.host == "openrouter.ai"
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body["model"] == spec.waterfall[0]:
+                raise failure
+            return httpx.Response(200, text=completed, headers={"Content-Type": "text/event-stream"})
+
+        streaming_client = _offline_waterfall_streaming_client(handler)
+        with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+            async with streaming_client:
+                chunks = await _drain(
+                    waterfall_complete(
+                        pool_spec=spec,
+                        messages=messages,
+                        max_tokens=16384,
+                        openrouter_key="offline-fake",
+                        request_id="raw-tls-waterfall-before-headers",
+                    )
+                )
+        assert [body["model"] for body in bodies] == list(spec.waterfall)
+        assert bodies[0]["messages"] == bodies[1]["messages"]
+        assert all(body["max_tokens"] == 16384 for body in bodies)
+        assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "existing fallback"
+        assert chunks[-1].kind == "done"
+        assert streaming_client.is_closed
+
+
+async def test_waterfall_raw_tls_failure_after_productive_output_preserves_cause_without_replay():
+    spec = get_pool("rose-1-ultra")
+    failure = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+    models_seen = []
+    closed = []
+    chunks = []
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise failure
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handler(request):
+        assert request.url.host == "openrouter.ai"
+        model = json.loads(request.content)["model"]
+        models_seen.append(model)
+        assert model == spec.waterfall[0], "productive output must prevent a second model attempt"
+        return httpx.Response(200, stream=InterruptedStream(), headers={"Content-Type": "text/event-stream"})
+
+    streaming_client = _offline_waterfall_streaming_client(handler)
+    with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+        async with streaming_client:
+            try:
+                async for chunk in waterfall_complete(
+                    pool_spec=spec,
+                    messages=[{"role": "user", "content": "unchanged request"}],
+                    openrouter_key="offline-fake",
+                    request_id="raw-tls-waterfall-after-output",
+                ):
+                    chunks.append(chunk)
+                raise AssertionError("a partial failed stream must remain an error")
+            except RoseError as error:
+                assert not isinstance(error, RoseAllFailed)
+                assert error.__cause__ is failure
+    assert models_seen == [spec.waterfall[0]]
+    assert "".join(chunk.data.get("text", "") for chunk in chunks if chunk.kind == "content") == "partial"
+    assert not any(chunk.kind == "done" for chunk in chunks)
+    assert closed == [True]
+    assert streaming_client.is_closed
+
+
+async def test_waterfall_raw_tls_failure_on_all_models_preserves_exact_step_errors():
+    spec = get_pool("rose-1-ultra")
+    models_seen = []
+    failures = {
+        model: ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac")
+        for model in spec.waterfall
+    }
+
+    def handler(request):
+        assert request.url.host == "openrouter.ai"
+        model = json.loads(request.content)["model"]
+        models_seen.append(model)
+        raise failures[model]
+
+    streaming_client = _offline_waterfall_streaming_client(handler)
+    with patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+        async with streaming_client:
+            try:
+                await _drain(
+                    waterfall_complete(
+                        pool_spec=spec,
+                        messages=[{"role": "user", "content": "unchanged request"}],
+                        openrouter_key="offline-fake",
+                        request_id="raw-tls-waterfall-all-models",
+                    )
+                )
+                raise AssertionError("TLS failure on every model must remain terminal")
+            except RoseAllFailed as error:
+                assert [step.model for step in error.step_errors] == list(spec.waterfall)
+                for step in error.step_errors:
+                    assert type(step.error) is RoseError
+                    assert step.error.__cause__ is failures[step.model]
+                    assert "SSLV3_ALERT_BAD_RECORD_MAC" in str(step.error)
+    assert models_seen == list(spec.waterfall)
+    assert streaming_client.is_closed
+
+
 async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
     """Browser Qwen prefers a cache-capable endpoint and retains fallback."""
     bodies = []
@@ -4738,9 +4876,10 @@ async def test_client_raw_tls_failure_after_output_preserves_error_without_repla
     # context over an offline transport to preserve the productive-output boundary.
     with patch.object(httpx.AsyncClient, "__init__", httpx_capture._original_init or httpx.AsyncClient.__init__):
         streaming_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
-    with patch.dict(
-        os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}
-    ), patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client):
+    with (
+        patch.dict(os.environ, {"GPT_API_KEY": "offline-fake", "ANTHROPIC_API_KEY": ""}),
+        patch("providers.rose.transport.get_streaming_http_client", return_value=streaming_client),
+    ):
         async with streaming_client:
             try:
                 async for chunk in RoseClient(openrouter_key="offline-fake").complete(
@@ -8047,6 +8186,18 @@ async def run_all_tests():
         test_openrouter_body_with_tools_preserves_tool_history,
     )
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
+    await r.record_async(
+        "waterfall_raw_tls_before_headers_uses_existing_next_model",
+        test_waterfall_raw_tls_failure_before_headers_uses_existing_next_model,
+    )
+    await r.record_async(
+        "waterfall_raw_tls_after_output_preserves_cause_without_replay",
+        test_waterfall_raw_tls_failure_after_productive_output_preserves_cause_without_replay,
+    )
+    await r.record_async(
+        "waterfall_raw_tls_all_models_preserves_exact_step_errors",
+        test_waterfall_raw_tls_failure_on_all_models_preserves_exact_step_errors,
+    )
     await r.record_async(
         "browser_qwen_cached_provider_with_fallback",
         test_browser_qwen_prefers_cached_provider_without_affecting_flash,

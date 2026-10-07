@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import sys
 import tempfile
 import types
-import importlib.util
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
-
 from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
 
 
@@ -846,9 +845,7 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
             assert len(grounded) == 6
             # The build corpus learns every grounded tool result even though
             # runtime simulation deliberately leaves general-purpose work real.
-            for_each = next(
-                step for step in grounded if step.action.name == "spawn_general_purpose_agent_for_each"
-            )
+            for_each = next(step for step in grounded if step.action.name == "spawn_general_purpose_agent_for_each")
             assert for_each.action.arguments == {
                 "type": "for_each",
                 "goal": "Contact each investor",
@@ -865,8 +862,7 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
             dag_specialized = next(
                 step
                 for step in grounded
-                if step.action.name == "spawn_explore_agent"
-                and step.action.tool_call_id == "dag-explore-call"
+                if step.action.name == "spawn_explore_agent" and step.action.tool_call_id == "dag-explore-call"
             )
             assert dag_specialized.action.arguments == {
                 "type": "explore",
@@ -877,8 +873,7 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
             legacy = next(
                 step
                 for step in grounded
-                if step.observation.metadata["source"] == "message_fixture"
-                and step.action.name == "browser_action"
+                if step.observation.metadata["source"] == "message_fixture" and step.action.name == "browser_action"
             )
             browser_terminal = next(
                 step
@@ -1145,6 +1140,88 @@ async def test_prediction_conformance_replays_expected_observations_and_fails_on
         assert failed["status"] == "failed"
         assert failed["dimensions"]["content_accuracy"] == 0.0
 
+        # Exercise native execution qualification through the actual evaluator,
+        # preserving the legacy/default case and all original scoring assertions.
+        from benchmarks.wmh_execution_policy import bind_execution_suite, execution_identity
+
+        class NativeClient(PerfectClient):
+            predictions = 0
+
+            def __init__(self, descriptor):
+                self.descriptor = descriptor
+
+            async def model_identity(self, name):
+                return {
+                    "world_model_id": "artifact-a",
+                    "world_model_manifest_sha256": "a" * 64,
+                    "execution_identity": self.descriptor,
+                }
+
+            async def start_session(self, *args, **kwargs):
+                self.predictions += 1
+                return await super().start_session(*args, **kwargs)
+
+        native_suite = {
+            **json.loads(suite_path.read_text()),
+            "native_world_model_id": "artifact-a",
+            "native_world_model_manifest_sha256": "a" * 64,
+        }
+        native_path = Path(tmp) / "native.base.json"
+        native_path.write_text(json.dumps(native_suite))
+        upstream = execution_identity("upstream", "artifact-a", "a" * 64)
+        candidate = execution_identity("rose-virtual-public-affordances-v1", "artifact-a", "a" * 64)
+        base_client = NativeClient(upstream)
+        baseline = await evaluate_world_model_conformance_suite(
+            native_path, world_model_name="rose-test", client=base_client
+        )
+        assert baseline["status"] == "passed" and base_client.predictions == 3
+        assert baseline["native_execution_identity"] == upstream
+        bound_path = Path(tmp) / "native.candidate.json"
+        native_bytes = native_path.read_bytes()
+        bound = bind_execution_suite(native_path, bound_path, "rose-virtual-public-affordances-v1")
+        assert native_path.read_bytes() == native_bytes and bound["examples"] == native_suite["examples"]
+        candidate_client = NativeClient(candidate)
+        candidate_report = await evaluate_world_model_conformance_suite(
+            bound_path,
+            world_model_name="rose-test",
+            client=candidate_client,
+            execution_policy="rose-virtual-public-affordances-v1",
+        )
+        assert candidate_report["status"] == "passed" and candidate_client.predictions == 3
+        assert candidate_report["native_execution_identity"] == candidate
+        for case_suite, served_descriptor, expected_policy in (
+            (native_path, candidate, "rose-virtual-public-affordances-v1"),
+            (bound_path, upstream, "rose-virtual-public-affordances-v1"),
+            (bound_path, None, "rose-virtual-public-affordances-v1"),
+            (bound_path, {**candidate, "effective_system_sha256": "b" * 64}, "rose-virtual-public-affordances-v1"),
+            (bound_path, candidate, "upstream"),
+        ):
+            reject_client = NativeClient(served_descriptor)
+            try:
+                await evaluate_world_model_conformance_suite(
+                    case_suite, world_model_name="rose-test", client=reject_client, execution_policy=expected_policy
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Missing/wrong execution expectation qualified a native prediction")
+            assert reject_client.predictions == 0
+        malformed_path = Path(tmp) / "native.wrong-policy.json"
+        malformed_path.write_text(json.dumps({**bound, "native_execution_identity": upstream}))
+        reject_client = NativeClient(candidate)
+        try:
+            await evaluate_world_model_conformance_suite(
+                malformed_path,
+                world_model_name="rose-test",
+                client=reject_client,
+                execution_policy="rose-virtual-public-affordances-v1",
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Wrong bound policy qualified a native prediction")
+        assert reject_client.predictions == 0
+
 
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
     OtelGenAIAdapter = _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
@@ -1186,10 +1263,11 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
     multiplication OOM-killed the 8 GiB cloud maintenance machine for a 20-bundle delta refresh.
     """
     _load_upstream_otel_adapter_class()
-    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
     import wmh.ingest.otel_genai as otel_genai
     from wmh.ingest.otel_genai import OtelGenAIAdapter
     from wmh.retrieval import HashingEmbedder
+
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
 
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
         restore = _with_archive_env(tmp)
@@ -1604,9 +1682,7 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
             assert not (Path(out) / "otel" / "root-simulated.otel.jsonl").exists()
 
             assert result["excluded_reasons"]["simulated-run"] == 2
-            export_event = [
-                event for event in progress_events if event["title"] == "World Model Trace Export"
-            ][-1]
+            export_event = [event for event in progress_events if event["title"] == "World Model Trace Export"][-1]
             assert export_event["metadata"]["filtered_before_export"] == 1
         finally:
             restore()
@@ -1894,9 +1970,7 @@ def test_export_worker_filters_bundles_without_completed_results():
             patch.object(wmh, "bundle_world_model_mode", return_value="real"),
             patch.object(wmh, "load_grounded_transitions", return_value=[]),
         ):
-            result = wmh._export_bundle_worker(
-                ("root-empty", str(otel), str(session), "train", 0)
-            )
+            result = wmh._export_bundle_worker(("root-empty", str(otel), str(session), "train", 0))
         assert result == ("root-empty", 0, "filtered:no-completed-results")
         assert not otel.exists()
         assert not session.exists()
@@ -1905,9 +1979,7 @@ def test_export_worker_filters_bundles_without_completed_results():
 def test_export_worker_retries_transient_r2_stream_failures():
     import benchmarks.world_model_harness as wmh
 
-    stream_failure = RuntimeError(
-        "ResponseStreamingError: IncompleteRead(1048576 bytes read, 2097152 more expected)"
-    )
+    stream_failure = RuntimeError("ResponseStreamingError: IncompleteRead(1048576 bytes read, 2097152 more expected)")
 
     with tempfile.TemporaryDirectory() as out:
         otel = Path(out) / "retry.otel.jsonl"
@@ -1931,9 +2003,7 @@ def test_export_worker_retries_transient_r2_stream_failures():
             patch.object(wmh, "_build_replay_session", return_value={"transition_count": 1}),
             patch.object(wmh.time, "sleep") as sleep,
         ):
-            result = wmh._export_bundle_worker(
-                ("root-stream-retry", str(otel), str(session), "train", 0)
-            )
+            result = wmh._export_bundle_worker(("root-stream-retry", str(otel), str(session), "train", 0))
 
         assert result == ("root-stream-retry", 1, None)
         assert prefetch.call_count == 2
@@ -1997,8 +2067,7 @@ def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
             bundle = Path(tmp) / root
             for item in list(bundle.rglob("*")):
                 if item.is_file() and (
-                    item.name.startswith("end.fixture.json.gz.enc")
-                    or item.name.startswith("transitions.json.gz.enc")
+                    item.name.startswith("end.fixture.json.gz.enc") or item.name.startswith("transitions.json.gz.enc")
                 ):
                     item.unlink()
 
@@ -2078,8 +2147,7 @@ def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
                 "real explore result",
             ]
             assert all(
-                transition.observation.metadata["source"] == "llm_context_tool_result"
-                for transition in transitions
+                transition.observation.metadata["source"] == "llm_context_tool_result" for transition in transitions
             )
         finally:
             restore()
@@ -2443,15 +2511,15 @@ def test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_pr
             del sys.modules[name]
 
     import numpy as np
+    from wmh.engine.build import build as native_build
+    from wmh.providers.base import Completion, Message, ProviderConfig, ProviderKind
+    from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
 
     from benchmarks.world_model_harness import (
         build_world_model_from_archives,
         load_grounded_transitions,
         normalize_world_model_index_records,
     )
-    from wmh.engine.build import build as native_build
-    from wmh.providers.base import Completion, Message, ProviderConfig, ProviderKind
-    from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
 
     class FakeProvider:
         def __init__(self) -> None:
@@ -2559,6 +2627,8 @@ def test_build_world_model_from_archives_runs_actual_upstream_build_with_fake_pr
 
 
 def test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing_clocks():
+    from wmh.ingest.otel_genai import OtelGenAIAdapter
+
     from benchmarks.world_model_harness import (
         CanonicalAction,
         CanonicalObservation,
@@ -2566,7 +2636,6 @@ def test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing
         jsonl_line,
         transitions_to_otel_spans,
     )
-    from wmh.ingest.otel_genai import OtelGenAIAdapter
 
     timestamps = [1783099905246] * 16 + list(range(1783099905245, 1783099905237, -1)) + [None, None, 0]
     transitions = [
@@ -2574,12 +2643,16 @@ def test_native_wmh_ingestion_preserves_completed_pairs_with_equal_or_regressing
             state_before={"root_agent_id": "equal-clock-root", "row": row},
             scratchpad=f"state-{row}",
             action=CanonicalAction(
-                category="explore", name="spawn_explore_agent",
-                arguments={"goal": f"request-{row}"}, tool_call_id=f"call-{row}",
+                category="explore",
+                name="spawn_explore_agent",
+                arguments={"goal": f"request-{row}"},
+                tool_call_id=f"call-{row}",
                 timestamp_ms=timestamp,
             ),
             observation=CanonicalObservation(
-                category="explore", content=f"completed-result-{row}", timestamp_ms=timestamp,
+                category="explore",
+                content=f"completed-result-{row}",
+                timestamp_ms=timestamp,
             ),
         )
         for row, timestamp in enumerate(timestamps)
@@ -2745,6 +2818,53 @@ async def test_wmh_http_client_matches_upstream_serving_routes():
         )
         assert obs["content"] == "predicted"
         assert [r["method"] for r in requests] == ["GET", "POST", "POST"]
+    finally:
+        teardown_mock()
+
+
+async def test_runtime_wmh_retirement_uses_exact_session_and_preserves_join_receipt():
+    from helpers.world_model_runtime import WMHHttpClient
+
+    receipt = {
+        "ended": "session-owned",
+        "session_id": "session-owned",
+        "session_scope_id": "root-owned",
+        "engine": "experiential",
+        "join_verified": True,
+        "revision": 7,
+        "state": {"counter": 7},
+        "history": [{"revision": 7}],
+        "usage": {"calls": 9, "total_cost_usd": 0.42},
+    }
+    responses = [
+        httpx.Response(200, json=receipt),
+        httpx.Response(200, json={**receipt, "ended": "session-foreign"}),
+        httpx.Response(409, json={"detail": "provider cleanup not joined"}),
+    ]
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "DELETE"
+        assert str(request.url) == "https://wmh.example.test/world_models/rose-native/sessions/session-owned"
+        assert not request.content
+        return responses.pop(0)
+
+    setup_mock_fn(handler)
+    try:
+        client = WMHHttpClient("https://wmh.example.test")
+        assert await client.end_session("rose-native", "session-owned") == receipt
+        try:
+            await client.end_session("rose-native", "session-owned")
+            raise AssertionError("a foreign receipt must not acknowledge owned retirement")
+        except ValueError:
+            pass
+        try:
+            await client.end_session("rose-native", "session-owned")
+            raise AssertionError("an unjoined HTTP error must not acknowledge retirement")
+        except httpx.HTTPStatusError as exc:
+            assert exc.response.status_code == 409
+        assert len(requests) == 3
     finally:
         teardown_mock()
 
@@ -2950,6 +3070,8 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
     from benchmarks.world_model_harness import canonical_action_from_tool_call
     from helpers.world_model_runtime import (
         WorldModelToolExecutionAdapter,
+    )
+    from helpers.world_model_runtime import (
         canonical_action_from_tool_call as runtime_action_from_tool_call,
     )
 
@@ -2986,13 +3108,14 @@ def test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it():
 
 async def test_demo_wmh_cache_reuses_equivalent_actions_across_run_ids():
     """Run-local action IDs and timestamps must not bust identical DEMO predictions."""
+    from wmh.core.render import build_env_prompt
+    from wmh.core.types import Action, ActionKind, EnvState
+    from wmh.providers.base import Message
+
     from benchmarks.wmh_rose_provider import RoseUsageAccumulator, RoseWMHProvider
     from providers.fast_cache.context import current_context
     from providers.fast_cache.rose_cache import request_key_material
     from providers.rose import RoseResponse
-    from wmh.core.render import build_env_prompt
-    from wmh.core.types import Action, ActionKind, EnvState
-    from wmh.providers.base import Message
 
     goal = "Raise me 5m dollars for my company Rose Labs\nNo questions asked"
     keys = []
@@ -3173,10 +3296,11 @@ def test_world_model_observation_preserves_archived_browser_state_shape():
 
 def test_world_model_observation_unwraps_nested_output_envelope():
     """An off-contract extra WMH output wrapper must not leak archive JSON."""
-    from benchmarks.world_model_harness import world_model_observation_to_tool_result
-    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
-    from domains.spawn_agent.handler import _world_model_specialized_result_text
     from wmh.core.parsing import parse_observation
+
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from domains.spawn_agent.handler import _world_model_specialized_result_text
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
 
     canonical = json.dumps(
         {
@@ -3200,14 +3324,20 @@ def test_world_model_observation_unwraps_nested_output_envelope():
         assert "output" not in result
 
         terminal = {"status": "success", "structured_response": {"account_accessed": True, "balance_usd": 0}}
-        object_observation = parse_observation(json.dumps({"output": terminal, "is_error": False})).model_dump(mode="json")
+        object_observation = parse_observation(json.dumps({"output": terminal, "is_error": False})).model_dump(
+            mode="json"
+        )
         object_result = convert(object_observation, simulated=True)
-        assert json.loads(_world_model_specialized_result_text(object_result)) == terminal, "object-valued WMH output must expose the terminal result"
+        assert json.loads(_world_model_specialized_result_text(object_result)) == terminal, (
+            "object-valued WMH output must expose the terminal result"
+        )
 
         production_result = {"success": True, "output": {"rows": []}, "metadata": {"source": "query"}}
         direct_result = convert({"content": json.dumps(production_result), "is_error": False}, simulated=True)
         assert direct_result["output"] == production_result["output"]
-        assert direct_result["metadata"] == production_result["metadata"], "production output fields must retain their result envelope"
+        assert direct_result["metadata"] == production_result["metadata"], (
+            "production output fields must retain their result envelope"
+        )
 
 
 def test_world_model_observation_keeps_error_text_for_temporal_messages():
@@ -3779,12 +3909,26 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     )
     verifier = AsyncMock(return_value={"score": 1, "reasoning": "Confirmed", "structured_response": {}})
     kwargs = dict(
-        user_id="user-1", agent_id="agent-1", goal="Complete checkout", tool_call_id="browser-call",
-        task_id="browser-task", session_id=None, cdp_url=None, is_resume=False,
-        output_schema={"fields": []}, attachments=None, write_lock_enabled=True,
-        start_url="https://shop.example.test", write_lock_resume_state=None,
-        system_name="Rose", use_claude_mode=False, gpt_token=None, gpt_account_id=None,
-        gpt_token_source=None, gpt_token_pool_id=None, world_model=FakeWorldModel(),
+        user_id="user-1",
+        agent_id="agent-1",
+        goal="Complete checkout",
+        tool_call_id="browser-call",
+        task_id="browser-task",
+        session_id=None,
+        cdp_url=None,
+        is_resume=False,
+        output_schema={"fields": []},
+        attachments=None,
+        write_lock_enabled=True,
+        start_url="https://shop.example.test",
+        write_lock_resume_state=None,
+        system_name="Rose",
+        use_claude_mode=False,
+        gpt_token=None,
+        gpt_account_id=None,
+        gpt_token_source=None,
+        gpt_token_pool_id=None,
+        world_model=FakeWorldModel(),
     )
     with (
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
@@ -3799,13 +3943,18 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     ):
         pending = await browser_handler._spawn_browser_agent_activity_v3_simulated(**kwargs)
         assert pending["status"] == "awaiting_payment_card_approval"
-        assert json.loads(pending["simulated_turn_messages"][-1]["content"])["status"] == "awaiting_payment_card_approval"
+        assert (
+            json.loads(pending["simulated_turn_messages"][-1]["content"])["status"] == "awaiting_payment_card_approval"
+        )
         kwargs["is_resume"] = True
         kwargs["write_lock_resume_state"] = {
-            **pending, "approval_type": "payment",
+            **pending,
+            "approval_type": "payment",
             "payment_card_refs": {
-                "card_number": "4111111111111111", "card_name": "Rose Labs",
-                "card_expiry": "12/30", "card_cvv": "123",
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
             },
             "payment_card_last4": "1111",
         }
@@ -4287,18 +4436,20 @@ async def test_startup_sms_seeds_wmh_with_demo_root_goal():
             forbidden_real,
             allow_real_fallback=False,
         )
-        assert created == [{
-            "task": root_goal,
-            "seed_state": {
-                "structured": {
-                    "schema": "rose.runtime_initial_state.v1",
-                    "root_agent_id": "agent-startup-test",
-                    "root_goal": root_goal,
+        assert created == [
+            {
+                "task": root_goal,
+                "seed_state": {
+                    "structured": {
+                        "schema": "rose.runtime_initial_state.v1",
+                        "root_agent_id": "agent-startup-test",
+                        "root_goal": root_goal,
+                    },
+                    "scratchpad": "",
                 },
-                "scratchpad": "",
-            },
-            "scope": "agent-startup-test",
-        }]
+                "scope": "agent-startup-test",
+            }
+        ]
         assert actions == ["notify_sms_event", "spawn_browser_agent"]
     finally:
         runtime._WMH_SESSION_CACHE.pop(cache_key, None)
@@ -4306,16 +4457,14 @@ async def test_startup_sms_seeds_wmh_with_demo_root_goal():
 
 async def test_runtime_world_model_session_is_shared_by_root_agent_tree():
     """Root and real GP children share WMH state; separate roots stay isolated."""
-    from helpers import world_model_runtime as runtime
     from domains.call_phone_number.handler import call_phone_number_activity
+    from helpers import world_model_runtime as runtime
 
     created: list[str] = []
     stepped: list[tuple[str, str]] = []
 
     class FakeClient:
-        async def create_session(
-            self, _model, *, task=None, seed_state=None, session_scope_id=None
-        ):
+        async def create_session(self, _model, *, task=None, seed_state=None, session_scope_id=None):
             session_id = f"session-{len(created) + 1}"
             created.append(session_id)
             assert seed_state["structured"]["root_agent_id"] == session_scope_id
@@ -4359,11 +4508,14 @@ async def test_runtime_world_model_session_is_shared_by_root_agent_tree():
         ]
         # Activities do not inherit workflow contextvars. Resolve the actual
         # phone caller's durable tree without prebinding root tracing context.
-        with patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-golden"}), patch.object(
-            runtime, "WMHHttpClient", return_value=FakeClient()
-        ), patch.object(runtime.activity, "in_activity", return_value=True), patch(
-            "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "child goal", False, "root-tree-1", "root goal", True)),
+        with (
+            patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-golden"}),
+            patch.object(runtime, "WMHHttpClient", return_value=FakeClient()),
+            patch.object(runtime.activity, "in_activity", return_value=True),
+            patch(
+                "providers.fast_cache.client.resolve_agent_fast_mode",
+                new=AsyncMock(return_value=(False, "child goal", False, "root-tree-1", "root goal", True)),
+            ),
         ):
             await call_phone_number_activity(
                 "+15551234567", "ask", {}, "gp-child-phone", "phone-call", world_model_mode="simulate"
@@ -4384,19 +4536,39 @@ async def test_runtime_wmh_http_retries_preserve_native_invocation_identity():
         requests.append(request)
         return httpx.Response(200, json={"observation": {"content": "ok"}})
 
-    info = types.SimpleNamespace(workflow_id="workflow-root", workflow_run_id="run-1", activity_id="activity-1", attempt=1)
+    info = types.SimpleNamespace(
+        workflow_id="workflow-root", workflow_run_id="run-1", activity_id="activity-1", attempt=1
+    )
     setup_mock_fn(handler)
     try:
-        with patch.object(runtime.activity, "in_activity", return_value=True), patch.object(runtime.activity, "info", return_value=info):
+        with (
+            patch.object(runtime.activity, "in_activity", return_value=True),
+            patch.object(runtime.activity, "info", return_value=info),
+        ):
             client = runtime.WMHHttpClient("https://wmh.example.test")
-            for activity_id, attempt, timestamp in [("activity-1", 1, 100), ("activity-1", 2, 200), ("activity-2", 1, 300)]:
+            for activity_id, attempt, timestamp in [
+                ("activity-1", 1, 100),
+                ("activity-1", 2, 200),
+                ("activity-2", 1, 300),
+            ]:
                 info.activity_id, info.attempt = activity_id, attempt
-                action = runtime.CanonicalAction(category="browser", name="browser_action", arguments={"query": "check balance"}, agent_id="child", tool_call_id="poll", timestamp_ms=timestamp)
+                action = runtime.CanonicalAction(
+                    category="browser",
+                    name="browser_action",
+                    arguments={"query": "check balance"},
+                    agent_id="child",
+                    tool_call_id="poll",
+                    timestamp_ms=timestamp,
+                )
                 await client.step("rose", "session-1", action)
         identities = [request.headers.get("X-Rose-WMH-Invocation") for request in requests]
         assert identities[0] and identities[0] == identities[1], "native retries lost their operation identity"
         assert identities[2] != identities[0], "a new funding check reused a prior receipt"
-        assert [json.loads(request.content)["action"]["arguments"]["timestamp_ms"] for request in requests] == [100, 200, 300]
+        assert [json.loads(request.content)["action"]["arguments"]["timestamp_ms"] for request in requests] == [
+            100,
+            200,
+            300,
+        ]
     finally:
         teardown_mock()
 
@@ -4768,8 +4940,8 @@ def test_write_eval_suite_matches_wmh_examples_shape():
 
 def test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps():
     """Parallel child actions may predict together without losing session writes."""
-    from concurrent.futures import ThreadPoolExecutor
     import threading
+    from concurrent.futures import ThreadPoolExecutor
     from unittest.mock import patch
 
     from fastapi import FastAPI
@@ -4825,12 +4997,18 @@ def test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps():
         session = model.new_session(task="Send two independent messages")
         _install_root_scoped_sessions(FastAPI(), "rose", model)
         actions = [
-            Action.model_validate(CanonicalAction(
-                category="message", name="message_transport_send", arguments={"id": n},
-                agent_id=f"child-{n}", tool_call_id=f"send-{n}",
-            ).to_wmh_action())
+            Action.model_validate(
+                CanonicalAction(
+                    category="message",
+                    name="message_transport_send",
+                    arguments={"id": n},
+                    agent_id=f"child-{n}",
+                    tool_call_id=f"send-{n}",
+                ).to_wmh_action()
+            )
             for n in (1, 2)
         ]
+
         def invoke(action, invocation):
             context = getattr(server, "_ROSE_STEP_INVOCATION", None)
             token = context.set(invocation) if context is not None else None
@@ -4840,8 +5018,15 @@ def test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps():
                 if context is not None:
                     context.reset(token)
 
-        with patch("benchmarks.serve_world_model.logger.info", side_effect=log_event), ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(invoke, action, f"native-activity-{n}") for n, action in enumerate(actions) for _ in range(2)]
+        with (
+            patch("benchmarks.serve_world_model.logger.info", side_effect=log_event),
+            ThreadPoolExecutor(max_workers=4) as pool,
+        ):
+            futures = [
+                pool.submit(invoke, action, f"native-activity-{n}")
+                for n, action in enumerate(actions)
+                for _ in range(2)
+            ]
             observations = [future.result(timeout=5) for future in futures]
 
         assert provider.peak_active == 2, "same-session WMH predictions must overlap"
@@ -4850,16 +5035,19 @@ def test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps():
         assert session.state.scratchpad.count("delivery recorded") == 2
         assert model.session_usage(session.id).total.calls == 2
         for event in ("wmh_step_prediction_started", "wmh_step_committed"):
-            assert {(entry.get("agent_id"), entry.get("tool_call_id")) for entry in logged if entry["event"] == event} == {
-                ("child-1", "send-1"), ("child-2", "send-2"),
+            assert {
+                (entry.get("agent_id"), entry.get("tool_call_id")) for entry in logged if entry["event"] == event
+            } == {
+                ("child-1", "send-1"),
+                ("child-2", "send-2"),
             }, "WMH timing events must retain the canonical agent and tool-call identities"
 
 
 def test_wmh_rose_provider_shares_one_event_loop_across_parallel_calls():
     """WMH cache batches use asyncio futures, which require one owning event loop."""
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     from wmh.providers.base import Message
 
@@ -4908,7 +5096,6 @@ def test_wmh_rose_provider_shares_one_event_loop_across_parallel_calls():
 
 def test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups():
     """Two served LLM calls must both leave the actual Fast Cache future queue."""
-    import asyncio
     import itertools
     import threading
 
@@ -4947,8 +5134,9 @@ def test_wmh_parallel_calls_finish_real_fast_cache_batch_lookups():
         except BaseException as exc:
             errors.append(exc)
 
-    with patch.object(cache_client, "_fetch_cache_records_many", fake_fetch), patch.object(
-        cache_client, "_GET_BATCH_DELAY_S", 0.05
+    with (
+        patch.object(cache_client, "_fetch_cache_records_many", fake_fetch),
+        patch.object(cache_client, "_GET_BATCH_DELAY_S", 0.05),
     ):
         threads = [threading.Thread(target=call, daemon=True) for _ in range(2)]
         for thread in threads:
@@ -5012,18 +5200,25 @@ def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committ
         action = {"kind": "tool_call", "name": "rose.explore.spawn_explore_agent", "arguments": {}}
 
         for content, finish in [
-            ("", "length"), (" \n\t", "stop"), ('{"output":"unfinished', "length"),
+            ("", "length"),
+            (" \n\t", "stop"),
+            ('{"output":"unfinished', "length"),
             ('{"output":"","is_error":false,"state_note":"research complete"}', "stop"),
             ('{"output":"","is_error":false}', "stop"),
             ('{"state_note":"research complete"}', "stop"),
         ]:
             client.content, client.finish_reason = content, finish
             response = http.post(url, json={"action": action}, headers={"X-Rose-WMH-Invocation": "native-step-1"})
-            assert response.status_code == 500, "blank or truncated WMH completion must not become successful tool output"
+            assert response.status_code == 500, (
+                "blank or truncated WMH completion must not become successful tool output"
+            )
             assert session.model_dump(mode="json") == before, "failed prediction changed WMH state"
             assert not retriever.added, "failed prediction polluted retrieval"
 
-        client.content, client.finish_reason = '{"output":"verified prospects","state_note":"research complete"}', "stop"
+        client.content, client.finish_reason = (
+            '{"output":"verified prospects","state_note":"research complete"}',
+            "stop",
+        )
         response = http.post(url, json={"action": action}, headers={"X-Rose-WMH-Invocation": "native-step-1"})
         assert response.status_code == 200
         assert response.json()["observation"]["content"] == "verified prospects"
@@ -5032,7 +5227,9 @@ def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committ
         retry = http.post(url, json={"action": action}, headers={"X-Rose-WMH-Invocation": "native-step-1"})
         assert retry.json() == response.json()
         assert len(session.history) == len(retriever.added) == 1, "HTTP activity retry duplicated a commit"
-        client.content = json.dumps({"output": {"status": "declined", "balance_usd": 0}, "is_error": True, "state_note": "no funding deposited"})
+        client.content = json.dumps(
+            {"output": {"status": "declined", "balance_usd": 0}, "is_error": True, "state_note": "no funding deposited"}
+        )
         response = http.post(url, json={"action": action})
         assert response.status_code == 200
         observation = response.json()["observation"]
@@ -5062,8 +5259,12 @@ def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committ
         observation = response.json()["observation"]
         assert observation["is_error"] is True, "production receipt discarded explicit error truth"
         from helpers.world_model_runtime import world_model_observation_to_tool_result
+
         assert world_model_observation_to_tool_result(observation, simulated=True)["success"] is False
-        for text in ["A valid observation with {unstructured braces}.", json.dumps({"success": False, "output": "declined", "metadata": {"source": "payment"}})]:
+        for text in [
+            "A valid observation with {unstructured braces}.",
+            json.dumps({"success": False, "output": "declined", "metadata": {"source": "payment"}}),
+        ]:
             client.content = text
             response = http.post(url, json={"action": action})
             assert response.status_code == 200
@@ -5073,6 +5274,7 @@ def test_served_wmh_rejects_empty_and_truncated_rose_predictions_without_committ
 def test_native_upstream_shared_world_regressions():
     """The recurring WMH gate must exercise the real isolated upstream package."""
     import subprocess
+
     from benchmarks.experiential_bridge import native_python
 
     root = Path(__file__).resolve().parents[3]
@@ -5114,11 +5316,17 @@ def test_native_delta_reuses_unchanged_artifact_and_reports_actual_builds():
                 (Path(output) / "build.manifest.json").write_text(json.dumps({"engine": "experiential"}))
                 (Path(output) / "conformance.native.json").write_text((Path(source) / "conformance.json").read_text())
 
-            with patch.dict(os.environ, {"WMH_ENGINE": "experiential", "WMH_EXPORT_WORKERS": "1"}), patch(
-                "benchmarks.experiential_bridge.build_native", native
+            with (
+                patch.dict(os.environ, {"WMH_ENGINE": "experiential", "WMH_EXPORT_WORKERS": "1"}),
+                patch("benchmarks.experiential_bridge.build_native", native),
             ):
-                options = dict(output_dir=out, root_agent_ids=["root-native-delta"], name="rose-native-delta",
-                               gepa_budget=0, require_conformance=False)
+                options = dict(
+                    output_dir=out,
+                    root_agent_ids=["root-native-delta"],
+                    name="rose-native-delta",
+                    gepa_budget=0,
+                    require_conformance=False,
+                )
                 first = update_world_model_for_simulation(**options)
                 second = update_world_model_for_simulation(**options)
                 forced = update_world_model_for_simulation(**options, force=True)
@@ -5152,7 +5360,10 @@ async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
     r.record("native_upstream_shared_world_regressions", test_native_upstream_shared_world_regressions)
-    r.record("native_delta_reuses_unchanged_artifact_and_reports_actual_builds", test_native_delta_reuses_unchanged_artifact_and_reports_actual_builds)
+    r.record(
+        "native_delta_reuses_unchanged_artifact_and_reports_actual_builds",
+        test_native_delta_reuses_unchanged_artifact_and_reports_actual_builds,
+    )
     r.record("native_rose_provider_regressions", test_native_rose_provider_regressions)
     await r.record_async(
         "runtime_wmh_http_retries_preserve_native_invocation_identity",
@@ -5353,6 +5564,10 @@ async def run_all_tests():
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
     await r.record_async(
         "wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes
+    )
+    await r.record_async(
+        "runtime_wmh_retirement_uses_exact_session_and_preserves_join_receipt",
+        test_runtime_wmh_retirement_uses_exact_session_and_preserves_join_receipt,
     )
     await r.record_async(
         "evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result",

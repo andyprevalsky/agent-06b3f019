@@ -192,6 +192,16 @@ class WMHHttpClient:
             raise ValueError("WMH session response did not include session_id")
         return session_id
 
+    async def end_session(self, world_model: str, session_id: str) -> JsonObject:
+        """Retire an owned world and retain the server's joined terminal receipt."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.delete(f"{self.base_url}/world_models/{world_model}/sessions/{session_id}")
+            response.raise_for_status()
+            data = response.json()
+        if not isinstance(data, dict) or data.get("ended") != session_id:
+            raise ValueError("WMH retirement response did not match the owned session")
+        return data
+
     async def step(self, world_model: str, session_id: str, action: CanonicalAction | JsonObject) -> JsonObject:
         wmh_action = action.to_wmh_action() if isinstance(action, CanonicalAction) else action
         # Native activity -> stable invocation header -> shared session receipt.

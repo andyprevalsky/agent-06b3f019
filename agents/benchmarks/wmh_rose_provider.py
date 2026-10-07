@@ -32,6 +32,7 @@ import json
 import os
 import re
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -56,6 +57,7 @@ logger = structlog.get_logger(__name__)
 
 _WMH_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
 _WMH_ASYNC_LOOP_LOCK = threading.Lock()
+_WMH_NATIVE_JOIN_TIMEOUT_SECONDS = 10.0
 
 
 def _wmh_async_loop() -> asyncio.AbstractEventLoop:
@@ -159,6 +161,11 @@ class _WMHFastCacheContext(FastCacheContext):
             # Generic DEMO normalization removes UUIDs and clocks. Native output
             # is correlated to exact call IDs, and state/history clocks shape its
             # prediction. Bind those inputs before applying generic normalization.
+            from benchmarks.wmh_execution_policy import cache_policy_identity
+
+            policy = cache_policy_identity(messages["messages"])
+            if policy is not None:
+                messages = {**messages, "native_execution_policy": policy}
             material = json.dumps(messages["messages"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             messages = {**messages, "native_request_fingerprint": hashlib.sha256(material.encode()).hexdigest()}
         return super().llm_key(call_site, messages)
@@ -465,6 +472,11 @@ class RoseWMHProvider:
         # Defaults to the process-level accumulator the `/rose_usage` route reads; tests
         # inject their own to assert accumulation in isolation.
         self._usage = usage if usage is not None else GLOBAL_ROSE_USAGE
+        # Native scope ownership lives exclusively on the shared provider loop.
+        self._native_operations: dict[str, dict[str, tuple[str, asyncio.Task]]] = {}
+        self._native_retirements: dict[str, asyncio.Task] = {}
+        self._native_closed_scopes: set[str] = set()
+        self._maximum_native_scopes = 16384
 
     # -- WMH Provider protocol -------------------------------------------------
 
@@ -493,6 +505,101 @@ class RoseWMHProvider:
             raise RuntimeError("WMH synchronous complete cannot run on its async bridge loop")
         future = asyncio.run_coroutine_threadsafe(self._complete_async(system, messages, max_tokens=max_tokens), loop)
         return future.result()
+
+    async def complete_scoped(
+        self, session_id: str, prediction_id: str, system: str, messages: List["Message"], *, max_tokens: int
+    ) -> "Completion":
+        """Keep native work cancellable without moving Fast Cache between loops."""
+        loop = _wmh_async_loop()
+        coroutine = self._complete_scoped_on_loop(session_id, prediction_id, system, messages, max_tokens)
+        if asyncio.get_running_loop() is loop:
+            return await coroutine
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, loop))
+
+    async def _complete_scoped_on_loop(self, session_id, prediction_id, system, messages, max_tokens):
+        if session_id in self._native_closed_scopes:
+            raise ValueError("Native provider session is retired")
+        identity = hashlib.sha256(
+            json.dumps(
+                {"messages": _to_rose_messages(system, messages), "max_tokens": max_tokens},
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        if session_id not in self._native_operations:
+            if len(self._native_closed_scopes.union(self._native_operations)) >= self._maximum_native_scopes:
+                raise ValueError("Native provider scope capacity reached")
+            self._native_operations[session_id] = {}
+        operations = self._native_operations[session_id]
+        existing = operations.get(prediction_id)
+        if existing:
+            if existing[0] != identity:
+                raise ValueError("Native prediction ID reused for a different request")
+            task = existing[1]
+        else:
+            task = asyncio.create_task(self._complete_async(system, messages, max_tokens=max_tokens))
+            operations[prediction_id] = (identity, task)
+
+            def completed(done):
+                # Retrieve failures even if an HTTP waiter disconnected. Explicit
+                # retirement still joins the actual task, not its wrapper Future.
+                if not done.cancelled():
+                    done.exception()
+                if operations.get(prediction_id, (None, None))[1] is done:
+                    operations.pop(prediction_id, None)
+                if not operations and self._native_operations.get(session_id) is operations:
+                    self._native_operations.pop(session_id, None)
+
+            task.add_done_callback(completed)
+        return await asyncio.shield(task)
+
+    async def retire_scope(self, session_id: str) -> dict:
+        """Fence this scope and await actual provider cleanup before acknowledging."""
+        loop = _wmh_async_loop()
+        coroutine = self._retire_scope_on_loop(session_id)
+        if asyncio.get_running_loop() is loop:
+            return await coroutine
+        # Losing this HTTP waiter cannot abandon a retirement already admitted.
+        return await asyncio.shield(asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, loop)))
+
+    async def _retire_scope_on_loop(self, session_id):
+        existing = self._native_retirements.get(session_id)
+        if existing is None:
+            if (
+                session_id not in self._native_closed_scopes
+                and session_id not in self._native_operations
+                and len(self._native_closed_scopes.union(self._native_operations)) >= self._maximum_native_scopes
+            ):
+                raise ValueError("Native provider retirement capacity reached")
+            self._native_closed_scopes.add(session_id)
+
+            async def join():
+                tasks = [item[1] for item in self._native_operations.get(session_id, {}).values()]
+                for task in tasks:
+                    if not task.cancelling():
+                        task.cancel()
+                if tasks:
+                    _, pending = await asyncio.wait(tasks, timeout=_WMH_NATIVE_JOIN_TIMEOUT_SECONDS)
+                    if pending:
+                        raise RuntimeError("Native provider tasks did not join during retirement")
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                self._native_operations.pop(session_id, None)
+                return {"session_id": session_id, "join_verified": True, "usage": self._usage.snapshot().as_dict()}
+
+            existing = asyncio.create_task(join())
+            # Duplicate retirement callers share this owner and its frozen receipt.
+            self._native_retirements[session_id] = existing
+
+            def completed(done):
+                # Keep the compact admission fence, rather than retaining a failed
+                # retirement traceback and its entire provider request indefinitely.
+                if done.cancelled() or done.exception() is not None:
+                    if self._native_retirements.get(session_id) is done:
+                        self._native_retirements.pop(session_id, None)
+
+            existing.add_done_callback(completed)
+        return deepcopy(await asyncio.shield(existing))
 
     def embed(self, texts: List[str]) -> List[List[float]]:  # pragma: no cover - not on serve path
         raise NotImplementedError(
