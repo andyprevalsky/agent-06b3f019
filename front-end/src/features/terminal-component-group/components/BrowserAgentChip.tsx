@@ -8,6 +8,10 @@
  *     - COLLAPSED: shows only the final result summary (+ status dot, step count).
  *     - EXPANDED:  shows a 3-tab view.
  *
+ * STATUS (derived from the result text, which leads with the task goal):
+ *   **Status** line present => [FAILED] iff that line has ❌/FAILED, else [DONE]
+ *   no **Status** line      => [FAILED] iff the text has ❌/FAILED/error, else [DONE]
+ *
  * TAB (only meaningful while EXPANDED):
  *   [RESULT] <-> [RECORDING]   (default RESULT)
  *   RECORDING = video player + live trajectory side panel (scrub-synced)
@@ -67,16 +71,13 @@ import {
   seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
+import { isFailedBrowserResult } from './browser-agent-chip/resultStatus';
 import { LiveViewFrame } from './browser-status-bar/BrowserLiveViewFrame';
 
 type Tab = 'result' | 'recording';
 
 interface BrowserAgentChipProps {
   message: Message;
-}
-
-function isFailure(text: string | undefined): boolean {
-  return !!text && /❌|FAILED|\berror\b/i.test(text);
 }
 
 export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
@@ -271,7 +272,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     [trajectory, playheadSec],
   );
 
-  const failed = isFailure(resultText);
+  const failed = isFailedBrowserResult(resultText);
 
   function syncPlayheadFromVideo(video: HTMLVideoElement, segIdx: number) {
     if (Number.isFinite(video.duration) && video.duration > 0) {
