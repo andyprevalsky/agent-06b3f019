@@ -22,6 +22,8 @@ tags:
   - post-completion
 sources:
   - agent 3be856d5-e4fe-4eb5-b30e-ea99d44793fe
+  - commit 35b4ed1ce08f216ed5feedf59b507c80c10b39d6
+  - PR #1437
 repro: front-end/src/tests/blackbox/hooks-lib-realtime-handlers.blackbox.ts
 status: fixed
 ---
