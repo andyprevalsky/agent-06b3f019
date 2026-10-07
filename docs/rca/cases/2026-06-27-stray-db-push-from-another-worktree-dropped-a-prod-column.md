@@ -122,9 +122,11 @@ sampled. A concurrent build's validation phase sorts the TIDs it finds in the
 new index, and a trigram GIN index holds one posting per trigram per row, which
 is the likely source. `AgentTrajectorySearch_searchText_trgm_idx` therefore
 remains absent until prod has measured disk headroom; a blocking build would
-stall the `Message` trigger that maintains the table. The stray `PhoneCallSession` table must be
-dropped before the branch's migration can deploy. That prod DDL, and the
-trajectory index rebuild, wait for explicit human approval.
+stall the `Message` trigger that maintains the table. With explicit human
+approval, the empty stray `PhoneCallSession` table was dropped on 2026-10-07 at
+15:21Z (`to_regclass` null afterwards) so the branch's migration can create it
+with RLS; the approved decision for the trajectory index is to leave it absent
+until disk headroom is measured.
 
 Before building an index concurrently on a large prod table, compare its
 expected temporary sort size with free disk, not only the statement timeout.
