@@ -12,7 +12,7 @@ export function safeArchivePath(input: string): string {
     .join('/');
 }
 
-function localArchiveRoot(): string {
+export function localArchiveRoot(): string {
   return process.env.TRACE_ARCHIVE_LOCAL_DIR || path.resolve(process.cwd(), '..', '.context');
 }
 

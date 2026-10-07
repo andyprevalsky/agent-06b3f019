@@ -1,4 +1,10 @@
-import { localObjectPath, objectKey, objectPrefix, safeArchivePath } from './traceArchivePaths';
+import {
+  localArchiveRoot,
+  localObjectPath,
+  objectKey,
+  objectPrefix,
+  safeArchivePath,
+} from './traceArchivePaths';
 import {
   type ArtifactCreation,
   getS3Client,

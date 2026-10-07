@@ -722,6 +722,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
+       "$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
@@ -780,6 +781,9 @@ GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
 PRESTACK_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestack-recovery.py"
 VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
 FORENSIC_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-forensic-retirement.py"
+SEALED_MACHINE_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sealed-machine-retirement.py"
+[ -f "$SEALED_MACHINE_RETIREMENT_HELPER" ] \
+    || SEALED_MACHINE_RETIREMENT_HELPER="$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py"
 RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
 # An exact owner created before this collector was snapshotted can still be
 # recovered with the committed controller helper. Its admission/run identity
@@ -7840,6 +7844,23 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         preferred_port; do
         case "$kind" in
             guest|pool-guest)
+                if [ "$kind" = guest ] \
+                    && { [ -e "$registry/sealed-machine-retirements/$machine_id.json" ] \
+                         || [ -L "$registry/sealed-machine-retirements/$machine_id.json" ] \
+                         || [ -e "$registry/sealed-machine-retirements/$machine_id.intent.json" ] \
+                         || [ -L "$registry/sealed-machine-retirements/$machine_id.intent.json" ]; }; then
+                    local sealed_reconnect_status=0
+                    if fleet_recovery_sealed_machine_reconnect_state "$registry" "$machine_id" "$volume_id"; then
+                        continue
+                    else
+                        sealed_reconnect_status=$?
+                    fi
+                    [ "$sealed_reconnect_status" -eq 2 ] || {
+                        echo "❌ [$bench] Machine-only retirement receipt no longer matches exact ownership" >&2
+                        cleanup_stale_owner_recovery_proxies || true
+                        return 1
+                    }
+                fi
                 if details="$(registry_machine_details "$machine_id")"; then
                     detail_status=0
                 else
@@ -8566,13 +8587,183 @@ PY
     printf '%s %s\n' "$source_id" "$volume_id"
 }
 
+fleet_recovery_sealed_machine_reconnect_state() {  # 0=verified retired; 2=verified present; 1=unsafe
+    local registry="$1" machine="$2" volume="$3" detail_status temporary status=1 details
+    if [ -e "$registry/sealed-machine-retirements/$machine.json" ] \
+        || [ -L "$registry/sealed-machine-retirements/$machine.json" ]; then
+        fleet_recovery_verify_retired_sealed_machine "$registry" "$machine" "$volume"
+        return $?
+    fi
+    [ -f "$registry/sealed-machine-retirements/$machine.intent.json" ] \
+        && [ ! -L "$registry/sealed-machine-retirements/$machine.intent.json" ] || return 1
+    if details="$(registry_machine_details "$machine" 2>/dev/null)"; then detail_status=0; else detail_status=$?; fi
+    if [ "$detail_status" -eq 1 ] \
+        || { [ "$detail_status" -eq 0 ] && [ "${details%% *}" = destroyed ]; }; then
+        fleet_recovery_verify_retired_sealed_machine "$registry" "$machine" "$volume"
+        return $?
+    fi
+    [ "$detail_status" -eq 0 ] || return 1
+    temporary="$(mktemp -d)" || return 1
+    temporary="$(cd "$temporary" && pwd -P)" || return 1
+    if machine_config_exact_read "$machine" > "$temporary/config.json" \
+        && fly_with_timeout 30 machines list -a "$APP" --json > "$temporary/native.json" 2>/dev/null \
+        && fly_with_timeout 30 volumes show "$volume" -a "$APP" --json > "$temporary/volume.json" 2>/dev/null \
+        && python3 "$SEALED_MACHINE_RETIREMENT_HELPER" verify-present-intent --registry "$registry" \
+            --machine-id "$machine" --app "$APP" --config-json "$temporary/config.json" \
+            --machines-json "$temporary/native.json" --volume-json "$temporary/volume.json" >/dev/null 2>&1; then
+        status=2
+    fi
+    rm -rf "$temporary"
+    return "$status"
+}
+
+fleet_recovery_verify_retired_sealed_machine() {  # <registry> <machine> <volume>
+    local registry="$1" machine="$2" volume="$3" detail_status temporary status=1 action=verify details
+    local -a terminal_args=()
+    if [ ! -e "$registry/sealed-machine-retirements/$machine.json" ] \
+        && [ ! -L "$registry/sealed-machine-retirements/$machine.json" ]; then
+        [ -f "$registry/sealed-machine-retirements/$machine.intent.json" ] \
+            && [ ! -L "$registry/sealed-machine-retirements/$machine.intent.json" ] || return 1
+        action=complete
+    fi
+    if details="$(registry_machine_details "$machine" 2>/dev/null)"; then detail_status=0; else detail_status=$?; fi
+    [ "$detail_status" -eq 1 ] \
+        || { [ "$detail_status" -eq 0 ] && [ "${details%% *}" = destroyed ]; } || return 1
+    temporary="$(mktemp -d)" || return 1
+    temporary="$(cd "$temporary" && pwd -P)" || return 1
+    chmod 700 "$temporary" || { rm -rf "$temporary"; return 1; }
+    if [ "$detail_status" -eq 0 ]; then
+        if ! machine_status_exact_read "$machine" > "$temporary/status.txt" \
+            || ! machine_config_exact_read "$machine" > "$temporary/config.json" \
+            || ! fly_with_timeout 30 machines list -a "$APP" --json > "$temporary/native.json" 2>/dev/null; then
+            rm -rf "$temporary"
+            return 1
+        fi
+        terminal_args=(--native-absence-kind exact-native-destroyed-unlisted \
+            --status-file "$temporary/status.txt" --config-json "$temporary/config.json" \
+            --machines-json "$temporary/native.json")
+    fi
+    if fly_with_timeout 30 volumes show "$volume" -a "$APP" --json > "$temporary/volume.json" 2>/dev/null \
+        && python3 "$SEALED_MACHINE_RETIREMENT_HELPER" "$action" --registry "$registry" \
+            --machine-id "$machine" --app "$APP" --volume-json "$temporary/volume.json" "${terminal_args[@]}" >/dev/null; then
+        status=0
+    fi
+    rm -rf "$temporary"
+    return "$status"
+}
+
+fleet_recovery_retire_one_sealed_machine() {  # <registry-dir>; volume/full ledger stay owned
+    local registry="$1" temporary plan kind bench clone machine volume out port
+    local detail_status state actual_name command candidate_status=2 attempt
+    local intent receipt
+    local refusal_stage="none"
+    temporary="$(mktemp -d)" || return 1
+    temporary="$(cd "$temporary" && pwd -P)" || return 1
+    chmod 700 "$temporary" || { rm -rf "$temporary"; return 1; }
+    plan="$temporary/full-owner-plan"
+    # Keep the original full registry and audit. The plan verifies all native
+    # identities are disjoint and all outputs belong to this exact dead owner.
+    if ! fleet_registry_build_guest_recovery_plan "$registry" "$plan"; then
+        rm -rf "$temporary"
+        return 1
+    fi
+    while IFS=$'\t' read -r kind bench clone machine volume out port; do
+        [ "$kind" = guest ] || continue
+        [ "$machine" != "${WARM_ID:-}" ] && [ "$machine" != "${SHARED_WARM_ID:-}" ] \
+            && [ "$volume" != "${WARM_VOLUME_ID:-}" ] && [ "$volume" != "${SHARED_WARM_VOLUME_ID:-}" ] || continue
+        intent="$registry/sealed-machine-retirements/$machine.intent.json"
+        receipt="$registry/sealed-machine-retirements/$machine.json"
+        if registry_machine_details "$machine" > "$temporary/details" 2>/dev/null; then detail_status=0; else detail_status=$?; fi
+        if [ -e "$receipt" ] || [ -L "$receipt" ] \
+            || { [ -f "$intent" ] && [ "$detail_status" -eq 0 ] \
+                 && [ "$(cut -d' ' -f1 "$temporary/details")" = destroyed ]; }; then
+            if fleet_recovery_verify_retired_sealed_machine "$registry" "$machine" "$volume"; then candidate_status=0; else candidate_status=1; fi
+            break
+        fi
+        if [ "$detail_status" -eq 1 ]; then
+            # Resume an interrupted native destroy only from its durable intent.
+            [ -f "$intent" ] && [ ! -L "$intent" ] || continue
+        else
+            [ "$detail_status" -eq 0 ] || continue
+            read -r state actual_name _ < "$temporary/details"
+            [ "$state" = started ] && [ "$actual_name" = "$clone" ] || continue
+            # A completed receipt may never authorize deletion of a reused ID.
+            [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || continue
+            command="$(python3 "$SEALED_MACHINE_RETIREMENT_HELPER" probe-command \
+                --registry "$registry" --machine-id "$machine" --app "$APP" 2>/dev/null)" || continue
+            if ! fly_with_timeout 60 ssh console -a "$APP" --machine "$machine" -C "$command" \
+                    > "$temporary/probe.reply" 2> "$temporary/probe.error"; then
+                continue
+            fi
+            # Never print original guest logs/bodies. flyctl may prepend a
+            # connection diagnostic; its final line is the bounded guest JSON.
+            tail -n 1 "$temporary/probe.reply" > "$temporary/guest-proof.json"
+            if ! machine_config_exact_read "$machine" > "$temporary/config.json" \
+                || ! fly_with_timeout 30 machines list -a "$APP" --json > "$temporary/native.json" 2>/dev/null \
+                || ! fly_with_timeout 30 volumes show "$volume" -a "$APP" --json > "$temporary/volume.json" 2>/dev/null \
+                || ! python3 "$SEALED_MACHINE_RETIREMENT_HELPER" prepare --registry "$registry" \
+                    --machine-id "$machine" --app "$APP" --config-json "$temporary/config.json" \
+                    --machines-json "$temporary/native.json" --guest-proof-json "$temporary/guest-proof.json" \
+                    --volume-json "$temporary/volume.json" >/dev/null 2> "$temporary/prepare.error"; then
+                refusal_stage="prepare-input"
+                if [ -f "$temporary/prepare.error" ]; then
+                    case "$(cat "$temporary/prepare.error")" in
+                        SEALED_RETIREMENT_REFUSAL_STAGE=native-inventory-input) refusal_stage="native-inventory-input" ;;
+                        SEALED_RETIREMENT_REFUSAL_STAGE=selected-native-identity) refusal_stage="selected-native-identity" ;;
+                        SEALED_RETIREMENT_REFUSAL_STAGE=source-binding) refusal_stage="source-binding" ;;
+                    esac
+                fi
+                continue
+            fi
+            # Re-read exact config immediately before mutation. A changed
+            # workload cannot spend this prior exact guest acknowledgement.
+            if ! machine_config_exact_read "$machine" > "$temporary/config-again.json" \
+                || ! cmp -s "$temporary/config.json" "$temporary/config-again.json" \
+                || ! fly_with_timeout 30 machines list -a "$APP" --json > "$temporary/native-again.json" 2>/dev/null \
+                || ! python3 "$SEALED_MACHINE_RETIREMENT_HELPER" prepare --registry "$registry" \
+                    --machine-id "$machine" --app "$APP" --config-json "$temporary/config-again.json" \
+                    --machines-json "$temporary/native-again.json" --guest-proof-json "$temporary/guest-proof.json" \
+                    --volume-json "$temporary/volume.json" >/dev/null 2>&1; then
+                candidate_status=1; break
+            fi
+            fly_with_timeout 60 machine destroy --force "$machine" -a "$APP" \
+                > "$temporary/destroy.reply" 2>&1 || true
+        fi
+        candidate_status=1
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if fleet_recovery_verify_retired_sealed_machine "$registry" "$machine" "$volume"; then
+                candidate_status=0
+                echo "🧭 retired sealed original Machine $machine; exact volume $volume and full failed-owner ledger retained (proof credit 0)"
+                break
+            fi
+            sleep 2
+        done
+        break
+    done < "$plan"
+    if [ "$candidate_status" -ne 0 ] && [ "$refusal_stage" != none ]; then
+        echo "⚠️ sealed Machine-only retirement refused at stage=$refusal_stage; full original ownership retained" >&2
+    fi
+    rm -rf "$temporary"
+    return "$candidate_status"
+}
+
 fleet_recovery_confirm_forensic_retirement() {  # <exact failed dead-owner registry>
     local registry="$1" run archive manifest machines volumes receipt result previous
+    local phase="${2:-retirement}"
+    local -a verification_args=()
     local meta="$registry/meta"
     run="$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"
     manifest="$run/_forensic/manifest.json"
     archive="$run/_forensic/originals.tar.gz"
     receipt="$run/_forensic/retirement-verified.json"
+    case "$phase" in
+        archive)
+            verification_args=(--archive-only)
+            receipt="$run/_forensic/archive-verified.json"
+            ;;
+        retirement) ;;
+        *) return 1 ;;
+    esac
     [ -f "$manifest" ] && [ ! -L "$manifest" ] \
         && [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
     machines="$(mktemp)" || return 1
@@ -8585,7 +8776,8 @@ fleet_recovery_confirm_forensic_retirement() {  # <exact failed dead-owner regis
     fi
     result="$(python3 "$FORENSIC_RETIREMENT_HELPER" \
         --registry "$registry" --run "$run" --manifest "$manifest" \
-        --archive "$archive" --machines "$machines" --volumes "$volumes")"
+        --archive "$archive" --machines "$machines" --volumes "$volumes" \
+        "${verification_args[@]}")"
     local status=$?
     rm -f "$machines" "$volumes"
     [ "$status" = "0" ] && [ -n "$result" ] || return 1
@@ -8609,19 +8801,36 @@ finally:
     os.close(directory)
 PY
     fi
-    # Preserve every original pending marker and the failed proof verdict. This
-    # only releases an ownership latch after exact archival and native absence.
+    # This latch covers evidence readiness. Archive mode validates the complete
+    # originals before the ordinary exact reaper changes their ownership ledger.
+    # Its separate receipt never claims native release or benchmark credit; the
+    # ordinary final provider audit remains mandatory after reaping.
     rm -f "$registry/runtime-evidence-unconfirmed" \
         && cloudbench_fsync_directory "$registry"
 }
 
 fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; verified copies only
-    local registry="$1" mapping index out machine bench mode status=0
+    local registry="$1" mapping index out machine bench mode manifest_schema status=0
     local FLEET_REGISTRY_DIR="$1" FLEET_REGISTRY_PUBLISHED=1
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
     local -a CHILD_OUT=() CHILD_MACHINE=()
     FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
     if [ -e "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" ]; then
+        manifest_schema="$(python3 - "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+assert path.is_file() and not path.is_symlink()
+with path.open() as stream:
+    payload = stream.read(1048577)
+assert len(payload) <= 1048576
+print(json.loads(payload).get("schema", ""))
+PY
+        )" || return 1
+        if [ "$manifest_schema" = cloudbench-forensic-retirement-v1 ]; then
+            fleet_recovery_confirm_forensic_retirement "$registry" archive
+            return $?
+        fi
         fleet_recovery_confirm_forensic_retirement "$registry"
         return $?
     fi
@@ -8886,6 +9095,15 @@ PY
     if [ "$needs_guest_recovery" = "1" ]; then
         echo "🧭 reconnecting exact owned guests for authenticated cleanup acknowledgement"
         if ! fleet_recovery_reconnect_guest_shutdowns "$registry"; then
+            # Runtime transfer may fail after every exact guest acknowledged
+            # cleanup. Free one independently sealed own Machine slot while
+            # retaining its volume, full ledger, failed exit and runtime latch.
+            if [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
+                && [ ! -L "$registry/guest-cleanup-unconfirmed" ] \
+                && [ -f "$registry/runtime-evidence-unconfirmed" ] \
+                && [ ! -L "$registry/runtime-evidence-unconfirmed" ]; then
+                fleet_recovery_retire_one_sealed_machine "$registry" || true
+            fi
             rm -rf "$registry/recovery-lock"
             return 1
         fi
@@ -8893,6 +9111,13 @@ PY
     if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
         && ! fleet_recovery_confirm_runtime_evidence "$registry"; then
+        local sealed_retirement_status=0
+        fleet_recovery_retire_one_sealed_machine "$registry" || sealed_retirement_status=$?
+        case "$sealed_retirement_status" in
+            0) echo "🧭 one sealed own Machine slot released; continue original-volume capture, then repeat exact-owner recovery" ;;
+            2) echo "🧭 no sealed original Machine is independently safe to retire; full ownership retained" ;;
+            *) echo "❌ sealed Machine-only retirement did not verify; full ownership retained" >&2 ;;
+        esac
         echo "❌ exact stale-owner runtime evidence is incomplete; original volumes remain retained" >&2
         rm -rf "$registry/recovery-lock"
         return 1

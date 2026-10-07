@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
 ROOT = Path(__file__).resolve().parents[2]
 READ_ONLY = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
 PROBE = "BENCHMARK_DEMO_CACHE_READ_ONLY"
@@ -46,7 +48,7 @@ def launch_probe(tmp_path: Path, *arguments: str):
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=FIXTURE_HOST_GUARD_SECONDS,
     )
     return result, json.loads(receipt.read_text()) if receipt.exists() else None
 

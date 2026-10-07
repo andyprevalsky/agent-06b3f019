@@ -198,6 +198,10 @@ controller filesystem; a reserve refusal requires actual disk/cohort evidence,
 not lowered storage floors or a replacement launcher. The owning quick
 regressions run in the normal benchmark deploy gate.
 
+Keep retained failed-owner recovery on CLAUDE.md's supported exact-owner CLI
+route. `archive-verified.json` preserves originals with zero proof credit;
+completion still requires the final native release audit and owner retirement.
+
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
 uses fifty distinct randomly selected eligible names together in one ordinary

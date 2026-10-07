@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
 ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", str(ROOT / "scripts/run-bench-fleet"))).resolve().parents[1]
 
@@ -29,6 +31,8 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         "'cohort': os.environ.get('RUN_BENCH_CAMPAIGN_COHORT'), 'at': time.monotonic_ns()}\n"
         "fd = os.open(os.environ['FIXTURE_EVENTS'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
         "os.write(fd, (json.dumps(value) + '\\n').encode()); os.close(fd)\n"
+        "if value['event'] == 'execute' and value['job'] == 'r001-j0001':\n"
+        " open(os.path.join(os.environ['FIXTURE_ROOT'], 'first-execute'), 'w').close()\n"
     )
     (binary / "curl").write_text(
         f"#!{sys.executable}\n"
@@ -44,7 +48,11 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         "trap 'event teardown' EXIT\n"
         "trap 'event signalled; exit 143' TERM\n"
         "index=${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}\nindex=$((10#$index))\n"
-        "if [ $((index % 2)) -eq 0 ]; then sleep 1; fi\n"
+        "if [ $((index % 2)) -eq 0 ]; then\n"
+        ' if [ "$FIXTURE_STRICT" = 0 ] && [ "$index" = 2 ]; then\n'
+        '  while [ ! -e "$FIXTURE_ROOT/first-execute" ]; do sleep 0.05; done\n'
+        " else sleep 1; fi\n"
+        "fi\n"
         'case " $FIXTURE_FAIL_JOBS " in *" $index "*) sleep 1; exit 7 ;; esac\n'
         'out=$FIXTURE_ROOT/$RUN_BENCH_CAMPAIGN_JOB_ID\nmkdir -p "$out"\n'
         "RUN_ID=$RUN_BENCH_CAMPAIGN_JOB_ID\n"
@@ -70,6 +78,7 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         FIXTURE_ROOT=str(tmp_path),
         FIXTURE_EVENTS=str(events),
         FIXTURE_FAIL_JOBS=" ".join(map(str, fail_jobs or (fail_job,))),
+        FIXTURE_STRICT=str(int(strict)),
     )
     command = [
         sys.executable,
@@ -85,7 +94,7 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
     ]
     if strict:
         command.append("--forward-arg=--strict-barrier")
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=40)
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     records = [json.loads(line) for line in events.read_text().splitlines()]
     return result, summary, records

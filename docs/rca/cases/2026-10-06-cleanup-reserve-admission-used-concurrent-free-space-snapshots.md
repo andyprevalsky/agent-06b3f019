@@ -151,3 +151,51 @@ finished or that its live startup problem is resolved. The independent DAILY-50
 control continues on its frozen pre-repair source without interference. Private
 source, unchanged controls, native test results and independent-review receipts
 are retained under `.context/fresh-basic-claude-final50-20261006/deploy/`.
+
+
+## October 6 deployment-fixture recurrence
+
+The normal structural gate on immutable `85070617776b8355565266bf16f08a58093c1072`
+failed six existing fixture targets on a host observed at load 107 with 14 CPUs.
+The fifty-owner reserve driver exceeded its outer 90-second observation guard.
+That outer subprocess timeout killed the Python driver while 46 original Bash
+owners remained alive, waiting for a retire marker in a subsequently deleted
+pytest directory. The driver lacked cancellation cleanup, and its accounting
+fixture shared the real filesystem admission namespace. Live fixture floors
+could therefore interfere with later tiny reserve controls. This is a fixture
+failure; it does not prove a new production admission defect.
+
+The original deployment owner revalidated the exact source, fixture path, job,
+native birth and command of every original owner before individual TERM signals.
+All 46 original parents were positively absent and their original group was
+empty afterward. No foreign namespace or Freedom resource changed. The shared
+admission ledger was preserved; the later read-only classification contained
+no exact-original fixture group. The unchanged ten-case capacity-loop control
+then passed in 16.261 seconds with every recorded owner absent and child reaped.
+That observation supports host interference, rather than a capacity-algorithm
+repair or an accepted fleet speedup.
+
+The fixture now uses a unique accounting namespace through its existing local
+filesystem transport. It still runs all fifty default owners against the same
+18,000 MiB modeled capacity, native process observations and original storage
+floors. FIFO handoffs replace fork-heavy start/retire polling. On interruption,
+the driver closes launch admission and drains its recorded private child
+sessions only after matching native birth, fixture path and PGID. Reaped or
+recycled leaders cannot authorize signaling. The existing owning test adds a
+cancellation-before-admission handoff and requires all fifty children reaped;
+the ordinary admission case retains every original outcome assertion.
+
+The affected offline fixtures share a 600-second host observation guard.
+Production task, provider, autoscaler-finalization and cleanup budgets are
+unchanged. Final focused verification passed sixteen cases in 48.904 seconds,
+including timezone/PID-reuse, capacity, ordinary inventory, repeated-cache
+controls and the existing strict-barrier inverses. Both cohort handoffs created and reaped fifty children. The actual
+permanent compact selector collected all eight cases without selector changes
+or an unrelated catalog-count assertion. Initial private dependency and helper
+module-layout setup failures receive zero final proof credit.
+
+Private source, original failure, final native proofs and registration receipts
+are in `.context/fresh-basic-claude-final50-20261006/deploy/root-structural-fixture-repair/`.
+Full normal deployment composition and independent review remain separate gates.
+No provider/model calls, benchmark results, acceptance credit or production
+performance claim arise from these fixture controls. This case remains mitigated.

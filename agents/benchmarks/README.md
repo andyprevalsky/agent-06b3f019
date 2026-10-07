@@ -160,6 +160,13 @@ binding are not silently accepted. The quick bootstrap and existing prestack
 controls run in the ordinary deploy process. Continue monitoring through exact
 Machine/volume release.
 
+For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
+complete originals with `native_release_verified=false` and zero proof credit.
+Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through
+its exact resource reaper and final native provider audit. Archive readiness is
+not release; follow CLAUDE.md's recovery guidance instead of calling the archive
+verifier directly. Other forensic receipt modes keep their existing contracts.
+
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash

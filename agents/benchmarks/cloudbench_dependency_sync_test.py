@@ -26,6 +26,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from benchmarks.fixture_host_guard import FIXTURE_DRAIN_SECONDS, FIXTURE_HOST_GUARD_SECONDS
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
@@ -23100,7 +23102,7 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         (binaries / name).chmod(0o755)
     driver = DRIVER_SCRIPT.read_text()
     start = driver.index('BENCH_TARGET_MODE_FOR_STACK=""')
-    end = driver.index("# The DB warm-start dump", start)
+    end = driver.index('log "launching stack (run.sh --benchmark)', start)
     target = "prod" if scenario == "production" else "local"
     requested_repo = tmp_path / "historical-repo" if scenario == "historical" else ROOT
     requested_repo.mkdir(exist_ok=True)
@@ -23137,7 +23139,7 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         start_new_session=True,
     ) as process:
         try:
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=30)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             stdout, stderr = process.communicate()
@@ -26424,6 +26426,101 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
     assert 'fleet_recovery_confirm_forensic_retirement "$registry"' in fleet
 
 
+@pytest.mark.parametrize("fault", ["none", "archive", "native-release"])
+def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(tmp_path: Path, fault: str) -> None:
+    """Preserve originals before mutation; only final native release closes recovery."""
+    test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path, "none")
+    owner = "a" * 32
+    registry = tmp_path / "registries" / owner
+    run = tmp_path / "runs/fixture-run"
+    audit_record = tmp_path / "audits" / owner / "fresh/clone"
+    meta = registry / "meta"
+    meta.write_text(meta.read_text() + "host=fixture-host\n")
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (run / "_forensic/retirement-verified.json").unlink()
+    machines, volumes = tmp_path / "machines.json", tmp_path / "volumes.json"
+    foreign_machine, foreign_volume = "c" * 14, "vol_foreign123"
+    machines.write_text(json.dumps([{"id": "b" * 14}, {"id": foreign_machine}]))
+    volumes.write_text(json.dumps([{"id": "vol_fixture123"}, {"id": foreign_volume}]))
+    if fault == "archive":
+        archive = run / "_forensic/originals.tar.gz"
+        archive.write_bytes(archive.read_bytes() + b"corrupt")
+    functions = "\n".join(
+        _extract_fleet_function(fleet_source_text(), signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_cleanup_state() {",
+            "fleet_recovery_confirm_forensic_retirement() {",
+            "fleet_recovery_confirm_runtime_evidence() {",
+            "recover_exact_stale_fleet_owner() {",
+        )
+    )
+    events = tmp_path / "events"
+    script = f"""set -u
+APP=bench-app
+FLEET_OWNER_HOST=fixture-host
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[1]))}
+FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
+MACHINES_FIXTURE={shlex.quote(str(machines))}
+VOLUMES_FIXTURE={shlex.quote(str(volumes))}
+AUDIT_RECORD={shlex.quote(str(audit_record))}
+EVENTS={shlex.quote(str(events))}
+FAULT={shlex.quote(fault)}
+{functions}
+cloudbench_fsync_directory() {{ :; }}
+registry_owner_alive() {{ return 1; }}
+release_cleanup_disk_reserve() {{ :; }}
+acquire_registry_recovery_lock() {{ mkdir -p "$1/recovery-lock"; }}
+fleet_recovery_retire_one_sealed_machine() {{ return 2; }}
+fleet_recovery_confirm_pool_claims() {{ :; }}
+recover_registry_audit_only_fresh() {{ :; }}
+reap_registry_clones() {{
+    echo exact-reap >> "$EVENTS"
+    if [ "$FAULT" = native-release ]; then return 1; fi
+    printf '[{{"id":"{foreign_machine}"}}]' > "$MACHINES_FIXTURE"
+    printf '[{{"id":"{foreign_volume}"}}]' > "$VOLUMES_FIXTURE"
+    sed 's/disposition=owned/disposition=destroyed-verified-absent/' "$AUDIT_RECORD" > "$AUDIT_RECORD.tmp"
+    mv "$AUDIT_RECORD.tmp" "$AUDIT_RECORD"
+    rm "$1/clones/clone"
+}}
+recover_exact_pool_claims() {{ :; }}
+capacity_release_stale_owner_reservations() {{ :; }}
+fleet_audit_finalize_recovered_registry() {{
+    grep -q disposition=destroyed-verified-absent "$AUDIT_RECORD" || return 1
+    [ ! -e "$1/clones/clone" ] || return 1
+    echo native-finalize >> "$EVENTS"
+}}
+fleet_registry_remove_if_empty() {{ echo owner-closed >> "$EVENTS"; }}
+fly_with_timeout() {{
+    case "$2" in machines) cat "$MACHINES_FIXTURE" ;; volumes) cat "$VOLUMES_FIXTURE" ;; *) return 90 ;; esac
+}}
+recover_exact_stale_fleet_owner {owner}
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    observed = events.read_text().splitlines() if events.exists() else []
+    assert not (run / "_forensic/retirement-verified.json").exists()
+    assert json.loads((run / "_batch/lifecycle.json").read_text())["status"] == "failed"
+    if fault == "archive":
+        assert result.returncode != 0 and observed == []
+        assert (registry / "runtime-evidence-unconfirmed").exists()
+        assert not (run / "_forensic/archive-verified.json").exists()
+    else:
+        assert (run / "_forensic/archive-verified.json").is_file(), result.stderr
+        receipt = json.loads((run / "_forensic/archive-verified.json").read_text())
+        assert receipt["schema"] == "cloudbench-forensic-archive-verified-v1"
+        assert receipt["native_release_verified"] is False and receipt["proof_credit"] == 0
+        assert not (registry / "runtime-evidence-unconfirmed").exists()
+        if fault == "native-release":
+            assert result.returncode != 0 and observed == ["exact-reap"]
+            assert (registry / "clones/clone").exists()
+        else:
+            assert result.returncode == 0, result.stderr
+            assert observed == ["exact-reap", "native-finalize", "owner-closed"]
+            assert json.loads(machines.read_text()) == [{"id": foreign_machine}]
+            assert json.loads(volumes.read_text()) == [{"id": foreign_volume}]
+
+
 def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
     """Real aggregation publishes evaluated outcomes while guest cleanup is pending."""
     from unittest.mock import patch
@@ -27354,18 +27451,44 @@ reserve_cleanup_disk_space
         }, sort_keys=True) + "\n")
 
 
-def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_path: Path) -> None:
+@pytest.mark.parametrize("handoff", ["admission", "cancel-before-admission"])
+def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_path: Path, handoff: str) -> None:
     """Fifty default owners retain cleanup and per-owner working floors together."""
     driver = ROOT / "agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+    command = [sys.executable, str(driver), str(FLEET_SCRIPT), str(tmp_path / "cohort")]
+    if handoff == "cancel-before-admission":
+        owner = subprocess.Popen(
+            command, env={**os.environ, "RESERVE_FIXTURE_HOLD_READY": "1"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert owner.stdout is not None
+            assert select.select([owner.stdout], [], [], FIXTURE_HOST_GUARD_SECONDS)[0], "cohort ready handoff absent"
+            stage = json.loads(owner.stdout.readline())
+            assert stage == {"stage": "cohort-ready", "owners": 50}
+            owner.terminate()
+            stdout, stderr = owner.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            assert owner.returncode == 143, stdout + stderr
+        finally:
+            if owner.poll() is None:
+                owner.terminate()
+                owner.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        drained = json.loads((tmp_path / "cohort/child-drain.safe.json").read_text())
+        assert drained["created"] == 50 and drained["all_reaped"]
+        assert not (tmp_path / "cohort/receipt.safe.json").exists()
+        return
     result = subprocess.run(
-        [sys.executable, str(driver), str(FLEET_SCRIPT), str(tmp_path / "cohort")],
-        env=os.environ.copy(), text=True, capture_output=True, check=False, timeout=90,
+        command,
+        env=os.environ.copy(), text=True, capture_output=True, check=False,
+        timeout=FIXTURE_HOST_GUARD_SECONDS + 2 * FIXTURE_DRAIN_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((tmp_path / "cohort/receipt.safe.json").read_text())
     assert receipt["admitted"] == 50 and receipt["failed"] == 0
     assert receipt["provider_calls"] == 0 and receipt["task_executions"] == 0
     assert all(receipt["assertions"].values())
+    drained = json.loads((tmp_path / "cohort/child-drain.safe.json").read_text())
+    assert drained["created"] == 50 and drained["all_reaped"]
 
 
 @pytest.mark.parametrize("interleaving", ["timezone", "reused-pid"])
@@ -27377,6 +27500,24 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identit
     neighbor = tmp_path / "neighbor"
     neighbor.write_bytes(b"unrelated")
     exact = tmp_path / "identity-reserve"
+    transport = tmp_path / "transport"
+    transport.mkdir()
+    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    (transport / "sitecustomize.py").write_text('''
+import os
+from pathlib import Path
+original = Path.lstat
+def isolated(self, *args, **kwargs):
+    observed = original(self, *args, **kwargs)
+    if str(self) == os.environ['RESERVE_TEST_PARENT']:
+        fields = list(observed)
+        fields[2] = int(os.environ['RESERVE_TEST_DEVICE'])
+        return os.stat_result(fields)
+    return observed
+Path.lstat = isolated
+''')
+    isolated_env = {**os.environ, "PYTHONPATH": str(transport),
+                    "RESERVE_TEST_PARENT": str(tmp_path), "RESERVE_TEST_DEVICE": str(namespace)}
     df = """df() { printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 10000 6928 3072 70% /fake'; }
 export -f df
 """
@@ -27395,11 +27536,11 @@ while [ ! -e "$3" ]; do sleep 0.01; done
 """
         owner = subprocess.Popen(
             ["bash", "-c", shell, "reserve", str(exact), str(ready), str(retire)],
-            env={**os.environ, "TZ": "UTC"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**isolated_env, "TZ": "UTC"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
             while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert ready.exists(), "first exact owner did not admit"
@@ -27408,15 +27549,15 @@ while [ ! -e "$3" ]; do sleep 0.01; done
             assert owner.poll() is None
             second = subprocess.run(
                 ["bash", "-c", shell.split(': > "$2"')[0], "reserve", str(tmp_path / "second")],
-                env={**os.environ, "TZ": "America/Los_Angeles"}, text=True,
-                capture_output=True, timeout=60,
+                env={**isolated_env, "TZ": "America/Los_Angeles"}, text=True,
+                capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS,
             )
             assert second.returncode != 0, "live owner's working floor was lost across TZ"
             assert not (tmp_path / "second").exists()
             assert exact.stat().st_size == 1048576
         finally:
             retire.touch()
-            owner.communicate(timeout=60)
+            owner.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
             exact.unlink(missing_ok=True)
         assert owner.returncode == 0
     else:
@@ -27443,9 +27584,9 @@ reserve_cleanup_disk_space
 """
         result = subprocess.run(
             ["bash", "-c", shell, "reserve", str(exact)],
-            env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+            env={**isolated_env, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                  "RESERVE_BIRTH_COUNTER": str(tmp_path / "birth-count")},
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS,
         )
         assert result.returncode != 0, "reserve adopted a reused owner PID"
         assert not exact.exists()

@@ -696,6 +696,13 @@ with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
 owner canceled before allocation can legitimately lack a pool directory and
 execution inputs; normal recovery proves empty ledgers and absence of allocation
 markers recursively. Never fabricate missing inputs or guest receipts.
+For a generic failed-owner archive, `_forensic/archive-verified.json` means
+the complete originals are preserved: `native_release_verified=false` and
+`proof_credit=0`. It admits the normal exact-owner reaper; it does not prove
+resource release. Continue the same supported recovery command through its
+final native provider audit and owner retirement. Do not invoke the archive
+verifier directly or treat archive readiness as completion. Other forensic
+receipt modes retain their existing contracts.
 If recovery retains a shared central Hub with
 `retained-exact-owner-transfer-required`, first prove that every controller
 borrowing that exact Hub token has retired. Keep its owner file and use the

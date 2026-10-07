@@ -9,9 +9,11 @@ import subprocess
 import time
 from pathlib import Path
 
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
 
 def native(pid):
-    p = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=10)
+    p = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     return p.stdout.strip() or None
 
 
@@ -235,7 +237,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 )
                 processes.append(scaler)
                 owners.append({"kind": "autoscaler", "pid": scaler.pid, "birth": native(scaler.pid)})
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
                 restored_inventory = False
                 restored_metrics_proxy = False
                 while True:
@@ -287,8 +289,8 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                     assert time.monotonic() < deadline, "fixture-host-guard"
                     time.sleep(0.01)
                 (case / "release-child").touch()
-                assert child.wait(timeout=10) == 1, "independent-child-return-code"
-                scaler_rc = scaler.wait(timeout=10)
+                assert child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS) == 1, "independent-child-return-code"
+                scaler_rc = scaler.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
                 calls = [list(map(int, line.split())) for line in (case / "calls").read_text().splitlines()] if (case / "calls").exists() else []
                 tracked = (out / "worker-clones.ids").read_text().splitlines()
                 ready = (out / "worker-ready.ids").read_text().splitlines()

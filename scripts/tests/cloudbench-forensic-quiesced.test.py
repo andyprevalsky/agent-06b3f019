@@ -18,6 +18,7 @@ def load(name, path):
 cleanup_test = load("cleanup_test", ROOT / "scripts/tests/cloudbench-exact-session-multi-root.test.py")
 retirement = load("retirement", ROOT / "scripts/cloudbench-forensic-retirement.py")
 cleanup = cleanup_test.cleanup
+sealed_machine_test = load("sealed_machine_test", ROOT / "scripts/tests/cloudbench-sealed-machine-retirement.test.py")
 
 
 class QuiescedForensicTest(unittest.TestCase):
@@ -76,6 +77,11 @@ class QuiescedForensicTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             retirement.verify_quiesced_provider_archive(
                 self.out, self.row, self.args.owner, self.args.fleet_run_id)
+
+
+class SealedMachineRecoveryTest(unittest.TestCase):
+    def test_completed_member_retires_independently_with_full_failed_owner_retained(self):
+        self.assertEqual(sealed_machine_test.run_recurrence()["status"], "PASS")
 
 
 if __name__ == "__main__":

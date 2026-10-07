@@ -214,3 +214,7 @@ launched-worker capture failures, and the decoded-size Hub transport boundary.
 Frontend coverage follows every phase through release; backend Hub round-trip
 coverage preserves those fields. The original full forensic bundle is unchanged;
 Hub transport omits duplicated diagnostic logs while keeping complete transcripts.
+Generic failed-owner archive readiness has a separate `archive-verified.json`
+receipt with `native_release_verified=false` and zero proof credit. Follow
+CLAUDE.md's supported exact-owner CLI recovery through its unchanged final
+native provider audit; archive readiness alone is not resource release.

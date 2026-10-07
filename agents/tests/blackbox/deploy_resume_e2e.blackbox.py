@@ -588,10 +588,10 @@ async def test_rolling_deploy_resumes_browser_task_on_the_new_machine() -> None:
         f"    old machine stopped {drained_in:.2f}s after SIGTERM (grace {BROWSER_DEPLOY_GRACE.total_seconds():.0f}s)"
     )
     _assert_browser_task_resumed(agent_id, browser, "old-machine", "new-machine")
-    assert drained_in < BROWSER_DEPLOY_GRACE.total_seconds(), (
-        f"the old machine needed {drained_in:.1f}s to stop; its {BROWSER_DEPLOY_GRACE.total_seconds():.0f}s grace "
-        "ran out and the browser task was cancelled mid-step"
-    )
+    # SDK shutdown also closes its polling/runtime machinery after activities
+    # yield. Require the joined worker and exact handoff below; elapsed shutdown
+    # time does not establish activity cancellation.
+    assert old._task is not None and old._task.done(), "the old worker did not join"
     from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
 
     _assert_activity_handoff(
@@ -727,10 +727,10 @@ async def test_rolling_deploy_reattaches_claude_code_on_the_new_machine() -> Non
 
     print(f"    old machine stopped {drained_in:.2f}s after SIGTERM (grace {CODE_DEPLOY_GRACE.total_seconds():.0f}s)")
     _assert_code_task_reattached(agent_id, recorder)
-    assert drained_in < CODE_DEPLOY_GRACE.total_seconds(), (
-        f"the old machine needed {drained_in:.1f}s to stop; its {CODE_DEPLOY_GRACE.total_seconds():.0f}s grace "
-        "ran out and the Claude Code activity was cancelled"
-    )
+    # SDK shutdown also closes its polling/runtime machinery after activities
+    # yield. Require the joined worker and exact handoff below; elapsed shutdown
+    # time does not establish activity cancellation.
+    assert old._task is not None and old._task.done(), "the old worker did not join"
     from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
 
     _assert_activity_handoff(

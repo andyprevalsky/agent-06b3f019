@@ -915,7 +915,8 @@ def object_file_from_bytes(data: bytes):
 
 
 def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
-           machines_path: Path, volumes_path: Path) -> dict[str, object]:
+           machines_path: Path, volumes_path: Path, *,
+           archive_only: bool = False) -> dict[str, object]:
     assert registry.is_dir() and not registry.is_symlink()
     assert run.is_dir() and not run.is_symlink()
     owner = registry.name
@@ -1214,10 +1215,13 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     assert isinstance(machines, list) and isinstance(volumes, list)
     active_machines = {row["id"] for row in machines}
     active_volumes = {row["id"] for row in volumes}
-    assert not active_machines.intersection(by_machine)
-    assert not active_volumes.intersection(row["volume_id"] for row in allocated)
-    assert not {row.get("name") for row in machines + volumes}.intersection(unallocated)
-    return {"schema": "cloudbench-forensic-retirement-verified-v1",
+    if not archive_only:
+        assert not active_machines.intersection(by_machine)
+        assert not active_volumes.intersection(row["volume_id"] for row in allocated)
+        assert not {row.get("name") for row in machines + volumes}.intersection(unallocated)
+    return {"schema": ("cloudbench-forensic-archive-verified-v1" if archive_only
+                       else "cloudbench-forensic-retirement-verified-v1"),
+            **({"native_release_verified": False} if archive_only else {}),
             "owner": owner, "run_id": meta["run_id"], "tasks": len(rows),
             "incomplete_tasks": incomplete, "unadmitted_clones": len(unadmitted),
             "unstarted_workers": len(unstarted_workers),
@@ -1231,8 +1235,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     for name in ("registry", "run", "manifest", "archive", "machines", "volumes"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument("--archive-only", action="store_true")
     args = parser.parse_args()
     manifest = object_file(args.manifest)
+    if args.archive_only:
+        assert manifest.get("schema") == "cloudbench-forensic-retirement-v1"
     if manifest.get("schema") == "cloudbench-prestart-evidence-v1":
         result = verify_prestart_evidence(args.registry, args.run, args.manifest,
                                           args.archive)
@@ -1245,7 +1252,7 @@ def main() -> None:
             args.machines, args.volumes)
     else:
         result = verify(args.registry, args.run, args.manifest, args.archive,
-                        args.machines, args.volumes)
+                        args.machines, args.volumes, archive_only=args.archive_only)
     print(json.dumps(result, sort_keys=True))
 
 

@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
@@ -147,7 +149,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         env=env,
         capture_output=True,
         text=True,
-        timeout=40,
+        timeout=FIXTURE_HOST_GUARD_SECONDS,
     )
     records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())

@@ -114,6 +114,9 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
+For a retained failed owner, follow CLAUDE.md's exact-owner recovery route.
+An `archive-verified.json` receipt preserves originals with zero proof credit;
+keep monitoring the supported CLI through the final native release audit.
 Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
 `bench-e2e.finished-epoch`. The start precedes provisioning and is conservative.
 Use the earliest retained fresh native Machine/volume `created_at` for newly

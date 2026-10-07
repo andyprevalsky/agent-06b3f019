@@ -113,3 +113,36 @@ Freedom and unrelated services/resources.
 
 Make every required parent traversable by the actual runtime user before the
 first child consumer; correct child ownership alone cannot cross a private parent.
+
+
+## Existing ngrok fixture extraction, October 6
+
+The final850 covered benchmark failed all twelve existing ngrok-bootstrap
+variants before invoking their driver fragment: its end delimiter was the DB
+warm-start paragraph that this parent-ownership repair correctly moved before
+stack selection. Searching after stack selection therefore raised ValueError.
+The fixture now ends at the real following stack-launch handoff. Driver code,
+all twelve scenarios and every bootstrap/architecture/failure assertion stay
+unchanged. Two archive searches were `ngrok bootstrap hangs fixture` and
+`fixture extraction delimiter moved paragraph`; this browser-bootstrap case owns
+the source movement, while the old production tunnel repair remains correct.
+
+The original owning missing-tool case reproduced the delimiter failure in
+3.830seconds. Correcting only that delimiter yielded eleven passes and one
+existing-hangs whole-command timeout; the latter had already printed
+BOOTSTRAP_DONE. The installer still bounds each binary probe at5seconds, and
+the fixture retains curl connect10/max30 inputs. The enclosing10second test
+command guard measured startup and multiple native probes as well. A controlled
+local6second shell startup delay gave the boundary-only fixture the same
+whole-command failure in10.862seconds. With a generous30second whole fixture
+guard, that identical control passed in12.236seconds. All twelve ordinary
+cases then passed in14.478seconds. This proves the enclosing guard can reject
+usable bootstrap state; it does not prove the exact cause of the original host
+delay or claim a production ngrok speed improvement.
+
+Only the extraction delimiter and whole fixture guard change. The five-second
+production probe, all transport limits, failure verdicts and assertions are
+unchanged. The ten captured verification leaders were revalidated natively
+absent. One private proxy setup failure is retained without owning credit.
+Normal combined covered benchmark qualification and production rollout remain
+pending; this local fixture supplies no task/acceptance credit.
