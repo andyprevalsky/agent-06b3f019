@@ -63,3 +63,29 @@ None recorded.
 
 A different scenario failing each run, always by timeout or SIGTERM and never by
 assertion, is host-load flake — check load average before debugging the code.
+
+
+## October 7 verification-policy recurrence
+
+At immutable `5b47da7f1695739a0bcbafaba151762dceb7e43a`, the normal
+quiesced-forensic deploy suite raised `subprocess.TimeoutExpired` at
+`scripts/tests/cloudbench-sealed-machine-retirement.test.py:243`. Its sixty-second
+cap covered an entire exact-owner Bash recovery workflow, rather than a synthetic
+fault deadline. The endpoint assertions had not run, so the failure proves
+expiry of this fixture guard; it does not establish a production recovery defect
+or a measured host-load cause. The original error and private log remain retained.
+
+The unchanged isolated owning test completed normally in 20.447 seconds, including
+all twenty-six sealed-Machine recovery variants. Its native group was drained,
+and a read-only scan found no surviving command in the original failed fixture
+namespace. These observations do not reconstruct the interrupted original
+endpoint state.
+
+The five whole-workflow subprocess caps now inherit the existing shared
+`FIXTURE_HOST_GUARD_SECONDS` (600 seconds). All original native identity,
+retirement, volume-retention, provider-state, failed-owner evidence, receipt reuse
+and fault assertions remain unchanged. Production CLI budgets and transport
+bounds remain unchanged. The existing `SealedMachineRecoveryTest` remains in
+the normal quiesced-forensic deploy route; this repair adds no verification gate
+or benchmark acceptance credit. The scoped candidate must pass this same owning
+family and final normal registration before integration is qualified.

@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_HOST_GUARD_SECONDS = runpy.run_path(str(ROOT / "agents/benchmarks/fixture_host_guard.py"))["FIXTURE_HOST_GUARD_SECONDS"]
 BASH = "/opt/homebrew/bin/bash" if Path("/opt/homebrew/bin/bash").exists() else shutil.which("bash")
 OWNER = "a" * 32
 APP = "sealed-retirement-fixture"
@@ -240,7 +241,7 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
         # complete mapping, source validator, guest program and receipt are real.
         write(base / "control.sh", script)
         env = dict(os.environ, FIXTURE_BASE=str(base), FIXTURE_STATE=str(base / "native.json"), FIXTURE_OWNER=OWNER, FIXTURE_SELECTED=MIDS[healthy], FIXTURE_VOLUME=VOLS[healthy], APP=APP, FLEET_OWNERSHIP_ROOT=str(base / "owners"), FLEET_AUDIT_ROOT=str(base / "audits"), FLEET_OWNER_HOST="fixture-host", SEALED_MACHINE_RETIREMENT_HELPER=str(ROOT / "scripts/cloudbench-sealed-machine-retirement.py"), SOURCE_HELPER="", POOL_CLAIMS_DIR="", FIXTURE_LIVE_OWNER="1" if inverse == "owner-live" else "0", FIXTURE_RECONNECT_FAIL="1" if inverse in ("reconnect-runtime-failure", "reconnect-guest-failure") else "0")
-        completed = subprocess.run([BASH, str(base / "control.sh")], env=env, capture_output=True, text=True, timeout=60)
+        completed = subprocess.run([BASH, str(base / "control.sh")], env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
         assert completed.returncode == 1, (completed.returncode, completed.stderr)
         state = json.loads((base / "native.json").read_text())
         for path, original in before.items():
@@ -259,7 +260,7 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
                 assert not (registry / "guest-cleanup-unconfirmed").exists()
             # Repeating ordinary recovery keeps the complete failed owner and
             # receipt, and does not spend it to retire the unsealed peer.
-            again = subprocess.run([BASH, str(base / "control.sh")], env=env, capture_output=True, text=True, timeout=60)
+            again = subprocess.run([BASH, str(base / "control.sh")], env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
             assert again.returncode == 1
             assert json.loads((base / "native.json").read_text())["journal"] == state["journal"]
             if absence_transition:
@@ -285,7 +286,7 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
                 write(base / "native.json", state)
                 prefix = script.rsplit('recover_exact_stale_fleet_owner "$FIXTURE_OWNER"', 1)[0]
                 verify_script = prefix + '\nfleet_recovery_verify_retired_sealed_machine ' + ' '.join(shlex.quote(x) for x in (str(registry), MIDS[healthy], VOLS[healthy])) + '\n'
-                checked = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=60)
+                checked = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
                 accepted = absence_transition in ("destroyed-to-not-found", "not-found-to-destroyed")
                 assert checked.returncode == (0 if accepted else 1), checked.stderr
                 assert receipt.read_bytes() == historical_bytes
@@ -301,14 +302,14 @@ recover_exact_stale_fleet_owner "$FIXTURE_OWNER"
             receipt.unlink()
             prefix = script.rsplit('recover_exact_stale_fleet_owner "$FIXTURE_OWNER"', 1)[0]
             verify_script = prefix + '\nfleet_recovery_verify_retired_sealed_machine ' + ' '.join(shlex.quote(x) for x in (str(registry), MIDS[healthy], VOLS[healthy])) + '\n'
-            resumed = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=60)
+            resumed = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
             assert resumed.returncode == 0 and receipt.exists(), resumed.stderr
             state = json.loads((base / "native.json").read_text())
             assert state["journal"] == [["machine-destroy", MIDS[healthy]]]
             # An ID that reappears after this receipt must fail verification.
             state["machines"][MIDS[healthy]] = {"name": "reused-foreign", "state": "started"}
             write(base / "native.json", state)
-            reused = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=60)
+            reused = subprocess.run([BASH, "-c", verify_script], env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
             assert reused.returncode == 1
             assert json.loads((base / "native.json").read_text())["journal"] == state["journal"]
         else:
