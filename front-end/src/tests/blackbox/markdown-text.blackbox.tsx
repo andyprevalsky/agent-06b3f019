@@ -11,11 +11,20 @@
  *  - className passthrough
  *  - onComplete callback (animated path)
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
+import { linkifyMarkdownText } from '@/features/terminal-component-group/components/markdown-text/linkifyMarkdownText';
 import { renderWords } from '@/features/terminal-component-group/components/markdown-text/renderWords';
 import { type WordItem } from '@/features/terminal-component-group/components/markdown-text/types';
+
+const CAPTURED_ATTENTION_TEXT = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'fixtures/agent-3be856d5-attention.txt'),
+  'utf8',
+);
 
 describe('MarkdownText', () => {
   it('renders plain text', async () => {
@@ -178,5 +187,105 @@ describe('MarkdownText', () => {
       // After normalization \* → *, producing **literal** semantics in markdown (emphasis).
       expect(container.textContent).toContain('literal');
     });
+  });
+
+  function hrefs(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('a'))
+      .map((anchor) => anchor.getAttribute('href') || '')
+      .filter(Boolean);
+  }
+
+  it('hyperlinks bare hostnames in captured send_message_to_user text', async () => {
+    const { container } = render(<MarkdownText text={CAPTURED_ATTENTION_TEXT} />);
+    await waitFor(() => {
+      expect(container.textContent).toContain('bytescafesa.com');
+    });
+    expect(hrefs(container)).toEqual(
+      expect.arrayContaining([
+        'https://bytescafesa.com',
+        'https://mixeresports.com',
+        'https://jbgamingcafe.com',
+      ]),
+    );
+    const bytes = Array.from(container.querySelectorAll('a')).find((anchor) =>
+      (anchor.getAttribute('href') || '').includes('bytescafesa.com'),
+    );
+    expect(bytes?.textContent).toContain('bytescafesa.com');
+    expect(bytes?.getAttribute('target')).toBe('_blank');
+    expect(bytes?.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('hyperlinks the same captured hostnames on the static breaks path', async () => {
+    const { container } = render(<MarkdownText text={CAPTURED_ATTENTION_TEXT} breaks />);
+    await waitFor(() => expect(container.textContent).toContain('bytescafesa.com'));
+    expect(hrefs(container)).toEqual(
+      expect.arrayContaining([
+        'https://bytescafesa.com',
+        'https://mixeresports.com',
+        'https://jbgamingcafe.com',
+      ]),
+    );
+  });
+
+  it('hyperlinks scheme-prefixed URLs without markdown wrappers', async () => {
+    const { container } = render(
+      <MarkdownText text="See https://bytescafesa.com/lounge for hours." />,
+    );
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    expect(hrefs(container)).toContain('https://bytescafesa.com/lounge');
+  });
+
+  it('hyperlinks www hosts without a scheme', async () => {
+    const { container } = render(<MarkdownText text="Visit www.jbgamingcafe.com tonight." />);
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    expect(hrefs(container)).toContain('https://www.jbgamingcafe.com');
+  });
+
+  it('does not linkify hostnames inside inline code or fences', async () => {
+    const { container } = render(
+      <MarkdownText text={'Use `bytescafesa.com` and\n\n```\nmixeresports.com\n```\n'} />,
+    );
+    await waitFor(() => expect(container.textContent).toContain('bytescafesa.com'));
+    expect(hrefs(container)).toEqual([]);
+  });
+
+  it('leaves explicit markdown links unchanged', async () => {
+    const { container } = render(
+      <MarkdownText text="Go to [Bytes](https://bytescafesa.com/lounge) now." />,
+    );
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    const a = container.querySelector('a')!;
+    expect(a.getAttribute('href')).toBe('https://bytescafesa.com/lounge');
+    expect(a.textContent).toContain('Bytes');
+  });
+});
+
+describe('linkifyMarkdownText', () => {
+  it('wraps parenthetical hostnames from the captured attention text', () => {
+    expect(linkifyMarkdownText('**Bytes Cyber Café** (bytescafesa.com)')).toBe(
+      '**Bytes Cyber Café** ([bytescafesa.com](https://bytescafesa.com))',
+    );
+  });
+
+  it('leaves schemed URLs, code, and existing markdown links alone', () => {
+    expect(linkifyMarkdownText('See https://bytescafesa.com/lounge')).toBe(
+      'See https://bytescafesa.com/lounge',
+    );
+    expect(linkifyMarkdownText('Use `bytescafesa.com` now')).toBe('Use `bytescafesa.com` now');
+    expect(linkifyMarkdownText('Go [Bytes](https://bytescafesa.com) now')).toBe(
+      'Go [Bytes](https://bytescafesa.com) now',
+    );
+    expect(linkifyMarkdownText('contact user@bytescafesa.com')).toBe(
+      'contact user@bytescafesa.com',
+    );
+    expect(linkifyMarkdownText('do not link node.js or package.json')).toBe(
+      'do not link node.js or package.json',
+    );
+  });
+
+  it('linkifies non-com country hosts and leaves dotted versions alone', () => {
+    expect(linkifyMarkdownText('See google.de and 1.2.3')).toBe(
+      'See [google.de](https://google.de) and 1.2.3',
+    );
   });
 });
