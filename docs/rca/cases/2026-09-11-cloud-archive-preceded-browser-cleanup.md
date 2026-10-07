@@ -1112,6 +1112,67 @@ the isolated `rose-payment-pause-mint-20261007` checkout. This offline causal pr
 does not establish original benchmark success or count toward the five fresh
 50-task LIVE runs. The frozen candidate and Control7 were not edited.
 
+### 2026-10-07 recurrence: write grant persistence also lost PAUSE followed by RESUME
+
+Independent review of payment source `d16141950c4cac5376baaa41f324536c4c9049ca`
+found that the sibling deferred write continuation still checked only current
+`is_paused`. Two archive searches used `explicit PAUSE resumed an abandoned
+browser` and `pause resume persisted write grant browser continuation`; both
+pointed to this case and the existing browser gate abandonment cases. Their
+solutions and human feedback require exact task terminals, preserved approval
+decisions and narrow coverage in the existing deploy owner.
+
+The actual existing `test_manager_write_pause_seals_persisted_browser_for_archive`
+was extended with one PAUSE-to-RESUME scenario at the write grant persistence
+activity. The fixture calls actual `AgentWorkflow.pause` and `resume`, verifies
+unpaused state with sequence 1, and retains the actual grant serialization,
+same-task recording, archive readiness predicate and foreign-terminal negative
+control. Before the repair, the ordinary manager started a second browser
+activity and the test failed with `explicit PAUSE resumed an abandoned browser`.
+This is local runtime evidence, not an inferred failure or a model trajectory.
+
+The first bad boundary is the deferred manager continuation after the grant
+yield. Its current-state check forgot the explicit signal when RESUME cleared
+the flag. The deeper evidenced gap is using mutable state to authorize an old
+suspended continuation. The earlier write test held PAUSE active, so it could
+not expose this inverse; the payment repair had not covered the write sibling.
+The problem class remains logical inconsistency in harness interruption
+ownership contracts, rather than model capability, provider or configuration.
+
+Write now snapshots the existing persisted pause sequence before approval and
+compares it at its existing pre-continue pause check, just as payment already
+does. Authentication retains its sequence across its distinct intentional pause
+and generation handoff. The repair emits the existing exact-task abandoned
+terminal excluded from model context. It does not alter approval decisions,
+browser prompts, task definitions, evaluators, model calls or timeouts. It adds
+only constant local state and a constant-time comparison at 10,000 agents.
+
+The identical command and test recorded RED exit 1 in 1.892 seconds and GREEN
+exit 0 in 0.893 seconds. The owning test also runs normal approval, active pause,
+concurrent approval, persisted replies, cancellation and generation handoff
+controls. Five existing payment, registered-activity-name, authentication and
+handoff controls passed in 1.150 seconds. The unchanged test SHA-256 is
+`7d573ca9c3a72b2d9e85701f652b08071d5583bffea2cef3e2778908cc45f2c7`.
+Exact argv, source hashes and immutable private logs are retained at
+`.context/write-pause-resume-rca-20261007/proof.safe.json` in the isolated
+`rose-write-pause-resume-20261007` checkout. A controls-launcher syntax error
+occurred before test execution and is not causal RED evidence.
+
+Golden implementations were reopened read-only: Claude Code
+`claude-code-src/src/cli/structuredIO.ts:490` rejects the outstanding request on
+abort, and OpenClaw `openclaw/src/agents/tool-search-code-mode.ts:142` settles the
+operation on parent abort. Both keep interruption attached to the old suspended
+operation. Hermes `hermes-agent/agent/interrupt_control.py:104` fences claims with
+an activity generation; it is not an exact Temporal PAUSE/RESUME analogue. Rose
+uses its existing sequence without adding a cancellation mechanism or a new
+guard on unrelated active browser execution.
+
+The reproduction remains in the existing browser `run_all_tests` registration,
+reached by normal agent blackbox coverage in `/deploy` Step 4g. This offline
+causal proof uses no provider/model calls and grants zero LIVE50 credit. The
+canonical deploy gate and a fresh source-bound ordinary CLI benchmark outcome
+remain separate requirements; Control7 and Control8 sources were not edited.
+
 Final qualification used the identical frozen fixture on baseline
 `8b895022f541ed6481711168cd0961f8b0778396`: both payment and authentication
 checks failed because real PAUSE left the manager parked (2 failed, 3.87 seconds).

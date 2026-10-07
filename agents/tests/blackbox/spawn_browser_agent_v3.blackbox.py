@@ -22634,6 +22634,7 @@ async def _drive_browser_write_pause_archive_boundary(
     handoff=False,
     parked_handoff=False,
     pause_on_grant=False,
+    resume_on_grant=False,
     pause_on_open=False,
     pause_during_mint=False,
     reply_phase=None,
@@ -22726,6 +22727,9 @@ async def _drive_browser_write_pause_archive_boundary(
                 "payment_card_ready" if payment else "write_lock_granted"
             ):
                 await AgentWorkflow.pause(wf)
+                if resume_on_grant:
+                    await AgentWorkflow.resume(wf)
+                    assert not wf.is_paused and wf._pause_signal_sequence == 1
             result = await function(*args)
             if (
                 reply_phase == "rejected-persisted"
@@ -23076,6 +23080,7 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(pause=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, concurrent_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True, resume_on_grant=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, pause_on_open=True)
     for phase in ("approved", "rejection-poll", "rejected"):
         await _drive_browser_write_pause_archive_boundary(pause=True, reply_phase=phase)

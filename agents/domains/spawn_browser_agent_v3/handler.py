@@ -10879,6 +10879,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     continue
 
                 if result and result.get("status") == "awaiting_write_approval":
+                    write_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
                     logger.info(
                         "Browser agent needs write lock approval",
                         approval_type=result.get("approval_type"),
@@ -10983,7 +10984,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             },
                         )
-                        if workflow_instance.is_paused:
+                        if (
+                            workflow_instance.is_paused
+                            or getattr(workflow_instance, "_pause_signal_sequence", 0) != write_pause_sequence
+                        ):
                             yield _browser_abandoned_resume_event(
                                 result.get("task_id") or known_task_id,
                                 "Browser paused before resuming the approved action.",
