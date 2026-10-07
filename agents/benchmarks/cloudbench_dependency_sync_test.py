@@ -196,7 +196,7 @@ if argv[:2]==['ssh','console']:
         if piece.startswith('/tmp/cloudbench-startup-archive-'):
             command=command.replace(piece,str(base/Path(piece).parent.name/Path(piece).name))
     command+=' --root '+shlex.quote(guest)
-    result=subprocess.run(command,shell=True,env={{**os.environ,'FLY_MACHINE_ID':{machine!r},'CLOUDBENCH_RUN_TOKEN':{token!r}}})
+    result=subprocess.run(shlex.split(command),shell=False,env={{**os.environ,'FLY_MACHINE_ID':{machine!r},'CLOUDBENCH_RUN_TOKEN':{token!r}}})
     raise SystemExit(result.returncode)
 if argv[:2]==['ssh','sftp']:
     source,destination=argv[-2:]

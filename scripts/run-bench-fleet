@@ -8218,7 +8218,7 @@ PY
         || ! fly_with_timeout 60 ssh sftp put -a "$APP" --machine "$machine" \
             "$GUEST_RECOVERY_HELPER" "$remote/cloudbench-guest-recovery.py" >> "$log" 2>&1 \
         || ! fly_with_timeout 300 ssh console -a "$APP" --machine "$machine" \
-            -C "PYTHONDONTWRITEBYTECODE=1 python3 '$remote/cloudbench-startup-failure-archive.py' capture --machine '$machine' --run-token '$guest_token' --archive '$remote/originals.tar.gz'" >> "$log" 2>&1 \
+            -C "python3 -B '$remote/cloudbench-startup-failure-archive.py' capture --machine '$machine' --run-token '$guest_token' --archive '$remote/originals.tar.gz'" >> "$log" 2>&1 \
         || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$machine" \
             "$remote/originals.tar.gz" "$archive" >> "$log" 2>&1 \
         || ! machine_config_exact_read "$machine" > "$attempt/after-native-config.json" \

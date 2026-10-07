@@ -1036,7 +1036,9 @@ absent preferred port as numeric zero; an explicit nonempty preference retains
 the allocator's validation. A real started startup rejection can retain an exact
 runtime owner without local start acceptance; its supported zero-credit archive
 preserves actual originals and config before native reaping. It never supplies a
-task result or completed-execution seal. Freeze sensible generous stage
+task result or completed-execution seal. Artifact console commands name an
+executable explicitly; use `python3 -B` instead of a shell environment-assignment
+prefix to suppress bytecode during read-only capture. Freeze sensible generous stage
 targets from comparable historical LIVE timings, excluding cache-assisted cold
 measurements, and report observed stage p95 plus image-start-to-full-release E2E.
 These fixed stage targets are generous operational targets, not measured p95
