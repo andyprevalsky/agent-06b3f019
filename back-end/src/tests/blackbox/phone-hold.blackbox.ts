@@ -398,24 +398,51 @@ const LIFECYCLE_CASES: Array<[string, () => Promise<void>]> = [
   ['status: call end merges final analysis', testCallEndMergesFinalAnalysis],
 ];
 
+/**
+ * The live detector runs Rose in this process; a funded key's 402 there must not
+ * cool the shared row that concurrent domains (integrations) are asserting.
+ */
+async function testFundedKeyMarksStayPrivate(): Promise<void> {
+  const { markGptApiKeyOnCooldown } = await import('../../providers/gptCredentials');
+  const { markAnthropicApiKeyOnCooldown } = await import('../../providers/computeCredentials');
+  const reason = `phone-hold-isolation-${process.pid}-${Date.now()}`;
+  await markGptApiKeyOnCooldown(reason);
+  await markAnthropicApiKeyOnCooldown(reason);
+  const leaked = await h.prisma.$queryRaw<Array<{ name: string }>>`
+    SELECT name FROM "Integration" WHERE "failureReason" = ${reason}`;
+  if (leaked.length > 0) {
+    await h.prisma.$executeRaw`
+      UPDATE "Integration" SET "rateLimitedUntil" = NULL, "failureReason" = NULL
+      WHERE "failureReason" = ${reason}`;
+  }
+  assert.deepEqual(leaked, [], 'phone-hold funded-key cooldowns reached the shared rows');
+}
+
 async function main(): Promise<void> {
   await setupHarness();
   const { EDGE_CASES } = await import('./phone-hold-edges.cases');
-  const cases = [...LIFECYCLE_CASES, ...EDGE_CASES];
+  const { withIsolatedFundedKeyCooldowns } = await import('./funded-key-cooldown.support');
+  const cases: Array<[string, () => Promise<void>]> = [
+    ...LIFECYCLE_CASES,
+    ...EDGE_CASES,
+    ['isolation: funded-key cooldowns stay private', testFundedKeyMarksStayPrivate],
+  ];
   const failures: string[] = [];
   try {
     // Sequential: the lifecycle cases walk one call through its states.
-    for (const [name, fn] of cases) {
-      const started = Date.now();
-      try {
-        await fn();
-        console.log(`  PASS  ${name} (${Date.now() - started}ms)`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        failures.push(`${name}: ${message}`);
-        console.log(`  FAIL  ${name} -- ${message} (${Date.now() - started}ms)`);
+    await withIsolatedFundedKeyCooldowns(async () => {
+      for (const [name, fn] of cases) {
+        const started = Date.now();
+        try {
+          await fn();
+          console.log(`  PASS  ${name} (${Date.now() - started}ms)`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failures.push(`${name}: ${message}`);
+          console.log(`  FAIL  ${name} -- ${message} (${Date.now() - started}ms)`);
+        }
       }
-    }
+    });
   } finally {
     await cleanupHarness();
   }
