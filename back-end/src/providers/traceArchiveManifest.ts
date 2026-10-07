@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { runTransactionWithRetry } from './database';
+import { databasePoolLimit, runTransactionWithRetry } from './database';
 import {
   type StoreResult,
   archiveEnabled,
@@ -300,10 +300,40 @@ type ManifestLockOwnership = {
   reconcile: () => Promise<ManifestReconciliationResult>;
 };
 
+// Each manifest lock pins one pooled connection for its whole operation, and
+// the operation's own queries need another. Unbounded, the holders and the
+// callers queued behind them inside Postgres pin every connection, and no
+// holder can run a query until the pool timeout: two concurrent agent deletes
+// starved a 4-connection pool for about 105 s. Admission keeps the locks one
+// process has open to under half its pool, so their queries always find a
+// connection; later callers wait here in memory, holding nothing. Like the
+// advisory lock itself, it is not re-entrant.
+let openManifestLocks = 0;
+const manifestLockWaiters: Array<() => void> = [];
+
+async function admitManifestLock(): Promise<() => void> {
+  const limit = Math.max(1, Math.floor((databasePoolLimit() - 1) / 2));
+  if (openManifestLocks >= limit) {
+    // The releasing caller hands its slot over, so the count is unchanged.
+    await new Promise<void>((resolve) => manifestLockWaiters.push(resolve));
+  } else {
+    openManifestLocks += 1;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = manifestLockWaiters.shift();
+    if (next) next();
+    else openManifestLocks -= 1;
+  };
+}
+
 export async function withArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
+  const release = await admitManifestLock();
   let enteredOperation: Promise<T> | undefined;
   try {
     return await runTransactionWithRetry(
@@ -340,6 +370,7 @@ export async function withArchiveManifestLock<T>(
     // Prisma can reject on expiry before the callback's bounded storage I/O ends.
     // Join that work; ownership checks prevent another rewrite or a false ACK.
     await enteredOperation?.catch(() => {});
+    release();
   }
 }
 
