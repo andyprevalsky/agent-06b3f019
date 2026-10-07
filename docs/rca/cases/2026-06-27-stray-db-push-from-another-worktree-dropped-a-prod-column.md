@@ -106,9 +106,28 @@ NOT EXISTS` from each migration's own SQL, including the partial index. The
 Supavisor pooler ignored `PGOPTIONS`, so the first pass hit the role's 2-minute
 `statement_timeout` on `Message` and `AgentTrajectorySearch` and left INVALID
 indexes. The second pass dropped each invalid index and rebuilt it with
-`SET statement_timeout = 0` inside the session. The stray `PhoneCallSession`
-table must be dropped before the branch's migration can deploy; that prod DDL
-waits for explicit human approval.
+`SET statement_timeout = 0` inside the session. `Message_text_trgm_idx` became
+valid after 177 seconds. The 8.2 GB `AgentTrajectorySearch` build ran for 1,315
+seconds and then failed with `could not write to file "base/pgsql_tmp/...": No
+space left on device`, leaving a 1,801 MB INVALID index. Render recorded 30
+`cannot execute UPDATE in a read-only transaction` (25006) failures from
+04:36:34Z to 04:37:02Z on `agent.update`, `user.updateMany` and
+`toolSideEffect.deleteMany`, and none before or after; that 29-second window
+ends with the build's failure at 04:37:00Z. So the remediation itself briefly
+made prod read-only by exhausting its disk. A fresh session afterwards reported
+`default_transaction_read_only` off, and `DROP INDEX CONCURRENTLY` removed the
+invalid index (database 51 GB → 49 GB, zero invalid indexes). Which build
+phase spilled was not captured: `pg_stat_progress_create_index` was not
+sampled. A concurrent build's validation phase sorts the TIDs it finds in the
+new index, and a trigram GIN index holds one posting per trigram per row, which
+is the likely source. `AgentTrajectorySearch_searchText_trgm_idx` therefore
+remains absent until prod has measured disk headroom; a blocking build would
+stall the `Message` trigger that maintains the table. The stray `PhoneCallSession` table must be
+dropped before the branch's migration can deploy. That prod DDL, and the
+trajectory index rebuild, wait for explicit human approval.
+
+Before building an index concurrently on a large prod table, compare its
+expected temporary sort size with free disk, not only the statement timeout.
 
 CLAUDE.md now names the local database explicitly for both the diff and the
 push, which goes through `npm run prisma:push:local`. That wrapper refuses any
