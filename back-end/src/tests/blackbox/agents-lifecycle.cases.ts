@@ -135,6 +135,24 @@ test('POST /generate-response-schema — missing goal → 400', async () => {
   assertStatus(res.status, 400, res.data);
 });
 
+// ========================= GET /:id/phone-calls/:callId/recording ==========
+
+test('GET /:id/phone-calls/:callId/recording — no auth → 401', async () => {
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/phone-calls/${FAKE_UUID}/recording`
+  );
+  assertStatus(res.status, 401, res.data);
+});
+
+test('GET /:id/phone-calls/:callId/recording — unknown agent → 404', async () => {
+  const session = await createAnonymousSession('phone-rec-missing');
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/phone-calls/${FAKE_UUID}/recording`,
+    { headers: authHeaders(session.session.access_token) }
+  );
+  assertStatus(res.status, 404, res.data);
+});
+
 // ========================= GET /:id/attachments/:fileId/url ================
 
 test('GET /:id/attachments/:fileId/url — no auth → 401', async () => {

@@ -125,6 +125,13 @@ export class FakeUpstream {
       const call = this.vapiCalls.get(vapiGet[1]);
       return call === undefined ? [404, { error: 'not found' }] : [200, call];
     }
+    const vapiRecording = /^\/call\/([^/?]+)\/mono-recording$/.exec(request.path);
+    if (vapiRecording !== null && request.method === 'GET') {
+      const call = this.vapiCalls.get(vapiRecording[1]);
+      return call?.status === 'ended'
+        ? [200, { recordingOf: vapiRecording[1] }]
+        : [404, { error: 'no recording' }];
+    }
     if (request.path.endsWith('/Calls.json') && request.method === 'POST') {
       const sid = `CA${randomUUID().replace(/-/g, '')}`;
       this.twilioStatuses.set(sid, 'queued');

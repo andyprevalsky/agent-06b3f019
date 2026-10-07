@@ -3820,8 +3820,8 @@ PY
 if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
     fail "default-detached fleet left durable ownership records after cleanup"
 fi
-# Without --wait nothing consumes the exit marker: it must remain as the
-# controller's exact exit status for `run-bench monitor --controller-status`.
+# The exit marker remains as the controller's exact exit status for
+# `run-bench monitor --controller-status`, independently of launcher waiting.
 for _ in $(seq 1 50); do
     [ -s "$detached_status_marker" ] && break
     sleep 0.1
@@ -3880,9 +3880,10 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
 fi
 [ "$wait_status_marker" != "$detached_status_marker" ] ||
     fail "detached wait launch reused the earlier controller exit marker"
-if [ -e "$wait_status_marker" ]; then
-    fail "detached wait fleet left a consumed status rendezvous"
-fi
+[ "$(cat "$wait_status_marker" 2>/dev/null)" = "0" ] ||
+    fail "detached wait fleet did not retain its exact successful terminal monitor status"
+[ ! -e "${wait_status_marker%.status}.owner" ] ||
+    fail "detached wait fleet left its live ownership rendezvous"
 [ "$(cat "$detached_status_marker" 2>/dev/null)" = "0" ] ||
     fail "detached wait cleanup consumed an earlier fleet's terminal monitor status"
 assert_no_controller_script_snapshots "detached-wait terminal cleanup"

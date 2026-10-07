@@ -17551,6 +17551,72 @@ def test_missing_call_findings_tolerates_spacing_and_punctuation():
     assert missing_call_findings(["ROSE-4471"], "The confirmation code is Rosa-4471.") == ["ROSE-4471"]
 
 
+async def test_phone_recording_playback_requires_first_party_audio():
+    """Daily phone benches fail when the FE recording URL is not playable audio."""
+    from benchmarks.phone_callee import phone_recording_playback_failures
+
+    agent_id = "b31c8a09-5992-4916-b797-b9c3ae5c75cf"
+    call_id = "01a11772-75ae-7000-83c6-064e004a57af"
+    data = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "call_phone_number",
+                    "toolStatus": "FINISHED",
+                    "phoneCall": {
+                        "callId": call_id,
+                        "recordingUrl": (
+                            "https://94bdb67bb98da30b06bdd917725c037d.r2.cloudflarestorage.com/"
+                            "hipaa-recordings/call-mono.wav"
+                        ),
+                    },
+                }
+            }
+        ]
+    }
+
+    class PrivateProviderResponse:
+        status_code = 400
+        headers = {"content-type": "application/xml"}
+        content = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b"<Error><Code>InvalidArgument</Code><Message>Authorization</Message></Error>"
+        )
+
+    class PlayableResponse:
+        status_code = 200
+        headers = {"content-type": "audio/wav"}
+        content = b"RIFF....WAVEfmt "
+
+    async def get_private(_url, headers=None):
+        return PrivateProviderResponse()
+
+    async def get_playable(url, headers=None):
+        assert "/api/agents/" in url
+        assert agent_id in url
+        assert call_id in url
+        assert headers == {"X-API-Key": "test"}
+        return PlayableResponse()
+
+    denied = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_private,
+    )
+    assert denied, "private provider recording must fail the FE playback check"
+
+    ok = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_playable,
+    )
+    assert ok == []
+
+
 def test_phone_search_text_includes_phone_call_metadata():
     """Agent-side haystack covers message text AND phoneCall metadata (transcript, structuredData)."""
     from benchmarks.phone_callee import phone_search_text
@@ -20841,6 +20907,10 @@ async def run_all_tests():
     )
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
+    await r.record_async(
+        "phone_recording_playback_requires_first_party_audio",
+        test_phone_recording_playback_requires_first_party_audio,
+    )
     r.record(
         "phone_final_result_text_excludes_raw_transcript", test_phone_final_result_text_excludes_raw_transcript_evidence
     )

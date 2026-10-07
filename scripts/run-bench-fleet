@@ -732,6 +732,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-image-publisher.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-image-registry.py" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"; then
         echo "FATAL: could not populate the fleet script snapshot" >&2
         exit 1
@@ -4005,6 +4006,12 @@ clone_failure_owned_volume_id() {  # <clone-status> <combined-output>; exact ID 
     # complete rejection line in the normal flyctl progress transcript are
     # sufficient attribution evidence.
     [ "$clone_status" = 1 ] || return 0
+
+    # Native Fly errors can decorate this same rejection with their RPC code.
+    # Normalize the captured failed-precondition representation before both
+    # complete-transcript classification and exact target-volume extraction.
+    output="$(printf '%s\n' "$output" | sed \
+        's/^Error: failed to launch VM: failed_precondition: /Error: failed to launch VM: /')"
 
     read -r candidate_count error_count timed_out <<EOF
 $(printf '%s\n' "$output" | awk '

@@ -67,6 +67,15 @@ exits with `FAIL` unless it runs as root on Linux. Through the runner, all three
 states execute in the container. A direct non-root run now fails and names the
 runner.
 
+A later `main` change (`8fb281874`, `8fabcdd4f`) routed unpinned Linux hosts to
+the container and skipped the control when pytest was missing. The second
+merge combines both conditions. A host runs the fixture natively only when it
+is root Linux and passes the pinned-toolchain preflight. Every other host uses
+the container, and the control still runs there without pytest instead of
+skipping. The dispatcher tests cover four cases: root and pinned (native),
+root and unpinned (container), non-root and pinned (container), and a direct
+non-root extraction (`FAIL`).
+
 ## Human feedback
 
 None recorded.

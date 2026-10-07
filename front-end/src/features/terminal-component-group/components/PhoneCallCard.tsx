@@ -10,6 +10,7 @@ export type { PhoneCallMetadata } from '../types';
 interface PhoneCallCardProps {
   phoneCall: PhoneCallMetadata;
   toolStatus: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+  agentId?: string | null;
   onTypingComplete?: () => void;
 }
 
@@ -20,12 +21,15 @@ interface PhoneCallCardProps {
  *
  *   initiating ──▶ in-progress ──wait_for_human──▶ on-hold ──live person──▶ in-progress
  *       │              │  (live audio)               (no live audio)            │
- *       │              └──────────────▶ ended (expandable) ◀──────────────────────┘
+ *       │              └──────────────▶ ended (collapsed) ◀───────────────────────┘
  *       └──────────────────────────────▶ error
+ *
+ *   ended + header click ──▶ expanded details ──callId──▶ first-party recording resolve
  */
 export const PhoneCallCard = memo(function PhoneCallCard({
   phoneCall,
   toolStatus,
+  agentId,
   onTypingComplete,
 }: PhoneCallCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -73,7 +77,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
         onToggleMuted={() => setIsMuted(!isMuted)}
       />
 
-      {isFinished && isExpanded && <PhoneCallDetails phoneCall={phoneCall} />}
+      {isFinished && isExpanded && <PhoneCallDetails phoneCall={phoneCall} agentId={agentId} />}
     </div>
   );
 });

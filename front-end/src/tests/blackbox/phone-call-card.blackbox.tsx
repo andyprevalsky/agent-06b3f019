@@ -3,13 +3,20 @@
  * Covers call-state branches (in-progress/ended/error), duration formatting,
  * timer, transcript/summary rendering, and the mute/expand interactions.
  */
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   PhoneCallCard,
   type PhoneCallMetadata,
 } from '@/features/terminal-component-group/components/PhoneCallCard';
+
+vi.mock('@/features/terminal-component-group/api', async (importActual) => ({
+  ...(await importActual<typeof import('@/features/terminal-component-group/api')>()),
+  fetchPhoneCallRecording: vi.fn(async () => new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46])], { type: 'audio/wav' })),
+}));
+
+import { fetchPhoneCallRecording } from '@/features/terminal-component-group/api';
 
 function makeCall(overrides: Partial<PhoneCallMetadata> = {}): PhoneCallMetadata {
   return {
@@ -160,35 +167,71 @@ describe('PhoneCallCard', () => {
       expect(screen.getByText(/appointmentBooked/)).toBeInTheDocument();
     });
 
-    it('shows recording player UI when expanded and recordingUrl is set', async () => {
+    it('plays a first-party recording blob instead of a provider URL', async () => {
       const u = userEvent.setup();
       render(
         <PhoneCallCard
+          agentId="agent-1"
           phoneCall={makeCall({
             status: 'ended',
             duration: 10,
             endedReason: 'complete',
+            callId: 'call-1',
             recordingUrl: 'https://example.test/rec.mp3',
           })}
           toolStatus="FINISHED"
         />,
       );
-      // Header click to expand
       const header = screen.getByText('+15555550000').closest('div')!.parentElement!.parentElement!;
       await u.click(header);
 
+      await waitFor(() => {
+        expect(fetchPhoneCallRecording).toHaveBeenCalledWith(
+          'agent-1',
+          'call-1',
+          expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        );
+      });
       const audio = document.querySelector('audio');
       expect(audio).not.toBeNull();
-      expect(audio!.getAttribute('src')).toBe('https://example.test/rec.mp3');
+      expect(audio!.getAttribute('src')).toMatch(/^blob:/);
 
-      // Player includes a play button — click it (mock play resolves via setup)
       const playButtons = document.querySelectorAll('button');
-      // Click first play control inside the player
       const playBtn = Array.from(playButtons).find(
         (btn) => btn.querySelector('svg.lucide-play') || btn.querySelector('svg.lucide-pause'),
       );
       expect(playBtn).toBeDefined();
       await u.click(playBtn!);
+    });
+
+    it('does not use a private Vapi recording URL as the audio src', async () => {
+      const u = userEvent.setup();
+      const privateUrl =
+        'https://94bdb67bb98da30b06bdd917725c037d.r2.cloudflarestorage.com/hipaa-recordings/01a11772-75ae-7000-83c6-064e004a57af-mono.wav';
+      render(
+        <PhoneCallCard
+          agentId="b31c8a09-5992-4916-b797-b9c3ae5c75cf"
+          phoneCall={makeCall({
+            status: 'ended',
+            duration: 268,
+            endedReason: 'silence-timed-out',
+            callId: '01a11772-75ae-7000-83c6-064e004a57af',
+            recordingUrl: privateUrl,
+          })}
+          toolStatus="FINISHED"
+        />,
+      );
+      const header = screen.getByText('+15555550000').closest('div')!.parentElement!.parentElement!;
+      await u.click(header);
+
+      await waitFor(() => {
+        const audio = document.querySelector('audio');
+        expect(audio).not.toBeNull();
+      });
+      const audio = document.querySelector('audio');
+      expect(audio?.getAttribute('src')).not.toBe(privateUrl);
+      expect(audio?.getAttribute('src') ?? '').not.toContain('r2.cloudflarestorage.com');
+      expect(audio?.getAttribute('src') ?? '').not.toContain('hipaa-recordings');
     });
 
     it('omits duration when it is 0 or missing', () => {

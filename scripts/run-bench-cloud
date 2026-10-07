@@ -2258,7 +2258,7 @@ build_warm_image() {
         # in-flight controller's publisher.
         source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || return $?
     fi
-    local attempt build_ok=0
+    local attempt build_ok=0 build_status=0
     local completion_file="$OUT_DIR/cloudbench-image-publication.json"
     IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
     local build_args=(
@@ -2283,11 +2283,20 @@ build_warm_image() {
             build_ok=1
             [ ! -f "$completion_file" ] || IMAGE_BUILD_COMPLETION="$(cat "$completion_file")"
             break
+        else
+            build_status=$?
+            # Registry continuation reuses the same built manifest. A failed
+            # handoff must not restart dependency installation or hide evidence.
+            [ "$build_status" != 74 ] || return "$build_status"
         fi
         [ "$attempt" = 3 ] || sleep 15
     done
     [ "$build_ok" = 1 ] || { echo "Image build failed after 3 attempts" >&2; return 1; }
-    IMAGE_REF="registry.fly.io/$APP:$IMAGE_LABEL"
+    IMAGE_REF="$(python3 - "$IMAGE_BUILD_COMPLETION" "registry.fly.io/$APP:$IMAGE_LABEL" <<'PY_IMAGE_REF'
+import json,sys
+print(json.loads(sys.argv[1]).get("published_image_ref") or sys.argv[2])
+PY_IMAGE_REF
+    )" || return $?
     IMAGE_BUILD_ATTEMPTS="$attempt"
     echo "✅ Image: $IMAGE_REF"
 }

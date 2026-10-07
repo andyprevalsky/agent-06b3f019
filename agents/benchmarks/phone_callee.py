@@ -361,6 +361,96 @@ def missing_call_findings(findings: List[str], haystack: str) -> List[str]:
     return [f for f in findings if f.lower() not in lowered and _squash(f) not in squashed]
 
 
+def finished_phone_calls(data: dict) -> list[dict]:
+    """FINISHED call_phone_number messages that carry phoneCall metadata."""
+    calls: list[dict] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "call_phone_number":
+            continue
+        if metadata.get("toolStatus") != "FINISHED":
+            continue
+        phone = metadata.get("phoneCall")
+        if isinstance(phone, dict):
+            calls.append(phone)
+    return calls
+
+
+def first_party_phone_recording_path(agent_id: str, call_id: str) -> str:
+    return f"/api/agents/{agent_id}/phone-calls/{call_id}/recording"
+
+
+def phone_recording_looks_like_audio(body: bytes, content_type: str) -> bool:
+    """True when the FE would receive a real audio container, not an error page."""
+    lowered = content_type.lower()
+    if "application/json" in lowered or "text/html" in lowered or "application/xml" in lowered:
+        return False
+    if len(body) < 16:
+        return False
+    if body.startswith(b"RIFF") or body.startswith(b"ID3") or body.startswith(b"OggS"):
+        return True
+    if body[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3"}:
+        return True
+    if len(body) >= 12 and body[4:8] == b"ftyp":
+        return True
+    return lowered.startswith("audio/")
+
+
+async def phone_recording_playback_failures(
+    data: dict,
+    *,
+    base_url: str,
+    agent_id: str,
+    headers: dict,
+    get=None,
+) -> list[str]:
+    """Fail when the FE first-party recording URL is missing or not playable audio."""
+    calls = finished_phone_calls(data)
+    if not calls:
+        return ["no finished call_phone_number message with phoneCall metadata"]
+    if not agent_id:
+        return ["phone recording playback check missing agent_id"]
+    failures: list[str] = []
+    client_get = get
+    if client_get is None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await phone_recording_playback_failures(
+                data,
+                base_url=base_url,
+                agent_id=agent_id,
+                headers=headers,
+                get=client.get,
+            )
+    for phone in calls:
+        call_id = phone.get("callId")
+        if not isinstance(call_id, str) or not call_id:
+            failures.append("finished phone call missing callId")
+            continue
+        url = f"{base_url.rstrip('/')}{first_party_phone_recording_path(agent_id, call_id)}"
+        try:
+            response = await client_get(url, headers=headers)
+        except Exception as exc:
+            failures.append(f"FE recording GET failed for call {call_id}: {exc}")
+            continue
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            failures.append(f"FE recording GET {status} for call {call_id}")
+            continue
+        headers_map = getattr(response, "headers", {}) or {}
+        content_type = str(headers_map.get("content-type") or headers_map.get("Content-Type") or "")
+        body = getattr(response, "content", b"") or b""
+        if not phone_recording_looks_like_audio(body, content_type):
+            failures.append(
+                f"FE recording for call {call_id} is not playable audio "
+                f"(content-type={content_type!r}, bytes={len(body)})"
+            )
+    return failures
+
+
 def phone_search_text(data: dict) -> str:
     """Agent messages + full metadata JSON (includes phoneCall transcript/structuredData)."""
     chunks: List[str] = []

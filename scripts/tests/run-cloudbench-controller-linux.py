@@ -162,13 +162,19 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     fixture = f"scripts/tests/cloudbench-{args.fixture}.test.sh"
-    # The fixtures exercise root-only Linux permission primitives; any other host
-    # runs them in the same offline root container.
+    # The fixtures exercise root-only Linux permission primitives with the
+    # pinned toolchain; any other host runs them in the same offline root container.
     if sys.platform == "linux" and os.geteuid() == 0:
-        subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
-        if args.check_only:
-            return 0
-        os.execvp("bash", ["bash", str(root / fixture)])
+        native = subprocess.run([sys.executable, "-c", TOOL_CHECK])
+        if native.returncode == 0:
+            if args.check_only:
+                return 0
+            os.execvp("bash", ["bash", str(root / fixture)])
+        print(
+            "host toolchain is not pinned Python3.11.9/Node22.13.0; "
+            "using offline controller image",
+            flush=True,
+        )
     recipe = root / "scripts/tests/cloudbench-controller-linux.Dockerfile"
     fingerprint = hashlib.sha256(recipe.read_bytes()).hexdigest()
     configured = os.environ.get("CLOUDBENCH_CONTROLLER_TEST_IMAGE", "")

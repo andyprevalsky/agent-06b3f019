@@ -44,6 +44,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS_VENV_PYTHON = REPO_ROOT / "agents" / "venv" / "bin" / "python"
+
+
+def _ensure_agents_site_packages() -> None:
+    """System python3 is the documented publisher entrypoint; markdown-it lives in agents/venv."""
+    if any(Path(entry).name == "site-packages" and "agents/venv" in entry for entry in sys.path):
+        return
+    lib_root = AGENTS_VENV_PYTHON.parent.parent / "lib"
+    for candidate in sorted(lib_root.glob("python*/site-packages")):
+        sys.path.insert(0, str(candidate))
+        return
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
 ARTIFACTS_ROOT = Path(
@@ -450,6 +460,7 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             # Use the existing agents dependency rather than approximating
             # CommonMark: adjacent emphasis delimiters may remain literal text.
             if markdown is None:
+                _ensure_agents_site_packages()
                 from markdown_it import MarkdownIt
 
                 markdown = MarkdownIt("commonmark", {"html": False}).enable(

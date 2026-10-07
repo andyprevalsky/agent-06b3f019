@@ -22,6 +22,7 @@ import {
 } from '../../providers/toolSideEffects';
 import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
 import {
+  agentIdForCallId,
   agentIdFromOperationKey,
   archiveVapiJson,
   archiveVapiPollResult,
@@ -30,6 +31,7 @@ import {
 import { placeHoldCapableCall, type HoldCallPlacement } from './holdService';
 import { getHoldCallStatus } from './holdStatusService';
 import { TwilioApiError } from './holdTelephonyService';
+import { rewriteEndedCallRecordingUrl } from './recordings';
 import {
   fetchVapi,
   getVapiPrivateKey,
@@ -262,7 +264,7 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
       status: String(holdStatus.status),
       hold_state: String((holdStatus.phoneHold as Json | undefined)?.state),
     });
-    return holdStatus;
+    return rewriteEndedCallRecordingUrl(holdStatus, callId, await agentIdForCallId(callId));
   }
   const requestUrl = `${VAPI_BASE_URL}/call/${callId}`;
   const startedAt = new Date();
@@ -283,12 +285,13 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
 
   const result = (await response.json()) as Record<string, unknown>;
   await archiveVapiPollResult(callId, result, exchange);
+  const rewritten = rewriteEndedCallRecordingUrl(result, callId, await agentIdForCallId(callId));
   log.info('Vapi call poll response', {
     callId,
-    status: String(result.status),
-    duration: String(result.duration),
-    endedReason: String(result.endedReason),
-    fullResponse: logJson(result),
+    status: String(rewritten.status),
+    duration: String(rewritten.duration),
+    endedReason: String(rewritten.endedReason),
+    fullResponse: logJson(rewritten),
   });
-  return result;
+  return rewritten;
 }

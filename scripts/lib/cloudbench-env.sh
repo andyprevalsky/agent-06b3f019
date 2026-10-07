@@ -969,7 +969,9 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     fi
   fi
   status="$(head -1 "$status_file" 2>/dev/null || true)"
-  rm -f "$owner_file" "$status_file" "$owner_file".tmp.* "$status_file".tmp.* \
+  # Ownership rendezvous is retired after group drain; the printed terminal
+  # receipt remains available to the independent monitor after --wait returns.
+  rm -f "$owner_file" "$owner_file".tmp.* "$status_file".tmp.* \
     2>/dev/null || true
   case "$status" in
     ''|*[!0-9]*)

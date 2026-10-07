@@ -183,6 +183,29 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(calls[2][2], identity + ":/tmp/.")
         self.assertEqual(calls[3], ["docker", "rm", identity])
 
+    def test_extracted_native_cache_controls_need_no_pytest_and_never_skip(self):
+        root = Path(__file__).resolve().parents[2]
+        fixture = Path(__file__).with_name("cloudbench-status-service-shutdown.test.sh")
+        block = fixture.read_text().split("<<'PY_CACHE_PARENT'\n", 1)[1].split(
+            "\nPY_CACHE_PARENT", 1
+        )[0]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.platform='darwin';sys.modules['pytest']=None\n" + block,
+                str(root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("FAIL: native cache-parent controls need root Linux", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+        self.assertNotIn("SKIP", result.stdout)
+        self.assertNotIn("PASS: native checkout cache parent", result.stdout)
+
     def test_foreign_identity_or_nonsealed_mounts_are_never_mutated(self):
         for settings in (
             {"label": "foreign-label"},
@@ -224,6 +247,7 @@ class ContainerOwnership(unittest.TestCase):
         fixture_exit_code=0,
         platform="darwin",
         euid=501,
+        native_preflight=None,
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -238,6 +262,14 @@ class ContainerOwnership(unittest.TestCase):
             image = "sha256:" + "a" * 64
 
             def docker(args, **_kwargs):
+                if (
+                    len(args) >= 3
+                    and args[0] == sys.executable
+                    and args[1] == "-c"
+                    and "requires Linux Python3.11.9" in args[2]
+                ):
+                    code = 0 if native_preflight else 1
+                    return subprocess.CompletedProcess(args, code, "", "")
                 tool_commands.append(args)
                 return subprocess.CompletedProcess(
                     args,
@@ -342,6 +374,60 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
         self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
 
+    def test_status_shutdown_runs_cache_parent_controls_without_a_pytest_gate(self):
+        source = Path(__file__).with_name(
+            "cloudbench-status-service-shutdown.test.sh"
+        ).read_text()
+        self.assertNotIn("import pytest", source)
+        self.assertNotIn("SKIP: native cache parent", source)
+
+    def test_root_linux_unpinned_host_uses_offline_controller_image(self):
+        self.assertEqual(
+            self.check_dispatch(platform="linux", euid=0, native_preflight=False),
+            ["join", "retire"],
+        )
+
+    def test_root_linux_pinned_host_execs_native_fixture(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                runner,
+                "__file__",
+                str(
+                    Path(temporary)
+                    / "scripts/tests/run-cloudbench-controller-linux.py"
+                ),
+            ),
+            patch.object(runner.sys, "platform", "linux"),
+            patch.object(runner.os, "geteuid", return_value=0),
+            patch.object(
+                runner.sys,
+                "argv",
+                ["runner", "--fixture", "status-service-shutdown"],
+            ),
+            patch.object(
+                runner.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as native,
+            patch.object(runner.os, "execvp", side_effect=SystemExit(0)) as execvp,
+            patch.object(runner.subprocess, "Popen") as launch,
+        ):
+            (Path(temporary) / "scripts/tests").mkdir(parents=True)
+            with self.assertRaises(SystemExit) as exit_status:
+                runner.main()
+            self.assertEqual(exit_status.exception.code, 0)
+            native.assert_called_once_with(
+                [runner.sys.executable, "-c", runner.TOOL_CHECK]
+            )
+            self.assertEqual(execvp.call_args.args[0], "bash")
+            self.assertTrue(
+                execvp.call_args.args[1][1].endswith(
+                    "scripts/tests/cloudbench-status-service-shutdown.test.sh"
+                )
+            )
+            launch.assert_not_called()
+
     def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
         for fixture in ("multi-workstream", "status-service-shutdown"):
             with self.subTest(fixture=fixture):
@@ -349,39 +435,15 @@ class ContainerOwnership(unittest.TestCase):
                     self.check_dispatch(fixture=fixture), ["join", "retire"]
                 )
 
-    def test_non_root_linux_uses_the_offline_root_container(self):
+    def test_non_root_linux_uses_the_offline_root_container_even_when_pinned(self):
         self.assertEqual(
             self.check_dispatch(
-                platform="linux", euid=1000, fixture="status-service-shutdown"
+                platform="linux",
+                euid=1000,
+                native_preflight=True,
+                fixture="status-service-shutdown",
             ),
             ["join", "retire"],
-        )
-
-    def test_root_linux_runs_the_fixture_natively_after_the_exact_preflight(self):
-        class Executed(Exception):
-            pass
-
-        with (
-            patch.object(runner.sys, "platform", "linux"),
-            patch.object(runner.os, "geteuid", return_value=0),
-            patch.object(
-                runner.sys, "argv", ["runner", "--fixture", "status-service-shutdown"]
-            ),
-            patch.object(runner.subprocess, "run") as preflight,
-            patch.object(runner.subprocess, "Popen") as launch,
-            patch.object(runner.os, "execvp", side_effect=Executed) as execute,
-            self.assertRaises(Executed),
-        ):
-            runner.main()
-        preflight.assert_called_once_with(
-            [runner.sys.executable, "-c", runner.TOOL_CHECK], check=True
-        )
-        launch.assert_not_called()
-        self.assertEqual(execute.call_args.args[0], "bash")
-        self.assertTrue(
-            execute.call_args.args[1][1].endswith(
-                "scripts/tests/cloudbench-status-service-shutdown.test.sh"
-            )
         )
 
     def test_invalid_fixture_is_rejected_before_any_docker_operation(self):

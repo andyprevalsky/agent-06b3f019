@@ -32,6 +32,7 @@
  *   - failure surface: Vapi/Twilio placement errors end the session; park/resume
  *     failures leave the call where it was
  *   - lost callback: a poll reconciles the line status from Twilio
+ *   - recording: an ended call plays its final segment through the first-party route
  *
  * Usage:
  *   bash scripts/run-blackbox-tests.sh phone-hold
@@ -383,6 +384,25 @@ async function testCallEndMergesFinalAnalysis(): Promise<void> {
   assert.equal(await lateStream.closed, 1008, 'an ended call refuses a hold stream');
 }
 
+async function testEndedCallRecordingIsTheFinalSegment(): Promise<void> {
+  const placed = placedCall();
+  const status = await h.service.getCallStatus(placed.callId);
+  assert.equal(
+    status.recordingUrl,
+    `/api/agents/${RUN_AGENT_ID}/phone-calls/${placed.callId}/recording`,
+    'the composite plays through the first-party route under its root id'
+  );
+  const { downloadVapiCallRecording } = await import('../../providers/vapiRecordings');
+  const before = h.upstream.requests.length;
+  const recording = await downloadVapiCallRecording(placed.callId);
+  assert.ok(recording, 'the root id resolves to a recording');
+  const fetched = h.upstream.requests
+    .slice(before)
+    .filter((request) => request.path.endsWith('-recording'))
+    .map((request) => request.path);
+  assert.deepEqual(fetched, [`/call/${resumedVapiCallId()}/mono-recording`]);
+}
+
 const LIFECYCLE_CASES: Array<[string, () => Promise<void>]> = [
   ['placement: bypass segment + Twilio call with hold tool', testPlacementIsHoldCapable],
   ['placement: idempotent retry places nothing new', testPlacementRetryIsIdempotent],
@@ -396,6 +416,7 @@ const LIFECYCLE_CASES: Array<[string, () => Promise<void>]> = [
   ['status: segments merge after resume', testStatusAfterResumeMergesSegments],
   ['twiml: reconnect after resume hangs up', testReconnectTwimlHangsUpOnceConnected],
   ['status: call end merges final analysis', testCallEndMergesFinalAnalysis],
+  ['recording: ended call plays the final segment', testEndedCallRecordingIsTheFinalSegment],
 ];
 
 /**
