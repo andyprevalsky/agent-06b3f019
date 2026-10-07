@@ -24,6 +24,31 @@ def test_configured_phone_pool_assigns_distinct_numbers_per_task(monkeypatch):
     assert phone_callee._configured_number_id_for_task("phone-call-hold-queue") == "number-hold"
 
 
+def test_configured_phone_pool_rejects_one_number_shared_by_two_tasks(monkeypatch):
+    configured = (
+        "phone-call-client-intake=number-shared,"
+        "phone-call-payment=number-payment,"
+        "phone-call-hold-queue=number-shared"
+    )
+    monkeypatch.setattr(
+        phone_callee,
+        "load_env_var",
+        lambda name, _path: configured
+        if name == "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
+        else "",
+    )
+
+    for task_name in ("phone-call-client-intake", "phone-call-hold-queue"):
+        try:
+            phone_callee._configured_number_id_for_task(task_name)
+        except RuntimeError as exc:
+            message = str(exc)
+            assert "phone-call-client-intake" in message and "phone-call-hold-queue" in message
+        else:
+            raise AssertionError(f"{task_name} resolved a callee number another task also attaches to")
+    assert phone_callee._configured_number_id_for_task("phone-call-payment") == "number-payment"
+
+
 def test_configured_phone_pool_never_calls_free_number_provisioning(monkeypatch):
     monkeypatch.setattr(
         phone_callee,

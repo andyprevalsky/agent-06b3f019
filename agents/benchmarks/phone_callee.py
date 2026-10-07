@@ -119,7 +119,14 @@ def _configured_number_id_for_task(task_name: str) -> str:
         assignments[name] = number_id
     if task_name not in assignments:
         raise RuntimeError(f"{CALLEE_NUMBER_IDS_ENV} has no assignment for {task_name}")
-    return assignments[task_name]
+    number_id = assignments[task_name]
+    sharing = sorted(name for name, assigned in assignments.items() if assigned == number_id)
+    if len(sharing) > 1:
+        raise RuntimeError(
+            f"{CALLEE_NUMBER_IDS_ENV} assigns callee number {number_id[:8]} to {', '.join(sharing)}; "
+            "each phone task needs its own number"
+        )
+    return number_id
 
 
 def _session_phone_number_name() -> str:
