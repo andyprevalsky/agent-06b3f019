@@ -44,6 +44,7 @@ import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
+import { composerCanSubmit } from './composerCanSubmit';
 import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
@@ -76,15 +77,13 @@ export function AgentChatArea({
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
   const sharedView = isBenchmarkSharedView();
 
-  const canSubmit =
-    !a.selectedAgentId ||
-    pendingGates.length > 0 ||
-    hasActiveAttentionRequest ||
-    a.agentDetail?.status === 'PAUSED' ||
-    a.agentDetail?.status === 'COMPLETED' ||
-    a.agentDetail?.status === 'FAILED' ||
-    a.agentDetail?.status === 'COST_LIMIT_REACHED' ||
-    a.isChatMode;
+  const canSubmit = composerCanSubmit({
+    selectedAgentId: a.selectedAgentId,
+    pendingGateCount: pendingGates.length,
+    hasActiveAttentionRequest,
+    status: a.agentDetail?.status,
+    isChatMode: a.isChatMode,
+  });
 
   return (
     <>

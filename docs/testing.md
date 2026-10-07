@@ -52,6 +52,13 @@ checks and shares the host with the other coverage pools. Timeout and cancellati
 still fail the domain and retire its owned process group. This infrastructure
 budget does not change benchmark task execution or allocation-to-release deadlines.
 
+For mock deadline cases, use the existing deterministic clock and wait controls
+at the owning request or stream boundary. Preserve the production budgets and
+endstate assertions; a few milliseconds of real host scheduling is not a stable
+mock contract. Hermetic shell fixtures must expose the existing bounded tools
+that the production command uses, including `timeout` when their reduced PATH
+would otherwise hide it.
+
 ### Backend Structural (`back-end/src/tests/structural/`)
 
 Architecture invariant tests — import direction, cross-domain isolation, provider boundaries, Prisma/Express encapsulation. Fast, no server needed.

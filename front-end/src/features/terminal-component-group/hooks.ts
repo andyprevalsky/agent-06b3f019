@@ -71,6 +71,7 @@ export {
   reportAgentBug,
   downloadAttachmentAsBlob,
   downloadAttachmentAsText,
+  fetchPhoneCallRecording,
 } from './api';
 
 // ── API types (used by components alongside the functions above) ──────────

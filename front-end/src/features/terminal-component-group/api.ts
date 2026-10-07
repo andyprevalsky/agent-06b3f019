@@ -8,6 +8,7 @@
 
 import { benchmarkAgentPreviewEnabled } from '@/lib/api/agents';
 import { getSession, getStoredSession, supabase } from '@/lib/supabase';
+import { getAuthHeaders } from '@/lib/api/client';
 import { API_URL, API_BASE_WITH_PATH } from './config';
 import type { CodeProvider, UsageData } from './types';
 
@@ -143,6 +144,26 @@ export async function downloadAttachmentAsText(
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }
   return response.text();
+}
+
+/** Fetch first-party phone-call recording bytes for FE playback. */
+export async function fetchPhoneCallRecording(
+  agentId: string,
+  callId: string,
+  options?: { signal?: AbortSignal },
+): Promise<Blob> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/agents/${encodeURIComponent(agentId)}/phone-calls/${encodeURIComponent(callId)}/recording`,
+    { headers: getAuthHeaders(), signal: options?.signal },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to load phone recording (${response.status})`);
+  }
+  const contentType = response.headers.get('content-type') ?? '';
+  if (contentType.includes('text/html') || contentType.includes('application/json')) {
+    throw new Error(`Phone recording response was not audio (${contentType || 'unknown'})`);
+  }
+  return response.blob();
 }
 
 const SIGNED_ATTACHMENT_URL_TTL_SECONDS = 3600;

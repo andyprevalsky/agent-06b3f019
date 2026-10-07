@@ -4,11 +4,11 @@ import { classifyAgentFailureForSurface } from '../../providers/credentialPropag
 import { createLogger } from '../../providers/logger';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
+import { TERMINAL_STATUSES, workflowIdForStatusBroadcast } from './statusBroadcastWorkflowId';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
 const log = createLogger('Agents');
-const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
 const IRREVERSIBLE_STATUSES = new Set(['COMPLETED', 'FAILED']);
 const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
@@ -107,7 +107,11 @@ async function failureSurface(agentId: string, body: UpdateStatusBody) {
   }
 }
 
-async function broadcastStatus(agentId: string, body: UpdateStatusBody): Promise<void> {
+async function broadcastStatus(
+  agentId: string,
+  body: UpdateStatusBody,
+  temporalWorkflowId: string | null
+): Promise<void> {
   await broadcastAgentUpdate(agentId, {
     progress: body.progress,
     status: body.status,
@@ -117,6 +121,7 @@ async function broadcastStatus(agentId: string, body: UpdateStatusBody): Promise
     tokensOut: body.tokensOut,
     contextSize: body.contextSize,
     messageCount: body.messageCount,
+    temporalWorkflowId: workflowIdForStatusBroadcast(body.status, temporalWorkflowId),
     ...(await failureSurface(agentId, body)),
   });
 }
@@ -143,7 +148,7 @@ export async function updateAgentStatus(
 
   const result = await persistStatus(agentId, body, workflowGeneration);
   if (result.agent === null || !result.accepted) return result.agent;
-  await broadcastStatus(agentId, body);
+  await broadcastStatus(agentId, body, result.agent.temporalWorkflowId);
   // Platform GMV: any agent (root or child) that completes with a structured
   // output containing BOTH a USD amount and an order/confirmation id.
   // Dynamic import keeps agents/purchases domains decoupled for layer-deps.

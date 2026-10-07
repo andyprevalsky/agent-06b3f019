@@ -7,6 +7,7 @@ import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
 import { recordAgentScopeDiscard, recordAgentSelection } from '@/lib/agentScopeDiagnostics';
 
 import { fetchAgentDetail } from '../api';
+import { isChatCapableAgent } from './realtimeHandlers';
 import type {
   PendingAgentCreation,
   PendingAgentCreationInput,
@@ -68,7 +69,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       setMessages((previous) =>
         isCurrentAgent() ? mergeCanonicalMessages(previous, data.messages, projection) : previous,
       );
-      setIsChatMode((previous) => (isCurrentAgent() ? !data.agent.temporal_workflow_id : previous));
+      setIsChatMode((previous) => (isCurrentAgent() ? isChatCapableAgent(data.agent) : previous));
       return true;
     },
     [

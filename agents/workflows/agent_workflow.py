@@ -744,6 +744,8 @@ class AgentWorkflow:
         self.tokens_out: int = 0
         self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
+        # Authentication can pause itself while waiting for the user's reply.
+        self._pause_signal_sequence: int = 0
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -975,6 +977,9 @@ class AgentWorkflow:
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        pause_sequence = runtime.get("pause_signal_sequence")
+        if type(pause_sequence) is int and pause_sequence >= 0:
+            self._pause_signal_sequence = pause_sequence
         self._orphaned = runtime.get("orphaned") is True
         self._parent_query_failures_while_paused = int(runtime.get("parent_query_failures", 0))
         self._has_new_messages = runtime.get("has_new_messages") is True
@@ -1199,6 +1204,7 @@ class AgentWorkflow:
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
+                "pause_signal_sequence": self._pause_signal_sequence,
                 "orphaned": self._orphaned,
                 "parent_query_failures": self._parent_query_failures_while_paused,
                 "has_new_messages": self._has_new_messages,
@@ -1311,6 +1317,7 @@ class AgentWorkflow:
     async def pause(self):
         """Pause workflow execution."""
         workflow.logger.info("🔴 Received PAUSE signal")
+        self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 

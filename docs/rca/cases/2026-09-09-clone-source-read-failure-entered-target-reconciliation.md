@@ -11,7 +11,7 @@ symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "ERROR: exact psql command is unavailable"
-  - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
+  - "Error: failed to launch VM: failed_precondition: insufficient resources to create new machine with existing volume"
   - "state: pending_destroy after six accepted exact volume destroy calls"
 tags:
   - cloudbench
@@ -58,6 +58,9 @@ sources:
   - fleet run stale-owner-539b11e970334d9db5d401fa167ac59e
   - commit 95ab4d584
   - commit 71197cc5b
+  - commit 744e67611555953fdc3aab7d69c7f46b283a7b32
+  - commit 5051c0594905da7f1170fd3d20c9d17cca160500
+  - fleet run 20261007-155532-35109
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -1265,6 +1268,88 @@ six repeated pairs. Audit state is constant-size per existing owner record, with
 no provider-wide inventory, cross-owner query, shared poller, row, lock, channel,
 subscription, or fan-in.
 
+## Seventeenth recurrence on 2026-10-07
+
+The fresh Control6 fleet's first rejected clone returned ordinary status 1,
+no authoritative Machine ID, and exact newly forked target Volume
+`vol_42kjxqg53pewy294`. Its native rejection inserted `failed_precondition:`
+between `failed to launch VM:` and the already supported insufficient-capacity
+reason. Clone attempt 2 succeeded. That recovered Machine did not prove the
+failed attempt's target Volume was retired.
+
+The retained producer transcript's SHA-256 is
+`29f0fc213d7f2cc3934a48e4627f9819c520ec0ecf2ea55e064a90c0101678cd`.
+The matching cached native inventory recorded that target Volume created at
+`2026-10-07T16:05:01.224Z`, unattached, and absent from both source and other
+cached Machine mounts. The exact Volume ID occurred zero times in the owner's
+durable audit. The rejected clone name instead received the
+`not-allocated-verified` disposition after name reconciliation found no
+Machine. No live provider probe was needed to establish this attribution gap.
+
+The critical path was:
+
+one clone's complete rejection → `clone_failure_owned_volume_id` rejects its
+RPC-decorated prefix → no durable target-Volume record → ordinary name lookup
+finds no Machine → name ownership retires → successful retry leaves the
+previous target Volume outside the normal exact-owner final reaper's ledger.
+
+The first bad boundary was the owned-volume classifier. Allocation and exact
+disposal already had the correct ordering, but the classifier admitted only
+the bare rendering of an otherwise identical native rejection. The fixture
+covered that bare rendering alone. This repeats the same lifecycle-contract
+inconsistency: an allocated target resource was represented as unallocated
+because its producer's native transport decoration was not canonicalized.
+Fly's capacity rejection remains a provider condition; this repair does not
+claim to fix capacity or the active run's final outcome.
+
+On unchanged runtime source `744e67611555953fdc3aab7d69c7f46b283a7b32`,
+the permanent owning command was:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /Users/andyprevalsky/Developer/rose-daily50-control4-20261007/agents/venv/bin/python -m pytest -q -p no:cacheprovider \
+  agents/benchmarks/cloudbench_dependency_sync_test.py \
+  -k 'failed_clone_captures_owned_volume_before_machine_name_reconciliation or failed_clone_retains_exact_owner_when_delete_absence_is_unknown or clone_retries_after_accepted_destroy_outlives_confirmation_window'
+```
+
+It failed with three failures and three passes in 8.89 seconds. The failures
+proved entry into name lookup before exact disposal, loss of the durable Volume
+record when disposal was unknown, and a successful retry without the first
+attempt's Volume owner. The unchanged command passed all six cases in 6.21
+seconds after the six-line production repair. Both provider renderings now
+exercise the actual clone, durable registry, exact reaper, and retry path.
+The expanded focused set passed all 15 cases in 5.71 seconds, including
+nonordinary statuses, unrelated provider codes, multiple errors, timeout
+evidence, malformed IDs, malformed request IDs, and a nonterminal notice.
+
+The classifier now removes only the captured `failed_precondition:` decoration
+at the anchored native failed-launch prefix before its two existing transcript
+checks. The original raw diagnostic remains unchanged. Exactly one complete
+ordinary rejection still grants authority for only its quoted target Volume.
+Unknown deletion retains both the exact Volume and clone name; authoritative
+terminal disposal retires them; the existing accepted-pending disposition may
+continue the existing bounded clone attempts while retaining ownership. No
+new provider inventory, sweep, authentication path, timeout, retry budget,
+task, evaluator, concurrency setting, or live-run source changed.
+
+The regression lives in the existing whole-file **Cloud
+Benchmark Lifecycle** suite selected by `scripts/test.sh` whenever
+`scripts/run-bench-fleet` changes. The RCA appended this existing case after
+two archive searches, rather than creating another ownership incident.
+Claude's stream cleanup in `claude-code-src/src/utils/hooks.ts` supplies only
+the general rule that ownership persists until an explicit transfer; searches
+of the available Claude, OpenClaw, and Hermes sources found no Fly clone/RPC
+formatting analog. The Codex reference clone was unavailable locally. The fix
+uses the already tested Rose ownership algebra instead of adding another
+disposal or reconciliation path.
+
+At 10,000 agents, the added work is one local bounded transcript normalization
+only after an ordinary failed clone. It retains the existing at-most-five
+attempts and exact-ID disposal behavior per owner, with no cross-owner query,
+shared row, lock, channel, subscription, global polling, or fan-in. The original
+Control6 runtime was not patched or restarted; its returned target Volume's
+live final disposal and the complete fifty-task outcome are separate evidence
+owned by the ongoing runner, not credited by this offline repair.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1384,6 +1469,14 @@ benchmark definitions, or touching neighboring resources. They required an
 unchanged failing-before/passing-after regression, focused lifecycle and
 multi-workstream suites, a separate pushed branch, the exact cherry-pick range,
 and the safe current-owner verification command.
+
+For the seventeenth recurrence, the authorized task required an isolated repair,
+the actual preserved rejection and target ownership join, an unchanged owning
+RED-to-GREEN reproduction, and permanent normal-deploy coverage. It required
+unknown deletion to retain both name and Volume, ordinary retry only after a
+safe disposition, and preservation of the active run. It rejected source or
+foreign-resource capture, sweeping, authentication changes, shorter timers,
+deadline changes, and benchmark or evaluator changes.
 
 ## Reusable lesson
 

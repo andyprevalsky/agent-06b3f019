@@ -183,6 +183,28 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(calls[2][2], identity + ":/tmp/.")
         self.assertEqual(calls[3], ["docker", "rm", identity])
 
+    def test_extracted_native_cache_controls_need_no_pytest_and_report_skips(self):
+        root = Path(__file__).resolve().parents[2]
+        fixture = Path(__file__).with_name("cloudbench-status-service-shutdown.test.sh")
+        block = fixture.read_text().split("<<'PY_CACHE_PARENT'\n", 1)[1].split(
+            "\nPY_CACHE_PARENT", 1
+        )[0]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.platform='darwin';sys.modules['pytest']=None\n" + block,
+                str(root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("SKIP: native cache parent "), 3)
+        self.assertIn("0 passed, 3 skipped", result.stdout)
+        self.assertNotIn("PASS: native checkout cache parent", result.stdout)
+
     def test_foreign_identity_or_nonsealed_mounts_are_never_mutated(self):
         for settings in (
             {"label": "foreign-label"},
@@ -216,7 +238,15 @@ class ContainerOwnership(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(calls[0][2], "owned-name")
 
-    def check_dispatch(self, *, cancelled=False, fixture=None, fixture_exit_code=0):
+    def check_dispatch(
+        self,
+        *,
+        cancelled=False,
+        fixture=None,
+        fixture_exit_code=0,
+        platform="darwin",
+        native_preflight=None,
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
@@ -230,6 +260,14 @@ class ContainerOwnership(unittest.TestCase):
             image = "sha256:" + "a" * 64
 
             def docker(args, **_kwargs):
+                if (
+                    len(args) >= 3
+                    and args[0] == sys.executable
+                    and args[1] == "-c"
+                    and "requires Linux Python3.11.9" in args[2]
+                ):
+                    code = 0 if native_preflight else 1
+                    return subprocess.CompletedProcess(args, code, "", "")
                 tool_commands.append(args)
                 return subprocess.CompletedProcess(
                     args,
@@ -267,7 +305,7 @@ class ContainerOwnership(unittest.TestCase):
                     "__file__",
                     str(tests / "run-cloudbench-controller-linux.py"),
                 ),
-                patch.object(runner.sys, "platform", "darwin"),
+                patch.object(runner.sys, "platform", platform),
                 patch.object(
                     runner.sys,
                     "argv",
@@ -327,6 +365,64 @@ class ContainerOwnership(unittest.TestCase):
     def test_dispatch_uses_native_storage_and_keeps_inherited_proxies(self):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
         self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
+
+    def test_status_shutdown_skips_pytest_native_branch_without_pytest(self):
+        source = Path(__file__).with_name(
+            "cloudbench-status-service-shutdown.test.sh"
+        ).read_text()
+        probe = "python3 -c 'import pytest'"
+        skip = (
+            "SKIP: native cache parent permissions "
+            "(offline controller image has no pytest)"
+        )
+        self.assertIn(probe, source)
+        self.assertIn(skip, source)
+        self.assertLess(source.index(probe), source.index(skip))
+        self.assertNotIn("\nimport pytest", source)
+
+    def test_linux_unpinned_host_uses_offline_controller_image(self):
+        self.assertEqual(
+            self.check_dispatch(platform="linux", native_preflight=False),
+            ["join", "retire"],
+        )
+
+    def test_linux_pinned_host_execs_native_fixture(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                runner,
+                "__file__",
+                str(
+                    Path(temporary)
+                    / "scripts/tests/run-cloudbench-controller-linux.py"
+                ),
+            ),
+            patch.object(runner.sys, "platform", "linux"),
+            patch.object(
+                runner.sys,
+                "argv",
+                ["runner", "--fixture", "status-service-shutdown"],
+            ),
+            patch.object(
+                runner.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as native,
+            patch.object(runner.os, "execvp", side_effect=SystemExit(0)) as execvp,
+            patch.object(runner.subprocess, "Popen") as launch,
+        ):
+            (Path(temporary) / "scripts/tests").mkdir(parents=True)
+            with self.assertRaises(SystemExit) as exit_status:
+                runner.main()
+            self.assertEqual(exit_status.exception.code, 0)
+            native.assert_called_once()
+            self.assertEqual(execvp.call_args.args[0], "bash")
+            self.assertTrue(
+                execvp.call_args.args[1][1].endswith(
+                    "scripts/tests/cloudbench-status-service-shutdown.test.sh"
+                )
+            )
+            launch.assert_not_called()
 
     def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
         for fixture in ("multi-workstream", "status-service-shutdown"):

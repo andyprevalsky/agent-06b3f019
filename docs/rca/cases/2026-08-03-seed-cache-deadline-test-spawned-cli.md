@@ -54,6 +54,37 @@ of the assertion. The focused test passed all seven cases afterward. The export
 does not alter CLI behavior; the test removes a process and adds no production
 work or 10,000-agent cost.
 
+## Recurrence: deterministic mock-stream deadlines on October 7
+
+The normal agents coverage run passed 108 of 109 domains but failed Rose's
+`client_direct_auth_stall_falls_through` case at its 0.01-second mock first-token
+budget. The unchanged case passed in 1.775 seconds when run alone. That control
+supports scheduling sensitivity; it does not establish a production timeout
+bug or qualify the original full run.
+
+The test now reuses the existing stream fixture's virtual clock while keeping
+real asyncio tasks and cancellation. Only the test's clock and wait boundary
+advance deterministically. The original 0.01-second first-token budget,
+0.5-second idle budget, one attempt, auth-error stall and fallback-content
+assertions remain unchanged. The focused case passed in 1.461 seconds, and the
+normal instrumented Rose domain subsequently passed all 213 cases. Production
+stream code, provider routes and benchmark deadlines did not change.
+
+The same stabilization batch repairs a separate hermetic shell fixture:
+`env -i` hid the Mac's GNU `timeout` from the cloud-init test. Its stub PATH now
+exposes the existing resolved timeout executable, with the existing bounded
+Perl method available when GNU timeout is absent. The unchanged owning shell
+command failed before this fixture correction and passed afterward; production
+cloud-init behavior is unchanged. Test setup must provide the tools used by the
+contract it exercises.
+
+Original coverage failures remain preserved. Combining 108 unchanged passing
+domain shards with one newly instrumented Rose domain is explicitly retained
+plus recovered qualification, followed by the normal cache, unit and coverage
+threshold tail; it is not a new execution of all 109 domains. This removes host
+scheduling from the mock deadline assertion without raising production caps or
+adding work per agent.
+
 ## Human feedback
 
 None recorded.

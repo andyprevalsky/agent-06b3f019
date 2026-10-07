@@ -2,6 +2,7 @@ import type React from 'react';
 import type { AgentDetail, Message } from '@/lib/api';
 
 import { fetchAgentDetail } from '../api';
+import { isChatCapableAgent } from './realtimeHandlers';
 import {
   BACKFILL_MAX_ATTEMPTS,
   BACKFILL_RETRY_BASE_MS,
@@ -28,7 +29,7 @@ export function applyAgentBackfill(
     );
   });
   setAgent((previous) => (isCurrentAgent() ? data.agent : previous));
-  setIsChatMode((previous) => (isCurrentAgent() ? !data.agent.temporal_workflow_id : previous));
+  setIsChatMode((previous) => (isCurrentAgent() ? isChatCapableAgent(data.agent) : previous));
 }
 
 /** True while the latest chat turn has no canonical answer and has not entered agent mode. */
