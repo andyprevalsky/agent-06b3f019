@@ -1944,29 +1944,28 @@ class RoseClient:
                     )
 
             active_route = "waterfall"
-            async for chunk in _guarded(
-                waterfall_complete(
-                    pool_spec=pool_spec,
-                    messages=messages,
-                    tools=waterfall_tools,
-                    tool_choice=waterfall_tool_choice,
-                    response_format=None if waterfall_tools else openrouter_response_format,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    seed=seed,
-                    provider_fast_mode=provider_fast_mode,
-                    effort=effort,
-                    openrouter_key=self._or_key(),
-                    request_id=rid,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    per_step_timeout_s=ttft_timeout_s,
-                    idle_timeout_s=idle_timeout_s,
-                    exclude_anthropic_family=_exclude_anthropic_family,
-                    cache_namespace=cache_namespace,
-                    skip_cache_write=skip_cache_write,
-                    skip_models=_skip_models,
-                )
+            async for chunk in waterfall_complete(
+                pool_spec=pool_spec,
+                messages=messages,
+                tools=waterfall_tools,
+                tool_choice=waterfall_tool_choice,
+                response_format=None if waterfall_tools else openrouter_response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                provider_fast_mode=provider_fast_mode,
+                effort=effort,
+                openrouter_key=self._or_key(),
+                request_id=rid,
+                agent_id=agent_id,
+                call_site=call_site,
+                per_step_timeout_s=ttft_timeout_s,
+                idle_timeout_s=idle_timeout_s,
+                exclude_anthropic_family=_exclude_anthropic_family,
+                cache_namespace=cache_namespace,
+                skip_cache_write=skip_cache_write,
+                skip_models=_skip_models,
+                stream_guard=_guarded,
             ):
                 chunk = _with_timing_if_done(chunk)
                 if claude_token_error is not None and chunk.kind == "metadata":
@@ -2082,23 +2081,78 @@ class RoseClient:
             dynamic_system_context=dynamic_system_context,
             turn_messages=turn_messages,
         )
-        response = await self.collect(
-            pool="rose-1-browser-use",
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            claude_auth=claude_auth,
-            gpt_auth=gpt_auth,
-            agent_id=agent_id,
-            request_id=request_id,
-            call_site=call_site,
-            deadline_s=deadline_s,
-            skip_cache_write=skip_cache_write,
-            dump_context=False,
-            cache_namespace=cache_namespace,
-        )
+        # Bind failed dumps to the same request that the client attempts.
+        request_id = request_id or uuid.uuid4().hex[:12]
+        try:
+            response = await self.collect(
+                pool="rose-1-browser-use",
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                claude_auth=claude_auth,
+                gpt_auth=gpt_auth,
+                agent_id=agent_id,
+                request_id=request_id,
+                call_site=call_site,
+                deadline_s=deadline_s,
+                skip_cache_write=skip_cache_write,
+                dump_context=False,
+                cache_namespace=cache_namespace,
+            )
+        except Exception as exc:
+            try:
+                from helpers.observability import dump_llm_context
+
+                dump_llm_context(
+                    call_site=call_site,
+                    messages=_messages_without_internal_system_boundaries(messages),
+                    agent_id=agent_id,
+                    model="rose-1-browser-use",
+                    config={
+                        "pool": "rose-1-browser-use",
+                        "actual_model": None,
+                        "mode": None,
+                        "capture_boundary": "complete_browser_use.collect",
+                        "requested_params": {
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                            "reasoning_effort": None,
+                            "thinking": None,
+                            "seed": None,
+                            "response_format": None,
+                            "tool_choice": tool_choice,
+                            "deadline_s": deadline_s,
+                            "ttft_timeout_s": _DEFAULT_TTFT_TIMEOUT_S,
+                            "idle_timeout_s": _DEFAULT_IDLE_TIMEOUT_S,
+                            "provider_fast_mode": True,
+                            "skip_cache_write": skip_cache_write,
+                            "cache_namespace": cache_namespace,
+                        },
+                        "pool_direct_auth_enabled": pool_spec.direct_auth_enabled,
+                        "pool_waterfall_reasoning_effort": pool_spec.waterfall_reasoning_effort,
+                        "candidate_models": {
+                            "cerebras": pool_spec.cerebras_model,
+                            "waterfall": list(pool_spec.waterfall),
+                        },
+                        "direct_auth_requested": {
+                            "claude": claude_auth is not None,
+                            "gpt": gpt_auth is not None,
+                        },
+                    },
+                    tools=tools,
+                    output={"request_id": request_id, "error": {"type": type(exc).__name__, "message": str(exc)}},
+                    extra={
+                        "browser_state": browser_state,
+                        "action_history": action_history,
+                        "turn_messages_count": len(turn_messages or []),
+                        **(dump_extra or {}),
+                    },
+                )
+            except Exception:
+                logger.debug("rose.browser_use.dump_failure_failed", call_site=call_site, exc_info=True)
+            raise
 
         actual_model = response.actual_model or ""
         # Only the `-claude` suffix indicates direct Anthropic via claudeAuth

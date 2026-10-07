@@ -280,7 +280,9 @@ For terminal-result/cleanup campaigns, use
 `scripts/verify_successful_llm_queries.py --diagnostics-only` to retain reported
 errors as warnings. Require meaningful real LLM calls (normally more than three; chat may need fewer), a terminal SUCCESS or
 FAILURE (including an execution-window FAILURE), and exact owned-resource cleanup
-within the 1800-second allocation deadline; do not force extra model calls.
+within that historical campaign's 1800-second allocation deadline; do not force
+extra model calls. The current width-fifty LIVE campaign uses the separate
+execution and whole-run clocks documented in Eval Suite below.
 
 **Cloud runner quick start:** From a configured clone, run
 `scripts/run-bench list`, then `scripts/run-bench <task> --wait` for one real
@@ -288,7 +290,7 @@ isolated benchmark. For an infrastructure streak, use
 `scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer>
 --exclude-file <prior-successful-names.json> --min-successful-llm 0`;
 the exclusion file is a JSON array of task names already used in accepted
-earlier runs. For the requested daily/Polar campaign, rebuild the eligible pool
+earlier runs. For the completed daily/Polar campaign, rebuild the eligible pool
 on every return to slice zero. Keep all 100 tasks distinct within that campaign;
 accepted and failed task names from earlier campaigns remain eligible.
 Capability slices
@@ -356,6 +358,18 @@ the worker log. Required recording attachments retry pre-request connection/pool
 failures at most three times with the same payload and generation; ambiguous
 read/write failures and HTTP rejections remain fail-closed. More archive wait
 cannot repair an attachment that was discarded after a connection failure.
+Closed network-body files publish automatically through the existing bounded
+batch path while recording is open; changed or incompletely acknowledged files
+retain their normal terminal fallback. Batch POST transport has a scoped
+120-second read/write budget; ordinary single-artifact transport and task,
+flush and allocation-to-release deadlines are unchanged. A late attempted ACK
+or HTTP 200 alone does not establish complete publication: retain encrypted
+outboxes and compare the final full manifest. Existing quick regressions run
+with `cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py
+recording-archive` and the backend trace-archive-batch unit family. Native
+fleet/R2 timing and historical attribution remain pending the matched normal
+CLI run; cached replay provides infrastructure proof only for exercised paths
+and zero LIVE LLM credit.
 A disconnected DELETE may still be sealing a large descendant tree. The runner
 waits at most 180 seconds for that exact root/owner's database deletion fence,
 preserving the last `delete_seal_observation`; provider/payment reconciliation
@@ -452,8 +466,9 @@ delimiter runs and line boundaries. A fresh-browser timeout can mean the verifie
 expected text the UI never renders; capture that exact predicate before changing
 timeouts. The existing publisher browser-validation blackbox owns these cases.
 
-PR #1299's current user-authorized acceptance requires **ten consecutive slices
-of ten distinct daily/Polar benchmarks**. Each benchmark must execute meaningful
+PR #1299's completed original acceptance required **ten consecutive slices
+of ten distinct daily/Polar benchmarks**. The new five width-fifty LIVE runs
+follow Eval Suite's Current width-fifty LIVE acceptance instructions. Each benchmark must execute meaningful
 real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
 owned resources within one 1,800-second allocation-to-finish deadline. Normally
 expect more than three LLM calls when sensible; chat, early terminal results and
@@ -506,7 +521,7 @@ Python's numeric equality is insufficient. An auxiliary final Hub upload warning
 preserves the canonical outcome and teardown exit code; durable evidence still
 needs independent confirmation before fleet acceptance. The same compact deploy
 control covers these boundaries, and the frontend renderer covers terminal display.
-For the next explicitly authorized follow-up 50-task run only, add five minutes:
+For the earlier explicitly authorized follow-up 50-task run only, add five minutes:
 use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` and `--timeout 600` (temporary).
 The normal 7,200-second backstop and independent 1,800-second allocation cutoff
 remain unchanged. Do not run paid smoke gates concurrently with a latency proof.
@@ -610,7 +625,7 @@ To interrupt a local benchmark, cancel its owning benchmark launcher first and
 wait for the benchmark cleanup receipt before stopping its dependent stack.
 `local-benchmark-owner.json` names the benchmark child; `local-stack-owner.json`
 names the service stack. Verify native process birth before signaling either.
-For the current campaign, draw 100 distinct tasks from the canonical `daily`
+For the completed original campaign, draw 100 distinct tasks from the canonical `daily`
 and `polar-bench` selectors. Reset the task pool whenever the streak restarts
 at slice zero; exclude successful names only within that active campaign.
 The daily selector has no compatible smoke tags in the current eligible pool,
@@ -677,10 +692,17 @@ machine-pinned status proxy before returning pool members; an interrupted local
 collector must never be mistaken for absent guest work.
 If a failed guest cannot seal runtime evidence, preserve its original bytes
 with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
-`scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>`. A task
+`scripts/run-bench --recover-stale-owner <exact-owner-token>`. A task
 owner canceled before allocation can legitimately lack a pool directory and
 execution inputs; normal recovery proves empty ledgers and absence of allocation
 markers recursively. Never fabricate missing inputs or guest receipts.
+For a generic failed-owner archive, `_forensic/archive-verified.json` means
+the complete originals are preserved: `native_release_verified=false` and
+`proof_credit=0`. It admits the normal exact-owner reaper; it does not prove
+resource release. Continue the same supported recovery command through its
+final native provider audit and owner retirement. Do not invoke the archive
+verifier directly or treat archive readiness as completion. Other forensic
+receipt modes retain their existing contracts.
 If recovery retains a shared central Hub with
 `retained-exact-owner-transfer-required`, first prove that every controller
 borrowing that exact Hub token has retired. Keep its owner file and use the
@@ -692,6 +714,20 @@ terminal receipt after verifying process-group absence. Retry the original
 `--recover-stale-owner` command to seal the remaining claim. Preserve other
 Hubs, the progress dashboard, provider inventory and the user's network settings;
 never remove a claim merely because its resource observation timed out.
+For a fresh task-free canary interrupted before service startup, follow
+`agents/benchmarks/README.md`'s original-volume capture procedure. The validator
+binds the clean checkout, native injected controls and original archive to the
+exact source recipe, then requires independent review of its pre-service phase.
+Its separate bootstrap receipt always grants zero benchmark credit; it does
+not fabricate a provider manifest or guest cleanup acknowledgment. Current
+source-equivalent clean recipes need no commit-specific validator edit.
+Pre-service phase approvals belong to the invoked controller's committed
+`scripts/cloudbench-prestack-source-reviews.json`, including its immutable
+script snapshot; capture-local review metadata is only an instance audit.
+A changed executable-source fingerprint requires independent review before a
+policy entry is committed. The existing bootstrap-recovery control remains in
+the normal CLI/deploy structural gate. Incomplete older captures
+still fail closed, and normal recovery must verify exact native resource release.
 An interrupted task
 that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
@@ -917,6 +953,132 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
 
 ## Eval Suite
 
+**Current width-fifty LIVE acceptance:** the original hundred-task campaign is
+complete. The new goal is five consecutive runs of fifty distinct, randomly
+selected eligible DAILY tasks per run. Keep the original completed campaign and
+the cached mass-demo diagnostics separate; neither supplies this new streak.
+Each run gets a temporary 1,200-second execution window per task and a hard
+3,600-second whole-run budget from the start of its uncached image build through
+final durable publication and verified release of every owned resource. The old
+300/600-second temporary task settings, 1,800-second allocation budget and cached
+diagnostic's 1,200-second allocation-to-release guard do not apply to this goal.
+Normal defaults, task contents, evaluators and the provider waterfall stay intact.
+
+A fresh CLI runner reads this file and uses the ordinary entrypoint. Make a
+minimal benign comment change in `agents/benchmarks/__init__.py` in its own
+checkout for each trial, record the resulting fetchable immutable ref, and build
+from that same checkout. This marker changes neither executable behavior nor the
+39 bootstrap/79 dependency inputs. Preserve any already-running control's source.
+Use the supported uncached image build and exact-image activation for every trial:
+
+```bash
+trial_dir=".context/daily-live50/$(date -u +%Y%m%d-%H%M%S)"
+umask 077
+mkdir -p "$trial_dir"
+date -u +%s > "$trial_dir/image-start.epoch"
+trial_ref=$(git rev-parse HEAD)
+scripts/run-bench image-build --builder depot --no-cache --build-context "$PWD" --out-dir "$trial_dir/image-build"
+trial_image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_ref"])' "$trial_dir/image-build/cloudbench-image-build.json")
+scripts/run-bench image-activate "$trial_image" --ref "$trial_ref" --out-dir "$trial_dir/image-activation"
+```
+
+Retain source/build receipts and verify the actual guest image digest. Generic
+source-only snapshot reuse is still normal outside this explicitly requested
+fresh-image campaign. Resolve the canonical DAILY selector, intersect it with
+the existing Linux/cloud-root and LIVE-eligible catalog pool, then draw fifty
+names without replacement using a recorded random seed. The existing
+`scripts/fleet_infra_sample.py:eligible_pool` supports those eligibility checks;
+its `minimum_successful_llm=3` filters intentionally zero-LIVE/replay tasks and
+does not require artificial model calls. Retain the concrete name list privately.
+Sample anew for each run; distinctness is required within each fifty-task run.
+Pass all fifty concrete names together to one ordinary fleet, without `-k` or
+`--concurrency`; the sequential proof wrapper's width-32 cap is unrelated.
+
+Inspect native provider inventory, controller CPU/memory/disk and normal
+admission before launch. Where this load requires it, use the command-scoped
+dedicated-primary profile below while preserving catalog memory and the ordinary
+worker profile. Ceiling 138 is a ceiling, not a capacity promise; keep native
+CPU, worker, disk and organization admission active. LIVE autoscaling remains
+the ordinary maximum 15. The cached mass-demo maximum 2 must not leak into LIVE.
+
+```bash
+# tasks[] contains the retained fifty distinct eligible DAILY names.
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200 \
+  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --wait --timeout 1200 --autoscale-max 15
+```
+
+Poll the exact monitoring command printed by this launch every thirty seconds
+through terminal publication and native release. Keep all fifty rows in one
+group; queued/startup rows need the original run timestamp, and genuine evaluated
+PASS/FAIL appears before teardown. Follow actual controller status even if a card
+or observation is stale. Retry transient observations with the original owner;
+do not restart a healthy run or reject microscopic intermediate timings. Stage
+handoffs must remain usable for their consumer. A rejected native start request
+is a warning while the existing current-run guest log and live data-plane proxy
+prove that the configured guest booted; a foreign, dead or unreadable guest still
+fails startup. A finished child without a benchmark result publishes an explicit
+infrastructure error in its original group immediately, without inventing an
+evaluation or agent archive. The existing compact deploy suite covers both
+startup admission and terminal placeholder publication. An early primary retirement
+receipt covers only that exact sealed scope; collector completion alone does
+not prove native release. Keep the original owner running through final native
+audit, and never rewrite PID birth records to force cleanup. Recovery keeps
+completed task outputs as history and reconnects only current allocations; retain
+the exact native retirement audit instead of deleting old outputs to match a
+shrinking registry. After the original CLI exits, use a verified current CLI for
+the documented exact-owner recovery while preserving its original guest source,
+owner and private evidence. Recovery's local proxy lease adapter represents an
+absent preferred port as numeric zero; an explicit nonempty preference retains
+the allocator's validation. A real started startup rejection can retain an exact
+runtime owner without local start acceptance; its supported zero-credit archive
+preserves actual originals and config before native reaping. It never supplies a
+task result or completed-execution seal. Artifact console commands name an
+executable explicitly; use `python3 -B` instead of a shell environment-assignment
+prefix to suppress bytecode during read-only capture. Freeze sensible generous stage
+targets from comparable historical LIVE timings, excluding cache-assisted cold
+measurements, and report observed stage p95 plus image-start-to-full-release E2E.
+These fixed stage targets are generous operational targets, not measured p95
+statistics or independent rejection/cancellation timers:
+
+| Stage | Target or hard limit | Historical basis and qualification |
+| --- | --- | --- |
+| Uncached image build/push | 600 seconds, target | Actual uncached invocation: 301 seconds. |
+| Exact-image activation | 360 seconds, target | Actual invocation: 279.179 seconds. |
+| Canary/preflight through its full native release | 720 seconds, target | Current CLI-to-canary release: 504.886 seconds. |
+| Fleet readiness | 900 seconds, target | Partial-run observation upper bound: 686.004 seconds; only 49 executed and one startup failed, so this is diagnostic and does not prove full-fifty readiness. |
+| Task execution | 1,200 seconds per task, hard | Temporary command-scoped execution window. |
+| Evidence and full native release after the last execution | 480 seconds, target | Target pending measured current tail; evidence publication also overlaps execution. |
+| Whole image-start-to-publication-and-release E2E | 3,600 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
+
+Stage targets are not additive entitlements: their sum exceeds one hour, and
+parallel/overlapping work must still fit the hard whole-run limit. Report actual
+stage p95 when comparable task observations support it; do not label a single
+historical invocation or target as p95. Warn and diagnose target overruns while a
+usable stage continues; never cancel on a per-poll or internal micro-budget.
+
+Retain unknown timings as unknown. Diagnose parallelism-related LLM latency and
+errors from the existing provider evidence; paid deploy smoke or other paid
+verification must not overlap an accepted LIVE latency measurement window.
+
+An ordinary task FAIL, including a genuine execution-window FAIL, is acceptable
+when it actually executed and has its unchanged terminal evaluation, durable
+evidence and exact cleanup. Normally expect more than three real LLM calls when
+sensible; early/chat outcomes can use fewer. Use
+`scripts/verify_successful_llm_queries.py --diagnostics-only`; never force calls,
+change prompts, seed replay or substitute cached acceptance. Unexecuted tasks,
+missing terminals/evidence, incorrect FE presentation, resource leaks, an actual
+parallelism-caused issue or the one-hour breach fail the run. Preserve every
+original outcome and finish exact cleanup. At a hard cutoff or catastrophe,
+verify native birth and stop only the exact owning controller through normal
+cleanup; interrupted/recovered runs get no retroactive credit. Fix a proven
+cause, then continue the requested five-run streak. Reset prior credit only if
+a runtime fix invalidates its exercised evidence; doc/test/benign-comment changes
+alone do not reset a qualified streak. Do not restart the completed original hundred.
+
 **Cloud startup reuse:** use `scripts/run-bench <task...> --wait` normally. The
 CLI reuses completed dependency snapshots across fresh checkouts and synchronizes
 the requested code after boot. Dependency hashes, the donor Machine/volume, and
@@ -971,10 +1133,15 @@ that is not a full cold-image timing. Fresh worktrees need no manual download.
 
 **Temporary cached startup diagnostic:** reuse an existing DEMO replay task;
 do not add cache tags, prompts or seed fixtures to make a performance run pass.
-The known recorded mass demo can be run with:
+The known recorded mass demo uses the documented dedicated-primary load-test
+profile below. Catalog memory stays unchanged; native capacity at width fifty
+still needs verification on each run:
 
 ```bash
 CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
@@ -999,6 +1166,15 @@ scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse H
 `image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
 
 REAL tasks now use fresh primary and worker volumes by default with the verified dependency image, exact authenticated Git checkout and the same canonical isolated database fixture. SIM tasks, including `--sim-on` overrides, retain their snapshot and cached World Model assets. `--snapshot-volumes` forces the historical restored-volume path for a provider diagnostic; generic `--provision-pool` and legacy startup keep compatible snapshot storage. Source-only changes reuse the pinned image and inject current bootstrap helpers. A successful clone command precedes storage readiness: inspect its exact owned IDs and keyed volume state when preflight waits; retain the original failed receipt and let the owning CLI finish cleanup.
+The first Git fetch on fresh REAL storage is shallow: it includes the complete
+requested source tree and exact commit, while earlier benchmark-repository
+versions are unavailable. Startup, patch replay, dependency checks and evaluators
+use that requested tree. Retained checkouts keep their available history and
+advance through the ordinary fetch path; a formerly fresh checkout still verifies
+the next exact ref, patch and dependency manifests. Work that requires earlier
+benchmark-repository history must retain the existing snapshot or pool path.
+This changes neither the task's own external repositories nor its task inputs.
+See `docs/rca/cases/2026-10-06-fresh-source-fetch-downloaded-unneeded-history.md`.
 
 Cloud fleets retain the aggregate progress/final publisher before the starting
 Hub write. They attempt that write once with a 120-second transport budget;
@@ -1008,6 +1184,19 @@ printed monitor through terminal publication and resource release; a starting
 HTTP response or a task verdict alone does not establish final acceptance.
 
 Bootstrap preserves both hoisted and workspace-local baked dependencies and uses the installed Prisma CLI; do not repair a missing CLI by downloading a floating version. If a strict campaign's infrastructure canary fails, its waiting copies observe the same cohort failure instead of launching another canary each. A new CLI invocation creates a fresh cohort automatically. Genuine benchmark task failure is still a valid terminal outcome for an infrastructure/speed run; a preflight failure has no task execution credit. The compact deploy gate owns the dependency-layout, schema-cache and failed-cohort regressions.
+
+Concurrent controllers reserve cleanup disk under one host/filesystem lock. A
+sealed `--strict-barrier` cohort shares available capacity while preserving each
+pending copy's 32 MiB cleanup minimum and 256 MiB working headroom; 512 MiB
+remains the preferred reserve. Standalone controllers use the same atomic
+admission, without promising capacity to future unannounced callers. Linux and
+macOS use verified physical preallocation when supported, with the existing
+zero-fill fallback for a genuine allocation-capability gap. Storage errors still
+stop before provider mutation. No extra CLI flag is needed. On a reserve
+refusal, inspect the actual filesystem free space and sealed cohort; do not
+delete ownership claims or lower storage floors. The normal compact benchmark
+deploy gate covers the 50-owner admission race, physical allocation, capability
+fallback, exact release and process-identity interleavings.
 
 Image installation loads the actual Vite configuration and compiles a small entry with its installed SWC, Rollup and esbuild dependencies before readiness. A missing declared native binding is repaired at the requesting package's exact installed version, without changing manifests or locks; healthy compilers need no extra install. Broken binaries, incorrect versions and unrelated configuration errors fail the build. Use the normal image CLI instead of ad hoc package upgrades. Matching fresh Linux dependency trees use a private writable overlay with metadata copy-up; unsupported kernels or mount permissions use the existing copy path. Checkout source, generated Prisma clients and activated Python remain isolated from the image donor. `CLOUDBENCH_DEPENDENCY_OVERLAY=0` selects the original copy path for a scoped diagnostic. Exact-owner recovery handles an empty cleanup join without weakening ownership checks. Preserve original failure receipts and use `--recover-stale-owner`; do not delete claims manually or stop a pre-existing shared Hub. These regressions remain in the normal compact deploy gate.
 
@@ -1022,6 +1211,10 @@ Use `python3 scripts/tests/run-cloudbench-controller-linux.py --check-only` to
 check its local package runners before the normal controller suite. An existing
 verified image can be selected with `CLOUDBENCH_CONTROLLER_TEST_IMAGE`; that
 override is recorded separately from qualification of the default recipe.
+Run the status-service shutdown control with
+`python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown`.
+Its driver-ownership check needs Linux `/proc`; the dispatcher uses native Linux
+there and the same offline exact-owner image on Mac, including verified retirement.
 
 An accepted delete plus an exact owned-volume `pending_destroy` or `destroyed`
 terminal receipt qualifies release even when Fly retains the object. Request
@@ -1029,14 +1222,20 @@ acceptance alone does not establish release.
 
 Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
 
+A strict cohort with that live inventory owner performs the existing complete canonical fixture GET once before admitting controllers. Each controller verifies the private receipt against the live parent/publisher births, sealed cohort membership, committed source, schema/PG/cache token, runner code and storage scope identifiers. An invalid advertised receipt fails closed; it does not fall back to repeated downloads. Standalone fleets keep their full GET. Every guest still performs its actual fixture download, exact sidecar checks and database restore; this host receipt does not replace them.
+
+The cohort host helper works with system Python without installing optional dotenv packages. It uses the existing startup budget, retries unavailable process observations, and drains only its owned GET session on cancellation before publishing proof. Follow the campaign's printed summary and private seed-preflight log; a slow healthy GET is not a reason to restart. The normal `campaign_inventory` deploy gate covers selector precedence, cancellation, exited-leader cleanup and late cancellation during hashing.
+
 For this explicitly requested 50-copy cached stress run, use the command-scoped
 Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
 Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
 slots. Inspect native app inventory and headroom again before a future run;
 ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
 two worker slots. This profile creates no idle resources and changes no default
-ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
-50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` coordinates
+all surviving eligible copies in one ready cohort. Keep the original requested
+50-copy count alongside `released_count` and `failed_count`; a partial release
+never earns full-width credit. Controller occupancy does not prove execution overlap.
 The default mass-task primary uses `shared-cpu-2x` / 4 GB; its optional worker
 uses `performance-1x` / 2 GB. Fifty primaries add 100 active shared CPU units.
 The unchanged governor keeps 20 of 160 shared units for production, leaving
@@ -1051,20 +1250,46 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
-`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The start precedes provisioning and is conservative.
+Use the earliest retained fresh native Machine/volume `created_at` for newly
+allocated exact resources; pooled allocation needs an immutable exact original
+claim receipt. Never use inode ctime, a pooled Machine's historical creation time,
+or first observation to start/reset the 1,200-second budget. Without an original
+allocation clock, qualify the original start as a conservative operator budget;
+on cutoff use `conservative-provisioning-operator-budget` and
+`deadline_breached=false`. A native breach needs genuine original allocation
+evidence showing over 1,200 seconds without full verified release. Never
+substitute the 7,200-second execution default. Release follows complete
+primary/worker/claim verification; `pool-primary.returned-epoch` is only the
+earlier borrowed-primary return. The immutable audit's
+`provider-teardown-verified.epoch` is the producer clock, bound to the same
+owner/run by `source-audit`; legacy clockless audits keep their post-verification
+fallback. The run's `teardown-ownership.path` identifies its
 exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process
 birth before any exact-owner signal. Audit retention is separate from liveness.
 
+Each CLI campaign is shown as one group in the benchmark viewer. Every scheduled
+copy has a distinct member row and keeps its own run/agent links; PASS/FAIL
+appears as soon as that child publishes, before teardown. Controller exit
+without a task result remains an infrastructure/cancellation status, and never
+claims resource release. Group timings use the original campaign clock, not a
+later recovery upload. The ordinary deploy tests cover grouping, early verdicts,
+child acknowledgments, paging and complete task history.
+
 This requests 50 independent one-task fleet controllers. Each unchanged mass
 task spawns 50 first-level general-purpose children: 2,500 across the campaign;
 its existing explore allowance remains unchanged. It is not 50 distinct tasks.
 For repeated campaigns, `--strict-barrier` holds each bounded cohort until all
-copies finish normal stack and autoscaler readiness, then releases their existing
-start barriers together. Startup failure aborts the cohort through owned cleanup;
-ordinary non-strict campaigns retain sliding scheduling. Active controller count
+surviving eligible copies finish normal stack and autoscaler readiness, then
+releases their existing start barriers together. An ordinary terminal member
+failure stays failed while healthy peers and later cohorts continue. Preserve
+the original requested count and report actual released and failed membership;
+partial release never earns full-width credit. Shared publisher or parent loss,
+invalid readiness ownership or release membership, and explicit cancellation
+retain owned abort handling. Ordinary non-strict campaigns retain sliding scheduling. Active controller count
 alone is not execution overlap; inspect actual task start/terminal intervals.
 `--demo-cache` keeps task-agent cache reads read-only and blocks their live
 fallback on cache misses or unresolved context. The separate benchmark harness
@@ -1090,7 +1315,15 @@ terminal status on every observation, even when the progress card stops changing
 The read-only command reports exclusive stage counts, card age, task outcomes,
 final lifecycle cleanup and controller exit separately, without dumping private
 trajectories. An early task PASS/FAIL does not mean teardown finished. Continue
-until the controller exits and exact owned resources are released. Stale or
+until the controller exits and exact owned resources are released. Campaign schedule
+publication observes the original CLI cancellation signal and drains its exact
+auxiliary uploader session. In-flight cancellation updates the original group
+record, and that same owned publisher reconciles the terminal Hub projection.
+An acknowledged terminal record with the exact publisher, private handoff token,
+record digest and native session closure is already complete; a later signal
+keeps that completed status. Keep completed child outcomes and the original E2E
+clock. Unverified publication remains pending and earns no remote-completion
+credit; its warning does not authorize restarting the fleet. Stale or
 missing observations are warnings: reconcile exact owner liveness and private
 diagnostics, never reset a run based on an observation timeout. The compact
 monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.
@@ -1462,6 +1695,20 @@ All realtime and tool message types are defined in `front-end/src/lib/realtime-t
 ## Rose Completions
 
 In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP hop.
+
+Python waterfall TTFT/progress guards belong inside each configured leg. Before
+productive output, a stalled leg may use the existing next model; partial-output
+idle errors and the fixed whole-call deadline remain terminal. Do not raise the
+590/90/120 browser budgets to hide this distinction. Run the normal deploy-owned
+`cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py rose rose-browser-use llm`
+for client or waterfall edits. These suites include fallback, original deadline,
+parser progress, cancellation and response-closure controls. Browser collect
+failures retain their built inputs and requested configuration through the
+existing best-effort dump path, with the same request/span/root and cache
+bindings. Capture failure preserves the original exception; cancellation and
+successful browser dumps are unchanged. Older failed calls may still lack an
+exact input dump; earlier successful dumps are not substitutes.
+See `docs/rca/cases/2026-10-06-client-stream-guard-bypassed-waterfall-fallback.md`.
 
 - `back-end/src/providers/rose/` - TS client (chat path: router/generator/supervisor)
 - `agents/providers/rose/` - Python client (agent/browser-use path)

@@ -118,3 +118,37 @@ get the same treatment.
 
 Any activity that can outlive a worker's deploy lifetime needs a checkpoint at a
 safe boundary that is triggered by worker drain, not just by user pause.
+
+
+## Verification fixture maintenance, October 6
+
+The full covered deploy-resume domain on commit850706177 failed its rolling
+deploy checks at the elapsed shutdown assertions. Those assertions measured
+the whole awaited Temporal Worker.shutdown, including polling/runtime teardown,
+against the activity grace. Elapsed shutdown time alone cannot establish that
+an activity was cancelled. The original production drain/resume repair remains
+in place; this is maintenance of its fixture endpoint contract.
+
+Two archive searches were `rolling deploy shutdown grace elapsed` and
+`Worker.shutdown activity handoff joined task`. This case owns the exact browser
+and code handoff. Its original real native join, same Steel session/E2B sandbox,
+activity yielded-for-deploy-drain to completed sequence, one chip and usage
+assertions remain required. The SDK activity grace inputs remain3 and4seconds.
+
+The fixture now requires the old worker task to be joined after shutdown instead
+of rejecting total wall time. A controlled4.2second delay inserted only after
+that native join reproduced both original elapsed assertions: two failures in
+69.083seconds. The same browser control passed41.634seconds with the endpoint
+change. Its paired code setup hit a separately retained native EADDRINUSE before
+the owning handoff; it earned no pass. A normal fresh fixture port, without
+signalling any listener, then passed the missing code control in34.860seconds.
+These split receipts are not represented as one uninterrupted two-case run.
+All four ordinary real Temporal worker cases then passed in87.349seconds.
+
+Only the two wall-time assertions become joined-worker endpoint assertions. All
+other test functions, runtime code, grace budgets and downstream handoff checks
+are unchanged. Captured native child births are independently revalidated absent;
+no provider/model calls were added. The original covered failure and the native
+port setup failure remain private and retained. Final normal covered-domain and
+combined deploy qualification remain pending; these local controls supply no
+benchmark acceptance or production performance claim.

@@ -1,5 +1,6 @@
 """Behavioral regression gates for late recordings and exact cloud cleanup."""
 
+import ast
 import asyncio
 import copy
 import functools
@@ -121,6 +122,147 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
     result = await bench.run_single_task("http://localhost:39999", task, **kwargs)
     assert result.passed is passed
     assert events == ["evaluated", "agent-cleanup", "phone-cleanup"]
+
+
+@pytest.mark.parametrize(
+    "path", ["delegate-pass", "delegate-fail", "already-evaluated", "cancelled", "raised", "skipped"]
+)
+def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_path, monkeypatch, path):
+    """Exercise the actual admitted wrapper when a delegate omits its callback."""
+    from benchmarks import outcome_publication
+
+    source = inspect.getsource(bench)
+    tree = ast.parse(source)
+    wrapper = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_reported_task"
+    )
+    execution = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Try)
+        and node.body
+        and isinstance(node.body[0], ast.If)
+        and isinstance(node.body[0].test, ast.Name)
+        and node.body[0].test.id == "checkpoint_source_mode"
+    )
+    coordinator = ast.AsyncFunctionDef(
+        name="_owning_coordinator",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=[execution],
+        decorator_list=[],
+    )
+    task = SimpleNamespace(name="delegated-task")
+    result = SimpleNamespace(name=task.name, passed=path != "delegate-fail", agent_id=ROOT)
+    if path == "skipped":
+        result = bench._claude_code_credential_skip_result(task)
+    returned = SimpleNamespace(name=task.name, passed=False, agent_id=ROOT) if path == "already-evaluated" else result
+    admitted, agents, evaluated, signatures, live_ids = {}, {}, {}, {}, {}
+    events = []
+    monkeypatch.setenv("BENCHMARK_HUB_PARENT_RUN_ID", "fixture-parent")
+    monkeypatch.setenv("FLY_MACHINE_ID", "1234567890abcd")
+    monkeypatch.setenv("BENCHMARK_CONTEXT_DIR", str(tmp_path / "context"))
+
+    async def acknowledged(pending):
+        if path == "skipped":
+            assert pending is None, "a credential skip never created an agent to acknowledge"
+            assert not (tmp_path / "cloudbench-outcome-owned-token.pending.json").exists()
+            assert result.status == result.benchmark_status == "SKIPPED" and result.passed is False
+            events.append("publication-unneeded")
+            return
+        packet = json.loads((tmp_path / "cloudbench-outcome-owned-token.pending.json").read_text())
+        assert pending and pending[1] == outcome_publication.digest(packet)
+        assert packet["name"] == task.name and packet["status"] == ("passed" if result.passed else "failed")
+        assert packet["run_id"] == "fixture-parent" and packet["run_token"] == "owned-token"
+        assert packet["machine_id"] == "1234567890abcd" and packet["agent_id"] == ROOT
+        events.append("publication-observed")
+
+    def emit(*, force=False):
+        token = asyncio.current_task()
+        if token not in admitted:
+            return
+        assert force and admitted[token] is task and evaluated[token] is result
+        events.append("evaluated-card")
+
+    async def delegate(_base_url, actual_task, *, on_agent_created, on_task_evaluated, **kwargs):
+        assert actual_task is task
+        assert kwargs == {"keep_failed_agents": False}
+        if path != "skipped":
+            on_agent_created(task.name, ROOT)
+        if path == "cancelled":
+            raise asyncio.CancelledError
+        if path == "raised":
+            raise RuntimeError("delegate failed before evaluation")
+        if path == "already-evaluated":
+            await on_task_evaluated(result)
+        events.append("delegate-complete")
+        return returned
+
+    monkeypatch.setattr(outcome_publication, "wait_for_publication", acknowledged)
+    run_file = tmp_path / "saved-run.json"
+    run_file.write_text("{}")
+    run = SimpleNamespace(task_results=[], save=lambda: run_file)
+
+    async def admitted_call(_task, call):
+        return await call()
+
+    async def finalizer(_base_url, results, roots):
+        assert not admitted and not agents and roots == ({} if path == "skipped" else {task.name: [ROOT]})
+        assert results == ([] if path in ("cancelled", "raised") else [returned])
+        events.append("batch-finalize")
+
+    async def stop_collector():
+        return 0
+
+    namespace = {
+        "asyncio": asyncio,
+        "BenchmarkTask": bench.BenchmarkTask,
+        "TaskResult": bench.TaskResult,
+        "base_url": "http://fixture.invalid",
+        "run_single_task": delegate,
+        "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
+        "_admitted_tasks": admitted,
+        "_admitted_agent_ids": agents,
+        "_evaluated_task_results": evaluated,
+        "_outcome_signatures": signatures,
+        "_remember_live_agent": lambda name, aid: live_ids.setdefault(name, []).append(aid),
+        "_emit_report": emit,
+        "checkpoint_source_mode": False,
+        "args": SimpleNamespace(parallel=False, keep_failed_agents=False),
+        "tasks": [task],
+        "run": run,
+        "_run_with_sandbox_payment_lock": admitted_call,
+        "_report_ticker_task": SimpleNamespace(cancel=lambda: None),
+        "stop_fly_log_collector": stop_collector,
+        "realtime_started": False,
+        "memory_gate_enabled": False,
+        "owned_batch_cleanup": True,
+        "_finalize_owned_cloud_batch": finalizer,
+        "_complete_interrupt_cleanup": lambda: events.append("batch-closed"),
+        "_live_task_agent_ids": live_ids,
+        "_fetch_wmh_retrieval_audit": lambda: None,
+        "Path": Path,
+        "os": os,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=[wrapper, coordinator], type_ignores=[]))
+    exec(compile(module, str(bench.__file__), "exec"), namespace)
+    if path in ("cancelled", "raised"):
+        with pytest.raises(asyncio.CancelledError if path == "cancelled" else RuntimeError):
+            asyncio.run(namespace["_owning_coordinator"]())
+        assert events == ["batch-finalize", "batch-closed"] and not evaluated and not signatures
+        assert not list(tmp_path.glob("*.pending.json"))
+    else:
+        asyncio.run(namespace["_owning_coordinator"]())
+        assert run.task_results[0] is returned
+        expected = ["evaluated-card", "publication-observed", "delegate-complete"]
+        if path != "already-evaluated":
+            expected = [
+                "delegate-complete",
+                "evaluated-card",
+                "publication-unneeded" if path == "skipped" else "publication-observed",
+            ]
+        assert events == expected + ["batch-finalize", "batch-closed"]
+        assert len(signatures) == (0 if path == "skipped" else 1)
+    assert not admitted and not agents and not evaluated
 
 
 def browser_rows(task="browser-one", *, attached=True):

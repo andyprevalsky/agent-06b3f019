@@ -226,3 +226,35 @@ When a benchmark waits on a third-party ledger, its failure has to print that
 ledger's rows next to ours. "Expected VOIDED, got HELD" points at our
 reconciler. The provider rows show the card closed and the provider never
 releasing it.
+
+
+## Retained original financial gate, October 6
+
+The earlier failed local AgentCard gate retains its exact isolated database and
+services while the existing reconciler owns financial cleanup. A fresh native,
+read-only database observation at02:10:23UTC found the root deleted, the purchase
+HELD and funding RECLAIMING for4396cents, with no persisted funding error. This
+is not financial release or a successful gate.
+
+Exact purchase-bound backend logs retained498 observations of `status=consumed`
+through00:32:03UTC. The next204 observations reported `status=undefined` beginning
+00:34:05UTC. That is a visibility gap, not evidence of provider release. Archive
+searches covered `list_transfers status undefined limit100` and `closed card
+funding RECLAIMING release pending`; the latter identified this open case.
+
+Fresh read-only capability discovery at02:12:54UTC exposed26 tools and confirmed
+that the transfer reader accepts only `status` and `limit` (maximum100), with
+no exact transfer-ID tool or pagination. Five bounded status-page reads at
+02:13:17–02:13:19UTC found the exact original transfer on the consumed page.
+Its card identity matched the retained purchase, amount and transferred value
+were4396cents, and released value was0. Thus losing the record from the
+unfiltered first100 results did not establish closure; the provider transfer
+was still visibly unreleased. Only scalar results are reported. Full responses,
+identifiers, database receipts and logs remain private and uncommitted.
+
+No refund, card mutation, provider recovery mutation or production source edit
+was made for this observation. The original gate remains failed and its owned
+stack remains available to the existing reconciler. The normal terminal wallet
+state and exact native resource release are still pending. There is no new
+causal reproduction or completed fix here; this is updated runtime evidence in
+the existing open case, independent of the five-run DAILY50 acceptance streak.

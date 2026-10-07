@@ -84,3 +84,29 @@ parallel diagnosis, and the unchanged acceptance gate.
 Re-observe a bounded
 read before declaring ownership unknowable; require positive native evidence
 before mutations, and cement that recovery path in the existing owning suite.
+
+## Backend coverage sentinel recurrence (2026-10-06)
+
+Coverage at `85070617` failed the existing empty-group sentinel assertion.
+An unchanged isolated run later passed, so the original sentinel's exact
+process table remains an observation gap. Actual whole-host native `ps` reads
+on the same loaded host took 1.491 and 1.736 seconds, exceeding the backend
+sentinel observer's separate one-second allowance. Archive searches covered
+the literal empty-group assertion and sentinel/native process observation.
+
+The existing owner now delays a genuine native group read by 1.5 seconds.
+The original observer repeatedly discards that positive read and fails the
+unchanged ten-second empty-group assertion. Giving that read five seconds
+allows the same owner to observe the empty group and pass. This implements
+the user's later explicit request for liberal internal infrastructure bounds;
+it changes neither benchmark execution nor any end-to-end deadline. Unknown
+process state still grants no cleanup authority. The test revalidates the
+captured sentinel birth and group before finally retiring its own fixture on
+failure, preventing a failed regression from leaking the fixture itself.
+
+The existing backend unit runner discovers the strengthened owner; no suite
+or model call was added. The controlled pair proves this observer failure
+mechanism, not the uncaptured state of the original failed sentinel. Native
+samples, original failures, unchanged isolated pass and paired receipts remain
+private in the deploy RCA workspace. Independent review and normal composed
+checks remain required before deployment.

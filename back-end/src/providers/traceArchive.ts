@@ -1,4 +1,22 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  localArchiveRoot,
+  localObjectPath,
+  objectKey,
+  objectPrefix,
+  safeArchivePath,
+} from './traceArchivePaths';
+import {
+  type ArtifactCreation,
+  getS3Client,
+  isExistingObjectError,
+  putLocal,
+  putR2,
+  resetS3Client,
+  shouldResetS3ClientAfterError,
+} from './traceArchiveWriteStorage';
+export { localObjectPath, objectKey, safeArchivePath } from './traceArchivePaths';
+export { getS3Client } from './traceArchiveWriteStorage';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -110,18 +128,6 @@ function encryptionKey(): Buffer | null {
   return crypto.createHash('sha256').update('rose-trace-archive-dev-key').digest();
 }
 
-function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 96) || 'unbound';
-}
-
-export function safeArchivePath(input: string): string {
-  return input
-    .split('/')
-    .filter((part) => part !== '' && part !== '.' && part !== '..')
-    .map(safeSegment)
-    .join('/');
-}
-
 function shouldCompress(objectPath: string, contentType: string, compress?: boolean): boolean {
   if (compress !== undefined) return compress;
   const ext = path.extname(objectPath).toLowerCase();
@@ -173,72 +179,6 @@ export function encryptArtifact(
   };
 }
 
-function localArchiveRoot(): string {
-  return process.env.TRACE_ARCHIVE_LOCAL_DIR || path.resolve(process.cwd(), '..', '.context');
-}
-
-export function objectKey(rootAgentId: string, objectPath: string): string {
-  return `trace-archive/${safeSegment(rootAgentId)}/${safeArchivePath(objectPath)}`;
-}
-
-function objectPrefix(rootAgentId: string): string {
-  return `trace-archive/${safeSegment(rootAgentId)}/`;
-}
-
-export function localObjectPath(rootAgentId: string, objectPath: string): string {
-  return path.join(localArchiveRoot(), objectKey(rootAgentId, objectPath));
-}
-
-async function putLocal(
-  rootAgentId: string,
-  objectPath: string,
-  body: Buffer,
-  metadata?: unknown
-): Promise<string> {
-  const target = localObjectPath(rootAgentId, objectPath);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, body);
-  if (metadata !== undefined) {
-    fs.writeFileSync(`${target}.meta.json`, JSON.stringify(metadata, null, 2));
-  }
-  return target;
-}
-
-let s3Client: S3Client | null = null;
-
-export function getS3Client(): S3Client {
-  if (s3Client !== null) return s3Client;
-  const accountId = process.env.R2_ACCOUNT_ID || '';
-  s3Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-    },
-  });
-  return s3Client;
-}
-
-function resetS3Client(): void {
-  s3Client?.destroy();
-  s3Client = null;
-}
-
-function shouldResetS3ClientAfterError(errorMessage: string): boolean {
-  const normalized = errorMessage.toLowerCase();
-  return (
-    normalized.includes('bad record mac') ||
-    normalized.includes('socket') ||
-    normalized.includes('tls') ||
-    normalized.includes('econnreset') ||
-    normalized.includes('etimedout') ||
-    normalized.includes('timeout') ||
-    normalized.includes('network') ||
-    normalized.includes('connection')
-  );
-}
-
 export function isMissingObjectError(error: unknown): boolean {
   const response = (error as { $metadata?: { httpStatusCode?: unknown }; name?: unknown }) ?? {};
   return (
@@ -246,53 +186,6 @@ export function isMissingObjectError(error: unknown): boolean {
     response.name === 'NoSuchKey' ||
     response.name === 'NotFound'
   );
-}
-
-async function putR2(
-  rootAgentId: string,
-  objectPath: string,
-  body: Buffer,
-  contentType: string,
-  metadata?: unknown
-): Promise<string> {
-  const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
-  if (
-    bucket === '' ||
-    !process.env.R2_ACCOUNT_ID ||
-    !process.env.R2_ACCESS_KEY_ID ||
-    !process.env.R2_SECRET_ACCESS_KEY
-  ) {
-    throw new Error('R2 trace archive is not configured');
-  }
-  const key = objectKey(rootAgentId, objectPath);
-  const client = getS3Client();
-  await withTraceArchiveRequestTimeout((abortSignal) =>
-    client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-        ServerSideEncryption: 'AES256',
-      }),
-      { abortSignal }
-    )
-  );
-  if (metadata !== undefined) {
-    await withTraceArchiveRequestTimeout((abortSignal) =>
-      client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: `${key}.meta.json`,
-          Body: Buffer.from(JSON.stringify(metadata, null, 2)),
-          ContentType: 'application/json',
-          ServerSideEncryption: 'AES256',
-        }),
-        { abortSignal }
-      )
-    );
-  }
-  return `r2://${bucket}/${key}`;
 }
 
 export function validateEncryptedArtifactEnvelope(params: {
@@ -373,10 +266,14 @@ export async function storeEncryptedArtifact(params: {
   ciphertext: Buffer;
   metadata?: unknown;
   contentType?: string;
+  createOnly?: boolean;
 }): Promise<string | null> {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const contentType = params.contentType || 'application/octet-stream';
+  // Retry a failed sidecar after an acknowledged creation without recreating its body.
+  const creation = params.createOnly ? { bodyStored: false } : undefined;
+  let lastError: unknown;
   for (let attempt = 1; attempt <= STORE_MAX_ATTEMPTS; attempt += 1) {
     try {
       if (backend === 'fake-r2') {
@@ -384,7 +281,9 @@ export async function storeEncryptedArtifact(params: {
           params.rootAgentId,
           params.objectPath,
           params.ciphertext,
-          params.metadata
+          params.metadata,
+          params.createOnly,
+          creation
         );
       }
       if (backend === 'r2' || (isProduction() && backend !== 'local')) {
@@ -393,16 +292,22 @@ export async function storeEncryptedArtifact(params: {
           params.objectPath,
           params.ciphertext,
           contentType,
-          params.metadata
+          params.metadata,
+          params.createOnly,
+          creation
         );
       }
       return await putLocal(
         params.rootAgentId,
         params.objectPath,
         params.ciphertext,
-        params.metadata
+        params.metadata,
+        params.createOnly,
+        creation
       );
     } catch (error) {
+      if (params.createOnly && isExistingObjectError(error)) return null;
+      lastError = error;
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.warn('Trace archive store failed', {
         root_agent_id: params.rootAgentId,
@@ -419,6 +324,7 @@ export async function storeEncryptedArtifact(params: {
       }
     }
   }
+  if (params.createOnly) throw lastError;
   return null;
 }
 
@@ -427,20 +333,43 @@ export async function storePlainArtifact(params: {
   objectPath: string;
   body: Buffer;
   contentType: string;
+  createOnly?: boolean;
 }): Promise<string | null> {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const objectPath = safeArchivePath(params.objectPath);
+  let lastError: unknown;
   for (let attempt = 1; attempt <= STORE_MAX_ATTEMPTS; attempt += 1) {
     try {
       if (backend === 'fake-r2') {
-        return await putFakeR2(params.rootAgentId, objectPath, params.body);
+        return await putFakeR2(
+          params.rootAgentId,
+          objectPath,
+          params.body,
+          undefined,
+          params.createOnly
+        );
       }
       if (backend === 'r2' || (isProduction() && backend !== 'local')) {
-        return await putR2(params.rootAgentId, objectPath, params.body, params.contentType);
+        return await putR2(
+          params.rootAgentId,
+          objectPath,
+          params.body,
+          params.contentType,
+          undefined,
+          params.createOnly
+        );
       }
-      return await putLocal(params.rootAgentId, objectPath, params.body);
+      return await putLocal(
+        params.rootAgentId,
+        objectPath,
+        params.body,
+        undefined,
+        params.createOnly
+      );
     } catch (error) {
+      if (params.createOnly && isExistingObjectError(error)) return null;
+      lastError = error;
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.warn('Trace public archive store failed', {
         root_agent_id: params.rootAgentId,
@@ -457,6 +386,7 @@ export async function storePlainArtifact(params: {
       }
     }
   }
+  if (params.createOnly) throw lastError;
   return null;
 }
 
@@ -503,6 +433,7 @@ export async function archiveBytes(params: {
   body: Buffer;
   contentType: string;
   compress?: boolean;
+  createOnly?: boolean;
 }): Promise<StoreResult | null> {
   if (!archiveEnabled()) return null;
   const encrypted = encryptArtifact(
@@ -517,6 +448,7 @@ export async function archiveBytes(params: {
     objectPath: encrypted.metadata.path,
     ciphertext: encrypted.ciphertext,
     metadata: encrypted.metadata,
+    createOnly: params.createOnly,
   });
   return ref === null ? null : { ref, metadata: encrypted.metadata };
 }
@@ -525,6 +457,7 @@ export async function archiveJson(params: {
   rootAgentId: string;
   objectPath: string;
   value: unknown;
+  createOnly?: boolean;
 }): Promise<StoreResult | null> {
   const value = params.objectPath.startsWith('provider/email/gmail/')
     ? redactGmailArchive(params.value)
@@ -535,6 +468,7 @@ export async function archiveJson(params: {
     body: Buffer.from(JSON.stringify(value, jsonReplacer)),
     contentType: 'application/json',
     compress: true,
+    createOnly: params.createOnly,
   });
 }
 
@@ -608,9 +542,11 @@ async function putFakeR2(
   rootAgentId: string,
   objectPath: string,
   body: Buffer,
-  metadata?: unknown
+  metadata?: unknown,
+  createOnly = false,
+  creation?: ArtifactCreation
 ): Promise<string> {
-  await putLocal(rootAgentId, objectPath, body, metadata);
+  await putLocal(rootAgentId, objectPath, body, metadata, createOnly, creation);
   return fakeR2Ref(rootAgentId, objectPath);
 }
 

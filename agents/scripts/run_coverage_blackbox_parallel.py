@@ -22,7 +22,10 @@ from pathlib import Path
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 ROOT_DIR = AGENTS_ROOT.parent
 TESTS_DIR = AGENTS_ROOT / "tests" / "blackbox"
-DOMAIN_TIMEOUT_SECONDS = 300
+# Whole verification domains include many independent native controls and run
+# beside the other deployment coverage pools. This budget does not change any
+# benchmark task timeout or its end-to-end allocation-to-release deadline.
+DOMAIN_TIMEOUT_SECONDS = 1800
 
 # Start the measured long poles together so a 27-second domain is not left at
 # the tail of an otherwise-drained worker pool. This changes scheduling only.

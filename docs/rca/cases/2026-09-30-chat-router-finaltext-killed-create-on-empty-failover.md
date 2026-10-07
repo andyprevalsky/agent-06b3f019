@@ -842,3 +842,26 @@ The existing `chat-router-failover` domain remains auto-discovered by the normal
 backend blackbox gate in `/deploy`; no suite or deadline was added.
 Independent review and final static checks are recorded with the private
 source-bound evidence under `.context/acceptance/proof113-chat-router-clock-rca/`.
+
+## Progress-fixture scheduling recurrence (2026-10-06)
+
+Backend coverage at `85070617` failed `chat-router-options` because its
+ten-millisecond interval produced too few chunks within a 150-millisecond
+fixture deadline. The assertion failed before testing whether progress could
+extend the attempt deadline. A controlled 170-millisecond event-loop delay
+reproduced that exact precondition failure; no provider request was involved.
+Archive searches covered the literal stream-progress precondition, router timer
+scheduling and native observer delays. This is another test-clock boundary in
+the same owner, not evidence of a changed production router deadline.
+
+The existing unit case now advances Node's actual timer APIs only after each
+observed chunk. It requires fourteen completed progress steps, permits progress
+at 149 milliseconds and requires expiration at the original 150 milliseconds.
+The identical delayed-event-loop command passes, as does ordinary execution.
+No production code, request budget, prompt, model or evaluator changed. The test
+remains recursively discovered by the normal backend unit and coverage runners;
+no new suite or paid verification was added. Original coverage failure and paired
+source-bound receipts remain private under the deploy RCA workspace.
+
+Standing user feedback requires robust, compact deploy regressions and rejects
+host-scheduling assumptions as independent runtime acceptance gates.

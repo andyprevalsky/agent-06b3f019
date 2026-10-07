@@ -119,6 +119,11 @@ def main() -> int:
             "RUN_BENCH_CAMPAIGN_BARRIER_DIR",
             "RUN_BENCH_CAMPAIGN_COHORT",
             "RUN_BENCH_CAMPAIGN_JOB_ID",
+            "BENCHMARK_HUB_GROUP_RUN_ID",
+            "RUN_BENCH_CAMPAIGN_RUN",
+            "RUN_BENCH_CAMPAIGN_STARTED_AT",
+            "RUN_BENCH_CAMPAIGN_TOTAL_JOBS",
+            "CLOUDBENCH_CAMPAIGN_SEED_PROOF",
         ):
             environment.pop(key, None)
         environment.update(

@@ -250,3 +250,35 @@ substrate preflight. The changed helper is verified by its owning offline gate;
 the recorded native and funded successes are retained with explicit dependency
 hash differences rather than relabeled as fresh full runs. A new successful
 cached campaign is still required for its own acceptance credit.
+
+
+## Recurrence — 2026-10-06 nested canary inherited its caller's seed proof
+
+CodeRabbit4201671720 found another parent-scoped capability crossing the same
+nested-controller boundary. The preflight correctly removed outer cohort/job
+identity and created a fresh nested owner, but omitted the newly introduced
+`CLOUDBENCH_CAMPAIGN_SEED_PROOF`. The nested fleet therefore entered the actual
+seed-consumption branch while its required barrier/job variables had already
+been removed. The first bad handoff is this incomplete environment isolation;
+the seed consumer's required-membership checks remain correct.
+
+The existing `fleet-infra-canary.test.sh` owning control now advertises the
+outer proof and executes the actual fleet seed-consumption branch before its
+unchanged rendezvous checks. Frozen5c1 failed (exit1,1.158s) at `nested controller
+rejected outer campaign identity`; the same complete quick suite passed after
+one scrub-list entry (exit0,3.689s). It verifies campaign and standalone nested
+checks, no inherited cohort/proof/group fields, unchanged parent identity,
+preserved inventory/proxy values, fresh nested owner, serialization, original
+failure status, wrong-PID rejection and correct-parent acceptance. Existing
+assertions remain intact. The outer control processes were reaped and their
+captured births are absent. No providers were called.
+
+The earlier fix handled known campaign fields but did not cover the later seed
+proof field; this is a recurrence of incomplete parent-authority isolation,
+not a new case or a justification to weaken proof validation. Literal and
+behavioral archive searches and immutable RED/GREEN hashes are in
+`.context/fresh-claude-grouped50-20261006/final-review-seed-proof-packet/`.
+The existing `/deploy` pointer and `scripts/test.sh` already run this quick
+suite. This private correction changes no task, deadline, source snapshot,
+shared inventory ownership or cleanup contract. Composed deploy and any real
+campaign outcome remain separate qualification, so the case remains open.
