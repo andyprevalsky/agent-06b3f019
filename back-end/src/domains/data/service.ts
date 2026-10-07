@@ -1,13 +1,13 @@
-/* eslint-disable max-lines-per-function */
 /**
  * Data domain service — business logic for grep and summary operations.
  */
 
 import { isPostgresRegexError } from './regexSafety';
-import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
 import {
+  isCalendarOnly,
+  isGoogleGrepSource,
   isMessageFamilySource,
   type GrepMatch,
   type GrepParams,
@@ -16,13 +16,20 @@ import {
   type ValidSource,
   type ValidatedGrepInput,
 } from './types';
-import { AgentNotFoundError, InvalidPatternError, MissingAgentIdError } from './errors';
+import { InvalidPatternError } from './errors';
 import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
 import { searchTrajectorySource } from './trajectorySearchService';
 import { searchMessageSource } from './messageSearchService';
 import { searchNetworkSource } from './networkSearchService';
+import { googleSourceSummary, searchGoogleSource } from './googleSourceSearchService';
+import {
+  searchAgentNetworkSource,
+  searchDocumentSource,
+  searchTransactionSource,
+  transactionSummaries,
+} from './tableSearchService';
 import { createLogger } from '../../providers/logger';
 
 // Per-source connectivity lives in a dedicated file; re-export so routes can
@@ -41,12 +48,13 @@ export {
   SourceNotFoundError,
 } from './errors';
 
-async function agentTreeIdsForGrep(userId: string, agentId: string | undefined): Promise<string[]> {
-  if (agentId === undefined || agentId === '') throw new MissingAgentIdError();
-  const agent = await repo.findAgentByIdAndUser(agentId, userId);
-  if (agent === null) throw new AgentNotFoundError(agentId);
-  const rootId = await repo.findRootAgentId(agentId, userId);
-  return repo.findAgentTreeIds(rootId, userId);
+interface SourceSearchResult {
+  total: number;
+  matches: GrepMatch[];
+  hasMore?: boolean;
+  nextPageAfter?: string | null;
+  /** Something the caller must know about these results, e.g. a source still syncing. */
+  notice?: string;
 }
 
 async function searchSource(
@@ -54,129 +62,24 @@ async function searchSource(
   input: ValidatedGrepInput,
   source: ValidSource,
   agentId: string | undefined
-): Promise<{
-  total: number;
-  matches: GrepMatch[];
-  hasMore?: boolean;
-  nextPageAfter?: string | null;
-}> {
-  if (isMessageFamilySource(source)) {
-    return searchMessageSource({ userId, input, source });
-  }
-
-  if (source === 'network') {
-    return searchNetworkSource({ userId, input });
-  }
-
-  if (source === 'transactions') {
-    const filters = input.filters.transactions;
-    const [total, rows] = await Promise.all([
-      grepRepo.countTransactionGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        since: filters?.since,
-        until: filters?.until,
-        account: filters?.account,
-        minAmount: filters?.minAmount,
-        maxAmount: filters?.maxAmount,
-        status: filters?.status,
-        pathInstitution: filters?.pathInstitution,
-        pathAccount: filters?.pathAccount,
-        pathTransactionId: filters?.pathTransactionId,
-      }),
-      grepRepo.searchTransactionGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-        since: filters?.since,
-        until: filters?.until,
-        account: filters?.account,
-        minAmount: filters?.minAmount,
-        maxAmount: filters?.maxAmount,
-        status: filters?.status,
-        pathInstitution: filters?.pathInstitution,
-        pathAccount: filters?.pathAccount,
-        pathTransactionId: filters?.pathTransactionId,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
-  }
-
-  if (source === 'documents') {
-    const filters = input.filters.documents;
-    const [total, rows] = await Promise.all([
-      grepRepo.countDocumentGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        documentSource: filters?.documentSource,
-        since: filters?.since,
-        until: filters?.until,
-        path: filters?.path,
-        pathDocumentSource: filters?.pathDocumentSource,
-        pathRest: filters?.pathRest,
-        tag: filters?.tag,
-      }),
-      grepRepo.searchDocumentGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-        documentSource: filters?.documentSource,
-        since: filters?.since,
-        until: filters?.until,
-        path: filters?.path,
-        pathDocumentSource: filters?.pathDocumentSource,
-        pathRest: filters?.pathRest,
-        tag: filters?.tag,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
-  }
-
+): Promise<SourceSearchResult> {
+  if (isMessageFamilySource(source)) return searchMessageSource({ userId, input, source });
+  if (isGoogleGrepSource(source)) return searchGoogleSource({ userId, input, source });
+  if (source === 'network') return searchNetworkSource({ userId, input });
+  if (source === 'transactions') return searchTransactionSource(userId, input);
+  if (source === 'documents') return searchDocumentSource(userId, input);
   if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
-
-  const agentIds = await agentTreeIdsForGrep(userId, agentId);
-  const agentNetworkFilters = input.filters.agentNetwork;
-  const [total, rows] = await Promise.all([
-    grepRepo.countAgentNetworkGrepRows({
-      agentIds,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      pathAgentId: agentNetworkFilters?.pathAgentId,
-      pathRole: agentNetworkFilters?.pathRole,
-      pathMessageId: agentNetworkFilters?.pathMessageId,
-      role: agentNetworkFilters?.role,
-    }),
-    grepRepo.searchAgentNetworkGrepRows({
-      agentIds,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      limit: input.headLimit,
-      offset: input.offset,
-      pathAgentId: agentNetworkFilters?.pathAgentId,
-      pathRole: agentNetworkFilters?.pathRole,
-      pathMessageId: agentNetworkFilters?.pathMessageId,
-      role: agentNetworkFilters?.role,
-    }),
-  ]);
-  return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
+  return searchAgentNetworkSource(userId, input, agentId);
 }
 
-// ---------------------------------------------------------------------------
-// Grep — main entry point
-// ---------------------------------------------------------------------------
-
-export async function grep(userId: string, params: GrepParams): Promise<GrepResult> {
-  const input = validateGrepInput(params);
-  let sourceResults;
+async function searchAllSources(
+  userId: string,
+  input: ValidatedGrepInput,
+  agentId: string | undefined
+): Promise<SourceSearchResult[]> {
   try {
-    sourceResults = await Promise.all(
-      input.sources.map((source) => searchSource(userId, input, source, params.agent_id))
+    return await Promise.all(
+      input.sources.map((source) => searchSource(userId, input, source, agentId))
     );
   } catch (error) {
     // Fix 1b: a regex feature Postgres ARE rejects (e.g. lookbehind) surfaces as
@@ -188,12 +91,57 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     }
     throw error;
   }
+}
+
+/** How one grep's merged matches are ordered and described. */
+function displayOrder(input: ValidatedGrepInput): {
+  soleTrajectory: boolean;
+  oldestFirst: boolean;
+  contextUnit: GrepResult['context_unit'];
+} {
+  const soleTrajectory = input.sources.length === 1 && input.sources[0] === 'agent_trajectories';
+  const allMessages = input.sources.every(isMessageFamilySource);
+  // Conversations and calendars read forward in time; everything else is newest first.
+  const allCalendar = isCalendarOnly(input.sources);
+  const oldestFirst = soleTrajectory ? input.order === 'oldest_first' : allMessages || allCalendar;
+  const contextUnit = allMessages
+    ? 'message_record'
+    : input.sources.some(isMessageFamilySource)
+      ? 'mixed'
+      : 'logical_line';
+  return { soleTrajectory, oldestFirst, contextUnit };
+}
+
+/** Source notices first, then the plain "no matches" line when nothing matched. */
+function resultMessage(
+  input: ValidatedGrepInput,
+  sourceResults: SourceSearchResult[],
+  returned: number
+): { message?: string } {
+  const parts = sourceResults
+    .map((result) => result.notice)
+    .filter((notice): notice is string => notice !== undefined);
+  if (returned === 0) {
+    const where = input.sources.join(', ');
+    parts.push(
+      input.pattern === ''
+        ? `Nothing to list in ${where} for these filters.`
+        : `No matches for '${input.pattern}' in ${where}.`
+    );
+  }
+  return parts.length === 0 ? {} : { message: parts.join(' ') };
+}
+
+// ---------------------------------------------------------------------------
+// Grep — main entry point
+// ---------------------------------------------------------------------------
+
+export async function grep(userId: string, params: GrepParams): Promise<GrepResult> {
+  const input = validateGrepInput(params);
+  const sourceResults = await searchAllSources(userId, input, params.agent_id);
+  const { soleTrajectory, oldestFirst, contextUnit } = displayOrder(input);
 
   const totalMatches = sourceResults.reduce((sum, result) => sum + result.total, 0);
-  const soleTrajectory = input.sources.length === 1 && input.sources[0] === 'agent_trajectories';
-  const oldestFirst = soleTrajectory
-    ? input.order === 'oldest_first'
-    : input.sources.every(isMessageFamilySource);
   const merged = soleTrajectory
     ? sourceResults[0].matches
     : sortMatches(
@@ -206,31 +154,8 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     ? sourceResults[0].hasMore === true
     : totalMatches > input.offset + matches.length;
   const summaries: GrepResult['summaries'] = {};
-
   if (input.sources.includes('transactions')) {
-    const filters = input.filters.transactions;
-    const aggregateRows = await grepRepo.aggregateTransactionGrepRows({
-      userId,
-      pattern: input.dbPattern,
-      caseInsensitive: input.caseInsensitive,
-      since: filters?.since,
-      until: filters?.until,
-      account: filters?.account,
-      minAmount: filters?.minAmount,
-      maxAmount: filters?.maxAmount,
-      status: filters?.status,
-      includePendingInTotals: filters?.includePendingInTotals,
-    });
-    summaries.transactions = {
-      totals_include_pending: filters?.includePendingInTotals === true,
-      currencies: aggregateRows.map((row) => ({
-        currency: row.currency,
-        outflow: row.outflow?.toString() ?? '0',
-        inflow: row.inflow?.toString() ?? '0',
-        net: row.net?.toString() ?? '0',
-        count: Number(row.count),
-      })),
-    };
+    summaries.transactions = await transactionSummaries(userId, input);
   }
 
   log.info(
@@ -251,18 +176,9 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
       truncated && input.pageAfterMessageId === undefined ? input.offset + matches.length : null,
     ...(keysetPage ? { next_page_after: sourceResults[0].nextPageAfter ?? null } : {}),
     display_order: oldestFirst ? 'oldest_first' : 'newest_first',
-    context_unit:
-      oldestFirst && !soleTrajectory
-        ? 'message_record'
-        : input.sources.some(isMessageFamilySource)
-          ? 'mixed'
-          : 'logical_line',
+    context_unit: contextUnit,
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
-    ...(matches.length === 0
-      ? {
-          message: `No matches for '${input.pattern}' in ${input.sources.join(', ')}.`,
-        }
-      : {}),
+    ...resultMessage(input, sourceResults, matches.length),
   };
 }
 
@@ -329,6 +245,11 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
   }
   if (documentSummary.total_documents > 0) {
     result.sources.documents = documentSummary;
+  }
+  const google = await googleSourceSummary(userId);
+  if (google !== undefined) {
+    result.sources.calendar = google.calendar;
+    result.sources.drive = google.drive;
   }
   return result;
 }

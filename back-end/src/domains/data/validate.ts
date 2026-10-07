@@ -20,6 +20,7 @@ import {
   parseAgentTrajectoryFilters,
   parseAgentPaging,
 } from './validate.agent';
+import { googleSourceOfPath, parseGoogleSourceFilters } from './validate.google';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -34,11 +35,15 @@ interface ResolvedSourceSelection {
   hasNetwork: boolean;
   hasAgentNetwork: boolean;
   hasAgentTrajectories: boolean;
+  hasGoogle: boolean;
+  /** No pattern means "list": agent sources, or only calendar/drive. */
+  patternOptional: boolean;
   mergeTopLevelNarrowing: boolean;
 }
 import {
   DEFAULT_GREP_SOURCES,
   VALID_SOURCES,
+  isGoogleGrepSource,
   isMessageFamilySource,
   type GrepParams,
   type ValidSource,
@@ -138,6 +143,10 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     }
   }
 
+  // A printed calendar or drive path names its own source, so following one
+  // works without repeating the source.
+  const pathSource = googleSourceOfPath(rawFilters.path);
+
   // Typed trajectory narrowing chooses its source when the caller omits one.
   const resolvedSources: ValidSource[] =
     sources !== undefined
@@ -146,13 +155,16 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
         ? [source as ValidSource]
         : trajectoryNarrowing
           ? ['agent_trajectories']
-          : DEFAULT_GREP_SOURCES;
+          : pathSource !== undefined
+            ? [pathSource]
+            : DEFAULT_GREP_SOURCES;
 
   if (
     params.filters !== undefined &&
     source === undefined &&
     sources === undefined &&
-    !trajectoryNarrowing
+    !trajectoryNarrowing &&
+    pathSource === undefined
   ) {
     throw new InvalidGrepParamError('filters');
   }
@@ -163,6 +175,7 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const hasNetwork = resolvedSources.includes('network');
   const hasAgentNetwork = resolvedSources.includes('agent_network');
   const hasAgentTrajectories = resolvedSources.includes('agent_trajectories');
+  const hasGoogle = resolvedSources.some(isGoogleGrepSource);
   validateAgentSourceSelection(params, resolvedSources);
 
   // Reject filters that NO resolved source can consume. Message/transaction/
@@ -172,7 +185,8 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   // Covers both the single-source (byte-identical to pre-`sources` behavior when
   // resolvedSources===[selectedSource]) and the multi-source path.
   const filterObj = rawFilters;
-  if (Object.keys(filterObj).length > 0 && !hasMessageFamily && !hasTransactions && !hasDocuments) {
+  const filtersParsedBySource = hasMessageFamily || hasTransactions || hasDocuments || hasGoogle;
+  if (Object.keys(filterObj).length > 0 && !filtersParsedBySource) {
     rejectUnsupportedFilters(resolvedSources[0], filterObj);
   }
 
@@ -184,6 +198,9 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     hasNetwork,
     hasAgentNetwork,
     hasAgentTrajectories,
+    hasGoogle,
+    patternOptional:
+      hasAgentTrajectories || hasAgentNetwork || resolvedSources.every(isGoogleGrepSource),
     // Merge top-level `person`/`since` into message filters whenever a message-
     // family source is EXPLICITLY selected — via singular `source` OR `sources`.
     // (Not for the implicit default trio, matching historical behavior.)
@@ -206,17 +223,14 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     hasNetwork,
     hasAgentNetwork,
     hasAgentTrajectories,
+    hasGoogle,
+    patternOptional,
     mergeTopLevelNarrowing,
   } = resolveSourceSelection(params);
 
   const agentPaging = parseAgentPaging(params);
 
-  const pattern =
-    params.pattern === undefined
-      ? hasAgentTrajectories || hasAgentNetwork
-        ? ''
-        : undefined
-      : params.pattern;
+  const pattern = params.pattern === undefined && patternOptional ? '' : params.pattern;
   if (typeof pattern !== 'string') throw new InvalidPatternError();
 
   const multiline = parseBoolean(params.multiline, false);
@@ -272,6 +286,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
       network: hasNetwork ? parseNetworkFilters(params) : undefined,
       agentNetwork: hasAgentNetwork ? parseAgentNetworkFilters(params) : undefined,
       agentTrajectories: hasAgentTrajectories ? parseAgentTrajectoryFilters(params) : undefined,
+      google: hasGoogle ? parseGoogleSourceFilters(params, resolvedSources) : undefined,
     },
   };
 }

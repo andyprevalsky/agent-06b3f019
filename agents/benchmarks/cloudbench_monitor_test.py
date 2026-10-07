@@ -176,3 +176,44 @@ def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: P
     assert len(statuses) == 1, "default detached launch lost its actual exit status"
     assert statuses[0].read_text().strip() == "7"
     assert "monitor every 30s" in result.stdout
+
+
+def test_fleet_monitor_snapshot_already_removed_is_a_clean_exit(tmp_path: Path):
+    """The snapshot's new owner removes it on exit; nothing is left to clean up.
+
+    Under load that removal landed between the cleanup's existence check and
+    its helper (which lives inside the snapshot) starting, and the launch
+    failed with "could not remove the exact owned script snapshot". The test
+    hook removes the snapshot at exactly that point.
+    """
+    runs = tmp_path / "runs"
+    snapshots = tmp_path / "snapshots"
+    runs.mkdir()
+    snapshots.mkdir()
+    env = {
+        **os.environ,
+        "CLOUDBENCH_RUNS_ROOT": str(runs),
+        "CLOUDBENCH_SCRIPT_SNAPSHOT": "",
+        "CLOUDBENCH_SKIP_LOCAL_PATCH": "1",
+        "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_EXIT_AFTER_CLAIM": "7",
+        "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_VANISH_BEFORE_CLEANUP": "1",
+        "TMPDIR": str(snapshots),
+    }
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/run-bench"), "spawn-sub-agents", "--ref", "origin/main"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    deadline = time.monotonic() + 10
+    statuses = []
+    while time.monotonic() < deadline:
+        statuses = list(runs.glob("detached-*.status"))
+        if statuses:
+            break
+        time.sleep(0.05)
+    assert len(statuses) == 1, "detached launch lost its actual exit status"
+    assert statuses[0].read_text().strip() == "7"
+    assert not list(snapshots.glob("cloudbench-scripts.*")), "the snapshot was left behind"

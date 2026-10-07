@@ -297,6 +297,12 @@ PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-doordash-count",
     "plaid-transactions-dead-subscriptions",
 }
+# Tasks answered from the frozen Google Calendar and Drive rows of the
+# google_workspace_benchmark_v1 fixture.
+GOOGLE_WORKSPACE_BENCHMARK_TASK_NAMES = {
+    "google-calendar-day-recall",
+    "google-drive-lease-recall",
+}
 # Live X Hello World grades write-lock + post evidence against the synced CookieBundle.
 # Do not steer the agent into MintedAccount signup or phone-auth recovery.
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
@@ -6755,6 +6761,47 @@ def _run_user_data_fixture(action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
+_GOOGLE_WORKSPACE_FIXTURE_CACHE: dict[str, dict] = {}
+
+
+def _run_google_workspace_fixture(action: str) -> dict:
+    """Seed (or remove) the frozen Google Calendar and Drive benchmark rows.
+
+    Applied once per runner process: the tasks sharing this fixture run in
+    parallel, and a second apply would delete and rewrite the rows while the
+    first task's agent is already searching them.
+    """
+    if action == "apply" and action in _GOOGLE_WORKSPACE_FIXTURE_CACHE:
+        return dict(_GOOGLE_WORKSPACE_FIXTURE_CACHE[action])
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for Google Workspace benchmark fixture")
+    env = os.environ.copy()
+    # The script refuses any non-local database: it replaces a user's synced
+    # Calendar and Drive rows, which must never happen to production data.
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/google-workspace-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Google Workspace benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _GOOGLE_WORKSPACE_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _GOOGLE_WORKSPACE_FIXTURE_CACHE.clear()
+    return manifest
+
+
 def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -10429,6 +10476,9 @@ def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge.
 
+    Rows are whole whenever the bundle fits the single-turn budget; only a
+    bundle that does not fit has each row cut to ``SINGLE_TURN_TEXT_CAP``.
+
     Payment-approval metadata and root transcripts come from the tree-aware
     single-turn builder. ``benchmark_state`` is the compact T-row view so
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
@@ -10447,10 +10497,16 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     )
 
     compact_state = _compact_benchmark_state_for_judge(data)
-    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
-    evidence = _append_structured_output_evidence(evidence, data)
-    if not single_turn_evidence_exceeds_budget(evidence):
-        return evidence
+    # Whole rows first. The per-row cap exists only to fit the budget, and it
+    # cuts without a marker: a 17k grep result lost the one line its judge had
+    # to ground on (grep-agent-trajectories-code-tool-status).
+    for text_cap in (None, SINGLE_TURN_TEXT_CAP):
+        evidence = _apply_compact_benchmark_state(
+            build_single_turn_evidence(data, text_cap=text_cap), compact_state
+        )
+        evidence = _append_structured_output_evidence(evidence, data)
+        if not single_turn_evidence_exceeds_budget(evidence):
+            return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
@@ -12973,6 +13029,15 @@ async def _run_single_task_as_run_user(
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
         print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
+    if task.name in GOOGLE_WORKSPACE_BENCHMARK_TASK_NAMES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        google_workspace_manifest = _run_google_workspace_fixture("apply")
+        print(
+            "    📅 Seeded frozen Google Calendar and Drive fixture: "
+            f"{google_workspace_manifest.get('event_count', '?')} events, "
+            f"{google_workspace_manifest.get('file_count', '?')} files"
+        )
     if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
