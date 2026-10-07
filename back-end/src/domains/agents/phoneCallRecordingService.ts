@@ -1,12 +1,14 @@
 import { isAdminUser } from '../../utils/adminAccess';
 import { createLogger } from '../../providers/logger';
-import { agentIdFromOperationKey } from '../vapi/archive';
-import { downloadVapiCallRecording } from '../vapi/recordings';
-import { findToolSideEffectOperationKey } from '../vapi/repo';
+import {
+  VAPI_CALL_OPERATION_TYPE,
+  agentIdFromOperationKey,
+  downloadVapiCallRecording,
+  findToolSideEffectOperationKey,
+} from '../../providers/vapiRecordings';
 import * as repo from './repo';
 
 const log = createLogger('PhoneCallRecording');
-const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
 
 export type PhoneCallRecordingResult =
   | { status: 200; body: Buffer; contentType: string }

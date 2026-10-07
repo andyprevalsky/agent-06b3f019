@@ -1,8 +1,7 @@
 /**
  * call_phone_number tool → PhoneCallCard.
  */
-import { useAgentContext } from '@/features/agent-context';
-import type { Message } from '../../hooks';
+import { useAgentContext, type Message } from '../../hooks';
 import type { PhoneCallMetadata } from '../../types';
 import { PhoneCallCard } from '../PhoneCallCard';
 

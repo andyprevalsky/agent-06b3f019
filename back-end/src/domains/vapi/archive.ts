@@ -1,11 +1,15 @@
 import { VAPI_BASE_URL } from './config';
 import { createLogger } from '../../providers/logger';
 import { archiveBytes, archiveJson } from '../../providers/traceArchive';
-import { downloadVapiCallRecording } from './recordings';
-import { findToolSideEffectOperationKey } from './repo';
+import {
+  VAPI_CALL_OPERATION_TYPE,
+  agentIdFromOperationKey,
+  downloadVapiCallRecording,
+  findToolSideEffectOperationKey,
+} from '../../providers/vapiRecordings';
 
 const log = createLogger('VapiArchive');
-const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
+export { agentIdFromOperationKey };
 
 export type VapiPollExchange = {
   request: {
@@ -58,15 +62,6 @@ export function buildVapiPollExchange(
       durationMs: Math.max(0, receivedAt.getTime() - startedAt.getTime()),
     },
   };
-}
-
-export function agentIdFromOperationKey(operationKey?: string): string | null {
-  if (operationKey === undefined) return null;
-  const prefix = `${VAPI_CALL_OPERATION_TYPE}:`;
-  if (!operationKey.startsWith(prefix)) return null;
-  const rest = operationKey.slice(prefix.length);
-  const agentId = rest.split(':')[0];
-  return agentId !== undefined && agentId !== '' ? agentId : null;
 }
 
 export async function agentIdForCallId(callId: string): Promise<string | null> {

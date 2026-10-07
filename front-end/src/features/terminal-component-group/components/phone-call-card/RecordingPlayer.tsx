@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
 import { Play, Pause } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { fetchPhoneCallRecording } from '../../api';
+import { fetchPhoneCallRecording } from '../../hooks';
 import { formatDuration } from './formatDuration';
 import { useRecordingPlayer } from './useRecordingPlayer';
 
