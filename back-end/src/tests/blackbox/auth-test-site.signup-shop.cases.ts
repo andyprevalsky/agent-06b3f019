@@ -219,6 +219,13 @@ test('signup_purchase: checkout needs an account, and one settled order belongs 
           (replayed.headers.get('location') ?? '').includes(orderNumber),
           `a repeated checkout POST must resolve to the placed order: ${replayed.headers.get('location')}`
         );
+        // The repeat resolves only for the purchaser: the same cart cookie without
+        // the member's session is not handed the member's order.
+        const signedOut = await postForm(base, pagePath(manifest, '/checkout'), CARD, cart);
+        assert(
+          !(signedOut.headers.get('location') ?? '').includes('/orders/'),
+          `a repeated checkout POST without the purchaser's session must not resolve to the order: ${signedOut.status} ${signedOut.headers.get('location')}`
+        );
         // A malformed session cookie reads as signed out, not as a 500.
         const malformed = await getPage(base, pagePath(manifest, ''), 'rose_shop_session=%E0');
         assert(malformed.status === 200, `malformed cookie must not 500: ${malformed.status}`);

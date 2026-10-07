@@ -215,9 +215,15 @@ export async function placeOrder(
   const totals = cartTotals(site, lines, input.session !== null);
   if (totals.lines.length === 0) {
     // A browser that missed the response repeats the POST against the cart the
-    // first attempt already emptied; hand back the order it paid for.
+    // first attempt already emptied; hand the purchaser back the order it paid
+    // for. Anyone else holding that cart cookie only has an empty cart.
     const placed = orderForCart(site, input.cartToken);
-    if (placed !== undefined) return { ok: true, order: placed };
+    if (
+      placed !== undefined &&
+      canViewOrder(placed, { session: input.session, cartToken: input.cartToken })
+    ) {
+      return { ok: true, order: placed };
+    }
     return { ok: false, reason: 'empty_cart' };
   }
   const buyer = input.session?.email ?? null;
