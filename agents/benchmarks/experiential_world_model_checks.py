@@ -568,7 +568,10 @@ def test_native_artifact_preserves_context_pairs_errors_and_rejects_identity_dri
         load_native(out, "rose-test", "rose-1-ultra", digest)
 
 
-def test_native_load_verifies_each_immutable_artifact_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gc_enabled", [True, False])
+def test_native_load_verifies_each_immutable_artifact_once(tmp_path, monkeypatch, gc_enabled):
+    import gc
+
     from exp.common.project import ArtifactCorruptionError, ArtifactStore
     from exp.common.project.database import project_connection
 
@@ -578,6 +581,7 @@ def test_native_load_verifies_each_immutable_artifact_once(tmp_path, monkeypatch
     source = _source_fixture(tmp_path)
     output = tmp_path / "output"
     build(source, output, "test", "rose-1-ultra", "a" * 64)
+    expected_artifact, expected_retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
     original = ArtifactStore.read
     calls = {}
     snapshots = []
@@ -590,29 +594,41 @@ def test_native_load_verifies_each_immutable_artifact_once(tmp_path, monkeypatch
     monkeypatch.setattr(_ReadSnapshot, "__init__", initialize)
 
     def read(store, artifact_id):
+        assert not gc.isenabled(), "automatic GC remains enabled during verified startup loading"
         calls[artifact_id] = calls.get(artifact_id, 0) + 1
         return original(store, artifact_id)
 
     monkeypatch.setattr(ArtifactStore, "read", read)
-    _, retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
-    assert len(retriever.loaded.transitions) == 2
-    assert len(calls) == 3 and set(calls.values()) == {1}, calls
-    # A fresh load revalidates all three artifacts; no trust survives the scope.
-    load_native(output, "test", "rose-1-ultra", "a" * 64)
-    assert set(calls.values()) == {2}, calls
-    assert all(not snapshot.verified for snapshot in snapshots)
-    with pytest.raises(ValueError, match="pool identity"):
-        load_native(output, "test", "rose-1-ultra", "b" * 64)
-    assert all(not snapshot.verified for snapshot in snapshots)
-    dataset_id = retriever.loaded.index.sources[0].artifact_input.artifact_id
-    with project_connection(output / "experiential", write=True) as connection:
-        connection.execute(
-            "UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?",
-            (b"corrupted source", "test", dataset_id, "traces.jsonl"),
-        )
-    with pytest.raises(ArtifactCorruptionError):
+    original_gc_enabled = gc.isenabled()
+    original_thresholds = gc.get_threshold()
+    try:
+        (gc.enable if gc_enabled else gc.disable)()
+        artifact, retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
+        assert artifact == expected_artifact and retriever.loaded == expected_retriever.loaded
+        assert len(retriever.loaded.transitions) == 2
+        assert len(calls) == 3 and set(calls.values()) == {1}, calls
+        assert gc.isenabled() is gc_enabled and gc.get_threshold() == original_thresholds
+        # A fresh load revalidates all three artifacts; no trust survives the scope.
         load_native(output, "test", "rose-1-ultra", "a" * 64)
-    assert all(not snapshot.verified for snapshot in snapshots)
+        assert set(calls.values()) == {2}, calls
+        assert all(not snapshot.verified for snapshot in snapshots)
+        assert gc.isenabled() is gc_enabled
+        with pytest.raises(ValueError, match="pool identity"):
+            load_native(output, "test", "rose-1-ultra", "b" * 64)
+        assert all(not snapshot.verified for snapshot in snapshots)
+        assert gc.isenabled() is gc_enabled
+        dataset_id = retriever.loaded.index.sources[0].artifact_input.artifact_id
+        with project_connection(output / "experiential", write=True) as connection:
+            connection.execute(
+                "UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?",
+                (b"corrupted source", "test", dataset_id, "traces.jsonl"),
+            )
+        with pytest.raises(ArtifactCorruptionError):
+            load_native(output, "test", "rose-1-ultra", "a" * 64)
+        assert all(not snapshot.verified for snapshot in snapshots)
+        assert gc.isenabled() is gc_enabled and gc.get_threshold() == original_thresholds
+    finally:
+        (gc.enable if original_gc_enabled else gc.disable)()
 
 
 def test_native_conformance_binds_every_case_to_exact_real_records(tmp_path):
@@ -641,6 +657,247 @@ def test_native_conformance_binds_every_case_to_exact_real_records(tmp_path):
     with pytest.raises(ValueError, match="lacks matching native source"):
         bind_conformance(suite, output / "bad.json", retriever.loaded.transitions, pointer)
     assert not (output / "bad.json").exists()
+
+
+def test_native_ascii_jsonl_preserves_unicode_and_public_provenance(tmp_path):
+    import hashlib
+
+    from exp.common.core.artifacts import canonical_json_bytes
+    from exp.common.project import ArtifactStore, ProjectPaths
+    from exp.common.traces import load_trace_dataset
+
+    import benchmarks.build_experiential_world_model as building
+    from benchmarks.serve_experiential_world_model import load_native
+
+    source = _source_fixture(tmp_path)
+    session_path = source / "sessions/real-root.session.json"
+    session = json.loads(session_path.read_text())
+    session["initial_state"]["unicode_resource"] = "café 🚀 \u2028 \u2029 \u0085"
+    session["initial_state"]["typed_values"] = [True, 1, 1.0, False, 0, 0.0, None]
+    session_path.write_text(json.dumps(session, ensure_ascii=False))
+    output = tmp_path / "native"
+    pointer = building.build(source, output, "test", "rose-1-ultra", "a" * 64)
+    store = ArtifactStore(ProjectPaths(output / "experiential", "test"))
+    artifact, retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
+    rag = retriever.loaded
+    for ref in rag.index.sources:
+        dataset = load_trace_dataset(store, ref.artifact_input.artifact_id)
+        assert store.read_bytes(dataset.dataset.dataset_id, dataset.dataset.traces_path).isascii()
+        assert dataset.traces[0].initial_context["unicode_resource"] == session["initial_state"]["unicode_resource"]
+    assert store.read_bytes(rag.index.rag_id, rag.index.transitions_path).isascii()
+    assert store.read_bytes(rag.index.rag_id, rag.index.vectors_path).isascii()
+    (source / "conformance.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "requested_examples": 2,
+                "examples": [
+                    {
+                        "root_agent_id": t.trace_id,
+                        "action": t.action.tool_arguments,
+                        "observation": json.loads(t.observation.content),
+                    }
+                    for t in rag.transitions
+                ],
+            }
+        )
+    )
+    before = hashlib.sha256(canonical_json_bytes(artifact)).hexdigest()
+    same = building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64, source)
+    after, _ = load_native(output, "test", "rose-1-ultra", "a" * 64)
+    assert same["world_model_id"] == pointer["world_model_id"]
+    assert hashlib.sha256(canonical_json_bytes(after)).hexdigest() == before
+
+
+def test_native_republication_reuses_embeddings_rebinds_cases_and_keeps_old_artifacts(tmp_path):
+    import hashlib
+    import sys
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    from exp.common.core.artifacts import SourceIdentity, canonical_json_bytes, canonical_jsonl_bytes, stable_id
+    from exp.common.project import ArtifactCorruptionError, ArtifactStore, ProjectPaths, artifact_input
+    from exp.common.project.database import project_connection
+    from exp.common.traces import TraceDataset, load_trace_dataset
+    from exp.simulation.retrieval import RAGLineageBinding, persist_trace_rag
+    from exp.simulation.world_model.artifact import (
+        GroundedWorldModelArtifact,
+        grounded_world_model_content,
+        persist_grounded_world_model,
+    )
+
+    import benchmarks.build_experiential_world_model as building
+    from benchmarks.experiential_world_model import lineage_id
+    from benchmarks.serve_experiential_world_model import load_native
+
+    source = _source_fixture(tmp_path)
+    session_path = source / "sessions/real-root.session.json"
+    session = json.loads(session_path.read_text())
+    session["initial_state"]["unicode_resource"] = "café 🚀 \u2028 \u2029 \u0085"
+    session["initial_state"]["typed_values"] = [True, 1, 1.0, False, 0, 0.0, None]
+    session_path.write_text(json.dumps(session, ensure_ascii=False))
+    trace, _, _ = building.load_rose_trace(source / "otel/real-root.otel.jsonl", session_path)
+    output = tmp_path / "legacy"
+    store = ArtifactStore(ProjectPaths(output / "experiential", "test"))
+    now = datetime.now(timezone.utc)
+    records = canonical_jsonl_bytes((trace,))
+    digest = hashlib.sha256(records).hexdigest()
+    dataset = TraceDataset(
+        created_at=now,
+        inputs=(),
+        code_revision="legacy-native-fixture",
+        source=SourceIdentity(kind="file", source_id="verified-fixture", sha256=digest),
+        dataset_id=stable_id("rose-real-traces", {"records_sha256": digest}),
+        semantic_convention_version="rose-canonical-export-v11",
+        traces_path="traces.jsonl",
+        traces_sha256=digest,
+        trace_ids=(trace.trace_id,),
+    )
+    manifest = store.write(
+        artifact_id=dataset.dataset_id,
+        artifact_type="trace-dataset",
+        envelope=dataset,
+        files={"trace-dataset.json": canonical_json_bytes(dataset), "traces.jsonl": records},
+    )
+    original_rag = persist_trace_rag(
+        store,
+        (artifact_input(manifest),),
+        (RAGLineageBinding(trace_id=trace.trace_id, lineage_id=lineage_id(trace.trace_id), partition="fit"),),
+        created_at=now,
+        code_revision="legacy-native-fixture",
+    )
+    world = persist_grounded_world_model(
+        store,
+        artifact_input(original_rag.manifest),
+        model_alias="rose-1-ultra",
+        model=building.model_snapshot("rose-1-ultra", "a" * 64),
+        created_at=now,
+        code_revision="legacy-native-fixture",
+        top_k=5,
+    )
+    pointer_path = output / "models/test/experiential.json"
+    pointer_path.parent.mkdir(parents=True)
+    pointer = {
+        "schema": "rose.experiential_model.v1",
+        "upstream_revision": building.UPSTREAM_REVISION,
+        "adapter_contract": building.ADAPTER_CONTRACT,
+        "world_model_id": world.artifact.world_model_id,
+        "world_model_manifest_sha256": artifact_input(world.manifest).sha256,
+        "source_corpus": str(source),
+        "observations": 2,
+        "trajectories": 1,
+        "exclusions": [{"retained": "original exclusion"}],
+        "redactions": [{"retained": "original redaction"}],
+    }
+    pointer_path.write_text(json.dumps(pointer))
+    examples = [
+        {
+            "root_agent_id": t.trace_id,
+            "action": t.action.tool_arguments,
+            "observation": json.loads(t.observation.content),
+        }
+        for t in original_rag.transitions
+    ]
+    (source / "conformance.json").write_text(
+        json.dumps({"status": "passed", "requested_examples": 2, "examples": examples})
+    )
+    original_ids = (dataset.dataset_id, original_rag.index.rag_id, world.artifact.world_model_id)
+    original_bytes = {identity: dict(store.read(identity).payloads) for identity in original_ids}
+    calls = Counter()
+
+    def profile(frame, event, arg):
+        if event == "call":
+            calls[frame.f_code.co_name] += 1
+
+    sys.setprofile(profile)
+    try:
+        result = building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64, source)
+    finally:
+        sys.setprofile(None)
+    assert calls["load_rag_index"] >= 2 and calls["load_trace_dataset"] >= 2
+    assert calls["load_rose_trace"] == calls["embed_rag_texts"] == 0
+    new_world, retriever = load_native(output, "test", "rose-1-ultra", "a" * 64)
+    new_rag = retriever.loaded
+    assert tuple(canonical_json_bytes(t) for t in new_rag.transitions) == tuple(
+        canonical_json_bytes(t) for t in original_rag.transitions
+    )
+    assert tuple(canonical_json_bytes(v) for v in new_rag.vectors) == tuple(
+        canonical_json_bytes(v) for v in original_rag.vectors
+    )
+    new_dataset = load_trace_dataset(store, new_rag.index.sources[0].artifact_input.artifact_id)
+    assert canonical_json_bytes(new_dataset.traces[0]) == canonical_json_bytes(trace)
+    assert new_dataset.traces[0].source.identity == trace.source.identity
+    assert new_dataset.dataset.dataset_id != dataset.dataset_id
+    assert (
+        new_rag.index.rag_id != original_rag.index.rag_id and new_world.world_model_id != world.artifact.world_model_id
+    )
+    assert new_world.serving_rag == artifact_input(new_rag.manifest)
+    assert new_rag.manifest.inputs == (artifact_input(store.read(new_dataset.dataset.dataset_id).manifest),)
+    assert result["exclusions"] == pointer["exclusions"] and result["redactions"] == pointer["redactions"]
+    assert all(dict(store.read(identity).payloads) == original_bytes[identity] for identity in original_ids)
+    assert store.read_bytes(new_dataset.dataset.dataset_id, new_dataset.dataset.traces_path).isascii()
+    assert store.read_bytes(new_rag.index.rag_id, new_rag.index.transitions_path).isascii()
+    bound = json.loads((output / "conformance.native.json").read_text())
+    assert len(bound["examples"]) == 2 and bound["native_world_model_id"] == new_world.world_model_id
+    examples[0]["latest_receipt"] = "rebound on idempotent republication"
+    suite_path = source / "conformance.json"
+    suite_path.write_text(json.dumps({"status": "passed", "requested_examples": 2, "examples": examples}))
+    assert (
+        building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64)["world_model_id"] == new_world.world_model_id
+    )
+    assert (
+        json.loads((output / "conformance.native.json").read_text())["examples"][0]["latest_receipt"]
+        == examples[0]["latest_receipt"]
+    )
+    suite_bytes = suite_path.read_bytes()
+    native_suite = output / "conformance.native.json"
+    native_bytes = native_suite.read_bytes()
+    suite_path.unlink()
+    native_suite.unlink()
+    with pytest.raises(ValueError, match="requires a complete conformance suite"):
+        building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64)
+    assert json.loads(pointer_path.read_text()) == result
+    suite_path.write_bytes(suite_bytes)
+    native_suite.write_bytes(native_bytes)
+    bad_values = new_world.model_dump(mode="json")
+    bad_values["prompt_sha256"] = "0" * 64
+    bad_values["world_model_id"] = stable_id(
+        "grounded-world-model",
+        grounded_world_model_content(
+            serving_rag=new_world.serving_rag,
+            model_alias=new_world.model_alias,
+            model=new_world.model,
+            prompt_version=new_world.prompt_version,
+            prompt_sha256=bad_values["prompt_sha256"],
+            top_k=new_world.top_k,
+            code_revision=new_world.code_revision,
+        ),
+    )
+    bad_world = GroundedWorldModelArtifact.model_validate(bad_values)
+    bad_manifest = store.write(
+        artifact_id=bad_world.world_model_id,
+        artifact_type="grounded-world-model",
+        envelope=bad_world,
+        files={"world-model.json": canonical_json_bytes(bad_world)},
+    )
+    bad_pointer = {
+        **result,
+        "world_model_id": bad_world.world_model_id,
+        "world_model_manifest_sha256": artifact_input(bad_manifest).sha256,
+    }
+    pointer_path.write_text(json.dumps(bad_pointer))
+    with pytest.raises(ValueError, match="prompt digest differs"):
+        building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64)
+    assert json.loads(pointer_path.read_text()) == bad_pointer
+    pointer_path.write_text(json.dumps(result))
+    with project_connection(store.paths.root, write=True) as connection:
+        connection.execute(
+            "UPDATE project_artifact_files SET payload=? WHERE project_id=? AND artifact_id=? AND path=?",
+            (b"corrupted source", "test", new_dataset.dataset.dataset_id, "traces.jsonl"),
+        )
+    with pytest.raises(ArtifactCorruptionError):
+        building.republish_ascii(output, "test", "rose-1-ultra", "a" * 64)
+    assert json.loads(pointer_path.read_text()) == result
 
 
 def test_upstream_secret_boundary_redacts_before_artifact_publication(tmp_path):

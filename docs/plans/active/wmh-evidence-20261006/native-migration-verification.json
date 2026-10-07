@@ -1,8 +1,123 @@
 {
   "branch": "codex/wmh-experiential-parallel-20261006",
+  "continuation_receipts": {
+    ".context/native-ascii-conversion-owner.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-conversion-owner.json",
+      "sha256": "dc89186f137ea9e3597dfd4abb39d824ba0647a223eedc33e1fe9e7bc8d63b7b"
+    },
+    ".context/native-ascii-jsonl-final-blackbox-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-jsonl-final-blackbox-green.log",
+      "sha256": "59aa64b36b17c313b4ed913fa2d43c3598f5ae5945dc8131711134ebc911e1b0"
+    },
+    ".context/native-ascii-jsonl-final-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-ascii-jsonl-final-green.log",
+      "sha256": "2c14b158c6954bed8f662db6fc5a2600cce1e6fa26e9cc0e072cef26bd1c2a44"
+    },
+    ".context/native-full-bind.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-bind.log",
+      "sha256": "674794a3dfab95bb32648e81729036494e3082aa1f828717e69bb14bf7933621"
+    },
+    ".context/native-full-bind.sample.txt": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-bind.sample.txt",
+      "sha256": "d3690e45890c8b3a06349e22b6729af0c0f8660989c3c3dbb4acefd7815ec632"
+    },
+    ".context/native-full-startup.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-full-startup.json",
+      "sha256": "68b43e7577dd95d9e1f7d3e82158810196e09795bae99a9a991b116045061ad4"
+    },
+    ".context/native-launch-cloud-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-launch-cloud-green.log",
+      "sha256": "76f229f309bbb9205bdd3ca240bcf3b2ab3cb55f5c07f85bcaf4e011e863ea79"
+    },
+    ".context/native-launch-serving-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-launch-serving-green.log",
+      "sha256": "05a6b1f27795b135448f7451e651259385dfd9d952b15f52839f382fa865f349"
+    },
+    ".context/native-prompt-approval-classification.json": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-prompt-approval-classification.json",
+      "sha256": "72ae417fa3e8631f11c4575aa576dbd91fae178e9c1cd1fa270e8e57a54ae302"
+    },
+    ".context/native-wmh-main-acceptance.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/native-wmh-main-acceptance.log",
+      "sha256": "2a391e8b9dd83094ba6717e28d62b238fb93829d3b995a017afc2cb3a7a6344d"
+    },
+    ".context/workspace-env-green.log": {
+      "local_path": "/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/workspace-env-green.log",
+      "sha256": "362a885d4d6177e3f06ff2c28ee34625a90c7c1b9ac33c3871e64c692a1216e4"
+    }
+  },
+  "deploy_preliminary_gates": {
+    "agents": {
+      "coverage_percent": 82,
+      "domains_failed": 0,
+      "domains_passed": 109,
+      "fast_cache_tests_passed": 181,
+      "unit_tests_passed": 131
+    },
+    "backend_coverage": {
+      "branch_coverage_percent": 80.46,
+      "domains_failed": 0,
+      "domains_passed": 186,
+      "function_coverage_percent": 91.47,
+      "line_coverage_percent": 89.4,
+      "owned_backend_cleanup": "normal exit and SIGTERM verified",
+      "unit_files_passed": 255
+    },
+    "backend_static": "lint, TypeScript and structural passed",
+    "cold_seed_memory": {
+      "maximum_mb": 183,
+      "runs": 5,
+      "status": "passed",
+      "unchanged_budget_mb": 228
+    },
+    "deploy_structural": "Workspace suite passes after resolving the host GNU timeout before the hermetic PATH; full registry rerun remains required.",
+    "frontend": {
+      "branch_coverage_percent": 72.99,
+      "files_passed": 149,
+      "function_coverage_percent": 80.98,
+      "line_coverage_percent": 83.21,
+      "skipped": 3,
+      "statement_coverage_percent": 80.85,
+      "tests_passed": 2629
+    },
+    "live_probes": {
+      "amplitude": "passed",
+      "chat_router_failover": "failed: first response missing required goal/mode; isolated schema proposal unapplied",
+      "credential_health": "passed with one provider warning"
+    },
+    "qualification": "Preliminary passes; native code is still changing, final frozen-source gates remain required.",
+    "workspace_timeout_fix": {
+      "boundary": "scripts/tests/cloud-init-env.test.sh env -i PATH omits macOS GNU tool location",
+      "deadline_seconds": 60,
+      "failure": "env: timeout: No such file or directory",
+      "owning_command": "bash scripts/tests/workspace-env.test.sh",
+      "owning_status": "passed"
+    }
+  },
   "engine_selection": "WMH_ENGINE=experiential",
+  "full_native_load": {
+    "bind_maximum_rss_bytes": 17551622144,
+    "bind_peak_footprint_bytes": 38737181560,
+    "bind_system_seconds": 39.17,
+    "bind_user_seconds": 143.03,
+    "bind_wall_seconds": 241.62,
+    "next": "Public-API-only equivalent ASCII JSONL republication; full-scale startup improvement unproven.",
+    "service_startup": {
+      "elapsed_seconds": 180.69639304094017,
+      "exit_code": 143,
+      "health_timeout_seconds": 180,
+      "model_name": "rose-archive",
+      "parent_birth": "Tue Oct  6 17:03:13 2026",
+      "parent_pid": 15276,
+      "retired_at": 1791331576.088096,
+      "started_at": 1791331393.807876,
+      "status": "startup-timeout",
+      "url": "http://127.0.0.1:56006"
+    },
+    "status": "startup_gate_failed"
+  },
   "fundraiser": "pending",
-  "integrated_main": "21378a4d8",
+  "integrated_main": "fda5cc0e7b2108f058def26c0e1726093702f19d",
   "live_conformance": "pending",
   "logs": {
     "native-artifact-match-green.log": {
@@ -62,10 +177,42 @@
       "sha256": "454642c27f46134967ca9e1a6e98297bddb964009f6bb11280c0d1a397e7cfac"
     }
   },
+  "merged_head": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+  "native_ascii_republication": {
+    "child_pid": 41252,
+    "embedding_calls": 0,
+    "new_model_pointer_promoted": false,
+    "original_model_pointer_preserved": true,
+    "original_record_reimport": false,
+    "owner_pid": 41233,
+    "published_source_artifact": "rose-real-traces-11e55f652486f0bea4bd",
+    "published_source_bytes": 3092573958,
+    "published_source_sha256": "c01eada41595d286325c2e5eed7f296d61c0778dffd56f0ac98f3b8256c24d87",
+    "status": "running"
+  },
   "native_cache_identity": {
     "candidate_envelope_timestamp_ignored": true,
     "exact_call_ids_preserved": true,
     "state_history_clocks_preserved": true
+  },
+  "native_cloud_launch": {
+    "build_serve_pool_agreement": true,
+    "checksum_capability": "sha256sum or shasum",
+    "default_engine": "legacy",
+    "full_cloud_native_artifact_startup": "not verified",
+    "local_interpreter_paths_not_forwarded": true,
+    "portable_engine_pool_context_forwarded": true,
+    "provisioning_auth_memory_artifact_transfer": "still requires qualification before native cloud use",
+    "status": "owning tests passed"
+  },
+  "original_native_build": {
+    "bound_original_cases": 100,
+    "encoding": "native canonical Unicode JSONL",
+    "observations": 179150,
+    "status": "published",
+    "trajectory_count": 12510,
+    "world_model_id": "grounded-world-model-f66ba7ebaf70116fd423",
+    "world_model_manifest_sha256": "12363c2cad83895433d07794faeeae0c7ef4bd4e567ae30e1167a08f97c1b143"
   },
   "parallel_boundary": {
     "committed_effects": 8,
@@ -87,14 +234,14 @@
     "embedding_checkpoints_committed": true,
     "excluded_demo_observations": 19,
     "excluded_demo_trajectories": 9,
-    "index_construction": "in_progress",
+    "index_construction": "published; full cold startup exceeded unchanged180s bound; ASCII republication pending",
     "observations": 179150,
     "remote_checksum_exclusions_unresolved": 97
   },
   "tests": {
     "focused_suites": 60,
-    "native_checks": 24,
-    "provider_checks": 47,
+    "native_checks": 27,
+    "provider_checks": 52,
     "wmh_blackbox_all_passed": true
   },
   "upstream_revision": "bf75987eac5e8c984d8f3868249f84e4095d1733",

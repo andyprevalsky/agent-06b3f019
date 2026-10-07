@@ -11,7 +11,14 @@ else
     if [ ! -x "$native_python" ]; then
         uv venv --python 3.12 "$native_env" >&2
     fi
-    signature="$(shasum -a 256 "$manifest" | cut -d ' ' -f 1)"
+    if command -v sha256sum >/dev/null 2>&1; then
+        signature="$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        signature="$(shasum -a 256 "$manifest" | cut -d ' ' -f 1)"
+    else
+        echo "Native simulator setup requires sha256sum or shasum" >&2
+        exit 1
+    fi
     if [ ! -f "$native_env/requirements.sha256" ] || [ "$(cat "$native_env/requirements.sha256")" != "$signature" ]; then
         uv pip install --python "$native_python" -r "$manifest" >&2
         uv pip check --python "$native_python" >&2

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import uuid
@@ -57,10 +58,16 @@ def load_native(root, name, pool, pool_sha256):
     ):
         raise ValueError("Native artifact version differs from the pinned runtime")
     store = _ReadSnapshot(paths)
+    # This synchronous startup load precedes serving. Typed JSON allocation can
+    # repeatedly sweep the growing live corpus; keep every public validator but
+    # defer automatic GC until the verified-byte snapshot has been released.
+    gc_enabled = gc.isenabled()
+    gc.disable()
     try:
         return _load_snapshot(store, pointer, pool, pool_sha256)
     finally:
         store.verified.clear()
+        (gc.enable if gc_enabled else gc.disable)()
 
 
 def _load_snapshot(store, pointer, pool, pool_sha256):

@@ -574,8 +574,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", choices=("legacy", "experiential"), default=os.environ.get("WMH_ENGINE", "legacy"))
     parser.add_argument(
         "--pool",
-        default="rose-1-ultra",
-        help="Rose pool backing WMH inference (default: rose-1-ultra).",
+        default=os.environ.get("WMH_ROSE_POOL") or "rose-1-ultra",
+        help="Rose pool backing WMH inference (default: WMH_ROSE_POOL or rose-1-ultra).",
     )
     args = parser.parse_args(argv)
 

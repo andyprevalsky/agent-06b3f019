@@ -1,0 +1,208 @@
+{
+  "status": "open-no-product-fix",
+  "investigated_source": "a1142bc14e632dacc2e6a1579c9d9e487ec6753f",
+  "scope": "Independent diagnosis of the unchanged /deploy live chat-router-failover gate. No live gate rerun, model request, prompt/schema/routing change, credential mutation, or external resource allocation.",
+  "symptom": "the live GLM failover must serve inside the first router attempt's bounds: 2 !== 1",
+  "actual_gate": {
+    "domain": "chat-router-failover",
+    "exit_code": 1,
+    "elapsed_ms": 30645,
+    "root_agent_id": "719356a3-f17d-4a5f-aec3-4a8d04719a64",
+    "outcome": "escalated on second router attempt",
+    "turn_escalation_ms": 30015,
+    "router_stream_ms": 29917,
+    "error_alerts": 0
+  },
+  "archive_searches": [
+    "live GLM failover first router attempt bounds",
+    "chat router failover Morph two attempts hedge schema"
+  ],
+  "archive_relationship": "Relative of the original fixed empty-stream failure and recurrence of its explicitly unresolved model-output inefficiency. The prior record is a lead, not causal proof.",
+  "request": {
+    "messages": 30,
+    "transcript_characters": 82649,
+    "same_retry_request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+    "actual_model": "z-ai/glm-5.3-flash",
+    "upstream_provider": "Morph",
+    "requested_pool": "rose-labs/rose-1-flash",
+    "requested_provider_route": "direct-cerebras",
+    "temperature": 0,
+    "max_tokens": 1024,
+    "requested_effort": "minimal",
+    "glm_effective_effort": "low",
+    "schema_properties_in_order": [
+      "reasoning",
+      "action",
+      "query",
+      "goal",
+      "mode"
+    ],
+    "provider_sort": "latency",
+    "preferred_min_throughput_p50": 80,
+    "ignored_provider": [
+      "friendli"
+    ],
+    "strict_schema": true,
+    "identity_scope": "Complete messages and config.requested_params only; excludes actual-model/pool/finish_reason response metadata and captured output/error. Full dump/config bytes are not identical."
+  },
+  "attempts": [
+    {
+      "request_id": "2c249d74179c",
+      "router_attempt_deadline_ms": 15000,
+      "direct_cerebras_guard_ms": 8000,
+      "hedge_ms": 800,
+      "glm_connected_ms": 191,
+      "glm_headers_ms": 2397,
+      "glm_first_content_ms": 2398,
+      "glm_end_ms": 14197,
+      "end": "caller_aborted",
+      "abort_reason": "Chat router completion exceeded 15000ms",
+      "captured_response": {
+        "attempt": 1,
+        "path": ".llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332170143-aaced0925b40-chat_router.json",
+        "capture_sha256": "7fb2a3403032b2929f58218d7a9c9771035c42192089b0cb5728f0873cc81b19",
+        "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+        "model": "z-ai/glm-5.3-flash",
+        "message_count": 30,
+        "output_characters": 2055,
+        "complete_fields": [
+          "reasoning",
+          "action"
+        ],
+        "reasoning_characters": 1237,
+        "query_characters": 753,
+        "goal_characters": 0,
+        "typed_miss": "Chat router completion expired",
+        "decision_action": null
+      }
+    },
+    {
+      "request_id": "ccb79493daae",
+      "router_attempt_deadline_ms": 15000,
+      "glm_headers_ms": 2587,
+      "glm_first_content_ms": 2588,
+      "glm_end_ms": 14098,
+      "end": "completed",
+      "completion_tokens": 488,
+      "captured_response": {
+        "attempt": 2,
+        "path": ".llm-dumps/719356a3-f17d-4a5f-aec3-4a8d04719a64/1791332185142-7dc2b47a48a5-chat_router.json",
+        "capture_sha256": "7bc89e0d309c0ad559df193e4b595c66148a11606465132f5f27da62ef25bb1e",
+        "request_sha256": "183d3ba9650d370784e5cb9dbd6a17cd1380afec68053489954068d4ab5754b5",
+        "model": "z-ai/glm-5.3-flash",
+        "message_count": 30,
+        "output_characters": 2032,
+        "complete_fields": [
+          "reasoning",
+          "action",
+          "query",
+          "goal",
+          "mode"
+        ],
+        "reasoning_characters": 1010,
+        "query_characters": 762,
+        "goal_characters": 162,
+        "typed_miss": null,
+        "decision_action": "start_superintelligence"
+      }
+    }
+  ],
+  "observed_first_incomplete_boundary": "The delivered first response has only closed reasoning and action fields; it ends inside an unused query before goal and mode. Existing action-specific finalization correctly rejects missing goal/mode and performs the configured regenerate.",
+  "broadcast_check": {
+    "observed_spans": 65,
+    "max_send_duration_ms": 7,
+    "max_queue_delay_ms": 13,
+    "implementation": "broadcastAssistantStream awaits local enqueue only; network drain occurs asynchronously",
+    "finding": "No evidence supports a broadcast wait as the cause of this deadline."
+  },
+  "local_response_replay": {
+    "red_command": "back-end/node_modules/.bin/tsx .context/chat-router-failover-live-replay.ts --assert-first-attempt",
+    "red_exit_code": 1,
+    "red_wall_seconds": 0.332970959,
+    "red_assertion": "captured first-attempt response cannot produce a complete router decision",
+    "control_command": "back-end/node_modules/.bin/tsx .context/chat-router-failover-live-replay.ts",
+    "control_exit_code": 0,
+    "control_wall_seconds": 0.377773959,
+    "control_assertions": [
+      "captured retry request hash is identical",
+      "captured first response produces typed deadline miss",
+      "captured complete second response validates as start_superintelligence"
+    ],
+    "limitation": "Control checks correct existing parser behavior. It is a different captured response, not an unchanged-repro post-fix PASS, and proves no product fix."
+  },
+  "existing_verdict_unit": {
+    "command": "cd back-end && node_modules/.bin/tsx src/tests/unit/chat-router-failover-live-verdict.test.ts",
+    "exit_code": 0,
+    "wall_seconds": 0.731512709,
+    "summary": "11 samples and 24 goals; the observed timely-content/no-complete-decision shape remains a terminal live-gate rejection"
+  },
+  "remaining_proof": "Raw full SSE chunk arrival times and provider-versus-consumer output counts were not captured; no exact local provider replay or controlled model-only comparison was executed. Do not classify this as a proven model-intelligence limitation or completed RCA.",
+  "next_check": "Capture the complete SSE arrival sequence at the existing live observation boundary and replay the exact request through the same client with non-model variables fixed; compare wire arrival against router consumption. The existing note also identifies action-specific unused query and long reasoning preceding required goal/mode as an LLM-visible contract optimization, which is outside this task's allowed prompt/schema/routing changes. Preserve current deadlines and first-attempt assertion.",
+  "receipts": [
+    {
+      "path": ".context/native-deploy-live-probes.log",
+      "sha256": "a6c746307deadfb98c5a890f200d10a376bc074f67ae1bd0f486f7abb690c62a",
+      "bytes": 315788
+    },
+    {
+      "path": ".context/test-runs/1791332162-29153-10237/runner.log",
+      "sha256": "5e1a0e196ef8e21f888bef39145edfeec50d652bff728ef43254ca2359cb1b78",
+      "bytes": 310901
+    },
+    {
+      "path": ".context/test-runs/1791332162-29153-10237/backend.log",
+      "sha256": "bc1f7c761a1331d151e5d11415d299e07266a8d9da3d6df3491280104e192166",
+      "bytes": 83051
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay.ts",
+      "sha256": "8b1604294d5576a627d395b23a281728ec64de3459bdfa203c0d834b2b4aa47b",
+      "bytes": 3184
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay-red.log",
+      "sha256": "4be9d6e2c3cf6e83e2c22157f92a5f578d8d7a968946888034310e5e08afcb4f",
+      "bytes": 3760
+    },
+    {
+      "path": ".context/chat-router-failover-live-replay-contract.log",
+      "sha256": "cb3b3039cdde11414d19ffd73ce84eedadbe5f7fe308602a8de66787ceaaf813",
+      "bytes": 2651
+    },
+    {
+      "path": "back-end/src/providers/chat/routerDecision.ts",
+      "sha256": "a30e5d3d9866c2eef0c163819c198bfa591887c9be79aa9593cdacf94771adc3",
+      "bytes": 6996
+    },
+    {
+      "path": "back-end/src/providers/chat/routerDecisionJsonSchema.ts",
+      "sha256": "54e60fbf9fef4745739aeb2718a227cf783d1d6cb8e93093d88418a387d75dc1",
+      "bytes": 1359
+    },
+    {
+      "path": "back-end/src/providers/rose/openrouterFastRoute.ts",
+      "sha256": "88f024b281b6c64aa87555dd17508210e2a5bf8e7fa6a959d7b8a71958c6a1d1",
+      "bytes": 9495
+    },
+    {
+      "path": "back-end/src/providers/chat/supabaseBroadcast.ts",
+      "sha256": "5c9c0b479299611d09de4dbe01543e2298a8f6586f29ecbfb42c8c62b80dacdd",
+      "bytes": 11964
+    },
+    {
+      "path": "back-end/src/tests/blackbox/chat-router-failover.live.support.ts",
+      "sha256": "12bf6db7b442a72e5635fd9097c7422fc1e49a888cc2729801659fd91e01efcc",
+      "bytes": 12410
+    }
+  ],
+  "independent_review": {
+    "reviewer": "root",
+    "status": "accepted mechanism, no performance improvement claim",
+    "notes": "Root independently verified output byte hashes and missing/present goal/mode; messages/response_format identical; response finish_reason differs None/stop. No parser defect and no prompt/schema edit applied."
+  },
+  "schema_proposal": {
+    "path": ".context/chat-router-union-proposal/proposed.patch",
+    "sha256": "0e4dd1aba19836b9eed294e3f5f05a1cf4fd265cb33c17ab11e2b80a149b5042",
+    "status": "unapplied reviewable proposal; same-client/live improvement unproven"
+  }
+}

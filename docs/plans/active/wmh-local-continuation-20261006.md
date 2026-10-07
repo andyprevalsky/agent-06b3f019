@@ -211,8 +211,8 @@ movement should occur in simulate mode.
 
 October 6 native architecture continuation: work is isolated in
 `~/Developer/rose-wmh-experiential-parallel`, branch
-`codex/wmh-experiential-parallel-20261006`. Current main `21378a4d8` was
-integrated at `264f47eb6`. The native path pins Experiential `0.7.158` at
+`codex/wmh-experiential-parallel-20261006`. Current main `fda5cc0e7` was
+integrated at `a1142bc14`. The native path pins Experiential `0.7.158` at
 `bf75987eac5e8c984d8f3868249f84e4095d1733` and uses its actual v3 request
 builder/parser, immutable dataset/RAG/model artifacts, lineage exclusion and
 context packing. Python 3.12 runs separately from Rose's Python 3.11 provider:
@@ -229,8 +229,8 @@ Invocation receipts survive caller disconnects and deduplicate retries;
 failed operations release their receipts, and the parent joins its exact
 native child during shutdown. Generated predictions remain outside fit data.
 
-The final WMH blackbox gate returned `all_passed: True` with 24 native checks
-and 47 provider checks. The focused serving/provider/initial-state suites
+The WMH blackbox gate returned `all_passed: True` with 27 native checks
+and 52 provider checks. The focused serving/provider/initial-state suites
 passed 60 tests. New evaluator tests first failed for exact canonical receipts,
 then passed with protocol-neutral decoding and unchanged fidelity thresholds.
 The caller retains its prior result shape. Native suites now record exact
@@ -244,18 +244,44 @@ changed builds retain upstream embedding checkpoints. Scoped artifact loading
 reads each immutable artifact once while retaining public typed/provenance
 validation; fresh loads revalidate storage and release the verified bytes on
 success or failure. The owning test first reproduced 3/4/4 whole-artifact
-reads, then passed at 1/1/1. Full-corpus startup timing remains unproven. Native
+reads, then passed at 1/1/1. Startup-only GC suppression preserves all public
+validators, releases the verified byte snapshot, and restores the caller's GC
+state on success and failure. Native
 cache keys retain exact call IDs and state/history clocks while ignoring only
 the current candidate envelope timestamp; the real-key UUID collision has an
 owning red/green regression.
 
 The full native import reached 179,150 observations, excluding nine explicit
 DEMO-fixture trajectories (19 observations) from the original 179,169-pair
-local snapshot. Index construction is still running; this does not yet prove
-a ready/loadable artifact, matching live conformance or improved fundraiser
-predictions. The previously recorded 97 remote checksum exclusions remain an
-open corpus gap. No native benchmark, viewer acceptance or production rollout
-has passed yet. The new model remains gitignored and must be rebuilt locally.
+local snapshot. The immutable dataset, RAG and model are published; all 100
+original conformance cases bind to exact native source transitions. Full loading
+and binding took 241.62 seconds with a 38.74 GB peak footprint. The actual native
+service then missed the unchanged 180-second startup bound and its owned parent
+and child retired cleanly. A public-API-only ASCII JSONL republication passed 27 native checks and the complete
+owning WMH blackbox, preserving decoded records, vectors, raw source identities,
+model/prompt settings and the original immutable artifacts. The full conversion is
+running; a new ASCII source dataset is published but the model pointer remains
+on the original artifact until official validation and all 100 bindings pass.
+Full-scale startup improvement and live prediction conformance remain unproven.
+Native launch settings now survive cloud boot, SSH and refresh, build/serve
+pools agree, and setup supports both GNU and macOS checksum tools; their owning
+red/green fixtures passed. Full cloud native runtime provisioning, authenticated
+installation, artifact transfer and memory/startup acceptance remain unqualified.
+The local workspace-env suite also passed after its hermetic fixture resolved
+the host timeout executable before clearing PATH, preserving the 60-second bound.
+Preliminary backend coverage passed 186 blackbox domains and 255 unit files;
+frontend and agents coverage passed. The live credential and Amplitude gates
+passed, while chat-router failover remains red because the first response ends
+in an unused query before its required goal/mode. Its separate schema proposal
+is unapplied. Final frozen-source deploy gates remain required.
+
+The 97 remote checksum exclusions remain an open corpus gap. A bounded audit
+verified their manifests and reproduced a current two-PUT ciphertext/metadata
+publisher race at the real S3 command boundary. This does not establish that the
+same schedule caused every historical failure or recover their starting fixtures.
+Repair alternatives and exact probes are in `remote-checksum-exclusion-review.json`.
+No native benchmark, viewer acceptance or production rollout has passed yet.
+The new model remains gitignored and must be rebuilt locally.
 
 1. Read `CLAUDE.md`, `docs/testing.md`, and
    `agents/benchmarks/README.md` (World-model refresh conformance). Set up the

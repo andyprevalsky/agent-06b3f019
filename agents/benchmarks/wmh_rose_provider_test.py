@@ -39,6 +39,39 @@ from benchmarks.wmh_rose_provider import (
 from providers.rose import ClaudeAuthContext, RoseResponse
 
 
+@pytest.mark.parametrize("engine", ["legacy", "experiential"])
+@pytest.mark.parametrize("explicit_pool", [None, "rose-1-flash"])
+def test_serving_cli_uses_declared_pool_and_preserves_explicit_override(monkeypatch, engine, explicit_pool):
+    from benchmarks import experiential_bridge, serve_world_model
+
+    monkeypatch.setenv("WMH_ENGINE", engine)
+    monkeypatch.setenv("WMH_ROSE_POOL", "rose-1-mini")
+    calls = []
+    if engine == "experiential":
+        monkeypatch.setattr(experiential_bridge, "serve_native", lambda *args: calls.append(args) or 0)
+    else:
+        monkeypatch.setattr(serve_world_model, "build_app", lambda *args: calls.append(args) or object())
+        monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    arguments = ["--name", "rose-test", "--root", "/guest/world-model", "--port", "3999"]
+    if explicit_pool:
+        arguments += ["--pool", explicit_pool]
+    assert serve_world_model.main(arguments) == 0
+    expected = ("rose-test", "/guest/world-model", explicit_pool or "rose-1-mini")
+    assert calls == [(*expected, 3999)] if engine == "experiential" else calls == [expected]
+
+
+def test_serving_cli_retains_legacy_and_ultra_defaults(monkeypatch):
+    from benchmarks import serve_world_model
+
+    monkeypatch.delenv("WMH_ENGINE", raising=False)
+    monkeypatch.delenv("WMH_ROSE_POOL", raising=False)
+    calls = []
+    monkeypatch.setattr(serve_world_model, "build_app", lambda *args: calls.append(args) or object())
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    assert serve_world_model.main(["--name", "rose-test", "--root", "/guest/world-model", "--port", "3999"]) == 0
+    assert calls == [("rose-test", "/guest/world-model", "rose-1-ultra")]
+
+
 @pytest.mark.parametrize("legacy_wrapper", [False, True])
 def test_native_canonical_receipt_scores_identically_to_unwrapped_observation(legacy_wrapper):
     from benchmarks.world_model_harness import CanonicalObservation, score_observation_prediction
@@ -89,7 +122,7 @@ def test_native_cache_identity_preserves_correlated_call_ids():
                         },
                     }
                 ]
-            }
+            },
         }
         return cache.llm_key(
             "wmh_world_model_v3",
