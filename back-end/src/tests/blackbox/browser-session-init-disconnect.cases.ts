@@ -6,16 +6,24 @@ import express from 'express';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
 async function observe<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('native HTTP observer did not settle within 30 seconds')), 30_000);
-    })]);
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('native HTTP observer did not settle within 30 seconds')),
+          30_000
+        );
+      }),
+    ]);
   } finally {
     clearTimeout(timer);
   }
@@ -25,7 +33,8 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
   // Load the production router unchanged. Only its auth/service/provider
   // boundaries are local fixtures; Express and the HTTP disconnect are real.
   const routePath = new URL('../../domains/browser-session/routes.ts', import.meta.url).pathname;
-  const initRoutePath = new URL('../../domains/browser-session/routes.init.ts', import.meta.url).pathname;
+  const initRoutePath = new URL('../../domains/browser-session/routes.init.ts', import.meta.url)
+    .pathname;
   const require = createRequire(import.meta.url);
   const loader = Module as unknown as {
     _load: (id: string, parent: { filename?: string } | undefined, isMain: boolean) => unknown;
@@ -47,19 +56,22 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
   };
   loader._load = function (id, parent, isMain) {
     if (parent?.filename === routePath || parent?.filename === initRoutePath) {
-      if (id === './service') return {
-        initSession: () => init(),
-        closeBrowserSession: (sessionId: string, pause: boolean) => close(sessionId, pause),
-      };
-      if (id.endsWith('/auth') || id.endsWith('/hybridAuth')) return {
-        authenticate: (_req: unknown, _res: unknown, next: () => void) => next(),
-        hybridAuth: async (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
-          req.isInternal = true;
-          next();
-        },
-      };
+      if (id === './service')
+        return {
+          initSession: () => init(),
+          closeBrowserSession: (sessionId: string, pause: boolean) => close(sessionId, pause),
+        };
+      if (id.endsWith('/auth') || id.endsWith('/hybridAuth'))
+        return {
+          authenticate: (_req: unknown, _res: unknown, next: () => void) => next(),
+          hybridAuth: async (req: { isInternal: boolean }, _res: unknown, next: () => void) => {
+            req.isInternal = true;
+            next();
+          },
+        };
       if (id.endsWith('/browser')) return { BrowserProviderRateLimitError: class extends Error {} };
-      if (id.endsWith('/logger')) return { createLogger: () => ({ info() {}, warn() {}, error() {} }) };
+      if (id.endsWith('/logger'))
+        return { createLogger: () => ({ info() {}, warn() {}, error() {} }) };
       if (registrationNames[id]) return { [registrationNames[id]]: () => undefined };
     }
     return originalLoad.call(this, id, parent, isMain);
@@ -86,7 +98,13 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
   });
   let settlePending: (() => void) | undefined;
   try {
-    for (const scenario of ['disconnect-during-preparation', 'disconnect-before-allocation', 'success', 'close-failure', 'init-error'] as const) {
+    for (const scenario of [
+      'disconnect-during-preparation',
+      'disconnect-before-allocation',
+      'success',
+      'close-failure',
+      'init-error',
+    ] as const) {
       const started = deferred<void>();
       const settle = deferred<void>();
       settlePending = () => settle.resolve();
@@ -103,7 +121,8 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         });
       });
       init = async () => {
-        if (scenario !== 'disconnect-before-allocation' && scenario !== 'init-error') sessions.set(ownedSessionId, 'ACTIVE');
+        if (scenario !== 'disconnect-before-allocation' && scenario !== 'init-error')
+          sessions.set(ownedSessionId, 'ACTIVE');
         started.resolve();
         await settle.promise;
         if (scenario === 'init-error') {
@@ -122,14 +141,19 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         if (scenario === 'close-failure') throw new Error('fixture provider close unavailable');
       };
       const client = httpRequest({
-        hostname: '127.0.0.1', port: address.port, path: '/api/browser-session/init',
-        method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+        hostname: '127.0.0.1',
+        port: address.port,
+        path: '/api/browser-session/init',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
       });
       client.on('error', () => undefined);
       const success = deferred<{ status: number | undefined; body: string }>();
       client.on('response', (res) => {
         let responseBody = '';
-        res.on('data', (chunk) => { responseBody += String(chunk); });
+        res.on('data', (chunk) => {
+          responseBody += String(chunk);
+        });
         res.on('end', () => success.resolve({ status: res.statusCode, body: responseBody }));
       });
       client.end(body);
@@ -154,8 +178,15 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         assert.deepEqual(closed, [], 'successful acknowledgment was spuriously cleaned up');
         assert.equal(sessions.get(ownedSessionId), scenario === 'success' ? 'ACTIVE' : undefined);
       } else {
-        assert.deepEqual(closed, [ownedSessionId], 'disconnected init retained an unacknowledged session');
-        assert.equal(sessions.get(ownedSessionId), scenario === 'close-failure' ? 'ERROR' : 'CLOSED');
+        assert.deepEqual(
+          closed,
+          [ownedSessionId],
+          'disconnected init retained an unacknowledged session'
+        );
+        assert.equal(
+          sessions.get(ownedSessionId),
+          scenario === 'close-failure' ? 'ERROR' : 'CLOSED'
+        );
       }
       console.log(`PASS browser-session init ${scenario}: exact owner, foreign unchanged`);
     }
@@ -163,7 +194,11 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
     settlePending?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
     server.closeAllConnections();
-    await observe(new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+    await observe(
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+    );
     assert.equal(server.listening, false);
     console.log('browser-session init native HTTP connections and server joined');
     delete require.cache[routePath];
