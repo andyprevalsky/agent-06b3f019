@@ -168,8 +168,12 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                     for name in ["proxy", "child"]:
                         p = case / f"{name}.pid"
                         if p.exists() and not any(o["kind"] == name for o in owners):
-                            pid = int(p.read_text())
-                            owners.append({"kind": name, "pid": pid, "birth": native(pid)})
+                            # The shell's `>` creates the file before printf writes the
+                            # newline-terminated PID; read it only once complete.
+                            text = p.read_text()
+                            if text.endswith("\n"):
+                                pid = int(text)
+                                owners.append({"kind": name, "pid": pid, "birth": native(pid)})
                     if mode == "pending_then_ready":
                         ready = (
                             (out / "worker-ready.ids").read_text().splitlines()
