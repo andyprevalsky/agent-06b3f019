@@ -426,6 +426,66 @@ assert any("no correctly attached recording" in f for f in
         zero_session_task_ids=allowed,
     ))
 import copy
+preparation = {
+    "version": 1, "agent_id": agent, "task_id": "preparation-task",
+    "tool_call_id": "preparation-call", "session_id": "preparation-session",
+    "provider": "steel", "phase": "initial_session_preparation",
+    "init_acknowledged": True, "task_actions_started": False,
+}
+preparation_messages = [msg(
+    toolName="spawn_browser_agent", action_type="task_complete", toolStatus="FINISHED",
+    task_id="preparation-task", toolCallId="preparation-call", excludeFromModel=True,
+    browser_preparation_cancellation=preparation,
+)]
+owned_session = {"agent_id": agent, "provider": "steel", "session_id": "preparation-session"}
+closed_snapshot = {
+    "root_exists": True, "root_deleted": True, "tree_agent_ids": [agent],
+    "browser_sessions": [owned_session],
+}
+preparation_bundle = {"run_id": "preparation-owned", "tasks": [{"agent_id": agent, "logs": {
+    "messages": preparation_messages,
+    "browser_preparation_cancellation_receipt": {
+        "root_agent_id": agent, "tree_agent_ids": [agent],
+        "task_ids_by_agent": {agent: ["preparation-task"]},
+        "receipts": {"preparation-task": preparation}, "archive_browser_sessions": [owned_session],
+    },
+    "cloud_cleanup_evidence": {"after": closed_snapshot, "final": closed_snapshot, "errors": []},
+    "cloud_provider_cleanup": {
+        "root_agent_id": agent, "tree_sealed": True, "root_deleted": True,
+        "provider_receipts": [{"provider": "steel", "session_id": "preparation-session", "status": 200}],
+    },
+}}]}
+allowed_preparation = mod.verified_preparation_cancelled_tasks(preparation_bundle, agent)
+assert allowed_preparation == {"preparation-task"}
+assert mod.validate_browser_agents_terminated_with_recording(
+    agent, preparation_messages, preparation_cancelled_task_ids=allowed_preparation,
+) == []
+assert mod.validate_browser_agents_terminated_with_recording(agent, preparation_messages)
+assert mod.validate_browser_agents_terminated_with_recording(
+    agent, preparation_messages + [msg(toolName="spawn_browser_agent", task_id="preparation-task",
+                                    action_type="task_started", toolStatus="FINISHED")],
+    preparation_cancelled_task_ids=allowed_preparation,
+)
+for poison in ("native-close", "foreign-owner", "unknown-phase", "unidentified-action", "malformed-task-map"):
+    poisoned = copy.deepcopy(preparation_bundle)
+    plogs = poisoned["tasks"][0]["logs"]
+    if poison == "native-close":
+        plogs["cloud_provider_cleanup"]["provider_receipts"] = []
+    elif poison == "foreign-owner":
+        plogs["cloud_cleanup_evidence"]["final"]["browser_sessions"][0]["agent_id"] = "foreign"
+    elif poison == "unknown-phase":
+        plogs["messages"][0]["metadata"]["browser_preparation_cancellation"]["init_acknowledged"] = False
+    elif poison == "unidentified-action":
+        plogs["messages"].append(msg(task_id="preparation-task", action_type="task_started"))
+    else:
+        plogs["browser_preparation_cancellation_receipt"]["task_ids_by_agent"] = []
+    try:
+        mod.verified_preparation_cancelled_tasks(poisoned, agent)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(f"preparation cancellation accepted {poison}")
+
 for changed in ("before", "after", "final"):
     poisoned = copy.deepcopy(bundle)
     poisoned["tasks"][0]["logs"]["cloud_cleanup_evidence"][changed]["browser_sessions"] = [

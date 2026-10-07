@@ -355,8 +355,15 @@ missing or corrupt sealed files remain INFRA and retain the owner.
 A browser tool canceled before allocating a session has no recording to attach; only a
 task-bound `browser_zero_allocation_receipt` plus zero sessions in the exact
 before/archive/after/final ownership reads and a clean provider receipt can
-establish that exception. Any allocated session still owes a playable recording.
-The durable publisher checks this proof; never synthesize a recording or waive
+establish that exception. If cancellation interrupts initial session preparation,
+inspect whether `_init_browser_session_preserving_owner` joined the same bounded
+init request, retained its returned task/session handle, and closed that exact
+session. Its existing FE-only cleanup terminal can carry a positive
+`browser_preparation_cancellation` receipt; archive capture and publication bind
+that receipt to exact owned inventory and native provider closure. Started or
+unknown-phase tasks still owe their playable recording. Missing action markers
+alone prove no exception, and missing original receipts must never be backfilled.
+The durable publisher checks these proofs; never synthesize a recording or waive
 its check to grant a slice credit. If the provider replay exists but the FINISHED
 recording message is missing, inspect `Failed to save browser action message` in
 the worker log. Required recording attachments retry pre-request connection/pool
