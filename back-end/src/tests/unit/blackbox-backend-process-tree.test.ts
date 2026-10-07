@@ -181,11 +181,15 @@ ${
     spawnSync('sleep', ['0.05']);
   }
   const survivors = new Set(members.filter(isAlive));
-  if (token) for (const pid of processesCarrying(token)) survivors.add(pid);
+  // The random token identifies a survivor born after the member snapshot.
+  const tokenCarriers = new Set(token ? processesCarrying(token) : []);
+  for (const pid of tokenCarriers) survivors.add(pid);
   for (const pid of survivors) {
     try {
       const expectedBirth = births.get(pid);
-      if (expectedBirth && processBirth(pid) === expectedBirth) process.kill(pid, 'SIGKILL');
+      if (tokenCarriers.has(pid) || (expectedBirth && processBirth(pid) === expectedBirth)) {
+        process.kill(pid, 'SIGKILL');
+      }
     } catch {
       // already gone
     }
