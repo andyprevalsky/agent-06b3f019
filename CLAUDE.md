@@ -1026,7 +1026,12 @@ evaluation or agent archive. The existing compact deploy suite covers both
 startup admission and terminal placeholder publication. An early primary retirement
 receipt covers only that exact sealed scope; collector completion alone does
 not prove native release. Keep the original owner running through final native
-audit, and never rewrite PID birth records to force cleanup. Freeze sensible generous stage
+audit, and never rewrite PID birth records to force cleanup. Recovery keeps
+completed task outputs as history and reconnects only current allocations; retain
+the exact native retirement audit instead of deleting old outputs to match a
+shrinking registry. After the original CLI exits, use a verified current CLI for
+the documented exact-owner recovery while preserving its original guest source,
+owner and private evidence. Freeze sensible generous stage
 targets from comparable historical LIVE timings, excluding cache-assisted cold
 measurements, and report observed stage p95 plus image-start-to-full-release E2E.
 These fixed stage targets are generous operational targets, not measured p95

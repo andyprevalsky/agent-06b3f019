@@ -25874,6 +25874,164 @@ def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, 
     return registry, audit, digest, expected
 
 
+def _partial_retirement_guest_plan_fixture(tmp_path: Path, *, retained_workers: bool = False):
+    """Keep fifty original outputs after forty-nine exact native retirements."""
+    registry, audit, _, expected = _private_source_guest_plan_fixture(tmp_path)
+    active_output = Path(expected[0].split("\t")[5])
+    (active_output / "status-proxy.port").unlink()
+    (active_output / "worker-clones.ids").write_text("")
+    (active_output / "cloudbench-boot-start.log").write_text("Error: machine is MIGRATING\n")
+    expected = [expected[0].rsplit("\t", 1)[0] + "\t0"]
+    run_dir = active_output.parent
+    owner = registry.name
+
+    def terminal(clone: str, machine: str, volume: str, source: str) -> None:
+        (audit / "expected-fresh" / clone).write_text(f"clone_name={clone}\nsource_machine_id={source}\n")
+        (audit / "by-machine-id" / machine).write_text(clone + "\n")
+        (audit / "fresh" / clone).write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id=fixture-run\n"
+            f"app=navi-whisper-lux-bench\nclone_name={clone}\nsource=fresh-clone\n"
+            f"source_machine_id={source}\nmachine_id={machine}\nvolume_id={volume}\n"
+            "disposition=destroyed-provider-retained\n"
+        )
+
+    retired = []
+    for ordinal in range(49):
+        machine = f"face{ordinal:010x}"
+        clone = f"cloudbench-retired-{ordinal}"
+        output = run_dir / f"bench-retired-{ordinal}"
+        output.mkdir()
+        (output / ".cid").write_text(f"clone {machine}\n")
+        (output / "status-proxy.port").write_text("61001\n")
+        (output / "worker-clones.ids").write_text("")
+        (output / "guest-shutdown.confirmed").write_text("fixture-run\n")
+        terminal(clone, machine, f"vol_retired_{ordinal}", "feedface000001")
+        retired.append((output, machine, clone))
+    for ordinal in range(2):
+        output, primary, _ = retired[ordinal]
+        machine, clone = f"fade{ordinal:010x}", f"cloudbench-retired-worker-{ordinal}"
+        terminal(clone, machine, f"vol_retired_worker_{ordinal}", primary)
+        evidence = output / "worker-runtime-evidence" / machine
+        evidence.mkdir(parents=True)
+        (evidence / "owner.json").write_text(json.dumps({
+            "version": 1, "machine_id": machine, "primary_machine_id": primary,
+            "run_token": f"{owner}-{ordinal}", "workspace": "/opt/fixture",
+        }) + "\n")
+        if retained_workers:
+            (output / "worker-clones.ids").write_text(machine + "\n")
+    return registry, audit, expected, retired
+
+
+def _partial_retirement_guest_plan_command(registry: Path, audit: Path, plan: Path):
+    build = _extract_fleet_function(fleet_source_text(), "fleet_registry_build_guest_recovery_plan() {")
+    command = f"""set -eu
+APP=navi-whisper-lux-bench
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+SOURCE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-source.py'))}
+PRIVATE_SOURCE_SHA256={'e' * 64}
+PRIVATE_SOURCE_FILE=/does-not-exist
+FLY() {{ printf unexpected-provider-call >&2; return 99; }}
+{build}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+"""
+    process = subprocess.Popen(
+        ["bash", "-c", command, "partial-retirement-recovery-plan", str(registry), str(plan)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+    assert process.poll() is not None, "fixture planner was not joined"
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
+    receipt = os.environ.get("CLOUDBENCH_PARTIAL_RETIREMENT_FIXTURE_RECEIPTS")
+    if receipt:
+        with open(receipt, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"pid": process.pid, "exit_code": process.returncode,
+                                     "joined": True, "group_absent": True}) + "\n")
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+@pytest.mark.parametrize("retained_workers", [False, True])
+def test_exact_recovery_consumes_runtime_receipt_after_partial_primary_retirement(
+    tmp_path: Path, retained_workers: bool
+) -> None:
+    registry, audit, expected, _ = _partial_retirement_guest_plan_fixture(
+        tmp_path, retained_workers=retained_workers
+    )
+    before = {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()}
+    plan = tmp_path / "plan"
+    result = _partial_retirement_guest_plan_command(registry, audit, plan)
+    assert result.returncode == 0, result.stderr
+    assert plan.read_text().splitlines() == expected
+    assert {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("corrupt", [
+    "missing-index", "linked-index", "unproven-native", "wrong-owner", "wrong-run",
+    "wrong-app", "wrong-machine", "wrong-intent", "duplicate-output", "volume-alias",
+    "worker-as-primary", "wrong-worker-source", "active-worker-under-retired-primary",
+])
+def test_exact_recovery_consumes_runtime_receipt_rejects_unsafe_retired_mapping(
+    tmp_path: Path, corrupt: str
+) -> None:
+    registry, audit, _, retired = _partial_retirement_guest_plan_fixture(tmp_path, retained_workers=True)
+    output, machine, clone = retired[0]
+    fresh = audit / "fresh" / clone
+    if corrupt == "missing-index":
+        (audit / "by-machine-id" / machine).unlink()
+    elif corrupt == "linked-index":
+        index = audit / "by-machine-id" / machine
+        target = tmp_path / "index-target"
+        index.rename(target)
+        index.symlink_to(target)
+    elif corrupt in {"unproven-native", "wrong-owner", "wrong-run", "wrong-app", "wrong-machine", "volume-alias"}:
+        old, new = {
+            "unproven-native": ("disposition=destroyed-provider-retained", "disposition=owned"),
+            "wrong-owner": (f"fleet_owner_token={registry.name}", f"fleet_owner_token={'a' * 32}"),
+            "wrong-run": ("run_id=fixture-run", "run_id=foreign-run"),
+            "wrong-app": ("app=navi-whisper-lux-bench", "app=foreign-app"),
+            "wrong-machine": (f"machine_id={machine}\n", "machine_id=eeeeeeeeeeeeee\n"),
+            "volume-alias": ("volume_id=vol_retired_0", "volume_id=vol_child"),
+        }[corrupt]
+        fresh.write_text(fresh.read_text().replace(old, new))
+    elif corrupt == "wrong-intent":
+        expected = audit / "expected-fresh" / clone
+        expected.write_text(expected.read_text().replace("feedface000001", "eeeeeeeeeeeeee"))
+    elif corrupt == "duplicate-output":
+        duplicate = output.parent / "duplicate-original"
+        duplicate.mkdir()
+        (duplicate / ".cid").write_bytes((output / ".cid").read_bytes())
+    elif corrupt == "worker-as-primary":
+        (output / ".cid").write_text("clone fade0000000000\n")
+        (output / "worker-clones.ids").write_text("")
+    elif corrupt == "wrong-worker-source":
+        worker = audit / "fresh" / "cloudbench-retired-worker-0"
+        worker.write_text(worker.read_text().replace(machine, retired[1][1]))
+        intent = audit / "expected-fresh" / "cloudbench-retired-worker-0"
+        intent.write_text(intent.read_text().replace(machine, retired[1][1]))
+    else:
+        worker = audit / "fresh" / "cloudbench-retired-worker-0"
+        worker.write_text(worker.read_text().replace("destroyed-provider-retained", "owned"))
+        (registry / "clones" / "cloudbench-retired-worker-0").write_text(
+            "name=cloudbench-retired-worker-0\nid=fade0000000000\nvolume_id=vol_retired_worker_0\n"
+        )
+    before = {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()}
+    plan = tmp_path / "plan"
+    result = _partial_retirement_guest_plan_command(registry, audit, plan)
+    assert result.returncode != 0, f"accepted {corrupt}"
+    assert not plan.exists()
+    assert "unexpected-provider-call" not in result.stderr
+    assert {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()} == before
+
+
 def _private_source_guest_plan_command(registry: Path, audit: Path, plan: Path):
     build = _extract_fleet_function(fleet_source_text(), "fleet_registry_build_guest_recovery_plan() {")
     return subprocess.run(

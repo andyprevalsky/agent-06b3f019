@@ -6936,7 +6936,63 @@ if pool_dir is not None and pool_dir.exists():
         pool_ids.add(machine_id)
         volume_ids.add(volume_id)
 
+retired_sources: dict[str, str] = {}
+
+
+def retired_source(machine_id: str) -> str:
+    """Bind retained history to the original exact native terminal receipt."""
+    if machine_id in retired_sources:
+        return retired_sources[machine_id]
+    if (
+        audit is None
+        or any(not plain_directory(audit / name) for name in
+               ("fresh", "expected-fresh", "by-machine-id"))
+        or audit_meta.get("fleet_owner_token") != owner
+        or audit_meta.get("run_id") != run_id
+        or audit_meta.get("app") != expected_app
+        or not safe_machine.fullmatch(machine_id)
+    ):
+        raise ValueError("unbound retired stale-owner audit")
+    index = audit / "by-machine-id" / machine_id
+    if not regular_file(index) or index.stat().st_size > 65_536:
+        raise ValueError("missing exact retired stale-owner index")
+    names = index.read_text(encoding="utf-8").splitlines()
+    if len(names) != 1 or not safe_key.fullmatch(names[0]) or not names[0].startswith("cloudbench-"):
+        raise ValueError("noncanonical retired stale-owner index")
+    clone_name = names[0]
+    expected = fields(audit / "expected-fresh" / clone_name,
+                      allowed={"clone_name", "source_machine_id"})
+    allowed = {"version", "fleet_owner_token", "run_id", "app", "clone_name",
+               "source", "source_machine_id", "machine_id", "volume_id", "disposition"}
+    fresh = fields(audit / "fresh" / clone_name, allowed=allowed)
+    source_id = expected.get("source_machine_id", "")
+    volume_id = fresh.get("volume_id", "")
+    if (
+        set(expected) != {"clone_name", "source_machine_id"}
+        or expected["clone_name"] != clone_name
+        or not safe_machine.fullmatch(source_id)
+        or set(fresh) != allowed
+        or fresh["version"] != "1"
+        or fresh["fleet_owner_token"] != owner
+        or fresh["run_id"] != run_id
+        or fresh["app"] != expected_app
+        or fresh["clone_name"] != clone_name
+        or fresh["source"] != "fresh-clone"
+        or fresh["source_machine_id"] != source_id
+        or fresh["machine_id"] != machine_id
+        or not safe_volume.fullmatch(volume_id)
+        or volume_id in volume_ids
+        or fresh["disposition"] not in
+           {"destroyed-verified-absent", "destroyed-provider-retained"}
+    ):
+        raise ValueError("unproven retired stale-owner native identity")
+    volume_ids.add(volume_id)
+    retired_sources[machine_id] = source_id
+    return source_id
+
+
 output_by_machine: dict[str, tuple[str, Path, int]] = {}
+retired_outputs: dict[str, tuple[str, Path, int]] = {}
 for candidate in run_dir.iterdir():
     if not plain_directory(candidate):
         continue
@@ -6951,8 +7007,17 @@ for candidate in run_dir.iterdir():
     machine_id = cid_parts[1]
     if (cid_parts[0] == "pool") != (machine_id in pool_ids):
         raise ValueError("stale-owner machine kind does not match owner audit")
-    if machine_id not in machine_records or machine_id in output_by_machine:
+    if machine_id in output_by_machine or machine_id in retired_outputs:
         raise ValueError("stale-owner output does not map one-to-one to registry")
+    if machine_id not in machine_records:
+        source_id = retired_source(machine_id)
+        # A fresh worker's source is another recorded allocation. It cannot
+        # masquerade as an original primary output, even after both retired.
+        source_index = audit / "by-machine-id" / source_id
+        if (source_id in machine_records or source_index.exists() or source_index.is_symlink()):
+            raise ValueError("retired worker cannot become a stale-owner primary")
+        retired_outputs[machine_id] = (candidate.name, candidate, 0)
+        continue
     port_path = candidate / "status-proxy.port"
     if not regular_file(port_path):
         # A provider-rejected post-config start never reaches proxy attach.
@@ -7006,11 +7071,26 @@ for candidate in run_dir.iterdir():
             raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
 
+if retired_outputs:
+    root_sources = {retired_sources[machine_id] for machine_id in retired_outputs}
+    for machine_id, (clone_name, _) in machine_records.items():
+        if machine_id not in output_by_machine or machine_id in pool_ids:
+            continue
+        expected = fields(audit / "expected-fresh" / clone_name,
+                          allowed={"clone_name", "source_machine_id"})
+        if expected.get("clone_name") != clone_name or not safe_machine.fullmatch(expected.get("source_machine_id", "")):
+            raise ValueError("unbound stale-owner primary source intent")
+        root_sources.add(expected["source_machine_id"])
+    if len(root_sources) != 1:
+        raise ValueError("mismatched retired stale-owner primary sources")
+
+original_outputs = {**output_by_machine, **retired_outputs}
 output_machine_by_path = {
     output: machine_id
-    for machine_id, (_, output, _) in output_by_machine.items()
+    for machine_id, (_, output, _) in original_outputs.items()
 }
 worker_by_machine: dict[str, tuple[str, Path, int, str]] = {}
+retired_workers: set[str] = set()
 for candidate in run_dir.iterdir():
     if not plain_directory(candidate):
         continue
@@ -7023,15 +7103,22 @@ for candidate in run_dir.iterdir():
     payload = worker_ledger.read_text(encoding="utf-8")
     if len(payload.encode()) > 65_536:
         raise ValueError("oversized stale-owner worker mapping")
-    bench, output, preferred_port = output_by_machine[primary_id]
+    bench, output, preferred_port = original_outputs[primary_id]
     for machine_id in payload.splitlines():
         if (
             not safe_machine.fullmatch(machine_id)
-            or machine_id not in machine_records
-            or machine_id in output_by_machine
+            or machine_id in original_outputs
             or machine_id in worker_by_machine
+            or machine_id in retired_workers
         ):
             raise ValueError("ambiguous stale-owner worker mapping")
+        if machine_id not in machine_records:
+            if retired_source(machine_id) != primary_id:
+                raise ValueError("retired stale-owner worker has a foreign primary")
+            retired_workers.add(machine_id)
+            continue
+        if primary_id in retired_outputs:
+            raise ValueError("active stale-owner worker has a retired primary")
         worker_by_machine[machine_id] = (
             bench,
             output,
