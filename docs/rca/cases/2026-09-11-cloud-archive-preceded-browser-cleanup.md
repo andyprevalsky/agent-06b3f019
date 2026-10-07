@@ -1361,3 +1361,55 @@ payment-mint/write/auth owning controls: PASS in 1.238 seconds. The private
 `68475694d94869a4a208e58022cd49cf07133f034842feabf750efb9700d43e7`.
 The author proof remains immutable. Fresh exact-head review3 and production
 rollout remain required; this source qualification gives no LIVE50 credit.
+
+
+### 2026-10-07 review recurrence: write omitted the shared approval sequence
+
+Verification review `5447578139` found one outside-diff issue at `handler.py:10923`
+on exact `886bdb4f8`: the write caller omitted the original sequence from the
+shared approval wait. Its final browser fence stopped activity resumption, but
+it first emitted `write_lock_granted` after PAUSE→RESUME. The unchanged existing
+write archive owner now observes that permission event and failed with
+`abandoned parked write granted permission` in 1.693 seconds. The identical
+command and permanent test bytes pass after the repair in 1.051 seconds.
+
+The previous repair exposed a shared optional keyword that only payment used.
+That optional interface allowed this proven sibling to survive despite correct
+parking state and a final browser fence. The deepest owned cause is an approval
+wait whose interruption contract could be silently omitted. The keyword is now
+required, and both production callers explicitly supply their original captured
+sequence. The existing permanent control asserts that omission cannot become a
+new silent caller default, and tests both currently paused and already resumed
+interruption without opening a fresh attention request. No new wait, manager-entry
+guard or cancellation path is added. All four initial/setup/subscription/KYC mint
+call sites still enter the one guarded mint loop; funding retries use that same
+pre-activity check.
+
+Archive searches were `Pass the write pause sequence into the approval wait` and
+`write_lock_granted pause resume parked approval pending`. This is a recurrence
+of this case's approval/archive boundary. The golden references and existing
+response-preservation service read in the preceding recurrence remain applicable:
+original owner cancellation state governs later effects, while a real completed
+decision is retained. Deleting the wait would break approval; making its original
+sequence mandatory unifies both sibling callers without another optional field.
+
+The existing registered
+`test_manager_write_pause_seals_persisted_browser_for_archive` runs actual
+continuation serialization/restore, approves the original request after the
+intervening pause, and asserts no permission grant, no new browser activity and
+a durable exact-task terminal. An unanswered parked inverse also closes its exact
+original approval chip. Normal write/payment handoff and missing-field legacy
+inverses remain, and all ten existing write/payment/auth owners passed. The
+pre/post command from `agents` is `source venv/bin/activate`, then
+`PYTHONPATH=.:tests/blackbox python
+../.context/registry-checkpoint-deploy.private/parked-approval-owning-launcher.private.py
+test_manager_write_pause_seals_persisted_browser_for_archive`. Raw RED/GREEN and
+source/test hash bindings are private in `write-wait-required-sequence-proof.safe.json`.
+
+The prior bounded lifecycle closed cycle3 FINDINGS and recorded deploy outcome
+blocked/review-unstable before source mutation. Its complete ledger is retained;
+there is no fourth cycle. Development stabilization is followed by a fresh
+qualified `/deploy` lifecycle and independent exact-source review. Original C9
+callers were independently proved quiescent; retained forensic resources are
+inert and receive zero acceptance credit. No model/provider calls, benchmark
+changes, full-suite pass, production rollout or LIVE50 outcome is claimed here.

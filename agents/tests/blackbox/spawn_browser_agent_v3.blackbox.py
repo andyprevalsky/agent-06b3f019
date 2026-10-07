@@ -22955,16 +22955,21 @@ async def _drive_browser_write_pause_archive_boundary(
                     assert len(starts) == (1 if pause else 2)
                     if payment:
                         assert len(mints) == (0 if pause else 1), "abandoned parked payment minted a card"
-                        if pause and resume_between_generations and not pending_parked_approval:
+                    if not auth and pause:
+                        assert not any(
+                            row.get("metadata", {}).get("action_type") == "write_lock_granted"
+                            for row in rows
+                        ), "abandoned parked write granted permission"
+                        if resume_between_generations and not pending_parked_approval:
                             assert any(
                                 row.get("metadata", {}).get("title") == "✓ User approval received"
                                 for row in rows
                             ), "abandonment discarded the original approval decision"
-                        if pending_parked_approval:
-                            assert any(
-                                row.get("metadata", {}).get("title") == "Approval interrupted"
-                                for row in rows
-                            ), "abandoned parked approval left its original chip open"
+                    if pending_parked_approval:
+                        assert any(
+                            row.get("metadata", {}).get("title") == "Approval interrupted"
+                            for row in rows
+                        ), "abandoned parked approval left its original chip open"
                     terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
                     assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
                     if pause:
@@ -23148,11 +23153,24 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(
         pause=True, handoff=True, parked_handoff=True, resume_between_generations=True
     )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, handoff=True, parked_handoff=True,
+        resume_between_generations=True, pending_parked_approval=True
+    )
+    import inspect
     from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused
 
     with patch("tools.request_user_approval.request_user_approval_direct", new_callable=AsyncMock) as request:
-        assert await _request_browser_write_approval_until_paused(SimpleNamespace(is_paused=True)) is None
+        assert await _request_browser_write_approval_until_paused(
+            SimpleNamespace(is_paused=True), pause_sequence=0
+        ) is None
+        assert await _request_browser_write_approval_until_paused(
+            SimpleNamespace(is_paused=False, _pause_signal_sequence=1), pause_sequence=0
+        ) is None
         request.assert_not_awaited()
+    assert inspect.signature(_request_browser_write_approval_until_paused).parameters[
+        "pause_sequence"
+    ].default is inspect.Parameter.empty, "approval caller can silently omit its original pause sequence"
 
 
 async def test_manager_abandoned_payment_resumes_close_exact_browser_task():

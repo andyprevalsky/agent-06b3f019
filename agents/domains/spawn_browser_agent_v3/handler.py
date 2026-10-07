@@ -10560,7 +10560,7 @@ class _BrowserPaymentResumeAbandoned(Exception):
 
 
 async def _request_browser_write_approval_until_paused(
-    workflow_instance: Any, *, pause_sequence: Optional[int] = None, **approval_kwargs
+    workflow_instance: Any, *, pause_sequence: int, **approval_kwargs
 ):
     """End an exact deferred browser resume on PAUSE without inventing rejection."""
     if _browser_resume_was_paused(workflow_instance, pause_sequence) and not approval_kwargs.get("resume_request"):
@@ -10912,6 +10912,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         approval_resume, parked_approval = parked_approval, None
                         approval_response = await _request_browser_write_approval_until_paused(
                             workflow_instance,
+                            pause_sequence=write_pause_sequence,
                             question=result["question"],
                             metadata={
                                 "toolApproval": True,
