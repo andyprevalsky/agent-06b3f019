@@ -17,6 +17,7 @@ import {
   AGENT_PHONE_PROVISIONING_LEASE_MS,
   claimAgentPhoneProvisioning,
   completeAgentPhoneProvisioning,
+  forgetDeletedAgentPhoneAgent,
   progressAgentPhoneProvisioning,
   releaseAgentPhoneProvisioning,
   waitForAgentPhoneProvisioning,
@@ -481,6 +482,9 @@ async function provisionAgentPhoneNumber(
       }
       if (createdThisAttempt && reconciledAgent !== null) {
         await deleteAgent(agent.id, requestDeadlineAt);
+      }
+      if (createdThisAttempt) {
+        await forgetDeletedAgentPhoneAgent(params.userId, claim.marker, agent.id);
       }
     } catch (reconcileError) {
       throw new AgentPhoneProvisioningError(

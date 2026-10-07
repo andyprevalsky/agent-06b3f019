@@ -3596,24 +3596,29 @@ async def _judge_output_recovers_expected_fields(
         return None
 
     claude_auth = await _benchmark_judge_claude_auth_kwargs()
-    judged = await check_progress(
-        context=[
-            {
-                "role": "USER",
-                "text": (
-                    "Populate each required output field from the agent's produced output below. A "
-                    "field is populatable when its value is recoverable by MEANING (any key name) or "
-                    "the output honestly reports no data for it."
-                ),
-            },
-            {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
-        ],
-        verifier_system_prompt=build_verifier_prompt(expected_schema),
-        response_schema=expected_schema,
-        call_site="semantic_output_field_recovery_judge",
-        agent_id=root_agent_id,
-        **claude_auth,
-    )
+    verifier_prompt = build_verifier_prompt(expected_schema)
+
+    async def judge() -> dict:
+        return await check_progress(
+            context=[
+                {
+                    "role": "USER",
+                    "text": (
+                        "Populate each required output field from the agent's produced output below. A "
+                        "field is populatable when its value is recoverable by MEANING (any key name) or "
+                        "the output honestly reports no data for it."
+                    ),
+                },
+                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
+            ],
+            verifier_system_prompt=verifier_prompt,
+            response_schema=expected_schema,
+            call_site="semantic_output_field_recovery_judge",
+            agent_id=root_agent_id,
+            **claude_auth,
+        )
+
+    judged = await _judge_until_verdict(judge)
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
         return None
@@ -10943,7 +10948,7 @@ async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dic
         return {}
     try:
         token_data = await fetch_claude_max_token(resolved_user_id)
-    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+    except Exception as exc:  # judge still runs; auth is best-effort
         print(f"    ⚠ Declared-judge Claude auth fetch failed: {exc}")
         return {}
     if not token_data or not token_data.get("accessToken"):
@@ -10973,7 +10978,7 @@ async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
         return {}
     try:
         token_data = await fetch_gpt_code_token_activity(resolved_user_id)
-    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+    except Exception as exc:  # judge still runs; auth is best-effort
         print(f"    ⚠ Declared-judge GPT auth fetch failed: {exc}")
         return {}
     if not token_data or not token_data.get("accessToken"):
@@ -10985,6 +10990,63 @@ async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
         "gpt_token_pool_id": token_data.get("poolTokenId"),
         "gpt_token_user_id": resolved_user_id,
     }
+
+
+class BenchmarkJudgeUnavailable(RuntimeError):
+    """A harness-side LLM judge produced no verdict, so the run was never evaluated."""
+
+
+# check_progress already retries six times inside one VERIFIER_TOTAL_TIMEOUT_S
+# fence, but its in-call backoff totals only ~6s, so a provider 429 burst
+# exhausts it within ~25s. Re-invoking after 30s and then 60s keeps the judge
+# retrying across ~165s of rate limiting, close to Claude Code's withRetry window.
+BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S = (30.0, 60.0)
+
+
+def _judge_no_verdict_summary(judged: dict) -> str:
+    summary = str(judged.get("reasoning") or "judge returned no verdict")
+    judge_error = judged.get("judge_error")
+    provider = judge_error.get("provider") if isinstance(judge_error, dict) else None
+    if isinstance(provider, dict):
+        statuses = sorted({str(step.get("status")) for step in provider.get("steps") or []})
+        detail = f"{provider.get('type')}: {provider.get('message')}"
+        if statuses:
+            detail += f"; step statuses {', '.join(statuses)}"
+        summary += f" [{detail}]"
+    return summary
+
+
+async def _judge_until_verdict(
+    call_judge: Callable[[], Awaitable[dict]],
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict:
+    """Invoke an idempotent harness judge until check_progress yields a verdict.
+
+    Raises BenchmarkJudgeUnavailable when every bounded re-invocation ends
+    without one; callers surface that as a harness ERROR, never a FAIL.
+    """
+    from helpers.llm import VERIFIER_TOTAL_TIMEOUT_S
+
+    # A re-invocation starts only while a whole verifier deadline still fits, so
+    # one judge spends at most two verifier deadlines even if every call stalls.
+    budget_s = 2 * VERIFIER_TOTAL_TIMEOUT_S
+    started = monotonic()
+    delays = iter(BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    attempts = 0
+    while True:
+        judged = await call_judge()
+        attempts += 1
+        if judged.get("verdict_available") is not False:
+            return judged
+        summary = _judge_no_verdict_summary(judged)
+        delay_s = next(delays, None)
+        if delay_s is None or monotonic() - started + delay_s + VERIFIER_TOTAL_TIMEOUT_S > budget_s:
+            raise BenchmarkJudgeUnavailable(
+                f"LLM judge produced no verdict after {attempts} judge attempt(s) (judge unavailable): {summary}"
+            )
+        print(f"    ⚠ LLM judge produced no verdict ({summary}); re-judging in {delay_s:.0f}s")
+        await asyncio.sleep(delay_s)
 
 
 async def _call_declared_llm_judge(
@@ -11040,24 +11102,29 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
     judge_user_id = agent.get("userId") or agent.get("user_id") or _current_benchmark_user_id()
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
-    return await check_progress(
-        context=[
-            {
-                "role": "USER",
-                "text": "Evaluate the supplied run evidence against the benchmark requirements.",
-            },
-            {
-                "role": "TOOL",
-                "text": json.dumps(evidence, default=str),
-            },
-        ],
-        verifier_system_prompt=verifier_prompt,
-        response_schema=None,
-        call_site="benchmark_declared_evaluator",
-        agent_id=agent.get("agent_id") or agent.get("id"),
-        **claude_auth,
-        **gpt_auth,
-    )
+    evidence_text = json.dumps(evidence, default=str)
+
+    async def judge() -> dict:
+        return await check_progress(
+            context=[
+                {
+                    "role": "USER",
+                    "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+                },
+                {
+                    "role": "TOOL",
+                    "text": evidence_text,
+                },
+            ],
+            verifier_system_prompt=verifier_prompt,
+            response_schema=None,
+            call_site="benchmark_declared_evaluator",
+            agent_id=agent.get("agent_id") or agent.get("id"),
+            **claude_auth,
+            **gpt_auth,
+        )
+
+    return await _judge_until_verdict(judge)
 
 
 def _iter_benchmark_messages(data: dict) -> list[dict]:
@@ -13704,6 +13771,8 @@ async def _run_single_task_as_run_user(
                 if prod_grep_contract_error:
                     passed = False
                     failure_reason = prod_grep_contract_error
+            except BenchmarkJudgeUnavailable:
+                raise
             except Exception as e:
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
@@ -13714,6 +13783,8 @@ async def _run_single_task_as_run_user(
                 if payment_confirmation_error:
                     passed = False
                     failure_reason = payment_confirmation_error
+            except BenchmarkJudgeUnavailable:
+                raise
             except Exception as e:
                 passed = False
                 failure_reason = f"Agent payment confirmation contract check failed: {e}"

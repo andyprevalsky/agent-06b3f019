@@ -10400,6 +10400,246 @@ async def test_declared_judge_errors_are_not_evaluator_rejections():
                 raise AssertionError(f"{helper}: execution error became a criterion failure")
 
 
+@contextlib.contextmanager
+def _scripted_judge_provider(verdict_from_invocation: int | None, score: float = 1.0, output: dict | None = None):
+    """Drive harness judges through the real check_progress → Rose waterfall path.
+
+    OpenRouter answers 429 (the d0f65322 incident) until check_progress has been
+    entered ``verdict_from_invocation`` times; ``None`` keeps it rate-limited.
+    """
+    from types import SimpleNamespace
+    import httpx
+    import benchmarks.run_benchmark as bench
+    import helpers.llm as llm
+    from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
+    from _test_utils import setup_mock_fn, teardown_mock
+
+    real_check_progress = llm.check_progress
+    probe = SimpleNamespace(invocations=0, openrouter_calls=0, call_sites=[], sleeps=AsyncMock())
+
+    async def counting_check_progress(*args, **kwargs):
+        probe.invocations += 1
+        probe.call_sites.append(kwargs.get("call_site"))
+        return await real_check_progress(*args, **kwargs)
+
+    verdict = json.dumps(
+        {"reasoning": f"judge verdict score={score}", "score": score, **({"output": output} if output else {})}
+    )
+    verdict_stream = "\n".join(
+        [
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [{"delta": {"content": verdict}}],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                }
+            ),
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"configured": True, "onCooldown": True})
+        if "api.anthropic.com" in url:
+            return httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error"}})
+        if "openrouter.ai" in url:
+            probe.openrouter_calls += 1
+            if verdict_from_invocation is not None and probe.invocations >= verdict_from_invocation:
+                return httpx.Response(200, text=verdict_stream, headers={"Content-Type": "text/event-stream"})
+            return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
+        return httpx.Response(404, json={"error": f"No mock for {url}"})
+
+    _reset_anthropic_api_key_cooldown_cache()
+    setup_mock_fn(handler)
+    try:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(llm, "check_progress", counting_check_progress))
+            stack.enter_context(patch.object(bench, "_benchmark_judge_claude_auth_kwargs", AsyncMock(return_value={})))
+            stack.enter_context(patch.object(bench, "_benchmark_judge_gpt_auth_kwargs", AsyncMock(return_value={})))
+            stack.enter_context(patch("helpers.llm.asyncio.sleep", probe.sleeps))
+            stack.enter_context(patch("temporalio.activity.heartbeat"))
+            yield probe
+    finally:
+        teardown_mock()
+        _reset_anthropic_api_key_cooldown_cache()
+
+
+def _rejudge_sleeps(probe) -> list[float]:
+    import benchmarks.run_benchmark as bench
+
+    delays = set(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    return [call.args[0] for call in probe.sleeps.call_args_list if call.args and call.args[0] in delays]
+
+
+def _declared_judge_task():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name="test-mass-agent-run-0",
+        prompt="Run the mass agent task and report completion.",
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "t7-schema-task-complete",
+                "method": "single_turn_llm_judge",
+                "criteria": ["The run reports Task Complete."],
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+
+
+_DECLARED_JUDGE_RUN = {
+    "agent": {"agent_id": "d0f65322-225f-419f-bec2-398761d817ba", "status": "COMPLETED"},
+    "messages": [
+        {
+            "role": "TOOL",
+            "text": "Task Complete",
+            "metadata": {"toolName": "completion_summary", "toolStatus": "FINISHED"},
+        }
+    ],
+}
+
+
+async def test_declared_judge_rejudges_after_no_verdict():
+    """A rate-limited judge that later answers yields its real verdict, not a 0.5 FAIL."""
+    import benchmarks.run_benchmark as bench
+
+    with _scripted_judge_provider(verdict_from_invocation=2, score=1.0) as probe:
+        passed, reason, results = await bench._run_declared_evaluators(
+            _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+        )
+    assert (passed, reason) == (True, None), (passed, reason)
+    assert results[0]["score"] == 1.0 and results[0]["reasoning"] == "judge verdict score=1.0", results
+    assert probe.invocations == 2, probe.invocations
+    assert set(probe.call_sites) == {"benchmark_declared_evaluator"}, probe.call_sites
+    assert _rejudge_sleeps(probe) == [bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S[0]], _rejudge_sleeps(probe)
+
+
+async def test_declared_judge_without_verdict_is_judge_unavailable_error():
+    """Persistent judge 429s surface a judge-unavailable ERROR that still fails the gate."""
+    from types import SimpleNamespace
+    import benchmarks.run_benchmark as bench
+    import benchmarks.sms_runner as sms
+    from benchmarks.results import BenchmarkRun
+
+    with _scripted_judge_provider(verdict_from_invocation=None) as probe:
+        try:
+            outcome = await bench._run_declared_evaluators(
+                _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+            )
+        except RuntimeError as error:
+            raised = error
+        else:
+            raise AssertionError(f"no-verdict judge was scored as an evaluator outcome: {outcome}")
+    assert isinstance(raised.__cause__, bench.BenchmarkJudgeUnavailable), repr(raised.__cause__)
+    assert "t7-schema-task-complete" in str(raised) and "no verdict" in str(raised), str(raised)
+    assert "RoseAllFailed" in str(raised), str(raised)
+    attempts = 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    assert probe.invocations == attempts, probe.invocations
+    assert _rejudge_sleeps(probe) == list(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), _rejudge_sleeps(probe)
+
+    sms_task = SimpleNamespace(
+        name="sms-judge-unavailable",
+        prompt="Reply to the user.",
+        evaluators=[
+            {"id": "sms-judge", "method": "single_turn_llm_judge", "criteria": ["Reply."], "pass_threshold": 1.0}
+        ],
+    )
+    deps = SimpleNamespace(is_local_base_url=lambda _: True, benchmark_user_id=lambda: "test-user")
+    sms_results = {}
+    for label, verdict_from_invocation in (("unavailable", None), ("recovered", 2)):
+        with _scripted_judge_provider(verdict_from_invocation=verdict_from_invocation) as probe:
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(sms, "parse_sms_script", return_value={"turns": []}))
+                stack.enter_context(patch.object(sms, "_user_phone", return_value="+15555550100"))
+                stack.enter_context(patch.object(sms, "_live_agent_ids", return_value=set()))
+                for helper in ("_reset_session", "_seed_transcript", "_cleanup", "_apply_web_search_fixture"):
+                    stack.enter_context(patch.object(sms, helper))
+                stack.enter_context(patch.object(sms, "_seed_agents", return_value=[]))
+                sms_results[label] = await sms.run_sms_task("http://127.0.0.1:32001", sms_task, deps)
+            assert set(probe.call_sites) == {"benchmark_sms_evaluator"}, probe.call_sites
+
+    unavailable = sms_results["unavailable"]
+    assert unavailable.passed is False
+    assert unavailable.benchmark_status == "ERROR", unavailable.benchmark_status
+    assert "no verdict" in (unavailable.failure_reason or ""), unavailable.failure_reason
+    assert bench._ci_should_fail(BenchmarkRun(task_results=[unavailable]).summary, [unavailable]) is True
+    recovered = sms_results["recovered"]
+    assert recovered.passed is True and recovered.benchmark_status == "PASSED", recovered.failure_reason
+
+
+async def test_semantic_output_judge_without_verdict_is_judge_unavailable():
+    """The semantic output judge re-judges a 429'd verdict and never scores a missing one."""
+    import benchmarks.run_benchmark as bench
+
+    schema = {"fields": [{"name": "receipt_id", "type": "str", "description": "order/receipt id"}]}
+    blob = json.dumps({"order": {"confirmation": "tp_c505"}})
+    with _scripted_judge_provider(verdict_from_invocation=None) as probe:
+        try:
+            outcome = await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task")
+        except bench.BenchmarkJudgeUnavailable as error:
+            assert "no verdict" in str(error), str(error)
+        else:
+            raise AssertionError(f"no-verdict semantic judge was scored: {outcome}")
+    assert probe.invocations == 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), probe.invocations
+    assert set(probe.call_sites) == {"semantic_output_field_recovery_judge"}, probe.call_sites
+
+    with _scripted_judge_provider(verdict_from_invocation=2, output={"receipt_id": "tp_c505"}) as probe:
+        assert await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task") is None
+    assert probe.invocations == 2, probe.invocations
+
+
+async def test_declared_judge_low_score_verdict_is_not_rejudged():
+    """A genuine 0.0 verdict is an ordinary FAIL carrying the judge's reasoning, with no retry."""
+    import benchmarks.run_benchmark as bench
+
+    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0) as probe:
+        passed, reason, results = await bench._run_declared_evaluators(
+            _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+        )
+    assert passed is False
+    assert reason == "Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0", reason
+    assert results[0]["score"] == 0.0, results
+    assert (probe.invocations, probe.openrouter_calls) == (1, 1), (probe.invocations, probe.openrouter_calls)
+    assert probe.sleeps.call_args_list == [], probe.sleeps.call_args_list
+
+
+async def test_declared_judge_no_verdict_retries_stay_within_budget():
+    """Re-judging only starts while a full verifier deadline still fits the bounded budget."""
+    from helpers.llm import VERIFIER_TOTAL_TIMEOUT_S
+    import benchmarks.run_benchmark as bench
+
+    no_verdict = {"score": 0.5, "reasoning": "Progress check failed: x", "verdict_available": False}
+    for invocation_seconds, expected_attempts in (
+        ((107.0, 25.0, 25.0), 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)),
+        ((VERIFIER_TOTAL_TIMEOUT_S, 0.0, 0.0), 1),
+    ):
+        now = [0.0]
+        durations = iter(invocation_seconds)
+
+        async def judge():
+            now[0] += next(durations)
+            return dict(no_verdict)
+
+        async def fake_sleep(seconds):
+            now[0] += seconds
+
+        judge_mock = AsyncMock(side_effect=judge)
+        with patch.object(bench.asyncio, "sleep", AsyncMock(side_effect=fake_sleep)):
+            try:
+                await bench._judge_until_verdict(judge_mock, monotonic=lambda: now[0])
+            except bench.BenchmarkJudgeUnavailable as error:
+                assert f"after {expected_attempts} judge attempt" in str(error), str(error)
+            else:
+                raise AssertionError("no-verdict judge returned a result")
+        assert judge_mock.await_count == expected_attempts, (invocation_seconds, judge_mock.await_count)
+        assert now[0] <= 2 * VERIFIER_TOTAL_TIMEOUT_S, now[0]
+
+
 async def test_sms_runner_harness_error_has_explicit_error_outcome():
     from types import SimpleNamespace
     import benchmarks.sms_runner as sms
@@ -20447,6 +20687,22 @@ async def run_all_tests():
     await r.record_async(
         "declared_judge_execution_error",
         test_declared_judge_errors_are_not_evaluator_rejections,
+    )
+    await r.record_async("declared_judge_rejudges_after_no_verdict", test_declared_judge_rejudges_after_no_verdict)
+    await r.record_async(
+        "declared_judge_without_verdict_is_judge_unavailable_error",
+        test_declared_judge_without_verdict_is_judge_unavailable_error,
+    )
+    await r.record_async(
+        "semantic_output_judge_without_verdict_is_judge_unavailable",
+        test_semantic_output_judge_without_verdict_is_judge_unavailable,
+    )
+    await r.record_async(
+        "declared_judge_low_score_verdict_is_not_rejudged", test_declared_judge_low_score_verdict_is_not_rejudged
+    )
+    await r.record_async(
+        "declared_judge_no_verdict_retries_stay_within_budget",
+        test_declared_judge_no_verdict_retries_stay_within_budget,
     )
     await r.record_async("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
     await r.record_async(

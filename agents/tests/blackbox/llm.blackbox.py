@@ -8326,6 +8326,65 @@ async def test_check_progress_error_returns_fallback_score():
     assert "failed" in result["reasoning"].lower() or "Progress check failed" in result["reasoning"]
 
 
+async def test_check_progress_rate_limited_keeps_agent_loop_fallback_and_marks_no_verdict():
+    """Agent-loop verifiers keep the 0.5 keep-running result on waterfall 429s, flagged as no verdict."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import check_progress
+    from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
+
+    verdict_body = _sse_body([{"choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}]}])
+    unchanged_reasoning = "Progress check failed: No JSON content received (chunks=0, model=unknown)"
+    rate_limited = True
+
+    def handler(req):
+        url = str(req.url)
+        if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"configured": True, "onCooldown": True})
+        if "openrouter.ai" in url:
+            if rate_limited:
+                return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
+            return httpx.Response(200, text=verdict_body, headers={"Content-Type": "text/event-stream"})
+        if "api.anthropic.com" in url:
+            return httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error"}})
+        return httpx.Response(404, json={"error": f"No mock for {url}"})
+
+    _reset_anthropic_api_key_cooldown_cache()
+    set_mock_handler(handler)
+    try:
+        with patch("helpers.llm.asyncio.sleep", AsyncMock()), patch("temporalio.activity.heartbeat"):
+            for call_site in (
+                "verifier_execute",
+                "verifier_plan",
+                "verifier_post_dag",
+                "verifier_browser",
+                "verifier_claude_code",
+            ):
+                result = await check_progress(
+                    context=[{"role": "USER", "text": "goal", "timestamp": "2024-01-01T00:00:00Z"}],
+                    verifier_system_prompt="VERIFY",
+                    call_site=call_site,
+                )
+                assert result["score"] == 0.5, (call_site, result)
+                assert result["reasoning"] == unchanged_reasoning, (call_site, result["reasoning"])
+                assert result["message"] == f"{result['reasoning']}\n\nScore: 0.5"
+                assert result["structured_response"] is None
+                assert result["verdict_available"] is False, (call_site, result)
+                provider = result["judge_error"]["provider"]
+                assert provider["type"] == "RoseAllFailed", result["judge_error"]
+                assert provider["steps"] and {step["status"] for step in provider["steps"]} == {429}, provider
+            rate_limited = False
+            verdict = await check_progress(
+                context=[{"role": "USER", "text": "goal", "timestamp": "2024-01-01T00:00:00Z"}],
+                verifier_system_prompt="VERIFY",
+                call_site="verifier_execute",
+            )
+    finally:
+        _reset_anthropic_api_key_cooldown_cache()
+    assert verdict["score"] == 1.0 and verdict["reasoning"] == "done", verdict
+    assert verdict.get("verdict_available") is not False and "judge_error" not in verdict, verdict
+
+
 async def test_build_llm_messages_system_role_gets_prefix():
     """build_llm_messages converts SYSTEM role entries to user with [SYSTEM]: prefix."""
     from unittest.mock import patch as _patch
@@ -9344,6 +9403,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "check_progress_error_returns_fallback_score", test_check_progress_error_returns_fallback_score
+    )
+    await r.record_async(
+        "check_progress_rate_limited_keeps_agent_loop_fallback",
+        test_check_progress_rate_limited_keeps_agent_loop_fallback_and_marks_no_verdict,
     )
     await r.record_async("build_llm_messages_system_role_prefix", test_build_llm_messages_system_role_gets_prefix)
     await r.record_async(
