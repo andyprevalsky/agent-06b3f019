@@ -691,6 +691,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
+       "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -785,6 +786,7 @@ SEALED_MACHINE_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-sealed-
 [ -f "$SEALED_MACHINE_RETIREMENT_HELPER" ] \
     || SEALED_MACHINE_RETIREMENT_HELPER="$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py"
 RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
+STARTUP_FAILURE_ARCHIVE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-startup-failure-archive.py"
 # An exact owner created before this collector was snapshotted can still be
 # recovered with the committed controller helper. Its admission/run identity
 # and the guest's immutable manifest are verified again below.
@@ -8173,6 +8175,65 @@ PY
     [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
 }
 
+fleet_recovery_capture_startup_failure() {  # <registry> <output> <machine> <guest-token>
+    local registry="$1" output="$2" machine="$3" guest_token="$4"
+    local base attempt remote log archive config saved_archive saved_config result
+    base="$output/failed-startup-runtime-archive"
+    log="$output/failed-startup-runtime-archive.log"
+    [ -f "$STARTUP_FAILURE_ARCHIVE_HELPER" ] \
+        && python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" eligible --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" >> "$log" 2>&1 \
+        || return 1
+    [ ! -L "$base" ] && mkdir -p "$base" && chmod 700 "$base" || return 1
+    attempt="$(mktemp -d "$base/attempt.XXXXXX")" || return 1
+    config="$attempt/original-native-config.json"
+    if ! machine_config_exact_read "$machine" > "$config"; then return 1; fi
+    if [ -f "$base/verified.json" ] && [ ! -L "$base/verified.json" ]; then
+        result="$(python3 - "$base/verified.json" "$base" <<'PY'
+import json, sys
+from pathlib import Path
+base = Path(sys.argv[2])
+row = json.loads(Path(sys.argv[1]).read_text())
+for key in ('archive_path', 'config_path'):
+    path = Path(row[key])
+    assert path.resolve(strict=True) == path and path.is_relative_to(base)
+print(row['archive_path'], row['config_path'], sep='\t')
+PY
+)" || return 1
+        IFS=$'\t' read -r saved_archive saved_config <<< "$result"
+        cmp -s "$saved_config" "$config" || return 1
+        python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" verify --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" \
+            --archive "$saved_archive" --config "$saved_config" --config-after "$config" > "$attempt/verified.json" 2>> "$log" \
+            && cmp -s "$attempt/verified.json" "$base/verified.json"
+        return $?
+    fi
+    [ ! -e "$base/verified.json" ] && [ ! -L "$base/verified.json" ] || return 1
+    remote="/tmp/cloudbench-startup-archive-$guest_token-$$-$RANDOM"
+    archive="$attempt/originals.tar.gz"
+    if ! fly_with_timeout 30 ssh console -a "$APP" --machine "$machine" \
+            -C "mkdir -m 700 '$remote'" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp put -a "$APP" --machine "$machine" \
+            "$STARTUP_FAILURE_ARCHIVE_HELPER" "$remote/cloudbench-startup-failure-archive.py" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp put -a "$APP" --machine "$machine" \
+            "$GUEST_RECOVERY_HELPER" "$remote/cloudbench-guest-recovery.py" >> "$log" 2>&1 \
+        || ! fly_with_timeout 300 ssh console -a "$APP" --machine "$machine" \
+            -C "PYTHONDONTWRITEBYTECODE=1 python3 '$remote/cloudbench-startup-failure-archive.py' capture --machine '$machine' --run-token '$guest_token' --archive '$remote/originals.tar.gz'" >> "$log" 2>&1 \
+        || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$machine" \
+            "$remote/originals.tar.gz" "$archive" >> "$log" 2>&1 \
+        || ! machine_config_exact_read "$machine" > "$attempt/after-native-config.json" \
+        || ! cmp -s "$config" "$attempt/after-native-config.json" \
+        || ! python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" verify --registry "$registry" \
+            --output "$output" --machine "$machine" --run-token "$guest_token" \
+            --archive "$archive" --config "$config" --config-after "$attempt/after-native-config.json" \
+            --receipt "$base/verified.json" > "$attempt/verified.json" 2>> "$log"; then
+        return 1
+    fi
+    # Original pending ownership remains diagnostic evidence. This separate
+    # durable receipt can satisfy only failed-owner retention recovery.
+    echo "✅ rejected startup originals preserved for exact zero-credit cleanup"
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local _capture_details=""
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
@@ -8480,6 +8541,11 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             output="${recovery_outputs[$recovery_index]}"
             [ -f "$output/runtime-evidence.pending" ] || continue
             [ ! -e "$output/remote-logs/runtime-evidence" ] || continue
+            if [ ! -e "$output/post-config-start.accepted" ] \
+                && fleet_recovery_capture_startup_failure "$registry" "$output" \
+                    "${recovery_machine_ids[$recovery_index]}" "${recovery_guest_tokens[$recovery_index]}"; then
+                continue
+            fi
             # Exact recovery may have stopped this guest after the original
             # plan was read. A stopped guest cannot serve a sealed capture;
             # retain its evidence latch for the original-volume archive.
@@ -9339,6 +9405,12 @@ PY
         return 1
     fi
     while IFS=$'\t' read -r index out machine bench mode; do
+        if [ -f "$out/failed-startup-runtime-archive/verified.json" ] \
+            && fleet_recovery_capture_startup_failure "$registry" "$out" "$machine" "$FLEET_OWNER_TOKEN-$index"; then
+            cloudbench_validate_worker_evidence_coverage "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
+                || status=1
+            continue
+        fi
         CHILD_OUT[$index]="$out"
         CHILD_MACHINE[$index]="$machine"
         if ! cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
@@ -9468,7 +9540,8 @@ PY
         && { [ ! -f "$forensic_manifest" ] || [ -L "$forensic_manifest" ] \
              || [ -e "$registry/guest-cleanup-unconfirmed" ]; }; then
         for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
-            if [ -f "$_evidence_output/post-config-start.accepted" ] \
+            if { [ -f "$_evidence_output/post-config-start.accepted" ] \
+                 || [ -f "$_evidence_output/runtime-evidence.owner.json" ]; } \
                 && [ -f "$_evidence_output/runtime-evidence.pending" ]; then
                 needs_guest_recovery=1
                 break
