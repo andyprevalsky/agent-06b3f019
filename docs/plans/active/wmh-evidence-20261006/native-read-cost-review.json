@@ -733,7 +733,7 @@
     "remaining_readiness": "Native host provisioning/authenticated pinned dependency installation, complete verified artifact transport and full cold-start/resource/benchmark/viewer/production acceptance remain root-owned and unproven by these fixtures."
   },
   "native_controller_fixture_registry_and_export": {
-    "scope": "Offline Linux controller test infrastructure only; default WMH engine and production provider behavior unchanged. Full multi-workstream qualification remains open at independent cancellation readiness failure.",
+    "scope": "Offline Linux controller test infrastructure only; full unchanged multi-workstream qualification and canonical dispatcher both passed. No WMH semantic benchmark or production outcome claim.",
     "registry": {
       "original_red": ".context/native-controller-checks/07.log",
       "cause": "Scripts-only fixture/snapshot omitted actual agents/providers/rose/pools.py newly consumed by cloud preflight. Stage and mount that authoritative single file read-only; retain actual registry validation.",
@@ -776,12 +776,11 @@
       "final_real_fixture_cleanup": "Exact ownership-guarded finally cleanup covers launch/readiness/assertion failures; no broad container cleanup."
     },
     "cancellation": {
-      "status": "Standard Docker --init correction has exact focused-control proof; full all-scenario qualification is running and not yet claimed green.",
+      "status": "Fixed at standard Docker launcher environment: unchanged full32scenario fixture passed; production PID classifier untouched.",
       "observed_focused_red": ".context/native-cancellation-focused-observed.log",
       "native_capture": ".context/native-cancellation-observer.jsonl",
       "complete_export_snapshot": ".context/cloudbench-controller-tests/native-yuqsc_i5",
       "facts": "Without Docker init, fixture shell is Linux PID1. It records protected live neighbor pid1 with exact proc-start birth. cloudbench_pid_birth_state requires pid>1; controller logs stale-neighbor recovery and attempts its volume cleanup. Own clone/audit/.cid eventually appear, but no status-proxy.port before unchanged400x0.05 readiness ends. Observer attached late after initial creation race; no complete no-init timing profile claimed. Same source/gates with Docker init gives fixture pid7 and PID1docker-init, preserves live neighbor, publishes status-proxy.port, and passes exact cancellation/recovery checks.",
-      "next_control": "Same actual focused selector/source/image/CPU/gate/deadlines with standard Docker --init only; capture proper host-like PID and native descendant reaping before considering smallest test-runner correction.",
       "causal_control": {
         "red_log": ".context/native-cancellation-focused-observed.log",
         "red_native_capture": ".context/native-cancellation-observer.jsonl",
@@ -800,7 +799,10 @@
       "full_candidate": {
         "command": "bash -c 'source .context/deploy-worktree.env; bash scripts/tests/cloudbench-multi-workstream.test.sh'",
         "log": ".context/native-pool-registry-multi-final.log",
-        "status": "running"
+        "status": "passed",
+        "exit_code": 0,
+        "proof": ".context/native-controller-full7-proof.json",
+        "scenario_count": 32
       }
     },
     "source_sha256": {
@@ -812,6 +814,175 @@
       "python3 scripts/rca_archive.py search \"docker cp permission denied fixture export\"",
       "python3 scripts/rca_archive.py search \"controller fixture PID1 detached reaping\""
     ],
-    "archive_scope": "Earlier cleanup-retention, terminal-zombie assertion and reserve-allocation cases are relatives with different first-bad boundaries. Existing reserve allocator and32MiB fixture reserve preserved. No literal tar/PID1 exporter match found; archive broad search hits are leads, not causal proof."
+    "archive_scope": "Earlier cleanup-retention, terminal-zombie assertion and reserve-allocation cases are relatives with different first-bad boundaries. Existing reserve allocator and32MiB fixture reserve preserved. No literal tar/PID1 exporter match found; archive broad search hits are leads, not causal proof.",
+    "final_full_fixture": {
+      "command": "bash -c 'source .context/deploy-worktree.env; bash scripts/tests/cloudbench-multi-workstream.test.sh'",
+      "exit_code": 0,
+      "log": ".context/native-pool-registry-multi-final.log",
+      "log_sha256": "53c25f429b714627c82e709f02fa380860de678f03b4555859a6127aef662cca",
+      "scenario_pass_count": 32,
+      "terminal_assertions": [
+        "PASS: every controller, including fail-closed runs, reaped its own local processes",
+        "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"
+      ],
+      "snapshot": ".context/cloudbench-controller-tests/native-mreh4a28",
+      "container_id": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323",
+      "owner": {
+        "name": "rose-cloudbench-controller-tests-e284409cae214294",
+        "owner": "e284409cae214294b79cc24e8dce5a8f",
+        "image_id": "sha256:ccfcd49a1667d5ca12f76805f0f3a238c34e3090da0efd11ea3a360376b05e2a"
+      },
+      "recipe_sha256": "d51342e8c125b67fddc1c4bb6b6249736f2ae8821a6d6096d7fa3d6994a6018f",
+      "source_bindings": {
+        "scripts/tests/cloudbench-multi-workstream.test.sh": {
+          "snapshot_sha256": "e249011a4578ddcf1348f428d1d54ec7cf1561c776fb39e63c82f70ca2d151c8",
+          "current_sha256": "e249011a4578ddcf1348f428d1d54ec7cf1561c776fb39e63c82f70ca2d151c8"
+        },
+        "scripts/tests/run-cloudbench-controller-linux.py": {
+          "snapshot_sha256": "e934d8009281c45a3e3279fb5d849d803320e3a21f67677a4fc6b5489104fbd9",
+          "current_sha256": "e934d8009281c45a3e3279fb5d849d803320e3a21f67677a4fc6b5489104fbd9"
+        },
+        "agents/providers/rose/pools.py": {
+          "snapshot_sha256": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836",
+          "current_sha256": "0925dff7cfe6a2443a3c10d62f1c1e77371aca8cd0d6c807c6c86fee2001c836"
+        }
+      },
+      "source_scope": "Executed fixture/helper/authoritative pool registry match final current bytes. The uninvoked dispatcher unittest file received final Darwin discovery/finally changes during the full fixture; final current unittest source separately passed11/11.",
+      "dispatcher": {
+        "command": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+        "log": ".context/native-controller-dispatcher-final.log",
+        "passed": 11,
+        "skipped": 0,
+        "seconds": 34.179,
+        "test_source_sha256": "2dcb57d18d67620b5e15afdb6525905dff96d42f479daba22907f1d2f549453b"
+      },
+      "exact_cleanup_commands": [
+        {
+          "args": [
+            "docker",
+            "inspect",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323",
+            "--format",
+            "{{.Id}}\n{{.Name}}\n{{index .Config.Labels \"org.rose.controller-test-owner\"}}\n{{.Image}}\n{{json .Mounts}}"
+          ],
+          "returncode": 0,
+          "stdout": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n/rose-cloudbench-controller-tests-e284409cae214294\ne284409cae214294b79cc24e8dce5a8f\nsha256:ccfcd49a1667d5ca12f76805f0f3a238c34e3090da0efd11ea3a360376b05e2a\n[{\"Destination\":\"/repo/scripts\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/scripts\",\"Type\":\"bind\"},{\"Destination\":\"/repo/agents/benchmarks\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/agents/benchmarks\",\"Type\":\"bind\"},{\"Destination\":\"/repo/agents/providers/rose/pools.py\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/andyprevalsky/Developer/rose-wmh-experiential-parallel/.context/cloudbench-controller-tests/native-mreh4a28/agents/providers/rose/pools.py\",\"Type\":\"bind\"}]\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "stop",
+            "--time",
+            "30",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 0,
+          "stdout": "Flag --time has been deprecated, use --timeout instead\nbdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "cp",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323:/tmp/.",
+            "-"
+          ],
+          "returncode": 0,
+          "stdout": null,
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "rm",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 0,
+          "stdout": "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "docker",
+            "inspect",
+            "bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+          ],
+          "returncode": 1,
+          "stdout": "[]\n",
+          "stderr": "error: no such object: bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323\n"
+        }
+      ],
+      "independent_native_absence": {
+        "exit_code": 1,
+        "stderr": "error: no such object: bdb042e4703a98964c654260d7983621e5645366cc6e457a34c04babfd560323"
+      },
+      "archive": {
+        "path": ".context/cloudbench-controller-tests/native-mreh4a28/fixture-tmp.tar",
+        "sha256": "5504305a49ec1ca2023628d1594ae577fc9a34d9d72f0bc0018df564b0d60278",
+        "bytes": 2048,
+        "regular_files": 0,
+        "regular_bytes": 0,
+        "nonregular_members": 2,
+        "snapshot_mode": "0o700",
+        "archive_mode": "0o600",
+        "inventory_mode": "0o600",
+        "scope": "A successful fixture deliberately removes its temporary root, so this complete archive contains0regularfiles. Separate mandatory Darwin restrictive-mode regression proves original bytes retained without unsafe extraction."
+      },
+      "runtime_limits": "CPU2, no network, original fixture assertions/readiness400x0.05/timeouts unchanged; standard Docker init only restores host-like PID/subreaping semantics.",
+      "verified_at_utc": "2026-10-07T01:14:57.642636+00:00"
+    },
+    "archive_verification_records": [
+      {
+        "id": "native-controller-fixture-omitted-authoritative-pool-registry",
+        "classification": "test-bug",
+        "problem_class": "fixture-environment-data-mismatch",
+        "first_bad_boundary": "Linux snapshot and scratch worktrees staged scripts/benchmarks but omitted actual agents/providers/rose/pools.py consumed by run-bench-cloud preflight.",
+        "problem": "Actual unchanged cmd7 exited before allocation with missing pools.py then Invalid WMH_ROSE_POOL.",
+        "diagnosis": "A real new source dependency was missing from the legitimate hermetic fixture, not a bad pool value. Owning dispatcher tests failed7/10 before exact registry staging/mount correction.",
+        "solution": "Stage/copy/hash authoritative single registry file and mount it read-only; preserve actual registry validation and exact mount-ownership checks. Full32scenario cmd7 and final11case dispatcher passed.",
+        "human_feedback": "Task direction explicitly prohibited skipping or stubbing registry validation, broad provider mounts, or raised bounds.",
+        "reusable_lesson": "Stage the authoritative dependencies consumed by the real launcher and bind their exact bytes in the fixture snapshot.",
+        "status": "fixed",
+        "repro": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+        "red": ".context/native-pool-registry-runner-red.log",
+        "green": ".context/native-controller-dispatcher-final.log"
+      },
+      {
+        "id": "native-controller-fixture-launched-as-linux-pid1",
+        "classification": "test-bug",
+        "problem_class": "fixture-environment-data-mismatch",
+        "first_bad_boundary": "Standard Docker launcher ran the ownership fixture itself as PID1 without host-like init/subreaping semantics.",
+        "problem": "Unchanged400x0.05 cancellation gate did not observe exact recoverable guest identity.",
+        "diagnosis": "Native capture proves fixture live-neighbor metadata had exact pid1 birth; PID identity contract requires pid>1, and real controller logged stale-neighbor recovery/volume attempt. Same actual focused source/gates passed with only Docker--init, using ordinary fixture pid7 and docker-init PID1. Historical full red state was not captured; no complete timing-profile claim.",
+        "solution": "Standard Docker--init in actual launcher plus owning public dispatcher assertion. Production classifier unchanged; full32scenarios including cancellation passed with original deadlines.",
+        "human_feedback": "Task direction required exact native identity evidence and prohibited classifier relaxation, timeout changes, or silent test skipping.",
+        "reusable_lesson": "Give process-ownership fixtures ordinary host-like PIDs and a real subreaper rather than running the fixture as container init.",
+        "status": "fixed",
+        "repro": "CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY=1 through the existing native dispatcher",
+        "red": ".context/native-cancellation-focused-observed.log",
+        "green": ".context/native-cancellation-focused-init.log",
+        "permanent_owning_red": ".context/native-controller-init-owning-red.log",
+        "permanent_owning_green": ".context/native-controller-dispatcher-final.log"
+      },
+      {
+        "id": "native-controller-host-export-applied-restrictive-guest-modes",
+        "classification": "test-bug",
+        "problem_class": "logical-inconsistency-in-harness-contracts",
+        "first_bad_boundary": "Docker host extraction applied guest directory permissions before creating nested fixture files.",
+        "problem": "Actual cp1 mkdir restrictive/nested: permission denied despite stop0/removal0/native absence1.",
+        "diagnosis": "Genuine unchanged permanent real-container test reproduced same extraction mechanism, with0500directory/0400file. Same command passed after stream publication and byte inventory. Earlier unexplained fullcmd7 exporter verdict remains historical proof gap, not claimed same cause.",
+        "solution": "Same exact docker cp source goes to0600tar under0700snapshot; digest archive and every regular member without extraction/link following. Preserve exact owner/image/CID/readonlymount/stop/removal gates and record lifecycle streams. Mandatory Darwin regression runs unchanged canonical deploy command. Malformed tar and failed copy fail closed.",
+        "human_feedback": "Task direction required complete private export, exact owned-container retirement, and actual restrictive-permission red/green without weakening modes or cleanup checks.",
+        "reusable_lesson": "Preserve untrusted guest filesystem evidence as a private verified archive instead of applying guest paths and modes on the host.",
+        "status": "fixed",
+        "repro": "CLOUDBENCH_TEST_LINUX_EXPORT_REAL=1 python3 scripts/tests/cloudbench-controller-linux.test.py ContainerOwnership.test_real_restrictive_linux_export_keeps_complete_bytes_and_retires_owner",
+        "red": ".context/native-controller-export-red.log",
+        "green": ".context/native-controller-export-owning-green-final.log",
+        "permanent_deploy_green": ".context/native-controller-dispatcher-final.log",
+        "scaling": "One bounded owning-container lifecycle; streaming1MiBchunks and per-member metadata, no dependence on production agent count and no inference/shared-state changes."
+      }
+    ],
+    "markdown_scope": "No new Markdown case created: CLAUDE.md1327 prohibits new .md docs unless explicitly requested; no explicit /deploy new-case exception found. Existing JSON preserves each independent first-bad boundary and exact reproducible evidence; no claim these records are entries in the Markdown case index."
   }
 }
