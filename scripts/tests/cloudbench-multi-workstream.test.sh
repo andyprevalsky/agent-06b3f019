@@ -3705,7 +3705,8 @@ fi
 grep -qF "[bench-default-detach] catalog timeout 9000s: run timeout 240s, execution backstop 9000s" "$detached_log" ||
     fail "detached fleet did not derive the catalog task's execution budget"
 grep -qF "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=9000" "$FAKE_DIR/journal.log" ||
-    fail "detached fleet did not hand the catalog backstop to the guest"# The detached PID has been reaped. Hubs remain isolated behind immutable
+    fail "detached fleet did not hand the catalog backstop to the guest"
+# The detached PID has been reaped. Hubs remain isolated behind immutable
 # owner records and never enter the raw controller-PID cleanup list.
 PIDS=()
 check_run_record "$WS_A" bench-default-detach "$BASE_REF" workstream-a ||
