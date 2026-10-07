@@ -128,7 +128,8 @@ function runTree(
   token?: string,
   useRunnerCleanup = false,
   pathPrefix?: string,
-  useWallClockHelper = false
+  useWallClockHelper = false,
+  readyFile?: string
 ): TreeRun {
   const script = `
 set -euo pipefail
@@ -146,9 +147,9 @@ ${command} >/dev/null 2>&1 &
 root=$!
 BACKEND_PID=$root
 members=""
-for _ in $(seq 1 200); do
+for _ in $(seq 1 1200); do
   members="$(process_tree_pids "$root" | tr '\\n' ' ')"
-  [[ $(wc -w <<<"$members") -ge ${minMembers} ]] && break
+  [[ $(wc -w <<<"$members") -ge ${minMembers} ]] ${readyFile ? `&& [[ -e "${readyFile}" ]]` : ''} && break
   sleep 0.05
 done
 echo "root=$root"
@@ -201,8 +202,26 @@ ${
 // The isolated blackbox backend is `npx tsx src/bootstrap.ts`. npx exits on
 // SIGTERM without forwarding it, so the old `kill $!` left tsx and the server
 // under PID 1: 54 leaked backends (~300MB each) exhausted a 16GB VM.
+// The backend is serving before cleanup runs, so wait for the node process tsx
+// runs to exist: on a loaded host tsx can still be spawning it at three members.
 const token = `process-tree-${randomUUID()}`;
-const npxTree = runTree(`npx tsx -e "setInterval(() => {}, 1000, '${token}')"`, 3, 5, token, true);
+const npxReadyDir = mkdtempSync(join(tmpdir(), 'npx-tree-ready-'));
+const npxReady = join(npxReadyDir, 'ready');
+let npxTree: TreeRun;
+try {
+  npxTree = runTree(
+    `npx tsx -e "require('node:fs').writeFileSync('${npxReady}', ''); setInterval(() => {}, 1000, '${token}')"`,
+    3,
+    5,
+    token,
+    true,
+    undefined,
+    false,
+    npxReady
+  );
+} finally {
+  rmSync(npxReadyDir, { recursive: true, force: true });
+}
 assert.ok(
   npxTree.members.length >= 3,
   `the launch must reach npx, tsx, and the node process tsx runs ` +
