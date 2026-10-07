@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the unchanged controller fixture on Linux; Mac uses an offline container."""
+"""Run the unchanged controller fixture as root on Linux; other hosts use an offline container."""
 
 from __future__ import annotations
 
@@ -162,7 +162,9 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     fixture = f"scripts/tests/cloudbench-{args.fixture}.test.sh"
-    if sys.platform == "linux":
+    # The fixtures exercise root-only Linux permission primitives; any other host
+    # runs them in the same offline root container.
+    if sys.platform == "linux" and os.geteuid() == 0:
         subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
         if args.check_only:
             return 0

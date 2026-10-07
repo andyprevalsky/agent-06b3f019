@@ -216,7 +216,15 @@ class ContainerOwnership(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(calls[0][2], "owned-name")
 
-    def check_dispatch(self, *, cancelled=False, fixture=None, fixture_exit_code=0):
+    def check_dispatch(
+        self,
+        *,
+        cancelled=False,
+        fixture=None,
+        fixture_exit_code=0,
+        platform="darwin",
+        euid=501,
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "scripts/tests"
@@ -267,7 +275,13 @@ class ContainerOwnership(unittest.TestCase):
                     "__file__",
                     str(tests / "run-cloudbench-controller-linux.py"),
                 ),
-                patch.object(runner.sys, "platform", "darwin"),
+                patch.object(runner.sys, "platform", platform),
+                patch.object(runner.os, "geteuid", return_value=euid),
+                patch.object(
+                    runner.os,
+                    "execvp",
+                    side_effect=AssertionError("ran the fixture natively"),
+                ),
                 patch.object(
                     runner.sys,
                     "argv",
@@ -334,6 +348,41 @@ class ContainerOwnership(unittest.TestCase):
                 self.assertEqual(
                     self.check_dispatch(fixture=fixture), ["join", "retire"]
                 )
+
+    def test_non_root_linux_uses_the_offline_root_container(self):
+        self.assertEqual(
+            self.check_dispatch(
+                platform="linux", euid=1000, fixture="status-service-shutdown"
+            ),
+            ["join", "retire"],
+        )
+
+    def test_root_linux_runs_the_fixture_natively_after_the_exact_preflight(self):
+        class Executed(Exception):
+            pass
+
+        with (
+            patch.object(runner.sys, "platform", "linux"),
+            patch.object(runner.os, "geteuid", return_value=0),
+            patch.object(
+                runner.sys, "argv", ["runner", "--fixture", "status-service-shutdown"]
+            ),
+            patch.object(runner.subprocess, "run") as preflight,
+            patch.object(runner.subprocess, "Popen") as launch,
+            patch.object(runner.os, "execvp", side_effect=Executed) as execute,
+            self.assertRaises(Executed),
+        ):
+            runner.main()
+        preflight.assert_called_once_with(
+            [runner.sys.executable, "-c", runner.TOOL_CHECK], check=True
+        )
+        launch.assert_not_called()
+        self.assertEqual(execute.call_args.args[0], "bash")
+        self.assertTrue(
+            execute.call_args.args[1][1].endswith(
+                "scripts/tests/cloudbench-status-service-shutdown.test.sh"
+            )
+        )
 
     def test_invalid_fixture_is_rejected_before_any_docker_operation(self):
         for fixture in ("unknown", "../foreign"):
