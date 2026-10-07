@@ -4564,6 +4564,84 @@ def test_fetch_ref_keeps_auth_header_out_of_git_argv() -> None:
     assert 'fetch_args=(-c "http.extraheader=$auth")' not in fetch
 
 
+@pytest.mark.parametrize("changed_dependencies", [False, True])
+def test_fetch_ref_restores_dirty_exact_sha_after_fresh_reuse(tmp_path: Path, changed_dependencies: bool) -> None:
+    """A formerly fresh checkout must advance normally without borrowing donor proof."""
+    author, origin, repo, donor = (tmp_path / name for name in ("author", "origin.git", "repo", "donor"))
+    _write_manifests(author)
+    _write_manifests(donor)
+    (author / ".gitignore").write_text("node_modules/\nagents/venv/\n")
+    (author / "value").write_text("earlier unused source\n")
+
+    def git(path: Path, *args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(path), *args], text=True, stderr=subprocess.DEVNULL).strip()
+
+    git(author, "init", "-q")
+    git(author, "config", "user.email", "fixture@example.com")
+    git(author, "config", "user.name", "fixture")
+    git(author, "add", ".")
+    git(author, "commit", "-qm", "earlier source")
+    unused_blob = git(author, "rev-parse", "HEAD:value")
+    (author / "value").write_text("first source\n")
+    git(author, "commit", "-qam", "first source")
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    git(author, "remote", "add", "origin", str(origin))
+    git(author, "push", "-q", "origin", "HEAD:main")
+    first = git(author, "rev-parse", "HEAD")
+    env = dict(os.environ, CLOUDBENCH_GIT_MIN_FREE_KB="1", CLOUDBENCH_DEPENDENCY_OVERLAY="0",
+               GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.file://{origin}.insteadOf",
+               GIT_CONFIG_VALUE_0="https://github.com/Rose-Ai-Labs/rose.git")
+    fresh = subprocess.run(["bash", str(FETCH_SCRIPT), str(repo), first],
+                           env=dict(env, CLOUDBENCH_FRESH_VOLUME="1"), capture_output=True, text=True)
+    assert fresh.returncode == 0, fresh.stderr
+    assert git(repo, "rev-parse", "--is-shallow-repository") == "true"
+    assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", unused_blob], capture_output=True).returncode != 0
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    python = donor / "agents/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+    python.chmod(0o755)
+
+    def sync() -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(SCRIPT), str(donor), str(repo)], env=env, capture_output=True, text=True)
+
+    initial = sync()
+    assert initial.returncode == 0, initial.stderr
+    markers = [repo / "node_modules/.cloudbench-deps-fingerprint", repo / "agents/venv/.cloudbench-deps-fingerprint"]
+    original_markers = [path.read_bytes() for path in markers]
+    (repo / "value").write_text("old workspace patch\n")
+    (author / "value").write_text("next source\n")
+    if changed_dependencies:
+        (author / "agents/requirements.txt").write_text("different dependencies\n")
+    git(author, "add", ".")
+    git(author, "commit", "-qm", "next source")
+    git(author, "push", "-q", "origin", "HEAD:main")
+    target = git(author, "rev-parse", "HEAD")
+    reused = subprocess.run(["bash", str(FETCH_SCRIPT), str(repo), target],
+                            env=dict(env, CLOUDBENCH_FRESH_VOLUME="0"), capture_output=True, text=True)
+    assert reused.returncode == 0, reused.stderr
+    assert git(repo, "rev-parse", "HEAD") == target
+    assert git(repo, "rev-parse", "HEAD^{tree}") == git(author, "rev-parse", "HEAD^{tree}")
+    assert git(repo, "diff", "--name-only", "HEAD") == ""
+    assert git(repo, "show", "HEAD~1:value") == "first source", "normal retained fetch discarded available history"
+    assert (repo / "value").read_text() == "next source\n"
+    (author / "value").write_text("next source with patch\n")
+    patch = subprocess.check_output(["bash", str(WORKTREE_PATCH_SCRIPT), str(author), target])
+    prepared = tmp_path / "workspace.patch"
+    prepared.write_bytes(patch)
+    subprocess.run(["bash", str(ROOT / "scripts/cloudbench-prepare-patch.sh"), str(repo), str(prepared)], check=True)
+    git(repo, "apply", str(prepared))
+    assert (repo / "value").read_text() == "next source with patch\n"
+    result = sync()
+    assert [path.read_bytes() for path in markers] == original_markers
+    assert (repo / "node_modules/current-package").is_dir()
+    if changed_dependencies:
+        assert result.returncode == 1
+        assert "Python dependencies do not match the checked-out ref" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
 def test_snapshot_selector_prefers_new_completed_incremental_snapshot() -> None:
     spec = importlib.util.spec_from_file_location("cloudbench_select_snapshot", SNAPSHOT_SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -22537,6 +22615,21 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown(
     fleet = fleet_source_text()
     reserve = _extract_fleet_function(fleet, "reserve_cleanup_disk_space() {")
     release = _extract_fleet_function(fleet, "release_cleanup_disk_reserve() {")
+    # Synthetic df values describe this fixture, so account only its native
+    # reserve owners, independently of real fleets sharing the host device.
+    transport = tmp_path / "accounting-transport"
+    transport.mkdir()
+    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    (transport / "reserve_namespace.py").write_text(
+        "import os\nfrom pathlib import Path\noriginal = Path.lstat\ndef isolated(self, *args, **kwargs):\n    observed = original(self, *args, **kwargs)\n    if str(self) == os.environ['RESERVE_TEST_PARENT']:\n        fields = list(observed)\n        fields[2] = int(os.environ['RESERVE_TEST_DEVICE'])\n        return os.stat_result(fields)\n    return observed\nPath.lstat = isolated\n"
+    )
+    (transport / "sitecustomize.py").write_text("import reserve_namespace\n")
+    isolated_env = {
+        **os.environ,
+        "PYTHONPATH": str(transport),
+        "RESERVE_TEST_PARENT": str(tmp_path),
+        "RESERVE_TEST_DEVICE": str(namespace),
+    }
     reserve_path = tmp_path / "cleanup-disk-reserve"
     script = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
@@ -22554,6 +22647,7 @@ provider_teardown
 """
     result = subprocess.run(
         ["bash", "-c", script, "reserve", str(reserve_path)],
+        env=isolated_env,
         text=True,
         capture_output=True,
         check=False,
@@ -22580,6 +22674,7 @@ rm -f "$CLEANUP_DISK_RESERVE_FILE"
 """
     constrained = subprocess.run(
         ["bash", "-c", constrained_script, "reserve", str(constrained_path)],
+        env=isolated_env,
         text=True,
         capture_output=True,
         check=False,
@@ -22605,6 +22700,7 @@ test ! -e "$CLEANUP_DISK_RESERVE_FILE"
 """
     insufficient = subprocess.run(
         ["bash", "-c", insufficient_script, "reserve", str(insufficient_path)],
+        env=isolated_env,
         text=True,
         capture_output=True,
         check=False,
@@ -22638,6 +22734,7 @@ test "$(wc -l < "$DF_CALLS" | tr -d ' ')" = 2
 """
     raced = subprocess.run(
         ["bash", "-c", raced_script, "reserve", str(raced_path), str(df_calls)],
+        env=isolated_env,
         text=True,
         capture_output=True,
         check=False,
@@ -22653,6 +22750,8 @@ test "$(wc -l < "$DF_CALLS" | tr -d ' ')" = 2
 import errno
 import os
 import sys
+
+import reserve_namespace
 
 mode = os.environ['RESERVE_FAULT']
 sys.platform = 'freebsd' if mode == 'nonlinux' else 'linux'
@@ -22709,8 +22808,8 @@ reserve_cleanup_disk_space
         result = subprocess.run(
             ["bash", "-c", controlled, "reserve", str(exact)],
             env={
-                **os.environ,
-                "PYTHONPATH": str(fault_dir),
+                **isolated_env,
+                "PYTHONPATH": str(fault_dir) + os.pathsep + str(transport),
                 "RESERVE_FAULT": mode,
                 "ALLOCATOR_CALLS": str(calls),
                 "DD_CALLS": str(writes),
@@ -26947,6 +27046,10 @@ def test_fresh_role_bootstraps_before_repo_writes_and_ready_work(tmp_path: Path,
         check=True,
     )
     subprocess.run(["git", "-C", str(author), "config", "user.name", "fixture"], check=True)
+    (author / "value").write_text("earlier unused source")
+    subprocess.run(["git", "-C", str(author), "add", "value"], check=True)
+    subprocess.run(["git", "-C", str(author), "commit", "-qm", "earlier fixture"], check=True)
+    unused_blob = subprocess.check_output(["git", "-C", str(author), "rev-parse", "HEAD:value"], text=True).strip()
     (author / "value").write_text("exact source")
     subprocess.run(["git", "-C", str(author), "add", "value"], check=True)
     subprocess.run(["git", "-C", str(author), "commit", "-qm", "fixture"], check=True)
@@ -27017,6 +27120,11 @@ printf ready > "$REPO_DIR/ready"
         REJECTED=rejected,
     )
     result = subprocess.run(["bash", "-c", header], env=env, capture_output=True, text=True, timeout=10)
+    assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == ref
+    assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"], text=True).strip() == "true", (
+        "fresh primary/worker source bootstrap downloaded unused benchmark history"
+    )
+    assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", unused_blob], capture_output=True).returncode != 0
     if rejected:
         assert result.returncode == 1
         assert not (repo / "ready").exists()

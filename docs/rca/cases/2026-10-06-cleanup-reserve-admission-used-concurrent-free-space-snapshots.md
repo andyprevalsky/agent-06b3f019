@@ -199,3 +199,39 @@ are in `.context/fresh-basic-claude-final50-20261006/deploy/root-structural-fixt
 Full normal deployment composition and independent review remain separate gates.
 No provider/model calls, benchmark results, acceptance credit or production
 performance claim arise from these fixture controls. This case remains mitigated.
+
+
+## Remaining synthetic-capacity fixture isolation
+
+The next normal affected gate on `5e4e5458` passed 306 controls and skipped
+four existing platform cases, but its older single-controller allocation
+fixture still combined synthetic `df` values with the host-wide real admission
+ledger. Its 4 MiB capacity subcase was correctly denied by live neighboring
+controller floors before it could observe the expected 2 MiB scaling message.
+The earlier fixture repair isolated the fifty-owner and stable-birth fixtures;
+it missed this older physical-allocation and storage-error control. This is
+fixture contract maintenance, not a new runtime admission defect.
+
+Both archive searches (`insufficient physical cleanup floors pending controllers
+synthetic df` and `cleanup reserve fixture namespace concurrent fleet mocked
+free space`) lead to this owning case. The zero-fill and temporary-filesystem
+cases are relatives. A source-bound reduction preserves the exact existing
+control and all fifteen assertions. It holds one real 1 MiB sibling reserve
+in a private accounting namespace, with a live native shell owner throughout
+the control. Original source fails the same scaling assertion; the repaired
+fixture passes all allocation, low-space, post-allocation-race, physical-byte
+and storage-failure subcases. The final formatted causal pair takes 0.546
+and 1.756 seconds respectively. The native sibling reserve remains intact until
+the fixture completes; every recorded native owner and process group is absent
+after its normal handoff. No live fleet admission ledger is modified by this
+reduction, and no provider or model call occurs.
+
+The fixture now assigns its exact temporary parent a private device namespace
+through the existing local `Path.lstat` transport. It propagates that same
+namespace into each allocator-fault subprocess, preserving real process births,
+physical allocation, unchanged capacity values, and all capability/error
+assertions. Production files, budgets and cleanup floors are unchanged. The
+existing permanent `cleanup_releases_emergency_disk` deploy selection already
+owns this control. The original full-gate failure and initial private import
+setup failure remain recorded separately; neither is converted into a passing
+receipt. Final normal affected qualification remains mandatory.

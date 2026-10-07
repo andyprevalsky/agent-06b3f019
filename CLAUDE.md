@@ -1145,6 +1145,15 @@ scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse H
 `image-activate` uses the existing app environment lock and owned warm-source setup. It strictly stops the exact existing donor before environment activation, activates the published image on the donor and this workspace's stopped pool members, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
 
 REAL tasks now use fresh primary and worker volumes by default with the verified dependency image, exact authenticated Git checkout and the same canonical isolated database fixture. SIM tasks, including `--sim-on` overrides, retain their snapshot and cached World Model assets. `--snapshot-volumes` forces the historical restored-volume path for a provider diagnostic; generic `--provision-pool` and legacy startup keep compatible snapshot storage. Source-only changes reuse the pinned image and inject current bootstrap helpers. A successful clone command precedes storage readiness: inspect its exact owned IDs and keyed volume state when preflight waits; retain the original failed receipt and let the owning CLI finish cleanup.
+The first Git fetch on fresh REAL storage is shallow: it includes the complete
+requested source tree and exact commit, while earlier benchmark-repository
+versions are unavailable. Startup, patch replay, dependency checks and evaluators
+use that requested tree. Retained checkouts keep their available history and
+advance through the ordinary fetch path; a formerly fresh checkout still verifies
+the next exact ref, patch and dependency manifests. Work that requires earlier
+benchmark-repository history must retain the existing snapshot or pool path.
+This changes neither the task's own external repositories nor its task inputs.
+See `docs/rca/cases/2026-10-06-fresh-source-fetch-downloaded-unneeded-history.md`.
 
 Cloud fleets retain the aggregate progress/final publisher before the starting
 Hub write. They attempt that write once with a 120-second transport budget;

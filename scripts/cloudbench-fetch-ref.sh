@@ -190,9 +190,9 @@ fetch_args=(--no-tags --no-auto-gc)
 if git_cmd rev-parse --verify HEAD >/dev/null 2>&1; then
     fetch_args+=(--negotiation-tip=HEAD)
 elif [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
-    # The first exact checkout has no HEAD to advertise. Keep ordinary full
-    # history fetch semantics without an invalid negotiation tip.
-    :
+    # A fresh REAL volume needs the complete requested source, not historical
+    # benchmark checkouts. Retained volumes keep their existing history above.
+    fetch_args+=(--depth=1)
 else
     echo "[cloudbench] FATAL: retained checkout has no verified HEAD" >&2
     exit 1
