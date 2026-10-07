@@ -1044,6 +1044,74 @@ The canonical deployment gate and fresh unchanged CLI fleet outcome remain
 required; offline producer GREEN does not count toward the five consecutive
 50-task LIVE proofs.
 
+### 2026-10-07 recurrence: PAUSE followed by RESUME disappeared during card mint
+
+CodeRabbit discussion
+https://github.com/Rose-Ai-Labs/rose/pull/1431#discussion_r4210080313,
+review `5446122315`, identified the payment continuation guard on exact source
+`fe8e1578e75dc5cde5709aa57e127697726b648d`. After an awaited mint, that guard
+only inspected current `is_paused`. Actual `AgentWorkflow.pause` increments the
+persisted `_pause_signal_sequence`; `resume` clears `is_paused` but preserves the
+sequence. Thus PAUSE followed by RESUME during mint could start another browser
+activity for the pending task. This is an async interruption ownership bug,
+within the existing logical-inconsistency-in-harness-contracts problem class.
+
+Archive searches used `pause resume sequence payment abandon terminal` and
+`interleaving approval interrupt resume mint browser`. They found this case and
+the September 6/11 payment abandonment cases. The completed AgentCard and browser
+auth plans confirm the existing approval flow and same-task resume contract.
+The full path is the deferred browser activity, direct approval, awaited mint,
+persisted `payment_card_ready`, manager continuation, then task terminal consumed
+by the durable archive predicate. The first bad boundary is the manager's
+continuation decision: a current-state flag cannot preserve an intervening signal.
+The previous payment repair observed pauses that remained active; auth already
+used the sequence to distinguish explicit interruption from its own paused wait.
+
+The permanent reproduction extends the existing
+`test_manager_payment_pause_seals_persisted_browser_for_archive` and its owning
+fixture. An Event suspends mint after the actual approval has completed; the
+test calls actual `AgentWorkflow.pause` and `resume`, verifies unpaused state with
+sequence 1, then releases mint. It retains actual manager message serialization,
+the exact task's persisted recording, archive refresh/readiness predicate, and
+the foreign-task-terminal negative control. No model trajectory is fabricated.
+On unchanged `fe8`, the test fails with
+`AssertionError: explicit PAUSE resumed an abandoned browser`: it observed two
+activity starts. The identical test and command pass after the repair, with one
+start, one same-task abandoned terminal excluded from model context, and actual
+archive readiness. Initial import/runner setup failures are retained separately
+and do not count as RED evidence.
+
+The manager now snapshots the payment pause sequence before lookup/approval
+awaits and compares it, together with the existing current-pause check, before
+continuing. The original approval and minted-card behavior is preserved. The
+existing abandoned-resume event closes the task without inventing purchase
+success. This is constant-space local state and a constant-time comparison at
+10,000 agents; no scan, timer, poll, provider request or additional gate is added.
+
+Golden references were searched for interruption/cancellation across suspension
+and reopened at the implementation. Claude Code
+`claude-code-src/src/cli/structuredIO.ts:490` rejects the outstanding request on
+its once-only abort listener. OpenClaw
+`openclaw/src/agents/tool-search-code-mode.ts:142` settles the pending operation
+on its parent abort listener. Codex
+`codex/codex-rs/core/src/tasks/mod.rs:400` checks a task-owned cancellation token
+after its awaited run; `:940` cancels that token, which remains cancelled for the
+old task. Its read-only checkout is `622e9e36962105af50b9c250902e8b8c66a950d8`.
+These preserve the interruption of the suspended operation. Hermes
+`hermes-agent/agent/interrupt_control.py:104` fences generation-specific interrupt
+claims, while `:197` explicitly clears mutable interrupt state; no exact Temporal
+PAUSE-to-RESUME analog was found. Rose's existing persisted sequence supplies the
+operation-history check without introducing another cancellation mechanism.
+
+The reproduction remains registered in the existing browser blackbox
+`run_all_tests`, reached through `scripts/test.sh agents spawn-browser-agent-v3`.
+Existing payment approval/interruption and authentication pause/handoff owner
+controls pass. The identical command, source/test bindings and immutable RED/GREEN
+logs are retained at `.context/payment-pause-mint-rca-20261007/proof.safe.json` in
+the isolated `rose-payment-pause-mint-20261007` checkout. This offline causal proof
+does not establish original benchmark success or count toward the five fresh
+50-task LIVE runs. The frozen candidate and Control7 were not edited.
+
 Final qualification used the identical frozen fixture on baseline
 `8b895022f541ed6481711168cd0961f8b0778396`: both payment and authentication
 checks failed because real PAUSE left the manager parked (2 failed, 3.87 seconds).

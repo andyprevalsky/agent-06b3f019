@@ -11015,6 +11015,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 if result and result.get("status") == "awaiting_payment_card_approval":
                     from tools.request_user_approval import request_user_attention_direct
 
+                    payment_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
                     logger.info(
                         "Browser payment approval started",
                         agent_id=workflow_instance.agent_id,
@@ -11550,7 +11551,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         },
                     )
-                    if workflow_instance.is_paused:
+                    if (
+                        workflow_instance.is_paused
+                        or getattr(workflow_instance, "_pause_signal_sequence", 0) != payment_pause_sequence
+                    ):
                         yield _browser_abandoned_resume_event(
                             result.get("task_id") or known_task_id,
                             "Browser paused before resuming the approved payment.",

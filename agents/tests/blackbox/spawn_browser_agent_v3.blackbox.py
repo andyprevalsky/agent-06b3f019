@@ -22635,6 +22635,7 @@ async def _drive_browser_write_pause_archive_boundary(
     parked_handoff=False,
     pause_on_grant=False,
     pause_on_open=False,
+    pause_during_mint=False,
     reply_phase=None,
     rejection_feedback="Specific fixture rejection feedback",
 ):
@@ -22655,12 +22656,15 @@ async def _drive_browser_write_pause_archive_boundary(
     rows, starts, paused_starts = [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
+    mint_pending, mint_release = asyncio.Event(), asyncio.Event()
     reply_pending = asyncio.Event()
     reply_blocked = False
     wf = SimpleNamespace(
         user_id="fixture-user",
         agent_id=root,
         is_paused=False,
+        parent_workflow_id=None,
+        _has_credits=True,
         write_lock_enabled=True,
         system_name="Rose",
         context=[],
@@ -22704,6 +22708,9 @@ async def _drive_browser_write_pause_archive_boundary(
             return {"found": False, "reusable": False, "purchase": None}
         if function == "mint_purchase_card_activity":
             assert payment and not wf.is_paused, "paused payment minted a card"
+            if pause_during_mint:
+                mint_pending.set()
+                await mint_release.wait()
             return {"cardId": "fixture-card", "last4": "4242"}
         if function is post_agent_message:
             expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
@@ -22973,18 +22980,26 @@ async def _drive_browser_write_pause_archive_boundary(
             else:
                 wf._signal_responses["owned-approval"] = "approved"
                 changed.set()
+                if pause_during_mint:
+                    await asyncio.wait_for(mint_pending.wait(), 10)
+                    assert not owned.done() and len(starts) == 1
+                    await AgentWorkflow.pause(wf)
+                    await AgentWorkflow.resume(wf)
+                    assert not wf.is_paused and wf._pause_signal_sequence == 1
+                    mint_release.set()
                 await asyncio.wait_for(asyncio.shield(owned), 10)
             await owned
             assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
+            abandoned = pause or pause_on_grant or pause_during_mint
+            assert len(starts) == (1 if abandoned else 2), "explicit PAUSE resumed an abandoned browser"
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
-            if pause or pause_on_grant:
+            if abandoned:
                 assert terminals[0]["metadata"]["excludeFromModel"] is True
                 assert all(
                     terminals[0]["message"] not in str(message)
                     for message in convert_context_to_messages(rows, include_assistant=True)
                 )
-            assert len(starts) == (1 if pause or pause_on_grant else 2)
             if pause and not concurrent_approval and not reply_phase and not auth:
                 assert any(row.get("metadata", {}).get("title") == "Approval interrupted" for row in rows), (
                     "PAUSE after durable approval opening left its exact chip IN_PROGRESS"
@@ -23110,6 +23125,7 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
 async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     """A real PAUSE must finish the pending payment browser before archival."""
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_during_mint=True)
 
 
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
