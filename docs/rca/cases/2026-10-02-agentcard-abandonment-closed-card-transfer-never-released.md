@@ -206,6 +206,27 @@ The unchanged lane rerun at 22:00 on HEAD `e93e406e5` (runtime identical to
   the stall is confined to the busy shared cardholder. This supports the
   exclusive-cardholder remedy below.
 
+### Recurrence on 2026-10-07
+
+`/deploy` Step 6a for PR #1417 (deploy run `20261007-023453-343760`, HEAD
+`e2b20fa1a`, stack `1791396285-2126832-43519`) failed
+`agent-payment-abandonment` (agent `7effdfe9-3999-493b-86b3-e5c9e3ba3b5f`)
+the same way. The other three tasks passed. The same lane passed 4/4 earlier in
+this deploy on HEAD `731627b37`; the runtime change since then is the merge of
+`main` and the zero-grace teardown floor, neither of which touches reclaim or
+release observation.
+
+- Transfer `owt_…a52e` (card `card_aec0bd2ceaea33cfb4e17c36`, $43.96 mint,
+  4396 transferred). `close_card` succeeded at 18:15:34 and `recover_funds` ran
+  after each of the first five release reads. The stale-lease retry requested
+  the release again every two to three minutes from 18:18 to 18:43. All 65
+  release reads through 18:43:52 returned `consumed`, `released_cents=0`.
+- The benchmark's owned payment drain then timed out after 180 seconds. The
+  runner recorded `failed_retained` and kept the stack and database as recovery
+  authority, which correctly withheld cleanup credit. That retained stack also
+  held the Step 6b latency ratchet, a separate harness bug fixed in
+  `2026-10-07-retained-recovery-stack-held-latency-ratchet`.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
