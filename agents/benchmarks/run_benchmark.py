@@ -5935,7 +5935,7 @@ async def _refresh_browser_archive_snapshot(
                 logs.pop("browser_archive_observation", None)
                 return latest
             if time.monotonic() >= deadline:
-                raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
+                raise TimeoutError("browser evidence did not become terminal with attached recordings before archive")
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
