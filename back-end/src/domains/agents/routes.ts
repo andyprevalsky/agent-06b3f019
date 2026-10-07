@@ -20,6 +20,7 @@ import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
 import archiveRoutes from './routes.archive';
 import reportBugRoutes from './routes.reportBug';
+import phoneRoutes from './routes.phone';
 import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
 const router = Router();
@@ -313,7 +314,8 @@ router.post(
   })
 );
 
-// Mount message, attachment, signal, and schema routes
+// Mount message, attachment, signal, schema, and phone-recording routes
 router.use(messageRoutes);
+router.use(phoneRoutes);
 
 export default router;

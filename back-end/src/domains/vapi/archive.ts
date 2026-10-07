@@ -1,10 +1,15 @@
 import { VAPI_BASE_URL } from './config';
 import { createLogger } from '../../providers/logger';
 import { archiveBytes, archiveJson } from '../../providers/traceArchive';
-import { findToolSideEffectOperationKey } from './repo';
+import {
+  VAPI_CALL_OPERATION_TYPE,
+  agentIdFromOperationKey,
+  downloadVapiCallRecording,
+  findToolSideEffectOperationKey,
+} from '../../providers/vapiRecordings';
 
 const log = createLogger('VapiArchive');
-const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
+export { agentIdFromOperationKey };
 
 export type VapiPollExchange = {
   request: {
@@ -59,16 +64,7 @@ export function buildVapiPollExchange(
   };
 }
 
-export function agentIdFromOperationKey(operationKey?: string): string | null {
-  if (operationKey === undefined) return null;
-  const prefix = `${VAPI_CALL_OPERATION_TYPE}:`;
-  if (!operationKey.startsWith(prefix)) return null;
-  const rest = operationKey.slice(prefix.length);
-  const agentId = rest.split(':')[0];
-  return agentId !== undefined && agentId !== '' ? agentId : null;
-}
-
-async function agentIdForCallId(callId: string): Promise<string | null> {
+export async function agentIdForCallId(callId: string): Promise<string | null> {
   const operationKey = await findToolSideEffectOperationKey(VAPI_CALL_OPERATION_TYPE, callId);
   return agentIdFromOperationKey(operationKey ?? undefined);
 }
@@ -89,26 +85,17 @@ export async function archiveVapiJson(
 export async function archiveVapiRecording(
   rootAgentId: string | null,
   callId: string,
-  recordingUrl: unknown
+  _recordingUrl?: unknown
 ): Promise<void> {
-  if (rootAgentId === null || typeof recordingUrl !== 'string' || recordingUrl === '') return;
+  if (rootAgentId === null || callId === '') return;
   try {
-    const response = await fetch(recordingUrl, {
-      method: 'GET',
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) return;
-    const arrayBuffer = await response.arrayBuffer();
-    const responseContentType = response.headers.get('content-type');
-    const contentType =
-      responseContentType !== null && responseContentType !== ''
-        ? responseContentType
-        : 'audio/mpeg';
+    const recording = await downloadVapiCallRecording(callId);
+    if (recording === null) return;
     await archiveBytes({
       rootAgentId,
       objectPath: `media/vapi/${callId}.recording`,
-      body: Buffer.from(arrayBuffer),
-      contentType,
+      body: recording.body,
+      contentType: recording.contentType,
       compress: false,
     });
   } catch (error) {
