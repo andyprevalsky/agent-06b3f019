@@ -3965,6 +3965,12 @@ clone_failure_owned_volume_id() {  # <clone-status> <combined-output>; exact ID 
     # sufficient attribution evidence.
     [ "$clone_status" = 1 ] || return 0
 
+    # Native Fly errors can decorate this same rejection with their RPC code.
+    # Normalize the captured failed-precondition representation before both
+    # complete-transcript classification and exact target-volume extraction.
+    output="$(printf '%s\n' "$output" | sed \
+        's/^Error: failed to launch VM: failed_precondition: /Error: failed to launch VM: /')"
+
     read -r candidate_count error_count timed_out <<EOF
 $(printf '%s\n' "$output" | awk '
     index($0, "failed to launch VM: insufficient resources to create new machine with existing volume") { candidates++ }

@@ -7722,8 +7722,10 @@ exit 0
     assert volume_classification < durable_volume < name_reconciliation
 
 
+@pytest.mark.parametrize("provider_error_prefix", ["", "failed_precondition: "])
 def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
     tmp_path: Path,
+    provider_error_prefix: str,
 ) -> None:
     """A provider-created volume from a rejected VM launch is still owned.
 
@@ -7778,7 +7780,7 @@ FLY() {{
         'Cloning Machine 683e47df5094d8 into region iad' \
         'Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR' \
         'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
-        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)" >&2
+        "Error: failed to launch VM: {provider_error_prefix}insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)" >&2
       return 1 ;;
     "volumes destroy")
       printf '%s\n' "$*" >> "$CALLS"
@@ -7828,7 +7830,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
         "Cloning Machine 683e47df5094d8 into region iad",
         "Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR",
         "Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...",
-        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)",
+        f"Error: failed to launch VM: {provider_error_prefix}insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)",
     ]
     assert len(diagnostic_lines) == 6
     assert re.fullmatch(
@@ -7839,8 +7841,10 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
     assert not owner_records, "successful exact-volume cleanup must retire its owner record"
 
 
+@pytest.mark.parametrize("provider_error_prefix", ["", "failed_precondition: "])
 def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
     tmp_path: Path,
+    provider_error_prefix: str,
 ) -> None:
     """Destroy + lifecycle-read failure must retain ownership for recovery.
 
@@ -7889,7 +7893,7 @@ FLY() {{
   case "$1 $2" in
     "machine clone")
       printf '%s\n' \
-        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_exactowned'" >&2
+        "Error: failed to launch VM: {provider_error_prefix}insufficient resources to create new machine with existing volume 'vol_exactowned'" >&2
       return 1 ;;
     "volumes destroy")
       record="$(find "$FLEET_REGISTRY_DIR/clones" -type f | head -1)"
@@ -7942,8 +7946,10 @@ grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || ex
         assert log.count("volumes show vol_exactowned -a bench-app --json") == 6
 
 
+@pytest.mark.parametrize("provider_error_prefix", ["", "failed_precondition: "])
 def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
     tmp_path: Path,
+    provider_error_prefix: str,
 ) -> None:
     """An accepted asynchronous destroy must not consume the clone retry budget.
 
@@ -8023,7 +8029,7 @@ FLY() {{
           'Cloning Machine 683e47df5094d8 into region iad' \
           'Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR' \
           'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
-          "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_delayed123' (Request ID: 01M25KWX15X1CHQWYRCE2BM64G-lax)" >&2
+          "Error: failed to launch VM: {provider_error_prefix}insufficient resources to create new machine with existing volume 'vol_delayed123' (Request ID: 01M25KWX15X1CHQWYRCE2BM64G-lax)" >&2
         return 1
       fi
       printf '%s\n' 'Machine feedface000002 has been created...'
@@ -8102,6 +8108,56 @@ volume_inventory_contains_id vol_delayed123 >/dev/null || absence_rc=$?
     assert all("rc=0 response=Destroyed volume ID: vol_delayed123" in line for line in destroy_lines)
     assert "update cloudbench-111111111111111111111111  vol_delayed123 owned" in audit.read_text()
     assert "destroyed-verified-absent" not in audit.read_text()
+
+
+@pytest.mark.parametrize(
+    ("clone_status", "variant"),
+    [
+        (142, "original"),
+        (0, "original"),
+        (1, "other-provider-code"),
+        (1, "multiple-errors"),
+        (1, "timeout"),
+        (1, "invalid-volume-id"),
+        (1, "invalid-request-id"),
+        (1, "nonterminal-notice"),
+    ],
+)
+def test_prefixed_clone_volume_attribution_preserves_existing_fences(
+    clone_status: int,
+    variant: str,
+) -> None:
+    rejection = (
+        "Error: failed to launch VM: failed_precondition: insufficient resources "
+        "to create new machine with existing volume 'vol_owned123' "
+        "(Request ID: 01M4B9925JG40T2SD3AHND41PA-sjc)"
+    )
+    variants = {
+        "original": rejection,
+        "other-provider-code": rejection.replace("failed_precondition", "permission_denied"),
+        "multiple-errors": rejection + "\nError: failed to create volume: provider rejection",
+        "timeout": rejection + "\noperation timed out waiting for clone response",
+        "invalid-volume-id": rejection.replace("vol_owned123", "vol_foreign_123"),
+        "invalid-request-id": rejection.replace("01M4B9925JG40T2SD3AHND41PA-sjc", "invalid request id"),
+        "nonterminal-notice": rejection.replace("Error:", "notice:", 1),
+    }
+    classifier = _extract_fleet_function(fleet_source_text(), "clone_failure_owned_volume_id() {")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            classifier + '\nclone_failure_owned_volume_id "$1" "$2"',
+            "_",
+            str(clone_status),
+            variants[variant],
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "", "ambiguous or unrelated transcript granted exact-volume authority"
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
