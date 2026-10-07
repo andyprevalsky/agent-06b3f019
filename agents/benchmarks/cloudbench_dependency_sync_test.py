@@ -1068,6 +1068,44 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     assert 'attempts="$(isolated_backend_ready_attempts)"' in stack
 
 
+def test_fleet_gives_a_long_catalog_task_its_own_default_budget() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
+    script = f"""set -euo pipefail
+ROOT_DIR={shlex.quote(str(ROOT))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+{catalog_fn}
+{budget_fn}
+_catalog_modes_for_batch phone-call-hold-queue phone-call-client-intake
+for operator_set in 0 1; do
+    for budget in 7200 300; do
+        printf 'budget %s %s %s %s\\n' "$operator_set" "$budget" \\
+            "$(bench_execution_budget 12600 "$budget" "$operator_set")" \\
+            "$(bench_execution_budget 600 "$budget" "$operator_set")"
+    done
+done
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    catalog = {task["name"]: task for task in json.loads(TASKS_JSON.read_text())}
+    hold_timeout = catalog["phone-call-hold-queue"]["timeout_seconds"]
+    intake_timeout = catalog["phone-call-client-intake"]["timeout_seconds"]
+    assert hold_timeout > 7200 > intake_timeout
+    assert lines[:2] == [f"real\tplain\t{hold_timeout}", f"real\tplain\t{intake_timeout}"]
+    assert lines[2:] == [
+        "budget 0 7200 12600 7200",
+        "budget 0 300 12600 600",
+        "budget 1 7200 7200 7200",
+        "budget 1 300 300 300",
+    ]
+    assert 'BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$bench_backstop" \\' in fleet
+    assert '[ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS+x}" ] && BACKSTOP_OPERATOR_SET="1"' in fleet
+    assert 'RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"' in fleet
+    assert "DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)" in fleet
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
@@ -1078,8 +1116,9 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS" in cloud
     assert 'START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"' in fleet
     assert "CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))" in fleet
+    assert "bench_child_timeout=$((bench_run_timeout + START_BARRIER_WAIT_SECONDS))" in fleet
     assert 'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"' in fleet
-    assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
+    assert '--timeout "$bench_child_timeout"' in fleet
     assert "deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     # The barrier now tolerates infra failures (see

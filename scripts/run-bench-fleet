@@ -44,7 +44,9 @@
 #                      controller's exact exit status (durable supervisors)
 #   --recover-stale-owner <32-hex-token>
 #                      internal exact-owner recovery after forced cancellation
-#   --timeout <s>      controller ceiling passed to run-bench-cloud (default 7200)
+#   --timeout <s>      controller ceiling passed to run-bench-cloud (default 7200;
+#                      a longer catalog timeout_seconds extends only the default,
+#                      as it does an unset BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)
 #   --autoscale-max N  per-bench ceiling including the primary; must be >=2
 #                      (default 15 = prod MAX_MACHINES)
 #   --infra-probe      fleet substrate canary: bring-up + barrier + DONE without
@@ -893,6 +895,9 @@ BENCH_REF=""
 DASH_BASE="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 KEEP_CLONES="0"
 RUN_TIMEOUT="7200"
+RUN_TIMEOUT_OPERATOR_SET="0"
+BACKSTOP_OPERATOR_SET="0"
+[ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS+x}" ] && BACKSTOP_OPERATOR_SET="1"
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
 case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
     ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
@@ -1040,7 +1045,7 @@ while [ $# -gt 0 ]; do
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
         --keep-clones)    KEEP_CLONES="1"; shift ;;
-        --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
+        --timeout)        RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"; shift 2 ;;
         --autoscale-max)
             AUTOSCALE_MAX="${2:-}"
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
@@ -1185,12 +1190,32 @@ for row in rows:
     if browser_required is not None and not isinstance(browser_required, bool):
         print(f"invalid browser requirement for {row['name']}", file=sys.stderr)
         raise SystemExit(1)
+    timeout_seconds = row.get("timeout_seconds")
+    if timeout_seconds is None:
+        timeout_seconds = 0
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds < 0:
+        print(f"invalid timeout_seconds for {row['name']}", file=sys.stderr)
+        raise SystemExit(1)
     print(("simulate" if world_model_mode == "simulate" else "real")
-          + "\t" + ("browser" if browser_required else "plain"))
+          + "\t" + ("browser" if browser_required else "plain")
+          + "\t" + str(timeout_seconds))
 PY
 }
 
+# A catalog timeout longer than a default budget extends that task's budget;
+# an operator-set --timeout or BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS stays a
+# hard cap, matching run_benchmark.agent_execution_backstop_seconds.
+bench_execution_budget() {  # <catalog-timeout-seconds> <budget-seconds> <operator-set 0|1>
+    local catalog_timeout="$1" budget="$2" operator_set="$3"
+    if [ "$operator_set" != "1" ] && [ "$catalog_timeout" -gt "$budget" ]; then
+        printf '%s\n' "$catalog_timeout"
+    else
+        printf '%s\n' "$budget"
+    fi
+}
+
 CATALOG_MODES=()
+CATALOG_TIMEOUTS=()
 CATALOG_BROWSER_REQUIRED_TASKS=()
 if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
@@ -1198,7 +1223,7 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
         exit 1
     fi
     catalog_index=0
-    while IFS=$'\t' read -r catalog_mode browser_requirement; do
+    while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout; do
         [ -n "$catalog_mode" ] || continue
         case "$catalog_mode" in
             real|simulate) CATALOG_MODES+=("$catalog_mode") ;;
@@ -1209,6 +1234,10 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
             plain) ;;
             *) echo "❌ benchmark catalog returned invalid browser requirement: $browser_requirement" >&2; exit 1 ;;
         esac
+        case "$catalog_timeout" in
+            ''|*[!0-9]*) echo "❌ benchmark catalog returned invalid timeout: $catalog_timeout" >&2; exit 1 ;;
+        esac
+        CATALOG_TIMEOUTS+=("$catalog_timeout")
         catalog_index=$((catalog_index + 1))
     done <<< "$catalog_modes_output"
     if [ "${#CATALOG_MODES[@]}" -ne "${#BENCHES[@]}" ]; then
@@ -1271,8 +1300,13 @@ if [ "$DETACH" = "1" ]; then
     SCRIPT_SNAPSHOT_HANDOFF_STATUS_FILE="$DETACH_STATUS"
     rm -f "$DETACH_STATUS" "$DETACH_OWNER" \
         "$DETACH_STATUS".tmp.* "$DETACH_OWNER".tmp.* 2>/dev/null || true
+    # The exported default must not reach the detached controller as an
+    # operator-set backstop, which would cap a longer catalog task timeout.
+    DETACH_ENV_UNSET=()
+    [ "$BACKSTOP_OPERATOR_SET" = "1" ] \
+        || DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)
     if ! cloudbench_detach_reexec_tracked "$DETACH_OWNER" "$DETACH_LOG" \
-        env CLOUDBENCH_FLEET_OWNER_TOKEN="$FLEET_OWNER_TOKEN" \
+        env ${DETACH_ENV_UNSET[@]+"${DETACH_ENV_UNSET[@]}"} CLOUDBENCH_FLEET_OWNER_TOKEN="$FLEET_OWNER_TOKEN" \
             CLOUDBENCH_DETACHED_STATUS_FILE="$DETACH_STATUS" \
             CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE="$detached_snapshot_mode" bash -c '
 status_file="$1"
@@ -13274,9 +13308,19 @@ for bench in "${BENCHES[@]}"; do
         echo "❌ [$bench] could not derive an isolated Temporal workspace" >&2
         exit 1
     fi
+    bench_run_timeout="$(bench_execution_budget "${CATALOG_TIMEOUTS[$i]}" "$RUN_TIMEOUT" "$RUN_TIMEOUT_OPERATOR_SET")"
+    bench_backstop="$(bench_execution_budget "${CATALOG_TIMEOUTS[$i]}" "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" "$BACKSTOP_OPERATOR_SET")"
+    bench_child_timeout="$bench_run_timeout"
+    if [ "$SYNCHRONIZED_START" = "1" ]; then
+        bench_child_timeout=$((bench_run_timeout + START_BARRIER_WAIT_SECONDS))
+    fi
+    if [ "$bench_run_timeout" != "$RUN_TIMEOUT" ] || [ "$bench_backstop" != "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" ]; then
+        echo "   ⏱️  [$bench] catalog timeout ${CATALOG_TIMEOUTS[$i]}s: run timeout ${bench_run_timeout}s, execution backstop ${bench_backstop}s"
+    fi
     # Bind the guest runtime and its autoscaler to one owner-derived token.
     # The supervisor's separate finish marker still means the entire collector
     # and its descendants have exited, including on controller cancellation.
+    BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$bench_backstop" \
     CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
     CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i" \
     CLOUDBENCH_ENV_VERIFIED=1 \
@@ -13311,7 +13355,7 @@ for bench in "${BENCHES[@]}"; do
             --no-open \
             "$mode_flag" \
             --ref "$BENCH_REF" \
-            --timeout "$CHILD_RUN_TIMEOUT" \
+            --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
     CHILD_PIDS+=("$!")
     CHILD_OUT+=("$out")
