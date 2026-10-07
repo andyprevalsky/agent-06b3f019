@@ -1291,3 +1291,63 @@ The receipt `root-parked-approval-independent-review.safe.json` has SHA-256
 `632560727f529e34af2332ee115fbfce3aa2d132f5867fbadd5f143abfd8c6c3`.
 The author proof remains immutable. Exact-head automated review and production
 rollout remain separate mandatory gates; this qualification adds no LIVE50 credit.
+
+
+### 2026-10-07 review recurrence: restored payment pause checked after card mint
+
+Fresh exact-head review `5447373912`, inline `4211148049`, found a remaining
+financial boundary on `d03b9eb8c`: restoring the original approval sequence
+prevented browser resumption, but the first card mint still preceded that check.
+The existing permanent payment archive controls now count actual mint activity
+calls. Three unchanged commands failed on the reviewed handler: an approved
+parked PAUSE→RESUME minted a card, PAUSE→RESUME after actual approval persistence
+minted a card, and PAUSE→RESUME during the company-funding wait issued a second
+mint. All three assertions passed after the repair, using identical test bytes.
+
+The critical path is original approval sequence → actual continuation restore or
+approval persistence → changed sequence while active → card activity → final
+browser-resume check. The first bad boundary is the financial side effect: it did
+not enforce the same original sequence as the browser resume. The prior test
+observed only browser activity starts, so a cancelled browser with an already
+minted card incorrectly passed. This is an owning-boundary review recurrence;
+no live task or benchmark outcome is claimed. Archive searches were `Check the
+restored pause sequence before minting a card` and `payment approval card side
+effect after pause generation handoff`. The October2 cooperative attention case
+is a relative; this existing archive producer case owns the recurrence.
+
+The shared predicate now checks both current pause and the supplied original
+sequence. Payment passes that sequence into its existing joined approval helper.
+An interrupted fresh request is never opened; a parked request runs the existing
+response/cancellation path so its real decision is preserved or its exact pending
+chip is closed. Every mint attempt checks that predicate, including funding and
+setup/gate retries. A private control-flow exception returns the existing exact
+browser-abandoned terminal. The final browser-resume check remains necessary for
+a pause occurring during an already-started mint or card-ready persistence. No
+manager-entry guard, fabricated rejection/card, alternate approval, timeout or
+benchmark definition is added. Legacy hints still use the current sequence.
+Deleting approval or mint retries would break valid purchasing; unifying their
+interruption predicate and the mint entry point prevents these proven siblings.
+
+From `agents`, the exact pre/post recipe was `source venv/bin/activate`, then
+`PYTHONPATH=.:tests/blackbox python
+../.context/registry-checkpoint-deploy.private/parked-approval-owning-launcher.private.py
+<existing-owner>`. Existing owners are
+`test_manager_payment_pause_seals_persisted_browser_for_archive`,
+`test_manager_payment_pause_preserves_approval_and_interruptions`, and
+`test_manager_payment_card_approval_uses_registered_activity_names_and_resumes`.
+Each actual RED exited1; each unchanged GREEN exited0. All ten registered
+write/payment/auth owning controls passed, preserving actual decision metadata,
+normal parked handoffs, legacy hints and exact archive/browser identity. The
+immutable proof and original log hashes are private in
+`payment-mint-boundary-proof.safe.json`.
+
+Golden references were re-read directly: Claude Code
+`src/hooks/useCancelRequest.ts:99` uses the original abort signal; OpenClaw
+`src/talk/agent-run-control.ts:83` binds control to the admitted owner/signal;
+Hermes `gateway/platforms/api_server_runs.py:651` releases that run's approval
+waiter; Codex `codex-rs/core/src/session/step_activation.rs:247` retains the
+original non-cancelled target and `session/turn_suspension.rs:72` cancels its token.
+They share identity-bound cancellation; Rose's existing approval service supplies
+the actual decision-preservation protocol used here. Independent root review and
+fresh exact-head review3 remain required. No model/provider calls, C9 mutation,
+production rollout, fresh whole-suite execution or LIVE50 acceptance is claimed.

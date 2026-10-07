@@ -21828,6 +21828,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
 async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_between_mint_retries=True)
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from domains.spawn_browser_agent_v3.service_actions import get_domain_from_url
     from tools.base import MessageStatus
@@ -22635,10 +22636,13 @@ async def _drive_browser_write_pause_archive_boundary(
     parked_handoff=False,
     resume_between_generations=False,
     legacy_approval_hint=False,
+    pending_parked_approval=False,
+    pause_on_approval=False,
     pause_on_grant=False,
     resume_on_grant=False,
     pause_on_open=False,
     pause_during_mint=False,
+    pause_between_mint_retries=False,
     reply_phase=None,
     rejection_feedback="Specific fixture rejection feedback",
 ):
@@ -22656,7 +22660,7 @@ async def _drive_browser_write_pause_archive_boundary(
 
     root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
     task_id = browser._stable_browser_task_id(root, tool)
-    rows, starts, paused_starts = [], [], []
+    rows, starts, paused_starts, mints = [], [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
     mint_pending, mint_release = asyncio.Event(), asyncio.Event()
@@ -22711,6 +22715,9 @@ async def _drive_browser_write_pause_archive_boundary(
             return {"found": False, "reusable": False, "purchase": None}
         if function == "mint_purchase_card_activity":
             assert payment and not wf.is_paused, "paused payment minted a card"
+            mints.append(copy.deepcopy(args))
+            if pause_between_mint_retries and len(mints) == 1:
+                return {"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": 5}
             if pause_during_mint:
                 mint_pending.set()
                 await mint_release.wait()
@@ -22733,6 +22740,10 @@ async def _drive_browser_write_pause_archive_boundary(
                     await AgentWorkflow.resume(wf)
                     assert not wf.is_paused and wf._pause_signal_sequence == 1
             result = await function(*args)
+            if pause_on_approval and (args[3] or {}).get("title") == "✓ User approval received":
+                await AgentWorkflow.pause(wf)
+                await AgentWorkflow.resume(wf)
+                assert not wf.is_paused and wf._pause_signal_sequence == 1
             if (
                 reply_phase == "rejected-persisted"
                 and not reply_blocked
@@ -22766,6 +22777,17 @@ async def _drive_browser_write_pause_archive_boundary(
             parked.set()
             await changed.wait()
             changed.clear()
+
+    original_sleep = browser.sleep_or_generation_handoff
+
+    async def funding_wait(workflow_instance, seconds, **kwargs):
+        if pause_between_mint_retries:
+            assert workflow_instance is wf and seconds == 5
+            await AgentWorkflow.pause(wf)
+            await AgentWorkflow.resume(wf)
+            assert not wf.is_paused and wf._pause_signal_sequence == 1
+            return
+        return await original_sleep(workflow_instance, seconds, **kwargs)
 
     class Handle:
         def done(self):
@@ -22843,6 +22865,7 @@ async def _drive_browser_write_pause_archive_boundary(
         patch.object(browser.workflow, "start_activity", side_effect=start_activity),
         patch.object(browser.workflow, "execute_activity", side_effect=execute_activity),
         patch.object(browser.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(browser, "sleep_or_generation_handoff", side_effect=funding_wait),
         patch.object(browser, "get_manager", return_value=browser.SpawnBrowserAgentManagerV3()),
     ):
         assert await save_browser_action_message(
@@ -22925,11 +22948,23 @@ async def _drive_browser_write_pause_archive_boundary(
                     restored._track_usage = AsyncMock()
                     restored._check_generation_handoff = AsyncMock(return_value=None)
                     wf = restored
-                    if not pause or resume_between_generations:
+                    if (not pause or resume_between_generations) and not pending_parked_approval:
                         wf._signal_responses["owned-approval"] = "authenticated" if auth else "approved"
                     owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
                     await asyncio.wait_for(asyncio.shield(owned), 10)
                     assert len(starts) == (1 if pause else 2)
+                    if payment:
+                        assert len(mints) == (0 if pause else 1), "abandoned parked payment minted a card"
+                        if pause and resume_between_generations and not pending_parked_approval:
+                            assert any(
+                                row.get("metadata", {}).get("title") == "✓ User approval received"
+                                for row in rows
+                            ), "abandonment discarded the original approval decision"
+                        if pending_parked_approval:
+                            assert any(
+                                row.get("metadata", {}).get("title") == "Approval interrupted"
+                                for row in rows
+                            ), "abandoned parked approval left its original chip open"
                     terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
                     assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
                     if pause:
@@ -23002,7 +23037,15 @@ async def _drive_browser_write_pause_archive_boundary(
                 await asyncio.wait_for(asyncio.shield(owned), 10)
             await owned
             assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
-            abandoned = pause or pause_on_grant or pause_during_mint
+            abandoned = pause or pause_on_grant or pause_during_mint or pause_on_approval or pause_between_mint_retries
+            if pause_between_mint_retries:
+                assert len(mints) == 1, "abandoned funding retry issued another mint activity"
+            if pause_on_approval:
+                assert not mints, "payment minted after approval persistence observed PAUSE and RESUME"
+                assert any(
+                    row.get("metadata", {}).get("title") == "✓ User approval received"
+                    for row in rows
+                ), "pause rewrote the original approval decision"
             assert len(starts) == (1 if abandoned else 2), "explicit PAUSE resumed an abandoned browser"
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
@@ -23149,9 +23192,14 @@ async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(
         pause=True, payment=True, handoff=True, parked_handoff=True, resume_between_generations=True
     )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, payment=True, handoff=True, parked_handoff=True,
+        resume_between_generations=True, pending_parked_approval=True
+    )
 
 
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, concurrent_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_grant=True)
