@@ -552,20 +552,29 @@ class BootstrapRecoveryTest(unittest.TestCase):
         self.assertFalse((out / "guest-bootstrap.confirmed").exists())
 
     def test_adjacent_provenance_validator_must_match_the_bound_ref(self):
-        helper = ROOT / "cloudbench_execution_provenance.py"
-        original = helper.read_bytes()
-        try:
-            helper.write_bytes(original + b"\n# mismatched local validator\n")
-            with self.assertRaisesRegex(
-                ValueError, "local provenance validator differs"
-            ):
-                recovery.bound_recipe(
-                    recovery.fields(self.registry / "meta"),
-                    self.config,
-                    self.provenance,
-                )
-        finally:
-            helper.write_bytes(original)
+        # Concurrent deploy gates read the checkout's validator; mutate a private copy.
+        private = self.base / "private-scripts"
+        write(
+            private / "cloudbench-prestack-recovery.py",
+            (ROOT / "cloudbench-prestack-recovery.py").read_bytes(),
+        )
+        write(
+            private / "cloudbench_execution_provenance.py",
+            (ROOT / "cloudbench_execution_provenance.py").read_bytes()
+            + b"\n# mismatched local validator\n",
+        )
+        private_spec = importlib.util.spec_from_file_location(
+            "bootstrap_recovery_private", private / "cloudbench-prestack-recovery.py"
+        )
+        assert private_spec and private_spec.loader
+        private_recovery = importlib.util.module_from_spec(private_spec)
+        private_spec.loader.exec_module(private_recovery)
+        with self.assertRaisesRegex(ValueError, "local provenance validator differs"):
+            private_recovery.bound_recipe(
+                private_recovery.fields(self.registry / "meta"),
+                self.config,
+                self.provenance,
+            )
 
     def test_absent_packed_provenance_document_is_explicit(self):
         mutant = copy.deepcopy(self.config)
