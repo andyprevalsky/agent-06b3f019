@@ -730,8 +730,11 @@ def _cloud_controller_source():
     ).read_text()
 
 
-@pytest.mark.parametrize("probe_timeout,delay,expected", [(None, 0, 10), ("8", 5.2, 8), ("999", 0, 270)])
-def test_explicit_codex_stage_uses_owned_probe_budget(tmp_path, probe_timeout, delay, expected):
+@pytest.mark.parametrize(
+    "probe_timeout,delay,expected,slack",
+    [(None, 0, 10, 0), ("8", 5.2, 8, 0), ("999", 0, 270, 1)],
+)
+def test_explicit_codex_stage_uses_owned_probe_budget(tmp_path, probe_timeout, delay, expected, slack):
     """Exercise the actual timeout owner, including a valid connection beyond five seconds."""
     import re
     import shlex
@@ -800,7 +803,9 @@ stage_explicit_codex_auth /cloudbench-codex-auth.py
         process.communicate()
     assert process.returncode == 0, (process.returncode, stdout, stderr)
     budgets = [int(value) for value in (tmp_path / "budgets").read_text().splitlines()]
-    assert budgets[0] == expected
+    # Bash SECONDS advances on wall-clock second boundaries, so a boundary between
+    # setting the stage deadline and reading its first remaining budget costs one second.
+    assert expected - slack <= budgets[0] <= expected
     assert len(budgets) == 3 and all(0 < value <= 270 for value in budgets)
     calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     assert [call["transport"] for call in calls] == ["console", "sftp", "console"]

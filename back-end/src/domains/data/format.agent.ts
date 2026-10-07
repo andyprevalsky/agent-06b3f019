@@ -8,7 +8,9 @@ export function buildAgentTrajectoryMatch(
   input: ValidatedGrepInput
 ): GrepMatch {
   const path = buildAgentTrajectoryPath(row.rootAgentId, row.agentId, row.role, row.messageId);
-  const toolStatus = /^\*\*Status\*\*:\s*(.+)$/i.exec(row.searchText.split('\n', 1)[0])?.[1];
+  const toolStatus = /^(?:\*\*Goal\*\*:[\s\S]*?\n\n)?\*\*Status\*\*:[^\S\n]*(.+)/i.exec(
+    row.searchText
+  )?.[1];
   const heading = [
     `trace_path: ${path}`,
     `message_role: ${row.role}`,
