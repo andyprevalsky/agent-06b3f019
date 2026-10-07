@@ -3,7 +3,7 @@
 set -euo pipefail
 
 cloudbench_install_pgvector() (
-    local pg_major server_version temporary source_dir pg_config
+    local pg_major server_version installed_version temporary source_dir pg_config
     pg_major="$(ls /usr/lib/postgresql | sort -n | tail -1)"
     [[ "$pg_major" =~ ^[0-9]+$ ]] || { echo "installed PostgreSQL major is missing" >&2; return 1; }
     if test -f "/usr/share/postgresql/$pg_major/extension/vector.control" \
@@ -20,6 +20,9 @@ cloudbench_install_pgvector() (
         apt-get install -y --no-install-recommends build-essential \
             "postgresql-server-dev-$pg_major" "postgresql-$pg_major"
     fi
+    # Either path must leave headers from the same build as the server that loads vector.so.
+    installed_version="$(dpkg-query -W -f='${Version}' "postgresql-$pg_major")"
+    test "$(dpkg-query -W -f='${Version}' "postgresql-server-dev-$pg_major")" = "$installed_version"
 
     temporary="$(mktemp -d)"
     trap 'rm -rf "$temporary"' EXIT

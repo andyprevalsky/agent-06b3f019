@@ -325,7 +325,18 @@ source "$1"
 fixture="$2"
 mode="$3"
 ls() { [[ "$*" == /usr/lib/postgresql ]]; printf '15\n'; }
-dpkg-query() { [[ "$*" == '-W -f=${Version} postgresql-15' ]]; printf '15.18-0+deb12u1'; }
+current_version() {
+    if [[ -e "$fixture/upgraded" ]]; then printf '15.19-0+deb12u1'; else printf '15.18-0+deb12u1'; fi
+}
+dpkg-query() {
+    if [[ "$*" == '-W -f=${Version} postgresql-15' ]]; then
+        if [[ "$mode" == withdrawn-pin-held-server ]]; then printf '15.18-0+deb12u1'; else current_version; fi
+    elif [[ "$*" == '-W -f=${Version} postgresql-server-dev-15' ]]; then
+        current_version
+    else
+        return 1
+    fi
+}
 test() {
     if [[ "$*" == '-f /usr/share/postgresql/15/extension/vector.control' ]]; then
         builtin test -f "$fixture/control"
@@ -342,8 +353,11 @@ apt-get() {
     if [[ "$*" == *postgresql-15-pgvector* ]]; then
         printf 'postgresql-15-pgvector : Breaks: postgresql-15-jit-llvm (< 19)\n' >&2
         return 100
-    elif [[ "$1" == install ]]; then
-        [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1' ]]
+    elif [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1' ]]; then
+        [[ "$mode" != withdrawn-pin* ]] || return 100
+    elif [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15 postgresql-15' ]]; then
+        [[ "$mode" == withdrawn-pin* ]] || return 1
+        touch "$fixture/upgraded"
     else
         [[ "$*" == update ]]
     fi
@@ -384,6 +398,8 @@ cloudbench_install_pgvector
         "build-failure",
         "missing-control",
         "missing-library",
+        "withdrawn-pin",
+        "withdrawn-pin-held-server",
     ):
         fixture = tmp_path / mode
         fixture.mkdir()
@@ -403,15 +419,23 @@ cloudbench_install_pgvector
             timeout=5,
         )
         assert not (fixture / "temporary").exists(), "source-build cleanup was abandoned"
-        if mode != "complete":
+        if mode not in {"complete", "withdrawn-pin"}:
             assert result.returncode != 0, mode
             assert not ((fixture / "control").exists() and (fixture / "library").exists())
+            if mode == "withdrawn-pin-held-server":
+                assert not (fixture / "build-calls").exists(), "built against headers from another server build"
             continue
         assert result.returncode == 0, result.stdout + result.stderr
-        assert (fixture / "apt-calls").read_text().splitlines() == [
-            "update",
-            "install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1",
-        ]
+        pinned = "install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1"
+        if mode == "withdrawn-pin":
+            assert "exact PostgreSQL 15.18-0+deb12u1 packages unavailable" in result.stderr
+            assert (fixture / "apt-calls").read_text().splitlines() == [
+                "update",
+                pinned,
+                "install -y --no-install-recommends build-essential postgresql-server-dev-15 postgresql-15",
+            ]
+        else:
+            assert (fixture / "apt-calls").read_text().splitlines() == ["update", pinned]
         builds = (fixture / "build-calls").read_text().splitlines()
         assert len(builds) == 2 and builds[1] == builds[0] + " install"
 
