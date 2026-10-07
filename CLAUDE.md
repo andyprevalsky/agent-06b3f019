@@ -122,10 +122,22 @@ Python or make a Git pack appear empty even though `ls` reports its full logical
 size. Finder's **Keep Downloaded** does not repair an already stalled iCloud
 sync; a fresh clone on local storage avoids that dependency.
 
+Before installing anything, inspect an existing healthy Developer checkout
+(the installed trees in `~/Developer/rose-pr1299` were verified). Reuse them
+when the root/workspace `package.json` files, committed package lockfiles and
+`agents/requirements.txt` match, with the same platform and pinned toolchains.
+Preserve the installation's layout: npm workspaces may hoist packages such as
+`dotenv` into root `node_modules`, while package-local installs keep them under
+`back-end/node_modules`. Link the existing root tree **and** each existing
+package tree into the same relative paths, plus the matching `agents/venv`;
+package trees alone do not reproduce a hoisted installation. Keep healthy trees
+and lockfiles intact. Activate the reused venv so child `python3` uses it too.
+
 Start Docker Desktop. Use Python **3.11.9** for `agents/venv` and Node
 **20.10.0** for the Mac app (`source ~/.nvm/nvm.sh`, `nvm install 20.10.0`,
 `nvm use 20.10.0`). Select the installed Python 3.11.9 explicitly when an asdf
-shim points elsewhere. Install backend, frontend, and Mac app dependencies in
+shim points elsewhere. When no matching healthy installation is available,
+install backend, frontend, and Mac app dependencies in
 their package directories with `npm install`; create `agents/venv` with
 `python3.11 -m venv venv` from `agents/`, activate it, and run
 `pip install -r requirements.txt`. Run `bash scripts/sync-reference-repos.sh`.
@@ -154,6 +166,20 @@ After installing backend dependencies, run `npx prisma generate` from
 client used by the seed/index scripts.
 For direct agent tests, run from `agents/` with `source venv/bin/activate`;
 an absolute venv Python alone leaves subprocess `python3` on the asdf shim.
+Before a fleet run, or before starting an image-build-to-fleet measurement,
+select the installed backend/frontend Node (22.13.0 was verified), activate the
+agents venv, and run this cheap check from the repository root:
+
+```bash
+(cd back-end && node --import tsx -e "require('./scripts/seed-dump-cache.ts'); console.log('backend seed-cache imports ready')")
+```
+
+This imports the actual canonical seed-cache producer through its installed
+TypeScript loader and dependency graph, allowing both npm layouts. It does not
+invoke the seed CLI, read its env file, contact R2 or start a stack. Resolve a
+failure before starting the measurement; an image-only publication needs no
+backend import check. See RCA
+`2026-10-07-controller-worktree-omitted-hoisted-root-dependencies`.
 Install the matching browser once with `python -m playwright install chromium`
 inside that activated venv before browser blackbox tests.
 Use the browser-use version pinned in `agents/requirements.txt`: native
@@ -984,7 +1010,9 @@ minimal benign comment change in `agents/benchmarks/__init__.py` in its own
 checkout for each trial, record the resulting fetchable immutable ref, and build
 from that same checkout. This marker changes neither executable behavior nor the
 39 bootstrap/79 dependency inputs. Preserve any already-running control's source.
-Use the supported uncached image build and exact-image activation for every trial:
+Complete Fresh clone setup's backend import check before recording the image
+start clock. Use the supported uncached image build and exact-image activation
+for every trial:
 
 ```bash
 trial_dir=".context/daily-live50/$(date -u +%Y%m%d-%H%M%S)"
