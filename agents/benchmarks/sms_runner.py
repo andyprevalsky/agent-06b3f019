@@ -651,20 +651,26 @@ Clarification of the declared criteria: {evaluator.get("judge_prompt", "")}
 
 async def run_sms_llm_judge(task: BenchmarkTask, evaluator: dict, turns: list[SmsTurn], scenario: dict) -> dict:
     """Judge the SMS trajectory itself — what the human's phone actually showed."""
-    from benchmarks.run_benchmark import _benchmark_judge_claude_auth_kwargs
+    from benchmarks.run_benchmark import _benchmark_judge_claude_auth_kwargs, _judge_until_verdict
     from helpers.llm import check_progress
 
     claude_auth = await _benchmark_judge_claude_auth_kwargs()
-    return await check_progress(
-        context=[
-            {"role": "USER", "text": "Evaluate this SMS thread against the criteria."},
-            {"role": "TOOL", "text": json.dumps(build_judge_transcript(turns), default=str)},
-        ],
-        verifier_system_prompt=build_sms_verifier_prompt(task, evaluator, scenario),
-        response_schema=None,
-        call_site="benchmark_sms_evaluator",
-        **claude_auth,
-    )
+    transcript_text = json.dumps(build_judge_transcript(turns), default=str)
+    verifier_prompt = build_sms_verifier_prompt(task, evaluator, scenario)
+
+    async def judge() -> dict:
+        return await check_progress(
+            context=[
+                {"role": "USER", "text": "Evaluate this SMS thread against the criteria."},
+                {"role": "TOOL", "text": transcript_text},
+            ],
+            verifier_system_prompt=verifier_prompt,
+            response_schema=None,
+            call_site="benchmark_sms_evaluator",
+            **claude_auth,
+        )
+
+    return await _judge_until_verdict(judge)
 
 
 async def evaluate_sms_turns(
@@ -689,11 +695,9 @@ async def evaluate_sms_turns(
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
                 raise ValueError(f"Unsupported evaluator method for runner='sms': {method}")
-        except Exception as exc:  # noqa: BLE001 — fail closed, surface the cause
+        except Exception as exc:  # fail closed, surface the cause
             raise RuntimeError(f"SMS evaluator {evaluator_id} execution failed: {exc}") from exc
-        results.append(
-            {"id": evaluator_id, "method": method, "score": score, "passed": passed, "reasoning": reasoning}
-        )
+        results.append({"id": evaluator_id, "method": method, "score": score, "passed": passed, "reasoning": reasoning})
         if not passed:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
     return True, None, results
@@ -771,7 +775,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
                     print(f"       ↳ {message[:140]}")
 
         passed, failure_reason, evaluator_results = await evaluate_sms_turns(task, turns, build_judge_scenario(script))
-    except Exception as exc:  # noqa: BLE001 — a harness error is a task failure, not a crash
+    except Exception as exc:  # a harness error is a task failure, not a crash
         execution_error = True
         passed = False
         failure_reason = f"SMS runner error: {exc}"
