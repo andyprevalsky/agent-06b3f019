@@ -298,6 +298,7 @@ async def waterfall_complete(
             skip_cache_write=skip_cache_write,
         )
         emitted_user_visible = False
+        pending_metadata: Optional[StreamChunk] = None
         try:
             source = _stream_one_step(
                 body=body,
@@ -313,9 +314,19 @@ async def waterfall_complete(
             if stream_guard is not None:
                 source = stream_guard(source)
             async for chunk in source:
+                if chunk.kind == "metadata":
+                    pending_metadata = chunk
+                    continue
+                # A failed pre-output leg must not publish its model identity.
+                # Flush before any selected-leg payload, including usage/done.
+                if pending_metadata is not None:
+                    yield pending_metadata
+                    pending_metadata = None
                 if chunk.kind in {"content", "reasoning", "tool_call", "codex_reasoning_item"}:
                     emitted_user_visible = True
                 yield chunk
+            if pending_metadata is not None:
+                yield pending_metadata
             return
         except RoseError as exc:
             if emitted_user_visible or isinstance(exc, RoseDeadlineError):

@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 import urllib.error
@@ -278,7 +280,9 @@ def _with_run_group(bundle: dict) -> dict:
     if existing is not None and existing != group:
         raise ValueError("benchmark Hub group identity changed")
     return {
-        **bundle, "group_run_id": group, "group_member_id": member,
+        **bundle,
+        "group_run_id": group,
+        "group_member_id": member,
         "group_run_number": int(os.environ.get("RUN_BENCH_CAMPAIGN_RUN", "1")),
         "group_timestamp": os.environ.get("RUN_BENCH_CAMPAIGN_STARTED_AT", ""),
         "group_total": int(os.environ.get("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "0")),
@@ -625,21 +629,70 @@ def _main() -> int:
     action.add_argument("--verify-visible", metavar="RUN_ID")
     parser.add_argument("--run-id")
     parser.add_argument("--source", default="direct-benchmark")
+    parser.add_argument("--follow-record-on-cancel", action="store_true")
+    parser.add_argument("--publication-ack", type=Path)
+    parser.add_argument("--publication-token")
     args = parser.parse_args()
+    if args.publication_ack and not (args.follow_record_on_cancel and args.publication_token):
+        parser.error("publication acknowledgement requires its campaign owner")
     if args.verify_visible:
         verify_run_visible(args.verify_visible)
         return 0
     path = Path(args.require_visible or args.register_starting or args.upload_final or args.upload_live)
+    cancelled = False
+
+    def cancellation(_signal, _frame):
+        nonlocal cancelled
+        cancelled = True
+
+    previous_handlers = {}
+    if args.follow_record_on_cancel:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, cancellation)
     bundle = json.loads(path.read_text())
     if args.run_id:
         bundle["run_id"] = args.run_id
     bundle.setdefault("source", args.source)
-    if args.require_visible:
-        require_run_visible(bundle)
-    elif args.register_starting:
-        register_starting_run(bundle)
-    else:
-        upload_run_bundle(bundle, live=bool(args.upload_live), required=True)
+    published = False
+    try:
+        try:
+            if args.require_visible:
+                require_run_visible(bundle)
+                published = True
+            elif args.register_starting:
+                published = register_starting_run(bundle)
+            else:
+                published = upload_run_bundle(bundle, live=bool(args.upload_live), required=True)
+        except HubVisibilityError:
+            if not cancelled:
+                raise
+        if cancelled:
+            # Finish the in-flight request before correcting its projection;
+            # this same publisher remains owned by the campaign's native drain.
+            terminal = json.loads(path.read_text())
+            if (
+                terminal.get("run_id") != bundle.get("run_id")
+                or terminal.get("timestamp") != bundle.get("timestamp")
+                or (terminal.get("run_group") or {}).get("status") != "cancelled"
+            ):
+                raise HubVisibilityError("cancelled campaign publication changed its identity or terminal status")
+            published = upload_run_bundle(terminal, required=True)
+            bundle = terminal
+        if args.publication_ack:
+            if not published:
+                raise HubVisibilityError("campaign publication was not acknowledged")
+            acknowledgement = {
+                "pid": os.getpid(),
+                "token": args.publication_token,
+                "record_sha256": hashlib.sha256(json.dumps(bundle, sort_keys=True).encode()).hexdigest(),
+            }
+            temporary = args.publication_ack.with_name(f".{args.publication_ack.name}.{os.getpid()}")
+            temporary.write_text(json.dumps(acknowledgement) + "\n")
+            temporary.chmod(0o600)
+            temporary.replace(args.publication_ack)
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
     return 0
 
 

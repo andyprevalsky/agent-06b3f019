@@ -1296,8 +1296,13 @@ final lifecycle cleanup and controller exit separately, without dumping private
 trajectories. An early task PASS/FAIL does not mean teardown finished. Continue
 until the controller exits and exact owned resources are released. Campaign schedule
 publication observes the original CLI cancellation signal and drains its exact
-auxiliary uploader session. Keep completed child outcomes and the original E2E
-clock; a pending publication warning does not authorize restarting the fleet. Stale or
+auxiliary uploader session. In-flight cancellation updates the original group
+record, and that same owned publisher reconciles the terminal Hub projection.
+An acknowledged terminal record with the exact publisher, private handoff token,
+record digest and native session closure is already complete; a later signal
+keeps that completed status. Keep completed child outcomes and the original E2E
+clock. Unverified publication remains pending and earns no remote-completion
+credit; its warning does not authorize restarting the fleet. Stale or
 missing observations are warnings: reconcile exact owner liveness and private
 diagnostics, never reset a run based on an observation timeout. The compact
 monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.

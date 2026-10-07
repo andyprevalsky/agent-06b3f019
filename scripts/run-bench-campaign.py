@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -50,7 +51,7 @@ def publish_campaign_group(
     *,
     live: bool,
     stop_requested: Callable[[], bool],
-) -> None:
+) -> bool:
     """The schedule is a real Hub resource; task results remain child-owned."""
     record = {
         "run_id": state["campaign_id"],
@@ -82,7 +83,7 @@ def publish_campaign_group(
     target = campaign_dir / "hub-group.json"
     write_json_atomic(target, record)
     if stop_requested():
-        return
+        return False
     environment = os.environ.copy()
     environment.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
     if not environment.get("BENCHMARK_HUB_API_KEY") and not environment.get(
@@ -105,6 +106,9 @@ def publish_campaign_group(
     cleanup = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cleanup)
     log = campaign_dir / "hub-group-publication.private.log"
+    acknowledgement = campaign_dir / "hub-group-publication-ack.private.json"
+    publication_token = secrets.token_hex(16)
+    completed = False
     with log.open("a") as stream:
         os.chmod(log, 0o600)
         result = subprocess.Popen(
@@ -115,6 +119,11 @@ def publish_campaign_group(
                 str(target),
                 "--source",
                 "benchmark-campaign",
+                "--follow-record-on-cancel",
+                "--publication-ack",
+                str(acknowledgement),
+                "--publication-token",
+                publication_token,
             ],
             cwd=root,
             env=environment,
@@ -131,15 +140,58 @@ def publish_campaign_group(
                 except subprocess.TimeoutExpired:
                     pass
         finally:
-            if result.returncode is None:
-                # Keep the leader waitable until its exact session closes,
-                # including exceptional exits. Reuse existing generous cleanup
-                # headroom; no fleet process or new stage deadline is involved.
-                cleanup.stop_get(result)
+            try:
+                try:
+                    if (
+                        not live
+                        and result.returncode == 0
+                        and acknowledgement.is_file()
+                    ):
+                        ack = json.loads(acknowledgement.read_text())
+                        native = subprocess.check_output(
+                            ["ps", "-ax", "-o", "pid=,pgid=,stat="], text=True
+                        )
+                        group_alive = any(
+                            int(row.split()[1]) == result.pid
+                            and not row.split()[2].startswith("Z")
+                            for row in native.splitlines()
+                        )
+                        completed = not group_alive and ack == {
+                            "pid": result.pid,
+                            "token": publication_token,
+                            "record_sha256": hashlib.sha256(
+                                json.dumps(record, sort_keys=True).encode()
+                            ).hexdigest(),
+                        }
+                except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                    # An unavailable or malformed observation cannot commit the
+                    # terminal publication or skip cancellation reconciliation.
+                    completed = False
+                if stop_requested() and not completed:
+                    # Give the already-owned publisher the terminal projection
+                    # before its existing session drain delivers cancellation.
+                    record["run_group"]["status"] = "cancelled"
+                    record["run_group"]["finished_at"] = utc_now()
+                    if live:
+                        for outcome in record["run_group"]["outcomes"].values():
+                            if outcome["status"] == "queued":
+                                outcome["status"] = "cancelled"
+                    write_json_atomic(target, record)
+            finally:
+                if result.returncode is None:
+                    # Keep the leader waitable until its exact session closes,
+                    # including exceptional exits. Reuse existing generous cleanup
+                    # headroom; no fleet process or new stage deadline is involved.
+                    cleanup.stop_get(result)
     if result.returncode:
         print(
             "Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners"
         )
+    elif not live and not completed:
+        print(
+            "Warning: campaign Hub terminal acknowledgement was not verified; publication remains pending"
+        )
+    return completed
 
 
 def parse_args() -> argparse.Namespace:
@@ -848,17 +900,18 @@ def main() -> int:
     state["finished_at"] = utc_now()
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
     write_json_atomic(summary_path, state)
+    publication_completed = False
     if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
         "BENCHMARK_HUB_PARENT_RUN_ID"
     ):
-        publish_campaign_group(
+        publication_completed = publish_campaign_group(
             root,
             campaign_dir,
             state,
             live=False,
             stop_requested=lambda: bool(stop_signal),
         )
-    if stop_signal:
+    if stop_signal and not publication_completed:
         state["status"] = "cancelled"
         result = 128 + stop_signal
     # Publication is part of the campaign lifetime, including cancellation

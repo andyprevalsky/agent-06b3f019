@@ -512,6 +512,10 @@ async def assert_waterfall_stalled_leg_uses_existing_fallback(scenario="recover"
                 feed = _SSE(clock, seconds=520, prelude=0, fail_after=True)
             elif scenario == "midstream_idle":
                 feed = _SSE(clock, mode="reasoning", seconds=1, prelude=0, tail_silence=121)
+            elif scenario == "empty":
+                feed = _SSE(clock, mode="metadata", seconds=0, prelude=0)
+            elif scenario == "buffered_arguments":
+                feed = _SSE(clock, seconds=10, prelude=0, fail_after=True)
             else:
                 await clock.sleep(10.5)
                 feed = Stalled()
@@ -561,13 +565,13 @@ async def assert_waterfall_stalled_leg_uses_existing_fallback(scenario="recover"
                 except (RoseDeadlineError, RoseStallError) as exc:
                     error = type(exc).__name__
     assert all(feed.closed for feed in feeds), "every owned response must close"
-    if scenario == "recover":
+    if scenario in {"recover", "empty", "buffered_arguments"}:
         assert error is None, (error, len(requests), clock.now)
         from providers.rose.pools import get_pool
 
         assert requests == list(get_pool("rose-1-browser-use").waterfall)
-        assert [chunk.kind for chunk in chunks].count("reasoning") == 1
-        assert chunks[-1].kind == "done"
+        assert [chunk.kind for chunk in chunks] == ["metadata", "reasoning", "usage", "done"]
+        assert chunks[0].data["actual_model"] == requests[-1]
         assert clock.now < 590.0
     else:
         assert error == "RoseDeadlineError", (error, len(requests), clock.now)

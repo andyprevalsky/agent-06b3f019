@@ -1041,6 +1041,10 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
             summary = json.loads(next((fixture / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
             assert summary["status"] == "cancelled"
             assert summary["finished_at"]
+            group = json.loads(next((fixture / ".context/benchmarks/campaigns").glob("*/hub-group.json")).read_text())
+            assert group["run_group"]["status"] == summary["status"], (
+                "cancelled campaign must leave the same terminal group status"
+            )
             assert admitted.exists() == (phase == "final")
             assert summary["jobs"][0]["status"] == ("passed" if phase == "final" else "cancelled")
             assert foreign.poll() is None, "cancellation must preserve the unrelated process"
@@ -1059,3 +1063,171 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
                 process.wait()
             foreign.terminate()
             foreign.wait()
+
+
+@pytest.mark.parametrize(
+    "phase", ["starting", "final", "completed", "wrong_token", "wrong_digest", "wrong_pid", "wrong_json"]
+)
+def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publisher(tmp_path, phase):
+    """Actual HTTP publication must finish cancelled through the original owner."""
+    import gzip
+    import signal
+    import threading
+    import time
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    fixture = tmp_path / phase
+    (fixture / "scripts").mkdir(parents=True)
+    uploader = fixture / "agents/benchmarks/hub_upload.py"
+    uploader.parent.mkdir(parents=True)
+    owner_path, cancelled_path = fixture / "owner.json", fixture / "cancel-observed"
+    admitted = fixture / "admitted"
+    (fixture / "scripts/run-bench").write_text('#!/usr/bin/env bash\ntouch "$FIXTURE_ADMITTED"\nexit 0\n')
+    actual = ROOT / "agents/benchmarks/hub_upload.py"
+    uploader.write_text(
+        "import json, os, runpy, signal\nfrom pathlib import Path\n"
+        'Path(os.environ["FIXTURE_OWNER"]).write_text(json.dumps({"pid":os.getpid()}))\n'
+        'with Path(os.environ["FIXTURE_OWNER"]).with_suffix(".jsonl").open("a") as journal: journal.write(str(os.getpid())+"\\n")\n'
+        "install=signal.signal\n"
+        "def observe(signum, handler):\n"
+        "    if not callable(handler): return install(signum, handler)\n"
+        "    def forward(*args):\n"
+        '        Path(os.environ["FIXTURE_CANCELLED"]).touch()\n'
+        "        return handler(*args)\n"
+        "    return install(signum, forward)\n"
+        "signal.signal=observe\n"
+        f"runpy.run_path({str(actual)!r}, run_name='__main__')\n"
+    )
+    records, blocked, release = [], threading.Event(), threading.Event()
+
+    class Hub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = self.rfile.read(int(self.headers["Content-Length"]))
+            if self.headers.get("Content-Encoding") == "gzip":
+                payload = gzip.decompress(payload)
+            record = json.loads(payload)
+            record["live"] = "live=1" in self.path
+            records.append(record)
+            target = ("live=1" in self.path) == (phase == "starting")
+            if target and not blocked.is_set():
+                blocked.set()
+                release.wait(FIXTURE_HOST_GUARD_SECONDS)
+            body = json.dumps({"run": record}).encode()
+            self.send_response(201)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+        def do_GET(self):
+            body = json.dumps({"run": records[-1]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("RUN_BENCH_CAMPAIGN_", "CLOUDBENCH_CAMPAIGN_", "BENCHMARK_HUB_"))
+    }
+    environment.update(
+        BENCHMARK_HUB_UPLOAD_URL=url,
+        BENCHMARK_HUB_API_KEY="fixture-key",
+        FIXTURE_OWNER=str(owner_path),
+        FIXTURE_CANCELLED=str(cancelled_path),
+        FIXTURE_ADMITTED=str(admitted),
+    )
+    campaign = ROOT / "scripts/run-bench-campaign.py"
+    completed_phase = phase not in ("starting", "final")
+    if completed_phase:
+        # Observe the real parent's wait boundary after the final publisher is
+        # natively reaped, then deliver cancellation. No runtime timer changes.
+        entrypoint = fixture / "campaign-main.py"
+        entrypoint.write_text(
+            "import json, os, runpy, signal, subprocess\nfrom pathlib import Path\n"
+            "Original=subprocess.Popen\n"
+            "class Observed(Original):\n"
+            "    def wait(self, *args, **kwargs):\n"
+            "        code=super().wait(*args, **kwargs)\n"
+            "        if '--upload-final' in self.args and not getattr(self, '_injected', False):\n"
+            "            self._injected=True\n"
+            "            if '--publication-ack' in self.args:\n"
+            "                path=Path(self.args[self.args.index('--publication-ack')+1])\n"
+            "                ack=json.loads(path.read_text())\n"
+            f"                field={{'wrong_token':'token','wrong_digest':'record_sha256','wrong_pid':'pid'}}.get({phase!r})\n"
+            "                if field: ack[field]='foreign'; path.write_text(json.dumps(ack))\n"
+            f"                if {phase!r} == 'wrong_json': path.write_text('{{invalid')\n"
+            "            os.kill(os.getpid(),signal.SIGTERM)\n"
+            "        return code\n"
+            "subprocess.Popen=Observed\n"
+            f"runpy.run_path({str(campaign)!r}, run_name='__main__')\n"
+        )
+        campaign = entrypoint
+        release.set()
+    command = [
+        sys.executable,
+        str(campaign),
+        "--root",
+        str(fixture),
+        "--runs",
+        "1",
+        "--concurrency",
+        "1",
+        "--task",
+        "fixture",
+    ]
+    with (fixture / "campaign.private.log").open("w") as log:
+        process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            assert blocked.wait(FIXTURE_HOST_GUARD_SECONDS), "real Hub transport never reached the held boundary"
+            owner = json.loads(owner_path.read_text())
+            if not completed_phase:
+                process.send_signal(signal.SIGTERM)
+                deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+                while not cancelled_path.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                release.set()
+            assert process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS) == (0 if phase == "completed" else 143)
+            directory = next((fixture / ".context/benchmarks/campaigns").iterdir())
+            summary = json.loads((directory / "summary.json").read_text())
+            local = json.loads((directory / "hub-group.json").read_text())
+            with urllib.request.urlopen(url + "/api/benchmarks/runs/" + summary["campaign_id"]) as response:
+                remote = json.load(response)["run"]
+            terminal_status = "passed" if phase == "completed" else "cancelled"
+            assert local["run_group"]["status"] == summary["status"] == terminal_status
+            assert remote["run_group"]["status"] == ("passed" if completed_phase else terminal_status)
+            assert remote["timestamp"] == local["timestamp"] == summary["started_at"]
+            assert remote["run_group"]["finished_at"]
+            assert remote["run_group"]["outcomes"] == local["run_group"]["outcomes"]
+            assert remote["run_group"]["outcomes"][summary["jobs"][0]["job_id"]]["status"] == (
+                "cancelled" if phase == "starting" else "passed"
+            )
+            assert admitted.exists() == (phase != "starting")
+            assert remote["live"] is False
+            assert cancelled_path.exists() == (not completed_phase)
+            assert len(records) == (3 if phase == "final" else 2)
+            owners = [int(pid) for pid in owner_path.with_suffix(".jsonl").read_text().splitlines()]
+            assert len(owners) == (1 if phase == "starting" else 2), "reconciliation must not add a new publisher"
+            assert owners[-1] == owner["pid"]
+            for pid in owners:
+                with pytest.raises(ProcessLookupError):
+                    os.kill(pid, 0)
+        finally:
+            release.set()
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            server.shutdown()
+            server.server_close()
+            thread.join()

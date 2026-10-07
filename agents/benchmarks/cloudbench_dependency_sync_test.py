@@ -8267,6 +8267,7 @@ FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RUN_ID={removal}
 export UPLOAD_WARNING={1 if removal == "upload-warning" else 0}
 FLEET_REGISTRY_DIR="$FLEET_DIR/registry"
+FLEET_TEARDOWN_OWNERSHIP_DIR="$FLEET_DIR/teardown-ownership"
 FLEET_REGISTRY_PUBLISHED=1
 FLEET_EXECUTION_COMPLETED=1
 AUTOSCALER_FAILURE=0
@@ -9014,7 +9015,30 @@ def _extract_fleet_function(source: str, signature: str) -> str:
         if match is not None:
             heredoc_terminator = next(value for value in match.groups() if value)
         if line.startswith("}") and stripped == "}":
-            return source[start : offset + len(line)]
+            function = source[start : offset + len(line)]
+            if signature == "cleanup() {" and "fleet_native_reap_open() {" in source:
+                return (
+                    _extract_fleet_function(source, "fleet_native_reap_open() {")
+                    + "\n"
+                    + _extract_fleet_function(source, "fleet_native_reap_close() {")
+                    + "\n"
+                    + function
+                )
+            if signature == "reap_registry_clones() {" and "fleet_reap_registry_record_native() {" in source:
+                return (
+                    "\n".join(
+                        _extract_fleet_function(source, dependency)
+                        for dependency in (
+                            "fleet_validate_reap_cohort() {",
+                            "fleet_with_native_reap_permit() {",
+                            "fleet_reap_registry_record_native() {",
+                            "fleet_reap_registry_record() {",
+                        )
+                    )
+                    + "\n"
+                    + function
+                )
+            return function
         offset += len(line)
     raise ValueError(f"unterminated shell function: {signature}")
 
@@ -10106,10 +10130,131 @@ exit "$rc"
         assert sorted(path.name.removeprefix("audit-cloudbench-") for path in root.glob("audit-*")) == machines
 
 
+def test_sealed_primary_retirement_overlaps_running_sibling(tmp_path: Path) -> None:
+    """The actual collector supervisor admits its sealed primary before a peer ends."""
+    supervisor = _extract_fleet_function(fleet_source_text(), "run_fleet_child_supervised() {")
+    script = f"""set -uo pipefail
+TEST_ROOT={shlex.quote(str(tmp_path))}
+FLEET_NATIVE_REAP_ENABLED=1
+fleet_retire_sealed_primary() {{
+  [ -f "$1/benchmark-child.finished" ] || return 41
+  [ ! -e "$TEST_ROOT/peer-finished" ] || return 42
+  touch "$TEST_ROOT/primary-retired"
+}}
+terminate_fleet_runner_group() {{ return 99; }}
+{supervisor}
+mkdir "$TEST_ROOT/closed"
+(while [ ! -e "$TEST_ROOT/release-peer" ]; do sleep .02; done; touch "$TEST_ROOT/peer-finished") &
+peer=$!
+run_fleet_child_supervised "$TEST_ROOT/closed/benchmark-child.finished" bash -c 'exit 1'
+child_status=$?
+[ "$child_status" = 1 ] || exit 43
+test -e "$TEST_ROOT/primary-retired"; assertion=$?
+kill -0 "$peer" || assertion=44
+touch "$TEST_ROOT/release-peer"
+wait "$peer"
+exit "$assertion"
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, "sealed primary stayed allocated behind an independently running sibling"
+    assert (tmp_path / "closed/benchmark-child.finished").read_text() == "1\n"
+
+
+@pytest.mark.parametrize("shell", ["bash", "/bin/bash"])
+@pytest.mark.parametrize("cancel", ["TERM", "KILL"])
+def test_sealed_primary_retirement_requires_join_and_returned_permits_before_reset(
+    tmp_path: Path,
+    shell: str,
+    cancel: str,
+) -> None:
+    source = fleet_source_text()
+    helpers = "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "fleet_native_reap_open() {",
+            "fleet_native_reap_close() {",
+            "fleet_with_native_reap_permit() {",
+        )
+    )
+    script = f"""set -uo pipefail
+FLEET_DIR={shlex.quote(str(tmp_path))}
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{helpers}
+native_fixture() {{
+  trap {'""' if cancel == "KILL" else "'exit 143'"} TERM
+  touch "$FLEET_DIR/native-entered"
+  sleep 60
+}}
+fleet_native_reap_open || exit 40
+fleet_with_native_reap_permit native_fixture &
+owned=$!
+deadline=$((SECONDS+5))
+until [ -e "$FLEET_DIR/native-entered" ]; do
+  [ "$SECONDS" -lt "$deadline" ] || exit 41
+  sleep .02
+done
+cloudbench_process_birth_table > "$FLEET_DIR/process-table.private.txt" || exit 48
+python3 - "$FLEET_DIR" "$owned" {cancel} <<'PY'
+import json, sys, time
+from pathlib import Path
+root=Path(sys.argv[1]); owned=int(sys.argv[2]); cancel=sys.argv[3]
+rows={{}}
+for line in (root/'process-table.private.txt').read_text().splitlines():
+    pid, parent, birth=line.split(None,2)
+    rows[int(pid)]=(int(parent),' '.join(birth.split()))
+assert owned in rows
+targets={{owned}}
+while True:
+    expanded=targets|{{pid for pid,(parent,_) in rows.items() if parent in targets}}
+    if expanded==targets: break
+    targets=expanded
+receipt={{'captured_epoch':time.time(),'cancel':cancel,'root_pid':owned,'targets':[{{'pid':pid,'birth':rows[pid][1]}} for pid in sorted(targets)]}}
+(root/'native-test-owner.safe.json').write_text(json.dumps(receipt,indent=2)+'\\n')
+with (root/'native-targets.private.txt').open('w') as stream:
+    for pid in sorted(targets): stream.write(str(pid)+'\\t'+rows[pid][1]+'\\n')
+PY
+rm "$FLEET_DIR/process-table.private.txt"
+cloudbench_terminate_tree_and_wait {"0" if cancel == "KILL" else "3"} "$owned" || exit 42
+while IFS=$'\\t' read -r target birth; do
+  observation="$(cloudbench_pid_observation_like "$target" "$birth")" || observation=""
+  state=absent
+  case "$observation" in
+    *$'\\t'*)
+      actual="${{observation%$'\\t'*}}"; process_state="${{observation##*$'\\t'}}"
+      if [ "$actual" = "$birth" ]; then
+        case "$process_state" in Z*) state=terminal-zombie ;; *) exit 49 ;; esac
+      fi ;;
+    *) [ "$(cloudbench_pid_birth_state "$target" "$birth")" = absent ] || exit 50 ;;
+  esac
+  printf '%s\\t%s\\n' "$target" "$state" >> "$FLEET_DIR/native-postjoin.safe.tsv"
+done < "$FLEET_DIR/native-targets.private.txt"
+if fleet_native_reap_close; then
+  [ {cancel} = TERM ] || exit 43
+  fleet_native_reap_open || exit 44
+  fleet_with_native_reap_permit touch "$FLEET_DIR/final-native-admitted"
+  fleet_native_reap_close || exit 45
+else
+  [ {cancel} = KILL ] || exit 46
+  test -p "$FLEET_DIR/.native-retirement.pipe" || exit 47
+fi
+"""
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "final-native-admitted").exists() == (cancel == "TERM")
+    assert (tmp_path / ".native-retirement.pipe").exists() == (cancel == "KILL")
+    owner = json.loads((tmp_path / "native-test-owner.safe.json").read_bytes())
+    assert len(owner["targets"]) >= 3
+    states = (tmp_path / "native-postjoin.safe.tsv").read_text().splitlines()
+    assert len(states) == len(owner["targets"])
+    assert all(row.split("\t")[1] in {"absent", "terminal-zombie"} for row in states)
+
+
+@pytest.mark.parametrize("shell", ["bash", "/bin/bash"])
 @pytest.mark.parametrize("failed_disposition", [0, 75])
 def test_current_registry_retirement_is_bounded_parallel_and_joins_receipts(
     tmp_path: Path,
     failed_disposition: int,
+    shell: str,
 ) -> None:
     """Slow independent exact native receipts overlap, and failures stay owned."""
     fleet = fleet_source_text()
@@ -10149,6 +10294,7 @@ if stage=='enter':
     reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
     script = f"""set -uo pipefail
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+FLEET_DIR={shlex.quote(str(tmp_path))}
 REGISTRY={shlex.quote(str(registry))}
 TEST_ROOT={shlex.quote(str(tmp_path))}
 PYTHON_BIN={shlex.quote(sys.executable)}
@@ -10163,11 +10309,17 @@ reap_machine() {{
 }}
 fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/audits"; }}
 {reaper}
+{_extract_fleet_function(fleet, "fleet_native_reap_open() {")}
+{_extract_fleet_function(fleet, "fleet_native_reap_close() {")}
+fleet_native_reap_open || exit 40
 reap_registry_clones "$REGISTRY" current
+reap_status=$?
+fleet_native_reap_close || exit 41
+exit "$reap_status"
 """
     started = time.monotonic()
     result = subprocess.run(
-        ["bash", "-c", script],
+        [shell, "-c", script],
         text=True,
         capture_output=True,
         check=False,
@@ -10186,6 +10338,234 @@ reap_registry_clones "$REGISTRY" current
     assert sorted(audits) == [
         f"cloudbench-{machine}" for machine in machines if failed_disposition == 0 or machine != machines[0]
     ]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "complete",
+        "task-fail",
+        "large-catalog",
+        "wrong-ordinal",
+        "wrong-catalog-binding",
+        "missing-seal",
+        "pending-evidence",
+        "foreign-guest",
+        "live-autoscaler",
+        "live-worker",
+        "native-pending",
+        "historical-worker-missing-seal",
+        "historical-worker-missing-owner",
+        "missing-worker-index-claim",
+        "missing-worker-index-group",
+        "duplicate-machine",
+        "duplicate-volume",
+        "worker-duplicate-machine",
+        "worker-duplicate-volume",
+    ],
+)
+def test_sealed_primary_retirement_keeps_every_unsealed_scope_owned(tmp_path: Path, fault: str) -> None:
+    owner, run_id, machine = "5d" * 16, "sealed-primary-fixture", "00000000000001"
+    clone, token = "cloudbench-" + machine, owner + "-0"
+    fleet = tmp_path / run_id
+    out, registry, audit = fleet / "closed", tmp_path / "ownership" / owner, tmp_path / "audit"
+    for directory in (
+        out,
+        fleet / "_batch",
+        registry / "clones",
+        audit / "fresh",
+        audit / "expected-fresh",
+        audit / "by-machine-id",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    catalog = [{"name": "closed", "mode": "LIVE"}, {"name": "running-peer", "mode": "LIVE"}]
+    if fault == "large-catalog":
+        catalog.extend({"name": f"daily_scale_fixture_{index:05d}", "mode": "LIVE"} for index in range(2, 10000))
+    (fleet / "_batch/benches.json").write_text(json.dumps(catalog, indent=2))
+    catalog_audit = tmp_path / "catalog-audit"
+    catalog_audit.mkdir()
+    (catalog_audit / "sitecustomize.py").write_text("""import os,sys
+def catalog_open(event,args):
+    if event=='open' and str(args[0]).endswith('/_batch/benches.json'):
+        fd=os.open(os.environ['CATALOG_READ_RECEIPT'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+        try: os.write(fd,b'catalog-open\\n')
+        finally: os.close(fd)
+sys.addaudithook(catalog_open)
+""")
+    (registry / "meta").write_text(f"version=2\nfleet_owner_token={owner}\nrun_id={run_id}\n")
+    (registry / "guest-cleanup-unconfirmed").touch()
+    (registry / "runtime-evidence-unconfirmed").touch()
+    record = registry / "clones" / clone
+    record.write_text(f"name={clone}\nid={machine}\nvolume_id=vol_{machine}\n")
+    peer = registry / "clones/cloudbench-00000000000002"
+    peer.write_text("name=cloudbench-00000000000002\nid=00000000000002\nvolume_id=vol_00000000000002\n")
+    peer_original = peer.read_bytes()
+    (audit / "by-machine-id" / machine).write_text(clone + "\n")
+    for name in (clone, peer.name):
+        ident = name.removeprefix("cloudbench-")
+        mid = machine if fault == "duplicate-machine" else ident
+        volume = f"vol_{machine}" if fault == "duplicate-volume" else f"vol_{ident}"
+        (audit / "fresh" / name).write_text(
+            f"fleet_owner_token={owner}\nrun_id={run_id}\nsource_machine_id=000000000000ff\nmachine_id={mid}\nvolume_id={volume}\n"
+        )
+        (audit / "expected-fresh" / name).write_text(f"clone_name={name}\nsource_machine_id=000000000000ff\n")
+    if fault in {"duplicate-machine", "duplicate-volume"}:
+        peer.write_text(
+            f"name={peer.name}\nid={machine if fault == 'duplicate-machine' else '00000000000002'}\nvolume_id={'vol_' + machine if fault == 'duplicate-volume' else 'vol_00000000000002'}\n"
+        )
+        peer_original = peer.read_bytes()
+    if fault in {"worker-duplicate-machine", "worker-duplicate-volume"}:
+        (registry / "clones/cloudbench-new-worker").write_text("name=cloudbench-new-worker\n")
+        (audit / "expected-fresh/cloudbench-new-worker").write_text(
+            f"clone_name=cloudbench-new-worker\nsource_machine_id={machine}\n"
+        )
+        (audit / "fresh/cloudbench-new-worker").write_text(
+            f"fleet_owner_token={owner}\nrun_id={run_id}\nsource_machine_id={machine}\nmachine_id=\nvolume_id=\n"
+        )
+    (out / ".cid").write_text(f"clone {machine}\n")
+    (out / "guest-shutdown.confirmed").write_text((run_id if fault != "foreign-guest" else "foreign-run") + "\n")
+    (out / "benchmark-child.finished").write_text("1\n" if fault == "task-fail" else "0\n")
+    (out / "autoscaler.completed-after-child").write_bytes((out / "benchmark-child.finished").read_bytes())
+    (out / "autoscaler.pid").write_text("999999|exact-fixture-birth\n")
+    (out / "worker-clones.ids").write_text("00000000000003\n" if fault == "live-worker" else "")
+    (out / "worker-ready.ids").write_bytes((out / "worker-clones.ids").read_bytes())
+    runtime = out / "remote-logs/runtime-evidence"
+    (runtime / "logs").mkdir(parents=True)
+    runtime_owner = {"version": 1, "machine_id": machine, "run_token": token}
+    (out / "runtime-evidence.owner.json").write_text(json.dumps(runtime_owner))
+    data = {
+        "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 1}}).encode(),
+        "run.json": b'{"tasks":[]}',
+        "stack.log": b"stopped\n",
+        f"cloudbench-stack-cleanup-{token}.status": f"state=clean\ntoken={token}\n".encode(),
+        "logs/backend.log": b"complete backend\n",
+        "logs/worker.log": b"complete worker\n",
+    }
+    for name, payload in data.items():
+        (runtime / name).write_bytes(payload)
+    manifest = {
+        **runtime_owner,
+        "files": {
+            name: {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+            for name, payload in data.items()
+        },
+    }
+    (runtime / "manifest.json").write_text(json.dumps(manifest))
+    if fault == "missing-seal":
+        (runtime / "logs/worker.log").write_bytes(b"unsealed later bytes\n")
+    if fault == "pending-evidence":
+        (out / "runtime-evidence.pending").touch()
+    if fault in {
+        "historical-worker-missing-seal",
+        "historical-worker-missing-owner",
+        "missing-worker-index-claim",
+        "missing-worker-index-group",
+    }:
+        worker = "00000000000003"
+        history = out / "worker-runtime-evidence" / worker
+        history.mkdir(parents=True)
+        (history / "owner.json").write_text(
+            json.dumps({"version": 1, "machine_id": worker, "primary_machine_id": machine, "run_token": token})
+        )
+        worker_clone = "cloudbench-" + worker
+        (audit / "by-machine-id" / worker).write_text(worker_clone + "\n")
+        (audit / "fresh" / worker_clone).write_text(
+            f"fleet_owner_token={owner}\nrun_id={run_id}\nsource_machine_id={machine}\nmachine_id={worker}\nvolume_id=vol_{worker}\ndisposition=destroyed-provider-retained\n"
+        )
+        (audit / "expected-fresh" / worker_clone).write_text(
+            f"clone_name={worker_clone}\nsource_machine_id={machine}\n"
+        )
+        if fault != "historical-worker-missing-seal":
+            (history / "owner.json").unlink()
+            history.rmdir()
+    source = fleet_source_text()
+    helpers = "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "fleet_retirement_index() {",
+            "fleet_validate_reap_cohort() {",
+            "fleet_native_reap_open() {",
+            "fleet_native_reap_close() {",
+            "fleet_with_native_reap_permit() {",
+            "fleet_retire_sealed_primary() {",
+            "fleet_reap_registry_record_native() {",
+            "fleet_reap_registry_record() {",
+            "registry_record_machine_identity() {",
+            "cloudbench_validate_primary_runtime_evidence() {",
+            "_pool_ids() {",
+            "_ready_pool_ids() {",
+            "pool_has_pending_worker() {",
+        )
+    )
+    native_status = 75 if fault == "native-pending" else 74
+    script = f"""set -uo pipefail
+FLEET_DIR={shlex.quote(str(fleet))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+FLEET_OWNER_TOKEN={owner}; RUN_ID={run_id}
+CLOUDBENCH_FLEET_RUN_TOKEN={token}; FLEET_REGISTRY_PUBLISHED=1; KEEP_CLONES=0
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=0
+TEST_ROOT={shlex.quote(str(tmp_path))}
+export CATALOG_READ_RECEIPT="$TEST_ROOT/catalog-read-count.safe.txt"
+python3() {{ PYTHONPATH={shlex.quote(str(catalog_audit))} {shlex.quote(sys.executable)} "$@"; }}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+cloudbench_pid_birth_state() {{ printf '%s\\n' {"live" if fault == "live-autoscaler" else "absent"}; }}
+registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
+cloudbench_capture_worker_runtime_evidence() {{ test -f "$1/worker-runtime-evidence/$2/capture/manifest.json"; }}
+reap_machine() {{ printf '%s\\n' "$1" >> "$TEST_ROOT/native-calls"; return {native_status}; }}
+fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/terminal-audits"; }}
+{helpers}
+if ! fleet_validate_reap_cohort "$FLEET_REGISTRY_DIR" || ! fleet_retirement_index init; then
+  case {fault} in duplicate-machine|duplicate-volume) exit 0 ;; *) exit 42 ;; esac
+fi
+case {fault} in
+  missing-worker-index-claim|missing-worker-index-group)
+    rm "$FLEET_DIR/.native-retirement-index/sources/{machine}/cloudbench-00000000000003"
+    [ {fault} != missing-worker-index-group ] || rmdir "$FLEET_DIR/.native-retirement-index/sources/{machine}"
+    ;;
+  wrong-ordinal|wrong-catalog-binding)
+    python3 - "$FLEET_DIR/.native-retirement-index/ordinals/closed" {fault} <<'PY'
+import json,sys
+from pathlib import Path
+path=Path(sys.argv[1]); row=json.loads(path.read_bytes())
+if sys.argv[2]=='wrong-ordinal': row['ordinal']=1
+else: row['catalog_sha256']='0'*64
+path.write_text(json.dumps(row))
+PY
+    ;;
+esac
+case {fault} in
+  worker-duplicate-machine|worker-duplicate-volume)
+    worker_mid=00000000000003; worker_volume=vol_00000000000003
+    [ {fault} != worker-duplicate-machine ] || worker_mid={machine}
+    [ {fault} != worker-duplicate-volume ] || worker_volume=vol_{machine}
+    FLEET_NATIVE_REAP_ENABLED=1
+    if registry_record_machine_identity "$FLEET_REGISTRY_DIR/clones/cloudbench-new-worker" cloudbench-new-worker "$worker_mid" "$worker_volume"; then exit 43; fi
+    [ "$(cat "$FLEET_REGISTRY_DIR/clones/cloudbench-new-worker")" = name=cloudbench-new-worker ] || exit 44
+    [ ! -e "$TEST_ROOT/terminal-audits" ] || exit 45
+    # The rejected registration must retain its parent; no native mutation follows.
+    exit 0 ;;
+esac
+fleet_native_reap_open || exit 40
+fleet_retire_sealed_primary "$FLEET_DIR/closed"; retirement_status=$?
+fleet_native_reap_close || exit 41
+exit "$retirement_status"
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    should_retire = fault in {"complete", "task-fail", "large-catalog"}
+    assert result.returncode == (75 if fault == "native-pending" else 0), result.stderr
+    assert record.exists() != should_retire
+    assert peer.read_bytes() == peer_original, "an independently running sibling changed"
+    assert (registry / "guest-cleanup-unconfirmed").exists()
+    assert (registry / "runtime-evidence-unconfirmed").exists()
+    calls = (tmp_path / "native-calls").read_text().splitlines() if (tmp_path / "native-calls").exists() else []
+    assert calls == ([machine] if should_retire or fault == "native-pending" else [])
+    if fault == "large-catalog":
+        assert 65536 < (fleet / "_batch/benches.json").stat().st_size <= 1048576
+        assert len(list((fleet / ".native-retirement-index/ordinals").iterdir())) == 10000
+        assert (tmp_path / "catalog-read-count.safe.txt").read_text().splitlines() == ["catalog-open"]
 
 
 @pytest.mark.parametrize("unsafe_record", ["symlink", "duplicate-machine", "warm-machine"])

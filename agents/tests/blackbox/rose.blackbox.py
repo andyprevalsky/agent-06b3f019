@@ -6867,6 +6867,38 @@ async def test_client_waterfall_stalled_leg_uses_existing_fallback():
     await assert_waterfall_stalled_leg_uses_existing_fallback("recover")
 
 
+async def test_client_waterfall_failed_parser_leg_discards_metadata():
+    from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
+
+    for scenario in ("empty", "buffered_arguments"):
+        await assert_waterfall_stalled_leg_uses_existing_fallback(scenario)
+
+
+async def test_waterfall_empty_success_keeps_metadata_before_usage_and_done():
+    """Successful normalized streams preserve metadata-first even without output."""
+    spec = get_pool("rose-1-browser-use")
+    calls = []
+
+    async def empty_success(**kwargs):
+        calls.append(kwargs["model"])
+        yield StreamChunk(kind="metadata", data={"actual_model": kwargs["model"]})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 0})
+        yield StreamChunk(kind="done", data={})
+
+    with patch("providers.rose.waterfall._stream_one_step", empty_success):
+        chunks = await _drain(
+            waterfall_complete(
+                pool_spec=spec,
+                messages=[{"role": "user", "content": "Offline fixture"}],
+                openrouter_key="offline-fake",
+                request_id="offline-empty-success",
+            )
+        )
+    assert [chunk.kind for chunk in chunks] == ["metadata", "usage", "done"]
+    assert chunks[0].data["actual_model"] == spec.waterfall[0]
+    assert calls == [spec.waterfall[0]]
+
+
 async def test_client_waterfall_global_deadline_preserves_error():
     from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
 
@@ -8141,6 +8173,12 @@ async def run_all_tests():
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
     await r.record_async(
         "client_waterfall_stalled_leg_fallback", test_client_waterfall_stalled_leg_uses_existing_fallback
+    )
+    await r.record_async(
+        "client_waterfall_failed_parser_metadata", test_client_waterfall_failed_parser_leg_discards_metadata
+    )
+    await r.record_async(
+        "waterfall_empty_success_metadata_order", test_waterfall_empty_success_keeps_metadata_before_usage_and_done
     )
     await r.record_async("client_waterfall_global_deadline", test_client_waterfall_global_deadline_preserves_error)
     await r.record_async("client_waterfall_partial_idle", test_client_waterfall_partial_idle_preserves_error)
