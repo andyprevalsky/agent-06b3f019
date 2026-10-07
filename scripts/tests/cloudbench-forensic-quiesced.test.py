@@ -3,6 +3,7 @@
 import hashlib
 import io
 import os
+import sys
 import tarfile
 from unittest.mock import patch
 import argparse
@@ -13,6 +14,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+_AGENTS_VENV = ROOT / "agents" / "venv" / "bin" / "python"
+if _AGENTS_VENV.is_file() and Path(sys.executable).resolve() != _AGENTS_VENV.resolve():
+    os.execv(str(_AGENTS_VENV), [str(_AGENTS_VENV), *sys.argv])
 
 
 def load(name, path):
