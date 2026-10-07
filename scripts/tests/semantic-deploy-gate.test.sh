@@ -339,12 +339,29 @@ set +e
 # localhost DSN here. That keeps the guard strict (rather than handing this gate
 # the BLACKBOX_TEST_ALLOW_REMOTE_DATABASE escape hatch) and makes it impossible
 # for the probe to reach production even if the credential check ever passed.
+# Use the workspace tsx binary. The Cloud VM's /exec-daemon/npx (npm 11)
+# crashes with "Class extends value undefined is not a constructor or null"
+# before tsx starts, which drops the fail-closed credential message and
+# fails this gate (docs/rca/cases/2026-10-06-semantic-deploy-amplitude-probe-failure-dropped-its-output.md).
+TSX_BIN=""
+for tsx_cand in \
+  "$ROOT_DIR/node_modules/.bin/tsx" \
+  "$ROOT_DIR/back-end/node_modules/.bin/tsx"
+do
+  if [ -x "$tsx_cand" ]; then
+    TSX_BIN="$tsx_cand"
+    break
+  fi
+done
+if [ -z "$TSX_BIN" ]; then
+  fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
+fi
 LIVE_AMPLITUDE_OUTPUT=$(
   cd "$ROOT_DIR/back-end" &&
     DATABASE_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
       DIRECT_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
       AMPLITUDE_API_KEY='' AMPLITUDE_SECRET_KEY='' ADMIN_HEALTH_LIVE_ONLY=1 \
-      npx tsx src/tests/blackbox/admin-health.blackbox.ts 2>&1
+      "$TSX_BIN" src/tests/blackbox/admin-health.blackbox.ts 2>&1
 )
 LIVE_AMPLITUDE_RC=$?
 set -e
