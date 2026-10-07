@@ -6,6 +6,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
+import { MarkdownLink } from './MarkdownLink';
 import { BASE_DELAY_SECONDS, FADE_DURATION_SECONDS, type WordItem } from './types';
 
 export interface WordIndexRef {
@@ -52,9 +53,9 @@ function wrapInlineFormatting(
   if (firstItem.isItalic) content = <em key={`${groupKey}-em`}>{content}</em>;
   if (firstItem.isLink && firstItem.href) {
     content = (
-      <a key={`${groupKey}-link`} href={firstItem.href}>
+      <MarkdownLink key={`${groupKey}-link`} href={firstItem.href}>
         {content}
-      </a>
+      </MarkdownLink>
     );
   }
   return content;
