@@ -22633,6 +22633,8 @@ async def _drive_browser_write_pause_archive_boundary(
     cancel=False,
     handoff=False,
     parked_handoff=False,
+    resume_between_generations=False,
+    legacy_approval_hint=False,
     pause_on_grant=False,
     resume_on_grant=False,
     pause_on_open=False,
@@ -22895,10 +22897,13 @@ async def _drive_browser_write_pause_archive_boundary(
                     if row.get("metadata", {}).get("action_type") == "task_complete"
                 ]
                 if parked_handoff:
-                    assert auth and handoff and not terminals
+                    assert handoff and not terminals
                     assert len(wf._pending_tool_resumes) == 1
                     if pause:
                         await AgentWorkflow.pause(wf)
+                        if resume_between_generations:
+                            await AgentWorkflow.resume(wf)
+                            assert not wf.is_paused and wf._pause_signal_sequence == 1
                     carrier = AgentWorkflow()
                     carrier.max_iterations, carrier.context_gates = None, {}
                     carrier.is_paused = wf.is_paused
@@ -22909,7 +22914,10 @@ async def _drive_browser_write_pause_archive_boundary(
                     restored._restore_deployment_state(state)
                     assert restored._pause_signal_sequence == (1 if pause else 0)
                     resume = restored._pending_tool_resumes[0]["resume"]
-                    assert resume["auth_pause_signal_sequence"] == 0
+                    if auth:
+                        assert resume["auth_pause_signal_sequence"] == 0
+                    elif legacy_approval_hint:
+                        resume.pop("approval_pause_signal_sequence", None)
                     restored.user_id, restored.agent_id = wf.user_id, root
                     restored._tool_resume_hints = {tool: resume}
                     restored._update_tree_state = AsyncMock()
@@ -22917,8 +22925,8 @@ async def _drive_browser_write_pause_archive_boundary(
                     restored._track_usage = AsyncMock()
                     restored._check_generation_handoff = AsyncMock(return_value=None)
                     wf = restored
-                    if not pause:
-                        wf._signal_responses["owned-approval"] = "authenticated"
+                    if not pause or resume_between_generations:
+                        wf._signal_responses["owned-approval"] = "authenticated" if auth else "approved"
                     owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
                     await asyncio.wait_for(asyncio.shield(owned), 10)
                     assert len(starts) == (1 if pause else 2)
@@ -23090,6 +23098,13 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
         )
     await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
+    for legacy in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=False, handoff=True, parked_handoff=True, legacy_approval_hint=legacy
+        )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, handoff=True, parked_handoff=True, resume_between_generations=True
+    )
     from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused
 
     with patch("tools.request_user_approval.request_user_approval_direct", new_callable=AsyncMock) as request:
@@ -23131,6 +23146,9 @@ async def test_manager_payment_pause_seals_persisted_browser_for_archive():
     """A real PAUSE must finish the pending payment browser before archival."""
     await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_during_mint=True)
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, payment=True, handoff=True, parked_handoff=True, resume_between_generations=True
+    )
 
 
 async def test_manager_payment_pause_preserves_approval_and_interruptions():
@@ -23142,6 +23160,10 @@ async def test_manager_payment_pause_preserves_approval_and_interruptions():
         await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, reply_phase=phase)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, cancel=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, handoff=True)
+    for legacy in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=False, payment=True, handoff=True, parked_handoff=True, legacy_approval_hint=legacy
+        )
 
 
 async def test_manager_explicit_pause_seals_auth_browser_for_archive():

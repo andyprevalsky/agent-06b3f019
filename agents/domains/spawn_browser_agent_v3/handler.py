@@ -10719,7 +10719,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     },
                 )
 
-            def park_browser_approval(phase: str) -> Callable[[Dict[str, str]], bool]:
+            def park_browser_approval(phase: str, pause_sequence: int) -> Callable[[Dict[str, str]], bool]:
                 # The approval branches only read the card refs from the prior
                 # resume state; the paused result carries everything else.
                 def park(approval: Dict[str, str]) -> bool:
@@ -10728,6 +10728,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         _payment_resume_fields(write_lock_resume_state),
                         parked_result=result,
                         approval=approval,
+                        approval_pause_signal_sequence=pause_sequence,
                     )
 
                 return park
@@ -10880,6 +10881,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if result and result.get("status") == "awaiting_write_approval":
                     write_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
+                    if reentered_pause:
+                        write_pause_sequence = (resume_hint or {}).get(
+                            "approval_pause_signal_sequence", write_pause_sequence
+                        )
                     logger.info(
                         "Browser agent needs write lock approval",
                         approval_type=result.get("approval_type"),
@@ -10900,7 +10905,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
-                            park=park_browser_approval("write_approval"),
+                            park=park_browser_approval("write_approval", write_pause_sequence),
                             resume_request=approval_resume,
                         )
                         if approval_response is None:
@@ -11020,6 +11025,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     from tools.request_user_approval import request_user_attention_direct
 
                     payment_pause_sequence = getattr(workflow_instance, "_pause_signal_sequence", 0)
+                    if reentered_pause:
+                        payment_pause_sequence = (resume_hint or {}).get(
+                            "approval_pause_signal_sequence", payment_pause_sequence
+                        )
                     logger.info(
                         "Browser payment approval started",
                         agent_id=workflow_instance.agent_id,
@@ -11085,7 +11094,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             "reusablePurchase": bool(lookup_result.get("reusable")),
                         },
-                        park=park_browser_approval("payment_approval"),
+                        park=park_browser_approval("payment_approval", payment_pause_sequence),
                         resume_request=approval_resume,
                     )
                     if approval_response is None:
