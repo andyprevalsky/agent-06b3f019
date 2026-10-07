@@ -1413,3 +1413,15 @@ qualified `/deploy` lifecycle and independent exact-source review. Original C9
 callers were independently proved quiescent; retained forensic resources are
 inert and receive zero acceptance credit. No model/provider calls, benchmark
 changes, full-suite pass, production rollout or LIVE50 outcome is claimed here.
+
+
+Independent root qualification on exact `ce3b5c216` audited all two production
+and two direct-test helper callers, original sequence restoration, grant/browser
+side effects and all four mint entries through the one guarded loop. It verified
+the original author RED/GREEN log hashes and unchanged test/source bytes; seven
+existing registered owning controls independently passed with zero provider calls
+and no findings. The private
+`root-required-approval-sequence-independent-review.safe.json` receipt has SHA-256
+`b4ed2a37734578a0c75e7e4b0b2edaff6cf09ffd5dfe2f27b5c72df93b918c76`.
+The author proof and prior closed three-cycle ledger remain immutable. Fresh
+exact-head review and actual rollout/production gates are still required.
