@@ -5,69 +5,30 @@
  */
 
 import { AUTH_TEST_SITE_BASE_PATH } from '../../domains/auth-test-site/config';
-import { setPaymentSettler } from '../../domains/auth-test-site/serviceShop';
 import {
   assert,
+  attemptTrail as trail,
+  cartWithTote,
   cleanup,
-  createFixture,
   createMintedIdentity,
   createUser,
   fetchReport,
   getPage,
   lastMailTo,
+  type Manifest,
   pagePath,
   postForm,
-  responseCookies,
   savedPasswordsInListedOrder,
+  seedShop as seed,
   sessionCookie,
+  SHOP_CARD as CARD,
   test,
   withLocalSite,
-  type Manifest,
+  withSettler,
 } from './auth-test-site.testkit';
 
-const CARD = {
-  cardNumber: '4242 4242 4242 4242',
-  cardName: 'Avery Ross',
-  cardExpiry: '12/30',
-  cardCvv: '123',
-  postalCode: '94105',
-};
 /** Canvas Tote 15.00 + 8.25% tax 1.24 + shipping 4.99. */
 const TOTE_TOTAL_CENTS = 2123;
-
-async function seed(base: string, userId: string, scenario: string): Promise<Manifest> {
-  const created = await createFixture(base, { userId, scenario, publicBaseUrl: base });
-  assert(created.status === 201, `${scenario} fixture expected 201, got ${created.status}`);
-  return (await created.json()) as Manifest;
-}
-
-function trail(report: {
-  attempts: Array<{ kind: string; outcome: string; reason: string | null }>;
-}) {
-  return report.attempts.map(
-    (a) => `${a.kind}:${a.outcome}${a.reason === null ? '' : `:${a.reason}`}`
-  );
-}
-
-/** Stands in for the sandbox card settlement; records every charge it is asked to make. */
-async function withSettler(
-  fn: (
-    charges: Array<{ cardNumber: string; amountCents: number; merchant: string }>
-  ) => Promise<void>,
-  behavior: 'settle' | 'decline' = 'settle'
-) {
-  const charges: Array<{ cardNumber: string; amountCents: number; merchant: string }> = [];
-  setPaymentSettler((input) => {
-    charges.push(input);
-    if (behavior === 'decline') return Promise.reject(new Error('no held purchase for this card'));
-    return Promise.resolve({ purchaseId: `purchase-${input.cardNumber}-${input.amountCents}` });
-  });
-  try {
-    await fn(charges);
-  } finally {
-    setPaymentSettler(null);
-  }
-}
 
 async function signUpAndVerify(
   base: string,
@@ -195,12 +156,6 @@ test('created_account_reused: sign-up leaves a password-only account', async () 
   }
 });
 
-async function cartWithTote(base: string, manifest: Manifest): Promise<string> {
-  const added = await postForm(base, pagePath(manifest, '/cart/add'), { item: 'canvas-tote' });
-  assert(added.status === 303, 'adding to the cart redirects to it');
-  return responseCookies(added);
-}
-
 test('signup_purchase: checkout needs an account, and one settled order belongs to it', async () => {
   const userId = await createUser();
   try {
@@ -250,6 +205,23 @@ test('signup_purchase: checkout needs an account, and one settled order belongs 
           orderNumber !== '' && receipt.includes(minted.email),
           'receipt names order and buyer'
         );
+        // Only the purchaser reads the receipt: an order number alone sends a
+        // stranger (no cookies, or a different browser's cart) back to the shop.
+        const stranger = await getPage(base, receiptPath, '');
+        assert(
+          stranger.status === 303 && !(stranger.headers.get('location') ?? '').includes('/orders/'),
+          `a receipt must not render for a request without the purchaser's session: ${stranger.status}`
+        );
+        // A browser that missed the redirect repeats the POST against the cart the
+        // order already emptied; it must get the paid order back, not "empty cart".
+        const replayed = await postForm(base, pagePath(manifest, '/checkout'), CARD, cookies);
+        assert(
+          (replayed.headers.get('location') ?? '').includes(orderNumber),
+          `a repeated checkout POST must resolve to the placed order: ${replayed.headers.get('location')}`
+        );
+        // A malformed session cookie reads as signed out, not as a 500.
+        const malformed = await getPage(base, pagePath(manifest, ''), 'rose_shop_session=%E0');
+        assert(malformed.status === 200, `malformed cookie must not 500: ${malformed.status}`);
 
         await cartWithToteInto(base, manifest, cart);
         const repeat = await postForm(base, pagePath(manifest, '/checkout'), CARD, cookies);
@@ -378,6 +350,14 @@ test('member price shops state the membership terms, and a refused sign-up still
         assert(
           (placed.headers.get('location') ?? '').includes('/orders/ORD-'),
           'guest order placed'
+        );
+        const guestReceiptPath = placed.headers.get('location') ?? '';
+        const withCart = await getPage(base, guestReceiptPath, cart);
+        assert(withCart.status === 200, 'the guest browser reads its own receipt');
+        const withoutCart = await getPage(base, guestReceiptPath, '');
+        assert(
+          withoutCart.status === 303,
+          `a guest receipt needs the cart that paid for it: ${withoutCart.status}`
         );
         const report = await fetchReport(base, manifest.siteId);
         assert(
@@ -518,37 +498,6 @@ test('session_expires_at_checkout: the first submit signs the member out and cha
           `unexpected trail ${trail(report)}`
         );
       });
-    });
-  } finally {
-    await cleanup(userId);
-  }
-});
-
-test('a declined card places no order', async () => {
-  const userId = await createUser();
-  try {
-    await createMintedIdentity(userId);
-    await withLocalSite(async ({ base }) => {
-      await withSettler(async () => {
-        const manifest = await seed(base, userId, 'guest_purchase');
-        const cart = await cartWithTote(base, manifest);
-        await postForm(base, pagePath(manifest, '/checkout/guest'), {}, cart);
-        const incomplete = await postForm(
-          base,
-          pagePath(manifest, '/checkout'),
-          { ...CARD, cardNumber: '42' },
-          cart
-        );
-        assert(
-          (await incomplete.text()).includes('Enter the card number'),
-          'card must be complete'
-        );
-        const declined = await postForm(base, pagePath(manifest, '/checkout'), CARD, cart);
-        assert((await declined.text()).includes('card was declined'), 'decline must be shown');
-        const report = await fetchReport(base, manifest.siteId);
-        assert(report.orders.length === 0, 'a declined card places no order');
-        assert(trail(report).includes('order:rejected:card_declined'), `trail ${trail(report)}`);
-      }, 'decline');
     });
   } finally {
     await cleanup(userId);

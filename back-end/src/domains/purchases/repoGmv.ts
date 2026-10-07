@@ -13,6 +13,8 @@ export async function findAgentcardCoveringPurchase(input: {
   totalCents: number;
   statuses: PurchaseSpendStatus[];
   since: Date;
+  /** Backfills bound the match by the event's own time; a later charge is not its cover. */
+  until?: Date;
 }): Promise<{ id: string } | null> {
   return prisma.purchaseSpend.findFirst({
     where: {
@@ -24,7 +26,7 @@ export async function findAgentcardCoveringPurchase(input: {
       // card purchase); the card row then still covers it. The bound keeps an
       // unrelated larger charge from swallowing a small structured sale.
       totalCents: { gte: input.totalCents, lte: coveringPurchaseCeilingCents(input.totalCents) },
-      createdAt: { gte: input.since },
+      createdAt: { gte: input.since, ...(input.until !== undefined ? { lte: input.until } : {}) },
     },
     select: { id: true },
   });

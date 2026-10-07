@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { EmailProvider, IntegrationStatus, IntegrationType } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { getAuthOptions, saveMintedAccountPassword } from '../../domains/auth-options/service';
+import { upsertSignupPassword } from '../../providers/authOptionsStore';
 import { mintedAccountPassword } from '../../providers/mintedAccountPassword';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -119,6 +120,71 @@ export const identityCases: Array<{ name: string; fn: () => Promise<void> }> = [
             'https://never-visited.example/'
           );
           assert(!elsewhere.saved, 'no minted account for a realm means nothing to save');
+        } finally {
+          await prisma.browserPassword.deleteMany({ where: { userId } });
+        }
+      }),
+  },
+  {
+    // The guard used to be a read before the write: a browser sync that inserted
+    // the same login between the two made the upsert take its conflict branch
+    // and replace the user's real password with the minted one. The write now
+    // carries the condition itself, so it is exercised here with the user's row
+    // already present, which is exactly what the losing write sees.
+    name: "a sign-up password write never replaces a login the user's browser synced",
+    fn: () =>
+      withFreshUser(async (userId) => {
+        const site = 'https://shop.example/signup';
+        const offered = await getAuthOptions(userId, site);
+        assert(offered.minted !== null, 'minted identity must be offered');
+        const username = offered.minted.email;
+        const write = (encryptedPassword: string) =>
+          upsertSignupPassword({
+            userId,
+            origin: site,
+            username,
+            encryptedPassword,
+            browserSource: 'agent_signup',
+            nowMs: Date.now(),
+          });
+        try {
+          await prisma.browserPassword.create({
+            data: {
+              userId,
+              origin: site,
+              username,
+              encryptedPassword: 'users-own-ciphertext',
+              browserSource: 'chrome',
+            },
+          });
+          const lost = await write('minted-ciphertext');
+          const kept = await prisma.browserPassword.findMany({ where: { userId } });
+          assert(
+            !lost.saved &&
+              kept.length === 1 &&
+              kept[0]?.encryptedPassword === 'users-own-ciphertext' &&
+              kept[0]?.browserSource === 'chrome',
+            `the user's synced login was replaced: ${JSON.stringify({ lost, kept: kept.map((row) => [row.browserSource, row.encryptedPassword]) })}`
+          );
+          const refused = await saveMintedAccountPassword(userId, site);
+          assert(
+            !refused.saved && refused.username === username,
+            `the save must report that the user's login was kept: ${JSON.stringify(refused)}`
+          );
+
+          // The agent's own row is still created once and updated in place.
+          await prisma.browserPassword.deleteMany({ where: { userId } });
+          const created = await write('minted-ciphertext-1');
+          const updated = await write('minted-ciphertext-2');
+          const own = await prisma.browserPassword.findMany({ where: { userId } });
+          assert(
+            created.saved &&
+              updated.saved &&
+              own.length === 1 &&
+              own[0]?.encryptedPassword === 'minted-ciphertext-2' &&
+              own[0]?.browserSource === 'agent_signup',
+            `the agent's own saved login must converge on one row: ${JSON.stringify(own.map((row) => [row.browserSource, row.encryptedPassword]))}`
+          );
         } finally {
           await prisma.browserPassword.deleteMany({ where: { userId } });
         }

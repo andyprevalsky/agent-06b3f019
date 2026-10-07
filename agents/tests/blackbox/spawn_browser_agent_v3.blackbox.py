@@ -9030,15 +9030,35 @@ async def test_browser_thinking_stream_restart_closes_the_abandoned_attempt():
     from providers.rose import StreamChunk
 
     stream = BrowserThinkingStream(agent_id="agent-1", task_id="browser-task-1", iteration=2)
-    with patch(
-        "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
-        new_callable=AsyncMock,
-    ) as publish:
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
+            new_callable=AsyncMock,
+        ) as publish,
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_tool_event",
+            new_callable=AsyncMock,
+        ) as tool_events,
+    ):
         await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "half an ans"}))
+        await stream.on_chunk(
+            StreamChunk(kind="tool_call", data={"id": "call-abandoned", "name": "click", "arguments": {}})
+        )
         first_stream_id = stream.stream_id
         await stream.on_chunk(StreamChunk(kind="restart", data={"reason": "output_limit"}))
         await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "full answer"}))
+        await stream.finish_tools(status="FINISHED")
         await stream.finish()
+
+    # The abandoned attempt's tool call never gets a result from the retry: it is
+    # closed as failed under the stream that opened it, and the retry's
+    # finish_tools has nothing left from it to publish under the new stream.
+    tool_calls = [call.kwargs for call in tool_events.await_args_list]
+    abandoned = [item for item in tool_calls if item["tool_call_id"] == "call-abandoned"]
+    assert abandoned, tool_calls
+    closing = [item for item in abandoned if item.get("status") in {"FAILED", "FINISHED"}]
+    assert closing and all(item["stream_id"] == first_stream_id for item in closing), abandoned
+    assert all(item["status"] == "FAILED" for item in closing), closing
 
     published = [call.kwargs for call in publish.await_args_list]
     first = [item for item in published if item["stream_id"] == first_stream_id]
@@ -9087,6 +9107,32 @@ async def test_credential_propagation_failure_keeps_the_browser_run_outcome():
     assert "500" in result["error"], result
     assert [item["status"] for item in saved] == [MessageStatus.IN_PROGRESS, MessageStatus.ERROR], saved
     assert saved[-1]["title"] == "Credential state update failed"
+
+    # The diagnostic write is best-effort: when the same backend refuses that
+    # message too, the fallback result is still returned instead of raising.
+    async def record_then_fail(**kwargs):
+        if kwargs.get("status") == MessageStatus.ERROR:
+            raise RuntimeError("backend unavailable")
+        saved.append(kwargs)
+
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=httpx.HTTPStatusError("500", request=request, response=response)),
+        ),
+        patch.object(handler, "save_browser_action_message", record_then_fail),
+    ):
+        fallback = await handler._propagate_browser_credentials_with_progress(
+            config=MagicMock(),
+            agent_id="agent-1",
+            task_id="browser-task-1",
+            browser_url="https://shop.example/account",
+            status="completed",
+            success=True,
+            message="Signed in.",
+        )
+    assert fallback["outcome"] == "unknown" and "500" in fallback["error"], fallback
 
     # A replaced workflow generation still stops the run.
     with (

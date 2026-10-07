@@ -34,8 +34,13 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
         "result": 'email=avery@example.com password="hunter2-correct#7a"',
         "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross"}],
         "count": 3,
+        # A page script can echo the typed value back as a dictionary KEY too.
+        "entered-hunter2-correct#7a": True,
     }
     masked = mask_secret_values(result, secret_refs)
+    assert "entered-pwd:avery@example.com" in masked and "entered-hunter2-correct#7a" not in masked, (
+        "secret in a result key must be masked too: %r" % sorted(masked)
+    )
     assert masked["result"] == 'email=avery@example.com password="pwd:avery@example.com"', masked
     assert masked["nested"][0]["value"] == "card card_number cvv 123 for Avery Ross", masked
     assert masked["count"] == 3 and masked["success"] is True

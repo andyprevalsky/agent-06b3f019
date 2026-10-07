@@ -42,6 +42,10 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
   const previousProxyServer = process.env.STEEL_PROXY_SERVER;
   const previousProxyEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
   let savedUrl: string | null = 'https://example.com/connection-retry';
+  // rotateBrowserProxy reserves the rotation before the provider recreates the
+  // session, so the row a rotation reads already carries its own position.
+  let replacedSessionId = 'steel-connection-old';
+  let proxyRotationCount = 1;
 
   try {
     delete process.env.STEEL_PROXY_SERVER;
@@ -50,7 +54,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
     ).findUnique = (async () => ({
       id: 'replacement-connection-retry-task',
-      sessionId: 'steel-connection-old',
+      sessionId: replacedSessionId,
+      proxyRotationCount,
       provider: 'kernel',
       providerProfileId: 'kernel-profile',
       providerProfileSource: 'kernel_session',
@@ -124,6 +129,42 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         rotationGeo.state !== 'CA' &&
         rotationGeo.city === undefined,
       `rotation must request a different state without a city, got ${JSON.stringify(rotationGeo)}`
+    );
+    // Every rotation of a task moves again. Live parity (2026-10-07) replaced
+    // Kernel session ociyyt6sx5uvqc1j22yq7g94 and then Steel session
+    // eaac6de5-290b-4bf9-bc9d-d7effdd6b147: both rotations asked Steel for FL
+    // and the second session read the first one's exit IP.
+    const consecutiveStates: unknown[] = [];
+    for (const [position, sessionId] of [
+      [3, 'ociyyt6sx5uvqc1j22yq7g94'],
+      [4, 'eaac6de5-290b-4bf9-bc9d-d7effdd6b147'],
+    ] as const) {
+      proxyRotationCount = position;
+      replacedSessionId = sessionId;
+      await recreateSession(
+        'replacement-connection-retry-task',
+        { forceManagedRotation: true },
+        {
+          createSession: async (input) => {
+            const geo = (input as { useProxy?: { geolocation?: Record<string, unknown> } }).useProxy
+              ?.geolocation;
+            consecutiveStates.push(geo?.state);
+            return {
+              id: `steel-rotation-${position}`,
+              debugUrl: 'https://steel.example/debug',
+              profileId: null,
+              proxySource: 'steel',
+            };
+          },
+          validateConnection: async () => null,
+        }
+      );
+    }
+    assert(
+      consecutiveStates.length === 2 &&
+        consecutiveStates.every((state) => typeof state === 'string' && state !== 'CA') &&
+        consecutiveStates[0] !== consecutiveStates[1],
+      `consecutive rotations must request different states, got ${JSON.stringify(consecutiveStates)}`
     );
     const resumeInputs: Array<Record<string, unknown>> = [];
     await recreateSession(

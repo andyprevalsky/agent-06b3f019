@@ -1190,16 +1190,27 @@ async def _propagate_browser_credentials_with_progress(
             status=status,
             error=error_message,
         )
-        await save_browser_action_message(
-            agent_id=agent_id,
-            title="Credential state update failed",
-            task_id=task_id,
-            message=error_message,
-            status=MessageStatus.ERROR,
-            browser_url=browser_url,
-            action_type="credential_propagation",
-            tool_call_id=tool_call_id,
-        )
+        # The diagnostic write is best-effort: the backend that just failed the
+        # propagation may refuse this message too, and that must not turn the
+        # fallback into a raise either.
+        try:
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title="Credential state update failed",
+                task_id=task_id,
+                message=error_message,
+                status=MessageStatus.ERROR,
+                browser_url=browser_url,
+                action_type="credential_propagation",
+                tool_call_id=tool_call_id,
+            )
+        except Exception as save_error:
+            logger.warning(
+                "Credential propagation diagnostic message was not saved",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=extract_error_message(save_error),
+            )
         return {"outcome": "unknown", "refs": 0, "applied": 0, "error": error_message}
 
     outcome = result.get("outcome", "unknown")

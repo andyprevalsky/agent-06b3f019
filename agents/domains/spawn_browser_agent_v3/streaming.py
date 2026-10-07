@@ -100,6 +100,9 @@ class BrowserThinkingStream:
             # decision never mixes the two.
             if self._started:
                 await self._publish_assistant(delta="", done=True)
+            # Tool calls the abandoned attempt announced never get a result from
+            # the retry, so close them under the stream that opened them.
+            await self.finish_tools(status="FAILED")
             self.stream_id = f"{self.stream_id.rsplit('-', 1)[0]}-{uuid.uuid4().hex[:8]}"
             self._started = False
             return

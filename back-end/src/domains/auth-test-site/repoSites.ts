@@ -36,6 +36,19 @@ export function getSite(siteId: string, nowMs = Date.now()): AuthTestSite | null
   return site;
 }
 
+/**
+ * The live site whose order a settled purchase already paid for. Settlement
+ * replays a cleared purchase for the same card and total, so the purchase id
+ * is the only thing tying a payment to the checkout that was charged. Bounded
+ * by MAX_ACTIVE_SITES, each holding the few orders of one benchmark run.
+ */
+export function siteIdForPurchase(purchaseId: string): string | null {
+  for (const [siteId, site] of sites) {
+    if (site.orders.some((order) => order.purchaseId === purchaseId)) return siteId;
+  }
+  return null;
+}
+
 export function deleteSite(siteId: string): boolean {
   return sites.delete(siteId);
 }

@@ -211,6 +211,8 @@ export interface SiteOrder {
   totalCents: number;
   at: string;
   purchaseId: string | null;
+  /** The cart that paid for it; a guest receipt is readable only with this cart's cookie. */
+  cartToken: string | null;
 }
 
 /**

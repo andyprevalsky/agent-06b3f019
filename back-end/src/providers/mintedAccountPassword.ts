@@ -71,16 +71,9 @@ export async function saveMintedAccountPassword(
     return { saved: false, username: null };
   }
   // A login the user synced from a browser for this site is theirs; typing
-  // pwd:new on a page never changes the site's real password, so it must not
-  // replace that row.
-  const existing = (await repo.findBrowserPasswords(userId)).find(
-    (row) => row.origin === origin && row.username === username
-  );
-  if (existing !== undefined && existing.browserSource !== MINTED_PASSWORD_BROWSER_SOURCE) {
-    log.info("Kept the user's saved login instead of the minted password", { userId, realm });
-    return { saved: false, username };
-  }
-  await repo.upsertSignupPassword({
+  // pwd:new on a page never changes the site's real password, so the write
+  // refuses to replace that row.
+  const { saved } = await repo.upsertSignupPassword({
     userId,
     origin,
     username,
@@ -88,6 +81,10 @@ export async function saveMintedAccountPassword(
     browserSource: MINTED_PASSWORD_BROWSER_SOURCE,
     nowMs: Date.now(),
   });
+  if (!saved) {
+    log.info("Kept the user's saved login instead of the minted password", { userId, realm });
+    return { saved: false, username };
+  }
   log.info('Saved minted account password', { userId, realm, username });
   return { saved: true, username };
 }

@@ -149,6 +149,35 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('a session whose row commits during the held-row query is still protected', async () => {
+    // createSessionWithContext registers the id in-flight, persists the row, then
+    // unregisters. If the reaper read in-flight AFTER the DB query, a session that
+    // committed between the two reads would be in neither set and get released.
+    const marker = steelOwnershipMarker('render:srv-1');
+    const now = Date.parse('2026-10-05T12:00:00Z');
+    const old = new Date(now - STEEL_REAPER_MIN_AGE_MS - 1).toISOString();
+    const committing = newOwnedSteelSessionId(marker);
+    const inFlight = new Set([committing]);
+    const released: string[] = [];
+    const summary = await reconcileOrphanedSteelSessions({
+      listLiveSessions: async () => [{ id: committing, createdAt: old }],
+      heldSessionIds: async () => {
+        // The row commits and the id is unregistered while this query runs; the
+        // query itself still predates the commit and returns no held row.
+        inFlight.delete(committing);
+        return new Set();
+      },
+      inFlightSessionIds: () => new Set(inFlight),
+      isOwned: (id) => isOwnedSteelSessionId(id, marker),
+      release: async (id) => {
+        released.push(id);
+      },
+      now: () => now,
+    });
+    assert.deepStrictEqual(released, [], 'a live session mid-commit must not be released');
+    assert.strictEqual(summary.skippedHeld, 1);
+  });
+
   await test('a failed release is counted, not thrown, so the other sessions still get released', async () => {
     const marker = steelOwnershipMarker('render:srv-1');
     const now = Date.now();

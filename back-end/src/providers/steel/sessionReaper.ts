@@ -124,8 +124,11 @@ export async function reconcileOrphanedSteelSessions(
   summary.skippedYoung = owned.length - oldEnough.length;
   if (oldEnough.length === 0) return summary;
 
-  const held = await deps.heldSessionIds(oldEnough.map((session) => session.id));
+  // Read the in-flight set before the held-row query: a session whose row
+  // commits (and is unregistered) between the two reads is then still seen by
+  // the later DB query, so it is never in neither set.
   const inFlight = deps.inFlightSessionIds();
+  const held = await deps.heldSessionIds(oldEnough.map((session) => session.id));
   for (const session of oldEnough) {
     if (held.has(session.id) || inFlight.has(session.id)) {
       summary.skippedHeld += 1;

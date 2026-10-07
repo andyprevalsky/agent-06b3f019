@@ -616,7 +616,8 @@ def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any
                     item = item.replace(plaintext, ref)
             return item
         if isinstance(item, dict):
-            return {key: mask(entry) for key, entry in item.items()}
+            # Keys can carry a secret too ({"entered-<password>": true}).
+            return {mask(key): mask(entry) for key, entry in item.items()}
         if isinstance(item, list):
             return [mask(entry) for entry in item]
         return item

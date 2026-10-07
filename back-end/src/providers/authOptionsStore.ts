@@ -123,6 +123,12 @@ export async function createAgentIdentityEmailIfAbsent(userId: string, email: st
 }
 
 /** The login a sign-up created, saved the way a synced browser password is. */
+/**
+ * Saves the password the agent created an account with. A login the user's
+ * browser synced for the same site and username is theirs and is never
+ * replaced: each statement below carries that condition itself, so a sync that
+ * lands between them cannot be overwritten.
+ */
 export async function upsertSignupPassword(params: {
   userId: string;
   origin: string;
@@ -130,28 +136,31 @@ export async function upsertSignupPassword(params: {
   encryptedPassword: string;
   browserSource: string;
   nowMs: number;
-}) {
+}): Promise<{ saved: boolean }> {
   const now = BigInt(params.nowMs);
-  return prisma.browserPassword.upsert({
-    where: {
-      userId_origin_username: {
-        userId: params.userId,
-        origin: params.origin,
-        username: params.username,
+  const key = { userId: params.userId, origin: params.origin, username: params.username };
+  const updateOwnRow = () =>
+    prisma.browserPassword.updateMany({
+      where: { ...key, browserSource: params.browserSource },
+      data: { encryptedPassword: params.encryptedPassword, dateLastUsed: now },
+    });
+  if ((await updateOwnRow()).count > 0) return { saved: true };
+  const created = await prisma.browserPassword.createMany({
+    data: [
+      {
+        ...key,
+        encryptedPassword: params.encryptedPassword,
+        dateLastUsed: now,
+        dateCreated: now,
+        browserSource: params.browserSource,
       },
-    },
-    create: {
-      userId: params.userId,
-      origin: params.origin,
-      username: params.username,
-      encryptedPassword: params.encryptedPassword,
-      dateLastUsed: now,
-      dateCreated: now,
-      browserSource: params.browserSource,
-    },
-    update: { encryptedPassword: params.encryptedPassword, dateLastUsed: now },
-    select: { id: true },
+    ],
+    skipDuplicates: true,
   });
+  if (created.count > 0) return { saved: true };
+  // The key was taken between the two statements: by a concurrent save of this
+  // same sign-up (update it) or by the user's own synced login (keep it).
+  return { saved: (await updateOwnRow()).count > 0 };
 }
 
 export async function setAgentIdentityPhone(params: {

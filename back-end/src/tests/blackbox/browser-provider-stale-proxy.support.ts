@@ -30,15 +30,26 @@ export async function assertResumeReprovisionsDeletedProxy(options: {
   kernel: Kernel;
   taskId: string;
   sessionId: string;
-  agentLocation: ProxyGeoLocation;
   proxySource: string | undefined;
   proxyLocation: BrowserMetadataResponse['proxy_location'];
   post: (path: string, body?: unknown) => Promise<BrowserApiResponse>;
 }): Promise<string> {
-  const { kernel, taskId, sessionId, agentLocation, proxySource, proxyLocation, post } = options;
+  const { kernel, taskId, sessionId, proxySource, proxyLocation, post } = options;
   const mode = managedKernelProxyFromSource(proxySource ?? null);
   assert(mode !== undefined, `no managed proxy mode for source ${String(proxySource)}`);
-  const candidate = kernelProxyCandidates(agentLocation, mode.type).find(
+  // The cached row to poison is the one for the proxy the session actually
+  // uses. After a rotation that is another US state than the agent's own, so
+  // the key comes from the session's reported location, not the agent's.
+  assert(
+    proxyLocation !== undefined && typeof proxyLocation.country === 'string',
+    `session reported no proxy location: ${JSON.stringify(proxyLocation)}`
+  );
+  const sessionLocation: ProxyGeoLocation = {
+    country: proxyLocation.country,
+    ...(proxyLocation.state ? { state: proxyLocation.state } : {}),
+    ...(proxyLocation.city ? { city: proxyLocation.city } : {}),
+  };
+  const candidate = kernelProxyCandidates(sessionLocation, mode.type).find(
     (c) => c.source === proxySource
   );
   assert(candidate !== undefined, `no managed proxy candidate for source ${String(proxySource)}`);

@@ -10,9 +10,13 @@
  */
 
 import { randomBytes } from '../../providers/crypto';
-import { settleAgentCardSandboxPayment } from '../../providers/agentcard/sandbox-settlement';
+import {
+  AgentCardSandboxSettlementError,
+  settleAgentCardSandboxPayment,
+} from '../../providers/agentcard/sandbox-settlement';
 import { createLogger } from '../../providers/logger';
 import { AUTH_TEST_SITE_NAME, SHOP_SHIPPING_CENTS, SHOP_TAX_RATE } from './config';
+import { siteIdForPurchase } from './repoSites';
 import { endSession, recordAttempt } from './serviceSignIn';
 import type { AuthTestSite, CartLine, SiteOrder, SiteSession } from './types';
 
@@ -205,9 +209,17 @@ export async function placeOrder(
   site: AuthTestSite,
   input: { cartToken: string | null; session: SiteSession | null; card: CardInput }
 ): Promise<PlaceOrderResult> {
-  const lines = cartLines(site, input.cartToken);
+  // Copy the cart first: settlement awaits a provider, and a concurrent cart
+  // change must not alter what this order records against the charged total.
+  const lines = cartLines(site, input.cartToken).map((line) => ({ ...line }));
   const totals = cartTotals(site, lines, input.session !== null);
-  if (totals.lines.length === 0) return { ok: false, reason: 'empty_cart' };
+  if (totals.lines.length === 0) {
+    // A browser that missed the response repeats the POST against the cart the
+    // first attempt already emptied; hand back the order it paid for.
+    const placed = orderForCart(site, input.cartToken);
+    if (placed !== undefined) return { ok: true, order: placed };
+    return { ok: false, reason: 'empty_cart' };
+  }
   const buyer = input.session?.email ?? null;
   if (input.session === null && !isGuestCart(site, input.cartToken)) {
     recordAttempt(site, 'order', '', 'rejected', 'sign_in_required');
@@ -235,12 +247,22 @@ export async function placeOrder(
       total_cents: totals.totalCents,
       error: error instanceof Error ? error.message : String(error),
     });
+    // Only a refused card is the shopper's to fix. An operational failure in
+    // settlement (a cleared purchase missing its hold, 502) is the route's error.
+    if (error instanceof AgentCardSandboxSettlementError && error.statusCode >= 500) throw error;
     recordAttempt(site, 'order', buyer ?? '', 'rejected', 'card_declined');
     return { ok: false, reason: 'card_declined' };
   }
 
   const existing = site.orders.find((order) => order.purchaseId === purchaseId);
   if (existing !== undefined) return { ok: true, order: existing };
+  // Settlement replays a cleared purchase for the same card and total without
+  // charging again. One that already paid for another site's order has not paid
+  // for this checkout.
+  if (siteIdForPurchase(purchaseId) !== null) {
+    recordAttempt(site, 'order', buyer ?? '', 'rejected', 'card_declined');
+    return { ok: false, reason: 'card_declined' };
+  }
   const order: SiteOrder = {
     orderNumber: newOrderNumber(),
     email: buyer,
@@ -248,6 +270,7 @@ export async function placeOrder(
     totalCents: totals.totalCents,
     at: new Date().toISOString(),
     purchaseId,
+    cartToken: input.cartToken,
   };
   site.orders.push(order);
   if (input.cartToken !== null) site.carts[input.cartToken] = [];
@@ -257,4 +280,26 @@ export async function placeOrder(
 
 export function findOrder(site: AuthTestSite, orderNumber: string): SiteOrder | undefined {
   return site.orders.find((order) => order.orderNumber === orderNumber);
+}
+
+/** The most recent order a cart paid for (a repeated checkout POST resolves to it). */
+export function orderForCart(site: AuthTestSite, cartToken: string | null): SiteOrder | undefined {
+  if (cartToken === null) return undefined;
+  for (let index = site.orders.length - 1; index >= 0; index -= 1) {
+    if (site.orders[index]!.cartToken === cartToken) return site.orders[index];
+  }
+  return undefined;
+}
+
+/**
+ * Whether this request may read a receipt: a member order belongs to the
+ * signed-in purchaser, a guest order to the browser holding the cart that paid
+ * for it. Anyone else only knows an order number.
+ */
+export function canViewOrder(
+  order: SiteOrder,
+  viewer: { session: SiteSession | null; cartToken: string | null }
+): boolean {
+  if (order.email !== null) return viewer.session?.email === order.email;
+  return order.cartToken !== null && viewer.cartToken === order.cartToken;
 }

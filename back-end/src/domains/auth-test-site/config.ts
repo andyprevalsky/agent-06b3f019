@@ -1,6 +1,12 @@
-/** The fixture serves sign-in pages and seeds credentials, so it never runs in production. */
+/**
+ * The fixture serves sign-in pages and seeds credentials, so it never runs in
+ * production. It is an explicit opt-in: only the development and test
+ * environments (what run.sh, the cloud guests and the test runners set) mount
+ * it; an unset or unexpected NODE_ENV keeps it off.
+ */
 export function authTestSiteEnabled(): boolean {
-  return process.env.NODE_ENV !== 'production';
+  const env = process.env.NODE_ENV?.trim();
+  return env === 'development' || env === 'test';
 }
 
 /** Fixture management (seed/report/delete) is limited to internal API-key callers. */

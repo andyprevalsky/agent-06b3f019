@@ -58,26 +58,7 @@ const rejectedProxyCities = new Set<string>(
     .filter((entry) => entry.split('|').length === 3 && entry.split('|')[2] !== '')
 );
 
-// A rotation exists to land on a different egress IP. Steel's residential pool
-// is keyed by geolocation and kept handing the same exit node back for the same
-// state across separate sessions (live parity saw one IP three runs in a row),
-// so a rotation moves to another large US state and drops the city. The old
-// session id picks the step, so consecutive rotations keep moving. Outside the
-// US Steel only keys on country; the rotation can only drop the city there.
-const ROTATION_STATES = ['TX', 'CA', 'FL', 'NY', 'IL', 'GA', 'WA', 'AZ', 'PA', 'OH'];
-
-export function rotationGeolocation(geolocation: ProxyGeoLocation, salt: string): ProxyGeoLocation {
-  const withoutCity: ProxyGeoLocation = {
-    country: geolocation.country,
-    ...(geolocation.state ? { state: geolocation.state } : {}),
-  };
-  if (geolocation.country !== 'US') return withoutCity;
-  const current = (geolocation.state ?? '').toUpperCase();
-  const candidates = ROTATION_STATES.filter((state) => state !== current);
-  let hash = 0;
-  for (const char of salt) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return { ...withoutCity, state: candidates[hash % candidates.length] };
-}
+export { rotationGeolocation } from '../browser/rotationGeolocation';
 
 export function proxyCityKey(geolocation: ProxyGeoLocation): string {
   return `${geolocation.country}|${geolocation.state ?? ''}|${geolocation.city ?? ''}`.toLowerCase();

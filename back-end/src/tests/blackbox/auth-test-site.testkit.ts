@@ -24,6 +24,8 @@ import express from 'express';
 import { prisma } from '../../providers/database';
 import authTestSiteRouter from '../../domains/auth-test-site/routes';
 import { AUTH_TEST_SITE_BASE_PATH } from '../../domains/auth-test-site/config';
+import { setPaymentSettler } from '../../domains/auth-test-site/serviceShop';
+import { AgentCardSandboxSettlementError } from '../../providers/agentcard/sandbox-settlement';
 
 export const BASE_URL = process.env.TEST_BASE_URL ?? '';
 export const API_KEY = process.env.BACKEND_API_KEY ?? '';
@@ -322,4 +324,64 @@ export async function signPasskeyAssertion(params: {
     authenticatorData: authenticatorData.toString('base64url'),
     signature: signature.toString('base64url'),
   };
+}
+
+// --- Shop checkout helpers shared by the sign-up/shop and checkout case files.
+
+export const SHOP_CARD = {
+  cardNumber: '4242 4242 4242 4242',
+  cardName: 'Avery Ross',
+  cardExpiry: '12/30',
+  cardCvv: '123',
+  postalCode: '94105',
+};
+
+export async function seedShop(base: string, userId: string, scenario: string): Promise<Manifest> {
+  const created = await createFixture(base, { userId, scenario, publicBaseUrl: base });
+  assert(created.status === 201, `${scenario} fixture expected 201, got ${created.status}`);
+  return (await created.json()) as Manifest;
+}
+
+export function attemptTrail(report: {
+  attempts: Array<{ kind: string; outcome: string; reason: string | null }>;
+}) {
+  return report.attempts.map(
+    (a) => `${a.kind}:${a.outcome}${a.reason === null ? '' : `:${a.reason}`}`
+  );
+}
+
+/** Stands in for the sandbox card settlement; records every charge it is asked to make. */
+export async function withSettler(
+  fn: (
+    charges: Array<{ cardNumber: string; amountCents: number; merchant: string }>
+  ) => Promise<void>,
+  behavior: 'settle' | 'decline' | 'outage' = 'settle'
+) {
+  const charges: Array<{ cardNumber: string; amountCents: number; merchant: string }> = [];
+  // One hold per test: like the real settler, the same card and total replay
+  // the same purchase inside a test, and another test's hold is another purchase.
+  const hold = randomUUID();
+  setPaymentSettler((input) => {
+    charges.push(input);
+    if (behavior === 'decline') return Promise.reject(new Error('no held purchase for this card'));
+    if (behavior === 'outage') {
+      return Promise.reject(
+        new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502)
+      );
+    }
+    return Promise.resolve({
+      purchaseId: `purchase-${hold}-${input.cardNumber}-${input.amountCents}`,
+    });
+  });
+  try {
+    await fn(charges);
+  } finally {
+    setPaymentSettler(null);
+  }
+}
+
+export async function cartWithTote(base: string, manifest: Manifest): Promise<string> {
+  const added = await postForm(base, pagePath(manifest, '/cart/add'), { item: 'canvas-tote' });
+  assert(added.status === 303, 'adding to the cart redirects to it');
+  return responseCookies(added);
 }

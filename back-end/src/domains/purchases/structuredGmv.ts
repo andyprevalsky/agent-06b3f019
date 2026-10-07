@@ -66,6 +66,9 @@ async function agentcardCoversPurchase(
     totalCents,
     statuses: AGENTCARD_COVERED_STATUSES,
     since: new Date(anchorMs - AGENTCARD_LOOKBACK_MS),
+    // A live event matches any card row so far; a historical one must not be
+    // covered by a card purchase that happened after it.
+    ...(occurredAt !== undefined ? { until: occurredAt } : {}),
   });
   return covered?.id ?? null;
 }

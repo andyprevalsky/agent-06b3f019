@@ -36,7 +36,13 @@ export function nextOf(req: Request): NextPage {
 function cookieValue(req: Request, cookieName: string): string | null {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const [name, ...rest] = part.trim().split('=');
-    if (name === cookieName) return decodeURIComponent(rest.join('='));
+    if (name !== cookieName) continue;
+    // A malformed sequence (`%E0`) must read as "no cookie", not a 500.
+    try {
+      return decodeURIComponent(rest.join('='));
+    } catch {
+      return null;
+    }
   }
   return null;
 }

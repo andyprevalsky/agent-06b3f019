@@ -196,9 +196,10 @@ export async function recreateSession(
       : undefined;
   log.info(`  Found old session with saved URL: ${savedUrl ?? 'NONE'}`);
   const baseGeo = await proxyLocationForAgent(oldSession.agentId);
-  // A rotation must land on a different egress IP; see rotationGeolocation.
+  // A rotation must land on a different egress IP; see rotationGeolocation. The
+  // caller already reserved this rotation, so the row's count is its step.
   const proxyGeo = options.forceManagedRotation
-    ? rotationGeolocation(baseGeo, oldSession.sessionId)
+    ? rotationGeolocation(baseGeo, taskId, oldSession.proxyRotationCount)
     : baseGeo;
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);

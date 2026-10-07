@@ -25,6 +25,7 @@ import {
   cartLines,
   cartTotals,
   findItem,
+  canViewOrder,
   findOrder,
   isGuestCart,
   markGuestCart,
@@ -169,7 +170,10 @@ shopRouter.post(
 shopRouter.get('/:siteId/orders/:orderNumber', (req: Request, res: Response) => {
   const site = siteOf(req);
   const order = findOrder(site, req.params.orderNumber);
-  if (order === undefined) {
+  if (
+    order === undefined ||
+    !canViewOrder(order, { session: sessionOf(req).session, cartToken: cartToken(req) })
+  ) {
     res.redirect(303, siteUrl(site));
     return;
   }

@@ -37,6 +37,72 @@ export function kernelRecreateProxySelection(
 }
 
 /**
+ * The location a cached managed proxy was resolved for, read back from its key
+ * (`<type>:<COUNTRY>[:<STATE>[:<city>]]`). A rotation moves the session to
+ * another state, so a later resume cannot recompute that location from the
+ * agent's own geolocation; it has to come from the proxy the session used.
+ */
+export function kernelProxyLocationFromKey(proxyKey: string): ProxyGeoLocation | undefined {
+  const [type, country, state, city, ...rest] = proxyKey.split(':');
+  if (rest.length > 0 || !type || !country || !/^[A-Z]{2}$/.test(country)) return undefined;
+  if (type !== 'residential' && type !== 'mobile' && type !== 'isp') return undefined;
+  return {
+    country,
+    ...(state !== undefined && state !== '' ? { state } : {}),
+    ...(city !== undefined && city !== '' ? { city } : {}),
+  };
+}
+
+/** The location a Kernel proxy's config pins (country required; state/city when set). */
+export function kernelProxyLocationFromConfig(config: unknown): ProxyGeoLocation | undefined {
+  if (config === null || typeof config !== 'object') return undefined;
+  const { country, state, city } = config as Record<string, unknown>;
+  if (typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country)) return undefined;
+  return {
+    country: country.toUpperCase(),
+    ...(typeof state === 'string' && state !== '' ? { state } : {}),
+    ...(typeof city === 'string' && city !== '' ? { city } : {}),
+  };
+}
+
+/**
+ * Location of the managed proxy the previous Kernel session actually used, so a
+ * resume lands on the same proxy even after a rotation moved it away from the
+ * agent's home location. Undefined when it cannot be established (the browser
+ * is gone from the provider, the proxy row was forgotten); the caller then
+ * falls back to the agent's location, which is what every resume did before.
+ */
+export async function recordedKernelProxyLocation(
+  client: Kernel,
+  sessionId: string | null
+): Promise<ProxyGeoLocation | undefined> {
+  if (sessionId === null || sessionId === '') return undefined;
+  try {
+    const browser = await client.browsers.retrieve(
+      sessionId,
+      { include_deleted: true },
+      { timeout: 10_000, maxRetries: 0 }
+    );
+    const proxyId = browser.proxy_id;
+    if (proxyId === undefined || proxyId === null || proxyId === '') return undefined;
+    // The proxy object itself is the authority on where it points; the cache
+    // row is only a fallback (it can have been re-pointed or forgotten since).
+    const fromProvider = await client.proxies
+      .retrieve(proxyId, { timeout: 10_000, maxRetries: 0 })
+      .then((proxy) => kernelProxyLocationFromConfig(proxy.config))
+      .catch(() => undefined);
+    if (fromProvider !== undefined) return fromProvider;
+    const row = await prisma.browserProviderProxy.findFirst({
+      where: { provider: 'kernel', proxyId },
+      select: { proxyKey: true },
+    });
+    return row === null ? undefined : kernelProxyLocationFromKey(row.proxyKey);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Kernel's SDK defaults (`timeout=60_000`, `maxRetries=2`) multiply a slow
  * `proxies.create` / `browsers.create` into ~180s of silence before surfacing
  * `APIConnectionTimeoutError` ("Request timed out."). Session init must fail
