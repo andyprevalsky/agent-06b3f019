@@ -2532,7 +2532,36 @@ cloudbench_env_value() { return 0; }
             "driver cleanup evidence interrupt_status=1 cleanup_ack=1"
         )
     finally:
-        _terminate_boot_fixture_tree(boot)
+        with ExitStack() as cleanup:
+            cleanup.callback(_reap_fixture_status_server, status_pid_file, status_wrapper)
+            _terminate_boot_fixture_tree(boot)
+
+
+def _reap_fixture_status_server(pid_file: Path, wrapper: Path) -> None:
+    """The driver relaunches the status server as its own setsid child, so it is
+    reparented away from the boot tree once the driver exits."""
+    text = pid_file.read_text() if pid_file.exists() else ""
+    if not text.endswith("\n"):
+        return
+    pid = int(text)
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        return
+    if str(wrapper).encode() not in argv:
+        return
+    os.kill(pid, signal.SIGKILL)
+
+    def live() -> bool:
+        try:
+            return ") Z " not in Path(f"/proc/{pid}/stat").read_text()
+        except FileNotFoundError:
+            return False
+
+    deadline = time.monotonic() + 10
+    while live() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not live(), "fixture status server survived cleanup"
 
 
 def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
