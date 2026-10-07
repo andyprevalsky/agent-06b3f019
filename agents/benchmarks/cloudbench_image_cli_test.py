@@ -30,7 +30,11 @@ def _manifest_registry(response):
         def respond(self):
             requests.append((self.command, self.path))
             request_body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            status, body, headers = response(self.command, self.path, request_body)
+            reply = response(self.command, self.path, request_body)
+            if reply is None:
+                self.close_connection = True
+                return
+            status, body, headers = reply
             self.send_response(status)
             for name, value in headers.items():
                 self.send_header(name, value)
@@ -100,6 +104,14 @@ def test_cold_image_exit_zero_cannot_publish_an_unavailable_actual_manifest(tmp_
         "republish",
         "unavailable",
         "missing-blobs",
+        "missing-blobs-settle",
+        "missing-blobs-wrong-digest",
+        "missing-blobs-digest-missing",
+        "invalid-manifest",
+        "mixed-manifest-errors",
+        "empty-manifest-errors",
+        "put-transport-settle",
+        "put-auth",
         "digest-missing",
         "wrong-digest",
         "auth",
@@ -119,7 +131,14 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:" + "c" * 64, "size": 2},
-        "layers": [],
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+zstd",
+                "digest": "sha256:" + str(index) * 64,
+                "size": 2,
+            }
+            for index in range(6)
+        ],
     }
     raw = json.dumps(manifest, indent=2).encode()
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -131,6 +150,16 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
     metadata_queries = []
     phase = 0
     elapsed = [0.0]
+    blob_errors = [
+        {"code": "MANIFEST_BLOB_UNKNOWN", "message": "blob unknown to registry", "detail": layer["digest"]}
+        for layer in manifest["layers"]
+    ]
+    settling = scenario.startswith("missing-blobs-") or scenario == "put-transport-settle"
+    put_errors = {
+        "invalid-manifest": [{"code": "MANIFEST_INVALID"}],
+        "mixed-manifest-errors": [*blob_errors, {"code": "MANIFEST_INVALID"}],
+        "empty-manifest-errors": [],
+    }
 
     def fixture_sleep(seconds):
         elapsed[0] += seconds
@@ -147,21 +176,33 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
         if method == "PUT":
             assert path == tag_path
             writes.append(body)
-            if scenario == "missing-blobs":
-                return 400, b'{"errors":[{"code":"MANIFEST_BLOB_UNKNOWN"}]}', {}
+            if scenario == "put-transport-settle":
+                return None
+            if scenario == "missing-blobs" or settling:
+                return 400, json.dumps({"errors": blob_errors}).encode(), {}
+            if scenario in put_errors:
+                return 400, json.dumps({"errors": put_errors[scenario]}).encode(), {}
+            if scenario == "put-auth":
+                return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {}
             phase = 1
             return 201, b"", {"Docker-Content-Digest": digest}
         assert method == "GET"
         if scenario == "auth":
             return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {}
-        if scenario in {"unavailable", "missing-blobs", "unreconstructable", "unanchored"} or (
-            scenario == "digest-missing" and path == digest_path
+        if (
+            scenario in {"unavailable", "missing-blobs", "unreconstructable", "unanchored"}
+            or (scenario == "digest-missing" and path == digest_path)
+            or scenario in put_errors
+            or scenario == "put-auth"
+            or (settling and elapsed[0] < 175)
         ):
+            return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
+        if scenario == "missing-blobs-digest-missing" and path == digest_path:
             return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
         if scenario == "republish" and phase < 2:
             phase += 1
             return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
-        header_digest = "sha256:" + "b" * 64 if scenario == "wrong-digest" else digest
+        header_digest = "sha256:" + "b" * 64 if scenario in {"wrong-digest", "missing-blobs-wrong-digest"} else digest
         return 200, raw, {} if scenario == "no-digest-header" else {"Docker-Content-Digest": header_digest}
 
     with _manifest_registry(response) as (origin, requests):
@@ -174,14 +215,21 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
             sleep=fixture_sleep,
             clock=lambda: elapsed[0],
         )
-        if scenario in {"available", "republish", "no-digest-header", "selected-app"}:
+        if scenario in {
+            "available",
+            "republish",
+            "no-digest-header",
+            "selected-app",
+            "missing-blobs-settle",
+            "put-transport-settle",
+        }:
             receipt = handoff.verify(image, digest)
             assert receipt["registry_handoff_verified"] is True
             assert receipt["published_image_ref"] == image + "@" + digest
             assert receipt["published_digest"] == digest
             assert receipt["manifest_republished"] is (scenario == "republish")
             assert requests[-2:] == [("GET", tag_path), ("GET", digest_path)]
-            assert bool(writes) is (scenario == "republish")
+            assert bool(writes) is (scenario in {"republish", "missing-blobs-settle", "put-transport-settle"})
         else:
             with pytest.raises(helper["HandoffError"]):
                 handoff.verify(image, None if scenario == "unanchored" else digest)
@@ -189,9 +237,10 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
                 assert requests == [("GET", tag_path)]
             if scenario == "unreconstructable":
                 assert requests == [("GET", tag_path), ("POST", "/graphql")]
-            if scenario == "missing-blobs":
+            if scenario in put_errors or scenario == "put-auth":
                 assert requests == [("GET", tag_path), ("POST", "/graphql"), ("PUT", tag_path)]
-            if scenario not in {"unavailable", "missing-blobs"}:
+                assert elapsed[0] == 0, "Unrelated registry rejections must remain terminal"
+            if scenario not in {"unavailable", "missing-blobs", *put_errors, "put-auth"} and not settling:
                 assert not writes
     if scenario == "wrong-app":
         assert not requests
@@ -204,10 +253,18 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
         for method, path in requests
     ), "Handoff must only read the exact manifest routes and republish the exact tag"
     assert all(query == {"appName": app, "imageRef": image} for query in metadata_queries)
+    if scenario == "missing-blobs" or settling:
+        assert len(metadata_queries) == 1, (
+            "The same metadata and authentication must span registry visibility observations"
+        )
+        assert len(writes) == 1, "A missing-blob rejection must settle through reads without repeating the exact PUT"
+        assert elapsed[0] == (180 if scenario in {"missing-blobs", "missing-blobs-digest-missing"} else 175)
     if scenario == "digest-missing":
         assert ("GET", digest_path) in requests
     if scenario in {"unavailable", "missing-blobs"}:
-        assert writes, "Cached metadata must be exercised without granting credit for unavailable publication"
+        assert len(writes) == 1, (
+            "Cached metadata gets one exact PUT without granting credit for unavailable publication"
+        )
     assert all(body == raw for body in writes), "Republication must preserve the original built manifest bytes"
     for artifact in (tmp_path / "private-observations").iterdir():
         assert artifact.stat().st_mode & 0o777 == 0o600

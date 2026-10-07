@@ -11,6 +11,7 @@ symptoms:
   - MANIFEST_UNKNOWN
   - registry.fly.io exact tag and digest return HTTP 404 after publisher exit zero
   - image-activate rejects a stopped donor update while native image metadata lookup succeeds
+  - Exact manifest republication HTTP 400 with MANIFEST_BLOB_UNKNOWN aborts the existing publication settle budget
 tags:
   - cloudbench
   - image-build
@@ -22,6 +23,9 @@ sources:
   - agent /root/registry_exact_image_handoff_rca
   - agent /root/publisher_quick_contract_review
   - agent /root/live50_stage_timing_observer
+  - commit 749019f97f3c83051d0a9c92e30462f880b4d098
+  - commit 895a0704b3092ac77ae386870fa8ced947815b45
+  - agent /root/depot_compression_owned_rca
 repro: agents/benchmarks/cloudbench_image_cli_test.py::test_cold_image_exit_zero_cannot_publish_an_unavailable_actual_manifest
 status: open
 ---
@@ -108,6 +112,30 @@ refreshed SDK flow are different observations; raw API rejection cannot prove
 donor absence or block the normal CLI. The external cause remains open because
 refresh and elapsed-time effects have not been isolated.
 
+The fresh normal Control5 run on clean `895a0704b`, whose parent was
+`749019f97`, closed after 409 seconds with producer exit zero and CLI exit 74.
+The exact tag GET returned 404, metadata POST returned 200, and the original
+hash-proven 5,251-byte manifest PUT returned 400 with six
+`MANIFEST_BLOB_UNKNOWN` errors. A later read-only diagnostic first observed
+the unchanged tag and digest returning matching 200 bodies 180.572 seconds
+after the failed CLI exited. Sixteen reads returned 200 and two transport
+observations remained unknown. At its final paired observation, both the held
+bundle and a subsequently refreshed normal bundle returned 200. The original
+failed bundle was not retained, so those reads prove neither credential refresh
+nor elapsed time caused the change. No additional build, layer upload or
+diagnostic manifest PUT preceded the successful reads.
+
+The recurring owned defect is narrower than the provider visibility cause:
+`RegistryHandoff.verify` classified every non-201 manifest PUT as terminal, so
+the actual missing-blob 400 bypassed its existing 180-second settle loop.
+The earlier inverse test asserted that immediate three-request abort and did
+not exercise subsequent readability of the same output. The new localhost
+reproduction emits the actual six-error schema,
+and makes the exact tag and digest readable at fake-clock second 175. It failed
+at the first PUT on unchanged production `749019f97`; the same assertion passes
+after the narrow repair below. This proves the premature-abort contract defect,
+not the external visibility cause or a fresh cold pipeline outcome.
+
 Archive searches were `MANIFEST_UNKNOWN registry manifest unknown image-activate`
 and `image publication successful donor activation digest 404`. No literal
 manifest-unknown case existed. The
@@ -150,6 +178,15 @@ directories, remain credential-free and private, and do not replace prior
 forensic bytes. Authentication follows the selected pinned Fly client; redirects
 cannot carry its credentials to another origin.
 
+A 400 containing a nonempty error list consisting only of
+`MANIFEST_BLOB_UNKNOWN` entries now enters the existing
+settle loop. After one exact PUT, settling is read-only: it reuses the same
+credentials and metadata, polls the exact manifest routes, and requires the unchanged
+tag and digest bytes before success. Persistent absence still fails within the
+unchanged budget; mixed, malformed, unrelated, auth and
+wrong-digest responses stay rejected. No compression, builder, task, model,
+evaluator, deadline or output is changed.
+
 The new helper is included in the existing immutable controller snapshot. The
 healthy path costs two small manifest reads per image publication, independently
 of agent count; recovery remains scoped to one owned artifact. At 10,000 agents
@@ -181,6 +218,19 @@ the private handoff failure receipt. Explicit object guards and eight quick
 inverse cases preserve exit 74 and the receipt. The owning suite passed 74 tests;
 the unchanged malformed-provider command failed before those guards and passed
 afterward. This adds no provider or model verification lane.
+
+The missing-blob settle reproduction command is
+`python3 -m pytest 'agents/benchmarks/cloudbench_image_cli_test.py::test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_digest[missing-blobs-settle]' -q`.
+It failed on unchanged production `749019f97` with
+`HandoffError: Exact manifest republication HTTP 400` in 0.65 seconds. The
+same command passed after the repair in 0.62 seconds. The final owning image
+suite passed all 82 cases in 23.36 seconds, including persistent absence,
+nonmatching and mixed 400 errors, empty errors, authentication refusal, wrong
+digest, digest absence, acknowledged-201 visibility lag, and an unknown PUT
+transport result. Every settle scenario retains at most one original-byte PUT,
+one metadata query, actual manifest reads and private captures. Ruff lint and
+format checks pass, and archive validation passes. These cases use the existing
+`cold_image` selection in `scripts/tests/benchmark-live-results.test.py`.
 
 One unchanged normal `image-activate` of the original 412-second output began
 at epoch 1791385658 with `--ref 2fd05622`, after the later normal helper green.

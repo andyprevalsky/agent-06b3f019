@@ -213,23 +213,40 @@ class RegistryHandoff:
         app, tag = match.groups()
         recovered = None
         republished = False
+        republication_attempted = False
         deadline = self.clock() + 180
         attempt = 0
         while True:
             attempt += 1
             try:
                 status, raw, headers = self.registry_get(app, tag)
-                if status == 404:
+                if status == 404 and not republication_attempted:
                     if not expected_digest:
                         raise HandoffError("Original published output digest is required before republication")
                     if recovered is None:
                         recovered = self.cached_manifest(app, image, expected_digest)
                     manifest, expected_digest, media_type = recovered
-                    status, _, put_headers = self.request(
+                    republication_attempted = True
+                    status, rejected, put_headers = self.request(
                         "PUT", f"{self.registry_origin}/v2/{app}/manifests/{tag}", manifest, media_type
                     )
                     if status != 201:
-                        raise HandoffError(f"Exact manifest republication HTTP {status}")
+                        try:
+                            rejection = json.loads(rejected) if status == 400 else None
+                        except ValueError:
+                            rejection = None
+                        errors = rejection.get("errors") if isinstance(rejection, dict) else None
+                        missing_blobs_pending = (
+                            isinstance(errors, list)
+                            and bool(errors)
+                            and all(
+                                isinstance(error, dict) and error.get("code") == "MANIFEST_BLOB_UNKNOWN"
+                                for error in errors
+                            )
+                        )
+                        raise HandoffError(
+                            f"Exact manifest republication HTTP {status}", retryable=missing_blobs_pending
+                        )
                     if put_headers.get("Docker-Content-Digest") not in (None, expected_digest):
                         raise HandoffError("Registry acknowledged a different manifest digest")
                     republished = True
