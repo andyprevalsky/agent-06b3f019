@@ -126,6 +126,17 @@ staged in an isolated c968 worktree for independent review and the coordinated
 deploy batch; no production mutation or paid call occurred. No end-to-end
 original Minted evidence recovery or fresh control acceptance is claimed.
 
+### Independent source qualification
+
+The frozen seven-file mitigation was committed and uploaded as
+`8bd6190b2ed02ddb72704940d1aad05f772d9007`. Root verified every frozen
+source, test and original RED/GREEN log hash, then reran the identical five-case
+HTTP command successfully in 0.372 seconds with native connections and server
+joined. A separate adversarial reviewer also verified the exact files and
+reran all five cases successfully. These reviews establish source qualification;
+normal deploy gates remain required. Original Control9 evidence, failure and
+zero credit are unchanged.
+
 ## Human feedback
 
 The parent required verification of the reviewer premise, an actual failing

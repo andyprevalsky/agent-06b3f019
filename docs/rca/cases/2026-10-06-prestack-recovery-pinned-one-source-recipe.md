@@ -172,7 +172,12 @@ its own temporary directory. Its rejection assertion remains unchanged.
 A compact owning control forbids writing the shared executable while exercising
 that same inverse: it fails before isolation and passes afterward with the
 control AST and command unchanged. Production validator bytes are untouched.
-Independent review and parallel failed-scope requalification remain pending.
+Independent review verified the frozen control and source hashes, reran both
+owning cases in 2.333 seconds, and confirmed shared executable bytes stayed
+unchanged. Parallel requalification passed 26 bootstrap methods and 15 forensic
+methods; the normal compact benchmark gate passed 480 controls with four
+documented skips. The original failed aggregate and the later fixture-race
+failure remain preserved. No provider calls or acceptance credit were added.
 
 ### October 7 review recurrence: direct native input closure
 
