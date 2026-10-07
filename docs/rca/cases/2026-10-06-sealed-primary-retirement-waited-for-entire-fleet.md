@@ -170,6 +170,81 @@ Status remains open pending adversarial review, Tank integration, and a fresh
 immutable ordinary LIVE run. No new fleet/build/provider calls were made, and
 no cloud speedup, benchmark PASS, or acceptance credit is claimed.
 
+
+### October 7 follow-up: legacy birth padding ended the single early callback
+
+The first ordinary run on the deployed early-retirement source supplied a new
+owning boundary. At the retained observation epoch 1791360337, all four native
+retirement permits were available, while many completed primary allocations
+remained owned. One primary had already retired before independently running
+peers finished; early retirement was therefore enabled, but that single success
+did not prove the other callback handoffs. The root timing observer separately
+captured its native receipt 28.331552 seconds after its local collector finish.
+No final full-release or speedup claim follows from these intermediate reads.
+
+A GET-only/native-local read on the immutable b591 controller source, with the
+same UTC timezone as its producer, found six still-live autoscaler PIDs whose
+edge-trimmed native lstart exactly matched their autoscaler.pid record. The
+unchanged cloudbench_pid_birth_state returned absent for all six. These records
+contained BSD internal day padding. fleet_pid_start_time deliberately preserves
+that spelling for legacy registry compatibility; the shared birth observation
+normalizes every whitespace run. The early callback passed the unnormalized
+record to that normalized comparison. A false absence bypassed the existing
+wait, and a not-yet-written completed-after-child marker then silently ended
+the single callback. The current run and its source were left unchanged.
+
+The existing unsealed-scope owning family now includes three real local native
+autoscaler cases: padded legacy birth, canonical birth, and mismatched birth.
+Each process is held behind a fixture-owned release marker. The actual birth
+reader records its result without replacing it; a false absence is allowed to
+finish its callback before the delayed completion producer is released. A live
+observation releases that producer while the existing callback continues to
+wait. The same actual primary registry, complete runtime manifest, exact-ID
+native-reaper fixture, worker-coverage guards, and independently running sibling record are
+retained. The end assertion requires the eligible primary to be retired after
+its matching completion marker; the mismatched-birth inverse remains owned.
+All native fixture leaders and their dedicated groups are joined before the
+assertions, including the original failing path.
+
+On the exact final formatted test bytes, the unchanged 591 fleet source gave
+one padded-birth failure and two inverse/control passes in 2.210026 seconds.
+The same command and test bytes passed all three in 1.150944 seconds after only
+normalizing the recorded legacy birth at this early comparison. The complete
+existing sealed-primary family passed 27 cases in 6.064717 seconds. The final
+control command was `python -m pytest agents/benchmarks/cloudbench_dependency_sync_test.py -k sealed_primary_retirement -q -rA`; the causal command selects the existing
+owning test with `-k late-native-autoscaler`. The ordinary compact deploy
+selector already contains sealed_primary_retirement and discovers the three
+new cases. Existing old fault guards stay unchanged; the new native fixture
+uses the existing shared host observation guard. All production budgets,
+proc-start identities, legacy producer/registry bytes, marker validation,
+unknown/mismatched birth behavior, exact worker/runtime authority, and native
+four remain unchanged. There is no retry registry or reenrollment framework.
+
+The byte-aligned RED, GREEN, family, and live native observation receipts are
+retained under early-primary-birth-repair.private and
+live50-fe-observation.private. Earlier unformatted RED/GREEN and a native probe
+with the wrong timezone remain historical evidence and are not substituted for
+these final bindings. The latter probe matched zero original births and earned
+zero causal credit. The final parent and independent reviews are separate from
+normal integration or a future immutable LIVE outcome.
+
+Archive searches were `lstart birth padding whitespace birth early retire
+sealed primary` and `false absence autoscaler completion PID reuse single
+shot`. This is a recurrence of the same early-retirement stage coupling through
+a different first-bad comparison, related to the October 2 identity-format
+case. Its general lesson is to compare producer and consumer identities in the
+same representation without rewriting durable owner records. The deliberate
+legacy registry compatibility is preserved, so deleting or globally rewriting
+that format would cross the documented ownership contract. Local golden reads
+in Hermes tools/process_registry.py:690 and :748 require incarnation matching
+before native action; OpenClaw and Claude Code keep process-bound cleanup, but
+none establishes a BSD whitespace comparator. Codex was absent locally; no
+reference fetch or provider call was needed.
+
+This local causal repair has no benchmark-grade or measured cloud-tail credit.
+The case remains open until the integrated source is independently qualified
+and a new immutable ordinary LIVE run establishes the intended end state.
+
 ## Human feedback
 
 Root explicitly limited the work to offline diagnosis and an isolated candidate,

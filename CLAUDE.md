@@ -1017,7 +1017,10 @@ group; queued/startup rows need the original run timestamp, and genuine evaluate
 PASS/FAIL appears before teardown. Follow actual controller status even if a card
 or observation is stale. Retry transient observations with the original owner;
 do not restart a healthy run or reject microscopic intermediate timings. Stage
-handoffs must remain usable for their consumer. Freeze sensible generous stage
+handoffs must remain usable for their consumer. An early primary retirement
+receipt covers only that exact sealed scope; collector completion alone does
+not prove native release. Keep the original owner running through final native
+audit, and never rewrite PID birth records to force cleanup. Freeze sensible generous stage
 targets from comparable historical LIVE timings, excluding cache-assisted cold
 measurements, and report observed stage p95 plus image-start-to-full-release E2E.
 These fixed stage targets are generous operational targets, not measured p95

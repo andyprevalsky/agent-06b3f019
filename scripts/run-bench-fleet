@@ -4985,6 +4985,12 @@ fleet_retire_sealed_primary() {  # <collector-output>; leave workers on the fina
     IFS='|' read -r pid birth < "$out/autoscaler.pid" || return 0
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     [ -n "$birth" ] || return 0
+    # Fleet legacy records retain BSD lstart padding; the shared observation
+    # normalizes whitespace. Compare in that form without rewriting ownership.
+    case "$birth" in
+        proc-start:*) ;;
+        *) birth="$(printf '%s\n' "$birth" | awk '{$1=$1; print}')" ;;
+    esac
     deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
     while :; do
         [ -z "${forwarded_signal_name:-}" ] || return 0
