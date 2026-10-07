@@ -144,3 +144,10 @@ and controller gates. This is one fixture-local adapter and bounded case
 accounting; the offline recipe, production runtime, model/provider path, budgets,
 and the running LIVE50 source are unchanged. The earlier missing-package RED and
 this framework-import RED remain separate evidence, with zero benchmark credit.
+
+Independent parent review verified the complete repair, original RED/GREEN and
+native custody hashes, unchanged recipe, and both exact containers' absence.
+The same 13 permanent owner checks passed independently in 3.269 seconds. Its
+`root-controller-cache-skip-independent-review.safe.json` receipt in the parent
+checkpoint directory has SHA-256
+`c132b6cf2f0211ae2bc724aff101d579bbdcea07880af15820ad70caf68e7371`.
