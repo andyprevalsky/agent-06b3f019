@@ -23250,9 +23250,64 @@ reserve_cleanup_disk_space
             assert not exact.exists(), mode
 
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    release_call = "release_cleanup_disk_reserve"
-    assert cleanup.index(release_call) < cleanup.index("cloudbench_terminate_and_wait")
-    assert cleanup.index(release_call) < cleanup.index("reap_registry_clones")
+    # Observe the real finalizer handoff, independent of its native drain helper
+    # name. Every consumer must receive the disk space before doing cleanup work.
+    handoff_events = tmp_path / "cleanup-handoff-events"
+    handoff_root = tmp_path / "cleanup-handoff"
+    handoff_root.mkdir()
+    handoff_script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+HANDOFF_EVENTS="$2"
+FLEET_DIR="$3"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=0
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+FLEET_REGISTRY_DIR="$FLEET_DIR/registry"
+FLEET_TEARDOWN_OWNERSHIP_DIR="$FLEET_DIR/teardown-ownership"
+FLEET_REGISTRY_PUBLISHED=1
+KEEP_CLONES=0
+CLAIMED_POOL_FILE="$FLEET_DIR/no-claims"
+LOCK_DIR="$FLEET_DIR/controller.lock"
+AUTOSCALER_PORT_LEASE_HELPER=/dev/null
+RUN_ID=reserve-handoff
+AUTOSCALER_PIDS=()
+PROVISION_PIDS=()
+CHILD_PIDS=()
+CHILD_OUT=()
+{reserve}
+{release}
+{cleanup}
+for helper in cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown \\
+    record_tainted_claimed_pool_machines reconcile_current_pool_transfer_claims \\
+    reconcile_current_pool_claims fleet_native_reap_close capacity_release_owner_reservations \\
+    finalize_terminal_projection fleet_audit_finalize_provider_teardown \\
+    fleet_registry_remove_if_empty cloudbench_controller_lock_release cleanup_owned_script_snapshot; do
+    eval "$helper() {{ return 0; }}"
+done
+observe_released_reserve() {{
+    test ! -e "$CLEANUP_DISK_RESERVE_FILE" || return 90
+    printf '%s\\n' "$1" >> "$HANDOFF_EVENTS"
+}}
+cloudbench_terminate_tree_and_wait() {{ observe_released_reserve native-drain; }}
+cloudbench_terminate_and_wait() {{ observe_released_reserve native-drain; }}
+cloudbench_collect_remaining_runtime_evidence() {{ observe_released_reserve forensic-consumer; }}
+reap_registry_clones() {{ observe_released_reserve provider-retirement; }}
+reserve_cleanup_disk_space || exit 91
+test -s "$CLEANUP_DISK_RESERVE_FILE" || exit 92
+trap cleanup EXIT
+exit 0
+"""
+    handoff = subprocess.run(
+        ["bash", "-c", handoff_script, "handoff", str(reserve_path), str(handoff_events), str(handoff_root)],
+        env=isolated_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert handoff.returncode == 0, handoff.stderr + handoff.stdout
+    observed_handoffs = handoff_events.read_text().splitlines()
+    assert {"native-drain", "forensic-consumer", "provider-retirement"}.issubset(observed_handoffs)
+    assert not reserve_path.exists()
 
     recovery = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries() {")
     stale_release = 'release_cleanup_disk_reserve "$registry/cleanup-disk-reserve"'
