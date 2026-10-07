@@ -5070,3 +5070,13 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 71.4, "cost_cents": 7.0, "timestamp": "2026-10-07T03:59:45.929998+00:00", "agent_id": "256325ab-a7de-413c-9be9-a9abd88767a2"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 176.9, "cost_cents": 11.0, "timestamp": "2026-10-07T03:59:45.929998+00:00", "agent_id": "81c5be80-d65c-43f4-ad42-1faefc0ca2d7"}
 {"task": "agent-payment-abandonment", "duration_seconds": 204.5, "cost_cents": 8.0, "timestamp": "2026-10-07T03:59:45.929998+00:00", "agent_id": "43251f18-4e5b-4116-b07b-2eb34d95d5bb"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 73.8, "cost_cents": 14.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "87a26fd8-b052-4f76-a7d1-7b6a3194eeb8"}
+{"task": "parallel-tool-calls", "duration_seconds": 202.2, "cost_cents": 13.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "c061e3f7-d308-43eb-a976-503e2cbcddb2"}
+{"task": "spawn-sub-agents", "duration_seconds": 263.0, "cost_cents": 24.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "db783fea-f8ff-4d23-80f5-1d3680d4f2b3"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 92.7, "cost_cents": 7.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "7f500b11-479f-46e8-adb9-bc933d9370d9"}
+{"task": "browser-smoke", "duration_seconds": 69.6, "cost_cents": 12.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "fff1f78e-6b2f-4a46-b19c-6f05a9fd5bbc"}
+{"task": "chat-mode", "duration_seconds": 15.5, "cost_cents": 0.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "c96ba2f0-dfb7-42c4-9a12-c032cf638404"}
+{"task": "claude-code-agent", "duration_seconds": 54.7, "cost_cents": 5.0, "timestamp": "2026-10-07T18:06:09.343168+00:00", "agent_id": "09500e21-16a7-4c7a-8393-ecdc89f92784"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 96.8, "cost_cents": 3.0, "timestamp": "2026-10-07T18:06:13.621311+00:00", "agent_id": "89583cb3-2b19-491e-a941-809ad31dc424"}
+{"task": "agent-payment-test-shop", "duration_seconds": 181.8, "cost_cents": 4.0, "timestamp": "2026-10-07T18:06:13.621311+00:00", "agent_id": "b3a30bcb-f1be-402d-9705-b3fdeb5f3267"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 218.3, "cost_cents": 41.0, "timestamp": "2026-10-07T18:06:13.621311+00:00", "agent_id": "66dea9e8-c223-4b28-b3d4-70b22675b24b"}
