@@ -11047,7 +11047,12 @@ exit "$retirement_status"
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS if late_native else 10)
+        # large-catalog writes 10k ordinal files with per-file fsync. That is
+        # real fixture I/O, not a synthetic hang, so it inherits the shared
+        # host guard used by late-native birth observation.
+        stdout, stderr = process.communicate(
+            timeout=FIXTURE_HOST_GUARD_SECONDS if late_native or fault == "large-catalog" else 10
+        )
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
@@ -29244,7 +29249,7 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, pa
         directory.chmod(0o755)
     interpreter = binary / "python"
     interpreter.write_text(
-        "#!/usr/local/bin/python3\n"
+        f"#!{sys.executable}\n"
         "import os, pathlib, sys\n"
         "if sys.argv[1:] == ['-m','playwright','install-deps','chromium']: sys.exit(0)\n"
         "assert sys.argv[1:] == ['-m','playwright','install','chromium']\n"
@@ -29258,7 +29263,7 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, pa
     tools.mkdir(mode=0o755)
     gosu = tools / "gosu"
     gosu.write_text(
-        "#!/usr/local/bin/python3\n"
+        f"#!{sys.executable}\n"
         "import os,pwd,sys\n"
         "user=pwd.getpwnam(sys.argv[1])\n"
         "os.setgroups([]);os.setgid(user.pw_gid);os.setuid(user.pw_uid)\n"
