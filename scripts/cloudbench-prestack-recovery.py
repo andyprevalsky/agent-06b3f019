@@ -54,7 +54,9 @@ def sha(data: bytes) -> str:
 
 def bootstrap_regular(path: Path, maximum: int = 64 * 1024 * 1024) -> bytes:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        )
     except OSError as error:
         raise ValueError("missing or unsafe bootstrap evidence file") from error
     try:
@@ -88,10 +90,17 @@ def bootstrap_identity(
         return json.loads(bootstrap_regular(path, maximum))
 
     for path in (registry, capture_dir):
-        if not path.is_absolute() or path.resolve() != path or not path.is_dir() or path.is_symlink():
+        if (
+            not path.is_absolute()
+            or path.resolve() != path
+            or not path.is_dir()
+            or path.is_symlink()
+        ):
             raise ValueError("unsafe bootstrap owner or capture path")
     owner = registry.name
-    if not re.fullmatch(r"[0-9a-f]{32}", owner) or not re.fullmatch(r"[A-Za-z0-9._-]+", bench):
+    if not re.fullmatch(r"[0-9a-f]{32}", owner) or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", bench
+    ):
         raise ValueError("unsafe bootstrap identity")
     meta = fields(registry / "meta")
     if (
@@ -114,7 +123,10 @@ def bootstrap_identity(
     ):
         raise ValueError("bootstrap run or audit is not exact")
     audit_meta = fields(audit / "meta")
-    if any(audit_meta.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app")):
+    if any(
+        audit_meta.get(key) != meta[key]
+        for key in ("fleet_owner_token", "run_id", "app")
+    ):
         raise ValueError("bootstrap audit owner disagrees")
     lifecycle, tasks = (
         obj(run / "_batch/lifecycle.json"),
@@ -146,7 +158,10 @@ def bootstrap_identity(
     claimed = fields(registry / "clones" / clone)
     volume = fresh.get("volume_id", "")
     if (
-        any(fresh.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app"))
+        any(
+            fresh.get(key) != meta[key]
+            for key in ("fleet_owner_token", "run_id", "app")
+        )
         or fresh.get("source") != "fresh-clone"
         or fresh.get("disposition") != "owned"
         or fresh.get("clone_name") != clone
@@ -156,7 +171,8 @@ def bootstrap_identity(
     ):
         raise ValueError("bootstrap fresh ownership is not exact")
     if (
-        bootstrap_regular(out / "post-config-start.accepted", 256) != (machine + "\n").encode()
+        bootstrap_regular(out / "post-config-start.accepted", 256)
+        != (machine + "\n").encode()
         or bootstrap_regular(out / "primary.ids", 256) != (machine + "\n").encode()
         or bootstrap_regular(out / "benchmark-child.finished", 256).strip() != b"143"
         or bootstrap_regular(out / "desired-worker-count", 256).strip() != b"0"
@@ -174,7 +190,9 @@ def bootstrap_identity(
         "guest-cleanup.recovery-receipt.json",
     ):
         if (out / name).exists() or (out / name).is_symlink():
-            raise ValueError("bootstrap receipt must remain distinct from guest/provider acknowledgement")
+            raise ValueError(
+                "bootstrap receipt must remain distinct from guest/provider acknowledgement"
+            )
     machines, volumes = (
         obj(machines_file, 128 * 1024 * 1024),
         obj(volumes_file, 128 * 1024 * 1024),
@@ -183,7 +201,9 @@ def bootstrap_identity(
         raise ValueError("unsafe bootstrap native inventory")
     native = [row for row in machines if row.get("id") == machine]
     native_volume = [row for row in volumes if row.get("id") == volume]
-    config_bytes = bootstrap_regular(capture_dir / f"{machine}.original-config.private.json", 1048576)
+    config_bytes = bootstrap_regular(
+        capture_dir / f"{machine}.original-config.private.json", 1048576
+    )
     config = json.loads(config_bytes)
     if (
         not isinstance(config, dict)
@@ -207,7 +227,9 @@ def bootstrap_identity(
     ):
         raise ValueError("original stopped bootstrap config or volume is not exact")
     marker = out / "guest-shutdown.confirmed"
-    if (marker.exists() or marker.is_symlink()) and bootstrap_regular(marker, 256) != (run_id + "\n").encode():
+    if (marker.exists() or marker.is_symlink()) and bootstrap_regular(marker, 256) != (
+        run_id + "\n"
+    ).encode():
         raise ValueError("existing genuine cleanup confirmation belongs to another run")
     return out, dict(
         meta=meta,
@@ -244,7 +266,9 @@ RECIPE_PATHS = (
 )
 
 
-def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[str, str, str]:
+def bound_recipe(
+    meta: dict[str, str], config: dict, provenance: dict
+) -> tuple[str, str, str]:
     if (
         not isinstance(config, dict)
         or not isinstance(config.get("env"), dict)
@@ -267,8 +291,14 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         "CLOUDBENCH_SYNC_PRISMA_SCRIPT": "/cloudbench-sync-prisma-client.sh",
     }
     for key, value in config["env"].items():
-        if key.startswith("CLOUDBENCH_") and key.endswith("_SCRIPT") and script_inputs.get(key) != value:
-            raise ValueError("native executable input is outside the bound source control schema")
+        if (
+            key.startswith("CLOUDBENCH_")
+            and key.endswith("_SCRIPT")
+            and script_inputs.get(key) != value
+        ):
+            raise ValueError(
+                "native executable input is outside the bound source control schema"
+            )
     ref = config.get("env", {}).get("REF", "")
     workspace = meta.get("workspace_root")
     if not isinstance(workspace, str) or not workspace:
@@ -303,9 +333,15 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         raise ValueError("captured checkout differs from the bound clean source")
     injected = {}
     for item in config.get("files", []):
-        if not isinstance(item, dict) or set(item) != {"guest_path", "raw_value"} or item["guest_path"] in injected:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"guest_path", "raw_value"}
+            or item["guest_path"] in injected
+        ):
             raise ValueError("unsafe original injected control files")
-        injected[item["guest_path"]] = base64.b64decode(item["raw_value"], validate=True)
+        injected[item["guest_path"]] = base64.b64decode(
+            item["raw_value"], validate=True
+        )
     for name in (
         "cloudbench-boot.sh",
         "cloudbench-boot-payload.py",
@@ -314,6 +350,19 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         if injected.get("/" + name) != blob("scripts/" + name):
             raise ValueError("original injected boot control differs from bound source")
     payload_path = config["env"].get("CLOUDBENCH_BOOT_PAYLOAD_FILE")
+    direct_paths = {
+        "/cloudbench-boot.sh",
+        "/cloudbench-boot-payload.py",
+        "/cloudbench-status-server.py",
+        "/cloudbench-boot-payload.json.gz",
+    }
+    if (
+        payload_path != "/cloudbench-boot-payload.json.gz"
+        or set(injected) != direct_paths
+    ):
+        raise ValueError(
+            "original direct native file set differs from the bound boot recipe"
+        )
     envelope = injected.get(payload_path)
     if (
         not isinstance(envelope, bytes)
@@ -351,7 +400,9 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         if data != blob(path):
             raise ValueError("actual packed executable differs from bound source")
         controls[path] = sha(data)
-    if not {"scripts/cloudbench-run.sh", "scripts/cloudbench-fetch-ref.sh"} <= set(controls):
+    if not {"scripts/cloudbench-run.sh", "scripts/cloudbench-fetch-ref.sh"} <= set(
+        controls
+    ):
         raise ValueError("original packed driver/fetch pair is incomplete")
     # JSON is owned by the existing provenance validator, never interpreted as
     # executable code or admitted solely because its filename ends in .json.
@@ -368,7 +419,9 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
     if module.validate_provenance(document):
         raise ValueError("original packed execution provenance is invalid")
     module.verify_code_binding(document, base_sha=ref, workspace_patch_sha256="none")
-    original_provenance = Path(meta["runs_root"]) / meta["run_id"] / "execution-provenance.json"
+    original_provenance = (
+        Path(meta["runs_root"]) / meta["run_id"] / "execution-provenance.json"
+    )
     if json.loads(bootstrap_regular(original_provenance, 1048576)) != document:
         raise ValueError("packed provenance differs from original bound fleet input")
     recipe = {
@@ -384,8 +437,12 @@ def bound_recipe(meta: dict[str, str], config: dict, provenance: dict) -> tuple[
         },
         "execution_provenance_sha256": sha(module.canonical_bytes(document)),
     }
-    source_recipe = {key: recipe[key] for key in ("checkout", "injected_controls", "boot_controls")}
-    source_fingerprint = sha(json.dumps(source_recipe, sort_keys=True, separators=(",", ":")).encode())
+    source_recipe = {
+        key: recipe[key] for key in ("checkout", "injected_controls", "boot_controls")
+    }
+    source_fingerprint = sha(
+        json.dumps(source_recipe, sort_keys=True, separators=(",", ":")).encode()
+    )
     return (
         ref,
         sha(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()),
@@ -400,7 +457,9 @@ def verify_bootstrap_current(
     machines_file: Path,
     volumes_file: Path,
 ) -> tuple[Path, dict]:
-    out, ctx = bootstrap_identity(registry, bench, capture_dir, machines_file, volumes_file)
+    out, ctx = bootstrap_identity(
+        registry, bench, capture_dir, machines_file, volumes_file
+    )
     meta, config, token, machine, volume, clone = (
         ctx[k] for k in ("meta", "config", "token", "machine", "volume", "clone")
     )
@@ -416,7 +475,9 @@ def verify_bootstrap_current(
     provenance = json.loads(bootstrap_regular(provenance_file, 1048576))
     capture = capture_dir / f"{machine}.originals.private.tar.gz"
     captured = bootstrap_regular(capture, 134217728)
-    config_bytes = bootstrap_regular(capture_dir / f"{machine}.original-config.private.json", 1048576)
+    config_bytes = bootstrap_regular(
+        capture_dir / f"{machine}.original-config.private.json", 1048576
+    )
     if (
         provenance.get("version") != 1
         or provenance.get("direct_original_volume") is not True
@@ -473,7 +534,10 @@ def verify_bootstrap_current(
         or not absent <= set(provenance["missing"])
         or set(originals) & set(provenance["missing"])
         or provenance.get("files")
-        != {name: {"bytes": len(data), "sha256": sha(data)} for name, data in originals.items()}
+        != {
+            name: {"bytes": len(data), "sha256": sha(data)}
+            for name, data in originals.items()
+        }
         or originals["cloudbench-driver.state"] != b"exited\n"
         or originals[f"cloudbench-shutdown-{token}.request"] != b""
     ):
@@ -502,7 +566,9 @@ def verify_bootstrap_current(
                 for key in ("services_manifest", "run_json", "backend_log")
             )
         ):
-            raise ValueError("original recovery state differs from exited pre-service guest")
+            raise ValueError(
+                "original recovery state differs from exited pre-service guest"
+            )
     bench_log = originals["bench.log"].decode()
     if (
         not bench_log.startswith(f"RUNSTAMP-{token}\n")
@@ -520,31 +586,39 @@ def verify_bootstrap_current(
             or "launching stack (run.sh --benchmark)" in bench_log
             or "waiting for stack to become healthy" in bench_log
         ):
-            raise ValueError("missing stack log is not an acknowledged pre-stack cancellation")
+            raise ValueError(
+                "missing stack log is not an acknowledged pre-stack cancellation"
+            )
         phase, database_created = "before-stack-launch", False
     else:
         if (
             "launching stack (run.sh --benchmark)" not in bench_log
             or "waiting for stack to become healthy" not in bench_log
-            or "stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement" not in bench_log
+            or "stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
+            not in bench_log
             or ack in originals
         ):
             raise ValueError("bootstrap stack interruption is not exact")
         stack = originals[stack_name].decode()
         lines = stack.splitlines()
-        db = re.findall(r"Created isolated system database ([A-Za-z_][A-Za-z0-9_]{0,62})", stack)
+        db = re.findall(
+            r"Created isolated system database ([A-Za-z_][A-Za-z0-9_]{0,62})", stack
+        )
         if len(db) != 1 or "DB restored from dump" not in stack or not lines:
             raise ValueError("original isolated database bootstrap is incomplete")
         if lines[-1] == "📦 Installing front-end dependencies...":
             phase = "frontend-dependency-preflight"
-        elif "🔎 Ensuring agent-network grep indexes (post-restore)..." in stack and not any(
-            marker in stack
-            for marker in (
-                "🧠 Re-ensuring Fast Mode cache schema (post-restore)...",
-                "🗜️  Saving seed dump for fast future warm-starts",
-                "📦 Installing front-end dependencies...",
-                "🌱 Local database already seeded; syncing browser credentials...",
-                "🌱 Syncing production data to local database",
+        elif (
+            "🔎 Ensuring agent-network grep indexes (post-restore)..." in stack
+            and not any(
+                marker in stack
+                for marker in (
+                    "🧠 Re-ensuring Fast Mode cache schema (post-restore)...",
+                    "🗜️  Saving seed dump for fast future warm-starts",
+                    "📦 Installing front-end dependencies...",
+                    "🌱 Local database already seeded; syncing browser credentials...",
+                    "🌱 Syncing production data to local database",
+                )
             )
         ):
             # Native cancellation can append command help/cleanup diagnostics
@@ -576,7 +650,9 @@ def verify_bootstrap_current(
         "capture_sha256": sha(captured),
         "capture_provenance_sha256": sha(bootstrap_regular(provenance_file)),
         "native_original_config_sha256": sha(config_bytes),
-        "original_file_sha256": {name: sha(data) for name, data in sorted(originals.items())},
+        "original_file_sha256": {
+            name: sha(data) for name, data in sorted(originals.items())
+        },
     }
 
 
@@ -589,8 +665,13 @@ def trusted_source_review_policy() -> dict[str, list[str]]:
         text=True,
         timeout=15,
     )
-    canonical_root = Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
-    canonical = canonical_root is not None and helper == canonical_root / "scripts/cloudbench-prestack-recovery.py"
+    canonical_root = (
+        Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
+    )
+    canonical = (
+        canonical_root is not None
+        and helper == canonical_root / "scripts/cloudbench-prestack-recovery.py"
+    )
     if canonical:
         root, ref = canonical_root, "HEAD"
     else:
@@ -604,7 +685,9 @@ def trusted_source_review_policy() -> dict[str, list[str]]:
             or re.fullmatch(r"[0-9a-f]{40}", ref) is None
             or snapshot != str(helper.parent)
         ):
-            raise ValueError("source review policy lacks a trusted controller source binding")
+            raise ValueError(
+                "source review policy lacks a trusted controller source binding"
+            )
         root = Path(workspace)
         source_root = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
@@ -625,15 +708,21 @@ def trusted_source_review_policy() -> dict[str, list[str]]:
             timeout=15,
         )
         if blob.returncode or bootstrap_regular(path, 1048576) != blob.stdout:
-            raise ValueError("source review policy or helper differs from trusted committed source")
+            raise ValueError(
+                "source review policy or helper differs from trusted committed source"
+            )
         committed[path] = blob.stdout
     if not canonical:
-        spec = importlib.util.spec_from_file_location("trusted_snapshot_owner", owner_path)
+        spec = importlib.util.spec_from_file_location(
+            "trusted_snapshot_owner", owner_path
+        )
         if spec is None or spec.loader is None:
             raise ValueError("controller snapshot provenance owner cannot be loaded")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        manifest = json.loads(bootstrap_regular(helper.parent / module.SNAPSHOT_MANIFEST_NAME, 1048576))
+        manifest = json.loads(
+            bootstrap_regular(helper.parent / module.SNAPSHOT_MANIFEST_NAME, 1048576)
+        )
         module.verify_snapshot(helper.parent, manifest)
     policy = json.loads(committed[policy_path])
     if (
@@ -667,11 +756,19 @@ def trusted_source_review_policy() -> dict[str, list[str]]:
 
 def require_independent_source_review(receipt: dict) -> None:
     sources = trusted_source_review_policy()
-    if receipt.get("bootstrap_phase") not in sources.get(receipt.get("source_review_fingerprint"), []):
-        raise ValueError("executable source boundary lacks a trusted independent review")
+    if receipt.get("bootstrap_phase") not in sources.get(
+        receipt.get("source_review_fingerprint"), []
+    ):
+        raise ValueError(
+            "executable source boundary lacks a trusted independent review"
+        )
     # The capture-local marker binds this audited instance; only the committed
     # source policy above can authorize its executable source and phase.
-    review = json.loads(bootstrap_regular(Path(receipt["capture_dir"]) / "source-boundary-reviewed.safe.json", 65536))
+    review = json.loads(
+        bootstrap_regular(
+            Path(receipt["capture_dir"]) / "source-boundary-reviewed.safe.json", 65536
+        )
+    )
     if (
         review.get("reviewed") is not True
         or not isinstance(review.get("reviewer"), str)
@@ -690,7 +787,9 @@ def verify_bootstrap(
     machines_file: Path,
     volumes_file: Path,
 ) -> tuple[Path, dict]:
-    return verify_bootstrap_current(registry, bench, capture_dir, machines_file, volumes_file)
+    return verify_bootstrap_current(
+        registry, bench, capture_dir, machines_file, volumes_file
+    )
 
 
 def verify(
@@ -701,7 +800,9 @@ def verify(
     volumes_file: Path,
 ) -> tuple[Path, dict[str, object]]:
     if bench != "message-person":
-        return verify_bootstrap(registry, bench, capture_dir, machines_file, volumes_file)
+        return verify_bootstrap(
+            registry, bench, capture_dir, machines_file, volumes_file
+        )
     owner = registry.name
     if not re.fullmatch(r"[0-9a-f]{32}", owner) or bench != "message-person":
         raise ValueError("unsupported prestack owner or task")
@@ -761,19 +862,23 @@ def verify(
         raise ValueError("guest was not a failed, cleaned prestack start")
     child = regular(out / "fleet-child.log", 1048576).decode()
     if (
-        "Live message-person benchmark requires a macOS controller for Apple Messages" not in child
+        "Live message-person benchmark requires a macOS controller for Apple Messages"
+        not in child
         or "Original exit code: 70" not in child
     ):
         raise ValueError("controller did not reject the unsupported platform")
     machines = json.loads(regular(machines_file, 128 * 1024 * 1024))
     volumes = json.loads(regular(volumes_file, 128 * 1024 * 1024))
     native = next((value for value in machines if value.get("id") == machine), None)
-    native_volume = next((value for value in volumes if value.get("id") == volume), None)
+    native_volume = next(
+        (value for value in volumes if value.get("id") == volume), None
+    )
     if (
         native is None
         or native.get("state") != "stopped"
         or (native.get("config") or {}).get("mounts", [{}])[0].get("volume") != volume
-        or (native.get("config") or {}).get("init", {}).get("cmd") != ["bash", "/cloudbench-boot.sh"]
+        or (native.get("config") or {}).get("init", {}).get("cmd")
+        != ["bash", "/cloudbench-boot.sh"]
         or native_volume is None
         or native_volume.get("attached_machine_id") != machine
     ):
@@ -793,7 +898,11 @@ def verify(
     original: dict[str, bytes] = {}
     with tarfile.open(capture_path, "r:gz") as archive:
         for member in archive:
-            if not member.isfile() or member.name in original or ".." in Path(member.name).parts:
+            if (
+                not member.isfile()
+                or member.name in original
+                or ".." in Path(member.name).parts
+            ):
                 raise ValueError("unsafe original-volume member")
             stream = archive.extractfile(member)
             assert stream is not None
@@ -832,7 +941,9 @@ def verify(
         "proof_credit": 0,
         "capture_sha256": sha(capture),
         "capture_provenance": provenance,
-        "original_file_sha256": {name: sha(data) for name, data in sorted(original.items())},
+        "original_file_sha256": {
+            name: sha(data) for name, data in sorted(original.items())
+        },
     }
 
 
@@ -844,13 +955,17 @@ def publish(out: Path, receipt: dict[str, object]) -> None:
         if receipt.get("kind") == "fresh-infra-bootstrap-zero-provider"
         else "guest-prestack.confirmed"
     )
-    payload = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    payload = (
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
     if path.exists() or path.is_symlink():
         if regular(path, 65536) != payload:
             raise ValueError("existing prestack receipt changed")
         return
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    descriptor = os.open(
+        temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(payload)
         stream.flush()
@@ -880,9 +995,12 @@ def main() -> None:
         if (
             args.publish
             or receipt.get("kind") != "fresh-infra-bootstrap-zero-provider"
-            or json.loads(bootstrap_regular(out / "guest-bootstrap.confirmed", 1048576)) != receipt
+            or json.loads(bootstrap_regular(out / "guest-bootstrap.confirmed", 1048576))
+            != receipt
         ):
-            raise ValueError("published bootstrap retirement does not match exact original capture")
+            raise ValueError(
+                "published bootstrap retirement does not match exact original capture"
+            )
     if args.publish:
         publish(out, receipt)
     print(

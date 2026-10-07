@@ -262,3 +262,59 @@ artifact 500 at 20:20:49.181 UTC (9727ms), then finalize 200 at 20:21:19.487 UTC
 (18978ms). Its task remained PASS with exact durable cleanup; this is a
 recovered warning, not an additional rejection or candidate speed gain. The
 scalar receipt is `.context/cached-mass-latency-independent-20261006/native-waterfall.safe.json`.
+
+### October 7 review recurrence: start PUT retries outlived manifest ownership
+
+The review exposed a storage-level gap in the previous start-manifest fence.
+A native manifest transaction can end while an entered storage operation is
+still retrying. The subsequent ownership assertion correctly rejects the
+caller, but an unconditional retry can already have replaced the encrypted
+terminal manifest or its public projection. Searches used `late start finalized
+manifest transaction loss retry` and `archive control write replaces terminal
+snapshot after lease expires`. The July creation-time-manifest case is related;
+this is a recurrence of this case's delayed-start terminal-ownership boundary.
+
+Two permanent controls join the existing trace-archive-batch family. Each
+identifies and terminates only its own PostgreSQL advisory-lock holder, writes
+a terminal snapshot through the actual archive APIs, and resumes the original
+start operation after a retryable storage error. Original 5c1fc870 source
+passes all eight previous controls and fails both added controls because the
+final encrypted or public object is replaced (18.111 seconds). The same ten
+controls pass with the storage repair (10.607 seconds); terminal control bytes
+and benchmark-result metadata remain exact. All six captured outer and native
+unit process births are positively absent afterward. Only the isolated C3
+PostgreSQL database and declared offline R2 transport are used; no model or
+external storage requests occur. Initial observer setup errors are retained
+separately and have no causal or acceptance credit.
+
+Start manifests now use conditional creation at the storage boundary. R2 PUTs
+include If-None-Match for the encrypted body, its metadata sidecar and the public
+manifest; local and fake-R2 writes use exclusive file creation. Existing objects
+are left intact. Finalizers and ordinary artifact writers retain replacement
+semantics, the transaction bound and the existing five-attempt transport loop.
+An acknowledged new body remains recognized across a sidecar retry, so retrying
+that sidecar does not recreate its body. Keeping a caller-local pre-write lease
+check alone cannot fence work already entered at storage. Removing creation-time
+manifests would revive the July crashed-run corpus loss, so that simplification
+is not a valid repair.
+
+Independent review also required preserving the new conditional API error
+contract. Two compact controls were added to the same family. One distinguishes
+an explicit existing-object precondition from exhausted real storage failures
+for both encrypted and required public manifests; the other retries a failed
+sidecar after an acknowledged encrypted body and reads back the matching pair
+through the ordinary archive reader. The first proposed repair passed eleven
+of twelve controls and failed the required error signal (19.631 seconds).
+Retaining the last transport error and throwing it after the unchanged five
+attempts only for conditional creation makes the identical twelve controls
+pass (25.360 seconds). Explicit precondition failures remain intentional no-ops,
+and ordinary replacement APIs keep their previous behavior. All six additional
+captured outer/native process births are positively absent. These guard
+receipts supplement the original lease-loss reproduction; they do not replace it.
+
+This proves the source-bound storage race and its correction, not a new benchmark
+verdict or cloud performance gain. Final normal backend qualification, combined
+source review, production rollout and the independent DAILY-run goals remain
+pending. Original failed attempts and the separate financial custody gap remain
+unchanged. Private reproduction, source and native-closure receipts are retained
+under the deployment context.

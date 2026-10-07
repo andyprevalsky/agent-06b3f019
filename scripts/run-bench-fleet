@@ -5228,6 +5228,30 @@ def live_consumers(group):
             if native_birth(owner["pid"]) == owner["birth"]}
 
 
+def pending_members(group):
+    pending = set(group["members"]) - set(group["consumed"])
+    if group["directory"] is None:
+        return len(pending)
+    manifest = Path(group["directory"]) / "manifest.json"
+    regular(manifest)
+    if manifest.stat().st_size > 1048576:
+        raise ValueError("oversized cleanup cohort manifest")
+    value = json.loads(manifest.read_text())
+    if set(value) != {"cohort_id", "jobs"} or not isinstance(value["jobs"], dict):
+        raise ValueError("malformed cleanup cohort manifest")
+    members = value["jobs"]
+    if sorted(members) != group["members"]:
+        raise ValueError("cleanup cohort membership changed")
+    if any(pid is not None and (type(pid) is not int or pid < 1)
+           for pid in members.values()):
+        raise ValueError("malformed cleanup cohort member")
+    # Unassigned jobs may still launch. Assigned jobs with no native birth have
+    # retired before admission; an uncertain/live (including reused) PID keeps
+    # its floor. Consumed owners retain the separate exact-birth accounting.
+    return sum(members[member] is None or bool(native_birth(members[member]))
+               for member in pending)
+
+
 def parent_active(group):
     if group["directory"] is None:
         return False
@@ -5457,8 +5481,8 @@ try:
         needed = 0
         for identifier, group in live.items():
             active = parent_active(group) or (identifier == key and group["directory"] is None)
-            peers = (len(group["members"]) - len(group["consumed"]) if active else 0) + len(live_consumers(group))
-            remaining = len(group["members"]) - len(group["consumed"]) if active else 0
+            remaining = pending_members(group) if active else 0
+            peers = remaining + len(live_consumers(group))
             floor += peers * group["headroom"]
             pending += remaining
             needed += remaining * group["minimum"]
@@ -10129,9 +10153,10 @@ write_startup_card() {  # write_startup_card <phase-text>
         startup_modes="${startup_modes}${mode} "
     done
     STARTUP_BENCHES="${BENCHES[*]:-}" STARTUP_MODES="$startup_modes" \
-    PHASE="$1" CARD_RUN_ID="$RUN_ID" python3 - "$FLEET_DIR/_batch" <<'PY'
+    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 - "$FLEET_DIR/_batch" <<'PY'
 import json, os, sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 benches = os.environ.get("STARTUP_BENCHES", "").split()
 modes = os.environ.get("STARTUP_MODES", "").split()
@@ -10140,6 +10165,7 @@ if len(benches) != len(modes):
     raise SystemExit("startup bench/mode manifest length mismatch")
 card = {
     "run_id": os.environ["CARD_RUN_ID"],
+    "timestamp": datetime.fromtimestamp(float(os.environ["CARD_STARTED_EPOCH"]), timezone.utc).isoformat(),
     "status": "starting",
     "phase": phase,
     "summary": {"total": len(benches), "passed": 0, "failed": 0,
@@ -13240,9 +13266,11 @@ RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
     while :; do
         env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
             ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
+            FLEET_CONTROLLER_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" \
             python3 - "$UNIFIED_DIR/report-card.json" <<'PY' || echo "⚠️ live benchmark publication failed" >&2
 import json, os, sys
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
 # Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
@@ -13326,6 +13354,7 @@ except Exception:
     code_summary = ""
 card = {
     "run_id": "batch",
+    "timestamp": datetime.fromtimestamp(float(os.environ["FLEET_CONTROLLER_STARTED_EPOCH"]), timezone.utc).isoformat(),
     "code": code_summary,
     "elapsed_s": elapsed,
     "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",

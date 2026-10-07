@@ -607,3 +607,83 @@ def test_campaign_inventory_seed_preflight_preserves_parent_toolchain_path_for_b
             ["bash", "-c", command, "seed-parent-path", str(tmp_path)], env=environment, capture_output=True, timeout=10
         )
         assert result.returncode == 0, "resolved Node/npm PATH did not survive in fleet parent"
+
+
+def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_consume(
+    tmp_path, monkeypatch
+):
+    import fcntl
+    import importlib.util
+    import time
+
+    root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
+    campaign = root / "campaign"
+    inventory = campaign / "shared-inventory"
+    inventory.mkdir(parents=True)
+    barrier = campaign / "startup-cohorts/c001"
+    barrier.mkdir(parents=True)
+    lock = (barrier.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    authority = {
+        "app": "navi-whisper-lux-bench",
+        "pid": str(os.getpid()),
+        "pid_start": module.birth(os.getpid()),
+        "token": "local-pg-default-owner",
+        "parent_pid": str(os.getpid()),
+        "parent_start": module.birth(os.getpid()),
+    }
+    (inventory / "owner").write_text(
+        "".join(f"{key}={value}\n" for key, value in authority.items())
+    )
+    (barrier / "manifest.json").write_text(
+        json.dumps({"cohort_id": "c001", "jobs": {"fixture": os.getpid()}})
+    )
+    normalize = next(
+        line
+        for line in (ROOT / "scripts/run-bench-fleet").read_text().splitlines()
+        if line.startswith('CLOUDBENCH_GUEST_PG_MAJOR="${')
+    )
+    spec = importlib.util.spec_from_file_location(
+        "native_seed_token", root / "agents/benchmarks/seed_cache_path.py"
+    )
+    seed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed)
+    try:
+        for configured in (None, "", "15", "16"):
+            if configured is None:
+                monkeypatch.delenv("CLOUDBENCH_GUEST_PG_MAJOR", raising=False)
+            else:
+                monkeypatch.setenv("CLOUDBENCH_GUEST_PG_MAJOR", configured)
+            proof = module.prepare(root, root / "scripts", inventory, barrier)
+            fleet_pg = subprocess.check_output(
+                [
+                    "bash",
+                    "-c",
+                    normalize + '\nprintf "%s" "$CLOUDBENCH_GUEST_PG_MAJOR"',
+                ],
+                text=True,
+            )
+            payload = json.loads(proof.read_text())
+            assert payload["fixture"]["pg_major"] == fleet_pg, (
+                "parent proof disagrees with fleet PG-major default"
+            )
+            assert payload["fixture"]["token"] == seed.seed_cache_token(
+                root / "back-end/prisma/schema.prisma", fleet_pg
+            )
+            monkeypatch.setenv("CLOUDBENCH_GUEST_PG_MAJOR", fleet_pg)
+            assert module.consume(
+                root,
+                root / "scripts",
+                inventory,
+                barrier,
+                proof,
+                "fixture",
+                os.getpid(),
+                time.time() + 10,
+            )["bytes"] == len(body)
+        assert len(calls) == 4 and all(method == "GET" for method, _ in calls)
+    finally:
+        lock.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()

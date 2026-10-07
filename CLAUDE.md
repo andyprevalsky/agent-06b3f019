@@ -280,7 +280,9 @@ For terminal-result/cleanup campaigns, use
 `scripts/verify_successful_llm_queries.py --diagnostics-only` to retain reported
 errors as warnings. Require meaningful real LLM calls (normally more than three; chat may need fewer), a terminal SUCCESS or
 FAILURE (including an execution-window FAILURE), and exact owned-resource cleanup
-within the 1800-second allocation deadline; do not force extra model calls.
+within that historical campaign's 1800-second allocation deadline; do not force
+extra model calls. The current width-fifty LIVE campaign uses the separate
+execution and whole-run clocks documented in Eval Suite below.
 
 **Cloud runner quick start:** From a configured clone, run
 `scripts/run-bench list`, then `scripts/run-bench <task> --wait` for one real
@@ -288,7 +290,7 @@ isolated benchmark. For an infrastructure streak, use
 `scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer>
 --exclude-file <prior-successful-names.json> --min-successful-llm 0`;
 the exclusion file is a JSON array of task names already used in accepted
-earlier runs. For the requested daily/Polar campaign, rebuild the eligible pool
+earlier runs. For the completed daily/Polar campaign, rebuild the eligible pool
 on every return to slice zero. Keep all 100 tasks distinct within that campaign;
 accepted and failed task names from earlier campaigns remain eligible.
 Capability slices
@@ -464,8 +466,9 @@ delimiter runs and line boundaries. A fresh-browser timeout can mean the verifie
 expected text the UI never renders; capture that exact predicate before changing
 timeouts. The existing publisher browser-validation blackbox owns these cases.
 
-PR #1299's current user-authorized acceptance requires **ten consecutive slices
-of ten distinct daily/Polar benchmarks**. Each benchmark must execute meaningful
+PR #1299's completed original acceptance required **ten consecutive slices
+of ten distinct daily/Polar benchmarks**. The new five width-fifty LIVE runs
+follow Eval Suite's Current width-fifty LIVE acceptance instructions. Each benchmark must execute meaningful
 real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
 owned resources within one 1,800-second allocation-to-finish deadline. Normally
 expect more than three LLM calls when sensible; chat, early terminal results and
@@ -518,7 +521,7 @@ Python's numeric equality is insufficient. An auxiliary final Hub upload warning
 preserves the canonical outcome and teardown exit code; durable evidence still
 needs independent confirmation before fleet acceptance. The same compact deploy
 control covers these boundaries, and the frontend renderer covers terminal display.
-For the next explicitly authorized follow-up 50-task run only, add five minutes:
+For the earlier explicitly authorized follow-up 50-task run only, add five minutes:
 use `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=600` and `--timeout 600` (temporary).
 The normal 7,200-second backstop and independent 1,800-second allocation cutoff
 remain unchanged. Do not run paid smoke gates concurrently with a latency proof.
@@ -622,7 +625,7 @@ To interrupt a local benchmark, cancel its owning benchmark launcher first and
 wait for the benchmark cleanup receipt before stopping its dependent stack.
 `local-benchmark-owner.json` names the benchmark child; `local-stack-owner.json`
 names the service stack. Verify native process birth before signaling either.
-For the current campaign, draw 100 distinct tasks from the canonical `daily`
+For the completed original campaign, draw 100 distinct tasks from the canonical `daily`
 and `polar-bench` selectors. Reset the task pool whenever the streak restarts
 at slice zero; exclude successful names only within that active campaign.
 The daily selector has no compatible smoke tags in the current eligible pool,
@@ -942,6 +945,111 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   intentionally redirect paths under the repository.
 
 ## Eval Suite
+
+**Current width-fifty LIVE acceptance:** the original hundred-task campaign is
+complete. The new goal is five consecutive runs of fifty distinct, randomly
+selected eligible DAILY tasks per run. Keep the original completed campaign and
+the cached mass-demo diagnostics separate; neither supplies this new streak.
+Each run gets a temporary 1,200-second execution window per task and a hard
+3,600-second whole-run budget from the start of its uncached image build through
+final durable publication and verified release of every owned resource. The old
+300/600-second temporary task settings, 1,800-second allocation budget and cached
+diagnostic's 1,200-second allocation-to-release guard do not apply to this goal.
+Normal defaults, task contents, evaluators and the provider waterfall stay intact.
+
+A fresh CLI runner reads this file and uses the ordinary entrypoint. Make a
+minimal benign comment change in `agents/benchmarks/__init__.py` in its own
+checkout for each trial, record the resulting fetchable immutable ref, and build
+from that same checkout. This marker changes neither executable behavior nor the
+39 bootstrap/79 dependency inputs. Preserve any already-running control's source.
+Use the supported uncached image build and exact-image activation for every trial:
+
+```bash
+trial_dir=".context/daily-live50/$(date -u +%Y%m%d-%H%M%S)"
+umask 077
+mkdir -p "$trial_dir"
+date -u +%s > "$trial_dir/image-start.epoch"
+trial_ref=$(git rev-parse HEAD)
+scripts/run-bench image-build --builder depot --no-cache --build-context "$PWD" --out-dir "$trial_dir/image-build"
+trial_image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image_ref"])' "$trial_dir/image-build/cloudbench-image-build.json")
+scripts/run-bench image-activate "$trial_image" --ref "$trial_ref" --out-dir "$trial_dir/image-activation"
+```
+
+Retain source/build receipts and verify the actual guest image digest. Generic
+source-only snapshot reuse is still normal outside this explicitly requested
+fresh-image campaign. Resolve the canonical DAILY selector, intersect it with
+the existing Linux/cloud-root and LIVE-eligible catalog pool, then draw fifty
+names without replacement using a recorded random seed. The existing
+`scripts/fleet_infra_sample.py:eligible_pool` supports those eligibility checks;
+its `minimum_successful_llm=3` filters intentionally zero-LIVE/replay tasks and
+does not require artificial model calls. Retain the concrete name list privately.
+Sample anew for each run; distinctness is required within each fifty-task run.
+Pass all fifty concrete names together to one ordinary fleet, without `-k` or
+`--concurrency`; the sequential proof wrapper's width-32 cap is unrelated.
+
+Inspect native provider inventory, controller CPU/memory/disk and normal
+admission before launch. Where this load requires it, use the command-scoped
+dedicated-primary profile below while preserving catalog memory and the ordinary
+worker profile. Ceiling 138 is a ceiling, not a capacity promise; keep native
+CPU, worker, disk and organization admission active. LIVE autoscaling remains
+the ordinary maximum 15. The cached mass-demo maximum 2 must not leak into LIVE.
+
+```bash
+# tasks[] contains the retained fifty distinct eligible DAILY names.
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200 \
+  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --wait --timeout 1200 --autoscale-max 15
+```
+
+Poll the exact monitoring command printed by this launch every thirty seconds
+through terminal publication and native release. Keep all fifty rows in one
+group; queued/startup rows need the original run timestamp, and genuine evaluated
+PASS/FAIL appears before teardown. Follow actual controller status even if a card
+or observation is stale. Retry transient observations with the original owner;
+do not restart a healthy run or reject microscopic intermediate timings. Stage
+handoffs must remain usable for their consumer. Freeze sensible generous stage
+targets from comparable historical LIVE timings, excluding cache-assisted cold
+measurements, and report observed stage p95 plus image-start-to-full-release E2E.
+These fixed stage targets are generous operational targets, not measured p95
+statistics or independent rejection/cancellation timers:
+
+| Stage | Target or hard limit | Historical basis and qualification |
+| --- | --- | --- |
+| Uncached image build/push | 600 seconds, target | Actual uncached invocation: 301 seconds. |
+| Exact-image activation | 360 seconds, target | Actual invocation: 279.179 seconds. |
+| Canary/preflight through its full native release | 720 seconds, target | Current CLI-to-canary release: 504.886 seconds. |
+| Fleet readiness | 900 seconds, target | Partial-run observation upper bound: 686.004 seconds; only 49 executed and one startup failed, so this is diagnostic and does not prove full-fifty readiness. |
+| Task execution | 1,200 seconds per task, hard | Temporary command-scoped execution window. |
+| Evidence and full native release after the last execution | 480 seconds, target | Target pending measured current tail; evidence publication also overlaps execution. |
+| Whole image-start-to-publication-and-release E2E | 3,600 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
+
+Stage targets are not additive entitlements: their sum exceeds one hour, and
+parallel/overlapping work must still fit the hard whole-run limit. Report actual
+stage p95 when comparable task observations support it; do not label a single
+historical invocation or target as p95. Warn and diagnose target overruns while a
+usable stage continues; never cancel on a per-poll or internal micro-budget.
+
+Retain unknown timings as unknown. Diagnose parallelism-related LLM latency and
+errors from the existing provider evidence; paid deploy smoke or other paid
+verification must not overlap an accepted LIVE latency measurement window.
+
+An ordinary task FAIL, including a genuine execution-window FAIL, is acceptable
+when it actually executed and has its unchanged terminal evaluation, durable
+evidence and exact cleanup. Normally expect more than three real LLM calls when
+sensible; early/chat outcomes can use fewer. Use
+`scripts/verify_successful_llm_queries.py --diagnostics-only`; never force calls,
+change prompts, seed replay or substitute cached acceptance. Unexecuted tasks,
+missing terminals/evidence, incorrect FE presentation, resource leaks, an actual
+parallelism-caused issue or the one-hour breach fail the run. Preserve every
+original outcome and finish exact cleanup. At a hard cutoff or catastrophe,
+verify native birth and stop only the exact owning controller through normal
+cleanup; interrupted/recovered runs get no retroactive credit. Fix a proven
+cause, then continue the requested five-run streak. Reset prior credit only if
+a runtime fix invalidates its exercised evidence; doc/test/benign-comment changes
+alone do not reset a qualified streak. Do not restart the completed original hundred.
 
 **Cloud startup reuse:** use `scripts/run-bench <task...> --wait` normally. The
 CLI reuses completed dependency snapshots across fresh checkouts and synchronizes

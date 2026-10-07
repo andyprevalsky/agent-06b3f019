@@ -83,7 +83,7 @@ def fixture(root, helpers):
     spec = importlib.util.spec_from_file_location("seed_identity", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    pg = os.environ.get("CLOUDBENCH_GUEST_PG_MAJOR", "15")
+    pg = os.environ.get("CLOUDBENCH_GUEST_PG_MAJOR") or "15"
     token = module.seed_cache_token(schema, pg_major=pg)
     effective = dict(dotenv_values(root / "back-end/.env"))
     effective.update(os.environ)

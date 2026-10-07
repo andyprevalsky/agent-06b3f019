@@ -135,7 +135,8 @@ export function encryptedManifestIndex(artifacts: ManifestArtifact[]): Record<st
 export async function writePublicManifest(
   rootAgentId: string,
   refs: ManifestArtifact[],
-  benchmarkTaskName?: string
+  benchmarkTaskName?: string,
+  options: { createOnly?: boolean } = {}
 ): Promise<string | null> {
   if (!publicManifestEnabled()) return null;
   const publicValue = publicManifest(rootAgentId, refs, benchmarkTaskName);
@@ -144,8 +145,9 @@ export async function writePublicManifest(
     objectPath: 'manifest.public.json',
     body: Buffer.from(JSON.stringify(publicValue, null, 2)),
     contentType: 'application/json',
+    createOnly: options.createOnly,
   });
-  if (archiveEnabled() && publicManifestRef === null) {
+  if (archiveEnabled() && publicManifestRef === null && !options.createOnly) {
     throw new Error(`Failed to archive required public manifest for ${rootAgentId}`);
   }
   return publicManifestRef;

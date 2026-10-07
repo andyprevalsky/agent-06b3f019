@@ -112,3 +112,42 @@ aggressive observation assertions and requested realistic breathing room.
 ## Reusable lesson
 
 Admit a sealed concurrent cohort against fresh disk capacity in one transaction before allocating its physical cleanup reserves.
+
+
+## Review recurrence: retired unadmitted members
+
+The final review identified a separate admission-floor recurrence. A cohort's
+parent can remain alive after a child retires before allocating its reserve.
+The immutable custody manifest correctly retains that child, but the admission
+loop counted every unconsumed member as pending. Its cleanup minimum and working
+floor could then deny capacity to a surviving controller.
+
+Two archive searches covered pending cohort members, native process births,
+abandoned reservations and cleanup headroom. This case owns the allocator;
+the pre-release-member failure case owns survivor scheduling. Custody membership
+must remain unchanged in both.
+
+An actual owning control invokes the real shell reserve function under a held
+native parent lock. A waited/reaped child supplies the retired manifest PID.
+The fixture isolates its accounting namespace and bounds the free-space
+transport while preserving real process-birth observations and real 1 MiB native
+physical allocation. Original 5c1fc870 fails the retired-member case and passes
+both live-member and unassigned-member inverses (1 failed, 2 passed, 0.93 s).
+The unchanged three cases pass against the repair (3 passed, 4.65 s). Initial
+scratch setup errors from a missing adjacent library were retained separately
+and are not causal reproduction credit. No provider or model calls occurred.
+
+The accounting loop now rereads bounded, owned cohort membership and removes
+only assigned, unconsumed members whose native process birth is absent from the
+fresh snapshot. Unassigned members remain eligible to launch. Any live or
+uncertain PID, including a possible reused PID, conservatively retains its
+floor. Consumed owners retain the existing exact-birth accounting. No custody
+manifest, provider resource, production budget, benchmark result or reservation
+default changes. The new three-case control joins the existing
+`cleanup_releases_emergency_disk` deploy selection; no separate gate is added.
+
+This is owning-boundary evidence, not a claim that a fresh fifty-task fleet has
+finished or that its live startup problem is resolved. The independent DAILY-50
+control continues on its frozen pre-repair source without interference. Private
+source, unchanged controls, native test results and independent-review receipts
+are retained under `.context/fresh-basic-claude-final50-20261006/deploy/`.

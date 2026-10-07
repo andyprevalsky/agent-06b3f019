@@ -68,6 +68,19 @@ exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
 release even when the provider retains that object; request acceptance alone
 does not.
 
+For the current user-requested five consecutive LIVE DAILY runs of fifty,
+follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+uses fifty distinct randomly selected eligible names together in one ordinary
+fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
+hard image-build-start through final publication/native release 3,600 seconds.
+Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
+exact-image activation every trial. LIVE autoscale remains 15; the cached mass
+profile's maximum 2 and allocation deadline do not apply. Keep the original
+hundred-task result complete, exact thirty-second monitoring, grouped early
+verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
+with accepted LIVE latency. The existing stability wrapper's width-32 cap does
+not restrict this ordinary fleet; do not substitute smaller slices.
+
 Ordinary source-only runs reuse verified dependency images and completed
 snapshots. For an explicitly requested cold build/push measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`

@@ -123,6 +123,7 @@ def main() -> int:
             "RUN_BENCH_CAMPAIGN_RUN",
             "RUN_BENCH_CAMPAIGN_STARTED_AT",
             "RUN_BENCH_CAMPAIGN_TOTAL_JOBS",
+            "CLOUDBENCH_CAMPAIGN_SEED_PROOF",
         ):
             environment.pop(key, None)
         environment.update(

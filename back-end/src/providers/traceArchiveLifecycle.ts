@@ -472,9 +472,10 @@ async function writeStartManifest(
       rootAgentId: agentId,
       objectPath: 'manifest.json.gz.enc',
       value: manifestValue,
+      createOnly: true,
     });
     await ownership.assertOwned();
-    await writePublicManifest(agentId, refs);
+    await writePublicManifest(agentId, refs, undefined, { createOnly: true });
     if (manifest !== null) {
       log.info('Trace archive manifest initialized at start', {
         root_agent_id: agentId,

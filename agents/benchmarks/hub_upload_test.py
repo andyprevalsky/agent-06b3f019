@@ -510,3 +510,72 @@ def test_live_response_preserves_phase_and_startup_label():
     assert live_response_matches(bundle, stored)
     for key in ("lifecycle_stage", "startup_label"):
         assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})
+
+@pytest.mark.parametrize("producer", ["startup", "aggregate"])
+def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(
+    tmp_path, monkeypatch, producer
+):
+    import os
+    import subprocess
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from benchmarks.hub_upload import live_bundle_from_report_card
+
+    repo = (
+        Path(os.environ["CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST"])
+        if "CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST" in os.environ
+        else Path(__file__).resolve().parents[2]
+    )
+    fleet = Path(
+        os.environ.get(
+            "CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet"
+        )
+    ).read_text()
+    directory = tmp_path / "fleet"
+    directory.mkdir()
+    started = 1791331914
+    expected = datetime.fromtimestamp(started, timezone.utc).isoformat()
+    definitions = fleet[
+        fleet.index("write_startup_card() {") : fleet.index(
+            "start_central_hub() {", fleet.index("write_startup_card() {")
+        )
+    ]
+    setup = (
+        'FLEET_DIR="$1"\nROOT_DIR="$2"\nRUN_ID=fixture-timestamp\nFLEET_CONTROLLER_STARTED_EPOCH='
+        + str(started)
+        + "\nBENCHES=(fixture)\nCATALOG_MODES=(real)\nSIM_ON_CSV=\n"
+    )
+    startup = (
+        definitions + "\n" + setup + 'write_startup_card "verifying environment"\n'
+    )
+    subprocess.run(
+        ["bash", "-c", startup, "timestamp-control", str(directory), str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    if producer == "aggregate":
+        marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
+        start = fleet.index(marker)
+        end = fleet.index("\nPY\n", start) + len("\nPY\n")
+        command = (
+            setup
+            + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n'
+            + fleet[start:end]
+        )
+    else:
+        command = definitions + "\n" + setup + 'write_startup_card "provisioning"\n'
+    for _ in range(2):
+        subprocess.run(
+            ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
+            check=True,
+            capture_output=True,
+        )
+        card = json.loads((directory / "_batch/report-card.json").read_text())
+        bundle = live_bundle_from_report_card(
+            card, run_id="fixture-timestamp", source="direct-cloud-fleet"
+        )
+        assert bundle["timestamp"] == expected, (
+            "live fleet publication lost its stable controller-start timestamp"
+        )
+        assert len(bundle["tasks"]) == 1 and bundle["tasks"][0]["passed"] is None

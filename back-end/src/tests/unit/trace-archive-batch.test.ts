@@ -7,11 +7,13 @@ import {
   archiveJson,
   storePlainArtifact,
   archiveBytes,
+  readArchivedArtifact,
 } from '../../providers/traceArchive';
 import { prisma } from '../../providers/database';
 import {
   inspectFinalizedManifest,
   writeFinalizationMarker,
+  writePublicManifest,
 } from '../../providers/traceArchiveManifest';
 import {
   ARCHIVE_BATCH_MAX_BYTES,
@@ -46,6 +48,7 @@ const originalSend = sender.send;
 const objects = new Map<string, Buffer>();
 let onPublicWrite: ((key: string) => Promise<void>) | undefined;
 let onEncryptedRead: ((key: string) => Promise<void>) | undefined;
+let onManifestWrite: ((key: string) => Promise<void>) | undefined;
 let activePuts = 0;
 let fixturePuts = 0;
 const interleavingSend = async (command: unknown) => {
@@ -58,6 +61,12 @@ const interleavingSend = async (command: unknown) => {
     try {
       fixturePuts++;
       if (key.endsWith('/manifest.public.json') && onPublicWrite) await onPublicWrite(key);
+      if (onManifestWrite) await onManifestWrite(key);
+      if (input.IfNoneMatch === '*' && objects.has(key))
+        throw Object.assign(new Error('offline object already exists'), {
+          name: 'PreconditionFailed',
+          $metadata: { httpStatusCode: 412 },
+        });
       objects.set(key, bodyToBuffer(input.Body));
       return {};
     } finally {
@@ -356,6 +365,117 @@ async function lateStartInterleaving() {
   );
 }
 
+async function startRetriesAfterLostLeasePreserveFinalization(
+  target: 'manifest.json.gz.enc' | 'manifest.public.json'
+) {
+  objects.clear();
+  const rootAgentId = 'offline-start-retry-' + target;
+  const fixture = {
+    rows: { Agent: [{ id: rootAgentId, isBenchmark: true, status: 'RUNNING' }] },
+    agent_ids: [rootAgentId],
+    user_id: 'offline-user',
+    base_image: 'offline',
+    captured_at: new Date().toISOString(),
+  } as unknown as Parameters<typeof archiveAgentStartFixture>[1];
+  let terminalObjects: Map<string, Buffer> | undefined;
+  let killed = false;
+  onManifestWrite = async (key) => {
+    if (key !== 'trace-archive/' + rootAgentId + '/' + target) return;
+    onManifestWrite = undefined;
+    const rows = await prisma.$queryRaw<{ pid: number }[]>`
+        SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.locktype = 'advisory' AND l.granted AND a.datname = current_database()
+        AND l.objsubid = 1
+        AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended(${rootAgentId + ':trace-archive-manifest'}, 8104327)
+      `;
+    assert.strictEqual(rows.length, 1, 'terminate only this start fixture lock holder');
+    const result = await prisma.$queryRaw<{ terminated: boolean }[]>`
+        SELECT pg_terminate_backend(${rows[0].pid}::int) AS terminated
+      `;
+    assert.strictEqual(result[0]?.terminated, true);
+    killed = true;
+    await seed(rootAgentId);
+    terminalObjects = new Map([...objects].filter(([name]) => name.includes('/manifest.')));
+    throw new Error('offline retryable write failure after the exact lease ended');
+  };
+  try {
+    await archiveAgentStartFixture(rootAgentId, fixture);
+    assert(killed && terminalObjects, 'retry must cross native lease loss and final publication');
+    assert.strictEqual(activePuts, 0, 'late started storage work must join');
+    for (const [key, body] of terminalObjects)
+      assert.deepStrictEqual(objects.get(key), body, 'late start retry replaced ' + key);
+    assert.strictEqual(decodedManifest(rootAgentId).finalized, true);
+    assert.deepStrictEqual(decodedManifest(rootAgentId).benchmark_result, { passed: true });
+  } finally {
+    onManifestWrite = undefined;
+  }
+}
+
+async function conditionalCreationDistinguishesExistingObjectsFromFailure() {
+  for (const encrypted of [false, true]) {
+    objects.clear();
+    const rootAgentId = 'offline-create-errors-' + encrypted;
+    const create = () =>
+      encrypted
+        ? archiveJson({
+            rootAgentId,
+            objectPath: 'manifest.json.gz.enc',
+            value: { original: true },
+            createOnly: true,
+          })
+        : writePublicManifest(rootAgentId, [], undefined, { createOnly: true });
+    assert(await create());
+    const accepted = new Map(objects);
+    assert.strictEqual(await create(), null, 'an existing object is an intentional no-op');
+    assert.deepStrictEqual(
+      objects,
+      accepted,
+      'a precondition rejection must preserve stored bytes'
+    );
+    objects.clear();
+    onManifestWrite = async () => {
+      throw new Error('offline create transport refused');
+    };
+    try {
+      await assert.rejects(create(), /offline create transport refused/);
+      assert.strictEqual(objects.size, 0);
+      assert.strictEqual(activePuts, 0);
+    } finally {
+      onManifestWrite = undefined;
+    }
+  }
+}
+
+async function conditionalEncryptedCreationRetriesAcceptedBodySidecar() {
+  objects.clear();
+  const rootAgentId = 'offline-create-sidecar-retry';
+  const objectPath = 'manifest.json.gz.enc';
+  const bodyKey = 'trace-archive/' + rootAgentId + '/' + objectPath;
+  let bodyWrites = 0;
+  let sidecarWrites = 0;
+  onManifestWrite = async (key) => {
+    if (key === bodyKey) bodyWrites++;
+    if (key === bodyKey + '.meta.json' && ++sidecarWrites === 1)
+      throw new Error('offline retryable sidecar failure after body acceptance');
+  };
+  const value = { finalized: false, fixture: 'accepted body and matching sidecar' };
+  try {
+    assert(await archiveJson({ rootAgentId, objectPath, value, createOnly: true }));
+    const stored = await readArchivedArtifact({ rootAgentId, objectPath });
+    assert(stored, 'the acknowledged pair must be readable through the ordinary archive reader');
+    assert.deepStrictEqual(JSON.parse(decryptAndValidateArtifact(stored).toString()), value);
+    assert.strictEqual(
+      bodyWrites,
+      1,
+      'sidecar retries must retain the acknowledged encrypted body'
+    );
+    assert.strictEqual(sidecarWrites, 2);
+    assert.strictEqual(activePuts, 0);
+  } finally {
+    onManifestWrite = undefined;
+  }
+}
+
 async function destructiveChangesRemainRejected() {
   for (const mode of ['removal', 'malformed'] as const) {
     objects.clear();
@@ -586,6 +706,18 @@ async function main(): Promise<void> {
       await test(
         'native transaction ownership loss stops rewrites and joins work',
         lostTransactionStopsWrites
+      );
+      for (const target of ['manifest.json.gz.enc', 'manifest.public.json'] as const)
+        await test('start retries after native lease loss preserve final ' + target, () =>
+          startRetriesAfterLostLeasePreserveFinalization(target)
+        );
+      await test(
+        'conditional creation preserves existing objects and rejects exhausted storage failures',
+        conditionalCreationDistinguishesExistingObjectsFromFailure
+      );
+      await test(
+        'conditional encrypted creation retries an accepted body sidecar into a readable pair',
+        conditionalEncryptedCreationRetriesAcceptedBodySidecar
       );
     } finally {
       onPublicWrite = undefined;

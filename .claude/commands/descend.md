@@ -184,6 +184,19 @@ controller filesystem; a reserve refusal requires actual disk/cohort evidence,
 not lowered storage floors or a replacement launcher. The owning quick
 regressions run in the normal benchmark deploy gate.
 
+For the current user-requested five consecutive LIVE DAILY runs of fifty,
+follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+uses fifty distinct randomly selected eligible names together in one ordinary
+fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
+hard image-build-start through final publication/native release 3,600 seconds.
+Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
+exact-image activation every trial. LIVE autoscale remains 15; the cached mass
+profile's maximum 2 and allocation deadline do not apply. Keep the original
+hundred-task result complete, exact thirty-second monitoring, grouped early
+verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
+with accepted LIVE latency. The existing stability wrapper's width-32 cap does
+not restrict this ordinary fleet; do not substitute smaller slices.
+
 The ordinary CLI automatically reuses verified completed dependency snapshots
 across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.

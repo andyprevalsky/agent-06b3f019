@@ -27435,3 +27435,201 @@ reserve_cleanup_disk_space
         assert result.returncode != 0, "reserve adopted a reused owner PID"
         assert not exact.exists()
     assert neighbor.read_bytes() == b"unrelated"
+
+
+@pytest.mark.parametrize("peer_state", ["departed", "unassigned", "live"])
+def test_fleet_cleanup_releases_emergency_disk_reserve_after_pending_member_departure(
+    tmp_path: Path, peer_state: str,
+) -> None:
+    """A retired unadmitted member cannot consume a survivor's disk floor."""
+    import fcntl
+
+    reserve = _extract_fleet_function(fleet_source_text(), "reserve_cleanup_disk_space() {")
+    namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
+    admission = Path("/tmp") / f"rose-cloudbench-cleanup-admission-{os.getuid()}" / str(namespace)
+    assert not admission.exists()
+    exact = tmp_path / "reserve"
+    neighbor = tmp_path / "neighbor"
+    neighbor.write_bytes(b"unrelated")
+    transport = tmp_path / "transport"
+    transport.mkdir()
+    # Isolate the accounting namespace from real concurrent fleet reservations.
+    # Native reserve allocation, process births and lifetime locking stay real.
+    (transport / "sitecustomize.py").write_text('''
+import os
+from pathlib import Path
+original = Path.lstat
+def isolated(self, *args, **kwargs):
+    observed = original(self, *args, **kwargs)
+    if str(self) == os.environ['RESERVE_TEST_PARENT']:
+        fields = list(observed)
+        fields[2] = int(os.environ['RESERVE_TEST_DEVICE'])
+        return os.stat_result(fields)
+    return observed
+Path.lstat = isolated
+''')
+    cohort = tmp_path / "cohorts" / "c001"
+    cohort.mkdir(parents=True)
+    lock = (cohort.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    peer = None
+    if peer_state == "departed":
+        retired = subprocess.Popen([sys.executable, "-c", "pass"])
+        retired.wait(timeout=60)
+        peer_pid = retired.pid
+        with pytest.raises(ProcessLookupError):
+            os.kill(peer_pid, 0)
+    elif peer_state == "live":
+        peer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(180)"])
+        peer_pid = peer.pid
+    else:
+        peer_pid = None
+    (cohort / "manifest.json").write_text(json.dumps({
+        "cohort_id": "c001", "jobs": {"r001-j0001": None, "r002-j0002": peer_pid},
+    }))
+    shell = f'''set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
+df() {{ printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fixture 10000 5904 4096 60% /fixture'; }}
+export -f df
+{reserve}
+reserve_cleanup_disk_space
+'''
+    try:
+        result = subprocess.run(
+            ["bash", "-c", shell, "reserve", str(exact)],
+            env={**os.environ, "PYTHONPATH": str(transport),
+                 "RESERVE_TEST_PARENT": str(tmp_path), "RESERVE_TEST_DEVICE": str(namespace),
+                 "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(cohort),
+                 "RUN_BENCH_CAMPAIGN_COHORT": "c001", "RUN_BENCH_CAMPAIGN_JOB_ID": "r001-j0001"},
+            text=True, capture_output=True, timeout=60,
+        )
+        if peer_state == "departed":
+            assert result.returncode == 0, "retired pending member retained disk floor: " + result.stderr
+            observed = exact.stat()
+            assert observed.st_size == 1048576 and observed.st_blocks * 512 >= observed.st_size
+        else:
+            assert result.returncode != 0, "live or unassigned pending member lost its disk floor"
+            assert not exact.exists()
+            if peer is not None:
+                assert peer.poll() is None
+        assert neighbor.read_bytes() == b"unrelated"
+    finally:
+        lock.close()
+        if peer is not None:
+            peer.terminate()
+            peer.wait(timeout=60)
+        exact.unlink(missing_ok=True)
+        if admission.exists():
+            shutil.rmtree(admission)
+
+
+@pytest.mark.parametrize("parent_state", ["missing", "root-private", "runtime-owned"])
+def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(
+    tmp_path, parent_state
+):
+    """Exercise the real first cache consumer with kernel runtime-user permissions."""
+    import pwd
+    import stat
+
+    if sys.platform != "linux" or os.geteuid() != 0:
+        pytest.skip(
+            "root Linux permission primitive is exercised by the native controller fixture"
+        )
+    runtime = pwd.getpwnam("daemon")
+    tmp_path.chmod(0o755)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o755)
+    cache = data / "cloudbench-cache"
+    private = None
+    if parent_state != "missing":
+        cache.mkdir(mode=0o700)
+        if parent_state == "runtime-owned":
+            os.chown(cache, runtime.pw_uid, runtime.pw_gid)
+        else:
+            private = cache / "private-control"
+            private.write_bytes(b"unchanged private control")
+            private.chmod(0o600)
+    repo = tmp_path / "repo"
+    binary = repo / "agents/venv/bin"
+    binary.mkdir(parents=True)
+    for directory in (repo / "node_modules", repo / "back-end/node_modules"):
+        directory.mkdir(parents=True)
+    for directory in (
+        repo,
+        repo / "agents",
+        repo / "agents/venv",
+        binary,
+        repo / "back-end",
+    ):
+        directory.chmod(0o755)
+    interpreter = binary / "python"
+    interpreter.write_text(
+        "#!/usr/local/bin/python3\n"
+        "import os, pathlib, sys\n"
+        "if sys.argv[1:] == ['-m','playwright','install-deps','chromium']: sys.exit(0)\n"
+        "assert sys.argv[1:] == ['-m','playwright','install','chromium']\n"
+        "assert os.geteuid() != 0\n"
+        "cache = pathlib.Path(os.environ['PLAYWRIGHT_BROWSERS_PATH'])\n"
+        "(cache / '.links').mkdir(exist_ok=True)\n"
+        "(cache / '.links' / 'runtime-write').write_text('installed control')\n"
+    )
+    interpreter.chmod(0o755)
+    tools = tmp_path / "tools"
+    tools.mkdir(mode=0o755)
+    gosu = tools / "gosu"
+    gosu.write_text(
+        "#!/usr/local/bin/python3\n"
+        "import os,pwd,sys\n"
+        "user=pwd.getpwnam(sys.argv[1])\n"
+        "os.setgroups([]);os.setgid(user.pw_gid);os.setuid(user.pw_uid)\n"
+        "os.execvp(sys.argv[2],sys.argv[2:])\n"
+    )
+    gosu.chmod(0o755)
+    driver = DRIVER_SCRIPT.read_text()
+    fragment = driver[
+        driver.index("# Prisma's generated client") : driver.index(
+            "# ── 4. Pin a stable"
+        )
+    ]
+    fragment = fragment.replace(
+        "/data/cloudbench-cache/playwright-browsers", str(cache / "playwright-browsers")
+    ).replace(
+        "/var/lib/rose-playwright-chromium-deps", str(tmp_path / "host-libraries.ready")
+    )
+    sync_prisma = tools / "sync-prisma.sh"
+    sync_prisma.write_text("#!/bin/bash\nexit 0\n")
+    environment = {
+        **os.environ,
+        "PATH": str(tools) + ":" + os.environ["PATH"],
+        "DATA_DIR": str(data),
+        "REPO_DIR": str(repo),
+        "APP_USER": runtime.pw_name,
+        "SYNC_PRISMA_SCRIPT": str(sync_prisma),
+        "BENCH_NEEDS_NEW_USER_CHECKOUT": "1",
+    }
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -eu; umask 077; log() { :; }; step() { :; }; finish() { exit "$1"; };\n'
+            + fragment,
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, (
+        "checkout browser cannot traverse the shared cache parent as its runtime user"
+    )
+    assert (cache / "playwright-browsers/.links/runtime-write").is_file()
+    assert cache.stat().st_uid == runtime.pw_uid
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    assert data.stat().st_uid == 0 and stat.S_IMODE(data.stat().st_mode) == 0o755
+    if private is not None:
+        assert private.read_bytes() == b"unchanged private control"
+        assert (
+            private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600
+        )

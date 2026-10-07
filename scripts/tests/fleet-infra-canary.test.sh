@@ -191,6 +191,11 @@ identity = {
     "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(directory),
     "RUN_BENCH_CAMPAIGN_COHORT": "c001",
     "RUN_BENCH_CAMPAIGN_JOB_ID": "parent-job",
+    "CLOUDBENCH_CAMPAIGN_SEED_PROOF": str(directory / "seed-proof.private.json"),
+    "BENCHMARK_HUB_GROUP_RUN_ID": "outer-group",
+    "RUN_BENCH_CAMPAIGN_RUN": "outer-campaign",
+    "RUN_BENCH_CAMPAIGN_STARTED_AT": "outer-start",
+    "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": "50",
 }
 environment = os.environ.copy()
 environment.update(identity)
@@ -205,8 +210,15 @@ preserved = {
 expected = root / "nested-preserved-environment.json"
 expected.write_text(json.dumps(preserved))
 canary = root / "nested-campaign-canary.sh"
+fleet = (helper.parent / "run-bench-fleet").read_text()
+seed_branch_start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_SEED_PROOF:-}" ]; then')
+seed_branch = fleet[seed_branch_start:fleet.index("\nelse", seed_branch_start)] + "\nfi\n"
 canary.write_text(
     "#!/usr/bin/env bash\nset -euo pipefail\n"
+    + "ROOT_DIR=" + shlex.quote(str(helper.parent.parent)) + "\n"
+    + "CLOUDBENCH_SCRIPT_SNAPSHOT=" + shlex.quote(str(helper.parent)) + "\n"
+    + "FLEET_CONTROLLER_STARTED_EPOCH=0\nSTART_BARRIER_WAIT_SECONDS=60\n"
+    + seed_branch
     + shlex.quote(sys.executable) + " " + shlex.quote(str(rendezvous))
     + ' --deadline "' + str(time.time() + 60) + '" --controller-pid "$$"\n'
     + shlex.quote(sys.executable) + " - " + shlex.quote(str(expected)) + " <<'INNER'\n"
@@ -216,6 +228,7 @@ canary.write_text(
     + "assert all(os.environ.get(k) == v for k, v in expected.items())\n"
     + "assert os.environ['CLOUDBENCH_CONTROLLER_LOCK_NAME'] == 'nested-canary.lock'\n"
     + "assert os.environ['CLOUDBENCH_FLEET_OWNER_TOKEN'] != 'a' * 32\n"
+    + "assert not any(k in os.environ for k in " + repr(tuple(identity)) + ")\n"
     + "INNER\n"
 )
 (directory / "manifest.json").write_text(json.dumps({

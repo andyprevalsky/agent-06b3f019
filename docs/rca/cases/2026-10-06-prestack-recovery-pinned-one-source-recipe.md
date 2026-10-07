@@ -138,3 +138,30 @@ composition. Combined fingerprint source review is complete; the normal deploy g
 remain pending. This repairs policy authority and source-equivalent admission,
 not historical performance, interrupted-run acceptance or resource-credit
 semantics. Status remains mitigated until root's final integration/outcome.
+
+### October 7 review recurrence: direct native input closure
+
+Review found that the complete packed executable recipe was bound, but native
+configuration could append other direct injected files without changing that
+reviewed recipe. Archive searches covered `direct native file set injected
+recipe control` and `prestack unreviewed configuration inputs source binding`.
+This is a source-recipe closure recurrence of the same owning validator, not
+permission to accept an unobserved execution phase.
+
+One permanent method in the existing bootstrap recovery family first verifies
+the unchanged exact native configuration, then appends three separate control
+or data paths. Original 5c1fc870 accepts all three mutants: the test fails in
+three unchanged subtests because ValueError is not raised. The repair makes
+that same method pass by requiring precisely the four canonical direct paths
+produced by run-bench-cloud, including its canonical compressed payload path.
+The original configuration still verifies; every previous method AST is
+unchanged. Packed executables, provenance validation, immutable Git checks,
+reviewed phase authority and exact cleanup ownership remain mandatory.
+
+The validator belongs at the incoming native configuration boundary; a later
+phase check cannot establish which extra file would have executed. No new
+reviewer key, capture waiver, task, prompt, provider call or acceptance credit
+is introduced. This source-bound control proves rejection of extra inputs;
+normal final committed-snapshot recovery qualification and production rollout
+remain pending. Private original RED, unchanged GREEN and independent-review
+packet are retained under the deployment context.
