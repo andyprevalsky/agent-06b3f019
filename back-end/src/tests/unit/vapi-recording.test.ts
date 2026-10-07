@@ -27,7 +27,10 @@ async function main(): Promise<void> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     urls.push(url);
     const headers = new Headers(init?.headers);
-    if (url.includes(`/call/${CALL_ID}/mono-recording`) && headers.get('authorization')?.startsWith('Bearer ')) {
+    if (
+      url.includes(`/call/${CALL_ID}/mono-recording`) &&
+      headers.get('authorization')?.startsWith('Bearer ')
+    ) {
       return new Response(Buffer.from('RIFF....WAVEfmt '), {
         status: 200,
         headers: { 'content-type': 'audio/wav' },
@@ -50,7 +53,9 @@ async function main(): Promise<void> {
     `archive must download via authenticated Vapi artifact API, got: ${urls.join(', ') || '(no fetches)'}`
   );
   assert.ok(
-    !urls.some((url) => url.includes('r2.cloudflarestorage.com') || url.includes('hipaa-recordings')),
+    !urls.some(
+      (url) => url.includes('r2.cloudflarestorage.com') || url.includes('hipaa-recordings')
+    ),
     `archive must not fetch the private provider recordingUrl: ${urls.join(', ')}`
   );
 

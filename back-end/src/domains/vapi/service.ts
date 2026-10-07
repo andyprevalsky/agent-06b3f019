@@ -274,11 +274,7 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
 
   const result = (await response.json()) as Record<string, unknown>;
   await archiveVapiPollResult(callId, result, exchange);
-  const rewritten = rewriteEndedCallRecordingUrl(
-    result,
-    callId,
-    await agentIdForCallId(callId)
-  );
+  const rewritten = rewriteEndedCallRecordingUrl(result, callId, await agentIdForCallId(callId));
   log.info('Vapi call poll response', {
     callId,
     status: String(rewritten.status),

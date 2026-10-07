@@ -43,7 +43,9 @@ function getVapiPrivateKey(): string {
  * signed URL. Native fetch follows that redirect without forwarding the Bearer
  * token to R2.
  */
-export async function downloadVapiCallRecording(callId: string): Promise<VapiRecordingBytes | null> {
+export async function downloadVapiCallRecording(
+  callId: string
+): Promise<VapiRecordingBytes | null> {
   const vapiPrivateKey = getVapiPrivateKey();
   for (const artifact of VAPI_RECORDING_ARTIFACT_PATHS) {
     const url = `${VAPI_BASE_URL}/call/${callId}/${artifact}`;

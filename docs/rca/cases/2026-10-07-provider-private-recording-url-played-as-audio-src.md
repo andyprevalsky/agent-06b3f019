@@ -23,6 +23,7 @@ tags:
   - daily-bench
 sources:
   - agent b31c8a09-5992-4916-b797-b9c3ae5c75cf
+  - PR #1439
 repro: back-end/src/tests/unit/vapi-recording.test.ts
 status: fixed
 ---
