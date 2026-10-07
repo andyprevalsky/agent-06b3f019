@@ -199,6 +199,25 @@ async function testPlacementFailuresEndTheSession(): Promise<void> {
 
   h.upstream.failNext('POST', /\/Calls\.json$/, 500, 'twilio down');
   await assert.rejects(placeCall('twilio-rejects'), (error: unknown) => statusCode(error) === 500);
+  // A 5xx may come after Twilio created the call, so the same key must not dial again.
+  const creates = {
+    vapi: h.upstream.vapiCreates().length,
+    twilio: h.upstream.twilioCreates().length,
+  };
+  await assert.rejects(
+    h.service.initiateCall({
+      to: CALLEE,
+      system_prompt: BRIEF,
+      output_schema: SCHEMA,
+      idempotency_key: `${RUN_AGENT_ID}:twilio-rejects`,
+    }),
+    (error: unknown) => statusCode(error) === 409
+  );
+  assert.deepEqual(
+    { vapi: h.upstream.vapiCreates().length, twilio: h.upstream.twilioCreates().length },
+    creates,
+    'an ambiguous placement failure is never retried into a second call'
+  );
 
   const failed = await h.prisma.phoneCallSession.findMany({
     where: {

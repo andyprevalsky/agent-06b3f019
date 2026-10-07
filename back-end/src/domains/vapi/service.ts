@@ -182,6 +182,20 @@ async function placeHoldCall(
   }
 }
 
+/**
+ * Only an outright 4xx refusal from Vapi or Twilio proves nobody was dialed.
+ * A timeout, a 5xx, or a failure after Twilio accepted the call may leave a
+ * call ringing, so the side effect stays STARTED and a retry is refused.
+ */
+function isDefinitiveRejection(error: unknown): error is VapiApiError {
+  return (
+    error instanceof VapiApiError &&
+    error.statusCode >= 400 &&
+    error.statusCode < 500 &&
+    error.statusCode !== 408
+  );
+}
+
 async function placeCall(call: PreparedCall): Promise<HoldCallPlacement> {
   const holdConfig = resolveHoldRuntimeConfig();
   try {
@@ -190,13 +204,14 @@ async function placeCall(call: PreparedCall): Promise<HoldCallPlacement> {
       : await placeHoldCall(call, holdConfig);
   } catch (error) {
     if (call.operationKey !== undefined) {
-      const message =
-        error instanceof VapiApiError
-          ? error.details
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      await markToolSideEffectFailed({ operationKey: call.operationKey, error: message });
+      if (isDefinitiveRejection(error)) {
+        await markToolSideEffectFailed({ operationKey: call.operationKey, error: error.details });
+      } else {
+        log.warn('Call placement outcome unknown; retries with this key will be refused', {
+          operationKey: call.operationKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
     throw error;
   }
