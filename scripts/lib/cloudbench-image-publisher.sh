@@ -103,8 +103,17 @@ cloudbench_image_publisher_client() {
         "$checksum" "$version"
 }
 
+cloudbench_image_verify_handoff() {
+    local client="$1" completion="$2" app="$3" label="$4" arguments=()
+    [ -z "${CLOUDBENCH_IMAGE_PUBLISHER_LOG:-}" ] || \
+        arguments+=(--publisher-log "$CLOUDBENCH_IMAGE_PUBLISHER_LOG")
+    python3 "$(dirname "${BASH_SOURCE[0]}")/cloudbench-image-registry.py" \
+        --client "$client" --app "$app" --image "registry.fly.io/$app:$label" \
+        --out-file "$completion.handoff.json" "${arguments[@]}"
+}
+
 cloudbench_image_publish() {
-    local client status=0 log resolve_log warning="" resolved=0
+    local client status=0 log resolve_log warning="" resolved=0 handoff_failed=0
     client="${IMAGE_PUBLISHER_CLIENT:-}"
     [ -n "$client" ] || client="$(cloudbench_image_publisher_client)" || return $?
     if [ -n "${CLOUDBENCH_IMAGE_COMPLETION_FILE:-}" ]; then
@@ -134,10 +143,30 @@ cloudbench_image_publish() {
                 warning="Builder refused final image metadata inspection after publication; exact published tag verified by SDK."
             fi
         fi
-        python3 - "$CLOUDBENCH_IMAGE_COMPLETION_FILE" "$status" "$resolved" "$warning" <<'PY_COMPLETION' || return $?
-import json,os,sys
-path,status,resolved,warning=sys.argv[1:]
-receipt={"publication_verified":status=="0" or resolved=="1",
+        if [ "$status" = 0 ] || [ "$resolved" = 1 ]; then
+            if ! CLOUDBENCH_IMAGE_PUBLISHER_LOG="$log" cloudbench_image_verify_handoff \
+                "$client" "$CLOUDBENCH_IMAGE_COMPLETION_FILE" \
+                "$CLOUDBENCH_IMAGE_ATTEMPT_APP" "$CLOUDBENCH_IMAGE_ATTEMPT_LABEL"; then
+                handoff_failed=1
+            fi
+        fi
+        python3 - "$CLOUDBENCH_IMAGE_COMPLETION_FILE" "$status" "$resolved" "$warning" "$handoff_failed" \
+            "$CLOUDBENCH_IMAGE_ATTEMPT_APP" "$CLOUDBENCH_IMAGE_ATTEMPT_LABEL" <<'PY_COMPLETION' || return $?
+import json,os,re,sys
+from pathlib import Path
+path,status,resolved,warning,failed,app,label=sys.argv[1:]
+handoff_path=Path(path+".handoff.json")
+try:
+    handoff=json.loads(handoff_path.read_text()) if handoff_path.is_file() else {}
+    if not isinstance(handoff,dict):
+        handoff={}
+except (OSError,ValueError):
+    handoff={}
+digest=handoff.get("published_digest")
+verified=(handoff.get("registry_handoff_verified") is True
+          and isinstance(digest,str) and re.fullmatch(r"sha256:[0-9a-f]{64}",digest)
+          and handoff.get("published_image_ref")==f"registry.fly.io/{app}:{label}@{digest}")
+receipt={**handoff,"publication_verified":bool((status=="0" or resolved=="1") and failed=="0" and verified),
          "publisher_exit_code":int(status),
          "published_tag_resolution_verified":resolved=="1",
          "publication_metadata_warning":warning or None}
@@ -145,6 +174,9 @@ with open(path,"w") as output:
     json.dump(receipt,output)
     output.write("\n")
 os.chmod(path,0o600)
+if (status=="0" or resolved=="1") and not receipt["publication_verified"]:
+    print("Published output has no verified registry handoff; original build retained without rebuilding.", file=sys.stderr)
+    raise SystemExit(74)
 PY_COMPLETION
         if [ "$status" = 0 ] || [ "$resolved" = 1 ]; then
             [ -z "$warning" ] || echo "Warning: $warning"

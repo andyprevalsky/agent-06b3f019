@@ -4,10 +4,15 @@ import hashlib
 import io
 import json
 import os
+import runpy
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -15,6 +20,279 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash")
 PUBLISHER_LIB = ROOT / "scripts/lib/cloudbench-image-publisher.sh"
+
+
+@contextmanager
+def _manifest_registry(response):
+    requests = []
+
+    class Registry(BaseHTTPRequestHandler):
+        def respond(self):
+            requests.append((self.command, self.path))
+            request_body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            status, body, headers = response(self.command, self.path, request_body)
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = respond
+        do_POST = respond
+        do_PUT = respond
+
+        def log_message(self, *_arguments):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+
+def test_cold_image_exit_zero_cannot_publish_an_unavailable_actual_manifest(tmp_path):
+    completion = tmp_path / "completion.json"
+    calls = tmp_path / "builds"
+    label = "cloudbench-warm-20261007-120000-123"
+    harness = tmp_path / "publish.sh"
+    with _manifest_registry(lambda *_request: (404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {})) as (
+        origin,
+        requests,
+    ):
+        verifier = tmp_path / "verify.py"
+        verifier.write_text(
+            "import sys,urllib.error,urllib.request\n"
+            f"url={origin!r}+'/v2/owned-benchmark-app/manifests/'+sys.argv[4]\n"
+            "try:\n"
+            "    urllib.request.urlopen(url,timeout=30).close()\n"
+            "except urllib.error.HTTPError as error:\n"
+            "    raise SystemExit(78 if error.code==404 else 1)\n"
+        )
+        harness.write_text(
+            f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+            f"CLOUDBENCH_IMAGE_COMPLETION_FILE={shlex.quote(str(completion))}\n"
+            "CLOUDBENCH_IMAGE_ATTEMPT_APP=owned-benchmark-app\n"
+            f"CLOUDBENCH_IMAGE_ATTEMPT_LABEL={label}\n"
+            "IMAGE_BUILD_BUILDER=depot\n"
+            "IMAGE_PUBLISHER_CLIENT=fixture-publisher\n"
+            f"cloudbench_image_publish_child() {{ echo build >> {shlex.quote(str(calls))}; return 0; }}\n"
+            f'cloudbench_image_verify_handoff() {{ python3 {shlex.quote(str(verifier))} "$@"; }}\n'
+            "cloudbench_image_publish deploy selected-context --build-only --push\n"
+        )
+        result = subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0, "Publisher exit zero must not hand an unavailable registry manifest to activation"
+    assert requests == [("GET", f"/v2/owned-benchmark-app/manifests/{label}")]
+    assert calls.read_text().splitlines() == ["build"]
+    if completion.exists():
+        assert json.loads(completion.read_text())["publication_verified"] is False
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "available",
+        "republish",
+        "unavailable",
+        "missing-blobs",
+        "digest-missing",
+        "wrong-digest",
+        "auth",
+        "unreconstructable",
+        "unanchored",
+        "no-digest-header",
+        "selected-app",
+        "wrong-app",
+    ],
+)
+def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_digest(tmp_path, scenario):
+    helper = runpy.run_path(str(ROOT / "scripts/lib/cloudbench-image-registry.py"))
+    app = "owned-benchmark-app" if scenario == "selected-app" else "navi-whisper-lux-bench"
+    image = f"registry.fly.io/{app}:cloudbench-warm-20261007-120000-123"
+    tag_path = f"/v2/{app}/manifests/" + image.split(":", 1)[1]
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:" + "c" * 64, "size": 2},
+        "layers": [],
+    }
+    raw = json.dumps(manifest, indent=2).encode()
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    digest_path = f"/v2/{app}/manifests/" + digest
+    metadata = {**manifest, "annotations": {"fly_builder_id": "fixture-cached-metadata"}}
+    if scenario == "unreconstructable":
+        metadata["config"] = {**manifest["config"], "digest": "sha256:" + "d" * 64}
+    writes = []
+    metadata_queries = []
+    phase = 0
+    elapsed = [0.0]
+
+    def fixture_sleep(seconds):
+        elapsed[0] += seconds
+        assert elapsed[0] < 3600, "Registry fixture exceeded its whole-operation guard"
+
+    def response(method, path, body):
+        nonlocal phase
+        if method == "POST":
+            assert path == "/graphql"
+            metadata_queries.append(json.loads(body)["variables"])
+            payload = {"data": {"app": {"image": {"digest": digest, "ref": image, "manifest": metadata}}}}
+            return 200, json.dumps(payload).encode(), {}
+        assert path in {tag_path, digest_path}, "Handoff must not probe config or layer blobs"
+        if method == "PUT":
+            assert path == tag_path
+            writes.append(body)
+            if scenario == "missing-blobs":
+                return 400, b'{"errors":[{"code":"MANIFEST_BLOB_UNKNOWN"}]}', {}
+            phase = 1
+            return 201, b"", {"Docker-Content-Digest": digest}
+        assert method == "GET"
+        if scenario == "auth":
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {}
+        if scenario in {"unavailable", "missing-blobs", "unreconstructable", "unanchored"} or (
+            scenario == "digest-missing" and path == digest_path
+        ):
+            return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
+        if scenario == "republish" and phase < 2:
+            phase += 1
+            return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
+        header_digest = "sha256:" + "b" * 64 if scenario == "wrong-digest" else digest
+        return 200, raw, {} if scenario == "no-digest-header" else {"Docker-Content-Digest": header_digest}
+
+    with _manifest_registry(response) as (origin, requests):
+        handoff = helper["RegistryHandoff"](
+            "fixture-registry-token",
+            tmp_path / "private-observations",
+            "foreign-benchmark-app" if scenario == "wrong-app" else app,
+            registry_origin=origin,
+            graphql_origin=origin + "/graphql",
+            sleep=fixture_sleep,
+            clock=lambda: elapsed[0],
+        )
+        if scenario in {"available", "republish", "no-digest-header", "selected-app"}:
+            receipt = handoff.verify(image, digest)
+            assert receipt["registry_handoff_verified"] is True
+            assert receipt["published_image_ref"] == image + "@" + digest
+            assert receipt["published_digest"] == digest
+            assert receipt["manifest_republished"] is (scenario == "republish")
+            assert requests[-2:] == [("GET", tag_path), ("GET", digest_path)]
+            assert bool(writes) is (scenario == "republish")
+        else:
+            with pytest.raises(helper["HandoffError"]):
+                handoff.verify(image, None if scenario == "unanchored" else digest)
+            if scenario in {"auth", "wrong-digest", "unanchored"}:
+                assert requests == [("GET", tag_path)]
+            if scenario == "unreconstructable":
+                assert requests == [("GET", tag_path), ("POST", "/graphql")]
+            if scenario == "missing-blobs":
+                assert requests == [("GET", tag_path), ("POST", "/graphql"), ("PUT", tag_path)]
+            if scenario not in {"unavailable", "missing-blobs"}:
+                assert not writes
+    if scenario == "wrong-app":
+        assert not requests
+    else:
+        assert requests[0] == ("GET", tag_path)
+    assert all(
+        (method == "GET" and path in {tag_path, digest_path})
+        or (method == "PUT" and path == tag_path)
+        or (method == "POST" and path == "/graphql")
+        for method, path in requests
+    ), "Handoff must only read the exact manifest routes and republish the exact tag"
+    assert all(query == {"appName": app, "imageRef": image} for query in metadata_queries)
+    if scenario == "digest-missing":
+        assert ("GET", digest_path) in requests
+    if scenario in {"unavailable", "missing-blobs"}:
+        assert writes, "Cached metadata must be exercised without granting credit for unavailable publication"
+    assert all(body == raw for body in writes), "Republication must preserve the original built manifest bytes"
+    for artifact in (tmp_path / "private-observations").iterdir():
+        assert artifact.stat().st_mode & 0o777 == 0o600
+
+
+def test_cold_image_registry_main_keeps_repeated_output_observations_private(tmp_path, monkeypatch):
+    helper = runpy.run_path(str(ROOT / "scripts/lib/cloudbench-image-registry.py"))
+    image = "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261007-120000-123"
+    raw = json.dumps(
+        {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "layers": []}
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    client = tmp_path / "fixture-client"
+    client.write_text('#!/usr/bin/env bash\nprintf \'{"token":"fixture-registry-token"}\\n\'\n')
+    client.chmod(0o700)
+    output = tmp_path / "handoff.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "registry-handoff",
+            "--client",
+            str(client),
+            "--app",
+            "navi-whisper-lux-bench",
+            "--image",
+            image,
+            "--out-file",
+            str(output),
+        ],
+    )
+    original = helper["RegistryHandoff"]
+    with _manifest_registry(lambda *_request: (200, raw, {"Docker-Content-Digest": digest})) as (origin, requests):
+        monkeypatch.setitem(
+            helper["main"].__globals__,
+            "RegistryHandoff",
+            lambda token, path, selected_app: original(token, path, selected_app, registry_origin=origin),
+        )
+        assert helper["main"]() == 0
+        assert helper["main"]() == 0
+    assert json.loads(output.read_text())["published_image_ref"] == image + "@" + digest
+    assert len(requests) == 4
+    captures = list(tmp_path.glob("handoff.json.*.private"))
+    assert len(captures) == 2
+    assert output.stat().st_mode & 0o777 == 0o600
+    for directory in captures:
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert len(list(directory.glob("*.private.body"))) == 2
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in directory.iterdir())
+
+
+@pytest.mark.parametrize("receipt_state", ["unavailable", "missing", "false", "malformed", "wrong-tag"])
+def test_cold_image_unavailable_handoff_stops_the_normal_build_retry(tmp_path, receipt_state):
+    source = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = source.index("build_warm_image() {")
+    end = source.index("\n}\n", start) + 3
+    calls = tmp_path / "builds"
+    verifier = tmp_path / "verify.py"
+    verifier.write_text(
+        "import json,sys\n"
+        f"state={receipt_state!r}\n"
+        "if state=='unavailable':sys.exit(78)\n"
+        "if state=='missing':sys.exit(0)\n"
+        "path,app,label=sys.argv[2:]\n"
+        "digest='sha256:'+'a'*64\n"
+        "if state=='wrong-tag':label+='-foreign'\n"
+        "with open(path+'.handoff.json','w') as output:\n"
+        "    if state=='malformed':output.write('{')\n"
+        "    else:json.dump({'registry_handoff_verified':state!='false','published_digest':digest,"
+        "'published_image_ref':f'registry.fly.io/{app}:{label}@{digest}'},output)\n"
+    )
+    harness = tmp_path / "build.sh"
+    harness.write_text(
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        "APP=owned-benchmark-app\nIMAGE_BUILD_BUILDER=depot\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
+        f"OUT_DIR={shlex.quote(str(tmp_path))}\nIMAGE_BUILD_CONTEXT={shlex.quote(str(tmp_path))}\n"
+        "IMAGE_PUBLISHER_CLIENT=fixture-publisher\n"
+        f"cloudbench_image_publish_child() {{ echo build >> {shlex.quote(str(calls))}; return 0; }}\n"
+        f'cloudbench_image_verify_handoff() {{ python3 {shlex.quote(str(verifier))} "$@"; }}\n'
+        "sleep() { :; }\n" + source[start:end] + "\nbuild_warm_image\n"
+    )
+    result = subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert calls.read_text().splitlines() == ["build"], "Registry refusal must not repeat an uncached dependency build"
+    assert json.loads((tmp_path / "cloudbench-image-publication.json").read_text())["publication_verified"] is False
 
 
 @pytest.mark.parametrize(
@@ -136,7 +414,9 @@ def test_cold_image_activation_quiesces_existing_donor_before_environment(tmp_pa
     events = tmp_path / "events"
     state = tmp_path / "state"
     state.write_text("stopped" if initial == "stopped" else "started")
-    script = "\n".join(functions) + r'''
+    script = (
+        "\n".join(functions)
+        + r"""
 MODE=setup
 APP=fixture
 CLOUDBENCH_HOLD_APP_ENV_LOCK=1
@@ -159,7 +439,8 @@ _inject_secrets_locked() {
     activate_machine_environment warm-1 warm
 }
 inject_secrets
-'''
+"""
+    )
     result = subprocess.run(
         [BASH, "-c", script],
         env={**os.environ, "EVENTS": str(events), "STATE": str(state), "INITIAL": initial},
@@ -591,6 +872,16 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
         f"IMAGE_BUILD_BUILDER={builder}\n"
         f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
         f"cloudbench_image_publisher_client() {{ printf '%s\\n' {shlex.quote(str(publisher))}; }}\n"
+        "cloudbench_image_verify_handoff() {\n"
+        'python3 - "$2.handoff.json" "$3" "$4" <<\'PY_HANDOFF\'\n'
+        "import json,sys\n"
+        "path,app,label=sys.argv[1:]\n"
+        "digest='sha256:'+'a'*64\n"
+        "with open(path,'w') as output:\n"
+        "    json.dump({'registry_handoff_verified':True,'published_digest':digest,"
+        "'published_image_ref':f'registry.fly.io/{app}:{label}@{digest}',"
+        "'manifest_republished':False,'registry_handoff_attempts':1},output)\n"
+        "PY_HANDOFF\n}\n"
         "sleep() { :; }\n" + source[start:end]
     )
     result = subprocess.run([BASH, str(harness)], capture_output=True, text=True, timeout=30)
