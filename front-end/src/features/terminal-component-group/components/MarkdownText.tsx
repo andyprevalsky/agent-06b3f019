@@ -23,7 +23,12 @@ import remarkBreaks from 'remark-breaks';
 
 import { cn } from '@/lib/utils';
 
-import { FadeInMarkdown, MarkdownLink, normalizeMarkdownText } from './markdown-text';
+import {
+  FadeInMarkdown,
+  MarkdownImage,
+  MarkdownLink,
+  normalizeMarkdownText,
+} from './markdown-text';
 import { MarkdownStyles } from './markdown-text/MarkdownStyles';
 
 interface MarkdownTextProps {
@@ -49,7 +54,7 @@ export const MarkdownText = memo(function MarkdownText({
         <MarkdownStyles />
         <ReactMarkdown
           remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
-          components={{ a: MarkdownLink }}
+          components={{ a: MarkdownLink, img: MarkdownImage }}
         >
           {normalizedText}
         </ReactMarkdown>

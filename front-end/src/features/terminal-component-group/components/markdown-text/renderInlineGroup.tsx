@@ -6,6 +6,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
+import { isAllowedImageSrc } from './isAllowedImageSrc';
 import { MarkdownLink } from './MarkdownLink';
 import { BASE_DELAY_SECONDS, FADE_DURATION_SECONDS, type WordItem } from './types';
 
@@ -83,7 +84,7 @@ function renderWordSpan(
   isLastWord: boolean,
   onLastWordComplete: () => void,
 ): React.ReactNode {
-  if (item.isImage && item.src) {
+  if (item.isImage && isAllowedImageSrc(item.src)) {
     const image = (
       <img
         key={`word-${idx}`}

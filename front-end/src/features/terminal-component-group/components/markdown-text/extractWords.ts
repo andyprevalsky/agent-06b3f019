@@ -4,6 +4,7 @@
  * word-by-word fade-in renderer.
  */
 
+import { isAllowedImageSrc } from './isAllowedImageSrc';
 import { type BlockType, type ListType, type WordItem } from './types';
 
 const BLOCK_TAGS: ReadonlySet<string> = new Set([
@@ -84,7 +85,7 @@ export function extractWords(root: Node): WordItem[] {
     if (tagName === 'img') {
       const src = element.getAttribute('src') || '';
       const alt = element.getAttribute('alt') || '';
-      if (!src) return;
+      if (!isAllowedImageSrc(src)) return;
       out.push({
         word: alt,
         isWord: true,
