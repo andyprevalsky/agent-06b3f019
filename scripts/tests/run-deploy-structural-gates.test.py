@@ -132,6 +132,39 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
         )
 
 
+class StructuralGateInterpreterTests(unittest.TestCase):
+    """The agents venv is preferred only when it is the pinned Python 3.11+.
+
+    cloud-build.sh falls back to whatever `python3` exists when Python 3.11
+    setup fails, so a venv can exist with an interpreter the suites cannot run
+    on. Prepending that venv made every gate fail on the wrong interpreter.
+    """
+
+    def _runner_with_venv(self, temporary: str, version: str):
+        spec = importlib.util.spec_from_file_location("deploy_runner_venv", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        venv = Path(temporary) / "venv"
+        venv_bin = venv / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python3").write_text("#!/bin/sh\n")
+        (venv / "pyvenv.cfg").write_text(f"home = /usr/bin\nversion = {version}\n")
+        module.VENV_BIN = venv_bin
+        return module, venv_bin
+
+    def test_supported_venv_interpreter_is_put_first(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-venv-") as temporary:
+            module, venv_bin = self._runner_with_venv(temporary, "3.11.9")
+            self.assertTrue(module.gate_environment()["PATH"].startswith(f"{venv_bin}{os.pathsep}"))
+
+    def test_unsupported_venv_interpreter_is_not_preferred(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-venv-") as temporary:
+            module, venv_bin = self._runner_with_venv(temporary, "3.10.5")
+            self.assertEqual(module.gate_environment().get("PATH"), os.environ.get("PATH"))
+            self.assertNotIn(str(venv_bin), module.gate_environment().get("PATH", ""))
+
+
 class StructuralGateRunnerTests(unittest.TestCase):
     def test_default_admission_is_bounded_and_runs_every_gate_once(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_admission", RUNNER)

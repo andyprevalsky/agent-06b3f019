@@ -23,11 +23,38 @@ ROOT = Path(__file__).resolve().parents[1]
 VENV_BIN = ROOT / "agents" / "venv" / "bin"
 
 
+def venv_runs_the_gates() -> bool:
+    """Whether agents/venv holds the pinned interpreter the suites need.
+
+    cloud-build.sh builds the venv from whatever `python3` exists when Python
+    3.11 setup fails, so the venv's presence alone does not make it usable.
+    The venv records the interpreter it was built from in pyvenv.cfg.
+    """
+    if not (VENV_BIN / "python3").exists():
+        return False
+    try:
+        config = (VENV_BIN.parent / "pyvenv.cfg").read_text()
+    except OSError:
+        return False
+    for line in config.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() not in {"version", "version_info"}:
+            continue
+        parts = value.strip().split(".")
+        try:
+            return (int(parts[0]), int(parts[1])) >= (3, 11)
+        except (IndexError, ValueError):
+            return False
+    return False
+
+
 def gate_environment() -> dict[str, str]:
     env = dict(os.environ)
-    if (VENV_BIN / "python3").exists():
+    if venv_runs_the_gates():
         env["PATH"] = f"{VENV_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
 SIGNAL_GRACE_SECONDS = 1.0
 DEFAULT_MAX_WORKERS = 8
 

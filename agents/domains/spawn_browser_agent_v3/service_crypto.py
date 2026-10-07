@@ -622,6 +622,12 @@ def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any
             return [mask(entry) for entry in item]
         return item
 
+    if isinstance(value, dict):
+        # The result's own field names (`success`, `status`) are the tool's
+        # protocol and are read after masking, so they are never rewritten: a
+        # password that happens to be the word `success` must not rename the
+        # field. What the page supplied sits beneath them and is masked whole.
+        return {key: mask(entry) for key, entry in value.items()}
     return mask(value)
 
 
