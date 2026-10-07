@@ -200,6 +200,20 @@ function segmentSeconds(call: Json): number {
   return Math.max(0, Math.round((end - started) / 1000));
 }
 
+/**
+ * Each hold follows the segment that parked it, so a call that ended on hold or
+ * while reconnecting has as many holds as segments and outlived its last
+ * segment. Otherwise the last segment's own end is the line's end; the session
+ * stamp can lag it when only the reconcile poll observed the hangup.
+ */
+function compositeEndedAt(session: PhoneCallSessionRecord, last: Json, now: Date): string {
+  const segmentEnd = asString(last.endedAt);
+  const endedOffSegment =
+    session.holds.length > 0 && session.holds.length >= session.segments.length;
+  if (!endedOffSegment && segmentEnd !== '') return segmentEnd;
+  return session.endedAt?.toISOString() ?? (segmentEnd || now.toISOString());
+}
+
 function holdSummaries(session: PhoneCallSessionRecord, now: Date): Json[] {
   return session.holds.map((hold) => ({
     startedAt: hold.startedAt,
@@ -253,7 +267,7 @@ export function buildCompositeCall(
     startedAt: first.startedAt ?? session.createdAt.toISOString(),
     ...(ended
       ? {
-          endedAt: asString(last.endedAt) || (session.endedAt?.toISOString() ?? now.toISOString()),
+          endedAt: compositeEndedAt(session, last, now),
           endedReason: session.endedReason ?? last.endedReason ?? 'unknown',
         }
       : {}),

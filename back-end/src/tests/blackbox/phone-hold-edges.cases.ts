@@ -85,10 +85,25 @@ async function testHoldEndsAtMaxDuration(): Promise<void> {
 async function testTwilioStatusMapping(): Promise<void> {
   const parked = await placeCall();
   await park(parked);
+  // The only Vapi segment ended (and was analysed) when the call was parked,
+  // well before the hangup.
+  h.upstream.vapiCalls.set(
+    parked.callId,
+    endedVapiSegment(parked.callId, {
+      endedReason: 'assistant-forwarded-call',
+      analysis: { summary: 'Reached the hold queue.' },
+    })
+  );
   await h.holdStatus.handleTwilioCallStatus(parked.session.id, 'completed');
   const hungUp = await loadSession(parked.session.id);
   assert.equal(hungUp.endedReason, 'customer-ended-call-during-hold');
   assert.ok(hungUp.holds[0].endedAt, 'hanging up closes the open hold');
+  const composite = await h.service.getCallStatus(parked.callId);
+  assert.equal(
+    composite.endedAt,
+    hungUp.endedAt?.toISOString(),
+    'a call that ends on hold ends when the line hangs up, not when it was parked'
+  );
 
   const busy = await placeCall();
   await h.holdStatus.handleTwilioCallStatus(busy.session.id, 'ringing');
@@ -101,17 +116,20 @@ async function testTwilioStatusMapping(): Promise<void> {
 
 async function testLostStatusCallbackReconcilesFromTwilio(): Promise<void> {
   const placed = await placeCall();
-  h.upstream.vapiCalls.set(
-    placed.callId,
-    endedVapiSegment(placed.callId, {
-      endedReason: 'assistant-ended-call',
-      analysis: { summary: 'Done.' },
-    })
-  );
+  const segment = endedVapiSegment(placed.callId, {
+    endedReason: 'assistant-ended-call',
+    analysis: { summary: 'Done.' },
+  });
+  h.upstream.vapiCalls.set(placed.callId, segment);
   h.upstream.twilioStatuses.set(placed.session.twilioCallSid ?? '', 'completed');
   const status = await h.service.getCallStatus(placed.callId);
   assert.equal(status.status, 'ended');
   assert.equal((await loadSession(placed.session.id)).state, 'ended');
+  assert.equal(
+    status.endedAt,
+    segment.endedAt,
+    'a call that ends in a live segment ends with that segment, not when the poll noticed'
+  );
 }
 
 function statusCode(error: unknown): number | undefined {
