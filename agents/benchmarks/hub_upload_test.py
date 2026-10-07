@@ -542,3 +542,125 @@ def test_live_response_preserves_phase_and_startup_label():
     assert live_response_matches(bundle, stored)
     for key in ("lifecycle_stage", "startup_label"):
         assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})
+
+@pytest.mark.parametrize("producer", ["startup", "aggregate", "terminal"])
+def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(
+    tmp_path, monkeypatch, producer
+):
+    """One 50-task fleet retains its identity and original clock through release."""
+    import os
+    import subprocess
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from benchmarks.hub_upload import live_bundle_from_report_card
+
+    repo = (
+        Path(os.environ["CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST"])
+        if "CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST" in os.environ
+        else Path(__file__).resolve().parents[2]
+    )
+    fleet = Path(
+        os.environ.get(
+            "CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet"
+        )
+    ).read_text()
+    run_id = "fixture-timestamp"
+    directory = tmp_path / run_id
+    directory.mkdir()
+    names = [f"fixture-{index:03d}" for index in range(50)]
+    started = 1791331914
+    expected = datetime.fromtimestamp(started, timezone.utc).isoformat()
+    definitions = fleet[
+        fleet.index("write_startup_card() {") : fleet.index(
+            "start_central_hub() {", fleet.index("write_startup_card() {")
+        )
+    ]
+    setup = (
+        'FLEET_DIR="$1"\nROOT_DIR="$2"\nRUN_ID=fixture-timestamp\nFLEET_CONTROLLER_STARTED_EPOCH='
+        + str(started)
+        + "\nBENCHES=(" + " ".join(names) + ")\nCATALOG_MODES=("
+        + " ".join(["real"] * len(names)) + ")\nSIM_ON_CSV=\n"
+    )
+    startup = definitions + "\n" + setup + 'write_startup_card "verifying environment"\n'
+
+    def execute(command):
+        subprocess.run(
+            ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
+            check=True, capture_output=True,
+        )
+
+    execute(startup)
+    if producer == "aggregate":
+        marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
+        start = fleet.index(marker)
+        end = fleet.index("\nPY\n", start) + len("\nPY\n")
+        command = (
+            setup
+            + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n'
+            + fleet[start:end]
+        )
+        phases = ("queued", "running", "evaluated", "teardown", "released")
+    elif producer == "terminal":
+        start = fleet.index("finalize_terminal_projection() {")
+        end = fleet.index("\ncleanup() {", start)
+        command = (
+            fleet[start:end] + "\n" + setup + 'PROVISION_POOL=\n'
+            + 'AGGREGATE_RUNS_SCRIPT="$ROOT_DIR/scripts/cloudbench-aggregate-runs.py"\n'
+            + "finalize_terminal_projection 0\n"
+        )
+        phases = ("teardown", "released", "released")
+    else:
+        command = definitions + "\n" + setup + 'write_startup_card "provisioning"\n'
+        phases = ("starting", "starting")
+    record = []
+    server, url = _serve(record)
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.delenv("BENCHMARK_HUB_GROUP_RUN_ID", raising=False)
+    try:
+        for phase in phases:
+            for index, name in enumerate(names):
+                child = directory / name
+                child.mkdir(exist_ok=True)
+                if phase == "starting" or phase == "queued":
+                    continue
+                terminal = producer == "terminal" or (phase != "running" and index < 2)
+                status = ("passed" if index % 2 == 0 else "failed") if terminal else "running"
+                row = {"name": name, "status": status,
+                       "agent_url": f"https://www.roselabs.ai/?agent-id=root-{index}"}
+                live = child / "cloudbench-live"
+                live.mkdir(exist_ok=True)
+                (live / "report-card.json").write_text(json.dumps({"per_task": [row]}))
+                task = {"name": name, "status": status.upper(), "passed": status == "passed",
+                        "agent_id": f"root-{index}", "agent_url": row["agent_url"]}
+                (child / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
+                if phase == "teardown":
+                    (child / "benchmark-child.finished").touch()
+                elif phase == "released":
+                    (child / "bench-e2e.finished-epoch").write_text(str(started + 60))
+            execute(command)
+            card = json.loads((directory / "_batch/report-card.json").read_text())
+            bundle = (
+                json.loads((directory / "_batch/run.json").read_text())
+                if producer == "terminal"
+                else live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
+            )
+            assert bundle["timestamp"] == expected, (
+                "live fleet publication lost its stable controller-start timestamp"
+            )
+            assert bundle["run_id"] == run_id
+            assert [task["name"] for task in bundle["tasks"]] == names
+            if phase in ("starting", "queued", "running"):
+                assert all(task["passed"] is None for task in bundle["tasks"])
+            else:
+                assert [task["passed"] for task in bundle["tasks"][:2]] == [True, False]
+                expected_stage = "evaluated" if phase == "evaluated" else phase
+                assert all(task["lifecycle_stage"] == expected_stage for task in bundle["tasks"][:2])
+            assert upload_run_bundle(bundle, live=producer != "terminal", required=True)
+        assert {item["body"]["run_id"] for item in record} == {run_id}
+        assert {item["body"]["timestamp"] for item in record} == {expected}
+        assert all([task["name"] for task in item["body"]["tasks"]] == names for item in record)
+    finally:
+        server.shutdown()
+        server.server_close()

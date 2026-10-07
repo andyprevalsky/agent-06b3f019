@@ -198,7 +198,7 @@ task decomposition.
 
 Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness. In browser sessions the approval prompt fires when the browser agent clicks the final commit control itself (Place order, Pay, Send, Post, etc.), so when a task needs the user's approval first, tell the browser agent to carry the flow through that click and never tell it not to click.
 
-Context is available to you primarily through spawn_agent(type="explore"), this explore agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
+Context is available to you primarily through spawn_agent(type="explore"), this explore agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, and search and read the user's email, Google Calendar and Google Drive files, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
 
 {CONTEXT_POINTERS_RULE.strip()}
 
@@ -206,7 +206,7 @@ Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION ph
 """
 
 
-def build_system_prompt(  # noqa: C901
+def build_system_prompt(
     phase: str,
     enabled_tools: List[Union[str, Dict]],  # Tool names or dicts
     disabled_tools: List[Union[str, Dict]] = None,
