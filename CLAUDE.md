@@ -1676,8 +1676,12 @@ idle errors and the fixed whole-call deadline remain terminal. Do not raise the
 590/90/120 browser budgets to hide this distinction. Run the normal deploy-owned
 `cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py rose rose-browser-use llm`
 for client or waterfall edits. These suites include fallback, original deadline,
-parser progress, cancellation and response-closure controls. Failed browser calls
-may lack an exact input dump; earlier successful dumps are not substitutes.
+parser progress, cancellation and response-closure controls. Browser collect
+failures retain their built inputs and requested configuration through the
+existing best-effort dump path, with the same request/span/root and cache
+bindings. Capture failure preserves the original exception; cancellation and
+successful browser dumps are unchanged. Older failed calls may still lack an
+exact input dump; earlier successful dumps are not substitutes.
 See `docs/rca/cases/2026-10-06-client-stream-guard-bypassed-waterfall-fallback.md`.
 
 - `back-end/src/providers/rose/` - TS client (chat path: router/generator/supervisor)

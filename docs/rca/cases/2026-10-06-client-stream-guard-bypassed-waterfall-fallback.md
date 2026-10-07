@@ -101,6 +101,47 @@ make an additional provider attempt, still under the original fixed deadline.
 Actual final qualification and independent review must be recorded before
 marking this repair deployed or granting any fleet credit.
 
+## Failure-capture addendum
+
+Independent review confirmed the guarded-fallback repair while retaining the
+missing failed-input gap. The RCA methodology explicitly says to add missing
+capture and keep the RCA open. The narrow browser collect failure boundary now
+uses the existing best-effort context dumper with the same built message/tool
+inputs, initial requested generation/deadline/cache controls and a request ID
+bound before collection. The dumper retains its existing span, agent and root
+binding, storage, encryption and production size controls. Unknown actual model,
+mode and response remain unknown; no synthetic response or inferred successful
+output is written. The requested omitted effort and known pool waterfall effort
+are separate, so capture does not invent an effective provider route.
+
+An ordinary collect exception is re-raised as the same object even if capture
+fails. Cancellation is not caught and starts no capture. The normal successful
+browser dump remains unchanged; enabling a second generic success dump would
+repeat large contexts unnecessarily. No new channel, provider attempt, public
+provider interface, timeout, grading gate or source-policy phase is added. At
+10,000 requests the success path adds only request-ID binding previously done in
+the inner client; failure serialization runs once through the existing helper.
+
+The new permanent controls execute the actual production browser method with a
+controlled failure at its normal collect boundary, then inspect the real dump
+in an isolated private directory. They verify original request/span/root,
+messages/tools, requested configuration and cache association, unknown response
+fields, exception identity, capture-failure behavior and cancellation. The
+unchanged successful Cerebras dump control remains in the same owning command.
+The frozen guard candidate is the RED baseline for this addendum, rather than
+substituting the original unguarded client. Setup/import and invalid synthetic
+history-shape attempts were excluded; the valid identical four-control pair
+produced two FAIL/two PASS before capture and four PASS afterward. Their exact
+hashes, native owners, timestamps and normal browser-family receipt are retained
+under `.context/trial2-waterfall-stall-rca/failure-capture-*.safe.json`.
+
+This captures future browser-call ingress and its requested controls; it does
+not claim original timed wire bytes, effective per-retry parameters, or a lost
+original input. The eleven earlier successful dumps remain non-substitutable,
+and the original provider-silence/concurrency question remains open. Instrumenting
+the next occurrence does not grant LIVE acceptance or turn this RCA into a
+completed upstream attribution.
+
 ## Human feedback
 
 Keep task failures acceptable, preserve runtime integrity, use generous whole
