@@ -14,7 +14,8 @@ export const ROUTER_JSON_SCHEMA = {
     action: {
       type: 'string',
       enum: ['direct_answer', 'web_search', 'start_superintelligence'],
-      description: 'The action to take',
+      description:
+        'The action to take. Use direct_answer only when the chat reply itself will contain the requested representation. A pointer or limitation is not direct_answer; use start_superintelligence.',
     },
     query: {
       type: 'string',

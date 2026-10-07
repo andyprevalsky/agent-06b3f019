@@ -21,8 +21,8 @@ tags:
   - capability-contract
 sources:
   - agent 3be856d5-e4fe-4eb5-b30e-ea99d44793fe
-repro: none-recorded
-status: open
+repro: back-end/src/tests/blackbox/chat-router-phase-sync.blackbox.ts (closed output-media / satisfaction-as-emission contract)
+status: fixed
 ---
 
 ## Problem
@@ -65,9 +65,11 @@ Not model-intelligence: the production router model escalates on the reduced con
 
 ## Solution
 
-Pending prompt approval. Proposed generalizable fix (not photo-specific): declare chat's closed output media and define "fully satisfy" as emitting the requested representation in-chat. A pointer, limitation, or "go look on Maps" is a rejection and must be `start_superintelligence`. A finished agent run does not shrink that rule.
+Approved prompt/schema contract (not photo-specific): `ROUTER_SYSTEM_PROMPT` now declares chat's closed output media and defines "fully satisfy" as emitting the requested representation. A pointer, limitation, or "go look on Maps" is a rejection and must be `start_superintelligence`. A finished agent run does not shrink that rule. The router JSON `action` description repeats the same bound.
 
-Do not add a "photos" classifier. Do not treat the sibling markdown renderer as closing this incident.
+Identical full-context live replay after the change: 3/3 `start_superintelligence` ("This surface cannot emit images. Escalating to agent to fetch and deliver photos").
+
+Cemented by `chat-router-phase-sync.blackbox.ts` ("router prompt defines closed output media and satisfaction as emission"). Sibling markdown renderer remains a separate case.
 
 **10k-agent:** O(1) prompt tokens on the existing per-agent router call; no extra subscriptions or fan-in.
 
