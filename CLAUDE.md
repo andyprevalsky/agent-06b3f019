@@ -1142,6 +1142,16 @@ not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
 set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
 The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
 
+For a credential-restore failure, inspect the first native seed error before the
+later cleanup exception. `PrismaClientInitializationError` with
+`max client connections reached` can occur at the initial database read,
+before any credential payload is read. Selected-user hydration now owns that
+first read through the existing bounded table retry; credential tables still run
+once and retain their own retries. Preserve the selected user and credential
+scopes. Pool occupancy needs separate evidence before changing capacity or env.
+A driver exit without its exact cleanup ACK remains failed; stopped services
+alone do not certify browser/provider release or a benchmark result.
+
 For an explicitly requested cold-image measurement, use the same CLI:
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
 The selected checkout supplies both `Dockerfile.cloudbench-warm` and
