@@ -9120,8 +9120,14 @@ async def _spawn_browser_agent_activity_v3_real(
                         tool_call_id=verifier_call_id,
                     )
 
+                    # The verifier must see the rendered page: a goal grounded in
+                    # what is visible (colors, images, layout) is unverifiable
+                    # from DOM text alone, so a DOM-only judge rejects every
+                    # completion at 0.5 and the agent loops to its deadline
+                    # (browser-smoke ec464455). build_browser_verifier_context
+                    # forwards this capture as the final_screenshot image block.
                     verifier_browser_state = await asyncio.wait_for(
-                        dom_service.get_browser_state(include_screenshot=False),
+                        dom_service.get_browser_state(include_screenshot=True),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
                     verifier_context = await build_browser_verifier_context(
@@ -10150,8 +10156,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 # stale ground truth and can misreport a last-step completion. Fall
                 # back to the last-known state if the refresh fails.
                 try:
+                    # Same final-state evidence as the attempt_completion
+                    # verifier, including the rendered screenshot.
                     final_browser_state = await asyncio.wait_for(
-                        dom_service.get_browser_state(include_screenshot=False),
+                        dom_service.get_browser_state(include_screenshot=True),
                         timeout=10,
                     )
                     current_url = final_browser_state.get("url", current_url) or current_url

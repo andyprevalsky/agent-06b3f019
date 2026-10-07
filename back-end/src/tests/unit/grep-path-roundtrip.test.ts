@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Invariant: anything grep emits as `path`, grep can parse back.
  *
@@ -21,6 +20,7 @@ import {
   buildAgentNetworkPath,
   buildAgentTrajectoryPath,
   buildDocumentPath,
+  buildGoogleSourcePath,
   buildMessagePath,
   buildNetworkPath,
   buildTransactionPath,
@@ -34,13 +34,14 @@ import {
   buildNetworkMatch,
   buildTransactionMatch,
 } from '../../domains/data/format';
+import { buildGoogleSourceMatch } from '../../domains/data/format.google';
 
 function test(name: string, fn: () => void): void {
   try {
     fn();
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (error) {
-    console.error(`  ❌ ${name}`);
+    process.stderr.write(`  ❌ ${name}\n`);
     throw error;
   }
 }
@@ -151,6 +152,24 @@ test('document paths round-trip', () => {
     documentSource: 'obsidian',
     rest: 'main/Projects/Calypso.md',
   });
+});
+
+test('calendar and drive paths round-trip at every folder depth', () => {
+  const stored = [
+    'a@example.com/2026-10-02/10:00 Project Sync.event',
+    'a@example.com/2026-10-02',
+    'a@example.com',
+    'a@example.com/My Drive/Legal/2026/Lease.gdoc',
+    'a@example.com/Shared with me/Budget.gsheet',
+  ];
+  for (const source of ['calendar', 'drive'] as const) {
+    for (const rest of stored) {
+      assert.deepEqual(parseGrepPath(buildGoogleSourcePath(source, rest)), { source, rest });
+      // A trailing slash addresses the same folder.
+      assert.deepEqual(parseGrepPath(`${buildGoogleSourcePath(source, rest)}/`), { source, rest });
+    }
+    assert.deepEqual(parseGrepPath(source), { source });
+  }
 });
 
 test('non-grep strings are rejected, not silently matched', () => {
@@ -301,6 +320,39 @@ test('every real formatter emits a path that parses back', () => {
     },
   ];
 
+  const googleRow = (path: string) =>
+    ({
+      id: 'doc-1',
+      source: 'google',
+      externalId: 'a@example.com:1',
+      title: 'Lease',
+      content: 'Lease ends December 31, 2026',
+      url: null,
+      metadata: { path, start: '2026-10-02T17:00:00.000Z' },
+      sourceUpdatedAt: new Date('2026-09-20T12:00:00.000Z'),
+      updatedAt: new Date('2026-09-20T12:00:00.000Z'),
+    }) as never;
+  emitted.push(
+    {
+      label: 'calendar',
+      path: buildGoogleSourceMatch(
+        googleRow('a@example.com/2026-10-02/10:00 Project Sync.event'),
+        'calendar',
+        INPUT
+      ).path,
+      expect: { source: 'calendar', rest: 'a@example.com/2026-10-02/10:00 Project Sync.event' },
+    },
+    {
+      label: 'drive',
+      path: buildGoogleSourceMatch(
+        googleRow('a@example.com/My Drive/Legal/Lease.gdoc'),
+        'drive',
+        INPUT
+      ).path,
+      expect: { source: 'drive', rest: 'a@example.com/My Drive/Legal/Lease.gdoc' },
+    }
+  );
+
   for (const { label, path, expect } of emitted) {
     const parsed = parseGrepPath(path);
     assert.notEqual(parsed, null, `${label}: emitted path ${path} did not parse`);
@@ -308,4 +360,4 @@ test('every real formatter emits a path that parses back', () => {
   }
 });
 
-console.log('grep path round-trip invariant holds');
+process.stdout.write('grep path round-trip invariant holds\n');

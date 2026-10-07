@@ -226,6 +226,10 @@ one.
 - If the intended fix is a prompt edit, Step 5b is recorded: the class you
   stopped at, the next-deeper class you tried, and why the more general
   solution failed to be coherent.
+- The golden-reference check (Step 6b in `docs/root-cause-analysis.md`) is
+  recorded: the `path:line` in `claude-code-src/`, `openclaw/`, `hermes-agent/`,
+  or `codex/` that handles the same problem, and whether the fix converges on
+  it. Prefer the fix that brings Rose closer to the reference harnesses.
 
 ## Step 8 — WRITE THE CASE FILE (mandatory, every time)
 
@@ -276,8 +280,9 @@ Then stop at that approval boundary using the canonical approval narrative from
 (`https://www.roselabs.ai/?agent-id=…` after
 `python3 scripts/publish_evidence_links.py`), last-call rendered LLM dump under
 `/opt/cursor/artifacts/rca_evidence/…`, numbered local-repro steps with a
-`Tests:` assertion and measured wall-clock, and Environment (evaluators with
-how they are checked, fixtures, task prompt). Put the unchanged repro's current
+`Tests:` assertion and measured wall-clock, the `Golden reference:` citation
+(reference-repo `path:line` and whether the fix converges on it), and
+Environment (evaluators with how they are checked, fixtures, task prompt). Put the unchanged repro's current
 failing result in Evidence and Detail, and the expected post-fix assertion in
 After Behavior.
 

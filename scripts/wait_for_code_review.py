@@ -51,6 +51,11 @@ FAILURE_STATES = {
     "TIMED_OUT",
 }
 REVIEW_TRIGGER = re.compile(r"^\s*@coderabbitai\s+(full\s+)?review\b", re.IGNORECASE)
+# What CodeRabbit posts for the push itself when review-on-push is disabled. It
+# is never the result of a `@coderabbitai review` command, and it can land
+# after the command and before the commanded review starts (PR 1415: command
+# 02:27:32Z, this skip 02:28:06Z, "Review in progress" 02:28:43Z).
+PUSH_AUTO_SKIP = "incremental reviews are disabled"
 
 
 class ReviewWaitError(RuntimeError):
@@ -409,6 +414,28 @@ def _enrich_coderabbit_description(
     return payload
 
 
+def _is_push_auto_skip(status: ReviewStatus) -> bool:
+    """Whether a skip is the push's own rather than the result of a command."""
+    description = str(status.raw.get("description") or "").lower()
+    return status.state == "REVIEW_SKIPPED" and PUSH_AUTO_SKIP in description
+
+
+def _awaiting_triggered_review(status: ReviewStatus, triggered_at: datetime) -> bool:
+    """Whether a terminal non-success still predates the commanded review.
+
+    The push's auto-skip is never a command's result, whenever it was posted,
+    so it never ends a commanded wait. CodeRabbit has taken from one to seven
+    minutes to start a commanded review (PR 1415: 71s, PR 1348: 391s), and no
+    shorter cut-off can tell a slow start from a command it ignored; an ignored
+    command ends at the wait's own timeout, which routes to the fallback. Any
+    other result counts only if it was posted after the command.
+    """
+    if _is_push_auto_skip(status):
+        return True
+    started = parse_github_time(status.raw.get("startedAt"))
+    return started is None or started < triggered_at
+
+
 def wait_for_review(
     *,
     pr: str,
@@ -473,12 +500,15 @@ def wait_for_review(
             if entry is not None
             else ReviewStatus("MISSING", False, False, "missing", {})
         )
-        if triggered_at is not None and status.terminal and not status.successful:
-            started = parse_github_time(status.raw.get("startedAt"))
-            if started is None or started < triggered_at:
-                status = ReviewStatus(
-                    "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
-                )
+        if (
+            triggered_at is not None
+            and status.terminal
+            and not status.successful
+            and _awaiting_triggered_review(status, triggered_at)
+        ):
+            status = ReviewStatus(
+                "AWAITING_TRIGGERED_REVIEW", False, False, status.kind, status.raw
+            )
         last_state = status.state
         _report(f"CodeRabbit {status.state} on {expected_head[:12]}")
         if status.terminal:
