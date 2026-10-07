@@ -17369,7 +17369,7 @@ def test_missing_call_findings_tolerates_spacing_and_punctuation():
     assert missing_call_findings(["ROSE-4471"], "The confirmation code is Rosa-4471.") == ["ROSE-4471"]
 
 
-def test_phone_recording_playback_requires_first_party_audio():
+async def test_phone_recording_playback_requires_first_party_audio():
     """Daily phone benches fail when the FE recording URL is not playable audio."""
     from benchmarks.phone_callee import phone_recording_playback_failures
 
@@ -17416,25 +17416,21 @@ def test_phone_recording_playback_requires_first_party_audio():
         assert headers == {"X-API-Key": "test"}
         return PlayableResponse()
 
-    denied = asyncio.run(
-        phone_recording_playback_failures(
-            data,
-            base_url="https://navi-j9a9.onrender.com",
-            agent_id=agent_id,
-            headers={"X-API-Key": "test"},
-            get=get_private,
-        )
+    denied = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_private,
     )
     assert denied, "private provider recording must fail the FE playback check"
 
-    ok = asyncio.run(
-        phone_recording_playback_failures(
-            data,
-            base_url="https://navi-j9a9.onrender.com",
-            agent_id=agent_id,
-            headers={"X-API-Key": "test"},
-            get=get_playable,
-        )
+    ok = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_playable,
     )
     assert ok == []
 
@@ -20709,7 +20705,7 @@ async def run_all_tests():
     )
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
-    r.record(
+    await r.record_async(
         "phone_recording_playback_requires_first_party_audio",
         test_phone_recording_playback_requires_first_party_audio,
     )
