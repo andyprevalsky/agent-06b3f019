@@ -16518,11 +16518,19 @@ def test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credi
     assert lease >= hold.timeout_seconds
     assert "task._callee_phone_number = phone_callee.dial_number" in inspect.getsource(bench)
 
-    backstop_source = inspect.getsource(bench._run_with_agent_execution_backstop)
     assert hold.timeout_seconds > 7200
-    assert "resolved > seconds" in backstop_source
-    assert "task.timeout_seconds" in backstop_source
     assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    short = get_task_by_name("phone-call-client-intake")
+    assert short.timeout_seconds < 7200
+    with patch.dict(os.environ):
+        os.environ.pop("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", None)
+        assert bench.agent_execution_backstop_seconds(hold) == hold.timeout_seconds
+        assert bench.agent_execution_backstop_seconds(short) == 7200
+        assert bench.agent_execution_backstop_seconds() == 7200
+        for operator_cap in ("300", "7200"):
+            os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"] = operator_cap
+            assert bench.agent_execution_backstop_seconds(hold) == int(operator_cap)
+            assert bench.agent_execution_backstop_seconds(short) == int(operator_cap)
 
 
 def test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card():

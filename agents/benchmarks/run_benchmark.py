@@ -4030,6 +4030,19 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def agent_execution_backstop_seconds(task: Optional[BenchmarkTask] = None) -> int:
+    """An operator-set backstop is a hard cap; only the default yields to a longer task timeout."""
+    seconds = benchmark_wall_clock_backstop_seconds()
+    if task is None or "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ:
+        return seconds
+    resolved = getattr(task, "_resolved_timeout_seconds", None)
+    if resolved is None:
+        resolved = task.timeout_seconds
+    if isinstance(resolved, (int, float)) and not isinstance(resolved, bool) and resolved > seconds:
+        return int(resolved)
+    return seconds
+
+
 async def poll_agent(
     base_url: str,
     agent_id: str,
@@ -4052,13 +4065,7 @@ async def _run_with_agent_execution_backstop(
     task: Optional[BenchmarkTask] = None,
 ) -> Any:
     """Bound all post-create execution, including preparation and checkpoints."""
-    seconds = benchmark_wall_clock_backstop_seconds()
-    if task is not None:
-        resolved = getattr(task, "_resolved_timeout_seconds", None)
-        if resolved is None:
-            resolved = task.timeout_seconds
-        if isinstance(resolved, (int, float)) and resolved > seconds:
-            seconds = int(resolved)
+    seconds = agent_execution_backstop_seconds(task)
     print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
     snapshot: dict = {}
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
