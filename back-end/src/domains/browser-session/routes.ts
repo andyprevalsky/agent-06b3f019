@@ -19,12 +19,10 @@ import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-import { BrowserProviderRateLimitError } from '../../providers/browser';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
-  initSession,
   closeBrowserSession,
   getTaskInfo,
   getTaskOwnerUserId,
@@ -39,7 +37,8 @@ import {
   SessionNoWsUrlError,
   CdpInjectionError,
 } from './service';
-import { initSessionSchema, closeSessionSchema, injectLocalStorageSchema } from './types';
+import { closeSessionSchema, injectLocalStorageSchema } from './types';
+import { registerBrowserInitRoute } from './routes.init';
 import { registerBrowserCredentialRoutes } from './routes.credentials';
 import { registerBrowserDataRoutes } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
@@ -67,40 +66,7 @@ const isValidViewportDimension = (value: unknown, maximum: number): value is num
  * Automatically injects user's stored Chrome cookies if available.
  * Fast operation - just creates session and injects cookies.
  */
-router.post(
-  '/init',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
-    try {
-      const { user_id, agent_id, start_url, task_id } = initSessionSchema.parse(req.body);
-      const userId = req.isInternal === true ? user_id : req.userId;
-      if (userId === undefined || userId === '') {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-
-      const result = await initSession(userId, agent_id, start_url, task_id);
-
-      res.json({ success: true, ...result });
-    } catch (error) {
-      if (error instanceof BrowserProviderRateLimitError) {
-        log.warn('Browser provider rate limit hit during session init', {
-          provider: error.provider,
-        });
-        res.status(429).json({
-          error: 'browser_provider_rate_limit',
-          provider: error.provider,
-          message: 'Browser session rate limit exceeded. Retry after delay.',
-        });
-        return;
-      }
-      log.error('Failed to init browser session', { error: String(error) });
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to initialize browser session',
-      });
-    }
-  })
-);
+registerBrowserInitRoute(router, auth);
 
 /**
  * POST /api/browser-session/close

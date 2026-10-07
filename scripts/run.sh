@@ -41,6 +41,7 @@ fi
 
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
+. "$SCRIPT_DIR/lib/cloudbench-env.sh"
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
@@ -2752,7 +2753,7 @@ if $BENCHMARK_MODE; then export ENABLE_BENCHMARK_MEMORY_BASELINE=1; fi
 python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c \
     'set -eo pipefail; cd agents; source venv/bin/activate; export HEALTH_CHECK_PORT=$HEALTH_PORT; exec ./scripts/run_local_worker.sh' &
 AGENTS_PID=$!
-AGENTS_BIRTH="$(ps -p "$AGENTS_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
+AGENTS_BIRTH="$(cloudbench_pid_start_time "$AGENTS_PID")"
 PIDS+=("$AGENTS_PID"); NAMES+=("agents")
 
 # Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab

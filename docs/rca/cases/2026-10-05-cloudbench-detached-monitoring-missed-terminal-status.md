@@ -101,6 +101,15 @@ existing terminal-receipt control reproduced this before correction and passed
 unchanged afterward. Either validated terminal signal now directs inspection
 of the exact owned resources; controller completion remains a separate field.
 
+
+### Independent source qualification
+
+Independent review of `447fa65d6a47af712109c634805a248199a3dc68` verified the
+unchanged RED/GREEN test and log hashes and reran the existing 69-control
+monitor/archive owning family: all passed in 16.56 seconds with no provider
+calls. The observed invalid-row action keeps priority; neither original
+outcomes nor deployment or benchmark acceptance is inferred from this check.
+
 ## Human feedback
 
 Monitor the active run throughout execution and make the CLI print instructions
@@ -174,3 +183,67 @@ rejected, earns zero campaign credit, and retains its original receipts; fresh
 ordinary fifty-task LIVE outcomes and exact cleanup still require independent
 proof. The user required supported CLI execution, broad outcome checks, exact
 owner cleanup and compact regression coverage.
+
+## Recurrence: child controller failure stayed hidden behind teardown occupancy
+
+Original Control9 (`20261007-185005-80376`, source `9a55d781`) had an IMAX
+child-supervisor exit125 by 19:22:11 UTC. Its original collector had reported
+missing guest cleanup acknowledgement, but the ordinary monitor continued to
+report teardown with no warning and `next_action=observe_again`. The full run
+later failed its one-hour gate. That result remains rejected; this operator
+repair does not repair the underlying worker cleanup or certify resource release.
+
+Archive searches were `fleet monitor hides abnormal child controller exit` and
+`teardown child finished missing cleanup acknowledgement`. This is a recurrence
+of the monitor's terminal-observation contract. The September29 stack-receipt
+case is a relative with a separate cleanup first-bad boundary. Here the path is
+child supervisor's atomic exit marker → monitor's existence-only stage read →
+operator receives teardown occupancy without the available abnormal exit. The
+earlier controls covered the parent terminal handle and ordinary task FAIL, but
+not a terminal child while healthy siblings continued.
+
+Read the existing tiny child marker as well as its existence. Exits0/1 remain
+ordinary task outcomes; another exit is disclosed as a task-controller warning
+with instructions to inspect it while healthy siblings continue. This changes
+no grading, occupancy, timing, cancellation, ownership or acceptance criterion.
+No private log, transcript or request content is printed. Final parent/lifecycle
+inspection still takes priority over an intermediate warning.
+
+The existing deploy-owned `cloudbench_monitor_test.py` now exercises exits0/1
+and the original cleanup/cancellation exits125/143 through `scripts/run-bench`.
+The identical test bytes failed on `d03b9eb8c` because both abnormal exits still
+returned `observe_again`; after the repair, the four cases passed in0.28s.
+The complete existing module passed13 controls in3.96s, and independent review
+passed the same13 in4.05s. A read-only comparison on the original C9 directory
+confirmed unchanged outcomes, occupancy and lifecycle/controller fields while
+disclosing all three abnormal children. Tests already run in the compact normal
+deploy wrapper's `fleet_monitor` selection; there is no new paid or long gate.
+Source/test/log hash bindings and the independent receipt are private under
+`.context/monitor-rca.private/`. No LIVE50 or production-deployment credit follows
+from this warning-only repair.
+
+## Follow-up: invalid-row advice must retain its precedence
+
+PR1440 review found that an abnormal child exit could override the monitor's
+existing invalid-row advice. The warning still said to inspect this exact
+owner, while `next_action` incorrectly invited continuation. Earlier tests
+covered malformed rows and abnormal children separately, masking their joint
+boundary. The existing abnormal-exit control now crosses exits0/1/125/143 with
+valid and invalid rows through the same supported CLI. Both invalid-row cases
+with abnormal exits failed with `inspect_task_warnings_and_continue` instead
+of the existing `observe_again`; ordinary outcomes and valid rows passed.
+The unchanged combined14-case command passed after the next-action selector
+requires valid rows. Terminal parent/lifecycle inspection still takes priority,
+invalid-row warnings retain the existing exact-owner advice, and healthy-row
+outcomes/occupancy are unchanged. No acceptance or cancellation policy changes.
+
+Searches `monitor invalid task rows warning next action` and `fleet monitor
+malformed rows child controller warning` identify this as a recurrence of the
+same observation contract. The reread OpenClaw process registry, Hermes lifecycle
+ledger and Claude Code cleanup registry retain authoritative lifetime ownership;
+Codex `codex-rs/core/src/unified_exec/async_watcher.rs:183` at `3342ee8c` settles
+terminal monitoring before classifying its result. None defines Rose's row
+advice vocabulary. Keeping the existing invalid-row branch ahead of advisory
+child continuation removes the conflicting precedence without another state,
+channel, registry or timing gate. The same `fleet_monitor` deploy selection
+runs every added case; original LIVE50 outcomes and credit stay unchanged.
