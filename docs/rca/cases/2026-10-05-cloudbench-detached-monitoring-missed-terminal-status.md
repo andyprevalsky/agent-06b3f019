@@ -12,6 +12,7 @@ symptoms:
   - default detached launch lost its actual exit status
   - caller-relative monitoring paths resolved from agents instead of the caller
   - startup label remained cloning after every modern boot start was accepted
+  - detached fleet completed (exit=1) but its printed controller exit marker was absent
 tags:
   - cloudbench
   - monitoring
@@ -20,6 +21,8 @@ sources:
   - fleet run 20261005-220635-19583
   - fleet run 20261005-224256-949
   - commit ca2cb3163e1b2f0dce448959bd96e6f3b70a774e
+  - fleet run 20261007-155532-35109
+  - commit 5051c0594905da7f1170fd3d20c9d17cca160500
 repro: agents/benchmarks/cloudbench_monitor_test.py
 status: fixed
 ---
@@ -109,3 +112,65 @@ run reset. Genuine benchmark failure is acceptable for infrastructure proof.
 
 Print an exact terminal handle with every asynchronous launch and inspect it on
 every observation independently of progress-card freshness.
+
+## Recurrence: --wait consumed the printed terminal receipt
+
+Control 6's ordinary fifty-task CLI launcher printed
+`detached-20261007-155531-34548.status`, then reported
+`detached fleet completed (exit=1)`. The original launcher and controller were
+natively absent, `_batch/lifecycle.json` preserved controller exit 1, and the
+printed marker was absent. The original closed controller log's retained hash
+is `fa3f847bb7c77ffab881826bae2ec6f7d9343681d4b0daa75d23a67b737e62ad`.
+Its host ENOSPC errors remain original evidence; this marker finding does not
+attribute them to inherited pipes or repair the rejected fleet's task outcomes.
+
+Archive searches were `No space left on device detached controller status` and
+`missing detached exit marker launcher wait pipe status file`. This is a
+recurrence of the monitoring contract above. The September 10 inherited-pipe
+case is a relative, and the October 5 waited-fixture case documented the older
+intentional consumed-rendezvous behavior. That behavior conflicted with the
+documented promise that the printed monitor handle remains available with `--wait`.
+The earlier regression exercised only immediate-return detach, so it missed the
+waiter's different terminal cleanup path.
+
+Critical path: supported `scripts/run-bench` launch → atomic detached status
+wrapper → native tracked-group drain → waiter reads exit status → waiter deletes
+status and ownership rendezvous → independent monitor loses the terminal handle.
+What: normal waited completion lost its printed terminal receipt. Where:
+`scripts/lib/cloudbench-env.sh::cloudbench_wait_tracked_detached`, after reading
+the status. Why: cleanup treated durable exit evidence as ephemeral ownership
+state. Proof: the supported CLI's existing offline exit-after-snapshot-claim hook
+returned its real exit 7 while the permanent monitor test found zero status
+receipts on the original helper. The deepest owned problem remains the
+observability contract: waiting changed the lifetime of the printed evidence.
+The same gap affected both successful and failed controller exits.
+
+The unchanged owning command was
+`python -m pytest -q 'agents/benchmarks/cloudbench_monitor_test.py::test_fleet_monitor_detached_launch_retains_actual_controller_exit[wait]'`,
+using the existing Python 3.11.9 agents environment with modern Bash on PATH.
+It failed in 11.17 seconds with `detached launch lost its actual exit status`
+on helper SHA256 `b4bd1f3355f97a49ddce476975f8fe2e26f7635cdd659fd83708f66740ea5ef0`.
+The same test bytes passed in 1.44 seconds after retaining the terminal status.
+Private RED/GREEN outputs and both source/test hashes are retained under
+`.context/cli-marker/` in the isolated RCA checkout.
+
+Delete the status file from the waiter's removal list. The exact owner file and
+temporary files still retire after the existing native group checks. Both normal
+CLI launch modes now share one durable terminal receipt; no new receipt, polling
+service, cleanup fallback or acceptance condition is added. The monitor test also
+requires exit 7 with cleanup still unknown, so controller completion cannot claim
+resource release. The existing Linux multi-workstream waited case now requires
+its exact retained exit 0 and absent owner while preserving native resource and
+older-receipt checks. These controls remain in the existing compact
+`benchmark-live-results.test.py` and controller deploy gates.
+The complete monitor file passed all nine controls in 3.01 seconds. The Linux
+controller fixture is part of the combined deployment verification, not a new
+LIVE fleet. Archive validation passed with all 812 cases retained.
+
+At 10,000 agents, the change removes one unlink per waited controller and retains
+one tiny existing receipt per launch. It adds no scan, channel, shared lock or
+agent-wide work. This fixes only the CLI evidence lifetime. Control 6 stays
+rejected, earns zero campaign credit, and retains its original receipts; fresh
+ordinary fifty-task LIVE outcomes and exact cleanup still require independent
+proof. The user required supported CLI execution, broad outcome checks, exact
+owner cleanup and compact regression coverage.

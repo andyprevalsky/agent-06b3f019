@@ -6,6 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -145,7 +147,10 @@ def test_fleet_monitor_preserves_caller_relative_paths(tmp_path: Path):
     assert value["controller_exit_code"] == 0
 
 
-def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: Path):
+@pytest.mark.parametrize("wait", [False, True], ids=["detach", "wait"])
+def test_fleet_monitor_detached_launch_retains_actual_controller_exit(
+    tmp_path: Path, wait: bool
+):
     runs = tmp_path / "runs"
     snapshots = tmp_path / "snapshots"
     runs.mkdir()
@@ -159,13 +164,20 @@ def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: P
         "TMPDIR": str(snapshots),
     }
     result = subprocess.run(
-        ["bash", str(ROOT / "scripts/run-bench"), "spawn-sub-agents", "--ref", "origin/main"],
+        [
+            "bash",
+            str(ROOT / "scripts/run-bench"),
+            "spawn-sub-agents",
+            "--ref",
+            "origin/main",
+            *(["--wait"] if wait else []),
+        ],
         env=env,
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == (7 if wait else 0), result.stdout + result.stderr
     deadline = time.monotonic() + 10
     statuses = []
     while time.monotonic() < deadline:
@@ -173,9 +185,15 @@ def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: P
         if statuses:
             break
         time.sleep(0.05)
-    assert len(statuses) == 1, "default detached launch lost its actual exit status"
+    assert len(statuses) == 1, "detached launch lost its actual exit status"
     assert statuses[0].read_text().strip() == "7"
     assert "monitor every 30s" in result.stdout
+    terminal = observe(runs / "not-allocated", "--controller-status", str(statuses[0]))
+    assert terminal["controller_exit_code"] == 7
+    assert terminal["controller_terminal"] is True
+    assert terminal["cleanup_status"] == "unknown"
+    if wait:
+        assert not list(runs.glob("detached-*.owner")), "waiter retained its live ownership rendezvous"
 
 
 def test_fleet_monitor_snapshot_already_removed_is_a_clean_exit(tmp_path: Path):

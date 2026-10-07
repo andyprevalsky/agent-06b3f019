@@ -183,6 +183,28 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(calls[2][2], identity + ":/tmp/.")
         self.assertEqual(calls[3], ["docker", "rm", identity])
 
+    def test_extracted_native_cache_controls_need_no_pytest_and_report_skips(self):
+        root = Path(__file__).resolve().parents[2]
+        fixture = Path(__file__).with_name("cloudbench-status-service-shutdown.test.sh")
+        block = fixture.read_text().split("<<'PY_CACHE_PARENT'\n", 1)[1].split(
+            "\nPY_CACHE_PARENT", 1
+        )[0]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.platform='darwin';sys.modules['pytest']=None\n" + block,
+                str(root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("SKIP: native cache parent "), 3)
+        self.assertIn("0 passed, 3 skipped", result.stdout)
+        self.assertNotIn("PASS: native checkout cache parent", result.stdout)
+
     def test_foreign_identity_or_nonsealed_mounts_are_never_mutated(self):
         for settings in (
             {"label": "foreign-label"},

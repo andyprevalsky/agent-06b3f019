@@ -941,3 +941,487 @@ RED/GREEN receipts are retained under
 `.context/acceptance/proof90-rejection-replay-rca/`. The prepared campaign remained
 unlaunched and earns zero credit. The standard gate and fresh fleet proof remain
 required.
+
+### 2026-10-07 recurrence: payment and authentication waits missed explicit PAUSE
+
+Original Control6 `20261007-155532-35109`, clean source
+`5051c0594905da7f1170fd3d20c9d17cca160500`, retained five
+`missing single-root tree` query-verifier warnings. Each original owned snapshot
+had a finished attached browser recording, but one exact browser task lacked
+`task_complete`; the original durable archive wait reported `archive: TimeoutError`.
+The authentication task also contained another browser that closed normally.
+All six recordings across these five snapshots were present. The optional
+`logs.tree` warning alone does not establish lost model queries: the original
+correlator independently finds 202 completed LIVE queries on their explicit roots.
+The missing task terminal is a distinct, material durable publication gap.
+
+Four payment managers reached the initial approval wait and then received their
+exact root's PAUSE: Alchemy 16:20:36.953 to 16:20:58.064 UTC, IMAX 16:27:28.457
+to 16:27:39.707, OpenTable 16:25:07.001 to 16:25:23.982, and Toast
+16:21:49.917 to 16:22:14.403. The activity had deliberately deferred its
+terminal for a resume and had persisted its recording. Unlike the repaired
+write-approval branch above, the payment manager called the direct approval
+helper without observing PAUSE. It stayed parked until cleanup deleted the root;
+no approval-granted or manager terminal followed in the retained events.
+
+The authentication manager entered its own paused assistance wait at
+16:19:49.444 UTC. The same root later received explicit PAUSE at 16:24:35.752
+and 16:26:32.180. Its predicate only watched the owned response or a transition
+to unpaused. Because authentication had already set `is_paused=True`, these
+explicit signals made no observable change to that predicate. The final
+snapshot remained paused with the recording attached and no same-task terminal.
+This is separate from raw workflow cancellation and from an unfinished recording.
+
+Archive searches for `awaiting_payment_card_approval PAUSE recording task_complete`
+and `awaiting_auth_assistance explicit pause archive terminal` found this case
+and the September 6/11 manager abandonment cases. This recurrence is at the
+initial payment/authentication wait, before the already covered rejected or
+exhausted payment gates. The original activity's pending-resume behavior and
+strict recording-plus-terminal consumer contract are correct.
+
+The owning reproduction extends the existing real manager, direct approval
+helper, bound `AgentWorkflow.pause`, HTTP-persisted message/recording and actual
+archive refresh fixture. Only browser execution, scheduling and external I/O
+are substituted. The exact payment test fails on unchanged production source
+because the manager remains parked after PAUSE (6.38 seconds), then the identical
+command passes with the repair (7.54 seconds). The unchanged authentication test
+also fails at that owning boundary (45.26 seconds under host load), then passes
+with the repair (2.68 seconds). Initial import/fixture setup failures are retained
+separately and are not counted as causal RED evidence.
+
+The payment branch now uses the existing pause-aware browser approval helper.
+An explicit pause closes only its interrupted approval chip and emits the
+existing task-scoped abandoned-resume terminal. The same post-grant guard as
+the write branch prevents a pause during persisted `payment_card_ready` from
+starting another activity. Actual decisions and minted cards are preserved.
+
+Authentication now distinguishes its own paused wait from explicit PAUSE signals
+using a workflow-local sequence. The manager captures the sequence before its
+first suspension and only a later explicit signal ends the pending resume.
+The sequence travels in the existing continuation runtime; a parked auth resume
+also carries its original sequence. Thus a pause between parking and continuation
+cannot disappear when the manager re-enters. Owned authentication replies and
+ordinary resume still reuse the same task/session. Raw cancellation and generation
+handoff retain their existing behavior. The existing abandoned-resume event is
+excluded from model context and does not invent authentication or task success.
+
+Four permanent tests are registered in the ordinary browser blackbox runner:
+payment and auth pause-to-archive reproductions plus their successful-resume,
+foreign identity, simultaneous response, persistence, cancellation and handoff
+controls. The auth handoff control executes actual park, continuation serialization,
+restoration and manager re-entry, both with and without an intervening explicit
+pause. Existing production deadlines, recording readiness, benchmark tasks,
+prompts, models and evaluators remain unchanged. There is no provider/model call,
+fleet scan, new timer or historical transcript repair.
+
+Original Control6 remains failed and earns zero acceptance credit. Its original
+controller exited 1 with 49 sealed host artifacts and one host ENOSPC capture
+error; documented recovery recaptured that original guest artifact without a
+task rerun. All 50 original TaskResult grade acknowledgements match their exact
+owner packets and precede original child finish and guest shutdown. Final supported
+query diagnostics cover 45 artifacts and 841 completed correlated queries, with
+historical overlap lower bound 35; the five tree-shape warnings remain separately
+qualified. These are sealed completed-query diagnostics, not live concurrency or
+all-50 latency proof. No visual browser/pixel proof is available.
+
+Independent retained resource evidence confirms all 50 actual cleanup scopes,
+including the account task's nested `logs.post` root, sealed/deleted with zero
+cleanup errors. The 34 exact owned browser allocations have 32 absent HTTP404
+receipts and two successful canonical Steel release HTTP200 receipts. Normal
+native teardown and exact orphan-volume retirement completed at
+1791391681.430532, 3854.431 seconds after the original first image invocation.
+Resource release does not restore the five missing durable task terminals or
+recover the original one-hour acceptance failure.
+
+Private original joins, immutable RED/GREEN logs and source/test bindings are
+under `.context/control6-independent-observer-20261007/` in the owned diagnostic
+checkout and `.context/browser-payment-pause-rca-20261007/` in the isolated repair
+checkout. The independent resource receipt SHA256 is
+`dfc381951fe9e13b7f98f3945373b01bcb274f70bb6bc1fbbd0a7b83257b6194`;
+the final original/recovered query and publication join is
+`8b0847ac17ec50ad811e829af9241f8f5ac1acf0b0a647ebdf1e4770c2a52af8`.
+The canonical deployment gate and fresh unchanged CLI fleet outcome remain
+required; offline producer GREEN does not count toward the five consecutive
+50-task LIVE proofs.
+
+### 2026-10-07 recurrence: PAUSE followed by RESUME disappeared during card mint
+
+CodeRabbit discussion
+https://github.com/Rose-Ai-Labs/rose/pull/1431#discussion_r4210080313,
+review `5446122315`, identified the payment continuation guard on exact source
+`fe8e1578e75dc5cde5709aa57e127697726b648d`. After an awaited mint, that guard
+only inspected current `is_paused`. Actual `AgentWorkflow.pause` increments the
+persisted `_pause_signal_sequence`; `resume` clears `is_paused` but preserves the
+sequence. Thus PAUSE followed by RESUME during mint could start another browser
+activity for the pending task. This is an async interruption ownership bug,
+within the existing logical-inconsistency-in-harness-contracts problem class.
+
+Archive searches used `pause resume sequence payment abandon terminal` and
+`interleaving approval interrupt resume mint browser`. They found this case and
+the September 6/11 payment abandonment cases. The completed AgentCard and browser
+auth plans confirm the existing approval flow and same-task resume contract.
+The full path is the deferred browser activity, direct approval, awaited mint,
+persisted `payment_card_ready`, manager continuation, then task terminal consumed
+by the durable archive predicate. The first bad boundary is the manager's
+continuation decision: a current-state flag cannot preserve an intervening signal.
+The previous payment repair observed pauses that remained active; auth already
+used the sequence to distinguish explicit interruption from its own paused wait.
+
+The permanent reproduction extends the existing
+`test_manager_payment_pause_seals_persisted_browser_for_archive` and its owning
+fixture. An Event suspends mint after the actual approval has completed; the
+test calls actual `AgentWorkflow.pause` and `resume`, verifies unpaused state with
+sequence 1, then releases mint. It retains actual manager message serialization,
+the exact task's persisted recording, archive refresh/readiness predicate, and
+the foreign-task-terminal negative control. No model trajectory is fabricated.
+On unchanged `fe8`, the test fails with
+`AssertionError: explicit PAUSE resumed an abandoned browser`: it observed two
+activity starts. The identical test and command pass after the repair, with one
+start, one same-task abandoned terminal excluded from model context, and actual
+archive readiness. Initial import/runner setup failures are retained separately
+and do not count as RED evidence.
+
+The manager now snapshots the payment pause sequence before lookup/approval
+awaits and compares it, together with the existing current-pause check, before
+continuing. The original approval and minted-card behavior is preserved. The
+existing abandoned-resume event closes the task without inventing purchase
+success. This is constant-space local state and a constant-time comparison at
+10,000 agents; no scan, timer, poll, provider request or additional gate is added.
+
+Golden references were searched for interruption/cancellation across suspension
+and reopened at the implementation. Claude Code
+`claude-code-src/src/cli/structuredIO.ts:490` rejects the outstanding request on
+its once-only abort listener. OpenClaw
+`openclaw/src/agents/tool-search-code-mode.ts:142` settles the pending operation
+on its parent abort listener. Codex
+`codex/codex-rs/core/src/tasks/mod.rs:400` checks a task-owned cancellation token
+after its awaited run; `:940` cancels that token, which remains cancelled for the
+old task. Its read-only checkout is `622e9e36962105af50b9c250902e8b8c66a950d8`.
+These preserve the interruption of the suspended operation. Hermes
+`hermes-agent/agent/interrupt_control.py:104` fences generation-specific interrupt
+claims, while `:197` explicitly clears mutable interrupt state; no exact Temporal
+PAUSE-to-RESUME analog was found. Rose's existing persisted sequence supplies the
+operation-history check without introducing another cancellation mechanism.
+
+The reproduction remains registered in the existing browser blackbox
+`run_all_tests`, reached through `scripts/test.sh agents spawn-browser-agent-v3`.
+Existing payment approval/interruption and authentication pause/handoff owner
+controls pass. The identical command, source/test bindings and immutable RED/GREEN
+logs are retained at `.context/payment-pause-mint-rca-20261007/proof.safe.json` in
+the isolated `rose-payment-pause-mint-20261007` checkout. This offline causal proof
+does not establish original benchmark success or count toward the five fresh
+50-task LIVE runs. The frozen candidate and Control7 were not edited.
+
+### 2026-10-07 recurrence: write grant persistence also lost PAUSE followed by RESUME
+
+Independent review of payment source `d16141950c4cac5376baaa41f324536c4c9049ca`
+found that the sibling deferred write continuation still checked only current
+`is_paused`. Two archive searches used `explicit PAUSE resumed an abandoned
+browser` and `pause resume persisted write grant browser continuation`; both
+pointed to this case and the existing browser gate abandonment cases. Their
+solutions and human feedback require exact task terminals, preserved approval
+decisions and narrow coverage in the existing deploy owner.
+
+The actual existing `test_manager_write_pause_seals_persisted_browser_for_archive`
+was extended with one PAUSE-to-RESUME scenario at the write grant persistence
+activity. The fixture calls actual `AgentWorkflow.pause` and `resume`, verifies
+unpaused state with sequence 1, and retains the actual grant serialization,
+same-task recording, archive readiness predicate and foreign-terminal negative
+control. Before the repair, the ordinary manager started a second browser
+activity and the test failed with `explicit PAUSE resumed an abandoned browser`.
+This is local runtime evidence, not an inferred failure or a model trajectory.
+
+The first bad boundary is the deferred manager continuation after the grant
+yield. Its current-state check forgot the explicit signal when RESUME cleared
+the flag. The deeper evidenced gap is using mutable state to authorize an old
+suspended continuation. The earlier write test held PAUSE active, so it could
+not expose this inverse; the payment repair had not covered the write sibling.
+The problem class remains logical inconsistency in harness interruption
+ownership contracts, rather than model capability, provider or configuration.
+
+Write now snapshots the existing persisted pause sequence before approval and
+compares it at its existing pre-continue pause check, just as payment already
+does. Authentication retains its sequence across its distinct intentional pause
+and generation handoff. The repair emits the existing exact-task abandoned
+terminal excluded from model context. It does not alter approval decisions,
+browser prompts, task definitions, evaluators, model calls or timeouts. It adds
+only constant local state and a constant-time comparison at 10,000 agents.
+
+The identical command and test recorded RED exit 1 in 1.892 seconds and GREEN
+exit 0 in 0.893 seconds. The owning test also runs normal approval, active pause,
+concurrent approval, persisted replies, cancellation and generation handoff
+controls. Five existing payment, registered-activity-name, authentication and
+handoff controls passed in 1.150 seconds. The unchanged test SHA-256 is
+`7d573ca9c3a72b2d9e85701f652b08071d5583bffea2cef3e2778908cc45f2c7`.
+Exact argv, source hashes and immutable private logs are retained at
+`.context/write-pause-resume-rca-20261007/proof.safe.json` in the isolated
+`rose-write-pause-resume-20261007` checkout. A controls-launcher syntax error
+occurred before test execution and is not causal RED evidence.
+
+Golden implementations were reopened read-only: Claude Code
+`claude-code-src/src/cli/structuredIO.ts:490` rejects the outstanding request on
+abort, and OpenClaw `openclaw/src/agents/tool-search-code-mode.ts:142` settles the
+operation on parent abort. Both keep interruption attached to the old suspended
+operation. Hermes `hermes-agent/agent/interrupt_control.py:104` fences claims with
+an activity generation; it is not an exact Temporal PAUSE/RESUME analogue. Rose
+uses its existing sequence without adding a cancellation mechanism or a new
+guard on unrelated active browser execution.
+
+The reproduction remains in the existing browser `run_all_tests` registration,
+reached by normal agent blackbox coverage in `/deploy` Step 4g. This offline
+causal proof uses no provider/model calls and grants zero LIVE50 credit. The
+canonical deploy gate and a fresh source-bound ordinary CLI benchmark outcome
+remain separate requirements; Control7 and Control8 sources were not edited.
+
+Final qualification used the identical frozen fixture on baseline
+`8b895022f541ed6481711168cd0961f8b0778396`: both payment and authentication
+checks failed because real PAUSE left the manager parked (2 failed, 3.87 seconds).
+The final repaired owning selection passed eight checks in 2.75 seconds, and two
+existing continuation controls passed in 1.63 seconds. Independent review passed
+three real manager/archive checks in 1.74 seconds. All 666 existing test bodies
+are unchanged; the four new checks are registered in the ordinary domain runner.
+Final syntax and same-path baseline/current lint checks report zero new diagnostics.
+
+The final replay-surface generation is `69be3fc881f1` across 273 files, compared
+with baseline `1ea6b130bacf`; both changed production modules are included. The
+existing deployment policy selects a new versioned queue for this changed hash,
+keeps old workers on their old histories, and moves cooperative handoffs through
+`continue_as_new`. This binds compatibility to the required generation cutover;
+no replay of old histories on the changed code was executed or claimed. Final
+source, unchanged-fixture RED/GREEN, registration and generation bindings are
+sealed in `final-qualified-handoff.safe.json` in the private repair directory.
+Canonical deployment and a fresh normal CLI LIVE50 outcome remain required.
+
+Independent parent review of final write source
+`854008ea2160845ec984bdbfd427d405f76da47a` completed on October 7. It verified
+the complete three-path diff, the unchanged-fixture RED/GREEN logs and their
+source/test hashes, normal owner registration, and the clean remote source.
+Three existing write, payment, and authentication/handoff manager/archive checks
+passed in 1.303 seconds without model or provider calls. The immutable parent
+receipt is `.context/write-pause-resume-rca-20261007/root-independent-review.safe.json`
+in `rose-write-pause-resume-20261007`, SHA-256
+`dc9d5e3857c44d31a325ef2c850e2ca822cff285de9e9f36ea6af4b12cfc1a8d`.
+The original author proof remains unchanged. Source review is clear; canonical
+deployment and fresh ordinary CLI LIVE50 outcomes remain separate requirements.
+
+### 2026-10-07 review recurrence: parked approvals lost their original pause sequence
+
+Fresh deploy review `5446956115`, inline `4210794699`, identified a distinct
+continuation boundary in the existing write/payment wait. The same permanent
+archive controls now park the actual tool, serialize and restore the actual
+`AgentWorkflow` continuation, execute PAUSE followed by RESUME between generations,
+and deliver the original approval decision. Both controls failed on the reviewed
+`97219c42f` source: the restored workflow correctly retained sequence1, but the
+manager started a second browser activity instead of ending the original task.
+The recorded assertion was `len(starts) == (1 if pause else 2)` at the parked
+archive boundary. This is an owning-boundary review reproduction, not a claim
+that a live benchmark failed or passed.
+
+Critical path: original approval branch captures sequence0 → approval parks its
+existing request/result → workflow continuation retains a later sequence1 →
+manager re-enters approval and captures sequence1 again → the existing resume
+check sees no change → the same browser task starts another activity. The first
+bad boundary is the approval parking producer: unlike auth, its hint omitted the
+original sequence. The workflow continuation itself retained the correct state.
+The general problem class is loss of decision-time state across a resumable wait.
+The previous guardrail covered same-generation grant/mint races and auth parking,
+but omitted write/payment continuation restore after an explicit pause and resume.
+
+Archive searches were `Preserve approval pause sequence across generation handoff`
+and `write payment paused browser resumed archive cleanup`. This is a recurrence
+of the exact-task archive producer case; the cooperative attention-wait case
+`2026-10-02-cooperative-approval-handoff-leaves-attention-pending` is a relative
+with a different first-bad field. Its solution preserves the original request
+identity rather than opening a replacement request; this repair preserves the
+original approval sequence in that same parked identity.
+
+The shared `park_browser_approval` producer now carries
+`approval_pause_signal_sequence`. Only a re-entered approval branch restores it;
+the existing write/payment resume checks compare against that original value.
+There is no manager-entry cancellation check affecting an active browser. A
+legacy hint without the field uses the previous current-sequence behavior.
+Deleting parking would break normal generation handoff; sharing the producer
+field unifies both affected approval branches without another wait or cancellation
+path. Approval decisions, metadata, pending card references and auth state remain
+on their existing paths.
+
+Permanent owners are the existing registered
+`test_manager_write_pause_seals_persisted_browser_for_archive` and
+`test_manager_payment_pause_seals_persisted_browser_for_archive`. Their immutable
+post-extension test SHA-256 is
+`14eb735af9fe8656b7450a5b9c754170692d5824f8ee0be781b2dc9b370a0e9c`.
+From `agents`, the identical pre/post command for each owner was:
+
+```bash
+source venv/bin/activate
+PYTHONPATH=.:tests/blackbox python ../.context/registry-checkpoint-deploy.private/parked-approval-owning-launcher.private.py <existing-owner-name>
+```
+
+Both actual RED exits were1; both unchanged GREEN commands exited0. All ten
+existing registered write/payment/auth and terminal manager controls then passed,
+including normal parked handoff and missing-field legacy hints. The structural
+registration owner confirms deploy discovery. Raw logs and source hashes are
+sealed privately in `parked-approval-handoff-proof.safe.json`; initial launcher
+import-path failures are preserved as diagnostics and receive no causal credit.
+
+Golden references were read directly: Claude Code
+`src/hooks/useCancelRequest.ts:99` retains the original abort signal and clears
+pending tool confirmations on cancellation; OpenClaw
+`src/talk/agent-run-control.ts:83` selects the exact admitted owner and its signal;
+Hermes `gateway/platforms/api_server_runs.py:651` releases the original approval
+waiter when its run is cancelled; Codex
+`codex-rs/core/src/session/step_activation.rs:247` captures the original task and
+rejects a cancelled target, and `session/turn_suspension.rs:72` cancels that task's
+token. Codex source was read at `8f21b7fffbefe77529325fc86c95289371841c6c`.
+These references share identity-bound interruption state; none supplies Rose's
+Temporal browser continuation protocol. The exact internal auth hint remains
+the applicable serialization example.
+
+The runtime generation changes from `4c15cedbe12e` to `86f944c4e051`; the active
+C9 image/source remains immutable. No model/provider calls, task definitions,
+evaluators, timeouts, archive readiness assertions or benchmark outcomes change.
+Independent parent review and final exact-head automated review remain required;
+this note gives no fresh whole-suite, production rollout or LIVE50 credit.
+
+Independent parent qualification on `2617cfb6f` read the complete production,
+permanent-test and archive diff, verified all original RED/GREEN log hashes and
+unchanged source/test bindings, and repeated four existing write/payment/auth
+owning controls: PASS in 2.141 seconds, with stable source and zero provider calls.
+The receipt `root-parked-approval-independent-review.safe.json` has SHA-256
+`632560727f529e34af2332ee115fbfce3aa2d132f5867fbadd5f143abfd8c6c3`.
+The author proof remains immutable. Exact-head automated review and production
+rollout remain separate mandatory gates; this qualification adds no LIVE50 credit.
+
+
+### 2026-10-07 review recurrence: restored payment pause checked after card mint
+
+Fresh exact-head review `5447373912`, inline `4211148049`, found a remaining
+financial boundary on `d03b9eb8c`: restoring the original approval sequence
+prevented browser resumption, but the first card mint still preceded that check.
+The existing permanent payment archive controls now count actual mint activity
+calls. Three unchanged commands failed on the reviewed handler: an approved
+parked PAUSE→RESUME minted a card, PAUSE→RESUME after actual approval persistence
+minted a card, and PAUSE→RESUME during the company-funding wait issued a second
+mint. All three assertions passed after the repair, using identical test bytes.
+
+The critical path is original approval sequence → actual continuation restore or
+approval persistence → changed sequence while active → card activity → final
+browser-resume check. The first bad boundary is the financial side effect: it did
+not enforce the same original sequence as the browser resume. The prior test
+observed only browser activity starts, so a cancelled browser with an already
+minted card incorrectly passed. This is an owning-boundary review recurrence;
+no live task or benchmark outcome is claimed. Archive searches were `Check the
+restored pause sequence before minting a card` and `payment approval card side
+effect after pause generation handoff`. The October2 cooperative attention case
+is a relative; this existing archive producer case owns the recurrence.
+
+The shared predicate now checks both current pause and the supplied original
+sequence. Payment passes that sequence into its existing joined approval helper.
+An interrupted fresh request is never opened; a parked request runs the existing
+response/cancellation path so its real decision is preserved or its exact pending
+chip is closed. Every mint attempt checks that predicate, including funding and
+setup/gate retries. A private control-flow exception returns the existing exact
+browser-abandoned terminal. The final browser-resume check remains necessary for
+a pause occurring during an already-started mint or card-ready persistence. No
+manager-entry guard, fabricated rejection/card, alternate approval, timeout or
+benchmark definition is added. Legacy hints still use the current sequence.
+Deleting approval or mint retries would break valid purchasing; unifying their
+interruption predicate and the mint entry point prevents these proven siblings.
+
+From `agents`, the exact pre/post recipe was `source venv/bin/activate`, then
+`PYTHONPATH=.:tests/blackbox python
+../.context/registry-checkpoint-deploy.private/parked-approval-owning-launcher.private.py
+<existing-owner>`. Existing owners are
+`test_manager_payment_pause_seals_persisted_browser_for_archive`,
+`test_manager_payment_pause_preserves_approval_and_interruptions`, and
+`test_manager_payment_card_approval_uses_registered_activity_names_and_resumes`.
+Each actual RED exited1; each unchanged GREEN exited0. All ten registered
+write/payment/auth owning controls passed, preserving actual decision metadata,
+normal parked handoffs, legacy hints and exact archive/browser identity. The
+immutable proof and original log hashes are private in
+`payment-mint-boundary-proof.safe.json`.
+
+Golden references were re-read directly: Claude Code
+`src/hooks/useCancelRequest.ts:99` uses the original abort signal; OpenClaw
+`src/talk/agent-run-control.ts:83` binds control to the admitted owner/signal;
+Hermes `gateway/platforms/api_server_runs.py:651` releases that run's approval
+waiter; Codex `codex-rs/core/src/session/step_activation.rs:247` retains the
+original non-cancelled target and `session/turn_suspension.rs:72` cancels its token.
+They share identity-bound cancellation; Rose's existing approval service supplies
+the actual decision-preservation protocol used here. Independent root review and
+fresh exact-head review3 remain required. No model/provider calls, C9 mutation,
+production rollout, fresh whole-suite execution or LIVE50 acceptance is claimed.
+
+
+Independent root qualification on `18fa07250` read the complete production,
+permanent-test and archive diff, verified every original author RED/GREEN log
+hash and unchanged source/test bytes, and repeated five existing registered
+payment-mint/write/auth owning controls: PASS in 1.238 seconds. The private
+`root-payment-mint-boundary-independent-review.safe.json` receipt has SHA-256
+`68475694d94869a4a208e58022cd49cf07133f034842feabf750efb9700d43e7`.
+The author proof remains immutable. Fresh exact-head review3 and production
+rollout remain required; this source qualification gives no LIVE50 credit.
+
+
+### 2026-10-07 review recurrence: write omitted the shared approval sequence
+
+Verification review `5447578139` found one outside-diff issue at `handler.py:10923`
+on exact `886bdb4f8`: the write caller omitted the original sequence from the
+shared approval wait. Its final browser fence stopped activity resumption, but
+it first emitted `write_lock_granted` after PAUSE→RESUME. The unchanged existing
+write archive owner now observes that permission event and failed with
+`abandoned parked write granted permission` in 1.693 seconds. The identical
+command and permanent test bytes pass after the repair in 1.051 seconds.
+
+The previous repair exposed a shared optional keyword that only payment used.
+That optional interface allowed this proven sibling to survive despite correct
+parking state and a final browser fence. The deepest owned cause is an approval
+wait whose interruption contract could be silently omitted. The keyword is now
+required, and both production callers explicitly supply their original captured
+sequence. The existing permanent control asserts that omission cannot become a
+new silent caller default, and tests both currently paused and already resumed
+interruption without opening a fresh attention request. No new wait, manager-entry
+guard or cancellation path is added. All four initial/setup/subscription/KYC mint
+call sites still enter the one guarded mint loop; funding retries use that same
+pre-activity check.
+
+Archive searches were `Pass the write pause sequence into the approval wait` and
+`write_lock_granted pause resume parked approval pending`. This is a recurrence
+of this case's approval/archive boundary. The golden references and existing
+response-preservation service read in the preceding recurrence remain applicable:
+original owner cancellation state governs later effects, while a real completed
+decision is retained. Deleting the wait would break approval; making its original
+sequence mandatory unifies both sibling callers without another optional field.
+
+The existing registered
+`test_manager_write_pause_seals_persisted_browser_for_archive` runs actual
+continuation serialization/restore, approves the original request after the
+intervening pause, and asserts no permission grant, no new browser activity and
+a durable exact-task terminal. An unanswered parked inverse also closes its exact
+original approval chip. Normal write/payment handoff and missing-field legacy
+inverses remain, and all ten existing write/payment/auth owners passed. The
+pre/post command from `agents` is `source venv/bin/activate`, then
+`PYTHONPATH=.:tests/blackbox python
+../.context/registry-checkpoint-deploy.private/parked-approval-owning-launcher.private.py
+test_manager_write_pause_seals_persisted_browser_for_archive`. Raw RED/GREEN and
+source/test hash bindings are private in `write-wait-required-sequence-proof.safe.json`.
+
+The prior bounded lifecycle closed cycle3 FINDINGS and recorded deploy outcome
+blocked/review-unstable before source mutation. Its complete ledger is retained;
+there is no fourth cycle. Development stabilization is followed by a fresh
+qualified `/deploy` lifecycle and independent exact-source review. Original C9
+callers were independently proved quiescent; retained forensic resources are
+inert and receive zero acceptance credit. No model/provider calls, benchmark
+changes, full-suite pass, production rollout or LIVE50 outcome is claimed here.
+
+
+Independent root qualification on exact `ce3b5c216` audited all two production
+and two direct-test helper callers, original sequence restoration, grant/browser
+side effects and all four mint entries through the one guarded loop. It verified
+the original author RED/GREEN log hashes and unchanged test/source bytes; seven
+existing registered owning controls independently passed with zero provider calls
+and no findings. The private
+`root-required-approval-sequence-independent-review.safe.json` receipt has SHA-256
+`b4ed2a37734578a0c75e7e4b0b2edaff6cf09ffd5dfe2f27b5c72df93b918c76`.
+The author proof and prior closed three-cycle ledger remain immutable. Fresh
+exact-head review and actual rollout/production gates are still required.

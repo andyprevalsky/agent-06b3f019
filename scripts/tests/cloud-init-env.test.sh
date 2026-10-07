@@ -51,8 +51,14 @@ fail() {
 # back to perl's alarm, which both systems have.
 if TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"; then
   BOUNDED=("$TIMEOUT_BIN" 60)
+  ln -s "$TIMEOUT_BIN" "$STUB_BIN/timeout"
 else
   BOUNDED=(/usr/bin/perl -e 'alarm shift; exec @ARGV' 60)
+  cat >"$STUB_BIN/timeout" <<'TIMEOUT'
+#!/bin/sh
+exec /usr/bin/perl -e 'alarm shift; exec @ARGV' "$@"
+TIMEOUT
+  chmod +x "$STUB_BIN/timeout"
 fi
 
 # run_cloud_init <case> <stale-value> [VAR=value ...]

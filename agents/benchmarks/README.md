@@ -94,6 +94,12 @@ dependencies and home assets except npm download caches/logs.
 records those requested options. Independent `807edee9f` no-cache build/push completed
 in 493.6 seconds in one attempt, excluding activation/fleet startup. Activate the
 exact receipt image and verify guest digest/runtime consumption before the cohort.
+The successful receipt's `image_ref` includes the verified registry digest. The
+publisher reads the exact tag and digest through the registry before handing it
+to activation. If an acknowledged manifest is missing, it republishes only
+manifest bytes matching the original build's digest, then verifies that same
+handoff. This continuation uploads no layers and repeats no dependency build;
+unverified output stops the image stage with its private observations retained.
 Image publication automatically caches a checksum-verified pinned Fly client in
 the Git common directory. Native publishing uses child-only classic Docker over
 HTTPS (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the benchmark
