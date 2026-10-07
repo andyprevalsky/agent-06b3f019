@@ -8956,6 +8956,19 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     raise ValueError(f"unterminated shell function: {signature}")
 
 
+def _fleet_registry_reaper_helpers(source: str) -> str:
+    """Registry reaper functions without the inventory library's top-level setup.
+    The shared library sits between its helpers and the fleet's registry block,
+    so a text span would also run controller initialization."""
+    shared = "".join(
+        _extract_fleet_function(source, signature)
+        for signature in ("registry_meta_value() {", "fly_with_timeout() {")
+    )
+    block_start = source.index("cloudbench_record_worker_evidence_owner() {")
+    block_end = source.index("\nfleet_registry_remove_if_empty() {", block_start)
+    return shared + source[block_start:block_end]
+
+
 def _fleet_pid_identity_helpers(source: str) -> str:
     """Birth helpers for extracted fleet and shared inventory owner/lock callers.
     A missing helper otherwise silently reads every owner as dead."""
@@ -14918,9 +14931,7 @@ def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
     clone-data volumes. Attached neighbors and other volume names are not
     ownership candidates and must remain untouched."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _fleet_registry_reaper_helpers(fleet)
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("b" * 32)
     clones = registry / "clones"
@@ -14988,9 +14999,7 @@ def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proo
     """A live exact name, an unattached clone-data volume, or malformed volume
     inventory each invalidates the legacy-record absence proof."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _fleet_registry_reaper_helpers(fleet)
     cases = (
         (
             "live-name",
@@ -18817,6 +18826,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
             f"""set -uo pipefail
 FLEET_DIR="$FD"
 RUN_ID=test-run
+FLEET_CONTROLLER_STARTED_EPOCH=1791331200
 BENCHES=(alpha beta)
 CATALOG_MODES=(real simulate)
 SIM_ON_CSV=
@@ -18832,6 +18842,7 @@ write_startup_card "healing warm snapshot (dep trees)"
     assert result.returncode == 0, result.stderr
     card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
     assert card["status"] == "starting"
+    assert card["timestamp"] == "2026-10-07T00:00:00+00:00"
     assert "healing warm snapshot" in card["phase"]
     assert card["summary"]["total"] == 2
     assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
@@ -26603,9 +26614,13 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
     supervisor = "\n".join(
         _extract_fleet_function(source, name + "() {")
-        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised")
+        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised", "bench_execution_budget")
     )
     parameters = {
+        "RUN_TIMEOUT": "10",
+        "RUN_TIMEOUT_OPERATOR_SET": "1",
+        "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS": "7200",
+        "BACKSTOP_OPERATOR_SET": "0",
         "FLEET_DIR": str(tmp_path),
         "DASH_BASE": "41000",
         "FLEET_OWNER_TOKEN": "fixture-owner",
@@ -26633,7 +26648,7 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     }
     assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in parameters.items())
     script = f"""set -uo pipefail
-FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}
+FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); CATALOG_TIMEOUTS=(0); SIM_ON_CSV={shlex.quote(sim_on)}
 CHILD_MACHINE=(); i=0
 {assignments}
 export ENV_CAPTURE
