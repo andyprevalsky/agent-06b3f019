@@ -54,6 +54,19 @@ container and root Linux running the exact native preflight. Against the old
 dispatcher, the non-root case fails with "ran the fixture natively". The
 fixture's assertions are unchanged.
 
+### Reconciled with main's parallel fix
+
+`main` fixed the same `NameError` separately in `94a32110c`. It imported
+`pytest` into the extracted cache-parent control and printed `SKIP` when the
+control called `pytest.skip`. After merging `main`, the 4cb gate failed in the
+container with `ModuleNotFoundError: No module named 'pytest'`, because the
+offline controller image deliberately has no pytest. A native non-root run
+also skipped all three permission states and still printed `PASS`. The merge
+keeps the container dispatch. The extraction now runs without pytest and
+exits with `FAIL` unless it runs as root on Linux. Through the runner, all three
+states execute in the container. A direct non-root run now fails and names the
+runner.
+
 ## Human feedback
 
 None recorded.

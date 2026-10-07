@@ -43,7 +43,9 @@ print('PASS: native cohort owner, wrong parent/publisher ticks and legacy birth 
 PY_COHORT_OWNER
 
 # Reuse the permanent cache-parent permission controls in this root Linux
-# namespace; derive their cases from the actual pytest decorator.
+# namespace; derive their cases from the actual pytest decorator. Non-root
+# hosts reach this fixture through the root controller container, so a skip
+# here would only hide the permission control.
 python3 - "$ROOT" <<'PY_CACHE_PARENT'
 import ast
 import os
@@ -53,7 +55,9 @@ import subprocess
 import sys
 import tempfile
 
-import pytest
+if sys.platform != 'linux' or os.geteuid() != 0:
+    sys.exit('FAIL: native cache-parent controls need root Linux; '
+             'run scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown')
 
 root = Path(sys.argv[1])
 source = root / 'agents/benchmarks/cloudbench_dependency_sync_test.py'
@@ -64,7 +68,7 @@ parameter = function.decorator_list[0]
 assert ast.literal_eval(parameter.args[0]) == 'parent_state'
 cases = ast.literal_eval(parameter.args[1])
 function.decorator_list = []
-namespace = {'os': os, 'sys': sys, 'subprocess': subprocess, 'pytest': pytest,
+namespace = {'os': os, 'sys': sys, 'subprocess': subprocess,
              'DRIVER_SCRIPT': root / 'scripts/cloudbench-run.sh'}
 exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
 for state in cases:
@@ -73,8 +77,6 @@ for state in cases:
     scope = Path(tempfile.mkdtemp(prefix='rose-cache-parent-'))
     try:
         namespace[name](scope, state)
-    except pytest.skip.Exception as skipped:
-        print(f'SKIP: native cache parent {state}: {skipped}')
     finally:
         shutil.rmtree(scope)
 print('PASS: native checkout cache parent permissions in all permanent states')
