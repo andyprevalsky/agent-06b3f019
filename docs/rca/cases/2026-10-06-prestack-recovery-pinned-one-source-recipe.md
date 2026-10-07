@@ -159,7 +159,20 @@ existing table, preserving all prior entries, validators and inverse controls.
 This is source qualification, not acceptance credit or a replacement for
 original resource receipts. The original failed aggregate gate remains
 preserved; its failed scopes require requalification after registration and
-host-space recovery. Status remains mitigated.
+host-space recovery. The identical positive command passes after the committed
+registration; the full bootstrap family passes all 25 methods. Status remains
+mitigated.
+
+Parallel failed-scope requalification exposed a separate fixture race: the
+bootstrap inverse temporarily changed the real adjacent provenance executable,
+so another forensic fixture rejected those transient bytes. Its original
+15-method run and error are preserved. The existing negative fixture now loads
+byte-identical owning recovery code beside a mutated provenance helper inside
+its own temporary directory. Its rejection assertion remains unchanged.
+A compact owning control forbids writing the shared executable while exercising
+that same inverse: it fails before isolation and passes afterward with the
+control AST and command unchanged. Production validator bytes are untouched.
+Independent review and parallel failed-scope requalification remain pending.
 
 ### October 7 review recurrence: direct native input closure
 

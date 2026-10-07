@@ -552,20 +552,33 @@ class BootstrapRecoveryTest(unittest.TestCase):
         self.assertFalse((out / "guest-bootstrap.confirmed").exists())
 
     def test_adjacent_provenance_validator_must_match_the_bound_ref(self):
-        helper = ROOT / "cloudbench_execution_provenance.py"
-        original = helper.read_bytes()
-        try:
-            helper.write_bytes(original + b"\n# mismatched local validator\n")
-            with self.assertRaisesRegex(
-                ValueError, "local provenance validator differs"
-            ):
-                recovery.bound_recipe(
-                    recovery.fields(self.registry / "meta"),
-                    self.config,
-                    self.provenance,
-                )
-        finally:
-            helper.write_bytes(original)
+        isolated = self.base / "adjacent-validator"
+        isolated.mkdir()
+        owner = isolated / "cloudbench-prestack-recovery.py"
+        owner.write_bytes((ROOT / owner.name).read_bytes())
+        helper = isolated / "cloudbench_execution_provenance.py"
+        helper.write_bytes(
+            (ROOT / helper.name).read_bytes() + b"\n# mismatched local validator\n"
+        )
+        spec = importlib.util.spec_from_file_location("isolated_recovery_inverse", owner)
+        assert spec and spec.loader
+        isolated_recovery = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(isolated_recovery)
+        with self.assertRaisesRegex(ValueError, "local provenance validator differs"):
+            isolated_recovery.bound_recipe(
+                recovery.fields(self.registry / "meta"), self.config, self.provenance
+            )
+
+    def test_adjacent_provenance_inverse_preserves_shared_source(self):
+        shared = (ROOT / "cloudbench_execution_provenance.py").resolve()
+        original_write = Path.write_bytes
+
+        def isolated_write(path, data):
+            self.assertNotEqual(path.resolve(), shared, "inverse fixture writes shared source")
+            return original_write(path, data)
+
+        with patch.object(Path, "write_bytes", isolated_write):
+            self.test_adjacent_provenance_validator_must_match_the_bound_ref()
 
     def test_absent_packed_provenance_document_is_explicit(self):
         mutant = copy.deepcopy(self.config)

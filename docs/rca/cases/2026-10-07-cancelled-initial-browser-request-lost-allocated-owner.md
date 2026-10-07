@@ -161,8 +161,10 @@ The unchanged command is
 `bash scripts/tests/publish_evidence_links_browser_validation.test.sh`.
 Immutable RED/GREEN logs and source/test hashes are retained privately under
 `.context/registry-checkpoint-deploy.private/review2-publisher-shape-repair.private/`.
-Independent review is pending; these checks make no provider calls and grant no
-credit to the original run. This case remains open.
+Independent review verified the frozen source, control and RED/GREEN hashes,
+then reran the unchanged publisher command successfully in 1.012 seconds.
+These checks make no provider calls and grant no credit to the original run.
+This case remains open.
 
 The local golden repositories support explicit shape checks, rather than a
 Rose-specific cancellation contract: Hermes `_read_json` in
