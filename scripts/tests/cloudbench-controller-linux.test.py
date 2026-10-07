@@ -377,8 +377,8 @@ class ContainerOwnership(unittest.TestCase):
         )
         self.assertIn(probe, source)
         self.assertIn(skip, source)
-        self.assertLess(source.index(probe), source.index("\nimport pytest"))
-        self.assertLess(source.index("\nimport pytest"), source.index(skip))
+        self.assertLess(source.index(probe), source.index(skip))
+        self.assertNotIn("\nimport pytest", source)
 
     def test_linux_unpinned_host_uses_offline_controller_image(self):
         self.assertEqual(
