@@ -472,7 +472,11 @@ if $DB_FOUND; then
   # Every blackbox/unit child creates its own Prisma pool. Bound each pool so
   # the prescribed parallel coverage workers cannot exceed Postgres's shared
   # max_connections ceiling before the test assertions even run.
-  TEST_DB_CONNECTION_LIMIT="${BACKEND_TEST_DB_CONNECTION_LIMIT:-4}"
+  # Default 16 (was 4): concurrency 3–4 domains share one backend pool, and a
+  # 4-slot pool timed out data-google-sources grep while data-real-user and
+  # download-telemetry were still holding connections. Isolated concurrency=1
+  # passed in ~5s; system max_connections is 300.
+  TEST_DB_CONNECTION_LIMIT="${BACKEND_TEST_DB_CONNECTION_LIMIT:-16}"
   if ! [[ "$TEST_DB_CONNECTION_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
     echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
     exit 1

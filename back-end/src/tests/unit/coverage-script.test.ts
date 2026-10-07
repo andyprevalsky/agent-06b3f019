@@ -401,7 +401,7 @@ assert.match(
 );
 assert.match(
   coverageScript,
-  /BACKEND_TEST_DB_CONNECTION_LIMIT:-4[\s\S]*connection_limit=\$TEST_DB_CONNECTION_LIMIT&pool_timeout=30/,
+  /BACKEND_TEST_DB_CONNECTION_LIMIT:-16[\s\S]*connection_limit=\$TEST_DB_CONNECTION_LIMIT&pool_timeout=30/,
   'parallel coverage children must use bounded Prisma pools'
 );
 assert.ok(
