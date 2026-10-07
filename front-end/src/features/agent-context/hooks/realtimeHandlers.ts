@@ -110,6 +110,30 @@ export function handleInsertMessage(
   setters.dispatchMessage(message);
 }
 
+const TERMINAL_CHAT_RESTORE_STATUSES = new Set([
+  'COMPLETED',
+  'FAILED',
+  'OUT_OF_CREDITS',
+  'COST_LIMIT_REACHED',
+]);
+
+export function shouldRestoreChatMode(updated: UpdateAgentPayload): boolean {
+  if (updated.status !== undefined && TERMINAL_CHAT_RESTORE_STATUSES.has(updated.status)) {
+    return true;
+  }
+  return updated.temporalWorkflowId !== undefined && !updated.temporalWorkflowId;
+}
+
+export function isChatCapableAgent(agent: {
+  status?: string;
+  temporal_workflow_id?: string | null;
+}): boolean {
+  if (agent.status !== undefined && TERMINAL_CHAT_RESTORE_STATUSES.has(agent.status)) {
+    return true;
+  }
+  return !agent.temporal_workflow_id;
+}
+
 export function handleUpdateAgent(
   updated: UpdateAgentPayload,
   setAgent: RealtimeSetters['setAgent'],
@@ -148,7 +172,9 @@ export function handleUpdateAgent(
     };
   });
 
-  if (updated.temporalWorkflowId !== undefined) {
+  if (shouldRestoreChatMode(updated)) {
+    setIsChatMode(true);
+  } else if (updated.temporalWorkflowId !== undefined) {
     setIsChatMode(!updated.temporalWorkflowId);
   }
 
