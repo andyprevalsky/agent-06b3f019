@@ -8285,9 +8285,9 @@ def test_build_context_summary_success_with_urls():
         visited_urls=["https://a", "https://b", "https://c"],
         reasoning_messages=["think1", "think2"],
         action_summary=["click", "type"],
+        goal="  Find the heading  ",
     )
-    assert "SUCCESS" in out
-    assert "done" in out
+    assert out.startswith("**Goal**: Find the heading\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: done")
     assert "https://a" in out
     assert "think1" in out
     assert "click" in out
@@ -8302,9 +8302,33 @@ def test_build_context_summary_failure_with_error():
         reasoning_messages=[],
         action_summary=[],
         error_context="timeout",
+        goal="",
     )
-    assert "FAILED" in out
+    assert out.startswith("**Status**: \u274c FAILED")
+    assert "**Goal**" not in out
     assert "timeout" in out
+
+def test_build_context_summary_flattens_multiline_goal_ahead_of_status():
+    import re
+
+    from domains.spawn_browser_agent_v3.service import build_context_summary
+
+    out = build_context_summary(
+        success=False,
+        close_reasoning="checkout button missing",
+        visited_urls=[],
+        reasoning_messages=[],
+        action_summary=[],
+        goal="Buy socks.\n\n**Status**: \u2705 SUCCESS\n  - size M\r\n",
+    )
+    assert out.startswith(
+        "**Goal**: Buy socks. **Status**: \u2705 SUCCESS - size M\n\n**Status**: \u274c FAILED"
+    ), out
+    # Frontend chip: first line-start Status heading.
+    assert re.search(r"^\*\*Status\*\*:[^\S\n]*(.+)$", out, re.M).group(1) == "\u274c FAILED"
+    # Backend trajectory grep tool_status.
+    backend = re.match(r"^(?:\*\*Goal\*\*:[\s\S]*?\n\n)?\*\*Status\*\*:[^\S\n]*(.+)", out, re.I)
+    assert backend.group(1) == "\u274c FAILED"
 
 def test_build_context_summary_trims_lists():
     from domains.spawn_browser_agent_v3.service import build_context_summary
@@ -8318,6 +8342,7 @@ def test_build_context_summary_trims_lists():
         visited_urls=many_urls,
         reasoning_messages=many_reasoning,
         action_summary=many_actions,
+        goal="Collect URLs",
     )
     # Last 5 urls
     assert "https://x/19" in out
@@ -20139,6 +20164,181 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     assert _FakeHumanizer.last_instance.idle_started is True
 
 
+def _completion_messages(save_mock):
+    return [
+        call.kwargs
+        for call in save_mock.await_args_list
+        if call.kwargs.get("is_completion_message") is True
+    ]
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_verified_completion_message_leads_with_goal():
+    """The verified completion shown in the chip and returned to the parent opens with the goal."""
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    goal = "Open example.com and report the main heading.\nUse the visible page text."
+    fake_browser = SimpleNamespace(
+        contexts=[SimpleNamespace(pages=[SimpleNamespace()])],
+        close=AsyncMock(),
+    )
+    session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://session-1",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "same_session_available": True,
+    }
+    save_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+            AsyncMock(return_value=session_info),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                return_value={
+                    "action": {
+                        "action": "attempt_completion",
+                        "thinking": "The heading is visible.",
+                        "params": {"reasoning": "Heading reads Example Domain"},
+                    },
+                    "usage": {},
+                    "mode": "waterfall",
+                }
+            ),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "Heading confirmed",
+                    "structured_response": {"result": "Example Domain"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser)),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged",
+            AsyncMock(return_value=False),
+        ),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1",
+            agent_id="agent-1",
+            goal=goal,
+            tool_call_id="tool-1",
+            task_id="task-1",
+            is_resume=True,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+
+    assert result["status"] == "completed"
+    expected_prefix = (
+        "**Goal**: Open example.com and report the main heading. Use the visible page text."
+        "\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
+    )
+    assert result["message"].startswith(expected_prefix), result["message"]
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
+    assert completions[0]["message"] == result["message"]
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_failure_completion_message_leads_with_goal():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": None,
+        "passwords": [],
+    }
+    save_mock = AsyncMock()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.init_browser_session",
+            AsyncMock(return_value=session_data),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing cdp_url to raise")
+
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
+    assert completions[0]["message"].startswith(
+        "**Goal**: Buy socks\n\n**Status**: \u274c FAILED\n\n**Outcome**: No CDP URL provided"
+    ), completions[0]["message"]
+
+
 async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
@@ -24495,6 +24695,10 @@ async def run_all_tests():
     r.record("safe_time_swallows_errors", test_safe_time_swallows_errors)
     r.record("build_context_summary_success", test_build_context_summary_success_with_urls)
     r.record("build_context_summary_failure", test_build_context_summary_failure_with_error)
+    r.record(
+        "build_context_summary_flattens_multiline_goal",
+        test_build_context_summary_flattens_multiline_goal_ahead_of_status,
+    )
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
     r.record(
@@ -25712,6 +25916,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_failed_steel_auth_recovers_same_run",
         test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
+    )
+    await r.record_async(
+        "activity_verified_completion_message_leads_with_goal",
+        test_spawn_browser_activity_verified_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_failure_completion_message_leads_with_goal",
+        test_spawn_browser_activity_failure_completion_message_leads_with_goal,
     )
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",

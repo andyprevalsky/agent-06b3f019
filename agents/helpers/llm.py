@@ -4282,6 +4282,46 @@ def _content_from_structured_rose_response(
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
+class VerifierNoJSONContent(ValueError):
+    """The verifier stream ended without a JSON verdict.
+
+    ``provider_error`` is the RoseError that ended the stream, when there was one.
+    It is deliberately not chained as ``__cause__``: ``extract_error_message``
+    follows causes, which would change the agent-loop verifier reasoning text.
+    """
+
+    def __init__(self, message: str, *, provider_error: Optional[RoseError] = None) -> None:
+        super().__init__(message)
+        self.provider_error = provider_error
+
+
+def _verifier_judge_error(error: BaseException) -> Dict[str, Any]:
+    """Structured cause for a check_progress call that produced no verdict."""
+    judge_error: Dict[str, Any] = {"type": type(error).__name__, "message": extract_error_message(error)}
+    provider_error: Optional[BaseException] = None
+    current: Optional[BaseException] = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and provider_error is None:
+        seen.add(id(current))
+        provider_error = current if isinstance(current, RoseError) else getattr(current, "provider_error", None)
+        current = current.__cause__
+    if provider_error is not None:
+        judge_error["provider"] = {
+            "type": type(provider_error).__name__,
+            "message": str(provider_error),
+            "status": getattr(provider_error, "status", None),
+            "steps": [
+                {
+                    "model": step.model,
+                    "type": type(step.error).__name__,
+                    "status": getattr(step.error, "status", None),
+                }
+                for step in getattr(provider_error, "step_errors", None) or []
+            ],
+        }
+    return judge_error
+
+
 async def _call_llm_verifier(
     messages: List[Dict[str, Any]],
     model: str,
@@ -4343,6 +4383,7 @@ async def _call_llm_verifier(
     tool_use_blocks: List[Dict[str, Any]] = []
     chunk_count = 0
     stream_usage: Optional[Dict[str, Any]] = None
+    provider_error: Optional[RoseError] = None
 
     verifier_request_id = current_request_id() or str(uuid.uuid4())[:8]
     rose_client = RoseClient()
@@ -4474,6 +4515,7 @@ async def _call_llm_verifier(
             elif kind == "done":
                 pass
     except RoseError as e:
+        provider_error = e
         logger.warning(
             f"Verifier RoseClient error after {chunk_count} chunks, "
             f"accumulated json={len(accumulated_json)} chars, reasoning={len(accumulated_reasoning)} chars: {e}"
@@ -4516,7 +4558,10 @@ async def _call_llm_verifier(
             logger.info("📦 Extracted JSON from reasoning (thinking model)")
 
     if not json_content:
-        raise ValueError(f"No JSON content received (chunks={chunk_count}, model={actual_model})")
+        raise VerifierNoJSONContent(
+            f"No JSON content received (chunks={chunk_count}, model={actual_model})",
+            provider_error=provider_error,
+        )
 
     parsed_json = json.loads(json_content)
     parsed_json = _fill_missing_verifier_output_from_messages(
@@ -5657,6 +5702,12 @@ async def check_progress(
         - ``structured_response`` (dict | None): always returned as
             ``result["output"]`` regardless of score — callers decide what
             to do with partial output (C2).
+        - ``verdict_available`` / ``judge_error``: only on the error path,
+            where no judge verdict was produced and ``score`` is the 0.5
+            keep-running placeholder. ``verdict_available`` is ``False`` and
+            ``judge_error`` holds the exception type, message and provider
+            failure (``provider.type/status/steps``). Harness judges must not
+            score this placeholder as a verdict.
     """
     # Fast Mode: set the cache context so the verifier's Rose call (via
     # _call_llm_verifier → cached_complete) records/replays by canonical request
@@ -6053,6 +6104,8 @@ async def check_progress(
                 "gpt_token_error": None,
             },
             "structured_response": None,
+            "verdict_available": False,
+            "judge_error": _verifier_judge_error(e),
         }
 
 

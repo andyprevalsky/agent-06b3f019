@@ -2414,6 +2414,9 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
     assert result["world_model_simulated"] is True
     assert result["simulated_browser_steps"] == 6
     assert result["structured_response"]["order_id"] == "111-2222222-3333333"
+    assert result["message"].startswith(
+        "**Goal**: Complete the Amazon order\n\n**Status**: \u2705 SUCCESS"
+    ), result["message"]
     assert len(world_model.session_tasks) == 1
     session_task, session_seed = world_model.session_tasks[0]
     assert session_task == "Complete the Amazon order"
