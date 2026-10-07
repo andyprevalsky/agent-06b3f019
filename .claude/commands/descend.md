@@ -1,5 +1,5 @@
 ---
-description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel on the cloud fleet by default, freeze a min-heap of failing tasks by fix complexity, pipeline approve → cloud-fleet outcome-proof rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches on the cloud fleet by default, triage every failure and cluster the failures that share one root cause, RCA each cluster once in parallel, rank clusters by tasks flipped, pipeline approve → cloud-fleet outcome-proof rerun of every member task, and async-deploy confirmed fixes with a second stop only for required admin approval."
 argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
@@ -71,28 +71,35 @@ Downstream Implications sections.
    benchmark rerun, and every deploy-unit handoff. Do not start the next action
    until the main merge, conflict resolution, local DB resync, and affected
    regression gates are complete.
-9. **Pin one issue cluster per row.** Classify at the proven first-bad boundary
-   using the taxonomy below. If two independent clusters caused one task
-   failure, split them into separate lifecycle rows. Never use a downstream
-   symptom such as “timeout” when the RCA proves a deeper cluster.
+9. **One root-cause cluster per row, one issue class per cluster.** A cluster
+   is the set of failed tasks that one fix at one proven first-bad boundary is
+   expected to flip. Classify each cluster at that boundary using the taxonomy
+   below. If two independent root causes caused one task failure, that task
+   belongs to both clusters, as separate lifecycle rows. Never use a downstream
+   symptom such as “timeout” to name a class or to group tasks when the
+   evidence shows a deeper boundary.
 10. **Time every state and parallel lane.** Use `scripts/descend_step_log.py`
     at every state boundary. Completed timings go to the tracked
     `agents/benchmarks/history/descend_steps.jsonl` ledger; `.context` holds
     only active clocks. A state transition is incomplete if its timing command
     did not succeed.
-11. **RCA before benchmark rerun.** Every failed task must enter its own `/RCA`
-    cycle before any benchmark rerun. Gather the runtime evidence, identify the
-    first-bad boundary, run the unchanged owning-boundary repro red then green,
-    and cement it first. A HARNESS fix must then have Andy's fix approval before
-    the exact post-fix benchmark rerun; an INFRA fix does not require approval.
-    That exact rerun supplies `/RCA`'s benchmark outcome proof and is what moves
-    the RCA from Causal proof; outcome pending to Complete. After the first
-    infra-clean run with causal RCA for every failing task, freeze a min-heap
-    over those tasks and pipeline the rest: do not wait for one task's
-    approve → outcome-proof rerun cycle to finish before asking about the next
-    idle task. On approve, immediately apply the fix on a local code snapshot
-    and rerun that task on the cloud fleet (default); immediately ask about the
-    next idle heap item.
+11. **Triage every failure, then RCA each cluster once, before any benchmark
+    rerun.** Every failed task gets its own read-only triage card. The cards
+    are grouped into root-cause clusters, and every cluster — a singleton
+    included — enters its own `/RCA` cycle on its exemplar task: gather the
+    runtime evidence, identify the first-bad boundary, run the unchanged
+    owning-boundary repro red then green, and cement it first. No failed task
+    may be rerun until a cluster RCA with causal proof covers it. A HARNESS fix
+    must then have Andy's fix approval before the exact post-fix benchmark
+    rerun; an INFRA fix does not require approval. That exact rerun supplies
+    `/RCA`'s benchmark outcome proof for each member task, and the RCA moves
+    from Causal proof; outcome pending to Complete only when every member has
+    it. After the first infra-clean run with causal RCA for every cluster, rank
+    the clusters and pipeline the rest: do not wait for one cluster's approve →
+    outcome-proof rerun cycle to finish before asking about the next idle
+    cluster. On approve, immediately apply the fix on a local code snapshot and
+    rerun that cluster's member tasks on the cloud fleet (default); immediately
+    ask about the next idle cluster.
 12. **Approval format is the ONLY response format — no exceptions.** Every
     response emitted while `/descend` is active MUST consist of exactly: the
     header block (including the approvals counter), the delta rows of the
@@ -111,14 +118,21 @@ Downstream Implications sections.
     Be as concise as possible without losing critical information: preserve the
     measurement, the wrong value, the expected value, and the file link; cut
     everything else. Never pad.
+13. **One pass does not confirm a fix for a task that already passes
+    sometimes.** Size every outcome proof with
+    `scripts/descend_outcome_runs.py` and require every run it asks for to
+    pass. Never report Confirmed from fewer runs, and never rerun a failed
+    proof to look for a pass.
 
-## Issue clusters
+## Issue classes
 
-Every lifecycle row has exactly one `issue_cluster`, rendered verbatim in the
-Cluster column. This is the user-facing core claim; the deeper RCA problem
-bucket may remain more technical.
+Every lifecycle row has exactly one `issue_class`, rendered verbatim in the
+Class column. This is the user-facing core claim; the deeper RCA problem
+bucket may remain more technical. A class says what kind of failure a cluster
+is; it never decides membership. Two tasks with the same class share a cluster
+only when the same fix flips both.
 
-| Issue cluster                    | Use when the proven first-bad boundary is…                                                                                                                                                                     |
+| Issue class                      | Use when the proven first-bad boundary is…                                                                                                                                                                     |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Faulty Evaluator**             | Evaluator code, checks, criteria, rubric, or verifier-scoring instructions disagree with the authoritative task contract—including task-versus-evaluator conflicts—or accept an outcome that contract forbids. |
 | **Prompting Inconsistency**      | Two instructions governing the acting agent before evaluation—task, system/tool prompt, or tool/response schema—contradict each other. Evaluator-only scoring conflicts are excluded.                          |
@@ -133,7 +147,7 @@ bucket may remain more technical.
 | **External Blocker**             | A third-party outage, policy block, CAPTCHA, or rate limit prevents completion after owned recovery behavior works correctly.                                                                                  |
 | **Infrastructure Failure**       | Fleet, queue, port, build, credential plumbing, teardown, or control-plane behavior prevents a trustworthy verdict.                                                                                            |
 | **Observability Gap**            | Required evidence is not captured, so no deeper completed classification is yet supportable.                                                                                                                   |
-| **Other**                        | None fits after proof; name the proposed new reusable cluster in the RCA so this taxonomy can be extended.                                                                                                     |
+| **Other**                        | None fits after proof; name the proposed new reusable class in the RCA so this taxonomy can be extended.                                                                                                       |
 
 Boundary rules resolve overlaps: every evaluator-side disagreement with the
 authoritative task—including criteria later injected into a verifier prompt—is
@@ -145,18 +159,18 @@ delivers valid input but owned application state changes incorrectly, use
 Product Defect. Do not call an owned broken recovery path an External Blocker
 merely because a third party triggered it.
 
-Map the deeper `/rca` problem buckets into the one-glance clusters as follows:
+Map the deeper `/rca` problem buckets into the one-glance classes as follows:
 
-| `/rca` problem bucket                              | `/descend` issue cluster                                                                                                                                                                                           |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Timeout too aggressive                             | Resource/Performance Failure                                                                                                                                                                                       |
-| Logical inconsistency in harness prompts/contracts | Faulty Evaluator for every evaluator-versus-task scoring conflict; Prompting Inconsistency only for contradictory instructions governing the acting agent before evaluation                                        |
-| Uncaptured user preference/spec                    | Underspecified Task                                                                                                                                                                                                |
-| New tool/capability required                       | Lacking Tool                                                                                                                                                                                                       |
-| Concurrency inefficiency                           | Resource/Performance Failure                                                                                                                                                                                       |
-| Fixture/environment/data mismatch                  | Fixture/Data Mismatch, or Infrastructure Failure when no trustworthy task verdict exists                                                                                                                           |
-| Observability/trace capture gap                    | Observability Gap                                                                                                                                                                                                  |
-| Other                                              | Reclassify from the proven first-bad boundary, normally Product Defect, Broken Tool, Agent Reasoning Failure, External Blocker, or Infrastructure Failure; retain Other only when proposing a new reusable cluster |
+| `/rca` problem bucket                              | `/descend` issue class                                                                                                                                                                                           |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Timeout too aggressive                             | Resource/Performance Failure                                                                                                                                                                                     |
+| Logical inconsistency in harness prompts/contracts | Faulty Evaluator for every evaluator-versus-task scoring conflict; Prompting Inconsistency only for contradictory instructions governing the acting agent before evaluation                                      |
+| Uncaptured user preference/spec                    | Underspecified Task                                                                                                                                                                                              |
+| New tool/capability required                       | Lacking Tool                                                                                                                                                                                                     |
+| Concurrency inefficiency                           | Resource/Performance Failure                                                                                                                                                                                     |
+| Fixture/environment/data mismatch                  | Fixture/Data Mismatch, or Infrastructure Failure when no trustworthy task verdict exists                                                                                                                         |
+| Observability/trace capture gap                    | Observability Gap                                                                                                                                                                                                |
+| Other                                              | Reclassify from the proven first-bad boundary, normally Product Defect, Broken Tool, Agent Reasoning Failure, External Blocker, or Infrastructure Failure; retain Other only when proposing a new reusable class |
 
 ## Resolve the slice
 
@@ -200,6 +214,10 @@ not restrict this ordinary fleet; do not substitute smaller slices.
 The ordinary CLI automatically reuses verified completed dependency snapshots
 across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
+
+Cold-image builds, image activation, and the recorded mass-demo cached run are
+explicitly requested diagnostics, never a step of an ordinary descent. The current
+user-requested five LIVE trials explicitly require their fresh uncached image.
 
 For an explicitly requested cold-image or cached startup diagnostic, follow
 CLAUDE.md's CLI commands and `/benchmark` guidance through the same entrypoint.
@@ -330,8 +348,11 @@ transition. It must contain:
 - controller PID, dashboard, run artifact, agent IDs, and FE links;
 - current state and epoch;
 - actual benchmark started_at, finished_at, and duration;
-- one lifecycle record per issue/fix;
-- the exact issue_cluster for every lifecycle record;
+- one triage card per failed task per epoch, and the cluster each card joined;
+- one lifecycle record per cluster (issue/fix), with its exemplar task, member
+  tasks, each member's boundary evidence, required runs and outcome-proof
+  result, and every split or merge;
+- the exact issue_class for every lifecycle record;
 - infra RCA ledger across all epochs;
 - `/sync` checkpoint timestamp, pre/post base SHA, origin/main SHA, DB-resync
   result, conflicts resolved, and affected regression gates;
@@ -339,9 +360,9 @@ transition. It must contain:
 - deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status;
 - active timing lanes, their current steps, and the last completed timing
   record ID;
-- the frozen min-heap: each failing task's immutable rank, complexity class,
-  issue cluster, and row ID;
-- each heap task's pipeline state: idle | applying | outcome-rerunning | rca.
+- the cluster queue: each cluster's current rank, member-task count,
+  complexity class, issue class, and row ID;
+- each cluster's pipeline state: idle | applying | outcome-rerunning | rca.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
@@ -453,7 +474,8 @@ benchmark. After that, checkpoint at these boundaries:
 One checkpoint may satisfy adjacent boundaries only when no commit, working-tree
 change, or origin/main advance occurred between them. For parallel RCAs, sync
 each isolated worktree immediately before its worker starts; a controller sync
-does not substitute for workers on a different base SHA.
+does not substitute for workers on a different base SHA. Triage workers only
+read evidence and need no checkpoint of their own.
 
 Before syncing a dirty controller workspace, persist `state.json` and preserve
 all in-progress work reversibly. Never discard it to make the merge succeed.
@@ -471,14 +493,22 @@ RESOLVE_SLICE
       ├─ INFRA found → SYNC_CHECKPOINT_PER_RCA → RCA_INFRA_FIX
       │                   → VERIFY_LOCAL → SYNC_CHECKPOINT → RUN_SLICE
       │                   └─ real rerun confirms fix → ENQUEUE_DEPLOY_UNIT ─┐
-      └─ infra-clean → SYNC_CHECKPOINT_PER_RCA                        │
-                           → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL
-                           → RANK_HEAP (freeze 1..N once)                   │
-                           → PIPELINE_HEAP                                  │
-                                ├─ ask min idle → HARNESS_FIX_DECISION [STOP 1]
-                                ├─ approve → APPLY_AND_CLOUD_RERUN (sub-agent)
-                                │    ├─ pass → ENQUEUE_DEPLOY_UNIT ─────────┤
-                                │    └─ fail → /rca again, reinsert at rank │
+      └─ infra-clean → TRIAGE_FAILURES (one read-only card per failed task) │
+                           → CLUSTER_FAILURES (group by shared fix)         │
+                           → SYNC_CHECKPOINT_PER_RCA                        │
+                           → RCA_HARNESS_FAILURES_IN_PARALLEL (per cluster) │
+                           → VERIFY_LOCAL                                   │
+                           → RANK_CLUSTERS (most member tasks first)        │
+                           → PIPELINE_CLUSTERS                              │
+                                ├─ ask top idle → HARNESS_FIX_DECISION [STOP 1]
+                                ├─ approve → APPLY_AND_CLOUD_RERUN (sub-agent:
+                                │            every member task + canaries)  │
+                                │    ├─ all pass → ENQUEUE_DEPLOY_UNIT ─────┤
+                                │    ├─ exemplar passes, sibling fails →    │
+                                │    │    split it out → TRIAGE_FAILURES;   │
+                                │    │    confirmed tasks → ENQUEUE_DEPLOY_UNIT
+                                │    └─ exemplar or canary fails → /rca     │
+                                │         again, same position              │
                                 └─ immediately ask next idle ───────────────┘
 
 MAIN:   continue every independent RCA, cloud-fleet outcome-proof, and deploy
@@ -566,72 +596,148 @@ infra-dirty run. A newly discovered infra failure begins another infra epoch.
 Once a real rerun confirms an infra fix, its deploy unit may start in parallel
 with the remaining descent.
 
+## Triage and clustering
+
+Only after an infra-clean run. Triage is cheap and read-only. It exists so
+that ten failures with three root causes cost three RCAs, three approvals, and
+three fixes instead of ten.
+
+### TRIAGE_FAILURES — one card per failed task
+
+Start one read-only triage worker per failed task, all in parallel. A triage
+worker runs `/rca` Step 0 and Step 0.5 for its task — run artifacts,
+worker/backend logs, agent_latency.py, agent_logs.py, DB, relevant HTTP
+evidence, then the archive search — and stops. It writes no repro, no fix, and
+no code. With exactly one failed task, skip the separate worker: its RCA worker
+writes the card as its first step.
+
+Each worker saves `.context/descend/<run-id>/triage/<epoch>/<task>.json` with:
+
+- `task`, `agent_ids`, the verified FE link, and the run artifact path;
+- `failed_evaluator`: the evaluator ID and its verbatim failure output;
+- `terminal_status`: the agent's terminal status, plus the last tool call and
+  its result;
+- `first_bad_boundary`: the owning component and one sentence saying what
+  first went wrong there;
+- `boundary_evidence`: the exact log line, span, message ID, or DB row that
+  shows it, marked `observed` or `inferred`. `observed` means this task's own
+  evidence shows that boundary going wrong. A guess from the symptom, from
+  another task's card, or from reading code is `inferred`;
+- `archive_hits`: matching `docs/rca/cases` IDs with each case's status, or
+  `none`;
+- `prior_outcomes`: the line `python3 scripts/descend_outcome_runs.py <task>`
+  prints; and
+- `contrast`: when a passing trajectory of the same task is available — this
+  descent's runs first, then retained run records — the first step where the
+  failing trajectory diverges from it; otherwise `none`.
+
+A task whose `prior_outcomes` show passes fails only some of the time, so its
+`contrast` is usually the shortest path to its boundary: start the RCA from
+that divergence rather than from the final error.
+
+### CLUSTER_FAILURES — group by shared fix
+
+Two failed tasks belong to the same cluster only when **one fix at one
+first-bad boundary is expected to flip both**. Apply these rules in order:
+
+1. Cards with `observed` evidence of the same mechanism at the same component
+   form one cluster.
+2. A card with `observed` evidence at the `first_bad_boundary` of an open or
+   mitigated archive case joins the cluster for that case.
+3. Every other card is a singleton cluster. An `inferred` card never joins a
+   cluster with another task; its own RCA has to find the boundary first.
+
+Never cluster on a shared symptom: the same failure string, evaluator, terminal
+status, timeout, website, or issue class. A symptom says where a failure
+surfaced, not what to fix, and many unrelated root causes end as the same
+timeout.
+
+Give every cluster a stable row ID, a kebab-case name for its boundary and
+mechanism, its member tasks, and one **exemplar**: the member with `observed`
+evidence and the cheapest owning-boundary repro. Membership is a hypothesis
+until that member's own outcome-proof rerun passes.
+
+On a later epoch, triage only the tasks that newly failed. Add each new card to
+an existing cluster by the same rules before creating a new one.
+
 ## HARNESS RCA
 
-Only after an infra-clean run:
+Only after CLUSTER_FAILURES:
 
-1. Gather runtime evidence first: run artifacts, worker/backend logs,
-   agent_latency.py, agent_logs.py, DB, and relevant HTTP evidence.
-2. Run `/sync` immediately before every distinct `/RCA`, then run independent
-   HARNESS RCAs in parallel when file ownership does not conflict. Sync each
-   isolated RCA worktree before its worker starts. Group dependent failures
-   under one root-cause RCA.
-3. Produce the local failing repro.
-4. Implement the root-cause fix.
-5. Run the identical repro and observe it pass.
-6. Cement the repro.
-7. Update exactly one lifecycle row per issue/fix.
-8. Assign exactly one issue cluster from the pinned taxonomy and record the
-   exact, untruncated `task.prompt` for every HARNESS row.
+1. Run `/sync` immediately before every distinct `/RCA`, then run one `/RCA`
+   per cluster, in parallel when file ownership does not conflict. Sync each
+   isolated RCA worktree before its worker starts. Give the worker the
+   cluster's triage cards; it starts from the exemplar's evidence and does not
+   regather what the cards already hold.
+2. Produce the local failing repro at the exemplar's first-bad boundary.
+3. Implement the root-cause fix.
+4. Run the identical repro and observe it pass.
+5. Cement the repro.
+6. Check every other member's card against the boundary the repro proved. A
+   member whose own evidence does not show that boundary leaves the cluster
+   and is clustered again.
+7. Update exactly one lifecycle row per cluster.
+8. Assign exactly one issue class from the pinned taxonomy and record the
+   exact, untruncated `task.prompt` of the exemplar for every HARNESS row.
+9. Name every member task in the cluster's archive case, so the next descent's
+   triage search finds the cluster by task name.
 
 At this boundary the owning-boundary RCA is causally proven, but the benchmark
 RCA is not outcome-complete yet. Do not run the exact benchmark here and do not
-label the row Complete. After RANK_HEAP, enter HARNESS_FIX_DECISION for the
-min idle heap item with Causal proof; outcome pending. After approval, the
-exact unchanged local-snapshot benchmark rerun either supplies the missing
-outcome proof and completes the RCA or becomes new primary evidence that
-returns that task through `/rca` and reinserts it at its original frozen rank.
+label the row Complete. After RANK_CLUSTERS, enter HARNESS_FIX_DECISION for the
+top idle cluster with Causal proof; outcome pending. After approval, the exact
+unchanged local-snapshot benchmark rerun of every member either supplies the
+missing outcome proof and completes the RCA or becomes new primary evidence for
+the tasks that still fail.
 
 Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
-## Fix-complexity min-heap
+## Cluster queue
 
 Phase A stays fully parallel: run every resolved task, fix infra without
-stopping, and RCA every failing task. RANK_HEAP starts only when the latest
-run is infra-clean and every failing task has causal RCA proof.
+stopping, triage every failed task, and RCA every cluster. RANK_CLUSTERS starts
+only when the latest run is infra-clean and every cluster has causal RCA proof.
 
-The heap is per failing **task**, not per issue row. Sort set Y by the
-complexity of the current proven issue, easiest first, then freeze immutable
-ranks 1..N for the entire descent. A later RCA never re-ranks that task.
-Infra and External Blocker never enter this heap.
+The queue holds clusters, not tasks. Sort it by:
 
-| Rank | Class                     | Clusters                                                                       |
+1. member-task count, largest first, so the fix that flips the most tasks is
+   decided first;
+2. complexity class, easiest first, from the table below; then
+3. row ID.
+
+Infra and External Blocker never enter this queue.
+
+| Rank | Complexity class          | Issue classes                                                                  |
 | ---- | ------------------------- | ------------------------------------------------------------------------------ |
 | 1    | Evaluator / task contract | Faulty Evaluator, Underspecified Task                                          |
 | 2    | Fixture / data            | Fixture/Data Mismatch                                                          |
 | 3    | Product / tool            | Product Defect, Broken Tool, Lacking Tool, Context Drift                       |
 | 4    | Harness                   | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
 
-Same-rank ties break by task name, then row ID.
+Re-rank only when membership changes: a later epoch's clustering, a split, or a
+merge. Between those events the order is stable, and a cluster whose
+outcome-proof rerun fails keeps its position.
 
-A task is **idle** when it is not applying, outcome-rerunning, or in RCA. Ask
-Andy about `min{ idle tasks that need a fix decision }`. Andy sees a deeper
-bench only if every easier bench is applying, outcome-rerunning, or in RCA.
+A cluster is **idle** when it is not applying, outcome-rerunning, or in RCA.
+Ask Andy about the top idle cluster that needs a fix decision. Andy sees a
+lower-ranked cluster only if every cluster above it is applying,
+outcome-rerunning, or in RCA.
 
-Do not yank an in-flight ask if a higher-priority task becomes idle. After
-Andy answers, the next ask is the new min idle.
+Do not yank an in-flight ask if a higher-ranked cluster becomes idle. After
+Andy answers, the next ask is the new top idle cluster.
 
 ## Stop 1 — HARNESS_FIX_DECISION
 
-Enter RANK_HEAP, then the first HARNESS_FIX_DECISION, only when:
+Enter RANK_CLUSTERS, then the first HARNESS_FIX_DECISION, only when:
 
 - the latest benchmark run is infra-clean; and
-- every HARNESS failure has complete causal RCA proof (evidence, unchanged
-  owning-boundary repro red then green, and a cemented test); and
+- every HARNESS failure has complete causal RCA proof through its cluster
+  (evidence, unchanged owning-boundary repro red then green, and a cemented
+  test); and
 - all independent RCA workers have returned.
 
-After the heap is frozen, enter HARNESS_FIX_DECISION whenever the min idle
-heap item needs a fix decision.
+After the queue is ranked, enter HARNESS_FIX_DECISION whenever the top idle
+cluster needs a fix decision.
 Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
 incomplete, remain in RCA_HARNESS_FAILURES_IN_PARALLEL and keep gathering it
 autonomously until every RCA has the unchanged owning-boundary failing/passing
@@ -646,43 +752,95 @@ use Not required.
 
 - **approve:** set Approval to Fix approved. Immediately fire a sub-agent to
   apply the approved fix on a local code snapshot — not a prod deploy — and
-  rerun that exact bench on the **cloud fleet** via `scripts/run-bench <task>`
-  (no `--local` unless Andy explicitly directed local for this rerun).
-  Immediately ask about the next idle heap item. If the outcome-proof rerun
-  fails, the sub-agent reruns `/rca` and reinserts the task at its original
-  frozen rank.
+  rerun every member task of that cluster on the **cloud fleet** via
+  `scripts/run-bench <task> [<task>...]` (no `--local` unless Andy explicitly
+  directed local for this rerun). Immediately ask about the next idle cluster.
+  The sub-agent then follows "Reading the outcome proof" below.
 - **edit:** set Approval to Edit requested, apply the instruction, return the
   row through the identical owning-boundary verification gate, and ask again at
-  the same frozen rank.
+  the same position.
 - **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
-  fix. The task stays at its original rank and needs a new RCA for a
-  different approach.
+  fix. The cluster keeps its position and needs a new RCA for a different
+  approach.
 
 The harness-fix decision does not satisfy any later prompt or terminal-behavior
 admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-On each approve, immediately start that task's outcome-proof run on the **cloud
-fleet** (apply the fix in a local code snapshot / worktree, then
-`scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
-to batch approvals or rerun the whole failed subset first.
+On each approve, immediately start that cluster's outcome-proof run on the
+**cloud fleet** (apply the fix in a local code snapshot / worktree, then
+`scripts/run-bench <task> [<task>...]` — never `--local` unless Andy opted in).
+Do not wait to batch approvals or rerun the whole failed subset first.
 Run `/sync` before every subset or full-slice rerun. The final acceptance run
 covers the entire original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
-criteria identical to the failing run except for the exact approved fix. A pass
-moves RCA to Complete and Real rerun to Confirmed. A failure moves Real rerun to
-Failed, reruns `/rca`, and reinserts the task at its original frozen rank;
-never call the RCA complete from its owning-boundary proxy proof alone.
+criteria identical to the failing run except for the exact approved fix. Never
+call the RCA complete from its owning-boundary proxy proof alone.
+
+### What the outcome proof runs
+
+- **Every member task of the cluster**, the exemplar and each sibling. The RCA
+  and its repro were built on the exemplar, so the siblings are the held-out
+  check that the fix removes the root cause rather than fitting one trajectory.
+- **Up to three canaries:** tasks in the original slice whose latest accepted
+  result is a pass, that share a `deploy_category` or tag with a member, and
+  whose `scripts/descend_outcome_runs.py` line shows at least five `attempts`
+  with `passes` equal to `attempts`. Run none when no task qualifies. Canaries
+  are an executed subset; they never change the slice or its denominator.
+
+### How many runs each task needs
+
+```bash
+python3 scripts/descend_outcome_runs.py <member-task> [<member-task>...]
+```
+
+It reads each task's last ten recorded attempts from
+`agents/benchmarks/history/task_attempts.jsonl` and prints the passing runs
+that task's proof requires:
+
+| Passes in the recorded window | Required runs | Why                                                |
+| ----------------------------- | ------------- | -------------------------------------------------- |
+| None                          | 1             | The task never passes, so one pass is new behavior |
+| Fewer than half               | 3             | It already passes sometimes without the fix        |
+| Half or more                  | 5             | One pass is the likely result with no fix at all   |
+
+That ledger records runs made from a checkout, so this descent's cloud-fleet
+results are not in it: use at least 3 for a task this descent has itself seen
+pass on unfixed code. A canary needs 1. Launch the tasks that need one run
+together with `scripts/run-bench <tasks...>`, and each larger group with
+`scripts/run-bench <tasks...> -k K --concurrency N`. Every required run must
+pass. Do not rerun a failed proof to look for a pass, and do not lower a count
+because the rerun is slow or costly.
+
+### Reading the outcome proof
+
+Classify every non-pass as INFRA or HARNESS first. An INFRA result is neither a
+pass nor a failure of the fix: RCA it under the infra loop, then rerun only the
+runs it denied.
+
+- **Every member passes every required run and no canary fails:** set Real
+  rerun to Confirmed and RCA to Complete, then enqueue the deploy unit.
+- **The exemplar passes but a sibling fails:** the fix is real and the cluster
+  was too wide. Split the failing siblings out, confirm the row for the tasks
+  that passed, and enqueue its deploy unit. The split tasks return to
+  TRIAGE_FAILURES with their post-fix run as primary evidence.
+- **The exemplar fails a required run:** set Real rerun to Failed and rerun
+  `/rca` for the cluster from that run. The cluster keeps its position.
+- **A canary fails:** set Real rerun to Failed and name the regressed task in
+  the Issue cell. The fix does not deploy until that failure is root-caused
+  from the canary's run. If its RCA proves a cause independent of the fix, the
+  canary becomes its own cluster and the original row is Confirmed.
 
 A fix earns deployment only after:
 
 - its local RCA repro passes unchanged;
 - its test is cemented;
 - Andy accepted it when it is a HARNESS fix; and
-- a real benchmark rerun confirms the affected task or infra boundary.
+- a real benchmark rerun confirms the affected member tasks or infra boundary,
+  with every required run passing and no canary failing.
 
 Create one deploy unit per independent fix, or the smallest group of fixes that
 must ship together. Run `/sync`, then record base_sha and exact fix_commits.
@@ -735,7 +893,7 @@ do not turn them into ad hoc prioritization questions.
 Every /descend response uses real rendered Markdown. Never put the header,
 lifecycle table, or approval content in a code block. Do not include an ASCII
 banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
-overall-slice header count. Emit exactly one table row per issue/fix, including
+overall-slice header count. Emit exactly one table row per cluster, including
 the full infra ledger and current HARNESS fixes.
 
 **This contract is exhaustive, not a minimum (Hard rule 12).** A response
@@ -805,8 +963,8 @@ Bench run: **Started Jul 20, 2026 · 10:14:22 PDT** · **18m 42s elapsed**
 Sort by:
 
 1. Rows with ⏳ Deploy approval first, ordered by row ID.
-2. Rows with ⏳ Fix approval next, ordered by frozen heap rank, then row ID.
-3. All other rows not yet deployed next, ordered by frozen heap rank, then row ID.
+2. Rows with ⏳ Fix approval next, ordered by cluster queue rank, then row ID.
+3. All other rows not yet deployed next, ordered by cluster queue rank, then row ID.
 4. Rows with ✅ Deployed #<PR> last, ordered by deployment completion timestamp.
 
 ### Render the delta, not the whole ledger
@@ -825,8 +983,8 @@ record of every row, so omitting a row from a response never loses it.
 ### One approval per response
 
 **Ask for exactly ONE approval at a time.** Emit the single highest-priority
-pending row by the sort order above: deploy-approval first, else the min idle
-heap item that needs a fix decision. Wait for Andy's answer, then emit the
+pending row by the sort order above: deploy-approval first, else the top idle
+cluster that needs a fix decision. Wait for Andy's answer, then emit the
 next. Never batch multiple approval sections into one response, and never list
 the still-pending ones as a preview — the counter below already conveys how
 many remain.
@@ -848,11 +1006,13 @@ The Issue cell is one line and at most 100 characters. It states the concrete
 observed failure, not the benchmark's goal. Prefer boundary-specific summaries
 such as "Browser agent failed to start because proxy generation returned HTTP
 400." Render the ledger as a real Markdown table. Andy and Admin are the same
-person, so there is exactly one Approval column.
+person, so there is exactly one Approval column. Tasks is the cluster's current
+member-task count; for an INFRA row it is the number of tasks the issue denied
+a verdict.
 
-| ID   | Kind    | Cluster     | Issue (≤100 chars)                                                       | RCA         | Fix       | Test        | Approval        | Real rerun | Deploy       |
-| ---- | ------- | ----------- | ------------------------------------------------------------------------ | ----------- | --------- | ----------- | --------------- | ---------- | ------------ |
-| H-01 | HARNESS | Broken Tool | Browser agent failed to start because proxy generation returned HTTP 400 | ✅ Complete | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
+| ID   | Kind    | Class       | Tasks | Issue (≤100 chars)                                                       | RCA                              | Fix       | Test        | Approval        | Real rerun | Deploy       |
+| ---- | ------- | ----------- | ----- | ------------------------------------------------------------------------ | -------------------------------- | --------- | ----------- | --------------- | ---------- | ------------ |
+| H-01 | HARNESS | Broken Tool | 4     | Browser agent failed to start because proxy generation returned HTTP 400 | 🧪 Causal proof; outcome pending | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
 
 Lifecycle values:
 
@@ -861,7 +1021,8 @@ Lifecycle values:
 - **Test:** ✅ Cemented | ⏳ Pending | — Not applicable for an open gap
 - **Approval:** ⏳ Fix approval | ✅ Fix approved | ✏️ Edit requested |
   ❌ Rejected | ⏳ Deploy approval | ✅ Deploy approved | — Not required
-- **Real rerun:** ⏳ Pending | ✅ Confirmed | ❌ Failed
+- **Real rerun:** ⏳ Pending | ✅ Confirmed | ❌ Failed. Confirmed means every
+  member task passed every required run and no canary failed.
 - **Deploy:** — Not queued | ⏳ Testing | 🔎 Review |
   🚫 Blocked: <reason> | ✅ Deployed #<PR>
 
@@ -870,11 +1031,13 @@ or multi-line explanations.
 
 ### Stop 1 content — fix approval
 
-After the lifecycle table, include one section for the current min-idle heap
-item with ⏳ Fix approval. Lead with the one-glance core claim, then use
+After the lifecycle table, include one section for the top idle cluster with
+⏳ Fix approval. Lead with the one-glance core claim, then use
 the canonical approval narrative from `.claude/shared/approval-format.md`.
-Put the verbatim `task.prompt` in Evidence, not above it. Never truncate,
-summarize, or paraphrase `task.prompt`, even when it is long or multiline:
+The Evidence pack is the exemplar's. Put the verbatim `task.prompt` in
+Evidence, not above it. Never truncate, summarize, or paraphrase `task.prompt`,
+even when it is long or multiline. End Evidence with one Cluster line per
+member task; never replace the siblings with a count:
 
 ### <row ID> · <issue summary>
 
@@ -900,6 +1063,8 @@ Tests: <one sentence naming the actual assertion>
 - Pre-fix: <measured wrong value>
 - Post-fix: <measured passing value>
 
+**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
+
 **Environment**
 
 - **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
@@ -908,9 +1073,14 @@ Tests: <one sentence naming the actual assertion>
 
 > <full exact task.prompt with every line and character preserved>
 
+**Cluster (<n> tasks):**
+
+- `<exemplar task>` (exemplar) — [Open agent](frontend-agent-url) — <observed boundary evidence> · <passes>/<attempts> recorded passes · <runs> proof runs
+- `<sibling task>` — [Open agent](frontend-agent-url) — <its own observed boundary evidence> · <passes>/<attempts> recorded passes · <runs> proof runs
+
 #### Detail
 
-**Core claim:** This task failed because **<issue cluster>**. <One or two plain
+**Core claim:** <This task | These <n> tasks> failed because **<issue class>**. <One or two plain
 sentences describing the exact mismatch or failure; expand internal names such
 as write_lock into ordinary language.>
 
@@ -974,6 +1144,8 @@ Tests: <one sentence naming the actual assertion>
 
 - Pre-fix: <measured wrong value>
 - Post-fix: <measured passing value>
+
+**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
 
 **Environment**
 

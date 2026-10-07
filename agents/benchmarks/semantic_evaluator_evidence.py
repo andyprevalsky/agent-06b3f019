@@ -56,11 +56,35 @@ def _root_agent_id(data: dict) -> str:
     return str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "")
 
 
-def _message_text(message: dict, text_cap: int) -> str:
+_OMISSION_MARKER = "\n[... {omitted} characters omitted ...]\n"
+
+
+def _cap_text(text: str, text_cap: int | None) -> str:
+    """Shorten ``text`` to ``text_cap`` chars: keep both ends, say what was dropped.
+
+    A judge must be able to tell that evidence is missing, and the end of a
+    tool result (status lines, totals, errors) is as likely to matter as its
+    start. This is the shape the reference harnesses use for an LLM reader:
+    Codex's transcript reviewer keeps a prefix and suffix around
+    ``<truncated omitted_approx_tokens="N" />`` (codex-rs/guardian-context
+    truncation.rs), and OpenClaw keeps head and tail around a
+    "N more characters truncated" notice (tool-result-truncation.ts).
+    """
+    if text_cap is None or len(text) <= text_cap:
+        return text
+    # Sized for the widest count the marker could carry, so the result fits.
+    keep = max(text_cap - len(_OMISSION_MARKER.format(omitted=len(text))), 0)
+    head = keep // 2
+    tail = keep - head
+    marker = _OMISSION_MARKER.format(omitted=len(text) - keep)
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _message_text(message: dict, text_cap: int | None) -> str:
     text_value = message.get("text", message.get("message", message.get("content", "")))
     if not isinstance(text_value, str):
         text_value = json.dumps(text_value, default=str)
-    return text_value[:text_cap]
+    return _cap_text(text_value, text_cap)
 
 
 def _message_metadata(message: dict) -> dict[str, Any]:
@@ -74,7 +98,7 @@ def _evidence_rows_from_messages(
     agent_id: str,
     parent_agent_id: str | None,
     goal: str,
-    text_cap: int,
+    text_cap: int | None,
     skip_user_system: bool,
     message_tail: int,
 ) -> list[dict[str, Any]]:
@@ -127,14 +151,16 @@ def _sorted_tree_agent_ids(tree: dict[str, dict], root_id: str) -> list[str]:
     return ordered
 
 
-def _append_completion_card(rows: list[dict[str, Any]], data: dict, text_cap: int) -> None:
+def _append_completion_card(
+    rows: list[dict[str, Any]], data: dict, text_cap: int | None
+) -> None:
     summaries = _final_completion_summaries(data)
     if not summaries:
         return
     completion = summaries[-1]
     outputs = completion.get("outputs")
     payload = {
-        "summary": str(completion.get("summary") or "")[:text_cap],
+        "summary": _cap_text(str(completion.get("summary") or ""), text_cap),
         "outputs": outputs[:200] if isinstance(outputs, list) else [],
     }
     rows.append(
@@ -164,15 +190,21 @@ def _final_completion_summaries(data: dict) -> list[dict]:
     return summaries
 
 
-def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
-    """Build bounded single-turn judge evidence from root and optional tree transcripts."""
+def build_single_turn_evidence(
+    data: dict, *, text_cap: int | None = SINGLE_TURN_TEXT_CAP
+) -> list[dict[str, Any]]:
+    """Build single-turn judge evidence from root and optional tree transcripts.
+
+    ``text_cap`` cuts each row's text; ``None`` keeps every row whole. The
+    caller owns the overall budget and picks the cap that fits it.
+    """
     root_id = _root_agent_id(data)
     rows = _evidence_rows_from_messages(
         data.get("messages") or [],
         agent_id=root_id,
         parent_agent_id=None,
         goal="",
-        text_cap=SINGLE_TURN_TEXT_CAP,
+        text_cap=text_cap,
         skip_user_system=True,
         message_tail=ROOT_MESSAGE_TAIL,
     )
@@ -189,13 +221,13 @@ def build_single_turn_evidence(data: dict) -> list[dict[str, Any]]:
                     agent_id=agent_id,
                     parent_agent_id=str(info.get("parent_agent_id") or "") or None,
                     goal=str(info.get("goal") or ""),
-                    text_cap=SINGLE_TURN_TEXT_CAP,
+                    text_cap=text_cap,
                     skip_user_system=True,
                     message_tail=SUBAGENT_MESSAGE_TAIL,
                 )
             )
 
-    _append_completion_card(rows, data, SINGLE_TURN_TEXT_CAP)
+    _append_completion_card(rows, data, text_cap)
     rows.append({"benchmark_state": data.get("_benchmark", {})})
     return rows
 
@@ -246,7 +278,7 @@ def build_agentic_evidence(data: dict) -> dict[str, Any]:
         outputs = completion.get("outputs")
         completion_cards.append(
             {
-                "summary": str(completion.get("summary") or "")[:AGENTIC_TEXT_CAP],
+                "summary": _cap_text(str(completion.get("summary") or ""), AGENTIC_TEXT_CAP),
                 "outputs": outputs[:200] if isinstance(outputs, list) else [],
             }
         )

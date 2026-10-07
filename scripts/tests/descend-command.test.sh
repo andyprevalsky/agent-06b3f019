@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
 DESCEND_STEP_LOGGER="$ROOT_DIR/scripts/descend_step_log.py"
+DESCEND_OUTCOME_RUNS="$ROOT_DIR/scripts/descend_outcome_runs.py"
 DESCEND_STEP_HISTORY="$ROOT_DIR/agents/benchmarks/history/descend_steps.jsonl"
 GIT_ATTRIBUTES="$ROOT_DIR/.gitattributes"
 RUN_BENCH="$ROOT_DIR/scripts/run-bench"
@@ -29,6 +30,7 @@ print(re.sub(r"\s+", " ", Path(sys.argv[1]).read_text()))
 PY
 )"
 [ -f "$DESCEND_STEP_LOGGER" ] || fail "/descend step logger is missing"
+[ -f "$DESCEND_OUTCOME_RUNS" ] || fail "/descend outcome-proof run counter is missing"
 [ -f "$DESCEND_STEP_HISTORY" ] || fail "/descend tracked step history is missing"
 grep -Fq 'agents/benchmarks/history/descend_steps.jsonl merge=union' "$GIT_ATTRIBUTES" || \
   fail "/descend step history must merge concurrent workspace records with union"
@@ -37,13 +39,17 @@ if git -C "$ROOT_DIR" check-ignore -q "$DESCEND_STEP_HISTORY"; then
 fi
 
 require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
-require_text 'Every failed task must enter its own `/RCA`' "/descend must enter RCA before benchmark rerunning"
+require_text 'Every failed task gets its own read-only triage card' "/descend must triage every failure before clustering"
+require_text 'every cluster — a singleton included — enters its own `/RCA` cycle' "/descend must enter RCA once per cluster before benchmark rerunning"
+require_text 'No failed task may be rerun until a cluster RCA with causal proof covers it' "/descend must not rerun a failure that no RCA covers"
 require_text 'run the unchanged owning-boundary repro red then green' "/descend must require causal fail/pass proof before a benchmark rerun"
 require_text 'That exact rerun supplies `/RCA`' "/descend must make the post-approval rerun supply benchmark outcome proof"
-require_text "freeze a min-heap" "/descend must freeze a min-heap after the first infra-clean RCA set"
-require_text "Andy sees a deeper" "/descend must show a deeper bench only when easier benches are busy"
+require_text "rank the clusters" "/descend must rank clusters after the first infra-clean RCA set"
+require_text "member-task count, largest first" "/descend must ask about the cluster that flips the most tasks first"
+require_text "Andy sees a lower-ranked cluster only if" "/descend must show a lower-ranked cluster only when higher ones are busy"
 require_text "not a prod deploy" "/descend must apply approved fixes on a local snapshot, not a prod deploy"
-require_text "original frozen rank" "/descend must reinsert a failed outcome-proof rerun at its original frozen rank"
+require_text "keeps its position" "/descend must keep a cluster's rank when its outcome-proof rerun fails"
+require_text "Re-rank only when membership changes" "/descend must keep the ask order stable between clusterings"
 require_text "Immediately fire a sub-agent" "/descend must start the outcome-proof rerun immediately on approve"
 require_text "APPLY_AND_CLOUD_RERUN" "/descend must apply the fix then rerun on the cloud fleet"
 require_text "**Default substrate: cloud fleet.**" "/descend must default benchmark runs to the cloud fleet"
@@ -53,8 +59,20 @@ if grep -Fq 'scripts/run-bench --local <task>' "$DESCEND_COMMAND"; then
   fail "/descend must not hardcode --local for outcome-proof bench reruns"
 fi
 require_text "fail-closes on a stale/missing infra-canary stamp" "/descend must document infra-canary fail-closed preflight"
-require_text "RANK_HEAP" "/descend must rank failing tasks before pipelined fix approval"
-require_text "PIPELINE_HEAP" "/descend must pipeline approve, cloud-fleet outcome-proof, and the next ask"
+require_text "TRIAGE_FAILURES" "/descend must triage every failed task before RCA"
+require_text "CLUSTER_FAILURES" "/descend must group failures by shared root cause before RCA"
+require_text "RANK_CLUSTERS" "/descend must rank clusters before pipelined fix approval"
+require_text "PIPELINE_CLUSTERS" "/descend must pipeline approve, cloud-fleet outcome-proof, and the next ask"
+require_text "one fix at one first-bad boundary is expected to flip both" "/descend must define a cluster by its shared fix"
+require_text "Never cluster on a shared symptom" "/descend must not cluster failures by symptom"
+require_text 'An `inferred` card never joins a cluster with another task' "/descend must cluster only on observed boundary evidence"
+require_text "A class says what kind of failure a cluster is; it never decides membership." "/descend must keep the issue-class taxonomy separate from cluster identity"
+require_text "rerun every member task of that cluster" "/descend outcome proof must cover every task the fix claims to flip"
+require_text "python3 scripts/descend_outcome_runs.py" "/descend must size outcome proofs from recorded outcomes"
+require_text "Every required run must pass." "/descend must not confirm a fix from a partial pass"
+require_text "Do not rerun a failed proof to look for a pass" "/descend must not retry an outcome proof until it is green"
+require_text "Split the failing siblings out" "/descend must split a cluster whose fix did not flip every member"
+require_text "A canary fails" "/descend must treat a regressed passing task as a failed outcome proof"
 require_text "## One benchmark command" "/descend must define one benchmark entrypoint"
 require_text "--concurrency N" "/descend must document bounded benchmark concurrency"
 require_text "-k K" "/descend must document repeated isolated benchmark runs"
@@ -104,7 +122,7 @@ require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort f
 require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"
 require_text "**INFRA:**" "/descend must classify infrastructure failures"
 require_text "**HARNESS:**" "/descend must classify trustworthy benchmark failures as harness"
-require_text "| ID | Kind | Cluster | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use an issue-oriented lifecycle table with a pinned issue cluster"
+require_text "| ID | Kind | Class | Tasks | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use a cluster-oriented lifecycle table with a pinned issue class and member count"
 require_text "Browser agent failed to start because proxy generation returned HTTP 400" "/descend issue rows must state the concrete observed failure"
 require_text "The issue is **<root cause at the first-bad boundary>**" "fix approval must explain the RCA"
 require_text "where we measured **<measurement>**" "fix approval must report the repro measurement"
@@ -375,6 +393,66 @@ for invalid in '-k=0' '--runs=bad' '--concurrency=0'; do
   grep -Fq 'must be positive integers' "$tmp/invalid.out" \
     || fail "$invalid must explain its positive-integer contract"
 done
+
+# OUTCOME_PROOF_RUN_COUNT_BEGIN
+python3 - "$DESCEND_OUTCOME_RUNS" "$tmp" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+script, temporary = sys.argv[1], Path(sys.argv[2])
+ledger = temporary / "attempts.jsonl"
+
+
+def row(task, passed, minute):
+    return json.dumps(
+        {"task": task, "passed": passed, "timestamp": f"2026-10-01T00:{minute:02d}:00+00:00"}
+    )
+
+
+lines = [row("never-passes", False, minute) for minute in range(3)]
+lines += [row("sometimes-passes", minute in (1, 6), minute) for minute in range(10)]
+lines += [row("usually-passes", minute != 4, minute) for minute in range(10)]
+lines += [row("half-passes", minute < 2, minute) for minute in range(4)]
+lines += [row("stable", True, minute) for minute in range(6)]
+# The ledger merges branches with union, so file order is not time order: these
+# two oldest attempts are written last and must still fall outside the window.
+lines += [row("stopped-passing", False, minute) for minute in range(10, 20)]
+lines += [row("stopped-passing", True, minute) for minute in range(2)]
+lines.insert(5, "{not json")
+ledger.write_text("\n".join(lines) + "\n")
+
+tasks = [
+    "never-passes", "sometimes-passes", "usually-passes", "half-passes",
+    "stable", "stopped-passing", "unrecorded",
+]
+completed = subprocess.run(
+    [sys.executable, script, "--attempts", str(ledger), *tasks],
+    capture_output=True, text=True, timeout=15,
+)
+assert completed.returncode == 0, completed.stdout + completed.stderr
+reported = [json.loads(line) for line in completed.stdout.splitlines()]
+assert reported == [
+    {"task": "never-passes", "attempts": 3, "passes": 0, "runs": 1},
+    {"task": "sometimes-passes", "attempts": 10, "passes": 2, "runs": 3},
+    {"task": "usually-passes", "attempts": 10, "passes": 9, "runs": 5},
+    {"task": "half-passes", "attempts": 4, "passes": 2, "runs": 5},
+    {"task": "stable", "attempts": 6, "passes": 6, "runs": 5},
+    {"task": "stopped-passing", "attempts": 10, "passes": 0, "runs": 1},
+    {"task": "unrecorded", "attempts": 0, "passes": 0, "runs": 1},
+], reported
+
+missing = subprocess.run(
+    [sys.executable, script, "--attempts", str(temporary / "absent.jsonl"), "never-passes"],
+    capture_output=True, text=True, timeout=15,
+)
+assert missing.returncode != 0, (
+    "a missing attempts ledger must not be reported as a task that never passes"
+)
+assert missing.stdout == "", missing.stdout
+PY
+# OUTCOME_PROOF_RUN_COUNT_END
 
 # CAMPAIGN_LIFECYCLE_REGRESSIONS_BEGIN
 python3 - "$ROOT_DIR" <<'PY'

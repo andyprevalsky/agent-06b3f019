@@ -4445,6 +4445,58 @@ def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
     assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
 
 
+def test_declared_evaluator_evidence_keeps_whole_rows_within_budget():
+    """A judge sees a whole tool result whenever the bundle fits its budget.
+
+    grep-agent-trajectories-code-tool-status: a 17,075-char grep result was cut
+    at 12,000 with no marker, 986 chars before the Status line its judge had to
+    cite, and the run failed on evidence the agent had actually produced.
+
+    When the bundle does not fit, a shortened row keeps both ends and says how
+    much is missing, so the judge never mistakes a cut for the whole result.
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_CHAR_BUDGET,
+        SINGLE_TURN_TEXT_CAP,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    status_line = "tool_status: FAILED"
+
+    def run_with_grep_result(padding: int) -> dict:
+        return {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": "x" * padding + status_line,
+                    "metadata": {"toolName": "grep", "toolStatus": "FINISHED"},
+                }
+            ]
+        }
+
+    def grep_rows(evidence: list[dict]) -> list[str]:
+        return [
+            str(row.get("text") or "")
+            for row in evidence
+            if isinstance(row, dict) and (row.get("metadata") or {}).get("toolName") == "grep"
+        ]
+
+    within_budget = _declared_evaluator_evidence(run_with_grep_result(SINGLE_TURN_TEXT_CAP + 986))
+    assert [status_line in text for text in grep_rows(within_budget)] == [True]
+
+    # A bundle too large for the judge still falls back to capped rows.
+    padding = SINGLE_TURN_CHAR_BUDGET
+    over_budget = _declared_evaluator_evidence(run_with_grep_result(padding))
+    assert not single_turn_evidence_exceeds_budget(over_budget)
+    (shortened,) = grep_rows(over_budget)
+    assert len(shortened) <= SINGLE_TURN_TEXT_CAP
+    assert shortened.startswith("x") and shortened.endswith(status_line)
+    kept = len(shortened.replace("x", "")) - len(status_line)  # the marker itself
+    omitted = padding + len(status_line) - (len(shortened) - kept)
+    assert f"[... {omitted} characters omitted ...]" in shortened
+
+
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -21119,6 +21171,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
         test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
+    )
+    r.record(
+        "declared_evaluator_evidence_keeps_whole_rows_within_budget",
+        test_declared_evaluator_evidence_keeps_whole_rows_within_budget,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
