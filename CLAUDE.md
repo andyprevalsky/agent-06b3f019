@@ -1285,7 +1285,10 @@ terminal status on every observation, even when the progress card stops changing
 The read-only command reports exclusive stage counts, card age, task outcomes,
 final lifecycle cleanup and controller exit separately, without dumping private
 trajectories. An early task PASS/FAIL does not mean teardown finished. Continue
-until the controller exits and exact owned resources are released. Stale or
+until the controller exits and exact owned resources are released. Campaign schedule
+publication observes the original CLI cancellation signal and drains its exact
+auxiliary uploader session. Keep completed child outcomes and the original E2E
+clock; a pending publication warning does not authorize restarting the fleet. Stale or
 missing observations are warnings: reconcile exact owner liveness and private
 diagnostics, never reset a run based on an observation timeout. The compact
 monitor controls run in the existing `benchmark-live-results.test.py` deploy gate.

@@ -1271,18 +1271,18 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             assert stream is not None
             digest = hashlib.sha256()
             left = member.size
-            task_name, relative = member.name.split("/", 1)
-            if task_name in phase_originals:
-                phase_originals[task_name][relative] = b""
+            task_name, _, relative = member.name.partition("/")
+            phase_buffer = None
+            if relative and task_name in phase_originals:
+                assert member.size <= 64 * 1024 * 1024
+                phase_buffer = bytearray()
             while left:
                 block = stream.read(min(left, 65536))
                 assert block
                 digest.update(block)
                 left -= len(block)
-                task_name, relative = member.name.split("/", 1)
-                if task_name in phase_originals:
-                    assert member.size <= 64 * 1024 * 1024
-                    phase_originals[task_name][relative] = phase_originals[task_name].get(relative, b"") + block
+                if phase_buffer is not None:
+                    phase_buffer.extend(block)
                 if member.name.endswith("/repo/.context/cloudbench/services.json"):
                     assert member.size <= 1048576
                     task_name = member.name.split("/", 1)[0]
@@ -1298,6 +1298,8 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
                 ):
                     assert member.size <= 1048576
                     archived_started[member.name] = archived_started.get(member.name, b"") + block
+            if phase_buffer is not None:
+                phase_originals[task_name][relative] = bytes(phase_buffer)
             assert digest.hexdigest() == info["sha256"]
             seen.add(member.name)
     assert seen == set(expected_members)

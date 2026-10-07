@@ -225,7 +225,8 @@ class PreServiceArchiveTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.verify()
 
-    def generic(self, native_worker=False, missing_worker_log=False):
+    def generic(self, native_worker=False, missing_worker_log=False, preserved_note=False,
+                multichunk_original=False):
         f = self.fixture
         owner, machine, volume, clone = (bootstrap_test.OWNER, bootstrap_test.MACHINE,
                                          bootstrap_test.VOLUME, bootstrap_test.CLONE)
@@ -283,9 +284,13 @@ class PreServiceArchiveTest(unittest.TestCase):
                                  for name, data in worker_files.items()})
         f.machines.write_text(json.dumps([dict(id=worker)] if native_worker else []))
         f.volumes.write_text("[]")
+        if multichunk_original:
+            self.originals["phase-diagnostic.log"] = b"original-diagnostic\n" * 16384
         payloads = {bootstrap_test.BENCH + "/" + name: data for name, data in self.originals.items()}
         payloads.update({"_normal_workers/" + worker + "/" + name: data
                          for name, data in worker_files.items()})
+        if preserved_note:
+            payloads["_note.json"] = b'{"original":true}\n'
         self.row["files"] = {name: dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
                              for name, data in self.originals.items()}
         destination = f.run / "_forensic"
@@ -301,6 +306,9 @@ class PreServiceArchiveTest(unittest.TestCase):
                         normal_workers=[worker_row], uncompressed_bytes=sum(map(len, payloads.values())),
                         archive_bytes=archive.stat().st_size,
                         archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+        if preserved_note:
+            data = payloads["_note.json"]
+            manifest["preserved_files"] = {"_note.json": dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())}
         manifest_path = destination / "manifest.json"
         manifest_path.write_text(json.dumps(manifest))
         return retirement.verify(f.registry, f.run, manifest_path, archive, f.machines, f.volumes,
@@ -308,6 +316,27 @@ class PreServiceArchiveTest(unittest.TestCase):
 
     def test_generic_archive_retains_honest_failed_worker_and_full_ledger(self):
         result = self.generic()
+        self.assertEqual(result["normal_worker_captures"], 1)
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertFalse(result["native_release_verified"])
+
+    def test_generic_archive_accepts_valid_single_segment_preserved_metadata(self):
+        result = self.generic(preserved_note=True)
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertFalse(result["native_release_verified"])
+
+    def test_generic_archive_preserves_multichunk_phase_original_bytes(self):
+        original_verifier = retirement.verify_pre_service_archive
+
+        def verify_received_originals(meta, row, originals):
+            self.assertEqual(originals["phase-diagnostic.log"],
+                             self.originals["phase-diagnostic.log"])
+            return original_verifier(meta, row, originals)
+
+        with patch.object(retirement, "verify_pre_service_archive",
+                          side_effect=verify_received_originals) as verifier:
+            result = self.generic(multichunk_original=True)
+        verifier.assert_called_once()
         self.assertEqual(result["normal_worker_captures"], 1)
         self.assertEqual(result["proof_credit"], 0)
         self.assertFalse(result["native_release_verified"])

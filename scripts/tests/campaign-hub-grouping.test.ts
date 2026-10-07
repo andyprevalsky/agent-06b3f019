@@ -620,6 +620,92 @@ test("group schedule, recovery, inverse ownership and deletion preserve exact ch
   assert.equal((await owner.getRunDetail("legacy")).tasks[0].passed, false);
 });
 
+for (const physicalKind of ["plain", "member"] as const) {
+  test(`owner-less group reservations reject ${physicalKind} physical ID collisions`, async () => {
+    const boundary = owningBoundary();
+    const { owner } = boundary;
+    const groupId = "reserved-group";
+    for (const [index, member] of ["m1", "m2"].entries()) {
+      await owner.putRun(
+        {
+          run_id: `reserved-child-${member}`,
+          timestamp: "2026-10-06T20:00:01+00:00",
+          ...metadata(groupId, member, index + 1),
+          tasks: [{ name: "repeat-task", passed: index === 0 }],
+        },
+        { live: false },
+      );
+    }
+    const before = [...boundary.objects];
+    const api = await apiBoundary(boundary);
+    try {
+      const rejected = await request(api.base, "/runs", "POST", {
+        run_id: groupId,
+        ...(physicalKind === "member"
+          ? metadata("another-group", "foreign-member", 1, 1)
+          : {}),
+        tasks: [{ name: "colliding-physical-task", passed: true }],
+      });
+      const catalog = await request(api.base, "/runs?grouped=1");
+      const detail = await request(api.base, `/runs/${groupId}`);
+      writeFileSync(
+        path.join(workRoot, `reverse-collision-${physicalKind}.safe.json`),
+        JSON.stringify({
+          physical_kind: physicalKind,
+          upload_status: rejected.status,
+          catalog_rows: catalog.body.runs.length,
+          unique_catalog_ids: new Set(
+            catalog.body.runs.map((run: { run_id: string }) => run.run_id),
+          ).size,
+          colliding_physical_bundle_stored: boundary.objects.has(
+            `runs/${groupId}.json`,
+          ),
+          detail_task_count: detail.body.run.tasks.length,
+          detail_contains_physical_task: detail.body.run.tasks.some(
+            (task: { name: string }) => task.name === "colliding-physical-task",
+          ),
+        }) + "\n",
+        { mode: 0o600 },
+      );
+      assert.equal(
+        rejected.status,
+        500,
+        "reserved group IDs cannot become physical runs",
+      );
+      assert.match(rejected.body.error, /collides/);
+      assert.deepEqual(
+        [...boundary.objects],
+        before,
+        "refusal must precede durable writes",
+      );
+      assert.equal(catalog.body.runs.length, 1);
+      assert.equal(detail.body.run.tasks.length, 2);
+      assert.equal(detail.body.run.timestamp, "2026-10-06T20:00:00+00:00");
+      assert.ok(await owner.getRunDetail("reserved-child-m1"));
+      // A real owner may adopt exact early children; unrelated physical runs
+      // retain their own detail and deletion boundary.
+      await owner.putRun(schedule(groupId), { live: true });
+      await owner.putRun({ run_id: "unrelated-physical", tasks: [] });
+      assert.equal((await owner.listRuns({ grouped: true })).length, 2);
+      assert.equal(await owner.deleteRun("unrelated-physical"), true);
+      assert.equal((await owner.getRunDetail(groupId)).tasks.length, 2);
+      assert.equal(await owner.deleteRun(groupId), true);
+      assert.deepEqual(
+        boundary.deleted.sort(),
+        [
+          groupId,
+          "reserved-child-m1",
+          "reserved-child-m2",
+          "unrelated-physical",
+        ].sort(),
+      );
+      assert.equal((await owner.listRuns()).length, 0);
+    } finally {
+      await api.close();
+    }
+  });
+}
+
 test("10k scheduled members poll one bounded catalog page without archive fanout", async () => {
   const boundary = owningBoundary();
   const members = Array.from(

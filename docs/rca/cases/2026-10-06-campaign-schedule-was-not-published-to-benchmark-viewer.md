@@ -70,6 +70,22 @@ module link; dependencies now resolve through the backend package owner.
 Native fifty-copy execution, frontend deployment and release proof remain
 outstanding, so this case is mitigated.
 
+Review follow-up at `c214f519` exposed a reverse namespace reservation gap.
+Existing owner-less children reserved a group ID, but a later plain physical
+run (or a member of another group) could write that same ID. The grouped
+catalog then had two rows with one identifier, coupling detail and deletion.
+The store now checks that reservation inside the existing index lock before
+any durable bundle write. Valid schedule adoption of matching early children
+and unrelated physical runs remain supported.
+
+The identical registered API/store controls produced six passes and two
+failures on original source in 3.005 seconds, then eight passes in 2.991
+seconds. Refusal-before-write, detail, late adoption and exact deletion are
+permanent inverses in the existing campaign-grouping gate. Native observed
+leaders and listeners are absent. This is a contract extension found during
+review, without live trial or production mutation; combined backend coverage
+and the grouped production rollout remain pending.
+
 ## Human feedback
 
 The user required every CLI batch to remain together in the frontend viewer,

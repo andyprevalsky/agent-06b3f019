@@ -26,7 +26,7 @@ _seed_dump_get() {
         runners+=("$(command -v tsx)")
     fi
     local runner
-    for runner in "${runners[@]}"; do
+    for runner in ${runners[@]+"${runners[@]}"}; do
         if (
             cd "$ROOT_DIR/back-end" &&
                 NODE_PATH="$ROOT_DIR/back-end/node_modules${NODE_PATH:+:$NODE_PATH}" \

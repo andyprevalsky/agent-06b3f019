@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,7 +44,12 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
 
 
 def publish_campaign_group(
-    root: Path, campaign_dir: Path, state: dict[str, object], *, live: bool
+    root: Path,
+    campaign_dir: Path,
+    state: dict[str, object],
+    *,
+    live: bool,
+    stop_requested: Callable[[], bool],
 ) -> None:
     """The schedule is a real Hub resource; task results remain child-owned."""
     record = {
@@ -74,6 +81,8 @@ def publish_campaign_group(
     }
     target = campaign_dir / "hub-group.json"
     write_json_atomic(target, record)
+    if stop_requested():
+        return
     environment = os.environ.copy()
     environment.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
     if not environment.get("BENCHMARK_HUB_API_KEY") and not environment.get(
@@ -87,10 +96,18 @@ def publish_campaign_group(
                 environment["BACKEND_API_KEY"] = key
         except ImportError:
             pass
+    # Load the existing exact auxiliary-session drain before allocating its
+    # publisher. A setup exception must never leave a child without an owner.
+    spec = importlib.util.spec_from_file_location(
+        "campaign_publication_cleanup",
+        Path(__file__).with_name("cloudbench-campaign-seed.py"),
+    )
+    cleanup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cleanup)
     log = campaign_dir / "hub-group-publication.private.log"
     with log.open("a") as stream:
         os.chmod(log, 0o600)
-        result = subprocess.run(
+        result = subprocess.Popen(
             [
                 sys.executable,
                 str(root / "agents/benchmarks/hub_upload.py"),
@@ -103,8 +120,22 @@ def publish_campaign_group(
             env=environment,
             stdout=stream,
             stderr=subprocess.STDOUT,
-            check=False,
+            start_new_session=True,
         )
+        try:
+            while result.returncode is None:
+                if stop_requested():
+                    break
+                try:
+                    result.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            if result.returncode is None:
+                # Keep the leader waitable until its exact session closes,
+                # including exceptional exits. Reuse existing generous cleanup
+                # headroom; no fleet process or new stage deadline is involved.
+                cleanup.stop_get(result)
     if result.returncode:
         print(
             "Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners"
@@ -501,9 +532,16 @@ def main() -> int:
         if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
             "BENCHMARK_HUB_PARENT_RUN_ID"
         ):
-            publish_campaign_group(root, campaign_dir, state, live=True)
+            publish_campaign_group(
+                root,
+                campaign_dir,
+                state,
+                live=True,
+                stop_requested=lambda: bool(stop_signal),
+            )
         if (
-            args.concurrency > 1
+            not stop_signal
+            and args.concurrency > 1
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
         ):
@@ -813,7 +851,21 @@ def main() -> int:
     if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
         "BENCHMARK_HUB_PARENT_RUN_ID"
     ):
-        publish_campaign_group(root, campaign_dir, state, live=False)
+        publish_campaign_group(
+            root,
+            campaign_dir,
+            state,
+            live=False,
+            stop_requested=lambda: bool(stop_signal),
+        )
+    if stop_signal:
+        state["status"] = "cancelled"
+        result = 128 + stop_signal
+    # Publication is part of the campaign lifetime, including cancellation
+    # during its final handoff. Preserve the original child outcomes.
+    state["finished_at"] = utc_now()
+    state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
+    write_json_atomic(summary_path, state)
     print(
         f"{'✅' if result == 0 else '❌'} campaign {state['status']} "
         f"wall={state['wall_clock_seconds']}s summary={summary_path}"

@@ -7,9 +7,68 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
+
+
+@pytest.mark.parametrize("runner_mode", ("installed", "node", "npx", "missing"))
+def test_campaign_inventory_seed_get_empty_runner_keeps_native_bash_fallbacks(tmp_path, runner_mode):
+    root = tmp_path / "checkout"
+    backend = root / "back-end"
+    backend.mkdir(parents=True)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    calls = tmp_path / "calls"
+    dump = tmp_path / "canonical.dump"
+    environment = {
+        **os.environ,
+        "PATH": str(binary) + ":/usr/bin:/bin",
+        "SEED_RUNNER_MODE": runner_mode,
+        "SEED_RUNNER_CALLS": str(calls),
+    }
+    runner = (
+        "#!/bin/sh\n"
+        'case "$1" in --experimental-strip-types)\n'
+        ' if [ "$2" = -e ]; then [ "$SEED_RUNNER_MODE" = node ]; exit $?; fi\n'
+        ' shift;; --yes) shift; [ "$1" = tsx ] || exit 94; shift;; esac\n'
+        'printf "%s\\n" "$0" >> "$SEED_RUNNER_CALLS"\n'
+        '[ "$1 $2 $3" = "scripts/seed-dump-cache.ts get fixture-token" ] || exit 95\n'
+        '[ "$SEED_RUNNER_MODE" != missing ] || exit 1\n'
+        'printf "complete-owned-canonical-fixture" > "$4"\n'
+    )
+    for name in ("node", "npx"):
+        executable = binary / name
+        executable.write_text(runner)
+        executable.chmod(0o700)
+    # Fault retries are still the real helper's five attempts. The offline
+    # negative control needs no wall delay between deterministic missing reads.
+    (binary / "sleep").write_text("#!/bin/sh\nexit 0\n")
+    (binary / "sleep").chmod(0o700)
+    if runner_mode == "installed":
+        installed = backend / "node_modules/.bin/tsx"
+        installed.parent.mkdir(parents=True)
+        installed.write_text(runner)
+        installed.chmod(0o700)
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts/cloudbench-seed-get.sh"), str(root), "fixture-token", str(dump)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS,
+    )
+    assert "unbound variable" not in result.stderr, result.stderr
+    assert result.returncode == (1 if runner_mode == "missing" else 0), result.stderr
+    entries = calls.read_text().splitlines()
+    expected = "tsx" if runner_mode == "installed" else "node" if runner_mode == "node" else "npx"
+    assert all(Path(entry).name == expected for entry in entries)
+    assert len(entries) == (5 if runner_mode == "missing" else 1)
+    if runner_mode == "missing":
+        assert not dump.exists()
+    else:
+        assert dump.read_bytes() == b"complete-owned-canonical-fixture"
 
 
 def producer_source(root):
@@ -915,3 +974,88 @@ def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_co
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("phase", ["starting", "final"])
+def test_campaign_inventory_group_publication_cancellation_retires_only_its_owned_processes(tmp_path, phase):
+    """The real campaign must honor cancellation during both Hub handoffs."""
+    import signal
+    import time
+
+    fixture = tmp_path / phase
+    scripts = fixture / "scripts"
+    scripts.mkdir(parents=True)
+    uploader = fixture / "agents/benchmarks/hub_upload.py"
+    uploader.parent.mkdir(parents=True)
+    marker = fixture / "publication-owner.json"
+    release = fixture / "release"
+    admitted = fixture / "admitted"
+    (scripts / "run-bench").write_text('#!/usr/bin/env bash\ntouch "$FIXTURE_ADMITTED"\nexit 0\n')
+    uploader.write_text(
+        "import json, os, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        'phase="starting" if "--register-starting" in sys.argv else "final"\n'
+        'if phase != os.environ["FIXTURE_PHASE"]: sys.exit(0)\n'
+        'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(120)"])\n'
+        'Path(os.environ["FIXTURE_MARKER"]).write_text(json.dumps({"pid":os.getpid(),"child_pid":child.pid}))\n'
+        'while not Path(os.environ["FIXTURE_RELEASE"]).exists(): time.sleep(0.1)\n'
+        "child.terminate(); child.wait()\n"
+    )
+    environment = dict(os.environ)
+    for name in list(environment):
+        if name.startswith(("RUN_BENCH_CAMPAIGN_", "CLOUDBENCH_CAMPAIGN_", "BENCHMARK_HUB_")):
+            environment.pop(name)
+    environment.update(
+        FIXTURE_PHASE=phase,
+        FIXTURE_MARKER=str(marker),
+        FIXTURE_RELEASE=str(release),
+        FIXTURE_ADMITTED=str(admitted),
+    )
+    command = [
+        sys.executable,
+        str(Path(os.environ.get("CLOUDBENCH_CAMPAIGN_SCRIPT_UNDER_TEST", ROOT / "scripts/run-bench-campaign.py"))),
+        "--root",
+        str(fixture),
+        "--runs",
+        "1",
+        "--concurrency",
+        "1",
+        "--task",
+        "fixture",
+    ]
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    with (fixture / "campaign.private.log").open("w") as log:
+        process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert marker.exists(), "the actual Hub publication did not reach its owning boundary"
+            owner = json.loads(marker.read_text())
+            process.send_signal(signal.SIGTERM)
+            try:
+                result = process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(f"campaign cancellation remained blocked in {phase} publication") from None
+            assert result == 143
+            summary = json.loads(next((fixture / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+            assert summary["status"] == "cancelled"
+            assert summary["finished_at"]
+            assert admitted.exists() == (phase == "final")
+            assert summary["jobs"][0]["status"] == ("passed" if phase == "final" else "cancelled")
+            assert foreign.poll() is None, "cancellation must preserve the unrelated process"
+            for owned_pid in owner.values():
+                try:
+                    os.kill(owned_pid, 0)
+                except ProcessLookupError:
+                    continue
+                raise AssertionError(f"owned publication process {owned_pid} remains")
+        finally:
+            release.touch()
+            try:
+                process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            foreign.terminate()
+            foreign.wait()

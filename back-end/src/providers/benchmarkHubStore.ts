@@ -342,6 +342,9 @@ async function storeRun(
           }
         }
       }
+      if (!summary.run_group && index.some((run) => run.group_run_id === runId)) {
+        throw new Error('Benchmark Hub group ID collides with a physical run');
+      }
       if (existing?.group_run_id) {
         for (const field of HUB_GROUP_FIELDS) {
           if (summary[field] !== undefined && summary[field] !== existing[field]) {
