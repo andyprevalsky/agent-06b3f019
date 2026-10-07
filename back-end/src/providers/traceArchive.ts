@@ -1,4 +1,15 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { localObjectPath, objectKey, objectPrefix, safeArchivePath } from './traceArchivePaths';
+import {
+  type ArtifactCreation,
+  getS3Client,
+  putLocal,
+  putR2,
+  resetS3Client,
+  shouldResetS3ClientAfterError,
+} from './traceArchiveWriteStorage';
+export { localObjectPath, objectKey, safeArchivePath } from './traceArchivePaths';
+export { getS3Client } from './traceArchiveWriteStorage';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -36,7 +47,6 @@ const MEDIA_EXTENSIONS = new Set([
   '.m3u8',
 ]);
 const STORE_MAX_ATTEMPTS = 5;
-type ArtifactCreation = { bodyStored: boolean };
 
 export interface EncryptedArtifactMetadata {
   path: string;
@@ -111,18 +121,6 @@ function encryptionKey(): Buffer | null {
   return crypto.createHash('sha256').update('rose-trace-archive-dev-key').digest();
 }
 
-function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 96) || 'unbound';
-}
-
-export function safeArchivePath(input: string): string {
-  return input
-    .split('/')
-    .filter((part) => part !== '' && part !== '.' && part !== '..')
-    .map(safeSegment)
-    .join('/');
-}
-
 function shouldCompress(objectPath: string, contentType: string, compress?: boolean): boolean {
   if (compress !== undefined) return compress;
   const ext = path.extname(objectPath).toLowerCase();
@@ -174,79 +172,6 @@ export function encryptArtifact(
   };
 }
 
-function localArchiveRoot(): string {
-  return process.env.TRACE_ARCHIVE_LOCAL_DIR || path.resolve(process.cwd(), '..', '.context');
-}
-
-export function objectKey(rootAgentId: string, objectPath: string): string {
-  return `trace-archive/${safeSegment(rootAgentId)}/${safeArchivePath(objectPath)}`;
-}
-
-function objectPrefix(rootAgentId: string): string {
-  return `trace-archive/${safeSegment(rootAgentId)}/`;
-}
-
-export function localObjectPath(rootAgentId: string, objectPath: string): string {
-  return path.join(localArchiveRoot(), objectKey(rootAgentId, objectPath));
-}
-
-async function putLocal(
-  rootAgentId: string,
-  objectPath: string,
-  body: Buffer,
-  metadata?: unknown,
-  createOnly = false,
-  creation?: ArtifactCreation
-): Promise<string> {
-  const target = localObjectPath(rootAgentId, objectPath);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  if (!creation?.bodyStored) {
-    fs.writeFileSync(target, body, { flag: createOnly ? 'wx' : 'w' });
-    if (creation) creation.bodyStored = true;
-  }
-  if (metadata !== undefined) {
-    fs.writeFileSync(`${target}.meta.json`, JSON.stringify(metadata, null, 2), {
-      flag: createOnly ? 'wx' : 'w',
-    });
-  }
-  return target;
-}
-
-let s3Client: S3Client | null = null;
-
-export function getS3Client(): S3Client {
-  if (s3Client !== null) return s3Client;
-  const accountId = process.env.R2_ACCOUNT_ID || '';
-  s3Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-    },
-  });
-  return s3Client;
-}
-
-function resetS3Client(): void {
-  s3Client?.destroy();
-  s3Client = null;
-}
-
-function shouldResetS3ClientAfterError(errorMessage: string): boolean {
-  const normalized = errorMessage.toLowerCase();
-  return (
-    normalized.includes('bad record mac') ||
-    normalized.includes('socket') ||
-    normalized.includes('tls') ||
-    normalized.includes('econnreset') ||
-    normalized.includes('etimedout') ||
-    normalized.includes('timeout') ||
-    normalized.includes('network') ||
-    normalized.includes('connection')
-  );
-}
-
 export function isMissingObjectError(error: unknown): boolean {
   const response = (error as { $metadata?: { httpStatusCode?: unknown }; name?: unknown }) ?? {};
   return (
@@ -267,60 +192,6 @@ function isExistingObjectError(error: unknown): boolean {
     response?.name === 'PreconditionFailed' ||
     response?.$metadata?.httpStatusCode === 412
   );
-}
-
-async function putR2(
-  rootAgentId: string,
-  objectPath: string,
-  body: Buffer,
-  contentType: string,
-  metadata?: unknown,
-  createOnly = false,
-  creation?: ArtifactCreation
-): Promise<string> {
-  const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
-  if (
-    bucket === '' ||
-    !process.env.R2_ACCOUNT_ID ||
-    !process.env.R2_ACCESS_KEY_ID ||
-    !process.env.R2_SECRET_ACCESS_KEY
-  ) {
-    throw new Error('R2 trace archive is not configured');
-  }
-  const key = objectKey(rootAgentId, objectPath);
-  const client = getS3Client();
-  if (!creation?.bodyStored) {
-    await withTraceArchiveRequestTimeout((abortSignal) =>
-      client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          Body: body,
-          ContentType: contentType,
-          ServerSideEncryption: 'AES256',
-          ...(createOnly ? { IfNoneMatch: '*' } : {}),
-        }),
-        { abortSignal }
-      )
-    );
-    if (creation) creation.bodyStored = true;
-  }
-  if (metadata !== undefined) {
-    await withTraceArchiveRequestTimeout((abortSignal) =>
-      client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: `${key}.meta.json`,
-          Body: Buffer.from(JSON.stringify(metadata, null, 2)),
-          ContentType: 'application/json',
-          ServerSideEncryption: 'AES256',
-          ...(createOnly ? { IfNoneMatch: '*' } : {}),
-        }),
-        { abortSignal }
-      )
-    );
-  }
-  return `r2://${bucket}/${key}`;
 }
 
 export function validateEncryptedArtifactEnvelope(params: {

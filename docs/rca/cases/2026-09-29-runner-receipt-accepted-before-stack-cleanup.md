@@ -368,3 +368,56 @@ to make benchmark outcomes pass.
 
 Never promote a clean receipt for one lifecycle owner into proof that a larger
 owner has shut down; query the larger owner's terminal state before acknowledging it.
+
+
+### Stopped originals must use volume archives instead of live recapture
+
+The October 7 fifty-task DAILY diagnostic at original source `5c1fc870`
+again had a clean benchmark-root receipt and a failed stack cleanup. The
+original slice is preserved as 29 PASS, 19 task FAIL and 2 INFRA errors, with
+zero five-run acceptance credit. Exact recovery proved the blue-bottle original
+Machine stopped, validated exact provider release, and published its guest
+confirmation before calling the live runtime collector. The stopped proof,
+provider receipt and confirmation were persisted at epochs 1791334793.080496,
+1791334793.559908 and 1791334793.787001 respectively. A native collector
+observation places its start within 1791334793.998104–1791334794.998104;
+this is a rounded process observation, not an invented precise start. It was
+still active at 1791335376.659715 under the unchanged 600-second capture
+budget. Original recovery exited unsuccessfully at 1791335400.542622.
+
+The earlier repair correctly separated the cleanup and evidence latches, but
+the reconnect handler reused its original started-Machine plan after exact
+cleanup had stopped that same original. It then tried to obtain an HTTP sealed
+bundle from an original that could no longer serve. Two archive searches used
+`stopped guest runtime evidence recapture deadline` and
+`exact cleanup provider stopped archive capture original volume`. This is a
+recurrence at the existing post-stop capture boundary, with no relaxation of
+cleanup, archive ownership, task results, or normal harness timeouts.
+
+Immediately before recapturing a missing bundle, the handler now performs its
+existing exact native Machine observation. A proven stopped original goes
+straight to an unsuccessful original-volume archive handoff: its runtime latch
+and pending marker remain, the already-proved cleanup latch stays discharged,
+and no acceptance credit is produced. Started or uncertain native observations
+retain the original collector and full existing capture budget. No timeout is
+shortened, evidence fabricated, task changed, or healthy run restarted.
+
+The existing `test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure`
+now covers started, stopped-after-cleanup and unavailable native observations.
+It runs the actual reconnect handler, retains every original final ownership
+assertion, and observes the real collector boundary. Original source fails the
+stopped case while both healthy/uncertain inverses pass; the unchanged three
+cases pass after the repair. Fixture durations are correctness evidence only,
+not production speed measurements. Exact owning pytest leaders were joined
+and their original native births are absent. There are zero provider or model
+requests and no changes to the original control source or outcomes.
+
+This one constant native read runs only for exceptional recovery with a missing
+local runtime bundle. It adds no per-agent runtime, provider inventory scan,
+model call, or extra normal-run polling. The permanent existing dependency-sync
+family retains this owning case. Independent review found it absent from the
+normal compact deploy selector; that existing selector now explicitly includes
+all three cases, without adding a larger verification family. Independent review,
+normal composed-source gate, rollout and a real future recovery timing remain
+pending; the original stack failure and provider capacity rejection remain
+separate, unresolved evidence gaps.

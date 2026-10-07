@@ -88,10 +88,15 @@ states from its actual decorator. Its exact fixture root is traversable by the
 runtime user and remains separate from private status/authentication files.
 The normal Linux dispatcher snapshots the owning dependency test alongside its
 existing read-only inputs; no pytest/image dependency or new test family is added.
-Normal composed STATUS qualification is still pending. A source-only dispatch
-from the incomplete private candidate failed before native allocation and has
-no fixture/acceptance credit. The final full C3 source will use the supported
-normal dispatcher, with exact snapshot and owned retirement evidence.
+The complete composed C3 source then passed the normal STATUS dispatcher in
+3.395 seconds, including the same three permission states and original status
+controls. All242 mounted source inputs matched; exact stop/export/removal
+succeeded, the native container and captured leaders were absent, and the
+observer reported zero errors. This is composed-source discovery evidence,
+not an immutable final-head or task-performance claim. An earlier source-only
+dispatch from the incomplete private candidate failed before native allocation
+and retains zero fixture/acceptance credit. Final integrated deploy qualification
+remains separate.
 
 Final independent review, combined source policy, normal deploy qualification,
 production rollout and actual new LIVE trials remain pending. The original

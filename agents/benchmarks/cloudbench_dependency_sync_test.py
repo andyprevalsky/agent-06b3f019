@@ -13695,8 +13695,10 @@ fi
             assert all("/shutdown" not in line for line in call_lines)
 
 
+@pytest.mark.parametrize("native_state", ["started", "stopped", "unavailable"])
 def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
     tmp_path: Path,
+    native_state: str,
 ) -> None:
     """A stopped guest's missing runtime bundle must not re-quarantine cleanup."""
     fleet = fleet_source_text()
@@ -13715,7 +13717,9 @@ def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
     (output / "guest-shutdown.confirmed").write_text("failed-run\n")
     (output / "runtime-evidence.pending").write_text("pending\n")
     helper = tmp_path / "collector.py"
-    helper.write_text("raise SystemExit(2)\n")
+    collector_called = tmp_path / "collector.called"
+    native_ready = tmp_path / "native-ready"
+    helper.write_text(f"from pathlib import Path\nPath({str(collector_called)!r}).touch()\nraise SystemExit(2)\n")
     script = f"""set -uo pipefail
 APP=bench-app
 REGISTRY={shlex.quote(str(registry))}
@@ -13737,7 +13741,12 @@ fly_with_timeout() {{ return 1; }}
 fleet_registry_build_guest_recovery_plan() {{
   printf 'pool-guest\\tinterrupted-bench\\tpool-machine\\tdeadbeef000001\\tvol_owned\\t%s\\t61001\\n' "$OUTPUT" > "$2"
 }}
-registry_machine_details() {{ printf 'started pool-machine fdaa::101\\n'; }}
+registry_machine_details() {{
+  if [ -f {shlex.quote(str(native_ready))} ]; then
+    [ "{native_state}" != unavailable ] || return 2
+    printf '{native_state} pool-machine fdaa::101\\n'
+  else printf 'started pool-machine fdaa::101\\n'; fi
+}}
 machine_guest_recovery_configuration() {{ printf 'barrier-token\\tguest-token\\t8011\\n'; }}
 claim_recovery_status_proxy_ports() {{ printf '62001\\n' > "$1"; }}
 start_data_plane_proxy() {{ sleep 60 & printf -v "$5" '%s' "$!"; }}
@@ -13748,7 +13757,7 @@ cleanup_stale_owner_recovery_proxies() {{
   done
   return 0
 }}
-cloudbench_confirm_guest_shutdowns() {{ return 0; }}
+cloudbench_confirm_guest_shutdowns() {{ touch {shlex.quote(str(native_ready))}; return 0; }}
 cloudbench_recover_guest_cleanup_receipts() {{ return 99; }}
 {confirm}
 {reconnect}
@@ -13766,6 +13775,10 @@ if fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"; then exit 90; fi
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+    assert collector_called.exists() == (native_state != "stopped"), (
+        "recovery attempted sealed runtime capture from an exact stopped guest"
+    )
 
 
 def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(

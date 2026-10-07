@@ -7775,6 +7775,7 @@ PY
 }
 
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
+    local _capture_details=""
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
     local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
     local guest_barrier_token details detail_status state actual_name configuration
@@ -8063,6 +8064,15 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             output="${recovery_outputs[$recovery_index]}"
             [ -f "$output/runtime-evidence.pending" ] || continue
             [ ! -e "$output/remote-logs/runtime-evidence" ] || continue
+            # Exact recovery may have stopped this guest after the original
+            # plan was read. A stopped guest cannot serve a sealed capture;
+            # retain its evidence latch for the original-volume archive.
+            if _capture_details="$(registry_machine_details "${recovery_machine_ids[$recovery_index]}")" \
+                && [ "${_capture_details%% *}" = stopped ]; then
+                echo "🧭 [${recovery_benches[$recovery_index]}] exact guest stopped; original-volume runtime archive required"
+                shutdown_status=1
+                continue
+            fi
             proxy_port="${recovery_proxy_ports[$recovery_index]}"
             if [ -z "$proxy_port" ] \
                 || [ ! -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
