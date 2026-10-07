@@ -1,3 +1,10 @@
+import { type StoreEncryptedArtifactRequest, validatedArtifactBatch } from './traceArchiveBatch';
+export {
+  ARCHIVE_BATCH_MAX_BYTES,
+  ARCHIVE_BATCH_MAX_RECORDS,
+  type StoreEncryptedArtifactRequest,
+  type StoreEncryptedArtifactsRequest,
+} from './traceArchiveBatch';
 import { createLogger } from './logger';
 import { prisma } from './database';
 import { indexArchivedTrace, indexArchivedTraceFromR2 } from './traceArchiveSearchIndex';
@@ -43,99 +50,7 @@ const FINALIZABLE_STATUSES = new Set([
   'ERROR',
 ]);
 
-export interface StoreEncryptedArtifactRequest {
-  rootAgentId: string;
-  path: string;
-  ciphertextB64: string;
-  metadata: EncryptedArtifactMetadata;
-}
-
-export const ARCHIVE_BATCH_MAX_RECORDS = 256;
-export const ARCHIVE_BATCH_MAX_BYTES = 64 * 1024 * 1024;
 const ARCHIVE_BATCH_UPLOAD_CONCURRENCY = 4;
-
-export interface StoreEncryptedArtifactsRequest {
-  rootAgentId: string;
-  artifacts: Omit<StoreEncryptedArtifactRequest, 'rootAgentId'>[];
-}
-
-/** Validate the entire request before writing any artifact or finalization fence. */
-function validatedArtifactBatch(input: unknown) {
-  if (input === null || typeof input !== 'object') {
-    throw new Error('Archive batch must be an object');
-  }
-  const body = input as StoreEncryptedArtifactsRequest;
-  if (
-    typeof body.rootAgentId !== 'string' ||
-    !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,95}$/.test(body.rootAgentId)
-  ) {
-    throw new Error('Archive batch requires one canonical rootAgentId');
-  }
-  if (
-    !Array.isArray(body.artifacts) ||
-    body.artifacts.length === 0 ||
-    body.artifacts.length > ARCHIVE_BATCH_MAX_RECORDS
-  ) {
-    throw new Error('Archive batch record count exceeds bounds');
-  }
-  if (Buffer.byteLength(JSON.stringify(input), 'utf8') > ARCHIVE_BATCH_MAX_BYTES) {
-    throw new Error('Archive batch byte count exceeds bounds');
-  }
-  const paths = new Set<string>();
-  const artifacts = body.artifacts.map((artifact) => {
-    if (
-      artifact === null ||
-      typeof artifact !== 'object' ||
-      'rootAgentId' in artifact ||
-      typeof artifact.path !== 'string' ||
-      artifact.path.length === 0 ||
-      artifact.path.length > 4096 ||
-      safeArchivePath(artifact.path) !== artifact.path ||
-      artifact.path.endsWith('.meta.json') ||
-      artifact.path.endsWith('.transaction') ||
-      /\.transaction\.\d+(?:\.\d+)?\.tmp$/.test(artifact.path) ||
-      paths.has(artifact.path)
-    ) {
-      throw new Error('Archive batch paths must be canonical and unique within one root');
-    }
-    paths.add(artifact.path);
-    if (
-      typeof artifact.ciphertextB64 !== 'string' ||
-      artifact.ciphertextB64.length === 0 ||
-      artifact.ciphertextB64.length > 44 * 1024 * 1024
-    ) {
-      throw new Error('Archive batch ciphertext must be canonical base64');
-    }
-    if (
-      artifact.metadata === null ||
-      typeof artifact.metadata !== 'object' ||
-      Buffer.byteLength(JSON.stringify(artifact.metadata), 'utf8') > 8192
-    ) {
-      throw new Error('Archive batch metadata exceeds bounds');
-    }
-    const ciphertext = Buffer.from(artifact.ciphertextB64, 'base64');
-    if (
-      ciphertext.length > 33 * 1024 * 1024 ||
-      ciphertext.toString('base64') !== artifact.ciphertextB64
-    ) {
-      throw new Error('Archive batch ciphertext exceeds bounds');
-    }
-    const metadata = validateEncryptedArtifactEnvelope({
-      objectPath: artifact.path,
-      ciphertext,
-      metadata: artifact.metadata,
-    });
-    if (
-      !Number.isSafeInteger(metadata.plaintext_bytes) ||
-      metadata.plaintext_bytes < 0 ||
-      metadata.plaintext_bytes > 32 * 1024 * 1024
-    ) {
-      throw new Error('Archive batch plaintext byte count exceeds bounds');
-    }
-    return { objectPath: artifact.path, ciphertext, metadata };
-  });
-  return { rootAgentId: body.rootAgentId, artifacts };
-}
 
 /** Preserve individual artifact envelopes; amortize terminal manifest publication. */
 export async function storeWorkerArtifacts(input: unknown): Promise<{
@@ -146,12 +61,17 @@ export async function storeWorkerArtifacts(input: unknown): Promise<{
   let next = 0;
   const uploads = await Promise.allSettled(
     Array.from(
-      { length: Math.min(ARCHIVE_BATCH_UPLOAD_CONCURRENCY, batch.artifacts.length) },
+      {
+        length: Math.min(ARCHIVE_BATCH_UPLOAD_CONCURRENCY, batch.artifacts.length),
+      },
       async () => {
         while (next < batch.artifacts.length) {
           const index = next++;
           const artifact = batch.artifacts[index];
-          const ref = await storeEncryptedArtifact({ rootAgentId: batch.rootAgentId, ...artifact });
+          const ref = await storeEncryptedArtifact({
+            rootAgentId: batch.rootAgentId,
+            ...artifact,
+          });
           if (ref === null) throw new Error('Trace archive is disabled or unavailable');
           refs[index] = { path: artifact.objectPath, ref };
         }
@@ -161,7 +81,9 @@ export async function storeWorkerArtifacts(input: unknown): Promise<{
   const failure = uploads.find((result) => result.status === 'rejected');
   if (failure?.status === 'rejected') throw failure.reason;
   if (await finalizationFenceExists(batch.rootAgentId)) {
-    const reconciled = await reconcileFinalizedManifest(batch.rootAgentId, { markerExists: true });
+    const reconciled = await reconcileFinalizedManifest(batch.rootAgentId, {
+      markerExists: true,
+    });
     if (reconciled.status === 'updated') {
       log.info('Trace archive manifest reconciled after late worker artifact batch', {
         root_agent_id: batch.rootAgentId,
@@ -438,33 +360,46 @@ async function writeStartManifest(
   fixture: Awaited<ReturnType<typeof collectFixture>>
 ): Promise<void> {
   if (fixture.agent_ids[0] !== agentId) return;
-  const refs = uniqueArtifacts(excludeControlArtifacts(await listArchivedObjects(agentId)));
-  const manifestValue = buildManifestValue({
-    rootAgentId: agentId,
-    refs,
-    worldModelMode: startWorldModelMode(agentId, fixture),
-    benchmarkResult: null,
-    run: encryptedRunMetadata(fixture),
-    correlations: {
-      root_agent_id: agentId,
-      user_id: fixture.user_id,
-      agent_ids: fixture.agent_ids,
-    },
-    finalized: false,
-    force: false,
-  });
-  const manifest = await archiveJson({
-    rootAgentId: agentId,
-    objectPath: 'manifest.json.gz.enc',
-    value: manifestValue,
-  });
-  await writePublicManifest(agentId, refs);
-  if (manifest !== null) {
-    log.info('Trace archive manifest initialized at start', {
-      root_agent_id: agentId,
-      artifact_count: refs.length,
+  await withArchiveManifestLock(agentId, async (ownership) => {
+    // A delayed start capture must not replace a finalizing/terminal control file.
+    // Its fixture is already durable, and the owning finalizer/reconciler includes it.
+    if (await finalizationFenceExists(agentId)) {
+      await ownership.reconcile();
+      return;
+    }
+    const refs = uniqueArtifacts(
+      excludeControlArtifacts(await listArchivedObjects(agentId, { throwOnError: true }))
+    );
+    const manifestValue = buildManifestValue({
+      rootAgentId: agentId,
+      refs,
+      worldModelMode: startWorldModelMode(agentId, fixture),
+      benchmarkResult: null,
+      run: encryptedRunMetadata(fixture),
+      correlations: {
+        root_agent_id: agentId,
+        user_id: fixture.user_id,
+        agent_ids: fixture.agent_ids,
+      },
+      finalized: false,
+      force: false,
     });
-  }
+    await ownership.assertOwned();
+    const manifest = await archiveJson({
+      rootAgentId: agentId,
+      objectPath: 'manifest.json.gz.enc',
+      value: manifestValue,
+      createOnly: true,
+    });
+    await ownership.assertOwned();
+    await writePublicManifest(agentId, refs, undefined, { createOnly: true });
+    if (manifest !== null) {
+      log.info('Trace archive manifest initialized at start', {
+        root_agent_id: agentId,
+        artifact_count: refs.length,
+      });
+    }
+  });
 }
 
 type PreparedArchiveTask<TFixture> = {

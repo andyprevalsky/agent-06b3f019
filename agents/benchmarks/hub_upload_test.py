@@ -543,10 +543,9 @@ def test_live_response_preserves_phase_and_startup_label():
     for key in ("lifecycle_stage", "startup_label"):
         assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})
 
+
 @pytest.mark.parametrize("producer", ["startup", "aggregate", "terminal"])
-def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(
-    tmp_path, monkeypatch, producer
-):
+def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(tmp_path, monkeypatch, producer):
     """One 50-task fleet retains its identity and original clock through release."""
     import os
     import subprocess
@@ -560,11 +559,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         if "CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST" in os.environ
         else Path(__file__).resolve().parents[2]
     )
-    fleet = Path(
-        os.environ.get(
-            "CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet"
-        )
-    ).read_text()
+    fleet = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet")).read_text()
     run_id = "fixture-timestamp"
     directory = tmp_path / run_id
     directory.mkdir()
@@ -579,15 +574,19 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
     setup = (
         'FLEET_DIR="$1"\nROOT_DIR="$2"\nRUN_ID=fixture-timestamp\nFLEET_CONTROLLER_STARTED_EPOCH='
         + str(started)
-        + "\nBENCHES=(" + " ".join(names) + ")\nCATALOG_MODES=("
-        + " ".join(["real"] * len(names)) + ")\nSIM_ON_CSV=\n"
+        + "\nBENCHES=("
+        + " ".join(names)
+        + ")\nCATALOG_MODES=("
+        + " ".join(["real"] * len(names))
+        + ")\nSIM_ON_CSV=\n"
     )
     startup = definitions + "\n" + setup + 'write_startup_card "verifying environment"\n'
 
     def execute(command):
         subprocess.run(
             ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
 
     execute(startup)
@@ -595,17 +594,16 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
         start = fleet.index(marker)
         end = fleet.index("\nPY\n", start) + len("\nPY\n")
-        command = (
-            setup
-            + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n'
-            + fleet[start:end]
-        )
+        command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
         start = fleet.index("finalize_terminal_projection() {")
         end = fleet.index("\ncleanup() {", start)
         command = (
-            fleet[start:end] + "\n" + setup + 'PROVISION_POOL=\n'
+            fleet[start:end]
+            + "\n"
+            + setup
+            + "PROVISION_POOL=\n"
             + 'AGGREGATE_RUNS_SCRIPT="$ROOT_DIR/scripts/cloudbench-aggregate-runs.py"\n'
             + "finalize_terminal_projection 0\n"
         )
@@ -627,13 +625,17 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
                     continue
                 terminal = producer == "terminal" or (phase != "running" and index < 2)
                 status = ("passed" if index % 2 == 0 else "failed") if terminal else "running"
-                row = {"name": name, "status": status,
-                       "agent_url": f"https://www.roselabs.ai/?agent-id=root-{index}"}
+                row = {"name": name, "status": status, "agent_url": f"https://www.roselabs.ai/?agent-id=root-{index}"}
                 live = child / "cloudbench-live"
                 live.mkdir(exist_ok=True)
                 (live / "report-card.json").write_text(json.dumps({"per_task": [row]}))
-                task = {"name": name, "status": status.upper(), "passed": status == "passed",
-                        "agent_id": f"root-{index}", "agent_url": row["agent_url"]}
+                task = {
+                    "name": name,
+                    "status": status.upper(),
+                    "passed": status == "passed",
+                    "agent_id": f"root-{index}",
+                    "agent_url": row["agent_url"],
+                }
                 (child / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
                 if phase == "teardown":
                     (child / "benchmark-child.finished").touch()
@@ -646,9 +648,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
                 if producer == "terminal"
                 else live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
             )
-            assert bundle["timestamp"] == expected, (
-                "live fleet publication lost its stable controller-start timestamp"
-            )
+            assert bundle["timestamp"] == expected, "live fleet publication lost its stable controller-start timestamp"
             assert bundle["run_id"] == run_id
             assert [task["name"] for task in bundle["tasks"]] == names
             if phase in ("starting", "queued", "running"):
@@ -661,6 +661,95 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         assert {item["body"]["run_id"] for item in record} == {run_id}
         assert {item["body"]["timestamp"] for item in record} == {expected}
         assert all([task["name"] for task in item["body"]["tasks"]] == names for item in record)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("child_exit", "prior_status", "expected_status", "expected_passed"),
+    [
+        (None, None, "queued", None),
+        (125, None, "error", False),
+        (0, None, "error", False),
+        (125, "queued", "error", False),
+        (1, "passed", "passed", True),
+        (0, "failed", "failed", False),
+    ],
+)
+def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
+    tmp_path, monkeypatch, child_exit, prior_status, expected_status, expected_passed
+):
+    """A finished child without a task result cannot remain a queued placeholder."""
+    import os
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    fleet = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet")).read_text()
+    source = fleet.split("# ── ONE aggregated batch dashboard", 1)[1]
+    aggregate = source.split("<<'PY'", 1)[1].split("\n", 1)[1].split("\nPY\n", 1)[0]
+    names = [f"fixture-{index:03d}" for index in range(50)]
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    (batch / "benches.json").write_text(json.dumps([{"name": name, "mode": "REAL"} for name in names]))
+    child = tmp_path / names[0]
+    child.mkdir()
+    (child / "bench-e2e.started-epoch").write_text("1791364506\n")
+    if child_exit is not None:
+        (child / "benchmark-child.finished").write_text(f"{child_exit}\n")
+    if prior_status is not None:
+        live = child / "cloudbench-live"
+        live.mkdir()
+        row = {"name": names[0], "status": prior_status}
+        if prior_status in {"passed", "failed"}:
+            row["agent_url"] = "https://www.roselabs.ai/?agent-id=owned-root"
+            row["outcome_sha256"] = "a" * 64
+        (live / "report-card.json").write_text(json.dumps({"per_task": [row]}))
+    record = []
+    server, url = _serve(record)
+    env = dict(
+        os.environ,
+        FLEET_DIR=str(tmp_path),
+        UNIFIED_DIR=str(batch),
+        ROOT_DIR=str(repo),
+        DASH_BASE="8765",
+        FLEET_CONTROLLER_STARTED_EPOCH="1791364019",
+        SELF_MANAGED_HUB_RUN="1",
+        BENCHMARK_HUB_PARENT_RUN_ID="fixture-terminal-startup",
+        BENCHMARK_HUB_API_KEY="fixture-key",
+        BENCHMARK_HUB_UPLOAD_URL=url,
+        PYTHONPATH=str(repo / "agents"),
+    )
+    monkeypatch.delenv("BENCHMARK_HUB_GROUP_RUN_ID", raising=False)
+    env.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
+    try:
+        subprocess.run(
+            [sys.executable, "-c", aggregate, str(batch / "report-card.json")],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        assert record, "the real live projection was not published"
+        bundle = record[-1]["body"]
+        assert bundle["run_id"] == "fixture-terminal-startup"
+        assert bundle["timestamp"] == datetime.fromtimestamp(1791364019, timezone.utc).isoformat()
+        assert [task["name"] for task in bundle["tasks"]] == names
+        task = bundle["tasks"][0]
+        assert task["status"] == expected_status, "terminal startup remained queued"
+        assert task["passed"] is expected_passed
+        assert task["lifecycle_stage"] == ("teardown" if child_exit is not None else "starting")
+        assert all(task["status"] == "queued" and task["passed"] is None for task in bundle["tasks"][1:])
+        if prior_status not in {"passed", "failed"}:
+            assert task["agent_id"] is None
+            assert task["outcome_sha256"] is None
+            assert task["duration_seconds"] is None
+            assert task["llm_call_count"] is None
+        else:
+            assert task["agent_id"] == "owned-root"
+            assert task["outcome_sha256"] == "a" * 64
     finally:
         server.shutdown()
         server.server_close()

@@ -79,7 +79,7 @@ def retire_owned_container(
         for relative, destination, writable in expected
     ):
         return False
-    evidence_ok = False
+    stopped_ok = False
     removed = False
     try:
         stopped = subprocess.run(
@@ -89,6 +89,7 @@ def retire_owned_container(
         )
         if stopped.returncode:
             raise subprocess.CalledProcessError(stopped.returncode, stopped.args)
+        stopped_ok = True
         archive = snapshot / "fixture-tmp"
         archive.mkdir(mode=0o700, exist_ok=True)
         exported = subprocess.run(
@@ -96,8 +97,20 @@ def retire_owned_container(
             capture_output=True,
             text=True,
         )
-        if exported.returncode == 0:
-            # Fixture diagnostics stay private; never follow exported symlinks.
+        if exported.returncode:
+            print(
+                "WARNING: controller diagnostic export is incomplete; native owner retirement is checked separately.",
+                file=sys.stderr,
+            )
+    except (OSError, subprocess.SubprocessError):
+        print(
+            "WARNING: controller stop or diagnostic export raised an observation error; native retirement remains required.",
+            file=sys.stderr,
+        )
+    finally:
+        # Even partial diagnostics stay private; never follow exported symlinks.
+        archive = snapshot / "fixture-tmp"
+        try:
             for directory, directories, files in os.walk(archive, followlinks=False):
                 Path(directory).chmod(0o700)
                 directories[:] = [
@@ -109,11 +122,12 @@ def retire_owned_container(
                     path = Path(directory) / item
                     if stat.S_ISREG(path.lstat().st_mode):
                         path.chmod(0o600)
-        evidence_ok = stopped.returncode == 0 and exported.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        evidence_ok = False
-    finally:
-        # A failed export must not leave this exact verified owner behind.
+        except OSError:
+            print(
+                "WARNING: some private diagnostic files could not be sealed.",
+                file=sys.stderr,
+            )
+        # A failed diagnostic export must not leave this exact verified owner behind.
         try:
             removed = (
                 subprocess.run(
@@ -127,7 +141,7 @@ def retire_owned_container(
         ["docker", "inspect", fields[0]], capture_output=True, text=True
     )
     return (
-        evidence_ok
+        stopped_ok
         and removed
         and gone.returncode == 1
         and any(
@@ -140,9 +154,14 @@ def retire_owned_container(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument(
+        "--fixture",
+        choices=("multi-workstream", "status-service-shutdown"),
+        default="multi-workstream",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    fixture = "scripts/tests/cloudbench-multi-workstream.test.sh"
+    fixture = f"scripts/tests/cloudbench-{args.fixture}.test.sh"
     if sys.platform == "linux":
         subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
         if args.check_only:
@@ -243,6 +262,8 @@ def main() -> int:
             "hub_upload",
             "outcome_publication",
             "seed_cache_path",
+            "cloudbench_campaign_inventory_test",
+            "cloudbench_dependency_sync_test",
         )
     ]
     hashes = {}
@@ -334,7 +355,7 @@ def main() -> int:
                     process.wait()
             if not retire_owned_container(snapshot, name, owner, image_id):
                 raise RuntimeError(
-                    "exact controller container retirement and private evidence export were not proven"
+                    "exact controller container retirement was not proven"
                 )
         finally:
             for signum, handler in prior.items():

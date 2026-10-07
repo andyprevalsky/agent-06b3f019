@@ -795,6 +795,11 @@ if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
     finish 1
 fi
 
+# The DB warm-start dump lives on the /data volume (persists across stop/start +
+# fork) but must be writable by $APP_USER — /data itself is root-owned and
+# /data/repo gets `git reset --hard`'d, so use a dedicated cache dir we chown.
+mkdir -p "$DATA_DIR/cloudbench-cache" && chown "$APP_USER:$APP_USER" "$DATA_DIR/cloudbench-cache" 2>/dev/null || true
+
 # The warm image omits local Chromium because ordinary simulated benches use
 # remote/browser-model boundaries. Hosted Stripe Checkout in this daily task
 # needs a real browser on the box; keep its binary cache on the persistent volume.
@@ -1094,11 +1099,6 @@ else
         "BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1"
     )
 fi
-
-# The DB warm-start dump lives on the /data volume (persists across stop/start +
-# fork) but must be writable by $APP_USER — /data itself is root-owned and
-# /data/repo gets `git reset --hard`'d, so use a dedicated cache dir we chown.
-mkdir -p "$DATA_DIR/cloudbench-cache" && chown "$APP_USER:$APP_USER" "$DATA_DIR/cloudbench-cache" 2>/dev/null || true
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 rm -f "$STACK_CLEANUP_STATUS_FILE"

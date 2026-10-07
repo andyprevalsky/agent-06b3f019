@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
 import type { UserData } from '../types';
 import { savePersonalInfoApi } from '../api';
@@ -17,6 +17,12 @@ export function useSavePersonalInfo(
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  useEffect(() => {
+    if (!saved) return;
+    const timer = setTimeout(() => setSaved(false), 3000);
+    return () => clearTimeout(timer);
+  }, [saved]);
+
   const saveSettings = useCallback(async () => {
     try {
       setSaving(true);
@@ -34,7 +40,6 @@ export function useSavePersonalInfo(
         country: userData.country,
       });
       setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
     } catch (err) {
       console.error('Failed to save settings:', err);
       setError(err instanceof Error ? err.message : 'Failed to save settings');

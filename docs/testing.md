@@ -39,6 +39,19 @@ cd agents && python scripts/run_blackbox_tests.py web-search    # single domain
 cd agents && python scripts/run_blackbox_tests.py --list        # list domains
 ```
 
+Agents coverage runs each blackbox domain in its own bounded interpreter and
+then combines coverage before fast-cache and unit checks:
+
+```bash
+cd agents && bash scripts/run-coverage.sh
+```
+
+`AGENTS_COVERAGE_DOMAIN_TIMEOUT` sets the whole verification-domain budget in
+seconds (default 1800, positive integer). A large domain includes many individual
+checks and shares the host with the other coverage pools. Timeout and cancellation
+still fail the domain and retire its owned process group. This infrastructure
+budget does not change benchmark task execution or allocation-to-release deadlines.
+
 ### Backend Structural (`back-end/src/tests/structural/`)
 
 Architecture invariant tests — import direction, cross-domain isolation, provider boundaries, Prisma/Express encapsulation. Fast, no server needed.
@@ -125,7 +138,19 @@ still needs its own isolated restored volume, and those restores run in
 parallel within a slice. Avoid recopying a large donor or refreshing its
 snapshot unless dependency manifests or the donor contents actually changed.
 
-PR #1299's current user-authorized acceptance is ten consecutive slices of ten
+Current LIVE acceptance is documented in CLAUDE.md's **Current width-fifty LIVE
+acceptance** subsection: five consecutive runs of fifty distinct random eligible
+DAILY tasks, temporary 1,200-second execution per task and hard 3,600-second
+image-build-start through final durable publication/native release per run.
+Use the normal uncached image build/activation and one ordinary fleet of fifty
+concrete names without repetition/concurrency flags. Keep LIVE autoscale maximum
+15, scoped native admission, thirty-second exact-handle monitoring and grouped
+early task verdicts. Intermediate observations warn/retry; usable stage handoffs
+and the whole-run limit remain authoritative. Compare generous fixed historical
+LIVE stage targets and avoid paid deploy overlap with accepted LIVE latency.
+The prior original hundred-task campaign is complete and is not restarted.
+
+PR #1299's original user-authorized acceptance was ten consecutive slices of ten
 distinct daily/Polar tasks. Each benchmark needs meaningful real provider
 execution, a genuine terminal `PASSED` or `FAILED`, and exact owned-resource
 release within one 1,800-second allocation-to-finish deadline. Normally expect
@@ -142,7 +167,7 @@ is best effort after resource release and does not block the next slice.
 Publishers must retire before final cleanup. Report whole-slice and individual
 benchmark E2E times, with task durations where available. The 20-minute target
 is a warning and speedup reviews are waived. Preserve 7,200/300/1,800-second
-normal execution, temporary execution and E2E budgets. The current follow-up
+normal execution, temporary execution and E2E budgets. The earlier follow-up
 50-task command is explicitly authorized to use 600 seconds temporarily; this
 does not change normal defaults or the 1,800-second allocation cutoff. A runtime change that
 invalidates earlier runs starts a fresh streak; test/doc-only changes can carry
@@ -189,3 +214,7 @@ launched-worker capture failures, and the decoded-size Hub transport boundary.
 Frontend coverage follows every phase through release; backend Hub round-trip
 coverage preserves those fields. The original full forensic bundle is unchanged;
 Hub transport omits duplicated diagnostic logs while keeping complete transcripts.
+Generic failed-owner archive readiness has a separate `archive-verified.json`
+receipt with `native_release_verified=false` and zero proof credit. Follow
+CLAUDE.md's supported exact-owner CLI recovery through its unchanged final
+native provider audit; archive readiness alone is not resource release.

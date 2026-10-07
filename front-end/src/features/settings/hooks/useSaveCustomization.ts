@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { type CustomizationData } from '@/features/customization';
 
 import { saveCustomizationApi } from '../api';
@@ -17,6 +17,12 @@ export function useSaveCustomization(
   const [savingCustomization, setSavingCustomization] = useState(false);
   const [savedCustomization, setSavedCustomization] = useState(false);
 
+  useEffect(() => {
+    if (!savedCustomization) return;
+    const timer = setTimeout(() => setSavedCustomization(false), 3000);
+    return () => clearTimeout(timer);
+  }, [savedCustomization]);
+
   const saveCustomization = useCallback(async () => {
     try {
       setSavingCustomization(true);
@@ -28,7 +34,6 @@ export function useSaveCustomization(
         customSystemPrompt: customization.customSystemPrompt || null,
       });
       setSavedCustomization(true);
-      setTimeout(() => setSavedCustomization(false), 3000);
     } catch (err) {
       console.error('Failed to save customization:', err);
       setError(err instanceof Error ? err.message : 'Failed to save customization');

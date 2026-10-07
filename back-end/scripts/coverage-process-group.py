@@ -32,7 +32,7 @@ def process_group_member_pids(pgid: int) -> set[int] | None:
             capture_output=True,
             start_new_session=True,
             text=True,
-            timeout=1,
+            timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

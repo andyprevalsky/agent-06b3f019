@@ -6,14 +6,18 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
-import signal
+import secrets
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +42,156 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     temporary.write_text(json.dumps(public_value(value), indent=2) + "\n")
     temporary.replace(path)
+
+
+def publish_campaign_group(
+    root: Path,
+    campaign_dir: Path,
+    state: dict[str, object],
+    *,
+    live: bool,
+    stop_requested: Callable[[], bool],
+) -> bool:
+    """The schedule is a real Hub resource; task results remain child-owned."""
+    record = {
+        "run_id": state["campaign_id"],
+        "timestamp": state["started_at"],
+        "source": "benchmark-campaign",
+        "suite": "cloud-fleet",
+        "tasks": [],
+        "run_group": {
+            "status": state["status"],
+            "finished_at": state.get("finished_at"),
+            "wall_clock_seconds": state.get("wall_clock_seconds"),
+            "outcomes": {
+                str(job["job_id"]): {
+                    "status": job["status"],
+                    "controller_exit_code": job["controller_exit_code"],
+                }
+                for job in state["jobs"]
+            },
+            "members": [
+                {
+                    "member_id": job["job_id"],
+                    "name": job["task"],
+                    "run_number": job["run"],
+                }
+                for job in state["jobs"]
+            ],
+        },
+    }
+    target = campaign_dir / "hub-group.json"
+    write_json_atomic(target, record)
+    if stop_requested():
+        return False
+    environment = os.environ.copy()
+    environment.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
+    if not environment.get("BENCHMARK_HUB_API_KEY") and not environment.get(
+        "BACKEND_API_KEY"
+    ):
+        try:
+            from dotenv import dotenv_values
+
+            key = dotenv_values(root / "back-end/.env").get("BACKEND_API_KEY")
+            if key:
+                environment["BACKEND_API_KEY"] = key
+        except ImportError:
+            pass
+    # Load the existing exact auxiliary-session drain before allocating its
+    # publisher. A setup exception must never leave a child without an owner.
+    spec = importlib.util.spec_from_file_location(
+        "campaign_publication_cleanup",
+        Path(__file__).with_name("cloudbench-campaign-seed.py"),
+    )
+    cleanup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cleanup)
+    log = campaign_dir / "hub-group-publication.private.log"
+    acknowledgement = campaign_dir / "hub-group-publication-ack.private.json"
+    publication_token = secrets.token_hex(16)
+    completed = False
+    with log.open("a") as stream:
+        os.chmod(log, 0o600)
+        result = subprocess.Popen(
+            [
+                sys.executable,
+                str(root / "agents/benchmarks/hub_upload.py"),
+                "--register-starting" if live else "--upload-final",
+                str(target),
+                "--source",
+                "benchmark-campaign",
+                "--follow-record-on-cancel",
+                "--publication-ack",
+                str(acknowledgement),
+                "--publication-token",
+                publication_token,
+            ],
+            cwd=root,
+            env=environment,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            while result.returncode is None:
+                if stop_requested():
+                    break
+                try:
+                    result.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            try:
+                try:
+                    if (
+                        not live
+                        and result.returncode == 0
+                        and acknowledgement.is_file()
+                    ):
+                        ack = json.loads(acknowledgement.read_text())
+                        native = subprocess.check_output(
+                            ["ps", "-ax", "-o", "pid=,pgid=,stat="], text=True
+                        )
+                        group_alive = any(
+                            int(row.split()[1]) == result.pid
+                            and not row.split()[2].startswith("Z")
+                            for row in native.splitlines()
+                        )
+                        completed = not group_alive and ack == {
+                            "pid": result.pid,
+                            "token": publication_token,
+                            "record_sha256": hashlib.sha256(
+                                json.dumps(record, sort_keys=True).encode()
+                            ).hexdigest(),
+                        }
+                except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                    # An unavailable or malformed observation cannot commit the
+                    # terminal publication or skip cancellation reconciliation.
+                    completed = False
+                if stop_requested() and not completed:
+                    # Give the already-owned publisher the terminal projection
+                    # before its existing session drain delivers cancellation.
+                    record["run_group"]["status"] = "cancelled"
+                    record["run_group"]["finished_at"] = utc_now()
+                    if live:
+                        for outcome in record["run_group"]["outcomes"].values():
+                            if outcome["status"] == "queued":
+                                outcome["status"] = "cancelled"
+                    write_json_atomic(target, record)
+            finally:
+                if result.returncode is None:
+                    # Keep the leader waitable until its exact session closes,
+                    # including exceptional exits. Reuse existing generous cleanup
+                    # headroom; no fleet process or new stage deadline is involved.
+                    cleanup.stop_get(result)
+    if result.returncode:
+        print(
+            "Warning: campaign Hub schedule publication is pending; child results and cleanup retain their owners"
+        )
+    elif not live and not completed:
+        print(
+            "Warning: campaign Hub terminal acknowledgement was not verified; publication remains pending"
+        )
+    return completed
 
 
 def parse_args() -> argparse.Namespace:
@@ -244,6 +398,8 @@ def main() -> int:
                 "status": "queued",
                 "ready_count": 0,
                 "expected_count": len(members),
+                "failed_count": 0,
+                "released_count": 0,
                 "released_at": None,
                 "_directory": directory,
                 "_jobs": members,
@@ -268,8 +424,13 @@ def main() -> int:
     if strict_start:
         print(
             f"   strict startup: {len(cohorts)} cohort(s), "
-            f"up to {args.concurrency} copies each; every member must be ready "
-            "before its cohort releases."
+            f"up to {args.concurrency} copies each; every surviving eligible member "
+            "must be ready before its cohort releases."
+        )
+        print(
+            "   ordinary terminal member failures stay failed; healthy peers and later "
+            "cohorts continue. Keep requested/released/failed counts; partial release "
+            "never earns full-width credit."
         )
         print(
             "   native capacity includes existing/stopped Machines and worker "
@@ -283,8 +444,28 @@ def main() -> int:
         "the campaign directory is not a fleet-monitor handle."
     )
     print(
-        "   check controller exit and continue through owned teardown; "
-        "task PASS/FAIL is available before cleanup."
+        "   controller status/exit is separate from monitor.task_outcomes; retain genuine task FAIL."
+    )
+    print(
+        "   keep the original owner on stale cards or retryable startup/publication warnings; reconcile native birth/log growth read-only."
+    )
+    print(
+        "   preserve actual fatal/terminal status; transient observations do not authorize cancellation, restart, or a clock reset."
+    )
+    print(
+        "   continue through required terminal publication and exact browser/provider/local-process release; outcome ACK alone is not completion."
+    )
+    print(
+        "   follow each fleet's _batch/lifecycle.json and teardown-ownership.path; provider-teardown-verified.epoch follows the full release audit."
+    )
+    print(
+        "   for the documented cached 50-copy diagnostic only: execution 300s, allocation-to-full-release hard 1200s per copy; use original native/claim epochs, or the conservative before-claim marker."
+    )
+    print(
+        "   at an explicitly requested hard cutoff, verify release and birth-check before TERM of only the exact owner; otherwise continue unless catastrophic or explicitly cancelled."
+    )
+    print(
+        "   when that original birth is absent with resources retained: scripts/run-bench --recover-stale-owner <exact-token>; keep original receipts, interruption/recovery has zero acceptance credit."
     )
 
     pending = deque(jobs)
@@ -328,10 +509,16 @@ def main() -> int:
         if cohort["status"] != "waiting":
             return
         ready_count = 0
+        failed_count = 0
+        survivors = []
         for job in cohort["_jobs"]:
+            if job.get("startup_failed_before_release"):
+                failed_count += 1
+                continue
             process = job.get("_process")
             if not isinstance(process, subprocess.Popen) or process.poll() is not None:
                 return
+            survivors.append(job)
             ready = cohort["_directory"] / "ready" / f"{job['job_id']}.json"
             if not ready.is_file():
                 continue
@@ -346,24 +533,35 @@ def main() -> int:
                 )
             ready_count += 1
             job["startup_ready_at"] = receipt["ready_at"]
-        if cohort["ready_count"] != ready_count:
+        if (
+            cohort["ready_count"] != ready_count
+            or cohort["failed_count"] != failed_count
+        ):
             cohort["ready_count"] = ready_count
+            cohort["failed_count"] = failed_count
             print(
-                f"⏸️ campaign startup {cohort['cohort_id']}: "
-                f"{ready_count}/{cohort['expected_count']} copies ready"
+                f"⏸️ campaign startup {cohort['cohort_id']}: {ready_count}/{cohort['expected_count']} copies ready"
             )
             write_json_atomic(summary_path, state)
-        if ready_count != cohort["expected_count"]:
+        if not survivors:
+            cohort["status"] = "failed"
+            write_json_atomic(summary_path, state)
+            return
+        if ready_count != len(survivors):
             return
         cohort["released_at"] = utc_now()
+        cohort["released_count"] = ready_count
         write_json_atomic(
             cohort["_directory"] / "release.json",
-            {"cohort_id": cohort["cohort_id"], "released_at": cohort["released_at"]},
+            {
+                "cohort_id": cohort["cohort_id"],
+                "released_at": cohort["released_at"],
+                "jobs": {str(job["job_id"]): job["_process"].pid for job in survivors},
+            },
         )
         cohort["status"] = "released"
         print(
-            f"🚦 campaign startup {cohort['cohort_id']}: releasing "
-            f"all {ready_count} ready copies"
+            f"🚦 campaign startup {cohort['cohort_id']}: releasing all {ready_count} ready copies"
         )
         write_json_atomic(summary_path, state)
 
@@ -383,8 +581,19 @@ def main() -> int:
     inventory_directory = None
     inventory_failure_signalled = False
     try:
+        if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
+            "BENCHMARK_HUB_PARENT_RUN_ID"
+        ):
+            publish_campaign_group(
+                root,
+                campaign_dir,
+                state,
+                live=True,
+                stop_requested=lambda: bool(stop_signal),
+            )
         if (
-            args.concurrency > 1
+            not stop_signal
+            and args.concurrency > 1
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
         ):
@@ -430,6 +639,68 @@ def main() -> int:
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
                     current_cohort["status"] = "waiting"
+                    if inventory_directory is not None:
+                        try:
+                            log = (
+                                current_cohort["_directory"]
+                                / "seed-preflight.private.log"
+                            )
+                            with log.open("w") as stream:
+                                log.chmod(0o600)
+                                result = subprocess.Popen(
+                                    [
+                                        sys.executable,
+                                        str(
+                                            root / "scripts/cloudbench-campaign-seed.py"
+                                        ),
+                                        "prepare",
+                                        "--root",
+                                        str(root),
+                                        "--inventory",
+                                        str(inventory_directory),
+                                        "--barrier",
+                                        str(current_cohort["_directory"]),
+                                    ],
+                                    cwd=root,
+                                    stdout=stream,
+                                    stderr=subprocess.STDOUT,
+                                )
+                                # Keep the original campaign cancellation and
+                                # inventory authority live while its owned GET
+                                # runs. The helper drains its exact child session.
+                                interrupted = False
+                                try:
+                                    while result.poll() is None:
+                                        if not interrupted and (
+                                            stop_signal
+                                            or inventory_process.poll() is not None
+                                        ):
+                                            result.terminate()
+                                            interrupted = True
+                                        try:
+                                            result.wait(timeout=0.2)
+                                        except subprocess.TimeoutExpired:
+                                            pass
+                                finally:
+                                    if result.poll() is None:
+                                        result.terminate()
+                                        result.wait()
+                            if result.returncode:
+                                raise ValueError("canonical fixture preflight failed")
+                            current_cohort["_seed_proof"] = (
+                                current_cohort["_directory"] / "seed-proof.private.json"
+                            )
+                        except (OSError, ValueError):
+                            first_failure = first_failure or 1
+                            barrier_failure = True
+                            abort_startup_cohort(
+                                current_cohort,
+                                "canonical fixture full GET failed before child admission",
+                            )
+                            print(
+                                "Campaign canonical fixture preflight failed; no cohort controller admitted"
+                            )
+                        write_json_atomic(summary_path, state)
             while (
                 pending
                 and len(active) < args.concurrency
@@ -439,13 +710,17 @@ def main() -> int:
             ):
                 job = pending.popleft()
                 environment = os.environ.copy()
-                # The campaign is only a local scheduler and does not create an
-                # in-app Hub aggregate. Each fleet child must therefore register
-                # its own visible aggregate before it provisions machines. A
-                # genuinely visible parent supplied by an outer controller is
-                # preserved through the copied environment.
+                # Group membership is distinct from publication ownership. Each
+                # child still registers, publishes and acknowledges its own run;
+                # the Hub projects these durable members as one campaign.
                 environment.update(
                     {
+                        "BENCHMARK_HUB_GROUP_RUN_ID": environment.get(
+                            "BENCHMARK_HUB_GROUP_RUN_ID"
+                        )
+                        or safe_id,
+                        "RUN_BENCH_CAMPAIGN_STARTED_AT": str(state["started_at"]),
+                        "RUN_BENCH_CAMPAIGN_TOTAL_JOBS": str(len(jobs)),
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
                         "RUN_BENCH_CAMPAIGN_JOB_ID": str(job["job_id"]),
                         "RUN_BENCH_CAMPAIGN_RUN": str(job["run"]),
@@ -459,7 +734,12 @@ def main() -> int:
                     )
                 else:
                     environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
+                environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start:
+                    if current_cohort.get("_seed_proof"):
+                        environment["CLOUDBENCH_CAMPAIGN_SEED_PROOF"] = str(
+                            current_cohort["_seed_proof"]
+                        )
                     environment.update(
                         {
                             "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(
@@ -509,8 +789,7 @@ def main() -> int:
                     int(state["peak_concurrency"]), len(active)
                 )
                 print(
-                    f"▶ {job['job_id']} task={job['task']} run={job['run']} "
-                    f"pid={process.pid}"
+                    f"▶ {job['job_id']} task={job['task']} run={job['run']} pid={process.pid}"
                 )
                 write_json_atomic(summary_path, state)
 
@@ -535,11 +814,11 @@ def main() -> int:
                     "status"
                 ] not in {"released", "aborted"}
                 if exited_before_release:
-                    barrier_failure = True
                     first_failure = first_failure or exit_code or 1
-                    abort_startup_cohort(
-                        job["_cohort"], "controller exited before cohort release"
-                    )
+                    # Keep the failed member and its original custody manifest.
+                    # Only release eligibility changes; healthy peers and later
+                    # cohorts can still complete, while the campaign stays failed.
+                    job["startup_failed_before_release"] = True
                 job["status"] = (
                     "cancelled"
                     if job.pop("_terminated_by_campaign", False)
@@ -580,8 +859,7 @@ def main() -> int:
                         f"{job['job_id']}:pid={process_id}:bytes={output_bytes}"
                     )
                 print(
-                    f"⏳ campaign liveness active={len(active)} "
-                    f"pending={len(pending)} {' '.join(evidence)}"
+                    f"⏳ campaign liveness active={len(active)} pending={len(pending)} {' '.join(evidence)}"
                 )
                 next_heartbeat = now + (10 if now - started < 60 else 60)
             if (stop_signal or barrier_failure) and not active:
@@ -619,6 +897,25 @@ def main() -> int:
     else:
         state["status"] = "passed" if first_failure == 0 else "failed"
         result = first_failure
+    state["finished_at"] = utc_now()
+    state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
+    write_json_atomic(summary_path, state)
+    publication_completed = False
+    if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
+        "BENCHMARK_HUB_PARENT_RUN_ID"
+    ):
+        publication_completed = publish_campaign_group(
+            root,
+            campaign_dir,
+            state,
+            live=False,
+            stop_requested=lambda: bool(stop_signal),
+        )
+    if stop_signal and not publication_completed:
+        state["status"] = "cancelled"
+        result = 128 + stop_signal
+    # Publication is part of the campaign lifetime, including cancellation
+    # during its final handoff. Preserve the original child outcomes.
     state["finished_at"] = utc_now()
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
     write_json_atomic(summary_path, state)

@@ -4245,19 +4245,23 @@ except Exception:
         fi
         sleep $(( _s * 2 ))
     done
-    [ "$_start_ok" = 1 ] || {
-        echo "❌ boot-launch: provider did not accept the required post-config start for $mid." >&2
-        tail -30 "$_start_log" 2>/dev/null | sed 's/^/   /' >&2 || true
-        exit 1
-    }
-    printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
-    mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
-    rm -f "$_start_log"
+    if [ "$_start_ok" = 1 ]; then
+        printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
+        mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
+        rm -f "$_start_log"
+    else
+        # An update can converge while every start request is rejected. Retain
+        # the diagnostic and let the existing data-plane/current-run log proof
+        # below decide whether this configured guest actually booted.
+        echo "⚠️ boot-launch: post-config start ACK unavailable for $mid; checking the current guest over the data plane." >&2
+    fi
     stage_explicit_codex_auth /cloudbench-codex-auth.py || {
         echo "❌ explicit Codex auth staging failed before benchmark setup" >&2
         exit 1
     }
-    echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
+    if [ "$_start_ok" = 1 ]; then
+        echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
+    fi
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
@@ -4820,8 +4824,20 @@ PY
             # could remain hung after DONE while the controller tried to exit.
             if {
                 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
-                    curl -fsS --max-time 6 \
-                        "http://127.0.0.1:$LOCAL_STATUS_PORT/repo/.context/cloudbench/report-card.json"
+                    # The parent can rotate its proxy after this mirror forks.
+                    # Consume its published current port on every observation.
+                    mirror_status_port=""
+                    if [ -f "$OUT_DIR/status-proxy.port" ] && [ ! -L "$OUT_DIR/status-proxy.port" ]; then
+                        mirror_status_port="$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)"
+                    fi
+                    case "$mirror_status_port" in
+                        ''|*[!0-9]*) false ;;
+                        *)
+                            [ "$mirror_status_port" -gt 0 ] && [ "$mirror_status_port" -le 65535 ] \
+                                && curl -fsS --max-time 6 \
+                                    "http://127.0.0.1:$mirror_status_port/repo/.context/cloudbench/report-card.json"
+                            ;;
+                    esac
                 else
                     ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null"
                 fi
@@ -4861,7 +4877,14 @@ if tasks.get("total") == expected_total and len(per_task) == expected_total and 
 raise SystemExit(1)
 PY
             then
-                mv "$tmp" "$DASH_DIR/report-card.json"
+                # An old proxy response may arrive after replacement was published.
+                if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ] \
+                    || { [ ! -L "$OUT_DIR/status-proxy.port" ] \
+                        && [ "$mirror_status_port" = "$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)" ]; }; then
+                    mv "$tmp" "$DASH_DIR/report-card.json"
+                else
+                    rm -f "$tmp"
+                fi
             else
                 rm -f "$tmp"
             fi
@@ -5270,6 +5293,24 @@ while :; do
     log_refresh_ok="0"
     refresh_bench_log "$BENCH_LOG_CHUNKS_PER_POLL" 2>/dev/null \
         && log_refresh_ok="1"
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] \
+       && [ "${_start_ok:-1}" = "0" ] && [ "$log_refresh_ok" = "1" ] \
+       && [ -s "$SSH_LOG" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+        # refresh_bench_log accepted this exact RUNSTAMP with the bounded log
+        # continuity protocol. A dead lifecycle never acknowledges boot.
+        _start_health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
+        case "$_start_health" in
+            204|425)
+                if kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+                    printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
+                    mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
+                    _start_ok=1
+                    echo "✅ boot-launch: $mid current guest verified after post-config start ACK rejection."
+                fi
+                ;;
+        esac
+    fi
     # A later chunk can fail after earlier chunks were already validated and
     # committed. Consume that bounded delta even when the overall refresh asks
     # the next poll to retry; otherwise a semantic line can be skipped forever.

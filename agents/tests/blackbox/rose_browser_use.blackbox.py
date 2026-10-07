@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2091,6 +2092,107 @@ async def test_complete_browser_use_dumps_cerebras_context():
     assert payload["extra"]["iteration"] == 7
 
 
+async def _assert_failed_browser_context_capture(*, dump_unavailable=False, cancelled=False):
+    """The actual browser method keeps its failure and captures its built inputs."""
+    from helpers import observability
+    from providers.rose.errors import RoseDeadlineError
+
+    original = asyncio.CancelledError() if cancelled else RoseDeadlineError("offline stream deadline")
+    client = RoseClient(openrouter_key="offline-fake")
+    client.collect = AsyncMock(side_effect=original)
+    agent_id = "11111111-1111-1111-1111-111111111111"
+    root_id = "22222222-2222-2222-2222-222222222222"
+    request_id = None if dump_unavailable else "offline-browser-request"
+    call_site = "test-bu-failure-capture"
+    browser_state = _browser_state()
+    history = [{"step": 1, "action": "screenshot", "result": {"success": True}}]
+    actual_dump = observability.dump_llm_context
+    with tempfile.TemporaryDirectory() as directory:
+        with (
+            patch.object(observability, "_DUMP_ROOT", Path(directory)),
+            patch.object(observability, "_IS_PRODUCTION", False),
+            patch.object(observability, "archive_json", return_value=None),
+            patch.object(observability, "current_span_id", return_value="offline-browser-span"),
+            patch.object(observability, "current_root_agent_id", return_value=root_id),
+            patch.object(
+                observability,
+                "dump_llm_context",
+                **(
+                    {"side_effect": OSError("offline dump unavailable")} if dump_unavailable else {"wraps": actual_dump}
+                ),
+            ) as dumped,
+        ):
+            try:
+                await client.complete_browser_use(
+                    task="offline capture fixture",
+                    browser_state=browser_state,
+                    action_history=history,
+                    available_actions=["click", "goto"],
+                    include_screenshot=False,
+                    agent_id=agent_id,
+                    request_id=request_id,
+                    call_site=call_site,
+                    skip_cache_write=True,
+                    cache_namespace="offline-browser-sequence",
+                    dump_extra={"iteration": 8},
+                )
+            except BaseException as observed:
+                assert observed is original, "capture must preserve the original exception object"
+            else:
+                raise AssertionError("the original browser failure was swallowed")
+            assert client.collect.await_count == 1
+            if cancelled:
+                assert dumped.call_count == 0, "cancellation must not start capture work"
+                return
+            assert dumped.call_count == 1, "the failed browser request has no input capture"
+            args = client.collect.await_args.kwargs
+            assert args["dump_context"] is False, "successful requests retain their existing single dump"
+            assert args["request_id"] and (request_id is None or args["request_id"] == request_id)
+            if dump_unavailable:
+                assert not list(Path(directory).rglob("*.json"))
+                return
+            files = list(Path(directory).rglob("*.json"))
+            assert len(files) == 1
+            payload = json.loads(files[0].read_text())
+            assert payload["messages"] == args["messages"] and payload["tools"] == args["tools"]
+            assert payload["agent_id"] == agent_id and payload["root_agent_id"] == root_id
+            assert payload["span_id"] == "offline-browser-span" and payload["call_site"] == call_site
+            assert payload["model"] == "rose-1-browser-use"
+            config = payload["config"]
+            assert config["actual_model"] is None and config["mode"] is None
+            params = config["requested_params"]
+            assert params["max_tokens"] == args["max_tokens"] == 2048
+            assert params["temperature"] == args["temperature"] == 0.3
+            assert params["tool_choice"] == args["tool_choice"] == "auto"
+            assert params["deadline_s"] == args["deadline_s"] == 590.0
+            assert params["ttft_timeout_s"] == 90.0 and params["idle_timeout_s"] == 120.0
+            assert params["cache_namespace"] == args["cache_namespace"] == "offline-browser-sequence"
+            assert params["skip_cache_write"] is args["skip_cache_write"] is True
+            assert params["reasoning_effort"] is None and params["thinking"] is None
+            assert params["seed"] is None and params["response_format"] is None
+            assert (
+                config["pool_waterfall_reasoning_effort"] == get_pool("rose-1-browser-use").waterfall_reasoning_effort
+            )
+            assert payload["output"] == {
+                "request_id": args["request_id"],
+                "error": {"type": "RoseDeadlineError", "message": "offline stream deadline"},
+            }
+            assert payload["extra"]["browser_state"] == browser_state
+            assert payload["extra"]["action_history"] == history and payload["extra"]["iteration"] == 8
+
+
+async def test_complete_browser_use_failure_captures_exact_context():
+    await _assert_failed_browser_context_capture()
+
+
+async def test_complete_browser_use_capture_failure_preserves_original_error():
+    await _assert_failed_browser_context_capture(dump_unavailable=True)
+
+
+async def test_complete_browser_use_cancellation_skips_failure_capture():
+    await _assert_failed_browser_context_capture(cancelled=True)
+
+
 async def test_complete_browser_use_bypasses_fast_cache_context():
     """Browser-use LLM calls must not read or write provider fast-cache."""
     sse_body = _openai_sse(
@@ -2444,6 +2546,16 @@ async def run_all_tests():
     await r.record_async("complete_browser_use_cerebras_path", test_complete_browser_use_cerebras_path_succeeds)
     await r.record_async(
         "complete_browser_use_dumps_cerebras_context", test_complete_browser_use_dumps_cerebras_context
+    )
+    await r.record_async(
+        "complete_browser_use_failure_context", test_complete_browser_use_failure_captures_exact_context
+    )
+    await r.record_async(
+        "complete_browser_use_capture_failure_original_error",
+        test_complete_browser_use_capture_failure_preserves_original_error,
+    )
+    await r.record_async(
+        "complete_browser_use_cancellation_no_capture", test_complete_browser_use_cancellation_skips_failure_capture
     )
     await r.record_async(
         "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context

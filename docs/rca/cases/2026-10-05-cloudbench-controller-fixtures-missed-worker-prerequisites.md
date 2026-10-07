@@ -71,6 +71,40 @@ private output is `cli-cache-final-suite.private.log`. Private artifacts:
 python -m pytest -q benchmarks/cloudbench_dependency_sync_test.py -k 'autoscaled_worker_uses_authenticated_fetch_ref_helper or autoscaler_stops_cleanly_when_its_benchmark_child_finishes or autoscaler_worker_clones_take_a_serialized_machine_slot or (boot_terminal_runtime_evidence_collects_complete_logs and hash)'
 ```
 
+## October 7 reserve handoff fixture correction
+
+The final source at `51535cebb96a4a1ab86b16ba264da110fc2399c2`
+passed 351 compact controls and failed one reserve control at
+`cleanup.index("cloudbench_terminate_and_wait")`: the actual cleanup now uses
+the stronger complete-tree drain. All earlier physical allocation, sparse-file,
+storage-fault and neighboring-file assertions passed. This was a fixture
+interface mismatch, not a demonstrated runtime ordering or disk failure.
+
+Archive searches used `substring not found cloudbench_terminate_and_wait cleanup
+reserve` and `reserve release final native drain teardown helper test`.
+The September 27 reserve-allocation case is a relative; this occurrence repeats
+the present case's source-token assumption after a native cleanup refactor.
+Its solution and human feedback require testing the intended handoff rather
+than a helper spelling.
+
+The unchanged owning pytest selection failed in 1.839 seconds. The corrected
+existing test keeps every physical/fault assertion and executes the extracted
+real finalizer with its real 1 MiB reserve and release functions. Controlled
+native-drain, forensic-capture and provider-retirement consumers reject a
+still-present reserve before doing work. All three handoffs were observed and
+the test passed in 2.904 seconds. A private controlled inverse moves only the
+original release call after the first native drain; the same corrected test
+fails at its actual handoff assertion in 1.896 seconds. No provider calls are
+made. Both pytest leaders and their supervisor process groups were reaped.
+
+The command is the existing pytest entrypoint selecting
+`test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown`.
+Private owner/log/source receipts are retained under
+`.context/fresh-basic-claude-final50-20261006/deploy/c4-cycle3-composition.private/reserve-handoff-fixture-repair.private/`.
+Production cleanup, resource ownership, physical floors, task outcomes and
+budgets are unchanged. This proves the fixture handoff, not cloud performance,
+benchmark acceptance, final native release or production deployment.
+
 ## Human feedback
 
 The user requires quick tests cemented in deploy, without a massive additional

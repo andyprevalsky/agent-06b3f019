@@ -1,8 +1,10 @@
 /* eslint-disable no-console */
 
+import assert from 'node:assert';
+import { retryWithBackoff } from '../../providers/retry';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import type { EncryptedArtifactMetadata } from '../../providers/traceArchive';
+import { encryptArtifact, type EncryptedArtifactMetadata } from '../../providers/traceArchive';
 
 export function createTestHarness(label: string): {
   test: (name: string, fn: () => void | Promise<void>) => Promise<void>;
@@ -79,4 +81,30 @@ export function bodyToBuffer(body: unknown): Buffer {
   if (body instanceof Uint8Array) return Buffer.from(body);
   if (typeof body === 'string') return Buffer.from(body);
   throw new Error(`Unsupported test S3 body type: ${typeof body}`);
+}
+
+export function offlineArchiveArtifact(path: string) {
+  const encrypted = encryptArtifact(path, Buffer.from('offline fixture ' + path), 'text/plain');
+  assert(encrypted);
+  const ciphertextB64 = encrypted.ciphertext.toString('base64');
+  const metadata = encrypted.metadata;
+  return { path, ciphertextB64, metadata };
+}
+
+export async function observeUntil(check: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  await retryWithBackoff(
+    async () => {
+      const ready = await check();
+      if (!ready && Date.now() >= deadline)
+        throw new Error('Native fixture observation guard expired');
+      return ready;
+    },
+    {
+      maxRetries: 12_001,
+      fixedDelays: Array(12_000).fill(5),
+      shouldRetryResult: (ready) => !ready,
+      isRetryable: () => false,
+    }
+  );
 }
