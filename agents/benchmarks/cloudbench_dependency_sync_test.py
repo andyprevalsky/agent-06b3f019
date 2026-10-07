@@ -11360,6 +11360,85 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+@pytest.mark.parametrize("preferred", ["", "0", "positive", "invalid", "1023"])
+def test_exact_recovery_consumes_runtime_receipt_proxy_ports(
+    tmp_path: Path, preferred: str
+) -> None:
+    """Use the real shell adapter and allocator when no old proxy port exists."""
+    if preferred == "positive":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            preferred = str(listener.getsockname()[1])
+    expected_valid = preferred not in {"invalid", "1023"}
+    fleet = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "claim_recovery_status_proxy_ports() {",
+            "release_recovery_status_proxy_ports() {",
+        )
+    )
+    lease_root = tmp_path / "leases"
+    ports_file = tmp_path / "ports"
+    receipt_file = tmp_path / "lease.json"
+    script = f"""set -euo pipefail
+CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT="$1"
+AUTOSCALER_PORT_LEASE_HELPER="$2"
+STALE_OWNER_RECOVERY_PORTS_FILE="$3"
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=fixture-exact-recovery
+{functions}
+trap 'python3 "$AUTOSCALER_PORT_LEASE_HELPER" release-owner --root "$1" --owner-pid "$$" --token "$STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN" >/dev/null 2>&1 || true' EXIT
+claim_recovery_status_proxy_ports "$3" 1 "$4"
+python3 - "$1" "$3" "$5" "$$" "$AUTOSCALER_PORT_LEASE_HELPER" <<'PY'
+import json, runpy, sys
+from pathlib import Path
+root, ports, receipt = map(Path, sys.argv[1:4])
+pid = int(sys.argv[4])
+values = ports.read_text().splitlines()
+assert len(values) == 1 and values[0].isdigit()
+record = json.loads((root / values[0]).read_bytes())
+assert record["pid"] == pid
+assert record["token"] == "fixture-exact-recovery"
+identity = runpy.run_path(sys.argv[5])["_process_start_identity"](pid)
+assert record["process_start"] == identity
+receipt.write_text(json.dumps(record))
+PY
+release_recovery_status_proxy_ports wrong-token
+[ -f "$1/$(cat "$3")" ]
+release_recovery_status_proxy_ports "$STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN"
+[ ! -f "$1/$(cat "$3")" ]
+"""
+    process = subprocess.Popen(
+        ["bash", "-c", script, "exact-recovery-port-claim", str(lease_root),
+         str(PORT_LEASE_SCRIPT), str(ports_file), preferred, str(receipt_file)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
+    assert not [path for path in lease_root.glob("*") if path.name.isdigit()]
+    if expected_valid:
+        assert process.returncode == 0, stderr + stdout
+        values = ports_file.read_text().splitlines()
+        assert len(values) == 1 and 1024 <= int(values[0]) <= 65535
+        if preferred not in {"", "0"}:
+            assert values == [preferred]
+        assert json.loads(receipt_file.read_text())["pid"] == process.pid
+    else:
+        assert process.returncode != 0
+        assert not ports_file.read_bytes()
+        assert not receipt_file.exists()
+
+
 def test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers(
     tmp_path: Path,
 ) -> None:

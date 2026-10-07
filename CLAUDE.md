@@ -1031,7 +1031,9 @@ completed task outputs as history and reconnects only current allocations; retai
 the exact native retirement audit instead of deleting old outputs to match a
 shrinking registry. After the original CLI exits, use a verified current CLI for
 the documented exact-owner recovery while preserving its original guest source,
-owner and private evidence. Freeze sensible generous stage
+owner and private evidence. Recovery's local proxy lease adapter represents an
+absent preferred port as numeric zero; an explicit nonempty preference retains
+the allocator's validation. Freeze sensible generous stage
 targets from comparable historical LIVE timings, excluding cache-assisted cold
 measurements, and report observed stage p95 plus image-start-to-full-release E2E.
 These fixed stage targets are generous operational targets, not measured p95

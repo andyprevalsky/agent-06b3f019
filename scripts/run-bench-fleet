@@ -7548,7 +7548,7 @@ start_data_plane_proxy() {
 }
 
 claim_recovery_status_proxy_ports() {  # <output-file> <count> <preferred-start>
-    local output="$1" count="$2" preferred="$3"
+    local output="$1" count="$2" preferred="${3:-0}"
     local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
     python3 "$AUTOSCALER_PORT_LEASE_HELPER" claim-batch \
         --root "$root" --owner-pid "$$" \
