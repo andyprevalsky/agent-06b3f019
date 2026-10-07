@@ -233,6 +233,7 @@ export async function broadcastAgentUpdate(
     tokensIn?: number;
     tokensOut?: number;
     messageCount?: number;
+    temporalWorkflowId?: string | null;
   }
 ): Promise<void> {
   log.info('[Broadcast] UPDATE', { agentId, ...updates });

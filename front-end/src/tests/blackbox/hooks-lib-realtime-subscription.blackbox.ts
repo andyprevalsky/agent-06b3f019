@@ -237,6 +237,77 @@ describe('useRealtimeSubscription', () => {
     unmount();
   });
 
+  it('restores chat mode when the root completion_summary finishes', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    let isChatMode = false;
+    const deps = makeDeps({
+      setIsChatMode: vi.fn((action) => {
+        isChatMode = typeof action === 'function' ? action(isChatMode) : action;
+      }),
+    });
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+
+    act(() => {
+      capturedHandlers.onInsert?.({
+        agentId: 'agent-1',
+        id: 'completion-summary',
+        timestamp: new Date().toISOString(),
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          toolCallId: 'c170f05c-1dbf-474a-b727-34442ac7ff94',
+          toolName: 'completion_summary',
+          toolStatus: 'FINISHED',
+          isFinalSummary: true,
+        },
+      });
+    });
+
+    expect(isChatMode).toBe(true);
+    unmount();
+  });
+
+  it('does not restore chat mode from a child completion_summary', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    let isChatMode = false;
+    const deps = makeDeps({
+      setIsChatMode: vi.fn((action) => {
+        isChatMode = typeof action === 'function' ? action(isChatMode) : action;
+      }),
+    });
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+
+    act(() => {
+      capturedHandlers.onInsert?.({
+        agentId: 'agent-1',
+        id: 'child-completion-summary',
+        timestamp: new Date().toISOString(),
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          toolCallId: 'child-summary',
+          toolName: 'completion_summary',
+          toolStatus: 'FINISHED',
+          isFinalSummary: true,
+          subAgentId: 'child-agent',
+        },
+      });
+    });
+
+    expect(isChatMode).toBe(false);
+    unmount();
+  });
+
   it('rejects an A update queued before switching when its React updater commits after B', async () => {
     let capturedHandlers: CapturedAgentHandlers = {};
     vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
