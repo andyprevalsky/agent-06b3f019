@@ -53,6 +53,8 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
 root = Path(sys.argv[1])
 source = root / 'agents/benchmarks/cloudbench_dependency_sync_test.py'
 name = 'test_prebuilt_checkout_browser_cache_parent_is_runtime_writable'
@@ -62,7 +64,7 @@ parameter = function.decorator_list[0]
 assert ast.literal_eval(parameter.args[0]) == 'parent_state'
 cases = ast.literal_eval(parameter.args[1])
 function.decorator_list = []
-namespace = {'os': os, 'sys': sys, 'subprocess': subprocess,
+namespace = {'os': os, 'sys': sys, 'subprocess': subprocess, 'pytest': pytest,
              'DRIVER_SCRIPT': root / 'scripts/cloudbench-run.sh'}
 exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
 for state in cases:
@@ -71,6 +73,8 @@ for state in cases:
     scope = Path(tempfile.mkdtemp(prefix='rose-cache-parent-'))
     try:
         namespace[name](scope, state)
+    except pytest.skip.Exception as skipped:
+        print(f'SKIP: native cache parent {state}: {skipped}')
     finally:
         shutil.rmtree(scope)
 print('PASS: native checkout cache parent permissions in all permanent states')
