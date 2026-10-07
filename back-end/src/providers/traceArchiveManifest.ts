@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { runTransactionWithRetry } from './database';
 import {
   type StoreResult,
@@ -134,7 +135,8 @@ export function encryptedManifestIndex(artifacts: ManifestArtifact[]): Record<st
 export async function writePublicManifest(
   rootAgentId: string,
   refs: ManifestArtifact[],
-  benchmarkTaskName?: string
+  benchmarkTaskName?: string,
+  options: { createOnly?: boolean } = {}
 ): Promise<string | null> {
   if (!publicManifestEnabled()) return null;
   const publicValue = publicManifest(rootAgentId, refs, benchmarkTaskName);
@@ -143,8 +145,9 @@ export async function writePublicManifest(
     objectPath: 'manifest.public.json',
     body: Buffer.from(JSON.stringify(publicValue, null, 2)),
     contentType: 'application/json',
+    createOnly: options.createOnly,
   });
-  if (archiveEnabled() && publicManifestRef === null) {
+  if (archiveEnabled() && publicManifestRef === null && !options.createOnly) {
     throw new Error(`Failed to archive required public manifest for ${rootAgentId}`);
   }
   return publicManifestRef;
@@ -241,7 +244,10 @@ async function loadManifestSnapshot(rootAgentId: string): Promise<LoadedManifest
   const [listed, publicBody] = await Promise.all([
     listArchivedObjectsStrict(rootAgentId),
     includePublicManifest
-      ? readPlainArchivedArtifact({ rootAgentId, objectPath: 'manifest.public.json' })
+      ? readPlainArchivedArtifact({
+          rootAgentId,
+          objectPath: 'manifest.public.json',
+        })
       : Promise.resolve(null),
   ]);
   const refs = uniqueArtifacts(excludeControlArtifacts(listed));
@@ -289,27 +295,52 @@ export async function inspectFinalizedManifest(
   return (await loadManifestSnapshot(rootAgentId)).result;
 }
 
+type ManifestLockOwnership = {
+  assertOwned: () => Promise<void>;
+  reconcile: () => Promise<ManifestReconciliationResult>;
+};
+
 export async function withArchiveManifestLock<T>(
   rootAgentId: string,
-  operation: () => Promise<T>
+  operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
-  return runTransactionWithRetry(
-    async (tx) => {
-      await tx.$queryRaw`
-        WITH settings AS MATERIALIZED (
-          SELECT set_config('idle_in_transaction_session_timeout', '120s', true)
-        ), acquired AS MATERIALIZED (
-          SELECT pg_advisory_xact_lock(
-            hashtextextended(${`${rootAgentId}:trace-archive-manifest`}, ${TRACE_ARCHIVE_MANIFEST_LOCK_SEED})
+  let enteredOperation: Promise<T> | undefined;
+  try {
+    return await runTransactionWithRetry(
+      async (tx) => {
+        await tx.$queryRaw`
+          WITH settings AS MATERIALIZED (
+            SELECT set_config('idle_in_transaction_session_timeout', '120s', true)
+          ), acquired AS MATERIALIZED (
+            SELECT pg_advisory_xact_lock(
+              hashtextextended(${`${rootAgentId}:trace-archive-manifest`}, ${TRACE_ARCHIVE_MANIFEST_LOCK_SEED})
+            )
+            FROM settings
           )
-          FROM settings
-        )
-        SELECT 1 AS locked FROM acquired
-      `;
-      return operation();
-    },
-    { maxWait: 10_000, timeout: 120_000 }
-  );
+          SELECT 1 AS locked FROM acquired
+        `;
+        const assertOwned = async () => {
+          // A timed-out/terminated interactive transaction no longer owns the lock.
+          await tx.$queryRaw`SELECT 1 AS owned`;
+        };
+        enteredOperation = (async () => {
+          const result = await operation({
+            assertOwned,
+            reconcile: () => reconcileFinalizedManifestLocked(rootAgentId, assertOwned),
+          });
+          await assertOwned();
+          return result;
+        })();
+        void enteredOperation.catch(() => {});
+        return enteredOperation;
+      },
+      { maxWait: 10_000, timeout: 120_000 }
+    );
+  } finally {
+    // Prisma can reject on expiry before the callback's bounded storage I/O ends.
+    // Join that work; ownership checks prevent another rewrite or a false ACK.
+    await enteredOperation?.catch(() => {});
+  }
 }
 
 export async function writeFinalizationMarker(rootAgentId: string): Promise<void> {
@@ -331,7 +362,8 @@ export async function writeFinalizationMarker(rootAgentId: string): Promise<void
 }
 
 async function rewriteManifestFromSnapshot(
-  snapshot: LoadedManifestSnapshot
+  snapshot: LoadedManifestSnapshot,
+  assertOwned: () => Promise<void>
 ): Promise<{ manifest: StoreResult | null; publicManifestRef: string | null }> {
   const { manifest, refs, result } = snapshot;
   if (manifest === null || result.status === 'not-finalized') {
@@ -349,6 +381,7 @@ async function rewriteManifestFromSnapshot(
       ...encryptedManifestIndex(refs),
     },
   };
+  await assertOwned();
   const encryptedManifest = await archiveJson({
     rootAgentId: result.rootAgentId,
     objectPath: 'manifest.json.gz.enc',
@@ -357,23 +390,77 @@ async function rewriteManifestFromSnapshot(
   if (archiveEnabled() && encryptedManifest === null) {
     throw new Error(`Failed to reconcile encrypted manifest for ${result.rootAgentId}`);
   }
+  await assertOwned();
   const publicManifestRef = await writePublicManifest(result.rootAgentId, refs, benchmarkTaskName);
+  await assertOwned();
   return { manifest: encryptedManifest, publicManifestRef };
 }
 
+function unchangedTerminalMetadata(
+  previous: Record<string, unknown> | null,
+  current: Record<string, unknown> | null
+): boolean {
+  const terminal = (manifest: Record<string, unknown> | null) => {
+    if (manifest === null) return null;
+    const copy = { ...manifest };
+    for (const key of Object.keys(publicManifest('', []))) {
+      if (key !== 'root_agent_id' && key !== 'benchmark_task_name') delete copy[key];
+    }
+    copy.benchmark_task_name = copy.benchmark_task_name ?? null;
+    if (isRecord(copy.sensitive)) {
+      const sensitive = { ...copy.sensitive };
+      for (const key of Object.keys(encryptedManifestIndex([]))) delete sensitive[key];
+      copy.sensitive = sensitive;
+    }
+    return copy;
+  };
+  return isDeepStrictEqual(terminal(previous), terminal(current));
+}
+
+function onlyConcurrentAdditions(
+  previous: LoadedManifestSnapshot,
+  current: LoadedManifestSnapshot
+): boolean {
+  if (
+    current.result.status !== 'stale' ||
+    current.result.extraInEncrypted.length > 0 ||
+    current.result.extraInPublic.length > 0 ||
+    !unchangedTerminalMetadata(previous.manifest, current.manifest)
+  )
+    return false;
+  const before = previous.refs.map(artifactPath).filter((path): path is string => path !== null);
+  const after = current.refs.map(artifactPath).filter((path): path is string => path !== null);
+  if (pathDifference(before, after).length > 0) return false;
+  const added = new Set(pathDifference(after, before));
+  return (
+    added.size > 0 &&
+    [...current.result.missingFromEncrypted, ...current.result.missingFromPublic].every((path) =>
+      added.has(path)
+    )
+  );
+}
+
 async function reconcileFinalizedManifestLocked(
-  rootAgentId: string
+  rootAgentId: string,
+  assertOwned: () => Promise<void>
 ): Promise<ManifestReconciliationResult> {
-  const snapshot = await loadManifestSnapshot(rootAgentId);
+  await assertOwned();
+  let snapshot = await loadManifestSnapshot(rootAgentId);
   if (snapshot.result.status !== 'stale') return snapshot.result;
-  await rewriteManifestFromSnapshot(snapshot);
-  const verified = await loadManifestSnapshot(rootAgentId);
-  if (verified.result.status !== 'current') {
-    throw new Error(
-      `Trace archive manifest reconciliation did not converge for ${rootAgentId}: ${verified.result.status}`
-    );
+  for (;;) {
+    await rewriteManifestFromSnapshot(snapshot, assertOwned);
+    const verified = await loadManifestSnapshot(rootAgentId);
+    await assertOwned();
+    if (verified.result.status === 'current') return { ...verified.result, status: 'updated' };
+    if (!onlyConcurrentAdditions(snapshot, verified)) {
+      throw new Error(
+        `Trace archive manifest reconciliation did not converge for ${rootAgentId}: ${verified.result.status}`
+      );
+    }
+    // Retry only a strictly observed monotonic addition. The existing live SQL
+    // transaction bounds publication; errors/removals/control overwrites fail.
+    snapshot = verified;
   }
-  return { ...verified.result, status: 'updated' };
 }
 
 export async function reconcileFinalizedManifest(
@@ -381,7 +468,7 @@ export async function reconcileFinalizedManifest(
   options: { markerExists?: boolean } = {}
 ): Promise<ManifestReconciliationResult> {
   if (!options.markerExists) await writeFinalizationMarker(rootAgentId);
-  return withArchiveManifestLock(rootAgentId, () => reconcileFinalizedManifestLocked(rootAgentId));
+  return withArchiveManifestLock(rootAgentId, (ownership) => ownership.reconcile());
 }
 
 export async function finalizationFenceExists(rootAgentId: string): Promise<boolean> {

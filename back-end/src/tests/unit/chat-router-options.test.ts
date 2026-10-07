@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 import { setInterval as every } from 'node:timers/promises';
 
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
@@ -181,21 +182,36 @@ async function run(): Promise<void> {
       yield chunk;
     }
   }
-  const tricklingStartedAt = performance.now();
+  // Advance the actual timer APIs after each observed chunk. Host scheduling
+  // must not decide whether this fixture produced its required progress.
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const trickling = createRouterCompletionDeadline(150);
-  let trickled = 0;
-  for await (const chunk of streamBeforeRouterCompletionDeadline(trickle(), trickling)) {
-    trickled = chunk;
+  try {
+    const stream = streamBeforeRouterCompletionDeadline(trickle(), trickling);
+    let trickled = 0;
+    for (let chunk = 1; chunk <= 14; chunk += 1) {
+      const next = stream.next();
+      mock.timers.tick(10);
+      const result = await next;
+      assert.equal(result.done, false);
+      assert.equal(result.value, chunk);
+      trickled = chunk;
+    }
+    assert.ok(trickled > 3, 'precondition: the stream kept making progress');
+    const afterProgress = stream.next();
+    mock.timers.tick(9);
+    assert.equal(
+      trickling.expired(),
+      false,
+      'progress remains allowed before the attempt deadline'
+    );
+    mock.timers.tick(1);
+    assert.equal(trickling.expired(), true, 'progress must not extend the attempt deadline');
+    assert.equal((await afterProgress).done, true);
+  } finally {
+    trickling.dispose();
+    mock.timers.reset();
   }
-  const trickledFor = Math.round(performance.now() - tricklingStartedAt);
-  assert.ok(trickled > 3, 'precondition: the stream kept making progress');
-  assert.equal(trickling.expired(), true);
-  // libuv arms timers from the event loop's cached clock, so a 150ms timer can
-  // fire a few milliseconds before 150ms of wall time have elapsed.
-  assert.ok(
-    trickledFor >= 140 && trickledFor < 400,
-    `the deadline runs from the attempt start; progress must not extend it (${trickledFor}ms)`
-  );
 
   let iteratorClosed = false;
   const uncooperativeStream: AsyncIterable<string> = {

@@ -3967,7 +3967,11 @@ PIDS+=("$cancel_launcher_pid")
 
 cancel_target_registry=""
 cancel_recovery_ready=0
-for _ in $(seq 1 400); do
+# Startup includes real host-side packaging and readiness publication even in
+# this offline provider fixture. Bound that whole infrastructure phase by time
+# while preserving the exact identity checks required before cancellation.
+cancel_ready_deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$cancel_ready_deadline" ]; do
     for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
         [ -d "$registry" ] || continue
         [ "$registry" = "$neighbor_registry" ] && continue
@@ -4194,7 +4198,9 @@ reset_fake_state
 : > "$FAKE_DIR/delay-machine-update"
 : > "$FAKE_DIR/metrics-require-started"
 boot_wait_status=0
-CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=2 \
+# This positive startup case uses the ordinary infrastructure readiness budget.
+# Its usable stage handoff is the assertion, rather than a two-second substep.
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-boot-wait.log" \
     autoscaler-waits-for-boot-release --timeout 240 || boot_wait_status=$?
 rm -f "$FAKE_DIR/delay-machine-update" "$FAKE_DIR/metrics-require-started"

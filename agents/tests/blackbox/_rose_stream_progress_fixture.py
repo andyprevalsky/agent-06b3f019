@@ -17,8 +17,22 @@ from helpers import httpx_capture
 
 from providers.rose.client import RoseClient
 from providers.rose.cerebras import _reset_cerebras_cooldown_cache
-from providers.rose.errors import RoseDeadlineError, RoseStallError
+from providers.rose.errors import RoseAllFailed, RoseDeadlineError, RoseStallError
 from providers.rose.streaming import parse_anthropic_sse, parse_responses_sse
+
+
+def single_step_waterfall(source):
+    """A mocked one-leg waterfall honors the client's production guard contract."""
+
+    async def generated(**kwargs):
+        guard = kwargs.pop("stream_guard", None)
+        stream = source(**kwargs)
+        if guard is not None:
+            stream = guard(stream)
+        async for chunk in stream:
+            yield chunk
+
+    return generated
 
 
 class _VirtualClock:
@@ -236,6 +250,7 @@ async def assert_progress_case(
     tail_silence=0,
     expected_error=None,
     expected_time=None,
+    exhausted=False,
     fallback=False,
     consumer_pause=0,
     idle_timeout_s=120.0,
@@ -266,7 +281,11 @@ async def assert_progress_case(
             next_feed = _SSE(clock, mode="reasoning", seconds=1, prelude=0)
             feeds.append(next_feed)
             return httpx.Response(200, stream=next_feed)
-        return httpx.Response(200, stream=feed, headers={"content-type": "text/event-stream"})
+        selected_feed = feed
+        if len(requests) > 2:
+            selected_feed = _SSE(clock, mode=mode, seconds=seconds, protocol=protocol, prelude=prelude)
+            feeds.append(selected_feed)
+        return httpx.Response(200, stream=selected_feed, headers={"content-type": "text/event-stream"})
 
     def offline_client(*args, **kwargs):
         return real_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"), trust_env=False)
@@ -305,7 +324,7 @@ async def assert_progress_case(
                 from contextlib import nullcontext
 
                 with (
-                    patch("providers.rose.client.waterfall_complete", parsed_waterfall)
+                    patch("providers.rose.client.waterfall_complete", single_step_waterfall(parsed_waterfall))
                     if protocol != "openai"
                     else nullcontext()
                 ):
@@ -325,12 +344,19 @@ async def assert_progress_case(
                             chunks.append(chunk)
                             if len(chunks) == 1 and consumer_pause:
                                 clock.now += consumer_pause
+                    except RoseAllFailed as exc:
+                        assert exhausted and len(exc.step_errors) == 2, exc
+                        assert isinstance(exc.step_errors[-1].error, RoseStallError), exc.step_errors
+                        error = str(exc.step_errors[-1].error)
+                        if not fallback:
+                            assert all(isinstance(step.error, RoseStallError) for step in exc.step_errors)
                     except (RoseDeadlineError, RoseStallError) as exc:
+                        assert not exhausted, exc
                         error = str(exc)
     assert error == expected_error, (mode, protocol, error, clock.now)
     if expected_time is not None:
         assert abs(clock.now - expected_time) < 0.000001, (clock.now, expected_time)
-    assert feed.closed, "timed-out/completed response must close"
+    assert all(item.closed for item in feeds), "every timed-out/completed response must close"
     if protocol == "openai":
         assert requests[:2] == [("api.cerebras.ai", "qwen-3.8-27b"), ("openrouter.ai", "qwen/qwen3.8-27b")], requests
     if expected_error is None:
@@ -438,7 +464,9 @@ async def assert_concurrent_progress_and_cancellation():
     ):
         async with offline_client() as stream_client:
             with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
-                productive, silent = await asyncio.gather(collect("productive"), collect("silent"), return_exceptions=True)
+                productive, silent = await asyncio.gather(
+                    collect("productive"), collect("silent"), return_exceptions=True
+                )
                 assert isinstance(silent, RoseDeadlineError) and "idle" in str(silent), silent
                 assert isinstance(productive, list) and productive[-1].kind == "done", productive
                 tool = next(chunk for chunk in productive if chunk.kind == "tool_call")
@@ -457,3 +485,96 @@ async def assert_concurrent_progress_and_cancellation():
                     raise AssertionError("cancellation was swallowed")
     assert all(feed.closed for feed in feeds.values())
     assert _stream_progress.get() is None
+
+
+async def assert_waterfall_stalled_leg_uses_existing_fallback(scenario="recover"):
+    """A metadata-only leg may fail without cancelling the configured next leg."""
+    clock = _VirtualClock()
+    requests = []
+    feeds = []
+    real_client = httpx.AsyncClient
+
+    class Stalled(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            await clock.sleep(600)
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            self.closed = True
+
+    async def handler(request):
+        assert request.url.host == "openrouter.ai", "fixture must remain offline"
+        requests.append(json.loads(request.content)["model"])
+        if len(requests) == 1:
+            if scenario == "global_deadline":
+                feed = _SSE(clock, seconds=520, prelude=0, fail_after=True)
+            elif scenario == "midstream_idle":
+                feed = _SSE(clock, mode="reasoning", seconds=1, prelude=0, tail_silence=121)
+            elif scenario == "empty":
+                feed = _SSE(clock, mode="metadata", seconds=0, prelude=0)
+            elif scenario == "buffered_arguments":
+                feed = _SSE(clock, seconds=10, prelude=0, fail_after=True)
+            else:
+                await clock.sleep(10.5)
+                feed = Stalled()
+        else:
+            if scenario == "global_deadline":
+                await clock.sleep(95)
+            feed = _SSE(clock, mode="reasoning", seconds=1, prelude=0)
+        feeds.append(feed)
+        return httpx.Response(200, stream=feed, headers={"content-type": "text/event-stream"})
+
+    def offline_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(handler), timeout=kwargs.get("timeout"), trust_env=False)
+
+    clock_asyncio = SimpleNamespace(
+        wait=clock.wait,
+        ensure_future=asyncio.ensure_future,
+        CancelledError=asyncio.CancelledError,
+        create_task=asyncio.create_task,
+    )
+    chunks = []
+    error = None
+    with (
+        patch.object(real_client, "__init__", httpx_capture._original_init or real_client.__init__),
+        patch("providers.rose.client.load_config", lambda: SimpleNamespace(anthropic=SimpleNamespace(api_key=""))),
+        patch("providers.rose.client._cerebras_api_key", return_value=""),
+        patch("providers.rose.client.anthropic_family_excluded", lambda requested=False: requested),
+        patch("providers.rose.client.time", SimpleNamespace(monotonic=clock.monotonic)),
+        patch("providers.rose.client.asyncio", clock_asyncio),
+        patch("providers.rose.client._safe_heartbeat", lambda message: None),
+        patch("providers.rose.transport.httpx.AsyncClient", offline_client),
+    ):
+        async with offline_client() as stream_client:
+            with patch("providers.rose.transport.get_streaming_http_client", return_value=stream_client):
+                try:
+                    async for chunk in RoseClient(openrouter_key="offline-fake").complete(
+                        pool="rose-1-browser-use",
+                        messages=[{"role": "user", "content": "Offline fixture"}],
+                        request_id="offline-waterfall-stall",
+                        call_site="explore_agent",
+                        max_tokens=8192,
+                        deadline_s=590.0,
+                        ttft_timeout_s=90.0,
+                        idle_timeout_s=120.0,
+                        dump_context=False,
+                    ):
+                        chunks.append(chunk)
+                except (RoseDeadlineError, RoseStallError) as exc:
+                    error = type(exc).__name__
+    assert all(feed.closed for feed in feeds), "every owned response must close"
+    if scenario in {"recover", "empty", "buffered_arguments"}:
+        assert error is None, (error, len(requests), clock.now)
+        from providers.rose.pools import get_pool
+
+        assert requests == list(get_pool("rose-1-browser-use").waterfall)
+        assert [chunk.kind for chunk in chunks] == ["metadata", "reasoning", "usage", "done"]
+        assert chunks[0].data["actual_model"] == requests[-1]
+        assert clock.now < 590.0
+    else:
+        assert error == "RoseDeadlineError", (error, len(requests), clock.now)
+        assert len(requests) == (2 if scenario == "global_deadline" else 1)
+        assert clock.now <= 590.0
+        assert not any(chunk.kind == "done" for chunk in chunks)

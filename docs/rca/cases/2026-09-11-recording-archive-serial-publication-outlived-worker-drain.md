@@ -238,3 +238,83 @@ must invalidate the slice. Preserve all evidence and ownership through recovery.
 Amortize final publication across bounded groups of individually durable artifacts
 to reduce repeated per-file reconciliation during executor joining, and verify
 total publication time on the actual recording size.
+
+### October 6 recurrence: bounded batches still timed out and began after recording closed
+
+The retained October 5 run has 720.558 seconds between the actual driver exit and outer terminal receipt. Its worker logged shutdown, then 23 batch ReadTimeout events continued across 5,785 attempted records. Native recording logs identify 6,726 closed network-body files over roughly 1,101 seconds of execution. The logged original body-byte sum is 306,684,695 bytes; it is not an exact retained-file total because existing truncation can reduce persisted bodies. No task, evaluator, cache, or recording content changed in this investigation.
+
+The client read budget was 30 seconds. Correlated backend observations show median pre-lock work of 40.377 seconds and a qualified locked tail of 11.025 seconds. These spans lack uniquely joined request IDs and do not establish an exact per-request sum or storage-only duration. Backend strict stale-manifest errors occurred after client timeouts. A separate native PostgreSQL reproduction proves the publication correctness race; it does not attribute the entire twelve-minute tail to that race.
+
+The unchanged native delayed-ACK driver sends a valid encrypted batch to a loopback HTTP server with a 35-second complete acknowledgement. Original source returns false at 30.008 seconds with the source and encrypted outbox retained. The scoped transport candidate accepts the same complete acknowledgement at 35.025 seconds. Independent replay also passes. Only the batch POST gains a 120-second read/write budget, 15-second connect and 30-second pool budget. Ordinary single-artifact transport remains 30 seconds. Flush, task, execution and end-to-end deadlines remain unchanged. Server attempted delivery or HTTP 200 alone never counts as client acknowledgement.
+
+Closed native response bodies are now optional early publication inputs. Existing 256-record and 64-MiB batch boundaries remain; there are no per-file requests or timers. The native 256-file control publishes one encrypted batch while recording remains open and verifies every file. At most the existing configured worker count of optional jobs is admitted, with an aggregate 64-MiB conservative wire reservation. Existing four threads and 64 slots remain. Ordinary publishers cancel only positively queued optional Futures before admission, including when slots are already free. Active I/O remains intact. A held-four native HTTP control proves the ordinary publisher is the next request after exactly one active request is released, and a separate queue inverse proves exact cancellation/slot/byte release.
+
+Terminal publication joins admitted Futures and skips only a file whose current streamed plaintext hash matches that file's fully acknowledged hash. Changed, failed, foreign-path, incomplete, cancelled, skipped and unacknowledged files keep their normal terminal fallback. Original source files, encrypted object/sidecar format, strict complete acknowledgement and encrypted outbox generations remain authoritative.
+
+The backend correctness candidate retains the existing root lock and transaction bound. It rewrites/reverifies strictly observed newer additions until complete equality, rejects removals and malformed state, checks transaction liveness before each new write and before ACK, joins entered storage work on transaction loss, and fences late start metadata from terminal state. Semantic terminal metadata comparison accepts reordered keys. Eight native PostgreSQL controls pass independently, and the exact fixture database is removed with workspace PostgreSQL identity and mounts preserved.
+
+Registration remains in the existing recording-archive blackbox and trace-archive-batch unit families. Original assertions remain; eight quick native closed-body controls and quick ACK inverses are added. The real 35-second transport reproduction is archived rather than made a sleeping mandatory suite. The normal family command remains `cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py recording-archive`.
+
+These are source-bound native HTTP/PostgreSQL correctness and overlap proofs, not production R2 or fleet speed measurements. A controlled 24-file loopback profile retains six requests and full equality while moving publication into execution; its injected delay and reduced fixture threshold cannot establish production gain. Active optional I/O may compete with other publications, existing producer quiescence remains required, and the backend candidate does not make every direct writer globally atomic after the last verified snapshot or redefine whole-server shutdown. The original failed attempt retains its original verdict and no new acceptance credit. Keep the performance qualification pending until the chosen normal CLI run establishes actual whole/stage duration, every exercised durable artifact path and exact resource release. The requested cached50 can supply real cloud/R2/process/provider infrastructure proof where it exercises these paths, with zero LIVE LLM credit. No additional LIVE campaign is required by this archive handoff; historical attribution and unexercised paths stay qualified.
+
+The later original 5233 cached smoke also recorded one manifest non-convergence
+artifact 500 at 20:20:49.181 UTC (9727ms), then finalize 200 at 20:21:19.487 UTC
+(18978ms). Its task remained PASS with exact durable cleanup; this is a
+recovered warning, not an additional rejection or candidate speed gain. The
+scalar receipt is `.context/cached-mass-latency-independent-20261006/native-waterfall.safe.json`.
+
+### October 7 review recurrence: start PUT retries outlived manifest ownership
+
+The review exposed a storage-level gap in the previous start-manifest fence.
+A native manifest transaction can end while an entered storage operation is
+still retrying. The subsequent ownership assertion correctly rejects the
+caller, but an unconditional retry can already have replaced the encrypted
+terminal manifest or its public projection. Searches used `late start finalized
+manifest transaction loss retry` and `archive control write replaces terminal
+snapshot after lease expires`. The July creation-time-manifest case is related;
+this is a recurrence of this case's delayed-start terminal-ownership boundary.
+
+Two permanent controls join the existing trace-archive-batch family. Each
+identifies and terminates only its own PostgreSQL advisory-lock holder, writes
+a terminal snapshot through the actual archive APIs, and resumes the original
+start operation after a retryable storage error. Original 5c1fc870 source
+passes all eight previous controls and fails both added controls because the
+final encrypted or public object is replaced (18.111 seconds). The same ten
+controls pass with the storage repair (10.607 seconds); terminal control bytes
+and benchmark-result metadata remain exact. All six captured outer and native
+unit process births are positively absent afterward. Only the isolated C3
+PostgreSQL database and declared offline R2 transport are used; no model or
+external storage requests occur. Initial observer setup errors are retained
+separately and have no causal or acceptance credit.
+
+Start manifests now use conditional creation at the storage boundary. R2 PUTs
+include If-None-Match for the encrypted body, its metadata sidecar and the public
+manifest; local and fake-R2 writes use exclusive file creation. Existing objects
+are left intact. Finalizers and ordinary artifact writers retain replacement
+semantics, the transaction bound and the existing five-attempt transport loop.
+An acknowledged new body remains recognized across a sidecar retry, so retrying
+that sidecar does not recreate its body. Keeping a caller-local pre-write lease
+check alone cannot fence work already entered at storage. Removing creation-time
+manifests would revive the July crashed-run corpus loss, so that simplification
+is not a valid repair.
+
+Independent review also required preserving the new conditional API error
+contract. Two compact controls were added to the same family. One distinguishes
+an explicit existing-object precondition from exhausted real storage failures
+for both encrypted and required public manifests; the other retries a failed
+sidecar after an acknowledged encrypted body and reads back the matching pair
+through the ordinary archive reader. The first proposed repair passed eleven
+of twelve controls and failed the required error signal (19.631 seconds).
+Retaining the last transport error and throwing it after the unchanged five
+attempts only for conditional creation makes the identical twelve controls
+pass (25.360 seconds). Explicit precondition failures remain intentional no-ops,
+and ordinary replacement APIs keep their previous behavior. All six additional
+captured outer/native process births are positively absent. These guard
+receipts supplement the original lease-loss reproduction; they do not replace it.
+
+This proves the source-bound storage race and its correction, not a new benchmark
+verdict or cloud performance gain. Final normal backend qualification, combined
+source review, production rollout and the independent DAILY-run goals remain
+pending. Original failed attempts and the separate financial custody gap remain
+unchanged. Private reproduction, source and native-closure receipts are retained
+under the deployment context.

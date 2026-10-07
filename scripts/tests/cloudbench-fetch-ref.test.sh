@@ -34,6 +34,8 @@ git -C "$TMP_ROOT/source" config user.name cloudbench-test
 printf 'one\n' > "$TMP_ROOT/source/payload.txt"
 git -C "$TMP_ROOT/source" add payload.txt
 git -C "$TMP_ROOT/source" commit -qm one
+first_commit="$(git -C "$TMP_ROOT/source" rev-parse HEAD)"
+first_blob="$(git -C "$TMP_ROOT/source" rev-parse HEAD:payload.txt)"
 git -C "$TMP_ROOT/source" remote add origin "$TMP_ROOT/origin.git"
 git -C "$TMP_ROOT/source" push -q origin HEAD:main
 
@@ -118,6 +120,24 @@ CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
   || fail "empty REAL-primary volume did not bootstrap its exact checkout"
 [ "$(git -C "$fresh_checkout" rev-parse HEAD)" = "$next_target" ] \
   || fail "fresh checkout did not verify the requested commit"
+# A REAL fresh volume executes this exact source tree; it does not need every
+# earlier version of the benchmark checkout. Exercise the real transport and
+# object store, rather than checking only the fetch argument spelling.
+[ "$(git -C "$fresh_checkout" rev-parse HEAD^{tree})" = \
+  "$(git -C "$TMP_ROOT/source" rev-parse "$next_target^{tree}")" ] \
+  || fail "fresh checkout changed the requested source tree"
+cmp "$TMP_ROOT/source/payload.txt" "$fresh_checkout/payload.txt" \
+  || fail "fresh checkout changed tracked source bytes"
+[ "$(git -C "$fresh_checkout" rev-parse --is-shallow-repository)" = true ] \
+  || fail "fresh source checkout downloaded unrelated benchmark history"
+if git -C "$fresh_checkout" cat-file -e "$first_blob" 2>/dev/null; then
+  fail "fresh source checkout transferred an earlier unused source version"
+fi
+# Existing retained volumes continue to provide their ordinary complete history.
+[ "$(git -C "$TMP_ROOT/checkout" rev-parse --is-shallow-repository)" = false ] \
+  || fail "retained checkout lost its complete history"
+[ "$(git -C "$TMP_ROOT/checkout" show "$first_commit:payload.txt")" = one ] \
+  || fail "retained checkout cannot read its earlier source"
 # Read the stored key: `remote get-url` applies the host's own insteadOf rules.
 [ "$(git -C "$fresh_checkout" config --get remote.origin.url)" = https://github.com/Rose-Ai-Labs/rose.git ] \
   || fail "fresh checkout persisted a rewritten or authenticated origin"

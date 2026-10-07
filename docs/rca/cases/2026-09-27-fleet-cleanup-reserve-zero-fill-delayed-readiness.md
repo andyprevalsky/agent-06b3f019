@@ -122,6 +122,34 @@ reserve boundary is repaired; the full controller gate remains blocked by the
 separate fixture issue. This local repair provides no credit toward the required
 ten consecutive live slices.
 
+## October 6, 2026 recurrence on macOS
+
+The fifty-copy cached startup diagnostic exposed a separate concurrent disk
+admission defect, recorded in
+[its own case](2026-10-06-cleanup-reserve-admission-used-concurrent-free-space-snapshots.md).
+During that investigation, the reserve still used zero-fill on macOS although
+the native filesystem supports physical preallocation. The unchanged owning
+Darwin control failed on the original source because `dd` was invoked, then
+passed with verified `F_PREALLOCATE` allocation. A real 32 MiB reserve retained
+its exact inode, mode, size, allocated blocks and zero-readable contents;
+release preserved an unrelated neighboring file. The component allocation
+measurements were 0.087 seconds for zero-fill and 0.048 seconds for native
+allocation. These measurements do not establish a fifty-copy startup speedup.
+
+The implementation uses the Darwin SDK's native `fstore_t` layout and verifies
+physical allocation before accepting the file. Only capability errors from the
+allocation operation use the original fallback. Allocation, truncation,
+synchronization, inode and sparse-file failures remain fatal. The existing
+Linux path is preserved. The compact deploy gate selects the owning allocation,
+fallback and release controls; Darwin execution adds three capability and nine
+fatal-boundary inverses. Root review required restoring the capability fallback
+after the first draft treated unsupported native allocation as a fatal error.
+Private scalar receipts and raw logs are retained under
+`.context/native-darwin-cleanup-reserve-20261006/`; independent review of the
+combined admission boundary is under
+`.context/fleet-preflight-local-rca-20261006/`. No task or provider calls were
+used for these local controls.
+
 ## Human feedback
 
 The user required infrastructure-only work, trustworthy terminal execution and

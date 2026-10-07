@@ -38,7 +38,10 @@ function verdictBadge(detail: HubRunDetail) {
         ● live
       </Badge>
     );
-  if (detail.totals.failed === 0 && detail.totals.passed > 0)
+  const allGroupTasksPassed =
+    !detail.is_group ||
+    detail.totals.passed === (detail.task_total ?? detail.pagination?.total ?? detail.tasks.length);
+  if (detail.totals.failed === 0 && detail.totals.passed > 0 && allGroupTasksPassed)
     return (
       <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
         pass
@@ -181,6 +184,10 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
   const [detail, setDetail] = useState<HubRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    setOffset(0);
+  }, [runId]);
 
   // Poll serialization: `inFlightRef` skips a tick while a request is pending;
   // `generationRef` is bumped when runId changes (and on unmount) so responses
@@ -193,7 +200,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
       generationRef.current += 1;
       inFlightRef.current = false;
     };
-  }, [runId]);
+  }, [runId, offset]);
 
   const load = useCallback(
     async (background = false) => {
@@ -205,7 +212,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
         setError(null);
       }
       try {
-        const next = await fetchHubRun(runId);
+        const next = await fetchHubRun(runId, offset);
         if (generation !== generationRef.current) return;
         setDetail(next);
         setError(null);
@@ -219,7 +226,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
         }
       }
     },
-    [runId],
+    [runId, offset],
   );
 
   useEffect(() => {
@@ -295,7 +302,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
           <div className="flex flex-wrap gap-2 pb-3" data-testid="run-tiles">
             <Tile
               label="Tasks"
-              value={`${detail.totals.passed + detail.totals.failed}/${detail.tasks.length} done`}
+              value={`${detail.totals.passed + detail.totals.failed}/${detail.pagination?.total ?? detail.tasks.length} done`}
             />
             <Tile label="Passed" value={String(detail.totals.passed)} />
             <Tile label="Failed" value={String(detail.totals.failed)} />
@@ -365,12 +372,17 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
               <tbody>
                 {detail.tasks.map((task) => (
                   <tr
-                    key={task.name}
+                    key={task.row_id ?? task.name}
                     className="border-b border-border/50 hover:bg-muted/40"
-                    data-testid={`run-view-task-${task.name}`}
+                    data-testid={`run-view-task-${task.row_id ?? task.name}`}
                   >
                     <td className="px-3 py-2">
                       <span className="font-medium">{task.name}</span>
+                      {task.run_number != null && (
+                        <span className="ml-1.5 text-xs text-muted-foreground">
+                          Run {task.run_number}
+                        </span>
+                      )}
                       <TaskFlagIcons
                         simOn={task.world_model_mode === 'simulate'}
                         fastOn={task.fast_mode}
@@ -386,15 +398,17 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                       <div className="text-[11px] text-muted-foreground">
                         {task.lifecycle_stage === 'teardown'
                           ? 'Releasing resources'
-                          : task.lifecycle_stage === 'released'
-                            ? 'Resources released'
-                            : task.lifecycle_stage === 'evaluated'
-                              ? 'Evaluated'
-                              : task.lifecycle_stage === 'ready'
-                                ? 'Ready'
-                                : task.lifecycle_stage === 'starting'
-                                  ? (task.startup_label ?? 'Starting')
-                                  : null}
+                          : task.lifecycle_stage === 'controller-terminal-cleanup-unknown'
+                            ? 'Controller finished; cleanup unconfirmed'
+                            : task.lifecycle_stage === 'released'
+                              ? 'Resources released'
+                              : task.lifecycle_stage === 'evaluated'
+                                ? 'Evaluated'
+                                : task.lifecycle_stage === 'ready'
+                                  ? 'Ready'
+                                  : task.lifecycle_stage === 'starting'
+                                    ? (task.startup_label ?? 'Starting')
+                                    : null}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-muted-foreground">
@@ -422,9 +436,9 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                         }
                         onClick={() => {
                           const agentId = task.agent_id?.trim();
-                          if (agentId) onOpenAgent(runId, agentId);
+                          if (agentId) onOpenAgent(task.child_run_id ?? runId, agentId);
                         }}
-                        data-testid={`run-view-open-${task.name}`}
+                        data-testid={`run-view-open-${task.row_id ?? task.name}`}
                       >
                         Open agent
                       </Button>
@@ -434,6 +448,30 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
               </tbody>
             </table>
           </div>
+          {detail.pagination && detail.pagination.total > detail.pagination.limit && (
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - detail.pagination!.limit))}
+              >
+                Previous
+              </Button>
+              <span>
+                {offset + 1}–{Math.min(offset + detail.tasks.length, detail.pagination.total)} of{' '}
+                {detail.pagination.total}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={offset + detail.tasks.length >= detail.pagination.total}
+                onClick={() => setOffset(offset + detail.pagination!.limit)}
+              >
+                Next
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>

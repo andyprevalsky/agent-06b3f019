@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "reviewed_executable_sources": {
+    "ab96c500ab3b72b677180682a1b9f388e6b0445971efd4cfb854b60d7d82b2a1": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "cfdd157d3ab41fdec4cf8fe97685c7323558706e1dcbbd311fd67a0708ebdf52": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "26d313ce72f4ee9461ed688621ba3d9e10f8e753a621d7793c0c49d3c0a47d9e": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "e5fee2656bd28102bcfc160c17a61391ec7e3ab7ede1605aa8102075f44ddd9b": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "087dc99095ce51de2a2b4d24b58df2302afa3dcce6a1efbfeb8f3b7dc9663a7f": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "cac1ffb7f5096046ec4abb176e213c77e083cc1ab46dedc90319b3e62701e9e6": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "07123e84e2b2244e2347e0b8ea01d581fe0c8663bc1551193f32d6bc74087f2f": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "be6a7b55ac61302ca4632883b760eaf0357b012692641f40902b79d085dd7fda": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "2f474af2d5fca3b6dda86cc1851b734e90882ce67f12ab85c39e09273fd6dc03": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "b5e427a694a48859060d0b43c407ec5fe1ee401a12a8e1a40329c0c6875ba31c": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "ebaf20fef42a7dbdfaffaddd77f259a5a2307e8171afa7796b3fa6b7d505607e": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ]
+  }
+}

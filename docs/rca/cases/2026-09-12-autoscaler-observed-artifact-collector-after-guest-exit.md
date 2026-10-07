@@ -200,3 +200,44 @@ to make tasks pass; the five-minute cap and validation criteria remain intact.
 ## Reusable lesson
 
 Bind metrics observation to the authenticated workload lifecycle while preserving independent artifact-collection and resource-cleanup completion obligations.
+
+### October 6 fixture recurrence after post-ready observation retries
+
+The final covered benchmark gate exposed seven failures in this case's owning
+handoff fixture: missing or wrong ACK, running state, wrong run or owner,
+same-bearer sibling, and wrong authentication. The fixture held the original
+collector until a release file appeared, made metrics unavailable after guest
+sealing, then waited eight seconds for the autoscaler to retire before releasing
+that collector. It relied on the former six-scrape infrastructure failure. The
+post-ready warning/retry repair correctly leaves both owned processes running
+when these invalid seals do not authorize a runtime handoff.
+
+Archive searches for `autoscaler handoff did not resolve` and `artifact collector
+guest runtime metrics six poll` identify this case and the October 6 post-ready
+observation case. This is a recurrence in the fixture's stage ordering, not a
+new production failure. Exact local reproduction on frozen `671b5d70` passes
+eight of the unchanged 15 cases and fails these seven in 74.085 seconds. The
+corrected fixture runs the same selection and passes all 15 in 27.897 seconds.
+All 90 captured native local status-server, supervisor and autoscaler Popen
+births are positively absent and their children are reaped. No provider or
+benchmark allocation was made.
+
+For the seven invalid-seal cases, cross seven or more missing observations while
+the collector remains held. Assert no runtime-completed or child/completed
+marker, no autoscaler failure or premature process retirement, and unchanged
+zero worker capacity. Then release the actual original child. Its real exit
+code remains 1. Once that exact local child finishes, the existing autoscaler
+contract may settle with exit 0 and copy the real child exit 1 into
+`autoscaler.completed-after-child`; the rejected guest seal still cannot create
+`autoscaler.runtime-completed`. Requiring autoscaler exit 1 at this point would
+reintroduce the removed observation failure rather than validate ownership.
+The remaining eight capacity, prior-failure and collector controls retain their
+existing expectations. Runtime code, task outcomes, finalization budgets and
+all 15 fixture parameters are unchanged.
+
+The existing permanent handoff family and normal Linux-controller selection
+already discover this control. Source hashes, paired native receipts and the
+private one-function patch are preserved under
+`.context/fresh-claude-grouped50-20261006/runtime-handoff-fixture-packet`.
+This proves fixture correctness only; it grants no actual50 acceptance, timing
+or cache credit. The historical fleet qualification remains unchanged.

@@ -19,13 +19,14 @@ OpenRouter today, so a single transport path is sufficient.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 import httpx
 import structlog
 
 from providers.rose.errors import (
     RoseAllFailed,
+    RoseDeadlineError,
     RoseError,
     RoseInvalidRequest,
     RoseStallError,
@@ -210,6 +211,7 @@ async def waterfall_complete(
     cache_namespace: Optional[str] = None,
     skip_cache_write: bool = False,
     skip_models: FrozenSet[str] = frozenset(),
+    stream_guard: Optional[Callable[[AsyncIterator[StreamChunk]], AsyncIterator[StreamChunk]]] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -296,8 +298,9 @@ async def waterfall_complete(
             skip_cache_write=skip_cache_write,
         )
         emitted_user_visible = False
+        pending_metadata: Optional[StreamChunk] = None
         try:
-            async for chunk in _stream_one_step(
+            source = _stream_one_step(
                 body=body,
                 model=model,
                 pool_name=pool_spec.name,
@@ -307,13 +310,26 @@ async def waterfall_complete(
                 call_site=call_site,
                 per_step_timeout_s=per_step_timeout_s,
                 idle_timeout_s=idle_timeout_s,
-            ):
+            )
+            if stream_guard is not None:
+                source = stream_guard(source)
+            async for chunk in source:
+                if chunk.kind == "metadata":
+                    pending_metadata = chunk
+                    continue
+                # A failed pre-output leg must not publish its model identity.
+                # Flush before any selected-leg payload, including usage/done.
+                if pending_metadata is not None:
+                    yield pending_metadata
+                    pending_metadata = None
                 if chunk.kind in {"content", "reasoning", "tool_call", "codex_reasoning_item"}:
                     emitted_user_visible = True
                 yield chunk
+            if pending_metadata is not None:
+                yield pending_metadata
             return
         except RoseError as exc:
-            if emitted_user_visible:
+            if emitted_user_visible or isinstance(exc, RoseDeadlineError):
                 raise
             logger.warning(
                 "rose.waterfall.step_failed",

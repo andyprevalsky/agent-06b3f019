@@ -192,16 +192,89 @@ Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
 campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
 `run-bench-cloud`, or an ad hoc repetition loop directly.
 
+Use CLAUDE.md's current cloud startup and monitoring instructions for that
+command. Strict cohorts now coordinate their physical cleanup reserves on the
+controller filesystem; a reserve refusal requires actual disk/cohort evidence,
+not lowered storage floors or a replacement launcher. The owning quick
+regressions run in the normal benchmark deploy gate.
+
+Keep retained failed-owner recovery on CLAUDE.md's supported exact-owner CLI
+route. `archive-verified.json` preserves originals with zero proof credit;
+completion still requires the final native release audit and owner retirement.
+
+For the current user-requested five consecutive LIVE DAILY runs of fifty,
+follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+uses fifty distinct randomly selected eligible names together in one ordinary
+fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
+hard image-build-start through final publication/native release 3,600 seconds.
+Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
+exact-image activation every trial. LIVE autoscale remains 15; the cached mass
+profile's maximum 2 and allocation deadline do not apply. Keep the original
+hundred-task result complete, exact thirty-second monitoring, grouped early
+verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
+with accepted LIVE latency. The existing stability wrapper's width-32 cap does
+not restrict this ordinary fleet; do not substitute smaller slices.
+
 The ordinary CLI automatically reuses verified completed dependency snapshots
 across fresh checkouts. Follow CLAUDE.md's "Cloud startup reuse" guidance and
 `scripts/run-bench --help`; source-only changes do not require dependency rebuilds.
 
 Cold-image builds, image activation, and the recorded mass-demo cached run are
-explicitly requested diagnostics, never a step of a descent. When Andy asks for
-one, follow CLAUDE.md's "Cloud startup reuse" and "Temporary cached startup
-diagnostic" guidance and `/benchmark` through this same entrypoint. Do not
-rebuild images during ordinary branch runs. Cached DEMO copies earn zero LIVE
-acceptance credit.
+explicitly requested diagnostics, never a step of an ordinary descent. The current
+user-requested five LIVE trials explicitly require their fresh uncached image.
+
+For an explicitly requested cold-image or cached startup diagnostic, follow
+CLAUDE.md's CLI commands and `/benchmark` guidance through the same entrypoint.
+Do not automatically rebuild images during ordinary branch runs. Cached DEMO
+copies earn zero LIVE acceptance credit and retain genuine evaluation; declared
+judges may call providers. The mass-demo fifty-copy command means fifty
+controllers and up to 2,500 first-level children, not fifty distinct tasks.
+Use its documented `--strict-barrier` to coordinate all surviving eligible ready
+copies in each bounded cohort. Retain failed members in the original requested
+count and report actual released width; partial release never earns full-width
+credit. Controller count alone is not execution overlap. Ordinary
+non-strict scheduling stays unchanged. Cold image publication automatically
+caches a checksum-verified pinned client in the Git common directory. The CLI
+defaults `image-build` to app-scoped Depot with zstd level 3 and AMD64; use
+`--builder native` for an explicit native diagnostic. Independent `807edee9f` no-cache
+build/push completed in 493.6 seconds in one attempt; activation/fleet startup
+remain separate stages. Native publishing uses child-only classic Docker over
+HTTPS; shared Fly installation remains unchanged.
+
+For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
+
+```bash
+scripts/run-bench image-build --builder depot --no-cache --build-context <committed-checkout> --out-dir .context/image-build
+benchmark_image_ref=$(python3 -c 'import json; print(json.load(open(".context/image-build/cloudbench-image-build.json"))["image_ref"])')
+scripts/run-bench image-activate "$benchmark_image_ref" --ref "$(git rev-parse HEAD)" --out-dir .context/image-activation
+```
+
+`image-activate` uses the existing app environment lock and owned warm-source setup, activates the published image on the donor and this workspace's pool, synchronizes the requested Git ref, and parks the donor. It sets the existing prebuilt-image selection internally, so it does not build again. Confirm guest image digests in the ensuing fleet's native inventory. Source-only branch runs normally reuse verified dependencies and need no image build or activation.
+
+Repeated concurrent cloud campaigns share one parent-owned Machines/Volumes inventory feed. Borrowers retain the same keyed generation and never stop the publisher; capacity admission and exact resource teardown checks stay native. A standalone fleet and production-only campaigns keep their existing paths.
+
+The existing recorded mass-demo diagnostic, when explicitly requested:
+
+```bash
+CLOUDBENCH_APP_MACHINE_CEILING=138 \
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
+  scripts/run-bench test-mass-agent-run-0 --demo-cache \
+  -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
+```
+
+For this explicitly requested 50-copy cached stress run, use the command-scoped
+Machine ceiling of 138 and `--autoscale-max 2`: the current 36 existing app
+Machines plus 50 primaries, up to 50 optional autoscaler workers and two transient
+slots. Inspect native app inventory and headroom again before a future run;
+ordinary ceiling 56 cannot hold this current cohort, and ceiling 88 leaves only
+two worker slots. This profile creates no idle resources and changes no default
+ceiling, shared-CPU governor or production headroom. `--strict-barrier` keeps all
+50 copies in one ready cohort; controller occupancy does not prove execution overlap.
+
+Poll the printed campaign `summary.json` with `python3 -m json.tool` every 30
+seconds, then follow each job log's exact printed fleet-monitor handle through
+controller exit and owned teardown. The campaign directory itself is not a
+fleet-monitor handle; task PASS/FAIL is available before cleanup finishes.
 
 Follow CLAUDE.md's "Monitor every cloud launch" instructions and the exact command
 printed at launch. Poll every 30 seconds, check terminal status on every poll, and

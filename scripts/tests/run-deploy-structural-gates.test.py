@@ -56,15 +56,18 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         self.assertIn("bash scripts/tests/deploy-agent-clone-recovery.test.sh", _registry_commands())
 
     def test_compact_benchmark_gates_are_always_registered(self) -> None:
-        self.assertTrue({
-            "bash scripts/tests/descend-command.test.sh",
-            "python3 scripts/tests/benchmark-live-results.test.py",
-            "bash scripts/tests/cloudbench-fetch-ref.test.sh",
-            "python3 scripts/tests/verify-successful-llm-queries.test.py",
-            "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
-            "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
-            "python3 scripts/tests/cloudbench-bootstrap-recovery.test.py",
-        }.issubset(_registry_commands()))
+        self.assertTrue(
+            {
+                "bash scripts/tests/descend-command.test.sh",
+                "python3 scripts/tests/benchmark-live-results.test.py",
+                "bash scripts/tests/campaign-hub-grouping.test.sh",
+                "bash scripts/tests/cloudbench-fetch-ref.test.sh",
+                "python3 scripts/tests/verify-successful-llm-queries.test.py",
+                "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
+                "python3 scripts/tests/cloudbench-forensic-quiesced.test.py",
+                "python3 scripts/tests/cloudbench-bootstrap-recovery.test.py",
+            }.issubset(_registry_commands())
+        )
 
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
@@ -74,10 +77,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     def test_deploy_md_lists_no_unregistered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         registry = _registry_commands()
-        documented = {
-            match.group(1)
-            for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)
-        }
+        documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
         stale = sorted(documented - registry)
         self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
 
@@ -124,14 +124,11 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
                 for low_a, high_a in ranges[first]:
                     for low_b, high_b in ranges[second]:
                         if low_a <= high_b and low_b <= high_a:
-                            overlaps.append(
-                                f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]"
-                            )
+                            overlaps.append(f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]")
         self.assertEqual(
             overlaps,
             [],
-            "concurrently-run gates share a port range; check-then-bind will race:\n"
-            + "\n".join(overlaps),
+            "concurrently-run gates share a port range; check-then-bind will race:\n" + "\n".join(overlaps),
         )
 
 
@@ -145,13 +142,20 @@ class StructuralGateRunnerTests(unittest.TestCase):
             root = Path(temporary)
             release = root / "release"
             gates = tuple(
-                module.Gate(str(index), (sys.executable, "-c", (
-                    "from pathlib import Path; import time; "
-                    f"Path({str(root / f'gate-{index}')!r}).open('x').close(); "
-                    f"release = Path({str(release)!r}); "
-                    "\nwhile not release.exists(): time.sleep(0.02)\n"
-                    f"raise SystemExit({7 if index == 10 else 0})"
-                )))
+                module.Gate(
+                    str(index),
+                    (
+                        sys.executable,
+                        "-c",
+                        (
+                            "from pathlib import Path; import time; "
+                            f"Path({str(root / f'gate-{index}')!r}).open('x').close(); "
+                            f"release = Path({str(release)!r}); "
+                            "\nwhile not release.exists(): time.sleep(0.02)\n"
+                            f"raise SystemExit({7 if index == 10 else 0})"
+                        ),
+                    ),
+                )
                 for index in range(11)
             )
             launched = []
@@ -171,18 +175,24 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 real_sleep(seconds)
 
             try:
-                with patch.object(module, "GATES", gates), patch.object(sys, "argv", [str(RUNNER)]), \
-                        patch.object(module.subprocess, "Popen", side_effect=launch), \
-                        patch.object(module.time, "sleep", side_effect=observe_admission), \
-                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with (
+                    patch.object(module, "GATES", gates),
+                    patch.object(sys, "argv", [str(RUNNER)]),
+                    patch.object(module.subprocess, "Popen", side_effect=launch),
+                    patch.object(module.time, "sleep", side_effect=observe_admission),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
                     result = module.main()
             finally:
                 release.touch()
             self.assertEqual(launched, [gate.command for gate in gates])
             self.assertEqual(len(list(root.glob("gate-*"))), 11)
             self.assertEqual(result, 1, "a real gate failure must remain fatal")
-            with patch.object(module, "run_gates", return_value=0) as run, \
-                    patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]):
+            with (
+                patch.object(module, "run_gates", return_value=0) as run,
+                patch.object(sys, "argv", [str(RUNNER), "--max-workers", "3"]),
+            ):
                 self.assertEqual(module.main(), 0)
                 run.assert_called_once_with(module.GATES, max_workers=3)
 
@@ -258,7 +268,9 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
                     for child in children.stdout.split():
                         identity = subprocess.run(
                             ["ps", "-p", child, "-o", "ppid=,pgid="],
-                            capture_output=True, text=True, timeout=60,
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
                         ).stdout.split()
                         if identity == [str(process.pid), child]:
                             try:

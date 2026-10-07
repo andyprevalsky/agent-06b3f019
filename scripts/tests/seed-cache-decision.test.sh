@@ -354,11 +354,23 @@ fi
 # Fleet must fail closed before provisioning when the cloud-guest (pg15)
 # canonical seed dump is missing — otherwise every clone dies at the barrier.
 FLEET="$ROOT_DIR/scripts/run-bench-fleet"
-if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
-   && grep -q 'Missing canonical base fixture for cloud guests' "$FLEET" \
-   && grep -q 'seed-dump-cache.ts get' "$FLEET" \
-   && grep -q 'experimental-strip-types' "$FLEET" \
-   && grep -q 'node_modules/.bin/tsx' "$FLEET"; then
+SEED_GET="$ROOT_DIR/scripts/cloudbench-seed-get.sh"
+# Follow the actual standalone helper; cohort proof admission is exercised by
+# cloudbench_campaign_inventory_test.py's native loopback seed preflight cases.
+PREFLIGHT="$(sed -n '/^CLOUDBENCH_GUEST_PG_MAJOR=/,/^echo "✅ Canonical seed dump present/p' "$FLEET")"
+SEED_FAILURE="$(printf '%s\n' "$PREFLIGHT" | sed -n '/if ! bash.*cloudbench-seed-get.sh/,/^    fi/p')"
+PREFLIGHT_LINE="$(grep -n '^CLOUDBENCH_GUEST_PG_MAJOR=' "$FLEET" | cut -d: -f1)"
+PROVISION_LINE="$(grep -n '^echo "⏳ provisioning ' "$FLEET" | cut -d: -f1)"
+if printf '%s\n' "$PREFLIGHT" | grep -q -- '--pg-major "$CLOUDBENCH_GUEST_PG_MAJOR"' \
+   && printf '%s\n' "$PREFLIGHT" | grep -q 'if ! bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-seed-get.sh"' \
+   && printf '%s\n' "$PREFLIGHT" | grep -q '"$ROOT_DIR" "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"; then' \
+   && printf '%s\n' "$SEED_FAILURE" | grep -q 'Missing canonical base fixture for cloud guests' \
+   && printf '%s\n' "$SEED_FAILURE" | grep -q 'exit 1' \
+   && [ -n "$PREFLIGHT_LINE" ] && [ -n "$PROVISION_LINE" ] \
+   && [ "$PREFLIGHT_LINE" -lt "$PROVISION_LINE" ] \
+   && grep -q 'seed-dump-cache.ts get' "$SEED_GET" \
+   && grep -q 'experimental-strip-types' "$SEED_GET" \
+   && grep -q 'node_modules/.bin/tsx' "$SEED_GET"; then
     PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
 else
     FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"

@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _test_utils import BlackboxResult, set_mock_handler, setup_mock, teardown_mock
+from _rose_stream_progress_fixture import single_step_waterfall
 
 import httpx
 
@@ -5828,7 +5829,7 @@ async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     client = RoseClient(openrouter_key="ork-x")
     with (
         patch("providers.rose.client._try_claude_auth", stalled_direct_auth),
-        patch("providers.rose.client.waterfall_complete", waterfall_ok),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(waterfall_ok)),
     ):
         chunks = await _drain(
             client.complete(
@@ -5879,7 +5880,7 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     client = RoseClient(openrouter_key="ork-x")
     with (
         patch("providers.rose.client._try_claude_auth", always_stalls),
-        patch("providers.rose.client.waterfall_complete", waterfall_ok),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(waterfall_ok)),
     ):
         chunks = await _drain(
             client.complete(
@@ -6182,7 +6183,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     raised = False
     with (
         patch("providers.rose.client._try_gpt_auth", silent_gpt_auth),
-        patch("providers.rose.client.waterfall_complete", silent_waterfall),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(silent_waterfall)),
         patch("providers.rose.client._anthropic_api_key_on_cooldown", api_key_on_cooldown),
     ):
         try:
@@ -6404,7 +6405,7 @@ async def test_client_waterfall_preserves_native_agent_action_tools():
 
     with (
         patch("providers.rose.client._openai_api_key", return_value=""),
-        patch("providers.rose.client.waterfall_complete", successful_waterfall),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(successful_waterfall)),
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
@@ -6751,7 +6752,7 @@ async def test_client_ttft_timeout_waits_for_first_productive_chunk():
 
     client = RoseClient(openrouter_key="ork-x")
     raised = False
-    with patch("providers.rose.client.waterfall_complete", slow_first_productive_chunk):
+    with patch("providers.rose.client.waterfall_complete", single_step_waterfall(slow_first_productive_chunk)):
         try:
             async for _ in client.complete(
                 pool="rose-1-flash",
@@ -6788,7 +6789,7 @@ async def test_client_heartbeats_during_ttft_wait():
     with (
         patch("providers.rose.client._try_openai_api_key", skip_api_key),
         patch("providers.rose.client._try_anthropic_api_key", skip_api_key),
-        patch("providers.rose.client.waterfall_complete", slow_ttft_then_content),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(slow_ttft_then_content)),
         patch("providers.rose.client._HEARTBEAT_INTERVAL_S", 0.05),
         patch("providers.rose.client._safe_heartbeat", side_effect=lambda msg: heartbeats.append(msg)),
     ):
@@ -6817,7 +6818,7 @@ async def test_client_allows_idle_gap_within_idle_window_after_first_chunk():
 
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
-    with patch("providers.rose.client.waterfall_complete", slow_second_chunk):
+    with patch("providers.rose.client.waterfall_complete", single_step_waterfall(slow_second_chunk)):
         async for chunk in client.complete(
             pool="rose-1-flash",
             messages=[{"role": "user", "content": "hi"}],
@@ -6844,7 +6845,7 @@ async def test_client_enforces_idle_timeout_after_first_productive_chunk():
 
     client = RoseClient(openrouter_key="ork-x")
     raised = False
-    with patch("providers.rose.client.waterfall_complete", stall_after_first):
+    with patch("providers.rose.client.waterfall_complete", single_step_waterfall(stall_after_first)):
         try:
             async for _ in client.complete(
                 pool="rose-1-flash",
@@ -6858,6 +6859,56 @@ async def test_client_enforces_idle_timeout_after_first_productive_chunk():
         except RoseDeadlineError as exc:
             raised = "idle" in str(exc)
     assert raised, "expected RoseDeadlineError citing idle window"
+
+
+async def test_client_waterfall_stalled_leg_uses_existing_fallback():
+    from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
+
+    await assert_waterfall_stalled_leg_uses_existing_fallback("recover")
+
+
+async def test_client_waterfall_failed_parser_leg_discards_metadata():
+    from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
+
+    for scenario in ("empty", "buffered_arguments"):
+        await assert_waterfall_stalled_leg_uses_existing_fallback(scenario)
+
+
+async def test_waterfall_empty_success_keeps_metadata_before_usage_and_done():
+    """Successful normalized streams preserve metadata-first even without output."""
+    spec = get_pool("rose-1-browser-use")
+    calls = []
+
+    async def empty_success(**kwargs):
+        calls.append(kwargs["model"])
+        yield StreamChunk(kind="metadata", data={"actual_model": kwargs["model"]})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 0})
+        yield StreamChunk(kind="done", data={})
+
+    with patch("providers.rose.waterfall._stream_one_step", empty_success):
+        chunks = await _drain(
+            waterfall_complete(
+                pool_spec=spec,
+                messages=[{"role": "user", "content": "Offline fixture"}],
+                openrouter_key="offline-fake",
+                request_id="offline-empty-success",
+            )
+        )
+    assert [chunk.kind for chunk in chunks] == ["metadata", "usage", "done"]
+    assert chunks[0].data["actual_model"] == spec.waterfall[0]
+    assert calls == [spec.waterfall[0]]
+
+
+async def test_client_waterfall_global_deadline_preserves_error():
+    from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
+
+    await assert_waterfall_stalled_leg_uses_existing_fallback("global_deadline")
+
+
+async def test_client_waterfall_partial_idle_preserves_error():
+    from _rose_stream_progress_fixture import assert_waterfall_stalled_leg_uses_existing_fallback
+
+    await assert_waterfall_stalled_leg_uses_existing_fallback("midstream_idle")
 
 
 async def test_client_buffered_tool_arguments_keep_real_progress_alive():
@@ -6899,7 +6950,8 @@ async def test_client_parser_only_progress_preserves_ttft_without_idle_timeout()
             prelude=0,
             idle_timeout_s=None,
             expected_error="rose.complete TTFT exceeded 90.0s",
-            expected_time=90.0,
+            expected_time=180.0 if protocol == "openai" else 90.0,
+            exhausted=protocol == "openai",
         )
     # Once real output reaches the consumer, disabling the idle budget remains
     # supported; the ordinary whole-call deadline still bounds the stream.
@@ -6910,7 +6962,12 @@ async def test_client_buffered_progress_resets_for_new_waterfall_attempt():
     from _rose_stream_progress_fixture import assert_progress_case
 
     await assert_progress_case(
-        seconds=110, prelude=0, fallback=True, expected_error="rose.complete TTFT exceeded 90.0s", expected_time=200.0
+        seconds=110,
+        prelude=0,
+        fallback=True,
+        expected_error="rose.complete TTFT exceeded 90.0s",
+        expected_time=200.0,
+        exhausted=True,
     )
 
 
@@ -7616,7 +7673,7 @@ async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth(
     with (
         patch("providers.rose.client._openai_api_key", return_value=""),
         patch("providers.rose.client._anthropic_api_key_on_cooldown", _always_on_cooldown),
-        patch("providers.rose.client.waterfall_complete", _fake_waterfall_complete),
+        patch("providers.rose.client.waterfall_complete", single_step_waterfall(_fake_waterfall_complete)),
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-test").complete(
@@ -7676,7 +7733,7 @@ async def test_rose_client_preserves_native_tools_for_waterfall():
     previous_gpt = os.environ.pop("GPT_API_KEY", None)
     previous_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
     try:
-        with patch("providers.rose.client.waterfall_complete", _fake_waterfall):
+        with patch("providers.rose.client.waterfall_complete", single_step_waterfall(_fake_waterfall)):
             await _drain(
                 RoseClient(openrouter_key="ork-test").complete(
                     pool="rose-1-ultra",
@@ -8114,6 +8171,17 @@ async def run_all_tests():
     await r.record_async("client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
+    await r.record_async(
+        "client_waterfall_stalled_leg_fallback", test_client_waterfall_stalled_leg_uses_existing_fallback
+    )
+    await r.record_async(
+        "client_waterfall_failed_parser_metadata", test_client_waterfall_failed_parser_leg_discards_metadata
+    )
+    await r.record_async(
+        "waterfall_empty_success_metadata_order", test_waterfall_empty_success_keeps_metadata_before_usage_and_done
+    )
+    await r.record_async("client_waterfall_global_deadline", test_client_waterfall_global_deadline_preserves_error)
+    await r.record_async("client_waterfall_partial_idle", test_client_waterfall_partial_idle_preserves_error)
     await r.record_async("client_heartbeats_during_ttft_wait", test_client_heartbeats_during_ttft_wait)
     await r.record_async(
         "client_allows_idle_within_window",
