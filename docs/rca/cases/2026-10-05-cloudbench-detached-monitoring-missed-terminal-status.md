@@ -101,6 +101,15 @@ existing terminal-receipt control reproduced this before correction and passed
 unchanged afterward. Either validated terminal signal now directs inspection
 of the exact owned resources; controller completion remains a separate field.
 
+
+### Independent source qualification
+
+Independent review of `447fa65d6a47af712109c634805a248199a3dc68` verified the
+unchanged RED/GREEN test and log hashes and reran the existing 69-control
+monitor/archive owning family: all passed in 16.56 seconds with no provider
+calls. The observed invalid-row action keeps priority; neither original
+outcomes nor deployment or benchmark acceptance is inferred from this check.
+
 ## Human feedback
 
 Monitor the active run throughout execution and make the CLI print instructions

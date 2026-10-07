@@ -133,6 +133,18 @@ This case remains open: no exact unchanged live benchmark before/after outcome
 has been established. The original durable evidence remains missing and
 immutable; a future real control must prove archive publication end to end.
 
+
+### Independent source qualification
+
+The final source was committed and uploaded as
+`12e5117e73c390dfd0018d4c6a4413a2aa38c302`. Independent review verified the
+frozen owner/archive RED/GREEN hashes and all ten source files, then ran seven
+activity controls, two archive controls and the existing publisher suite: all
+passed. The linear validation revision preserves the positive and inverse
+assertions. This establishes source qualification; the original missing
+durable evidence and zero acceptance credit remain unchanged, and the case
+stays open pending a real unchanged live before/after outcome.
+
 ## Human feedback
 
 The user permits ordinary terminal failure and early cancellation when honest

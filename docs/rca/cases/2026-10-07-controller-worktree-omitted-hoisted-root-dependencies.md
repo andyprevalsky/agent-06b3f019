@@ -94,6 +94,15 @@ failed and immutable; it was not relaunched. This case remains mitigated until a
 new independently authorized ordinary run demonstrates the unchanged task
 outcome and full closure. The separate CLI readiness repair is not claimed here.
 
+
+### Independent source qualification
+
+The final documentation was committed and uploaded as
+`3e578c324d211be11df35a5b6c542d2b1ef21d5c`. Independent review verified the
+frozen five-file patch and original import RED/GREEN receipts, and imported
+the actual seed-cache producer successfully. This qualifies the setup guidance;
+the original C10 remains failed and fully released with zero credit.
+
 ## Human feedback
 
 None recorded.
