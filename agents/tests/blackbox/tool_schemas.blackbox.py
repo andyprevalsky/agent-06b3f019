@@ -266,6 +266,8 @@ def test_grep_tool_schema_exact_contract():
         "agent_trajectories",
         "transactions",
         "documents",
+        "calendar",
+        "drive",
         "summary",
     }
 

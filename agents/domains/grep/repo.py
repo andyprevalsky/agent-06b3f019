@@ -3,7 +3,7 @@
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 from temporalio import activity
@@ -192,6 +192,34 @@ async def grep_activity(
         raise
 
 
+def _google_source_lines(sources: Dict[str, Any]) -> List[str]:
+    """calendar/ and drive/ entries for a connected Google account.
+
+    The count is left out while nothing is stored: the first search is what
+    fills these, so "0 events" would wrongly read as an empty calendar.
+    """
+    lines: List[str] = []
+    for source, label, unit, count_key in (
+        ("calendar", "Google Calendar", "events", "total_events"),
+        ("drive", "Google Drive", "files", "total_files"),
+    ):
+        entry = sources.get(source)
+        if not isinstance(entry, dict):
+            continue
+        accounts = [a for a in entry.get("accounts") or [] if isinstance(a, str) and a]
+        if not accounts:
+            continue
+        count = entry.get(count_key) or 0
+        detail = f"{label}, {count:,} {unit}" if count > 0 else label
+        lines += [
+            "",
+            f"{source + '/':39s}{detail}",
+            f"  Accounts: {', '.join(accounts)}",
+            f'  Search with grep source="{source}".',
+        ]
+    return lines
+
+
 @activity.defn
 async def fetch_local_data_summary(user_id: str) -> str:
     """
@@ -231,7 +259,9 @@ async def fetch_local_data_summary(user_id: str) -> str:
         total_transactions = transactions.get("total_transactions", 0)
         total_documents = documents.get("total_documents", 0)
 
-        if total_messages == 0 and total_transactions == 0 and total_documents == 0:
+        google_lines = _google_source_lines(sources)
+
+        if total_messages == 0 and total_transactions == 0 and total_documents == 0 and not google_lines:
             summary = "No local data available."
             _data_summary_cache[user_id] = {"summary": summary, "fetched_at": now}
             return summary
@@ -303,7 +333,7 @@ messages/                              {total_threads} threads, {total_messages:
   Date range: {from_date} → {to_date}
 {chr(10).join(latest_message_lines)}
   Threads by volume:
-{chr(10).join(thread_lines)}{chr(10).join(transaction_lines)}{chr(10).join(document_lines)}"""
+{chr(10).join(thread_lines)}{chr(10).join(transaction_lines)}{chr(10).join(document_lines)}{chr(10).join(google_lines)}"""
 
         _data_summary_cache[user_id] = {"summary": summary, "fetched_at": now}
         return summary

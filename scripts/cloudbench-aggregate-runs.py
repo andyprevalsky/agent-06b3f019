@@ -9,7 +9,6 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -224,6 +223,14 @@ def aggregate(
     controller_exit_code: int | None = None,
 ) -> dict:
     benches = json.loads((fleet_dir / "_batch/benches.json").read_text())
+    # The startup/live producer owns the original controller clock. Terminal
+    # refreshes preserve it; older artifacts without that field stay unknown.
+    card_path = fleet_dir / "_batch/report-card.json"
+    timestamp = (
+        json.loads(card_path.read_text()).get("timestamp") or ""
+        if card_path.is_file()
+        else ""
+    )
     if expected_execution_provenance is not None:
         if expected_execution_task_matrix is None:
             raise ValueError("expected execution task matrix is missing")
@@ -343,7 +350,7 @@ def aggregate(
     )
     result = {
         "run_id": fleet_dir.name,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp,
         "elapsed_s": round(
             controller_elapsed_seconds
             if controller_elapsed_seconds is not None

@@ -35,7 +35,7 @@ function contactName(row: grepRepo.NetworkGrepRow): string {
   return firstNonEmpty(fullName, row.email, row.phoneNumber, row.id);
 }
 
-function buildMatch(params: {
+export function buildMatch(params: {
   source: ValidSource;
   path: string;
   pointer: string;

@@ -2098,6 +2098,9 @@ class DOMService:
         if include_screenshot and not screenshot_to_use:
             logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
             screenshot_to_use = self._blank_screenshot(viewport_width, viewport_height)
+            # A synthetic white frame is not page evidence; evidence consumers
+            # (the browser verifier) must not present it as the rendered page.
+            result["screenshot_placeholder"] = True
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)

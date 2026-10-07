@@ -501,6 +501,63 @@ class ReviewWaitTest(unittest.TestCase):
             MODULE.gh_payload = original
         self.assertEqual(len(calls), 2)
 
+    def test_push_auto_skip_never_ends_a_commanded_wait(self) -> None:
+        """PR 1415: command 02:27:32, the push's auto-skip 02:28:06, review 02:28:43."""
+        head = "2" * 40
+        triggered_at = MODULE.parse_github_time("2026-10-06T02:27:32Z")
+        skip = "Review skipped: incremental reviews are disabled"
+
+        def rollup(state: str, started: str | None, description: str) -> dict[str, object]:
+            entry = {
+                "__typename": "StatusContext",
+                "context": "CodeRabbit",
+                "state": state,
+                "description": description,
+            }
+            if started is not None:
+                entry["startedAt"] = started
+            return {"headRefOid": head, "statusCheckRollup": [entry]}
+
+        payloads = iter(
+            [
+                rollup("SUCCESS", "2026-10-06T02:28:06Z", skip),
+                rollup("PENDING", "2026-10-06T02:28:43Z", "Review in progress"),
+                rollup("SUCCESS", "2026-10-06T02:33:56Z", "Review completed"),
+            ]
+        )
+        progress: list[str] = []
+        status = MODULE.wait_for_review(
+            pr="1415",
+            expected_head=head,
+            repo=None,
+            timeout_seconds=1,
+            poll_seconds=0,
+            loader=lambda _pr, _repo: next(payloads),
+            sleeper=lambda _seconds: None,
+            progress=progress.append,
+            triggered_at=triggered_at,
+        )
+
+        self.assertEqual(status.state, "SUCCESS")
+        self.assertTrue(status.successful)
+        self.assertEqual(progress[0], f"CodeRabbit AWAITING_TRIGGERED_REVIEW on {head[:12]}")
+
+        # Posted after the command, before it, or undated: while it is all there
+        # is, the wait runs to its own timeout, which routes to the fallback. A
+        # commanded review has started as late as 391s after its command.
+        for started in ("2026-10-06T02:28:06Z", "2026-10-06T02:27:00Z", None):
+            with self.assertRaisesRegex(TimeoutError, "AWAITING_TRIGGERED_REVIEW"):
+                MODULE.wait_for_review(
+                    pr="1415",
+                    expected_head=head,
+                    repo=None,
+                    timeout_seconds=0.05,
+                    poll_seconds=0,
+                    loader=lambda _pr, _repo, payload=rollup("SUCCESS", started, skip): payload,
+                    sleeper=lambda _seconds: None,
+                    triggered_at=triggered_at,
+                )
+
     def test_skip_posted_after_the_trigger_is_terminal(self) -> None:
         head = "1" * 40
         status = MODULE.wait_for_review(

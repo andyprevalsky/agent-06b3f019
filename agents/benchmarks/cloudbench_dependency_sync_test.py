@@ -26374,6 +26374,7 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         UNIFIED_DIR=str(batch),
         ROOT_DIR=str(ROOT),
         DASH_BASE="8765",
+        FLEET_CONTROLLER_STARTED_EPOCH="1791331914",
         SELF_MANAGED_HUB_RUN="1",
         BENCHMARK_HUB_PARENT_RUN_ID="live-parent",
         BENCHMARK_HUB_API_KEY="fixture-key",
@@ -26403,6 +26404,7 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
         path, bundle = received[-1]
         assert path == "/api/benchmarks/runs?live=1"
         assert bundle["run_id"] == "live-parent"
+        assert bundle["timestamp"] == "2026-10-07T00:11:54+00:00"
         assert [(t["name"], t["status"], t["passed"]) for t in bundle["tasks"]] == [
             ("alpha", "running", None),
             ("beta", "passed", True),

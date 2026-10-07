@@ -184,8 +184,18 @@ cleanup_owned_script_snapshot() {
         --pid-start "$owner_start"
     )
     [ "$SCRIPT_SNAPSHOT_ALLOW_TRANSFER" = "1" ] && cleanup_args+=(--allow-transfer)
+    if [ -n "${CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_VANISH_BEFORE_CLEANUP:-}" ]; then
+        # Vanish in one rename. Deleting in place shows the launcher's poll a
+        # snapshot that exists without its helper, which it reports as failed.
+        mv "$CLOUDBENCH_SCRIPT_SNAPSHOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT.vanished" \
+            && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT.vanished"
+    fi
     python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/$SCRIPT_SNAPSHOT_OWNER_HELPER" \
         "${cleanup_args[@]}" >/dev/null || {
+            # The helper lives inside the snapshot. A claimant that took the
+            # snapshot over removes it on its own exit; when that lands after
+            # the existence check above, nothing is left to remove or to leak.
+            [ -e "$CLOUDBENCH_SCRIPT_SNAPSHOT" ] || return 0
             echo "FATAL: could not remove the exact owned script snapshot" >&2
             return 1
         }
@@ -9854,9 +9864,10 @@ write_startup_card() {  # write_startup_card <phase-text>
         startup_modes="${startup_modes}${mode} "
     done
     STARTUP_BENCHES="${BENCHES[*]:-}" STARTUP_MODES="$startup_modes" \
-    PHASE="$1" CARD_RUN_ID="$RUN_ID" python3 - "$FLEET_DIR/_batch" <<'PY'
+    PHASE="$1" CARD_RUN_ID="$RUN_ID" CARD_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" python3 - "$FLEET_DIR/_batch" <<'PY'
 import json, os, sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 benches = os.environ.get("STARTUP_BENCHES", "").split()
 modes = os.environ.get("STARTUP_MODES", "").split()
@@ -9865,6 +9876,7 @@ if len(benches) != len(modes):
     raise SystemExit("startup bench/mode manifest length mismatch")
 card = {
     "run_id": os.environ["CARD_RUN_ID"],
+    "timestamp": datetime.fromtimestamp(float(os.environ["CARD_STARTED_EPOCH"]), timezone.utc).isoformat(),
     "status": "starting",
     "phase": phase,
     "summary": {"total": len(benches), "passed": 0, "failed": 0,
@@ -13023,9 +13035,11 @@ RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
     while :; do
         env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
             ROOT_DIR="$ROOT_DIR" SELF_MANAGED_HUB_RUN="$SELF_MANAGED_HUB_RUN" \
+            FLEET_CONTROLLER_STARTED_EPOCH="$FLEET_CONTROLLER_STARTED_EPOCH" \
             python3 - "$UNIFIED_DIR/report-card.json" <<'PY' || echo "⚠️ live benchmark publication failed" >&2
 import json, os, sys
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
 # Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
@@ -13109,6 +13123,7 @@ except Exception:
     code_summary = ""
 card = {
     "run_id": "batch",
+    "timestamp": datetime.fromtimestamp(float(os.environ["FLEET_CONTROLLER_STARTED_EPOCH"]), timezone.utc).isoformat(),
     "code": code_summary,
     "elapsed_s": elapsed,
     "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",

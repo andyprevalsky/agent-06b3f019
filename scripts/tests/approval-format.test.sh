@@ -122,6 +122,20 @@ require_text "$FORMAT" '/opt/cursor/artifacts' \
   "approval LLM dumps must land under Cursor artifacts for multi-day reachability"
 require_text "$FORMAT" 'Never link `file://…/.context/rendered-llm-dumps/…`' \
   "approval LLM dumps must not cite workspace-local file:// render paths alone"
+require_text "$FORMAT" '**Golden reference:** `<reference-repo>/<path>:<line>`' \
+  "approval requests must cite the reference-harness implementation"
+require_text "$FORMAT" "the default fix is the one that brings Rose" \
+  "approval requests must prefer the fix that converges on the reference harnesses"
+require_text "$FORMAT" "Never cite a" \
+  "golden references must be opened, not recalled"
+require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
+  "an approval without a golden reference must be invalid"
+require_text "$DESCEND" '**Golden reference:** `<reference-repo>/<path>:<line>`' \
+  "descend approval narrative must carry the golden reference field"
+require_text "$RCA" 'The golden-reference check (Step 6b in `docs/root-cause-analysis.md`)' \
+  "RCA completion must record the golden-reference check"
+require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
+  "RCA methodology must check the reference harnesses before choosing a fix"
 require_text "$FORMAT" "Never invent a failing test." \
   "approval requests must distinguish proactive changes from reproduced failures"
 require_text "$FORMAT" "Not applicable — <reason>" \

@@ -209,6 +209,40 @@ async def test_fetch_local_data_summary():
     assert "2026-04-01T12:34:56Z" in result
 
 
+async def test_local_data_summary_lists_calendar_and_drive_as_their_own_sources():
+    """A connected Google account shows up as calendar/ and drive/, even with nothing else stored."""
+    setup_mock({
+        "/api/data/summary": {
+            "status": 200,
+            "json": {
+                "sources": {
+                    "messages": {"total_threads": 0, "total_messages": 0, "channels": {}, "threads": []},
+                    "calendar": {"accounts": ["a@example.com"], "total_events": 1605},
+                    "drive": {"accounts": ["a@example.com", "b@example.com"], "total_files": 0},
+                }
+            },
+        },
+    })
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import _data_summary_cache, fetch_local_data_summary
+
+        _data_summary_cache.clear()
+        result = await fetch_local_data_summary("user-google-only")
+        _data_summary_cache.clear()
+
+    assert result != "No local data available."
+    lines = result.splitlines()
+    calendar = next(index for index, line in enumerate(lines) if line.startswith("calendar/"))
+    assert "1,605 events" in lines[calendar]
+    assert lines[calendar + 1] == "  Accounts: a@example.com"
+    assert lines[calendar + 2] == '  Search with grep source="calendar".'
+    drive = next(index for index, line in enumerate(lines) if line.startswith("drive/"))
+    # Nothing stored yet is not the same as an empty Drive: the first search fills it.
+    assert "0 files" not in lines[drive]
+    assert lines[drive + 1] == "  Accounts: a@example.com, b@example.com"
+    assert lines[drive + 2] == '  Search with grep source="drive".'
+
+
 async def test_grep_empty_pattern():
     """grep_activity with empty pattern still sends POST request."""
     _setup()
@@ -591,6 +625,115 @@ async def test_execute_grep_partial_connectivity():
     assert grep_called_with.get("sources") == ["transactions"]
 
 
+def test_grep_tool_accepts_calendar_and_drive_listings():
+    """calendar and drive are selectable sources, and a listing needs no pattern."""
+    from utils.tool_schemas import GrepTool
+
+    day = GrepTool.model_validate(
+        {"tool": "grep", "sources": ["calendar"], "filters": {"since": "2026-10-02", "until": "2026-10-02"}}
+    )
+    assert day.pattern is None
+    assert day.sources == ["calendar"]
+    folder = GrepTool.model_validate(
+        {"tool": "grep", "sources": ["drive"], "filters": {"path": "drive/a@example.com/My Drive/Legal"}}
+    )
+    assert folder.sources == ["drive"]
+    assert GrepTool.model_validate({"tool": "grep", "source": "drive", "pattern": "lease"}).source == "drive"
+
+
+async def test_execute_grep_calendar_listing_reaches_backend():
+    """A pattern-less calendar listing is forwarded as asked and titled by its source."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "source_status_activity":
+            return [{"source": "calendar", "connector": "gmail", "connected": True, "connectUrl": None}]
+        if name == "grep_activity":
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    tool_call = {"sources": ["calendar"], "filters": {"since": "2026-10-02", "until": "2026-10-02"}}
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call=tool_call,
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    status_calls = [c for c in calls if c["activity"] == "source_status_activity"]
+    assert status_calls and status_calls[0]["args"][1] == ["calendar"]
+    grep_calls = [c for c in calls if c["activity"] == "grep_activity"]
+    assert grep_calls and grep_calls[0]["args"][0] == tool_call
+    tool_titles = [
+        call["args"][3]["title"]
+        for call in calls
+        if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
+    ]
+    assert tool_titles[0] == "Searching calendar"
+    assert tool_titles[-1] == "Searched calendar"
+
+
+async def test_execute_grep_drive_unconnected_gates_on_google():
+    """drive without a Google connection is skipped and reported against the gmail connector."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "source_status_activity":
+            return [
+                {
+                    "source": "drive",
+                    "connector": "gmail",
+                    "connected": False,
+                    "connectUrl": "https://roselabs.ai/connect/gmail",
+                }
+            ]
+        return {"matches": [], "total_matches": 0}
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "lease", "sources": ["drive"]},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["unavailable_sources"][0]["connector"] == "gmail"
+    assert "grep_activity" not in calls
+
+
+def test_printed_google_path_names_its_source():
+    """A calendar or drive path with no source still gates and titles as that source."""
+    from domains.grep.service import _extract_sources, _title_source
+
+    drive = {"filters": {"path": "drive/a@example.com/My Drive/Legal/Lease.gdoc"}}
+    assert _extract_sources(drive) == ["drive"]
+    assert _title_source(drive) == "drive"
+    assert _extract_sources({"filters": {"path": "calendar/a@example.com/2026-10-06"}}) == ["calendar"]
+    # An explicit choice wins, and other paths keep the default local sources.
+    assert _extract_sources({"sources": ["messages"], "filters": {"path": "drive/a@example.com"}}) == ["messages"]
+    assert _extract_sources({"filters": {"path": "messages/Alice.thread"}}) == []
+
+
+def test_grep_titles_name_the_requested_sources():
+    """A card title names what was searched instead of 'all local data'."""
+    from domains.grep.service import _format_grep_title, _title_source
+
+    assert _title_source({"sources": ["email", "drive"]}) == "email, drive"
+    assert _title_source({"source": "messages", "sources": ["drive"]}) == "messages"
+    assert _title_source({}) == ""
+    assert _format_grep_title("Searching", "lease", "drive") == 'Searching drive for "lease"'
+    assert _format_grep_title("Searching", "", "drive") == "Searching drive"
+    assert _format_grep_title("Searching", "", "email") == "Searching email for all messages"
+    assert _format_grep_title("Searching", "", "") == "Searching all local data for all messages"
+
+
 async def test_execute_grep_documents_provider_gate():
     """Documents is an umbrella grep corpus; provider filters drive source gates."""
     from domains.grep.service import execute_grep
@@ -676,6 +819,10 @@ async def run_all_tests():
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
+    await r.record_async(
+        "local_data_summary_lists_calendar_and_drive_as_their_own_sources",
+        test_local_data_summary_lists_calendar_and_drive_as_their_own_sources,
+    )
     await r.record_async("empty_pattern", test_grep_empty_pattern)
     await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)
     await r.record_async("invalid_regex_literal_fallback", test_grep_invalid_regex_retries_as_literal)
@@ -691,6 +838,15 @@ async def run_all_tests():
     await r.record_async("execute_grep_source_unavailable", test_execute_grep_source_unavailable)
     await r.record_async("execute_grep_partial_connectivity", test_execute_grep_partial_connectivity)
     await r.record_async("execute_grep_documents_provider_gate", test_execute_grep_documents_provider_gate)
+    r.record("grep_tool_accepts_calendar_and_drive_listings", test_grep_tool_accepts_calendar_and_drive_listings)
+    r.record("printed_google_path_names_its_source", test_printed_google_path_names_its_source)
+    await r.record_async(
+        "execute_grep_calendar_listing_reaches_backend", test_execute_grep_calendar_listing_reaches_backend
+    )
+    await r.record_async(
+        "execute_grep_drive_unconnected_gates_on_google", test_execute_grep_drive_unconnected_gates_on_google
+    )
+    r.record("grep_titles_name_the_requested_sources", test_grep_titles_name_the_requested_sources)
     await r.record_async(
         "execute_grep_documents_provider_opportunistic_does_not_gate",
         test_execute_grep_documents_provider_opportunistic_does_not_gate,

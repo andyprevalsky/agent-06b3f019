@@ -2,8 +2,11 @@ import { MessageChannel, type GoogleDataPurge, type Prisma } from '@prisma/clien
 import { prisma } from '../../providers/database';
 import { revokeGoogleGrant } from '../../providers/googleRevoke';
 import { createLogger } from '../../providers/logger';
+import { GOOGLE_WORKSPACE_SOURCES } from './googleWorkspaceDocuments';
 
 const log = createLogger('GoogleDataPurge');
+/** Every document source whose rows came from a Google account. */
+const GOOGLE_DOCUMENT_SOURCES = ['gmail', ...GOOGLE_WORKSPACE_SOURCES];
 const BATCH_SIZE = 1_000;
 const REVOCATION_RETRY_DELAY_MS = 30 * 60_000;
 
@@ -37,12 +40,17 @@ async function deleteAccountDocuments(job: GoogleDataPurge): Promise<void> {
       : [{ googleAccountEmail: job.email }, { googleAccountEmail: null as null }];
   const where = {
     userId: job.userId,
-    source: 'gmail',
+    source: { in: GOOGLE_DOCUMENT_SOURCES },
     createdAt: { lte: job.requestedAt },
     ...(accountFilters.length > 0 ? { OR: accountFilters } : {}),
   };
   await prisma.userSnapshotRevision.deleteMany({ where });
   await prisma.userDataDocument.deleteMany({ where });
+  // Drop the Calendar and Drive cursors so a later reconnect starts from a full
+  // sync, and any account still connected re-lists on its next refresh.
+  await prisma.userDataProviderSyncState.deleteMany({
+    where: { userId: job.userId, source: { in: [...GOOGLE_WORKSPACE_SOURCES] } },
+  });
 }
 
 async function processClaimedJob(job: GoogleDataPurge, fetcher: typeof fetch): Promise<void> {

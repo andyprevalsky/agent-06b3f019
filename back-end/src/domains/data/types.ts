@@ -107,6 +107,25 @@ export const DATA_SOURCE_CONFIGS = {
     connector: 'documents',
     channel: null,
   },
+  calendar: {
+    description: 'Google Calendar events on the primary calendar',
+    table: 'UserDataDocument' as const,
+    searchField: 'title/path/details',
+    groupBy: 'googleAccountEmail',
+    filters: ['since', 'until', 'path'] as const,
+    // Shares the Google connection that `email` uses.
+    connector: 'gmail',
+    channel: null,
+  },
+  drive: {
+    description: 'Google Drive files and folders',
+    table: 'UserDataDocument' as const,
+    searchField: 'title/path/text',
+    groupBy: 'googleAccountEmail',
+    filters: ['since', 'until', 'path'] as const,
+    connector: 'gmail',
+    channel: null,
+  },
 } as const;
 
 export const VALID_SOURCES = DATA_SOURCE_CONFIGS;
@@ -134,6 +153,18 @@ export const MESSAGE_FAMILY_SOURCES: readonly ValidSource[] = [
 
 export function isMessageFamilySource(source: ValidSource): boolean {
   return MESSAGE_FAMILY_SOURCES.includes(source);
+}
+
+/** Sources backed by Google rows in the document store, refreshed on read. */
+export type GoogleGrepSource = 'calendar' | 'drive';
+
+export function isGoogleGrepSource(source: ValidSource): source is GoogleGrepSource {
+  return source === 'calendar' || source === 'drive';
+}
+
+/** A search over calendar alone reads forward in time; any mix is newest first. */
+export function isCalendarOnly(sources: readonly ValidSource[]): boolean {
+  return sources.length > 0 && sources.every((source) => source === 'calendar');
 }
 
 export interface PersonInfo {
@@ -264,6 +295,22 @@ export interface DocumentGrepFilters {
   tag?: string;
 }
 
+/**
+ * `calendar` and `drive` narrowing. A date-only `since`/`until` on calendar is
+ * compared with the event's own local date, so `until: 2026-10-02` includes
+ * that whole day wherever the event is.
+ */
+export interface GoogleSourceGrepFilters {
+  since?: Date;
+  until?: Date;
+  sinceDate?: string;
+  untilDate?: string;
+  /** Which source the printed `filters.path` belongs to. */
+  pathSource?: GoogleGrepSource;
+  /** Folder or record path below the source root, as grep printed it. */
+  pathPrefix?: string;
+}
+
 export interface MessageGrepFilters {
   person?: string;
   since?: Date;
@@ -301,6 +348,7 @@ export interface ValidatedGrepInput {
     agentTrajectories?: AgentTrajectoryGrepFilters;
     transactions?: TransactionGrepFilters;
     documents?: DocumentGrepFilters;
+    google?: GoogleSourceGrepFilters;
   };
 }
 
