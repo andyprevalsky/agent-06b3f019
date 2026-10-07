@@ -951,9 +951,12 @@ def build_verifier_context_messages(
 
     Multimodal: when a TOOL message carries `metadata.screenshot_b64`, the
     current text batch is flushed and a separate multimodal user message is
-    emitted containing a text description plus an Anthropic-shaped image
-    content block. Anthropic + OpenAI both accept content arrays mixed with
-    plain-string messages, so the rest of the conversation remains text-only.
+    emitted containing a text description plus an image content block in
+    Rose's canonical OpenAI ``image_url`` (data URI) shape. The Rose transform
+    layer converts it per transport (Anthropic ``image``/base64, Responses
+    ``input_image``, OpenRouter ``image_url``); an Anthropic-shaped block would
+    be silently dropped by the Responses path. The rest of the conversation
+    remains text-only.
     """
     context = _filter_superseded_browser_protocol_failures(context)
     sorted_context = sorted(
@@ -1099,12 +1102,8 @@ def build_verifier_context_messages(
                         "content": [
                             {"type": "text", "text": tool_text},
                             {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": screenshot_b64,
-                                },
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{media_type};base64,{screenshot_b64}"},
                             },
                         ],
                     }

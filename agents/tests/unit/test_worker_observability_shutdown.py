@@ -1,6 +1,8 @@
 """The real worker entry point must finish native RPCs before interpreter exit."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -15,9 +17,60 @@ import pytest
 
 
 AGENTS = Path(__file__).resolve().parents[2]
+NATIVE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
+_pthread = ctypes.CDLL(None)
+_pthread.pthread_create.argtypes = [ctypes.POINTER(ctypes.c_ulong), ctypes.c_void_p, NATIVE_CALLBACK, ctypes.c_void_p]
+_pthread.pthread_join.argtypes = [ctypes.c_ulong, ctypes.c_void_p]
 
 
-CHILD = r'''
+def _run_python_on_native_thread(seconds):
+    """Execute Python on a thread threading did not start, as an SDK Tokio thread does."""
+    entered, finished = threading.Event(), threading.Event()
+
+    def body(_argument):
+        # Logging from a native thread registers a _DummyThread like this.
+        threading.current_thread()
+        entered.set()
+        time.sleep(seconds)
+        finished.set()
+        return None
+
+    callback = NATIVE_CALLBACK(body)
+    thread = ctypes.c_ulong()
+    assert _pthread.pthread_create(ctypes.byref(thread), None, callback, None) == 0
+    assert entered.wait(5)
+    return thread, callback, finished
+
+
+def test_worker_exit_waits_for_native_thread_python_callback():
+    import worker
+
+    thread, callback, finished = _run_python_on_native_thread(0.3)
+    try:
+        assert worker._foreign_threads_running_python()
+        assert asyncio.run(worker._drain_native_python_callbacks(timeout=5)) is True
+        assert finished.is_set(), "entry point could return while a native callback was still in Python"
+        assert not worker._foreign_threads_running_python()
+    finally:
+        assert _pthread.pthread_join(thread, None) == 0
+        del callback
+
+
+def test_worker_exit_native_callback_wait_is_bounded():
+    import worker
+
+    thread, callback, finished = _run_python_on_native_thread(1.0)
+    try:
+        started = time.monotonic()
+        assert asyncio.run(worker._drain_native_python_callbacks(timeout=0.05)) is False
+        assert time.monotonic() - started < 0.5
+        assert not finished.is_set()
+    finally:
+        assert _pthread.pthread_join(thread, None) == 0
+        del callback
+
+
+CHILD = r"""
 import asyncio
 import os
 from pathlib import Path
@@ -67,7 +120,7 @@ with (
     asyncio.run(worker.main())
 (directory / "entrypoint-returned").touch()
 print("WORKER_ENTRYPOINT_RETURNED", flush=True)
-'''
+"""
 
 
 @pytest.mark.parametrize("phase", ["count", "describe"])
@@ -111,23 +164,34 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             server = grpc.server(executor)
-            server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-                "temporal.api.workflowservice.v1.WorkflowService", {
-                    "GetSystemInfo": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
-                    "CountWorkflowExecutions": grpc.unary_unary_rpc_method_handler(count),
-                    "DescribeTaskQueue": grpc.unary_unary_rpc_method_handler(describe),
-                },
-            ),))
+            server.add_generic_rpc_handlers(
+                (
+                    grpc.method_handlers_generic_handler(
+                        "temporal.api.workflowservice.v1.WorkflowService",
+                        {
+                            "GetSystemInfo": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+                            "CountWorkflowExecutions": grpc.unary_unary_rpc_method_handler(count),
+                            "DescribeTaskQueue": grpc.unary_unary_rpc_method_handler(describe),
+                        },
+                    ),
+                )
+            )
             port = server.add_insecure_port("127.0.0.1:0")
             server.start()
             environment = os.environ.copy()
             environment.update(
-                BACKEND_API_KEY="worker-exit-test", TEMPORAL_WORKER_REQUIRE_ACTIVATION="0",
-                AUTOSCALER_ACTUATE="false", WORKER_INDEX="0", PYTHONUNBUFFERED="1",
+                BACKEND_API_KEY="worker-exit-test",
+                TEMPORAL_WORKER_REQUIRE_ACTIVATION="0",
+                AUTOSCALER_ACTUATE="false",
+                WORKER_INDEX="0",
+                PYTHONUNBUFFERED="1",
             )
             process = subprocess.Popen(
                 [sys.executable, "-c", CHILD, f"127.0.0.1:{port}", directory],
-                cwd=AGENTS, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=AGENTS,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
             try:
@@ -137,21 +201,25 @@ def test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit(outcome, phase
                     process.kill()
                     output, _ = process.communicate()
                     # Only allowlisted lifecycle facts can enter failure output.
-                    pytest.fail(json.dumps({
-                        "process_hung": True,
-                        "worker_drained": (root / "worker-drained").exists(),
-                        "worker_stopped_logged": b"Worker stopped" in output,
-                        "entrypoint_returned": b"WORKER_ENTRYPOINT_RETURNED" in output,
-                        "rpc_finished": rpc_finished.is_set(),
-                    }))
+                    pytest.fail(
+                        json.dumps(
+                            {
+                                "process_hung": True,
+                                "worker_drained": (root / "worker-drained").exists(),
+                                "worker_stopped_logged": b"Worker stopped" in output,
+                                "entrypoint_returned": b"WORKER_ENTRYPOINT_RETURNED" in output,
+                                "rpc_finished": rpc_finished.is_set(),
+                            }
+                        )
+                    )
                 assert process.returncode == 0, "Worker startup/shutdown failed before process-exit assertion"
                 assert b"WORKER_ENTRYPOINT_RETURNED" in output
                 assert observations.get("worker_drained") is True
                 assert rpc_finished.wait(10)
                 if outcome != "deadline":
-                    assert observations["entrypoint_returned_before_first_response"] is False, (
-                        "Worker entry point returned while its native metrics RPC was unfinished"
-                    )
+                    assert (
+                        observations["entrypoint_returned_before_first_response"] is False
+                    ), "Worker entry point returned while its native metrics RPC was unfinished"
                 expected_calls = ["count"] if phase == "count" else ["count", "describe"]
                 assert calls == expected_calls, "Shutdown started another metrics RPC after worker drain"
                 assert 0 < observations["rpc_deadline_seconds"] <= 5.1

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -90,6 +91,7 @@ async def run_domain(
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         communicate_task = asyncio.create_task(process.communicate())
         timed_out = False
@@ -97,9 +99,20 @@ async def run_domain(
             output, _ = await asyncio.wait_for(asyncio.shield(communicate_task), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             timed_out = True
-            process.kill()
+            # This session belongs only to the domain, including its browsers.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             output, _ = await communicate_task
             output += (f"\nTIMEOUT: domain {domain!r} exceeded {timeout_seconds}s\n").encode()
+        except asyncio.CancelledError:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await communicate_task
+            raise
     log_path.write_bytes(output)
     elapsed = time.monotonic() - started
     return DomainResult(
@@ -134,14 +147,20 @@ async def async_main() -> int:
 
     semaphore = asyncio.Semaphore(concurrency)
     results: list[DomainResult] = []
-    tasks = [run_domain(domain, semaphore, coverage_bin, artifact_dir) for domain in domains]
-    for completed in asyncio.as_completed(tasks):
-        result = await completed
-        results.append(result)
-        status = "PASS" if result.passed else "FAIL"
-        print(f"  {status:<4} {result.domain:<30} {result.duration_seconds:>7.2f}s  {result.log}")
-        if not result.passed:
-            print((ROOT_DIR / result.log).read_text(errors="replace"))
+    tasks = [asyncio.create_task(run_domain(domain, semaphore, coverage_bin, artifact_dir)) for domain in domains]
+    try:
+        for completed in asyncio.as_completed(tasks):
+            result = await completed
+            results.append(result)
+            status = "PASS" if result.passed else "FAIL"
+            print(f"  {status:<4} {result.domain:<30} {result.duration_seconds:>7.2f}s  {result.log}")
+            if not result.passed:
+                print((ROOT_DIR / result.log).read_text(errors="replace"))
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     results.sort(key=lambda result: result.domain)
     failures = [result for result in results if not result.passed]
@@ -158,9 +177,33 @@ async def async_main() -> int:
     return 1 if failures else 0
 
 
+async def run_cli() -> int:
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.create_task(async_main())
+    received_signal = None
+
+    def stop(signum: int) -> None:
+        nonlocal received_signal
+        if received_signal is None:
+            received_signal = signum
+            main_task.cancel()
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(signum, stop, signum)
+    try:
+        return await main_task
+    except asyncio.CancelledError:
+        if received_signal is None:
+            raise
+        return 128 + received_signal
+    finally:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            loop.remove_signal_handler(signum)
+
+
 def main() -> None:
     try:
-        exit_code = asyncio.run(async_main())
+        exit_code = asyncio.run(run_cli())
     except ValueError as error:
         print(error, file=sys.stderr)
         exit_code = 2

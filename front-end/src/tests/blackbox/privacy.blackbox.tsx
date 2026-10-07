@@ -56,6 +56,13 @@ describe('Privacy page', () => {
       screen.getByText(/we remove the stored credential, request revocation of its oauth token/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/openai may retain content.*up to 30 days/i)).toBeInTheDocument();
+    // Calendar and Drive are synced into the searchable store, so the policy
+    // must say that copies are kept, not only that content is fetched on demand.
+    expect(
+      screen.getByText(
+        /copies of your synced email, your google calendar events, and your google drive file names and document text are stored/i,
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: /google api services user data policy/i }),
     ).toHaveAttribute('href', 'https://developers.google.com/terms/api-services-user-data-policy');

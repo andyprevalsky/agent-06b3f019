@@ -80,6 +80,8 @@ require_text "$RUN_SH" 'export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-e
 require_text "$RUN_SH" 'export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"' "semantic stack must retain frontend evidence"
 require_text "$RUN_SH" 'Building bundled frontend before starting runtime services' "bundled frontend must build before memory-heavy runtime services start"
 require_text "$RUN_SH" 'npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir' "each bundled frontend build must own its output directory"
+require_text "$RUN_SH" 'NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \' "bundled frontends must call the backend through the origin that served them"
+require_count "$RUN_SH" 'VITE_BACKEND_API_URL="$PUBLIC_BASE_URL"' "0" "bundled frontends must not bake the public tunnel in as their backend origin"
 require_text "$RUN_SH" 'npx vite preview --outDir "$FRONTEND_DIST_DIR" --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve its completed production build"
 require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
 require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
@@ -304,8 +306,10 @@ if printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq 'Cannot find module'; then
   fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
 fi
 printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
-  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || \
+  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || {
+  printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | tail -n 40 >&2
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
+}
 require_text "$DEPLOY_COMMAND" 'Do not start the Group 4 semantic/smoke' "/deploy must not oversubscribe Group 3 with Group 4 worker pools"
 for stage in backend frontend agents mac; do
   require_text "$DEPLOY_COMMAND" "run-deploy-stage ${stage}-coverage-blackbox" "/deploy must run ${stage} coverage and blackbox behavior once in a combined gate"

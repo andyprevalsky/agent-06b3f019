@@ -5014,6 +5014,139 @@
     "deploy_canary": true
   },
   {
+    "name": "google-calendar-day-recall",
+    "title": "Google Calendar Day Recall",
+    "description": "List one day's events from the user's synced Google Calendar using local data search.",
+    "prompt": "What's on my Google Calendar on Friday, March 12, 2027? List every event that day with its start and end time.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "calendar", "google"],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {"grep": 1},
+    "forbidden_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "message_person"],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["google_workspace_benchmark_v1"],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "live_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Frozen Google Calendar and Drive rows for the account rose.benchmark@example.com, written by back-end/scripts/google-workspace-benchmark-fixture.ts through the same mappers the live sync uses. The sync state is frozen as fresh, so no search calls Google. Reachable only through the calendar and drive grep sources; no browser, network, or live service is needed."
+    },
+    "evaluators": [
+      {
+        "id": "google-calendar-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "google-calendar-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own Google Calendar data (grep against the calendar source) rather than opening a browser or answering from assumption",
+          "The final answer lists 'Quarterly roadmap review' on March 12, 2027 from 9:30 AM to 10:15 AM",
+          "The final answer lists 'Lunch with Priya Raman' on March 12, 2027 from 12:00 PM to 1:00 PM",
+          "The final answer lists 'Dentist — Dr. Okafor' on March 12, 2027 from 3:30 PM to 4:00 PM",
+          "The final answer does not present events from other days as happening on March 12: neither 'Vendor demo: Lumen Analytics' (March 11) nor 'Offsite in Austin' (March 13-14)"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every fact the answer states must be grounded in actual grep output from the user's own Google Calendar data, not asserted and not read from a browser. Minor formatting differences are acceptable: times may be written in 12-hour or 24-hour form and dates in any clear form. Do not require details the user did not ask for. Score 1.0 only when every requested item is present and matches the expected value. Score 0.0 if any requested item is missing, wrong, contradicted by the transcript, or produced without searching the Google Calendar data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user:calendar-drive-read-2026-10-05", "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"],
+    "deploy_category": "grep"
+  },
+  {
+    "name": "google-drive-lease-recall",
+    "title": "Google Drive Lease Recall",
+    "description": "Read a lease stored in the user's synced Google Drive and report four terms from different sections of it.",
+    "prompt": "Find my current lease agreement in my Google Drive and tell me four things: the monthly rent, the date the lease ends, how many days' notice I have to give before moving out, and whether pets are allowed.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "drive", "google", "documents"],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {"grep": 1},
+    "forbidden_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "message_person"],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["google_workspace_benchmark_v1"],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "live_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Frozen Google Calendar and Drive rows for the account rose.benchmark@example.com, written by back-end/scripts/google-workspace-benchmark-fixture.ts through the same mappers the live sync uses. The sync state is frozen as fresh, so no search calls Google. Reachable only through the calendar and drive grep sources; no browser, network, or live service is needed."
+    },
+    "evaluators": [
+      {
+        "id": "google-drive-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "google-drive-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own Google Drive data (grep against the drive source) and read the lease text rather than opening a browser or answering from assumption",
+          "Monthly rent: the final answer reports $3,450 per month",
+          "Lease end: the final answer reports that the lease ends on August 31, 2027",
+          "Notice: the final answer reports 60 days' written notice before moving out",
+          "Pets: the final answer reports that one cat is permitted; the $500 refundable pet deposit and the ban on dogs are optional details",
+          "The answer is taken from the current lease for 412 Juniper Lane, not the expired 2024 lease whose rent was $2,900 with 30 days' notice and no pets"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every fact the answer states must be grounded in actual grep output from the user's own Google Drive data, not asserted and not read from a browser. Minor formatting differences are acceptable: times may be written in 12-hour or 24-hour form and dates in any clear form. Do not require details the user did not ask for. Score 1.0 only when every requested item is present and matches the expected value. Score 0.0 if any requested item is missing, wrong, contradicted by the transcript, or produced without searching the Google Drive data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user:calendar-drive-read-2026-10-05", "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"],
+    "deploy_category": "grep"
+  },
+  {
     "name": "agent-payment-production-purchase",
     "title": "Agent Payment Production Completed Purchase",
     "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",

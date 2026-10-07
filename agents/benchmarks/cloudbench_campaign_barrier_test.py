@@ -1,0 +1,260 @@
+"""Strict copies must rendezvous before the existing fleet data-plane release."""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    events = tmp_path / "events.jsonl"
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    start = source.index("release_start_barrier() {")
+    release = source[start : source.index("\n}\n", start) + 3]
+    (binary / "event").write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, time\n"
+        "value = {'event': sys.argv[1], 'job': os.environ['RUN_BENCH_CAMPAIGN_JOB_ID'], "
+        "'cohort': os.environ.get('RUN_BENCH_CAMPAIGN_COHORT'), 'at': time.monotonic_ns()}\n"
+        "fd = os.open(os.environ['FIXTURE_EVENTS'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
+        "os.write(fd, (json.dumps(value) + '\\n').encode()); os.close(fd)\n"
+    )
+    (binary / "curl").write_text(
+        f"#!{sys.executable}\n"
+        "import subprocess, sys\n"
+        "if 'POST' in sys.argv:\n"
+        " subprocess.run(['event', 'execute'], check=True); print('204')\n"
+    )
+    for path in binary.iterdir():
+        path.chmod(0o700)
+    cli = scripts / "run-bench"
+    cli.write_text(
+        "#!/usr/bin/env bash\nset -eu\n"
+        "trap 'event teardown' EXIT\n"
+        "trap 'event signalled; exit 143' TERM\n"
+        "index=${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}\nindex=$((10#$index))\n"
+        "if [ $((index % 2)) -eq 0 ]; then sleep 1; fi\n"
+        'if [ "$index" -eq "$FIXTURE_FAIL_JOB" ]; then sleep 1; exit 7; fi\n'
+        'out=$FIXTURE_ROOT/$RUN_BENCH_CAMPAIGN_JOB_ID\nmkdir -p "$out"\n'
+        "RUN_ID=$RUN_BENCH_CAMPAIGN_JOB_ID\n"
+        'printf \'synchronized start barrier ready: %s\\n\' "$RUN_ID" > "$out/fleet-child.log"\n'
+        "printf '12345\\n' > \"$out/status-proxy.port\"\n"
+        "SYNCHRONIZED_START=1\nSTART_BARRIER_WAIT_SECONDS=20\n"
+        "PER_BOX_BARRIER_WAIT_SECONDS=20\nSTRICT_BARRIER=1\n"
+        "CLOUDBENCH_BARRIER_TOKEN=fixture-only\nCLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=1\n"
+        'CHILD_PIDS=("$$")\nCHILD_OUT=("$out")\n'
+        "CHILD_BENCH=(fixture)\nCHILD_MACHINE=(fixture)\n"
+        "wait_for_mandatory_autoscaler_startup() { event ready; }\n"
+        f"CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}\n"
+        f"{release}\n"
+        "release_start_barrier\n"
+    )
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("RUN_BENCH_CAMPAIGN_") or key == "CLOUDBENCH_STRICT_BARRIER":
+            env.pop(key)
+    env.update(
+        PATH=str(binary) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
+        CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
+        FIXTURE_ROOT=str(tmp_path),
+        FIXTURE_EVENTS=str(events),
+        FIXTURE_FAIL_JOB=str(fail_job),
+    )
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/run-bench-campaign.py"),
+        "--root",
+        str(tmp_path),
+        "--runs",
+        str(runs),
+        "--concurrency",
+        str(concurrency),
+        "--task",
+        "unchanged-task",
+    ]
+    if strict:
+        command.append("--forward-arg=--strict-barrier")
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=40)
+    summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
+    records = [json.loads(line) for line in events.read_text().splitlines()]
+    return result, summary, records
+
+
+def test_campaign_start_barrier_waits_for_every_ready_copy(tmp_path):
+    result, summary, events = run_campaign(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    ready = [event["at"] for event in events if event["event"] == "ready"]
+    executed = [event["at"] for event in events if event["event"] == "execute"]
+    assert len(ready) == len(executed) == 3
+    assert min(executed) > max(ready)
+    assert summary["peak_concurrency"] == 3
+
+
+def test_campaign_start_barrier_child_failure_aborts_without_partial_release_or_signals(tmp_path):
+    result, summary, events = run_campaign(tmp_path, fail_job=3)
+    assert result.returncode != 0
+    assert not [event for event in events if event["event"] in {"execute", "signalled"}]
+    assert len([event for event in events if event["event"] == "teardown"]) == 3
+    assert summary["status"] == "failed"
+    assert all(job["finished_at"] for job in summary["jobs"])
+
+
+def test_campaign_start_barrier_preserves_non_strict_sliding_launch(tmp_path):
+    result, _, events = run_campaign(tmp_path, strict=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    ready = [event["at"] for event in events if event["event"] == "ready"]
+    executed = [event["at"] for event in events if event["event"] == "execute"]
+    assert min(executed) < max(ready)
+
+
+def test_campaign_start_barrier_bounds_and_releases_each_complete_cohort(tmp_path):
+    result, summary, events = run_campaign(tmp_path, runs=5, concurrency=2)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert summary["peak_concurrency"] == 2
+    assert len([event for event in events if event["event"] == "execute"]) == 5
+    for first in (1, 3, 5):
+        ids = {f"r{index:03d}-j{index:04d}" for index in range(first, min(first + 2, 6))}
+        ready = [event["at"] for event in events if event["job"] in ids and event["event"] == "ready"]
+        executed = [event["at"] for event in events if event["job"] in ids and event["event"] == "execute"]
+        assert min(executed) > max(ready)
+
+
+def test_campaign_start_barrier_failed_infra_canary_runs_once_per_cohort_and_next_cohort_can_retry(tmp_path):
+    canary = tmp_path / "canary.sh"
+    calls = tmp_path / "canary-calls"
+    canary.write_text('printf "called\\n" >> "$FIXTURE_CANARY_CALLS"\nexit 7\n')
+    stamp = tmp_path / "passed"
+    lock = tmp_path / "transaction.lock"
+    cohort = tmp_path / "cohort-one"
+    cohort.mkdir()
+    env = dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(cohort), FIXTURE_CANARY_CALLS=str(calls))
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+        "--stamp",
+        str(stamp),
+        "--lock",
+        str(lock),
+        "--ttl-seconds",
+        "300",
+        "--width",
+        "2",
+        "--canary",
+        str(canary),
+        "--nested-controller-lock",
+        "fixture-only",
+    ]
+    peers = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
+    try:
+        for peer in peers:
+            peer.communicate(timeout=30)
+        assert all(peer.returncode != 0 for peer in peers)
+        assert calls.read_text().splitlines() == ["called"]
+        assert not stamp.exists()
+
+        next_cohort = tmp_path / "cohort-two"
+        next_cohort.mkdir()
+        env["RUN_BENCH_CAMPAIGN_BARRIER_DIR"] = str(next_cohort)
+        retry = subprocess.run(command, env=env, capture_output=True, timeout=30)
+        assert retry.returncode == 7
+        assert calls.read_text().splitlines() == ["called", "called"]
+        assert not stamp.exists()
+    finally:
+        for peer in peers:
+            if peer.poll() is None:
+                peer.terminate()
+                try:
+                    peer.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    peer.kill()
+                    peer.wait(timeout=5)
+
+
+def test_campaign_start_barrier_aborted_cohort_does_not_reuse_a_successful_infra_canary(tmp_path):
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    (cohort / "abort.json").write_text('{"reason":"controller failed"}')
+    stamp = tmp_path / "passed"
+    stamp.write_text("actual previous canary success\n")
+    canary = tmp_path / "canary.sh"
+    canary.write_text("exit 0\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+            "--stamp",
+            str(stamp),
+            "--lock",
+            str(tmp_path / "transaction.lock"),
+            "--ttl-seconds",
+            "300",
+            "--width",
+            "2",
+            "--canary",
+            str(canary),
+            "--nested-controller-lock",
+            "fixture-only",
+        ],
+        env=dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(cohort)),
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+
+
+def test_campaign_start_barrier_infra_canary_caller_checks_aborted_cohort_before_fresh_cache(tmp_path):
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    start = source.index("fleet_infra_canary_preflight() {")
+    function = source[start : source.index("\n}\n", start) + 3]
+    stamp = tmp_path / "passed"
+    stamp.write_text("actual fixture canary success\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    calls = tmp_path / "canary-calls"
+    (scripts / "run-fleet-infra-canary").write_text('printf "called\\n" >> "$FIXTURE_CANARY_CALLS"\nexit 97\n')
+    runner = tmp_path / "caller.sh"
+    runner.write_text(
+        "set -eu\n"
+        # Supply GNU stat's file metadata on both supported host platforms.
+        "stat() {\n"
+        ' [ "$#" -eq 3 ] && [ "$1" = "-c" ] && [ "$2" = "%Y" ] || return 99\n'
+        f" {shlex.quote(sys.executable)} -c "
+        "'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' \"$3\"\n"
+        "}\n"
+        f"{function}\nfleet_infra_canary_preflight\n"
+    )
+    env = dict(os.environ)
+    env.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
+    env.update(
+        ROOT_DIR=str(tmp_path),
+        CLOUDBENCH_SCRIPT_SNAPSHOT=str(scripts),
+        INFRA_CANARY_PREFLIGHT_SCRIPT=str(ROOT / "scripts/cloudbench-infra-canary-preflight.py"),
+        FLEET_INFRA_CANARY_STAMP=str(stamp),
+        FLEET_INFRA_CANARY_TTL_SECONDS="300",
+        FIXTURE_CANARY_CALLS=str(calls),
+        INFRA_PROBE="0",
+        CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT="0",
+        CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE="0",
+        CLOUDBENCH_FAKE_DIR="",
+        RECOVER_STALE_ONLY="0",
+        PROVISION_POOL="",
+    )
+    standalone = subprocess.run(["bash", str(runner)], env=env, capture_output=True, timeout=30)
+    assert standalone.returncode == 0, standalone.stdout + standalone.stderr
+    assert not calls.exists()
+
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    (cohort / "abort.json").write_text('{"reason":"controller failed"}')
+    env["RUN_BENCH_CAMPAIGN_BARRIER_DIR"] = str(cohort)
+    aborted = subprocess.run(["bash", str(runner)], env=env, capture_output=True, timeout=30)
+    assert aborted.returncode != 0, aborted.stdout + aborted.stderr
+    assert not calls.exists()

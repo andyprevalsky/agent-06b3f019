@@ -27,7 +27,7 @@ import os
 import time
 import uuid
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
+from typing import Any, AsyncIterator, Dict, FrozenSet, List, Optional, Type, cast
 
 import structlog
 from pydantic import BaseModel
@@ -71,6 +71,7 @@ from providers.rose.schema import (
 )
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.truncation import model_key, recover_truncated
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -645,11 +646,16 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        probe_read_only = os.environ.get("BENCHMARK_DEMO_CACHE_READ_ONLY") == "1" and os.environ.get(
+            "BENCHMARK_ISOLATED_RUN", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         exclude_anthropic_family = anthropic_family_excluded(bool(kwargs.get("_exclude_anthropic_family", False)))
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -671,6 +677,8 @@ class RoseClient:
                 }
 
         if ctx is None or not ctx.active or messages is None:
+            if probe_read_only:
+                raise FastCacheLookupError("DEMO replay probe has no usable cache context; live fallback is disabled")
             async with aclosing(self._complete_impl(**kwargs)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
@@ -856,6 +864,8 @@ class RoseClient:
             # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+        if probe_read_only:
+            raise FastCacheLookupError("DEMO replay probe cache miss; live fallback is disabled")
         if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
             raise FastCacheLookupError(
                 f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
@@ -871,7 +881,22 @@ class RoseClient:
                     logger.info("llm.cache.stored", call_site=call_site, key=key)
                 yield chunk
 
-    async def _complete_impl(
+    async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+        """One completion under the shared cut-off policy (`providers/rose/truncation.py`).
+
+        `recover_truncation=True` is passed by consumers that handle `restart`
+        chunks; everyone else gets exactly one attempt, as before.
+        """
+        if not kwargs.pop("recover_truncation", False):
+            async with aclosing(self._complete_once(**kwargs)) as stream:
+                async for chunk in stream:
+                    yield chunk
+            return
+        async with aclosing(recover_truncated(self._complete_once, kwargs)) as stream:
+            async for chunk in stream:
+                yield chunk
+
+    async def _complete_once(
         self,
         *,
         pool: PoolName,
@@ -901,6 +926,7 @@ class RoseClient:
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
         _exclude_anthropic_family: bool = False,
+        _skip_models: FrozenSet[str] = frozenset(),
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -1632,7 +1658,11 @@ class RoseClient:
             # API keys either -- gating only the OAuth routes left this hole,
             # through which a pinned run could still be served by gpt_auth_model.
             openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
-            if openai_api_key and not await _gpt_api_key_on_cooldown():
+            if (
+                openai_api_key
+                and model_key(pool_spec.gpt_auth_model) not in _skip_models
+                and not await _gpt_api_key_on_cooldown()
+            ):
                 active_route = "openai_apikey"
                 openai_yielded_any = False
                 try:
@@ -1713,6 +1743,7 @@ class RoseClient:
                 pool_spec.direct_auth_enabled
                 and not _exclude_anthropic_family
                 and anthropic_api_key
+                and model_key(pool_spec.claude_auth_model) not in _skip_models
                 and not await _anthropic_api_key_on_cooldown()
             ):
                 active_route = "anthropic_apikey"
@@ -1786,7 +1817,9 @@ class RoseClient:
             # Funded Azure fallback for the same GPT model and Responses shape
             # as the compute-token route. A pre-content failure continues to
             # OpenRouter; an interrupted visible response remains an error.
-            if foundry_configured(pool_spec):
+            # A model that was cut off at its output limit is excluded from every
+            # route that serves it, funded ones included (see truncation.py).
+            if foundry_configured(pool_spec) and model_key(pool_spec.gpt_auth_model) not in _skip_models:
                 active_route = "foundry"
                 foundry_yielded_any = False
                 try:
@@ -1846,7 +1879,7 @@ class RoseClient:
                     )
 
             cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
-            if cerebras_key:
+            if cerebras_key and model_key(pool_spec.cerebras_model) not in _skip_models:
                 active_route = "cerebras"
                 cerebras_yielded_any = False
                 try:
@@ -1932,6 +1965,7 @@ class RoseClient:
                     exclude_anthropic_family=_exclude_anthropic_family,
                     cache_namespace=cache_namespace,
                     skip_cache_write=skip_cache_write,
+                    skip_models=_skip_models,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)
@@ -2184,8 +2218,12 @@ class RoseClient:
             dump_context=dump_context,
             dump_extra=dump_extra,
             cache_namespace=cache_namespace,
+            recover_truncation=True,
         ):
-            if chunk.kind == "content" and structured_output is not None:
+            if chunk.kind == "restart":
+                result = RoseResponse()
+                structured_output = StructuredOutputAccumulator() if response_model is not None else None
+            elif chunk.kind == "content" and structured_output is not None:
                 structured_output.add_chunk(chunk)
             else:
                 _fold(result, chunk)

@@ -46,7 +46,6 @@ import tempfile
 import time
 import unicodedata
 import uuid
-from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -318,6 +317,12 @@ PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-monthly-spend",
     "plaid-transactions-doordash-count",
     "plaid-transactions-dead-subscriptions",
+}
+# Tasks answered from the frozen Google Calendar and Drive rows of the
+# google_workspace_benchmark_v1 fixture.
+GOOGLE_WORKSPACE_BENCHMARK_TASK_NAMES = {
+    "google-calendar-day-recall",
+    "google-drive-lease-recall",
 }
 # Live X Hello World grades write-lock + post evidence against the synced CookieBundle.
 # Do not steer the agent into MintedAccount signup or phone-auth recovery.
@@ -2847,6 +2852,10 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
     wallet_funding = lifecycle.get("walletFunding")
     if isinstance(wallet_funding, dict):
         parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
+    agent_card = lifecycle.get("agentCard")
+    if isinstance(agent_card, dict):
+        fields = ("status", "balanceCents")
+        parts.append(f"agentCard={json.dumps({key: agent_card.get(key) for key in fields})}")
     org_transfer = lifecycle.get("orgTransfer")
     if isinstance(org_transfer, dict):
         fields = ("id", "cardId", "status", "transferredCents", "releasedCents")
@@ -6812,6 +6821,47 @@ def _run_user_data_fixture(action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
+_GOOGLE_WORKSPACE_FIXTURE_CACHE: dict[str, dict] = {}
+
+
+def _run_google_workspace_fixture(action: str) -> dict:
+    """Seed (or remove) the frozen Google Calendar and Drive benchmark rows.
+
+    Applied once per runner process: the tasks sharing this fixture run in
+    parallel, and a second apply would delete and rewrite the rows while the
+    first task's agent is already searching them.
+    """
+    if action == "apply" and action in _GOOGLE_WORKSPACE_FIXTURE_CACHE:
+        return dict(_GOOGLE_WORKSPACE_FIXTURE_CACHE[action])
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for Google Workspace benchmark fixture")
+    env = os.environ.copy()
+    # The script refuses any non-local database: it replaces a user's synced
+    # Calendar and Drive rows, which must never happen to production data.
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/google-workspace-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Google Workspace benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _GOOGLE_WORKSPACE_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _GOOGLE_WORKSPACE_FIXTURE_CACHE.clear()
+    return manifest
+
+
 def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -10486,6 +10536,9 @@ def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge.
 
+    Rows are whole whenever the bundle fits the single-turn budget; only a
+    bundle that does not fit has each row cut to ``SINGLE_TURN_TEXT_CAP``.
+
     Payment-approval metadata and root transcripts come from the tree-aware
     single-turn builder. ``benchmark_state`` is the compact T-row view so
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
@@ -10504,10 +10557,16 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     )
 
     compact_state = _compact_benchmark_state_for_judge(data)
-    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
-    evidence = _append_structured_output_evidence(evidence, data)
-    if not single_turn_evidence_exceeds_budget(evidence):
-        return evidence
+    # Whole rows first. The per-row cap exists only to fit the budget, and it
+    # cuts without a marker: a 17k grep result lost the one line its judge had
+    # to ground on (grep-agent-trajectories-code-tool-status).
+    for text_cap in (None, SINGLE_TURN_TEXT_CAP):
+        evidence = _apply_compact_benchmark_state(
+            build_single_turn_evidence(data, text_cap=text_cap), compact_state
+        )
+        evidence = _append_structured_output_evidence(evidence, data)
+        if not single_turn_evidence_exceeds_budget(evidence):
+            return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
@@ -13036,6 +13095,15 @@ async def _run_single_task_as_run_user(
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
         print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
+    if task.name in GOOGLE_WORKSPACE_BENCHMARK_TASK_NAMES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        google_workspace_manifest = _run_google_workspace_fixture("apply")
+        print(
+            "    📅 Seeded frozen Google Calendar and Drive fixture: "
+            f"{google_workspace_manifest.get('event_count', '?')} events, "
+            f"{google_workspace_manifest.get('file_count', '?')} files"
+        )
     if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
@@ -15143,8 +15211,12 @@ async def main_async(args):
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
-    # name -> FIFO of live agent ids so k-repeats of the same task name each keep
-    # their own deep link instead of overwriting one shared slot.
+    # Entry to _run_reported_task is after every admission guard. Pending
+    # futures can still be waiting for a semaphore or cross-process slot.
+    # Task ownership also isolates repeated names and child agent callbacks.
+    _admitted_tasks: dict[asyncio.Task, BenchmarkTask] = {}
+    _admitted_agent_ids: dict[asyncio.Task, str] = {}
+    # All created roots retain batch cleanup custody after their report row ends.
     _live_task_agent_ids: dict[str, list[str]] = {}
     _evaluated_task_results: dict[asyncio.Task, TaskResult] = {}
     _outcome_signatures: dict[str, str] = {}
@@ -15153,7 +15225,7 @@ async def main_async(args):
         if task_name and agent_id:
             _live_task_agent_ids.setdefault(task_name, []).append(agent_id)
 
-    def _report_snapshot(running_name_counts: dict[str, int]) -> RunState:
+    def _report_snapshot() -> RunState:
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -15161,12 +15233,9 @@ async def main_async(args):
             peak_fly_machines = None
         task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
-        finished_agent_ids: set[str] = set()
         evaluated_results = list(_evaluated_task_results.values())
         for r in [*run.task_results, *evaluated_results]:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
-            if r.agent_id:
-                finished_agent_ids.add(r.agent_id)
             per_task.append(
                 TaskCard(
                     name=r.name,
@@ -15184,24 +15253,20 @@ async def main_async(args):
                     infra_usd=_infra_usd_for_elapsed(r.duration_seconds) if r.duration_seconds is not None else None,
                 )
             )
-        # Emit one running card per still-pending occurrence (Counter), not one
-        # per distinct name — otherwise `bench A A A` with one finished looks
-        # like all three completed.
-        evaluated_counts = Counter(r.name for r in evaluated_results)
-        for name, running_count in running_name_counts.items():
-            live_ids = [
-                agent_id for agent_id in _live_task_agent_ids.get(name, []) if agent_id not in finished_agent_ids
-            ]
-            for index in range(max(0, running_count - evaluated_counts[name])):
-                live_agent_id = live_ids[index] if index < len(live_ids) else None
-                per_task.append(
-                    TaskCard(
-                        name=name,
-                        status="running",
-                        agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
-                        world_model_mode=task_world_model_modes.get(name),
-                    )
+        # Evaluated occurrences retain their verdict during teardown; only
+        # admitted, unevaluated executor occurrences are still running.
+        for token, task in _admitted_tasks.items():
+            if token in _evaluated_task_results:
+                continue
+            live_agent_id = _admitted_agent_ids.get(token)
+            per_task.append(
+                TaskCard(
+                    name=task.name,
+                    status="running",
+                    agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
+                    world_model_mode=task_world_model_modes.get(task.name),
                 )
+            )
         elapsed = time.monotonic() - _report_start
         wmh_usage = _fetch_wmh_usage()
         return RunState(
@@ -15226,10 +15291,10 @@ async def main_async(args):
             infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
         )
 
-    def _emit_report(running_name_counts: dict[str, int] | None = None, *, force: bool = False) -> None:
+    def _emit_report(*, force: bool = False) -> None:
         try:
             _report_emitter.maybe_emit(
-                _report_snapshot(dict(running_name_counts or {})),
+                _report_snapshot(),
                 force=force,
             )
         except Exception as exc:  # [REDACTED] must never fail the run
@@ -15238,15 +15303,22 @@ async def main_async(args):
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
     # blocking task (or any long task) would otherwise leave the report screen blank
-    # until the very end. `_report_running` is a Counter so k-repeats of the same
-    # task name each keep a distinct "running" slot.
-    _report_running: Counter[str] = Counter()
+    # until the very end. Admission state keeps repeated task occurrences
+    # distinct without treating pending scheduler waiters as active executors.
 
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
         # The owning task preserves repeated names and retains the evaluated
         # row until the coordinator replaces it with the final cleanup result.
         token = asyncio.current_task()
         assert token is not None
+        _admitted_tasks[token] = task
+
+        def remember_agent(task_name: str, agent_id: str) -> None:
+            # Creation can run in a child task; retain the admitted owner.
+            # Cleanup owns every root, including composite or interrupted runs.
+            _remember_live_agent(task_name, agent_id)
+            if agent_id:
+                _admitted_agent_ids.setdefault(token, agent_id)
 
         async def evaluated(result: TaskResult) -> None:
             from benchmarks.outcome_publication import prepare, wait_for_publication
@@ -15260,16 +15332,22 @@ async def main_async(args):
             if pending:
                 _outcome_signatures[result.agent_id] = pending[1]
             _evaluated_task_results[token] = result
-            _emit_report(dict(_report_running), force=True)
+            _emit_report(force=True)
             await wait_for_publication(pending)
 
-        return await run_single_task(base_url, task, on_task_evaluated=evaluated, **kwargs)
+        try:
+            return await run_single_task(
+                base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated, **kwargs
+            )
+        finally:
+            _admitted_tasks.pop(token, None)
+            _admitted_agent_ids.pop(token, None)
 
     async def _report_ticker() -> None:
         try:
             while True:
                 await asyncio.sleep(1)
-                _emit_report(dict(_report_running))
+                _emit_report()
         except asyncio.CancelledError:
             pass
 
@@ -15277,7 +15355,7 @@ async def main_async(args):
     if owned_batch_cleanup:
         _begin_interrupt_cleanup()
     _report_ticker_task = asyncio.create_task(_report_ticker())
-    _emit_report({}, force=True)
+    _emit_report(force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -15293,7 +15371,6 @@ async def main_async(args):
                     checkpoint_source_boundary=args.checkpoint_source_boundary,
                     checkpoint_source_out=Path(args.checkpoint_source_out),
                     checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
-                    on_agent_created=_remember_live_agent,
                 ),
             )
             run.task_results.append(result)
@@ -15327,7 +15404,6 @@ async def main_async(args):
                     lambda: _run_reported_task(
                         task,
                         keep_failed_agents=args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
                     ),
                 )
 
@@ -15336,22 +15412,16 @@ async def main_async(args):
             try:
                 for task in exclusive_db_tasks:
                     print(f"\n  Running destructive DB fixture task serially: {task.name}")
-                    _report_running.clear()
-                    _report_running[task.name] += 1
                     result = await _run_with_sandbox_payment_lock(
                         task,
                         lambda: _run_reported_task(
                             task,
                             keep_failed_agents=args.keep_failed_agents,
-                            on_agent_created=_remember_live_agent,
                         ),
                     )
                     run.task_results.append(result)
                     _evaluated_task_results.pop(asyncio.current_task(), None)
-                    _report_running[task.name] -= 1
-                    if _report_running[task.name] <= 0:
-                        del _report_running[task.name]
-                    _emit_report({})
+                    _emit_report()
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -15364,8 +15434,6 @@ async def main_async(args):
                 }
                 pending = set(pending_results)
                 while pending:
-                    _report_running.clear()
-                    _report_running.update(Counter(pending_results[future].name for future in pending))
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -15389,7 +15457,7 @@ async def main_async(args):
                         else:
                             run.task_results.append(result)
                         _evaluated_task_results.pop(task_future, None)
-                    _emit_report(Counter(pending_results[future].name for future in pending))
+                    _emit_report()
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -15416,26 +15484,20 @@ async def main_async(args):
                 raise
         else:
             for task in tasks:
-                _report_running.clear()
-                _report_running[task.name] += 1
                 result = await _run_with_sandbox_payment_lock(
                     task,
                     lambda: _run_reported_task(
                         task,
                         keep_failed_agents=args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
                     ),
                 )
                 run.task_results.append(result)
                 _evaluated_task_results.pop(asyncio.current_task(), None)
-                _report_running[task.name] -= 1
-                if _report_running[task.name] <= 0:
-                    del _report_running[task.name]
-                _emit_report({})
+                _emit_report()
     finally:
         _report_ticker_task.cancel()
         _evaluated_task_results.clear()
-        _emit_report({}, force=True)
+        _emit_report(force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:

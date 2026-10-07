@@ -89,6 +89,7 @@ import {
   OPENROUTER_API_URL,
 } from '../../providers/rose/transport';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
+import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -4284,12 +4285,14 @@ async function main(): Promise<void> {
 
   const results: TestResult[] = [];
   // Run sequentially — tests share process.env + global.fetch state.
-  for (const t of tests) {
-    const r = await runTest(t.name, t.fn);
-    results.push(r);
-    console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);
-    if (!r.passed) console.log(`    ${r.error}`);
-  }
+  await withIsolatedFundedKeyCooldowns(async () => {
+    for (const t of tests) {
+      const r = await runTest(t.name, t.fn);
+      results.push(r);
+      console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);
+      if (!r.passed) console.log(`    ${r.error}`);
+    }
+  });
 
   const passed = results.filter((r) => r.passed).length;
   const failed = results.length - passed;

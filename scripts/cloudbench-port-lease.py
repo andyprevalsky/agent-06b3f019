@@ -19,7 +19,7 @@ import tempfile
 import time
 
 
-def _process_start_identity(pid: int) -> str | None:
+def _legacy_lstart_identity(pid: int) -> str | None:
     result = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)],
         text=True,
@@ -28,6 +28,37 @@ def _process_start_identity(pid: int) -> str | None:
     )
     identity = " ".join(result.stdout.split())
     return identity or None
+
+
+def _process_start_identity(pid: int) -> str | None:
+    """Birth identity shared with cloudbench_pid_start_time in cloudbench-env.sh.
+
+    Linux ``ps -o lstart`` is re-derived from the current boot-time estimate and
+    shifts with wall-clock steps, so Linux uses the boot-relative /proc tick.
+    """
+    if not os.path.exists("/proc/self/stat"):
+        return _legacy_lstart_identity(pid)
+    try:
+        boot_id = (
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        )
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if not boot_id or len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return f"proc-start:{boot_id}:{fields[19]}"
+
+
+def _process_start_matches(pid: int, recorded_start: object) -> bool:
+    if not isinstance(recorded_start, str) or not recorded_start:
+        return False
+    if recorded_start.startswith("proc-start:"):
+        actual = _process_start_identity(pid)
+    else:
+        actual = _legacy_lstart_identity(pid)
+    return actual is not None and actual == recorded_start
 
 
 def _read_record(path: Path) -> dict[str, object] | None:
@@ -45,7 +76,7 @@ def _record_is_live(record: dict[str, object]) -> bool:
         token = str(record["token"])
     except (KeyError, TypeError, ValueError):
         return False
-    return bool(token) and _process_start_identity(pid) == recorded_start
+    return bool(token) and _process_start_matches(pid, recorded_start)
 
 
 def _port_is_bindable(port: int) -> bool:
@@ -190,11 +221,10 @@ class Registry:
     def release(self, *, port: int, owner_pid: int, token: str) -> None:
         lease = self.root / str(port)
         record = _read_record(lease)
-        current_start = _process_start_identity(owner_pid)
         if (
             record is not None
             and record.get("pid") == owner_pid
-            and record.get("process_start") == current_start
+            and _process_start_matches(owner_pid, record.get("process_start"))
             and record.get("token") == token
         ):
             try:
@@ -203,7 +233,6 @@ class Registry:
                 pass
 
     def release_owner(self, *, owner_pid: int, token: str) -> None:
-        current_start = _process_start_identity(owner_pid)
         for lease in self.root.iterdir():
             if not lease.name.isdigit() or not lease.is_file():
                 continue
@@ -211,7 +240,7 @@ class Registry:
             if (
                 record is not None
                 and record.get("pid") == owner_pid
-                and record.get("process_start") == current_start
+                and _process_start_matches(owner_pid, record.get("process_start"))
                 and record.get("token") == token
             ):
                 try:
@@ -220,7 +249,6 @@ class Registry:
                     pass
 
     def release_prefix(self, *, owner_pid: int, token_prefix: str) -> None:
-        current_start = _process_start_identity(owner_pid)
         for lease in self.root.iterdir():
             if not lease.name.isdigit() or not lease.is_file():
                 continue
@@ -228,7 +256,7 @@ class Registry:
             if (
                 record is not None
                 and record.get("pid") == owner_pid
-                and record.get("process_start") == current_start
+                and _process_start_matches(owner_pid, record.get("process_start"))
                 and str(record.get("token", "")).startswith(token_prefix)
             ):
                 try:
@@ -273,9 +301,7 @@ def main() -> int:
         elif args.action == "release":
             if args.port is None:
                 parser.error("release requires --port")
-            registry.release(
-                port=args.port, owner_pid=args.owner_pid, token=args.token
-            )
+            registry.release(port=args.port, owner_pid=args.owner_pid, token=args.token)
         elif args.action == "release-owner":
             registry.release_owner(owner_pid=args.owner_pid, token=args.token)
         else:

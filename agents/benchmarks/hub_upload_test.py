@@ -1,12 +1,15 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
 import gzip
+import io
 import json
 import socket
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
@@ -115,6 +118,51 @@ def test_upload_timeout_scales_with_payload_size():
     assert timeout >= 120.0
     assert timeout <= 300.0
     assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
+
+
+def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
+    """Both publication and visibility use the user's route outside loopback."""
+    from benchmarks.hub_upload import verify_run_visible
+
+    calls = []
+
+    class Response:
+        status = 201
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, *_args):
+            return b'{"run":{"run_id":"fixture-route"}}'
+
+    class Opener:
+        def open(self, request, **_kwargs):
+            calls[-1][1].append(request.get_method())
+            return Response()
+
+    def build_opener(*handlers):
+        calls.append((handlers, []))
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    for base in ("https://hub.example", "http://localhost.example", "http://127.0.0.1.example"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        assert calls[-2:] == [((), ["POST"]), ((), ["GET"])]
+    for base in ("http://localhost:8767", "http://127.0.0.1:8767", "http://[::1]:8767"):
+        monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", base)
+        assert upload_run_bundle({"run_id": "fixture-route"}, required=True)
+        verify_run_visible("fixture-route")
+        for handlers, methods in calls[-2:]:
+            assert len(handlers) == 1
+            assert isinstance(handlers[0], urllib.request.ProxyHandler)
+            assert handlers[0].proxies == {}
+            assert methods in (["POST"], ["GET"])
 
 
 def test_disabled_without_env(monkeypatch):
@@ -254,6 +302,28 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         assert len(attempts) == 2
     finally:
         server.shutdown()
+
+
+def test_hub_transport_starting_upload_cannot_reconcile_a_programming_error_as_success(monkeypatch):
+    from benchmarks import hub_upload
+
+    methods = []
+
+    class Opener:
+        def open(self, request, timeout):
+            methods.append(request.get_method())
+            if request.get_method() == "POST":
+                raise ValueError("controlled invalid transport invocation")
+            return io.BytesIO(b'{"run":{"run_id":"fixture-programming-error"}}')
+
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "https://fixture.invalid")
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setattr(hub_upload, "_hub_opener", lambda base: Opener())
+    monkeypatch.setattr(hub_upload.time, "sleep", lambda seconds: None)
+    with pytest.raises(HubVisibilityError) as failure:
+        hub_upload.register_starting_run({"run_id": "fixture-programming-error", "tasks": []})
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert methods == ["POST"], "programming errors must not be acknowledged by an unrelated visible row"
 
 
 def test_prepare_run_bundle_strips_tool_usage_tree_and_keeps_child_transcripts():
@@ -440,3 +510,125 @@ def test_live_response_preserves_phase_and_startup_label():
     assert live_response_matches(bundle, stored)
     for key in ("lifecycle_stage", "startup_label"):
         assert not live_response_matches(bundle, {**stored, "tasks": [{k: v for k, v in task.items() if k != key}]})
+
+@pytest.mark.parametrize("producer", ["startup", "aggregate", "terminal"])
+def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_timestamp(
+    tmp_path, monkeypatch, producer
+):
+    """One 50-task fleet retains its identity and original clock through release."""
+    import os
+    import subprocess
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from benchmarks.hub_upload import live_bundle_from_report_card
+
+    repo = (
+        Path(os.environ["CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST"])
+        if "CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST" in os.environ
+        else Path(__file__).resolve().parents[2]
+    )
+    fleet = Path(
+        os.environ.get(
+            "CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", repo / "scripts/run-bench-fleet"
+        )
+    ).read_text()
+    run_id = "fixture-timestamp"
+    directory = tmp_path / run_id
+    directory.mkdir()
+    names = [f"fixture-{index:03d}" for index in range(50)]
+    started = 1791331914
+    expected = datetime.fromtimestamp(started, timezone.utc).isoformat()
+    definitions = fleet[
+        fleet.index("write_startup_card() {") : fleet.index(
+            "start_central_hub() {", fleet.index("write_startup_card() {")
+        )
+    ]
+    setup = (
+        'FLEET_DIR="$1"\nROOT_DIR="$2"\nRUN_ID=fixture-timestamp\nFLEET_CONTROLLER_STARTED_EPOCH='
+        + str(started)
+        + "\nBENCHES=(" + " ".join(names) + ")\nCATALOG_MODES=("
+        + " ".join(["real"] * len(names)) + ")\nSIM_ON_CSV=\n"
+    )
+    startup = definitions + "\n" + setup + 'write_startup_card "verifying environment"\n'
+
+    def execute(command):
+        subprocess.run(
+            ["bash", "-c", command, "timestamp-control", str(directory), str(repo)],
+            check=True, capture_output=True,
+        )
+
+    execute(startup)
+    if producer == "aggregate":
+        marker = 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"'
+        start = fleet.index(marker)
+        end = fleet.index("\nPY\n", start) + len("\nPY\n")
+        command = (
+            setup
+            + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n'
+            + fleet[start:end]
+        )
+        phases = ("queued", "running", "evaluated", "teardown", "released")
+    elif producer == "terminal":
+        start = fleet.index("finalize_terminal_projection() {")
+        end = fleet.index("\ncleanup() {", start)
+        command = (
+            fleet[start:end] + "\n" + setup + 'PROVISION_POOL=\n'
+            + 'AGGREGATE_RUNS_SCRIPT="$ROOT_DIR/scripts/cloudbench-aggregate-runs.py"\n'
+            + "finalize_terminal_projection 0\n"
+        )
+        phases = ("teardown", "released", "released")
+    else:
+        command = definitions + "\n" + setup + 'write_startup_card "provisioning"\n'
+        phases = ("starting", "starting")
+    record = []
+    server, url = _serve(record)
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.delenv("BENCHMARK_HUB_GROUP_RUN_ID", raising=False)
+    try:
+        for phase in phases:
+            for index, name in enumerate(names):
+                child = directory / name
+                child.mkdir(exist_ok=True)
+                if phase == "starting" or phase == "queued":
+                    continue
+                terminal = producer == "terminal" or (phase != "running" and index < 2)
+                status = ("passed" if index % 2 == 0 else "failed") if terminal else "running"
+                row = {"name": name, "status": status,
+                       "agent_url": f"https://www.roselabs.ai/?agent-id=root-{index}"}
+                live = child / "cloudbench-live"
+                live.mkdir(exist_ok=True)
+                (live / "report-card.json").write_text(json.dumps({"per_task": [row]}))
+                task = {"name": name, "status": status.upper(), "passed": status == "passed",
+                        "agent_id": f"root-{index}", "agent_url": row["agent_url"]}
+                (child / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
+                if phase == "teardown":
+                    (child / "benchmark-child.finished").touch()
+                elif phase == "released":
+                    (child / "bench-e2e.finished-epoch").write_text(str(started + 60))
+            execute(command)
+            card = json.loads((directory / "_batch/report-card.json").read_text())
+            bundle = (
+                json.loads((directory / "_batch/run.json").read_text())
+                if producer == "terminal"
+                else live_bundle_from_report_card(card, run_id=run_id, source="direct-cloud-fleet")
+            )
+            assert bundle["timestamp"] == expected, (
+                "live fleet publication lost its stable controller-start timestamp"
+            )
+            assert bundle["run_id"] == run_id
+            assert [task["name"] for task in bundle["tasks"]] == names
+            if phase in ("starting", "queued", "running"):
+                assert all(task["passed"] is None for task in bundle["tasks"])
+            else:
+                assert [task["passed"] for task in bundle["tasks"][:2]] == [True, False]
+                expected_stage = "evaluated" if phase == "evaluated" else phase
+                assert all(task["lifecycle_stage"] == expected_stage for task in bundle["tasks"][:2])
+            assert upload_run_bundle(bundle, live=producer != "terminal", required=True)
+        assert {item["body"]["run_id"] for item in record} == {run_id}
+        assert {item["body"]["timestamp"] for item in record} == {expected}
+        assert all([task["name"] for task in item["body"]["tasks"]] == names for item in record)
+    finally:
+        server.shutdown()
+        server.server_close()

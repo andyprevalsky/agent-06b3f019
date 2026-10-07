@@ -100,6 +100,11 @@ export const KNOWN_TAGS = [
   // WhatsApp recall slice — tasks that read the frozen WhatsApp history baked
   // into the canonical base fixture (see whatsapp-history-recall in tasks.json).
   'whatsapp',
+  // Google Calendar and Drive searched through the calendar/drive grep sources
+  // (google-calendar-day-recall, google-drive-lease-recall in tasks.json).
+  'google',
+  'calendar',
+  'drive',
   'messages',
   // Polar-bench (Odysseys + BU Bench V1) — opt-in suite; tags mirror upstream
   // sources in agents/benchmarks/polar/*.json via polar_catalog.py.

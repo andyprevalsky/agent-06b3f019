@@ -441,7 +441,8 @@ async def build_browser_verifier_context(
     # DOMService and is the only safe substrate for verifying a
     # claimed answer.
     dom_tree = browser_state.get("dom_tree", "") or ""
-    final_screenshot_b64 = browser_state.get("screenshot")
+    # A blank placeholder frame (capture failed) is not rendered-page evidence.
+    final_screenshot_b64 = None if browser_state.get("screenshot_placeholder") else browser_state.get("screenshot")
     session_files = await list_session_files(config, session_id)
     files_text = "Downloaded Files in Session:\n"
     if session_files:
@@ -554,7 +555,7 @@ async def build_browser_verifier_context(
             "role": "TOOL",
             "text": (
                 "Final-state screenshot attached (b64-encoded PNG of "
-                "the entire scrollable page). Treat the DOM tree above as "
+                "the visible viewport). Treat the DOM tree above as "
                 "ground truth; the screenshot is supplementary."
                 if final_screenshot_b64
                 else "No final-state screenshot included; DOM tree is the verifier ground truth."

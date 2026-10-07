@@ -35,6 +35,17 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$label"
 }
 
+# Minimal venv fixture: an interpreter stub plus an activate script that roots
+# the environment at $2 (the venv itself unless a test simulates a copy).
+write_fake_venv() {
+  local venv="$1"
+  local activates_to="${2:-$1}"
+  mkdir -p "$venv/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$venv/bin/python"
+  chmod +x "$venv/bin/python"
+  printf 'VIRTUAL_ENV="%s"\nexport VIRTUAL_ENV\n' "$activates_to" >"$venv/bin/activate"
+}
+
 [ -x "$PREFLIGHT" ] || fail "deploy-worktree preflight must be executable"
 
 controller="$TMP_ROOT/controller"
@@ -178,9 +189,8 @@ deploy_two_name="$(
 [ "$deploy_two_name" != "$deploy_one_name" ] || fail "same-basename deploy worktrees must receive path-unique resource identities"
 echo "PASS: same-basename deploy worktrees receive path-unique resource identities"
 
-mkdir -p "$deploy_one/node_modules" "$deploy_one/agents/venv/bin"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_one/agents/venv/bin/python"
-chmod +x "$deploy_one/agents/venv/bin/python"
+mkdir -p "$deploy_one/node_modules"
+write_fake_venv "$deploy_one/agents/venv"
 PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
   bash "$PREFLIGHT" \
     --worktree "$deploy_one" \
@@ -194,6 +204,29 @@ PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
     bash "$PREFLIGHT" --check
 )
 expect_eq "$(sed -n '3p' "$fake_docker_state/container")" "$deploy_one" "owned database carries the canonical worktree label"
+
+# A venv copied from the controller still activates the controller's path.
+write_fake_venv "$controller/agents/venv"
+write_fake_venv "$deploy_one/agents/venv" "$controller/agents/venv"
+set +e
+copied_venv_output="$(
+  cd "$deploy_one"
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
+    bash "$PREFLIGHT" --check 2>&1
+)"
+copied_venv_status=$?
+set -e
+[ "$copied_venv_status" -ne 0 ] || fail "preflight check must reject a venv that activates another checkout"
+[[ "$copied_venv_output" == *"activates another checkout's environment"* ]] || fail "copied venv failure must name the foreign activation"
+write_fake_venv "$deploy_one/agents/venv"
+(
+  cd "$deploy_one"
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
+    bash "$PREFLIGHT" --check
+) >/dev/null
+echo "PASS: a venv copied from another checkout fails the deploy preflight"
 
 foreign_state="$TMP_ROOT/foreign-container"
 cp "$fake_docker_state/container" "$foreign_state"
@@ -317,9 +350,8 @@ require_text "$PREFLIGHT" 'persist_system_pg_mode' "system Postgres mode must pe
 require_text "$PREFLIGHT" 'hydrate_seed_cache' "deploy-worktree prep must hydrate seed-cache for the seed-memory ratchet"
 
 # System Postgres path: durable marker + env so --check works without ambient flag.
-mkdir -p "$deploy_system/node_modules" "$deploy_system/agents/venv/bin"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_system/agents/venv/bin/python"
-chmod +x "$deploy_system/agents/venv/bin/python"
+mkdir -p "$deploy_system/node_modules"
+write_fake_venv "$deploy_system/agents/venv"
 cat >"$fake_bin/pg_isready" <<'PG_ISREADY'
 #!/usr/bin/env bash
 exit 0

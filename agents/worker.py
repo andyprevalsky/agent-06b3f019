@@ -217,6 +217,7 @@ logger = structlog.get_logger()
 
 import math
 import socket
+import threading
 import time
 
 import httpx
@@ -1056,6 +1057,33 @@ def _start_sdk_runtime(port: int) -> tuple[Runtime, int]:
     raise AssertionError("runtime port allocation exhausted without a result")
 
 
+NATIVE_CALLBACK_DRAIN_SECONDS = 2.0
+
+
+def _foreign_threads_running_python() -> bool:
+    python_started = {
+        thread.ident for thread in threading.enumerate() if not isinstance(thread, threading._DummyThread)
+    }
+    return any(ident not in python_started for ident in sys._current_frames())
+
+
+async def _drain_native_python_callbacks(timeout: float = NATIVE_CALLBACK_DRAIN_SECONDS) -> bool:
+    """Wait until no SDK-owned native thread is executing Python code.
+
+    An SDK RPC completion resolves its asyncio future from a Tokio thread via
+    call_soon_threadsafe, whose self-pipe write releases the GIL before the
+    callback returns. If the entry point returns first, that thread re-takes
+    the GIL during interpreter finalization and the process aborts (SIGABRT
+    "PyGILState_Release ... finalizing" or SIGSEGV) after a clean shutdown.
+    """
+    deadline = time.monotonic() + timeout
+    while _foreign_threads_running_python():
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.005)
+    return True
+
+
 async def main():
     """Main worker entry point."""
     global SDK_METRICS_PORT, HEALTH_CHECK_PORT
@@ -1492,6 +1520,8 @@ async def main():
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
             _profiler.dump_stats(out)
             logger.warning("cProfile stats dumped", path=out)
+        if not await _drain_native_python_callbacks():
+            logger.warning("Native SDK callback still executing Python at worker exit")
         logger.info("Worker stopped")
         if metrics_error is not None and primary_error is None:
             raise metrics_error

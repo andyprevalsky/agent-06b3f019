@@ -139,6 +139,27 @@ def test_build_planner_system_prompt_is_static_across_calls():
     )
 
 
+def test_planner_is_told_explore_can_search_calendar_and_drive():
+    """The planner only sends work to explore for data it knows explore can search.
+
+    Without calendar and Drive named here, a real run planned authenticated
+    browser sessions on calendar.google.com and drive.google.com for a question
+    the synced sources answer directly.
+    """
+    from utils.prompts import MAIN_SYSTEM_PROMPT, build_planner_system_prompt
+
+    for name, prompt in (
+        ("main", MAIN_SYSTEM_PROMPT),
+        ("planner", build_planner_system_prompt("tool descriptions here")),
+    ):
+        sentence = next(
+            (line for line in prompt.splitlines() if 'spawn_agent(type="explore")' in line and "grep" in line),
+            "",
+        )
+        for source in ("email", "Google Calendar", "Google Drive"):
+            assert source in sentence, f"{name} prompt does not say explore can search {source}"
+
+
 def test_explore_agent_system_prompt_template_is_constant():
     """EXPLORE_AGENT_SYSTEM_PROMPT must be a constant string with NO placeholders.
 
@@ -1178,7 +1199,7 @@ def _iter_prompt_string_literals(text: str):
         def __init__(self):
             self.skip_depth = 0
 
-        def visit(self, node: ast.AST) -> None:  # type: ignore[override]
+        def visit(self, node: ast.AST) -> None:
             push = False
             if isinstance(node, ast.Call) and _is_non_prompt_call(node):
                 push = True
@@ -1933,6 +1954,10 @@ async def run_all_tests():
     r.record(
         "build_planner_system_prompt_static_across_calls",
         test_build_planner_system_prompt_is_static_across_calls,
+    )
+    r.record(
+        "planner_is_told_explore_can_search_calendar_and_drive",
+        test_planner_is_told_explore_can_search_calendar_and_drive,
     )
     r.record(
         "explore_agent_system_prompt_template_constant",

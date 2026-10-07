@@ -92,6 +92,10 @@ BENCH_MAX_CONCURRENCY="${BENCH_MAX_CONCURRENCY:-5}"
 BENCH_SIMULATE="${BENCH_SIMULATE:-1}"
 BENCH_DASHPORT="${BENCH_DASHPORT:-8009}"
 BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-}"
+if [ "${CLOUDBENCH_FAST_CACHE_READ_ONLY:-}" = 1 ]; then
+    export FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1
+    export BENCHMARK_DEMO_CACHE_READ_ONLY=1
+fi
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
 case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
     ''|*[!0-9]*|0) echo "FATAL: BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
@@ -591,6 +595,13 @@ if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
+if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] && [ ! -d "$REPO_DIR/.git" ]; then
+    [ "$BENCH_SIMULATE" = 0 ] && [ -n "$REF" ] || { log "FATAL: fresh checkout requires an exact REAL task ref"; finish 1; }
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not bootstrap requested ref on fresh storage"
+        finish 1
+    fi
+fi
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: $REPO_DIR is not a git checkout (expected a pre-authed volume checkout)"
     finish 1
@@ -768,11 +779,11 @@ fi
 # Prisma's generated client is compiled from schema.prisma, not just the npm
 # manifests. A warm dependency tree can therefore be package-current but
 # schema-stale when a benchmark checks out another ref or applies a local patch.
+chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
     log "FATAL: Prisma client synchronization failed"
     finish 1
 fi
-chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 
 # The warm image omits local Chromium because ordinary simulated benches use
 # remote/browser-model boundaries. Hosted Stripe Checkout in this daily task
@@ -964,6 +975,12 @@ STACK_ENV=(
 )
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
+fi
+if [ -n "${FAST_MODE_CACHE_DISABLE_WRITE_THROUGH:-}" ]; then
+    STACK_ENV+=("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=$FAST_MODE_CACHE_DISABLE_WRITE_THROUGH")
+fi
+if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+    STACK_ENV+=("BENCHMARK_DEMO_CACHE_READ_ONLY=1")
 fi
 if [ -n "$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY" ]; then
     STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")
@@ -1315,6 +1332,18 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     BENCH_ARGS+=(--simulate --world-model-url "http://localhost:$WMH_PORT" --world-model-name "$WMH_MODEL_NAME")
 fi
 
+BENCH_HARNESS_ENV=()
+if [ "${BENCHMARK_DEMO_CACHE_READ_ONLY:-}" = 1 ]; then
+    # The temporary replay guard belongs to task agents in STACK_ENV and the
+    # worker wrappers. Leave the harness's declared judges on their ordinary
+    # evaluation path, including real provider calls when its cache misses.
+    BENCH_HARNESS_ENV+=(
+        -u FAST_MODE_CACHE_DISABLE_WRITE_THROUGH
+        -u BENCHMARK_DEMO_CACHE_READ_ONLY
+        -u CLOUDBENCH_FAST_CACHE_READ_ONLY
+    )
+fi
+
 log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[*]}"
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
@@ -1324,7 +1353,7 @@ set +e
 # Pass workspace identity as environment arguments so shell metacharacters in
 # the name cannot break the inner command. The inner shell forwards these values
 # to run_benchmark.py and logs them below.
-run_with_heartbeat "benchmark" gosu "$APP_USER" env \
+run_with_heartbeat "benchmark" gosu "$APP_USER" env "${BENCH_HARNESS_ENV[@]}" \
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME" \
     "BENCHMARK_RUN_ID=$WORKSPACE_NAME" \
     "TEMPORAL_TASK_QUEUE=navi-agent-tasks-$WORKSPACE_NAME" bash -c "

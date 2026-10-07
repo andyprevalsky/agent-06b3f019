@@ -55,11 +55,30 @@ def _format_source(source: str) -> str:
     return source.replace("_", " ") if source else "messages"
 
 
+# Sources whose pattern-less search lists messages; any other source lists its own records.
+_MESSAGE_TITLE_SOURCES = {"", "messages", "email", "gmail", "imessage", "whatsapp"}
+
+
+# Sources a printed path selects by itself when the caller names none.
+_PATH_NAMED_SOURCES = {"calendar", "drive"}
+
+
+def _title_source(tool_call: Dict[str, Any]) -> str:
+    """Source label for the tool card: the legacy single source, else the requested list."""
+    single = tool_call.get("source")
+    if single:
+        return str(single)
+    return ", ".join(_extract_sources(tool_call))
+
+
 def _format_grep_title(prefix: str, pattern: str, source: str) -> str:
     display_pattern = _truncate_pattern(pattern)
     source_label = _format_source(source) if source else "all local data"
-    query = f'"{display_pattern}"' if display_pattern else "all messages"
-    return f"{prefix} {source_label} for {query}"
+    if display_pattern:
+        return f'{prefix} {source_label} for "{display_pattern}"'
+    if source.lower() in _MESSAGE_TITLE_SOURCES:
+        return f"{prefix} {source_label} for all messages"
+    return f"{prefix} {source_label}"
 
 
 def _public_grep_params(tool_call: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,7 +136,17 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     if isinstance(raw, list) and raw:
         return [str(s) for s in raw if s]
     single = tool_call.get("source")
-    return [str(single)] if single else []
+    if single:
+        return [str(single)]
+    # A printed calendar or drive path names its own source (the backend
+    # resolves it the same way), so the connection check must cover it too.
+    filters = tool_call.get("filters")
+    path = filters.get("path") if isinstance(filters, dict) else None
+    if isinstance(path, str):
+        root = path.split("/", 1)[0]
+        if root in _PATH_NAMED_SOURCES:
+            return [root]
+    return []
 
 
 def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
@@ -168,7 +197,7 @@ async def execute_grep(
 ) -> Dict[str, Any]:
     """Execute grep search and post events via handle_tool_event."""
     pattern = tool_call.get("pattern") or ""
-    source = tool_call.get("source", "")
+    source = _title_source(tool_call)
 
     progress_title = _format_grep_title("Searching", pattern, source)
     completed_title = _format_grep_title("Searched", pattern, source)

@@ -667,6 +667,92 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
 
 
+def test_browser_verifier_captures_rendered_screenshot():
+    """Both browser verifier passes must capture the rendered page.
+
+    browser-smoke ec464455: the attempt_completion verifier read
+    get_browser_state(include_screenshot=False), so the judge got "No
+    final-state screenshot included". A goal grounded in what is visible
+    (here: the page's colors) was unverifiable from DOM text, every
+    completion scored 0.5, and the agent looped until the benchmark timed out.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    for capture in (
+        "verifier_browser_state = await asyncio.wait_for(",
+        "final_browser_state = await asyncio.wait_for(",
+    ):
+        assert src.count(capture) == 1, capture
+        call = src[src.index(capture) :]
+        call = call[: call.index(")") + 1]
+        assert "dom_service.get_browser_state(include_screenshot=True)" in call, call
+
+
+async def test_browser_verifier_context_uses_real_capture_not_blank_placeholder():
+    """A real capture reaches the verifier; the blank fallback frame does not."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+
+    class _History:
+        def get_entries(self):
+            return [{"step": 1, "action": "goto", "result": {"success": True}}]
+
+    async def browser_state(capture):
+        dom = DOMService.__new__(DOMService)
+        dom._selector_map = {}
+        dom._session = SimpleNamespace(
+            get_browser_state_summary=AsyncMock(
+                return_value=SimpleNamespace(url="https://www.roselabs.ai/", title="Rose", dom_state=None)
+            )
+        )
+        geometry = {
+            "viewport_width": 1280,
+            "viewport_height": 713,
+            "scroll_x": 0,
+            "scroll_y": 0,
+            "pages_above": 0,
+            "pages_below": 0,
+            "total_pages": 1,
+        }
+        with (
+            patch.object(dom, "_page_geometry", return_value=geometry),
+            patch.object(dom, "_extract_page_statistics", return_value={"interactive": 1}),
+            patch.object(dom, "_serialized_dom_tree", return_value="<main>What is your first goal?</main>"),
+            patch.object(dom, "_summarized_tabs", return_value=[]),
+            patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value=capture)),
+            patch.object(dom, "_analyze_screenshot"),
+        ):
+            return await dom.get_browser_state(include_screenshot=True)
+
+    async def verifier_screenshot(state):
+        with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+            ctx = await bsvc.build_browser_verifier_context(
+                goal="Name three colors visible on the page",
+                current_url=state["url"],
+                browser_state=state,
+                action_history=_History(),
+                config=SimpleNamespace(),
+                session_id="sess-1",
+            )
+        return next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
+
+    real_state = await browser_state("cmVhbC1wbmc=")
+    assert "screenshot_placeholder" not in real_state
+    real = await verifier_screenshot(real_state)
+    assert real["metadata"]["screenshot_b64"] == "cmVhbC1wbmc="
+    assert real["text"].startswith("Final-state screenshot attached")
+
+    blank_state = await browser_state(None)
+    assert blank_state["screenshot_placeholder"] is True
+    assert blank_state["screenshot"]  # the browser-use step still receives a frame
+    blank = await verifier_screenshot(blank_state)
+    assert blank["metadata"]["screenshot_b64"] == ""
+    assert blank["text"].startswith("No final-state screenshot included")
+
+
 def test_evaluate_does_not_snapshot_dom_behind_the_model():
     """The browser LLM owns its context: evaluate returns only its JS result."""
     import inspect
@@ -9451,9 +9537,6 @@ async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_presen
     secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
 
     with patch(
-        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-        AsyncMock(return_value="Place order $1.00"),
-    ), patch(
         "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
         return_value="Place order $1.00",
     ):
@@ -15262,10 +15345,6 @@ async def test_click_write_lock_result_skips_plain_email_input():
         get_all_children_text=lambda: "Buy Now",
     )
     with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="buynow-email-si\nBuy Now"),
-        ),
         patch("browser_tools.write_lock.is_purchase_button", return_value=True),
         patch("browser_tools.write_lock.is_email_send_button", return_value=True),
     ):
@@ -15294,15 +15373,9 @@ async def test_click_write_lock_result_still_locks_submit_input():
         parent_node=None,
         get_all_children_text=lambda: "Place Order",
     )
-    with (
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
-            AsyncMock(return_value="Place Order"),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
-            return_value="Place Order",
-        ),
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place Order",
     ):
         out = await _click_write_lock_result(
             session=MagicMock(),
@@ -15396,9 +15469,13 @@ def test_write_lock_email_send_excludes_resend_controls():
     assert is_email_send_button("Send hotpot photos")
     assert is_email_send_button("Send adoption papers")
 
-    # The resend exemption stays positional: retry wording welded into another
-    # token is not a resend action.
-    assert is_email_send_button("alt-action-resend")
+    # The resend exemption stays positional: a label that sends and only later
+    # mentions resending is still a send. An id like ``alt-action-resend`` has
+    # no send word at all (agent f1ef359f: Target ``showResendMessageLink``),
+    # so it is not a send; an id with its own send word still is.
+    assert is_email_send_button("Send reply or resend later")
+    assert not is_email_send_button("alt-action-resend")
+    assert is_email_send_button("alt-action-send")
     assert is_email_send_button("Send invoice to billing@corp.com")
 
     # Each newline-delimited signal is judged on its own, so a resend label can
@@ -23835,6 +23912,11 @@ async def run_all_tests():
     )
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    r.record("browser_verifier_captures_rendered_screenshot", test_browser_verifier_captures_rendered_screenshot)
+    await r.record_async(
+        "browser_verifier_uses_real_capture_not_blank_placeholder",
+        test_browser_verifier_context_uses_real_capture_not_blank_placeholder,
     )
     r.record("evaluate_does_not_snapshot_dom", test_evaluate_does_not_snapshot_dom_behind_the_model)
     r.record("verifier_checkpoints_stay_bounded", test_verifier_checkpoints_stay_bounded)

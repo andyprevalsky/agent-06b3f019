@@ -13,6 +13,7 @@ import {
 } from './types';
 import { createLogger } from '../../providers/logger';
 import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrations/gmailParser';
+import { startGoogleWorkspaceSync } from '../../services/integrations/googleWorkspaceSync';
 import { EMAIL_PROVIDER_CONFIG } from './config';
 import { storedOAuthGrant } from './googleOAuthCredential';
 import * as repo from './repo';
@@ -92,6 +93,15 @@ function maybeSyncGmailAfterOAuth(params: {
   });
 }
 
+/**
+ * Google granted every requested scope: release any agent waiting on the
+ * connection and start the first Calendar and Drive sync in the background.
+ */
+async function onCompleteGrant(userId: string, providerKey: EmailProviderSlug): Promise<void> {
+  await resolveSourceConnectGate(userId, providerKey);
+  if (providerKey === 'gmail') startGoogleWorkspaceSync(userId);
+}
+
 /** Handle an already-connected email — refresh tokens and return. */
 async function handleExistingEmail(
   userId: string,
@@ -138,7 +148,7 @@ async function handleExistingEmail(
     returnUrl,
     errorUrl,
   });
-  if (grant.complete) await resolveSourceConnectGate(userId, providerKey);
+  if (grant.complete) await onCompleteGrant(userId, providerKey);
 }
 
 /** Finalize a new credential: save tokens, update integration, and start email sync. */
@@ -207,7 +217,7 @@ async function finalizeNewCredential(
     returnUrl,
     errorUrl,
   });
-  if (grant.complete) await resolveSourceConnectGate(credential.userId, providerKey);
+  if (grant.complete) await onCompleteGrant(credential.userId, providerKey);
 
   if (grant.complete) {
     maybeSyncGmailAfterOAuth({
