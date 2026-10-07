@@ -44,7 +44,11 @@ def read_runtime_metadata(path: Path, maximum: int) -> bytes:
 
 def runtime_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
     """Enumerate the complete stopped stack, never a capped agent-filtered view."""
-    context = root / "repo/.context/cloudbench"
+    return runtime_evidence_context_paths(root / "repo/.context/cloudbench", run_token)
+
+
+def runtime_evidence_context_paths(context: Path, run_token: str) -> dict[str, Path]:
+    """Apply the same stopped-stack contract to original or collected contexts."""
     service_path = context / "services.json"
     services = json.loads(read_runtime_metadata(service_path, MAX_RECOVERY_STATE_BYTES))
     count = services["env"]["worker_processes"]
@@ -70,7 +74,11 @@ def runtime_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
 
 
 def runtime_evidence_manifest(root: Path, run_token: str, machine: str) -> dict:
-    paths = runtime_evidence_paths(root, run_token)
+    return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine)
+
+
+def runtime_evidence_context_manifest(context: Path, run_token: str, machine: str) -> dict:
+    paths = runtime_evidence_context_paths(context, run_token)
     files = {}
     for name, path in paths.items():
         before = path.stat()
@@ -91,7 +99,7 @@ def runtime_evidence_manifest(root: Path, run_token: str, machine: str) -> dict:
             if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
                 raise ValueError("runtime evidence changed during read")
         files[name] = {"bytes": opened.st_size, "sha256": digest.hexdigest()}
-    if runtime_evidence_paths(root, run_token) != paths:
+    if runtime_evidence_context_paths(context, run_token) != paths:
         raise ValueError("runtime inventory changed")
     return {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
 

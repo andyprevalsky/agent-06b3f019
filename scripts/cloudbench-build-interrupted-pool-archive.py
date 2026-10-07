@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preserve original files of a failed pool owner without claiming proof credit.
+"""Preserve original files of a failed pool or fresh owner without proof credit.
 
 Sealed bundles come from the normal status-plane collector. Unsealed guests
 must be captured separately from their exact stopped volumes and supplied as
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import tarfile
 
 
@@ -42,10 +43,27 @@ def main() -> None:
     assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0
     tasks = json.loads((run / "_batch/benches.json").read_text())
     audit = Path(meta["audit_dir"])
+    kinds = {(run / task["name"] / ".cid").read_text().split()[0] for task in tasks}
+    assert len(kinds) == 1 and kinds <= {"pool", "clone"}
+    fresh = kinds == {"clone"}
+    original_fresh = {}
+    if fresh:
+        for path in (audit / "fresh").iterdir():
+            original = fields(path)
+            assert original["fleet_owner_token"] == owner and original["run_id"] == meta["run_id"]
+            assert original["app"] == meta["app"]
+            if original.get("machine_id"):
+                assert original["machine_id"] not in original_fresh
+                original_fresh[original["machine_id"]] = original
+    runtime = runpy.run_path(str(Path(__file__).with_name("cloudbench-status-server.py")))
+    read = runtime["read_runtime_metadata"]
     destination = run / "_forensic"
     destination.mkdir(mode=0o700, exist_ok=False)
     archive_path = destination / "originals.tar.gz"
     rows = []
+    normal_workers = []
+    uncompressed = 0
+    preserved = {}
     try:
         with tarfile.open(archive_path, "w:gz") as archive:
             for ordinal, task in enumerate(tasks):
@@ -53,8 +71,8 @@ def main() -> None:
                 assert re.fullmatch(r"[A-Za-z0-9._-]+", name)
                 out = run / name
                 kind, machine = (out / ".cid").read_text().split()
-                assert kind == "pool" and re.fullmatch(r"[0-9a-f]+", machine)
-                volume = fields(audit / "pool" / machine)["volume_id"]
+                assert kind in kinds and re.fullmatch(r"[0-9a-f]+", machine)
+                volume = (original_fresh[machine] if fresh else fields(audit / "pool" / machine))["volume_id"]
                 run_token = f"{owner}-{ordinal}"
                 entry = {
                     "task": name, "ordinal": ordinal, "run_token": run_token,
@@ -63,6 +81,7 @@ def main() -> None:
                 }
 
                 def add(relative: str, data: bytes) -> None:
+                    nonlocal uncompressed
                     assert relative not in entry["files"]
                     entry["files"][relative] = {
                         "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
@@ -71,20 +90,27 @@ def main() -> None:
                     info.mode = 0o600
                     info.mtime = 0
                     archive.addfile(info, io.BytesIO(data))
+                    uncompressed += len(data)
 
                 sealed = out / "remote-logs/runtime-evidence"
                 if (sealed / "manifest.json").is_file():
                     entry["kind"] = "sealed"
-                    manifest_bytes = (sealed / "manifest.json").read_bytes()
+                    manifest_bytes = read(sealed / "manifest.json", 1048576)
                     manifest = json.loads(manifest_bytes)
                     assert manifest["machine_id"] == machine
                     assert manifest["run_token"] == run_token
-                    add("sealed/manifest.json", manifest_bytes)
+                    if fresh:
+                        assert manifest == runtime["runtime_evidence_context_manifest"](sealed, run_token, machine)
+                    add("normal-primary/manifest.json" if fresh else "sealed/manifest.json", manifest_bytes)
                     for relative, info in sorted(manifest["files"].items()):
-                        data = (sealed / relative).read_bytes()
+                        data = read(sealed / relative, 512 * 1024 * 1024)
                         assert len(data) == info["bytes"]
                         assert hashlib.sha256(data).hexdigest() == info["sha256"]
-                        add("sealed/" + relative, data)
+                        add(("repo/.context/cloudbench/" if fresh else "sealed/") + relative, data)
+                    if fresh:
+                        add("bench.log", read(out / "remote-logs/cloudbench-driver.log", 512 * 1024 * 1024))
+                        entry["missing"].append(f"cloudbench-driver-clean-{run_token}.ack")
+                        entry["services_status"] = "stopped"
                 else:
                     entry["kind"] = "interrupted"
                     capture = args.capture_dir / f"{machine}.tar.gz"
@@ -98,20 +124,20 @@ def main() -> None:
                             assert ".." not in Path(member.name).parts
                             stream = original.extractfile(member)
                             assert stream is not None
-                            add("original/" + member.name,
+                            add(("" if fresh else "original/") + member.name,
                                 stream.read(member.size + 1))
-                            assert entry["files"]["original/" + member.name]["bytes"] == member.size
+                            assert entry["files"][("" if fresh else "original/") + member.name]["bytes"] == member.size
                             seen.add(member.name)
                     run_json = "repo/.context/cloudbench/run.json"
                     if run_json not in seen:
-                        entry["missing"].append("original/" + run_json)
+                        entry["missing"].append(("" if fresh else "original/") + run_json)
                     # An interrupted driver removes its PID file when it
                     # exits, even if stack cleanup subsequently fails. Keep
                     # that absence explicit; the verifier binds it to the
                     # original exited/failed state and exact stop receipt.
                     driver_pid = "cloudbench-driver.pid"
                     if driver_pid not in seen:
-                        entry["missing"].append("original/" + driver_pid)
+                        entry["missing"].append(("" if fresh else "original/") + driver_pid)
                     if (out / "guest-prestack.confirmed").is_file():
                         for relative in (
                             "repo/.context/cloudbench/services.json",
@@ -121,21 +147,84 @@ def main() -> None:
                         ):
                             if relative not in seen:
                                 entry["missing"].append("original/" + relative)
+                    if fresh:
+                        services_name = "repo/.context/cloudbench/services.json"
+                        if services_name in seen:
+                            with tarfile.open(capture, "r:gz") as original:
+                                service_stream = original.extractfile(services_name)
+                                assert service_stream is not None
+                                services = json.loads(service_stream.read(1048577))
+                            entry["services_status"] = services["status"]
+                            count = services["env"]["worker_processes"]
+                            assert type(count) is int and 1 <= count <= 1024
+                            for number in range(count):
+                                relative = "repo/.context/cloudbench/logs/worker" + (f".{number}" if number else "") + ".log"
+                                if relative not in seen:
+                                    entry["missing"].append(relative)
+                        else:
+                            entry["services_status"] = None
+                            for relative in (services_name, "repo/.context/cloudbench/stack.log",
+                                             "repo/.context/cloudbench/logs/backend.log", "repo/.context/cloudbench/logs/worker.log"):
+                                if relative not in seen:
+                                    entry["missing"].append(relative)
+                        ack = f"cloudbench-driver-clean-{run_token}.ack"
+                        if ack not in seen:
+                            entry["missing"].append(ack)
+                if fresh:
+                    entry["runtime_evidence_complete"] = False
                 rows.append(entry)
+            if fresh:
+                primary_ids = {row["machine_id"] for row in rows}
+                primary_by_id = {row["machine_id"]: row for row in rows}
+                for machine, original in original_fresh.items():
+                    if machine in primary_ids:
+                        continue
+                    parent = primary_by_id[original["source_machine_id"]]
+                    base = run / parent["task"] / "worker-runtime-evidence" / machine
+                    worker_manifest = json.loads(read(base / "capture/manifest.json", 1048576))
+                    worker = {"machine_id": machine, "volume_id": original["volume_id"],
+                              "primary_machine_id": parent["machine_id"], "task": parent["task"],
+                              "run_token": parent["run_token"], "proof_credit": 0, "files": {}}
+                    for relative in ("owner.json", "capture/manifest.json", *("capture/" + name for name in worker_manifest["files"])):
+                        data = read(base / relative, 512 * 1024 * 1024)
+                        worker["files"][relative] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                        info = tarfile.TarInfo(f"_normal_workers/{machine}/{relative}")
+                        info.size, info.mode, info.mtime = len(data), 0o600, 0
+                        archive.addfile(info, io.BytesIO(data))
+                        uncompressed += len(data)
+                    normal_workers.append(worker)
+                for name in ("execution-provenance.json", "execution-task-matrix.json"):
+                    data = read(run / name, 1048576)
+                    member = "_" + name
+                    preserved[member] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                    info = tarfile.TarInfo(member)
+                    info.size, info.mode, info.mtime = len(data), 0o600, 0
+                    archive.addfile(info, io.BytesIO(data))
+                    uncompressed += len(data)
+        os.chmod(archive_path, 0o600)
+        with archive_path.open("rb") as original:
+            os.fsync(original.fileno())
         archive_bytes = archive_path.stat().st_size
         assert archive_bytes <= 512 * 1024 * 1024
         manifest = {
-            "schema": "cloudbench-interrupted-pool-evidence-v1",
+            "schema": "cloudbench-forensic-retirement-v1" if fresh else "cloudbench-interrupted-pool-evidence-v1",
             "owner": owner, "run_id": meta["run_id"], "proof_credit": 0,
             "archive_bytes": archive_bytes,
             "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
             "tasks": rows,
+            **({"uncompressed_bytes": uncompressed, "normal_workers": normal_workers,
+                "preserved_files": preserved} if fresh else {}),
         }
         with (destination / "manifest.json").open("x") as output:
             json.dump(manifest, output, sort_keys=True)
             output.write("\n")
             output.flush()
             os.fsync(output.fileno())
+        directory_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         print(json.dumps({"run_id": meta["run_id"], "tasks": len(rows),
                           "incomplete": sum(x["kind"] == "interrupted" for x in rows),
                           "archive_bytes": archive_bytes, "proof_credit": 0}))
