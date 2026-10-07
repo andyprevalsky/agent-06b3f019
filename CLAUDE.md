@@ -1670,6 +1670,16 @@ All realtime and tool message types are defined in `front-end/src/lib/realtime-t
 
 In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP hop.
 
+Python waterfall TTFT/progress guards belong inside each configured leg. Before
+productive output, a stalled leg may use the existing next model; partial-output
+idle errors and the fixed whole-call deadline remain terminal. Do not raise the
+590/90/120 browser budgets to hide this distinction. Run the normal deploy-owned
+`cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py rose rose-browser-use llm`
+for client or waterfall edits. These suites include fallback, original deadline,
+parser progress, cancellation and response-closure controls. Failed browser calls
+may lack an exact input dump; earlier successful dumps are not substitutes.
+See `docs/rca/cases/2026-10-06-client-stream-guard-bypassed-waterfall-fallback.md`.
+
 - `back-end/src/providers/rose/` - TS client (chat path: router/generator/supervisor)
 - `agents/providers/rose/` - Python client (agent/browser-use path)
 - `back-end/src/providers/rose/pools.ts` / `agents/providers/rose/pools.py` - Canonical pool registry (`rose-1-flash`, `rose-1-ultra`, `rose-1-browser-use`)

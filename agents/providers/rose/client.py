@@ -1944,29 +1944,28 @@ class RoseClient:
                     )
 
             active_route = "waterfall"
-            async for chunk in _guarded(
-                waterfall_complete(
-                    pool_spec=pool_spec,
-                    messages=messages,
-                    tools=waterfall_tools,
-                    tool_choice=waterfall_tool_choice,
-                    response_format=None if waterfall_tools else openrouter_response_format,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    seed=seed,
-                    provider_fast_mode=provider_fast_mode,
-                    effort=effort,
-                    openrouter_key=self._or_key(),
-                    request_id=rid,
-                    agent_id=agent_id,
-                    call_site=call_site,
-                    per_step_timeout_s=ttft_timeout_s,
-                    idle_timeout_s=idle_timeout_s,
-                    exclude_anthropic_family=_exclude_anthropic_family,
-                    cache_namespace=cache_namespace,
-                    skip_cache_write=skip_cache_write,
-                    skip_models=_skip_models,
-                )
+            async for chunk in waterfall_complete(
+                pool_spec=pool_spec,
+                messages=messages,
+                tools=waterfall_tools,
+                tool_choice=waterfall_tool_choice,
+                response_format=None if waterfall_tools else openrouter_response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                provider_fast_mode=provider_fast_mode,
+                effort=effort,
+                openrouter_key=self._or_key(),
+                request_id=rid,
+                agent_id=agent_id,
+                call_site=call_site,
+                per_step_timeout_s=ttft_timeout_s,
+                idle_timeout_s=idle_timeout_s,
+                exclude_anthropic_family=_exclude_anthropic_family,
+                cache_namespace=cache_namespace,
+                skip_cache_write=skip_cache_write,
+                skip_models=_skip_models,
+                stream_guard=_guarded,
             ):
                 chunk = _with_timing_if_done(chunk)
                 if claude_token_error is not None and chunk.kind == "metadata":

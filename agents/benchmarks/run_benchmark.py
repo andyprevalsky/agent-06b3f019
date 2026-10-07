@@ -10501,9 +10501,7 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     # cuts without a marker: a 17k grep result lost the one line its judge had
     # to ground on (grep-agent-trajectories-code-tool-status).
     for text_cap in (None, SINGLE_TURN_TEXT_CAP):
-        evidence = _apply_compact_benchmark_state(
-            build_single_turn_evidence(data, text_cap=text_cap), compact_state
-        )
+        evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data, text_cap=text_cap), compact_state)
         evidence = _append_structured_output_evidence(evidence, data)
         if not single_turn_evidence_exceeds_budget(evidence):
             return evidence
@@ -15259,7 +15257,7 @@ async def main_async(args):
             contract = cloud_batch_cleanup.contract()
             pending = None
             try:
-                pending = prepare(result, contract[0].parent, contract[1]) if contract else None
+                pending = prepare(result, contract[0].parent, contract[1]) if contract and result.agent_id else None
             except (OSError, ValueError) as exc:
                 print(f"  ⚠ outcome acknowledgment preparation unavailable: {type(exc).__name__}")
             if pending:
@@ -15269,9 +15267,12 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
-            return await run_single_task(
+            result = await run_single_task(
                 base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated, **kwargs
             )
+            if token not in _evaluated_task_results:
+                await evaluated(result)
+            return result
         finally:
             _admitted_tasks.pop(token, None)
             _admitted_agent_ids.pop(token, None)

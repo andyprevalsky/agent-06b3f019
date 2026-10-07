@@ -618,15 +618,24 @@ elif name == 'rsync':
     for relative in ("node_modules", "back-end/node_modules", "front-end/node_modules", "agents/venv"):
         actual, expected = (repo / relative).stat(), (donor / relative).stat()
         assert (actual.st_uid, actual.st_gid, actual.st_mode & 0o7777) == (
-            expected.st_uid, expected.st_gid, expected.st_mode & 0o7777
+            expected.st_uid,
+            expected.st_gid,
+            expected.st_mode & 0o7777,
         ), f"hydrated {relative} changed donor root access"
     state_root = repo / ".cloudbench-deps-overlays"
     if state_root.exists():
         assert state_root.stat().st_mode & 0o777 == 0o700
         assert all(owner.stat().st_mode & 0o777 == 0o600 for owner in state_root.glob("*/owner"))
     frontend = subprocess.run(
-        ["node", "-e", "const {createRequire}=require('node:module'); const r=createRequire(process.argv[1]); if(r('frontend-fixture')!=='frontend-ready')process.exit(1);", str(repo / "front-end/package.json")],
-        capture_output=True, text=True, timeout=10,
+        [
+            "node",
+            "-e",
+            "const {createRequire}=require('node:module'); const r=createRequire(process.argv[1]); if(r('frontend-fixture')!=='frontend-ready')process.exit(1);",
+            str(repo / "front-end/package.json"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert frontend.returncode == 0, frontend.stderr
     mounted = [args for name, args in operations if name == "mount"]
@@ -4588,18 +4597,27 @@ def test_fetch_ref_restores_dirty_exact_sha_after_fresh_reuse(tmp_path: Path, ch
     git(author, "remote", "add", "origin", str(origin))
     git(author, "push", "-q", "origin", "HEAD:main")
     first = git(author, "rev-parse", "HEAD")
-    env = dict(os.environ, CLOUDBENCH_GIT_MIN_FREE_KB="1", CLOUDBENCH_DEPENDENCY_OVERLAY="0",
-               GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.file://{origin}.insteadOf",
-               GIT_CONFIG_VALUE_0="https://github.com/Rose-Ai-Labs/rose.git")
-    fresh = subprocess.run(["bash", str(FETCH_SCRIPT), str(repo), first],
-                           env=dict(env, CLOUDBENCH_FRESH_VOLUME="1"), capture_output=True, text=True)
+    env = dict(
+        os.environ,
+        CLOUDBENCH_GIT_MIN_FREE_KB="1",
+        CLOUDBENCH_DEPENDENCY_OVERLAY="0",
+        GIT_CONFIG_COUNT="1",
+        GIT_CONFIG_KEY_0=f"url.file://{origin}.insteadOf",
+        GIT_CONFIG_VALUE_0="https://github.com/Rose-Ai-Labs/rose.git",
+    )
+    fresh = subprocess.run(
+        ["bash", str(FETCH_SCRIPT), str(repo), first],
+        env=dict(env, CLOUDBENCH_FRESH_VOLUME="1"),
+        capture_output=True,
+        text=True,
+    )
     assert fresh.returncode == 0, fresh.stderr
     assert git(repo, "rev-parse", "--is-shallow-repository") == "true"
     assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", unused_blob], capture_output=True).returncode != 0
     (donor / "node_modules/current-package").mkdir(parents=True)
     python = donor / "agents/venv/bin/python"
     python.parent.mkdir(parents=True)
-    python.write_text(f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+    python.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} "$@"\n')
     python.chmod(0o755)
 
     def sync() -> subprocess.CompletedProcess:
@@ -4617,8 +4635,12 @@ def test_fetch_ref_restores_dirty_exact_sha_after_fresh_reuse(tmp_path: Path, ch
     git(author, "commit", "-qm", "next source")
     git(author, "push", "-q", "origin", "HEAD:main")
     target = git(author, "rev-parse", "HEAD")
-    reused = subprocess.run(["bash", str(FETCH_SCRIPT), str(repo), target],
-                            env=dict(env, CLOUDBENCH_FRESH_VOLUME="0"), capture_output=True, text=True)
+    reused = subprocess.run(
+        ["bash", str(FETCH_SCRIPT), str(repo), target],
+        env=dict(env, CLOUDBENCH_FRESH_VOLUME="0"),
+        capture_output=True,
+        text=True,
+    )
     assert reused.returncode == 0, reused.stderr
     assert git(repo, "rev-parse", "HEAD") == target
     assert git(repo, "rev-parse", "HEAD^{tree}") == git(author, "rev-parse", "HEAD^{tree}")
@@ -19549,11 +19571,8 @@ finish_clock
             assert marker.read_text() == "2\n", "legacy completed release receipt was overwritten"
 
 
-
 @pytest.mark.parametrize("pooled", [False, True])
-def test_fleet_retained_resources_do_not_claim_release_before_owned_worker_closes(
-    tmp_path: Path, pooled: bool
-) -> None:
+def test_fleet_retained_resources_do_not_claim_release_before_owned_worker_closes(tmp_path: Path, pooled: bool) -> None:
     """Run real pool-return/audit/final-clock code with an owned worker pending."""
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
     for path in (registry / "meta", audit / "meta", audit / "fresh" / clone):
@@ -19574,7 +19593,10 @@ def test_fleet_retained_resources_do_not_claim_release_before_owned_worker_close
         end = fleet.index("                    done", start) + len("                    done")
         pool_code = fleet[start:end]
         result = subprocess.run(
-            ["bash", "-c", f"""set -eu
+            [
+                "bash",
+                "-c",
+                f"""set -eu
 id=feedface000004
 ec=0
 teardown_failed=0
@@ -19582,7 +19604,11 @@ CHILD_MACHINE=($id)
 CHILD_OUT=({shlex.quote(str(out))})
 date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
 {pool_code}
-"""], capture_output=True, text=True, timeout=10,
+""",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, result.stderr
         assert not finished.exists(), "pool primary return stopped full-owned-resource accounting"
@@ -19604,7 +19630,8 @@ date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
     worker = audit / "fresh" / clone
     worker.write_text(worker.read_text().replace("disposition=owned", "disposition=destroyed-verified-absent"))
     closed = _private_source_identity_command(
-        registry, audit,
+        registry,
+        audit,
         "date() { [ \"$1\" = +%s ] && printf '400\\n'; }\nfleet_audit_finalize_provider_teardown",
     )
     assert closed.returncode == 0, closed.stdout + closed.stderr
@@ -19613,7 +19640,8 @@ date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
     assert (mirror / clock.name).read_bytes() == clock.read_bytes()
     # A later verifier must retain the original immutable event, not reset time.
     verified_again = _private_source_identity_command(
-        registry, audit,
+        registry,
+        audit,
         "date() { [ \"$1\" = +%s ] && printf '900\\n'; }\nfleet_audit_finalize_provider_teardown",
     )
     assert verified_again.returncode == 0, verified_again.stdout + verified_again.stderr
@@ -19622,7 +19650,10 @@ date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
     end = fleet.index("    # Keep the parent live while releasing resources.", start)
     fallback = fleet[start:end]
     completed = subprocess.run(
-        ["bash", "-c", f"""set -eu
+        [
+            "bash",
+            "-c",
+            f"""set -eu
 KEEP_CLONES=0
 teardown_failed=0
 ec=0
@@ -19637,14 +19668,17 @@ finish_clock() {{
 finish_clock
 [ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" = 300 ]
 [ "$CHILD_RUN_TIMEOUT" = 300 ]
-"""], capture_output=True, text=True, timeout=10,
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert finished.read_text() == "400\n", "observer/late fallback replaced native full-release time"
     assert allocated.read_text() == "1\n" and verdict.read_bytes() == before_verdict
     if pooled:
         assert pool_return.read_text() == "100\n", "early exact pool return was discarded"
-
 
 
 def test_fleet_retained_resources_do_not_claim_release_when_clock_write_fails(
@@ -19654,7 +19688,10 @@ def test_fleet_retained_resources_do_not_claim_release_when_clock_write_fails(
     registry, audit, clone, _, _ = _private_source_identity_fixture(tmp_path, private=False)
     fresh = audit / "fresh" / clone
     fresh.write_text(fresh.read_text().replace("disposition=ownership-pending", "disposition=not-allocated-verified"))
-    result = _private_source_identity_command(registry, audit, r"""
+    result = _private_source_identity_command(
+        registry,
+        audit,
+        r"""
 # Force failure of the exact clock temporary file, while meta remains writable.
 clock_tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch.tmp.$$"
 mkdir "$clock_tmp"
@@ -19667,7 +19704,8 @@ rmdir "$clock_tmp"
 date() { [ "$1" = +%s ] && printf '700\n'; }
 fleet_audit_finalize_provider_teardown || exit 96
 [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)" = provider-teardown-verified ] || exit 97
-""")
+""",
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     clock = audit / "provider-teardown-verified.epoch"
     assert clock.read_text() == "700\n"
@@ -25564,8 +25602,13 @@ def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
     release = tmp_path / "release-collector"
     sealed = tmp_path / "guest-sealed"
     unverified_runtime = variant in {
-        "missing_ack", "wrong_ack", "running", "wrong_run", "wrong_owner",
-        "same_bearer_sibling", "wrong_auth",
+        "missing_ack",
+        "wrong_ack",
+        "running",
+        "wrong_run",
+        "wrong_owner",
+        "same_bearer_sibling",
+        "wrong_auth",
     }
     source = fleet_source_text()
     q = shlex.quote
@@ -26620,6 +26663,97 @@ recover_exact_stale_fleet_owner {owner}
             assert json.loads(volumes.read_text()) == [{"id": foreign_volume}]
 
 
+@pytest.mark.parametrize(
+    "case", ["rotated-pass", "rotated-fail", "late-old-response", "foreign-row", "partial-json", "missing-port"]
+)
+def test_data_plane_mirror_reads_current_owner_port_before_publishing_evaluation(tmp_path: Path, case: str) -> None:
+    """Run the real mirror after its parent publishes a replacement status proxy."""
+    name = "owned-task"
+    status = "failed" if case == "rotated-fail" else "passed"
+    output = tmp_path / name
+    live = output / "cloudbench-live"
+    live.mkdir(parents=True)
+    pointer = output / "status-proxy.port"
+    initial_status = status if case == "late-old-response" else "queued"
+
+    def card(row_status, row_name=name):
+        return {
+            "run_id": "exact-guest-run",
+            "tasks": {"total": 1},
+            "per_task": [{"name": row_name, "status": row_status}],
+        }
+
+    mirror_path = live / "report-card.json"
+    mirror_path.write_text(json.dumps(card(initial_status)))
+    requests = []
+    current = None
+
+    class Old(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append("old")
+            if case == "late-old-response":
+                pointer.write_text(str(current.server_port))
+            raw = json.dumps(card("running")).encode()
+            if case == "foreign-row":
+                raw = json.dumps(card(status, "foreign-task")).encode()
+            elif case == "partial-json":
+                raw = b'{"tasks":'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *_args):
+            pass
+
+    class Current(Old):
+        def do_GET(self):
+            requests.append("current")
+            raw = json.dumps(card(status)).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    old = ThreadingHTTPServer(("127.0.0.1", 0), Old)
+    current = ThreadingHTTPServer(("127.0.0.1", 0), Current)
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (old, current)]
+    for thread in threads:
+        thread.start()
+    if case != "missing-port":
+        pointer.write_text(str(current.server_port if case.startswith("rotated-") else old.server_port))
+    source = CLOUD_SCRIPT.read_text()
+    start = source.index('        expected_total="${#BENCH_TASKS[@]}"')
+    mirror = source[start : source.index("    ) &\n    DASHBOARD_MIRROR_PID", start)]
+    setup = f"""set -euo pipefail
+BENCH_TASKS=({name})
+DASH_DIR={shlex.quote(str(live))}
+OUT_DIR={shlex.quote(str(output))}
+LOCAL_STATUS_PORT={old.server_port}
+LOCAL_DASH_PORT=8765
+CLOUDBENCH_BOOT_LAUNCH=1
+sleep() {{ exit 0; }}
+"""
+    try:
+        result = subprocess.run(["bash", "-c", setup + mirror], capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        row = json.loads(mirror_path.read_text())["per_task"][0]
+        expected = status if case.startswith("rotated-") or case == "late-old-response" else initial_status
+        assert row["name"] == name and row["status"] == expected, "current evaluated outcome lost at live mirror"
+        if case.startswith("rotated-"):
+            assert requests == ["current"], "mirror read the superseded status proxy"
+        if case == "missing-port":
+            assert not requests, "missing current owner pointer must not reuse a stale port"
+        assert not (output / "guest-shutdown.confirmed").exists()
+    finally:
+        for server in (old, current):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+
+
 def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
     """Real aggregation publishes evaluated outcomes while guest cleanup is pending."""
     from unittest.mock import patch
@@ -27121,9 +27255,10 @@ printf ready > "$REPO_DIR/ready"
     )
     result = subprocess.run(["bash", "-c", header], env=env, capture_output=True, text=True, timeout=10)
     assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == ref
-    assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"], text=True).strip() == "true", (
-        "fresh primary/worker source bootstrap downloaded unused benchmark history"
-    )
+    assert (
+        subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--is-shallow-repository"], text=True).strip()
+        == "true"
+    ), "fresh primary/worker source bootstrap downloaded unused benchmark history"
     assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", unused_blob], capture_output=True).returncode != 0
     if rejected:
         assert result.returncode == 1
@@ -27410,7 +27545,10 @@ reserve_cleanup_disk_space
     result = subprocess.run(
         ["bash", "-c", script, "reserve", str(exact)],
         env={**os.environ, "DD_CALLS": str(writes)},
-        text=True, capture_output=True, check=False, timeout=40,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=40,
     )
     elapsed = time.monotonic() - started
     try:
@@ -27429,8 +27567,11 @@ reserve_cleanup_disk_space
         assert total == observed.st_size
     finally:
         released = subprocess.run(
-            ["bash", "-c", f"{release}\nrelease_cleanup_disk_reserve \"$1\"", "release", str(exact)],
-            text=True, capture_output=True, check=False, timeout=40,
+            ["bash", "-c", f'{release}\nrelease_cleanup_disk_reserve "$1"', "release", str(exact)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=40,
         )
     assert released.returncode == 0 and not exact.exists(), released.stderr
     assert neighbor.read_bytes() == b"unrelated"
@@ -27439,18 +27580,29 @@ reserve_cleanup_disk_space
     if receipt_dir:
         target = Path(receipt_dir)
         target.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (target / "physical.safe.json").write_text(json.dumps({
-            "allocation_elapsed_s": round(elapsed, 6), "size_bytes": observed.st_size,
-            "physical_bytes": observed.st_blocks * 512, "zero_read_bytes": total,
-            "inode_nonzero": observed.st_ino > 0, "link_count": observed.st_nlink,
-            "mode": oct(stat.S_IMODE(observed.st_mode)), "reserve_released": not exact.exists(),
-            "neighbor_unchanged": neighbor.read_bytes() == b"unrelated", "dd_call_count": dd_count,
-        }, sort_keys=True) + "\n")
+        (target / "physical.safe.json").write_text(
+            json.dumps(
+                {
+                    "allocation_elapsed_s": round(elapsed, 6),
+                    "size_bytes": observed.st_size,
+                    "physical_bytes": observed.st_blocks * 512,
+                    "zero_read_bytes": total,
+                    "inode_nonzero": observed.st_ino > 0,
+                    "link_count": observed.st_nlink,
+                    "mode": oct(stat.S_IMODE(observed.st_mode)),
+                    "reserve_released": not exact.exists(),
+                    "neighbor_unchanged": neighbor.read_bytes() == b"unrelated",
+                    "dd_call_count": dd_count,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
     assert dd_count == 0, "Darwin reserve still streamed zero bytes through dd"
 
     fault_dir = tmp_path / "native-faults"
     fault_dir.mkdir()
-    (fault_dir / "sitecustomize.py").write_text(r'''
+    (fault_dir / "sitecustomize.py").write_text(r"""
 import errno
 import fcntl
 import os
@@ -27505,9 +27657,22 @@ if mode == 'ftruncate_unsupported':
     def failed_ftruncate(fd, size):
         raise OSError(errno.ENOSYS, 'injected truncate failure')
     os.ftruncate = failed_ftruncate
-''')
+""")
     rows = []
-    for mode in ("unsupported", "unsupported_enosys", "unsupported_eopnotsupp", "enospc", "io_failure", "short", "sparse", "fsync_failure", "fsync_unsupported", "ftruncate_unsupported", "zero_inode", "changed_inode"):
+    for mode in (
+        "unsupported",
+        "unsupported_enosys",
+        "unsupported_eopnotsupp",
+        "enospc",
+        "io_failure",
+        "short",
+        "sparse",
+        "fsync_failure",
+        "fsync_unsupported",
+        "ftruncate_unsupported",
+        "zero_inode",
+        "changed_inode",
+    ):
         fault_exact = tmp_path / f"reserve-{mode}"
         calls = tmp_path / f"preallocate-{mode}"
         fallback = tmp_path / f"dd-{mode}"
@@ -27523,9 +27688,17 @@ reserve_cleanup_disk_space
 """
         failed = subprocess.run(
             ["bash", "-c", controlled, "reserve", str(fault_exact)],
-            env={**os.environ, "PYTHONPATH": str(fault_dir), "NATIVE_RESERVE_FAULT": mode,
-                 "PREALLOCATE_CALLS": str(calls), "DD_CALLS": str(fallback)},
-            text=True, capture_output=True, check=False, timeout=40,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(fault_dir),
+                "NATIVE_RESERVE_FAULT": mode,
+                "PREALLOCATE_CALLS": str(calls),
+                "DD_CALLS": str(fallback),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=40,
         )
         capability_gap = mode.startswith("unsupported")
         assert (failed.returncode == 0) is capability_gap, (mode, failed.stderr)
@@ -27533,30 +27706,50 @@ reserve_cleanup_disk_space
         if capability_gap:
             observed_fallback = fault_exact.stat()
             assert stat.S_ISREG(observed_fallback.st_mode) and observed_fallback.st_ino > 0
-            assert observed_fallback.st_size == 1048576 and observed_fallback.st_blocks * 512 >= observed_fallback.st_size
+            assert (
+                observed_fallback.st_size == 1048576 and observed_fallback.st_blocks * 512 >= observed_fallback.st_size
+            )
             assert fault_exact.read_bytes() == bytes(1048576)
             fault_exact.unlink()
         assert not fault_exact.exists(), mode
         assert neighbor.read_bytes() == b"unrelated", mode
         assert calls.exists() is (mode != "zero_inode"), mode
-        rows.append({"fault": mode, "capability_fallback": capability_gap, "failed_closed": not capability_gap,
-                     "reserve_absent": True, "dd_call_count": 1 if capability_gap else 0})
+        rows.append(
+            {
+                "fault": mode,
+                "capability_fallback": capability_gap,
+                "failed_closed": not capability_gap,
+                "reserve_absent": True,
+                "dd_call_count": 1 if capability_gap else 0,
+            }
+        )
 
     # Exact release failure is reported; neither the owned directory nor neighbor
     # is recursively removed as a workaround.
     release_error = tmp_path / "release-directory"
     release_error.mkdir()
     failed_release = subprocess.run(
-        ["bash", "-c", f"{release}\nrelease_cleanup_disk_reserve \"$1\"", "release", str(release_error)],
-        text=True, capture_output=True, check=False, timeout=40,
+        ["bash", "-c", f'{release}\nrelease_cleanup_disk_reserve "$1"', "release", str(release_error)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=40,
     )
     assert failed_release.returncode != 0 and release_error.is_dir()
     assert neighbor.read_bytes() == b"unrelated"
     release_error.rmdir()
     if receipt_dir:
-        (Path(receipt_dir) / "faults.safe.json").write_text(json.dumps({
-            "faults": rows, "release_error_reported": True, "neighbor_unchanged": True,
-        }, sort_keys=True) + "\n")
+        (Path(receipt_dir) / "faults.safe.json").write_text(
+            json.dumps(
+                {
+                    "faults": rows,
+                    "release_error_reported": True,
+                    "neighbor_unchanged": True,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
 
 
 @pytest.mark.parametrize("handoff", ["admission", "cancel-before-admission"])
@@ -27566,8 +27759,11 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_pat
     command = [sys.executable, str(driver), str(FLEET_SCRIPT), str(tmp_path / "cohort")]
     if handoff == "cancel-before-admission":
         owner = subprocess.Popen(
-            command, env={**os.environ, "RESERVE_FIXTURE_HOLD_READY": "1"},
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            command,
+            env={**os.environ, "RESERVE_FIXTURE_HOLD_READY": "1"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         try:
             assert owner.stdout is not None
@@ -27587,7 +27783,10 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_pat
         return
     result = subprocess.run(
         command,
-        env=os.environ.copy(), text=True, capture_output=True, check=False,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
         timeout=FIXTURE_HOST_GUARD_SECONDS + 2 * FIXTURE_DRAIN_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -27601,7 +27800,8 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_pat
 
 @pytest.mark.parametrize("interleaving", ["timezone", "reused-pid"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identity(
-    tmp_path: Path, interleaving: str,
+    tmp_path: Path,
+    interleaving: str,
 ) -> None:
     """Shared budget hints retain a live owner across TZ, and reject PID reuse."""
     reserve = _extract_fleet_function(fleet_source_text(), "reserve_cleanup_disk_space() {")
@@ -27611,7 +27811,7 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_with_stable_owner_identit
     transport = tmp_path / "transport"
     transport.mkdir()
     namespace = int(hashlib.sha256(str(tmp_path).encode()).hexdigest()[:14], 16)
-    (transport / "sitecustomize.py").write_text('''
+    (transport / "sitecustomize.py").write_text("""
 import os
 from pathlib import Path
 original = Path.lstat
@@ -27623,9 +27823,13 @@ def isolated(self, *args, **kwargs):
         return os.stat_result(fields)
     return observed
 Path.lstat = isolated
-''')
-    isolated_env = {**os.environ, "PYTHONPATH": str(transport),
-                    "RESERVE_TEST_PARENT": str(tmp_path), "RESERVE_TEST_DEVICE": str(namespace)}
+""")
+    isolated_env = {
+        **os.environ,
+        "PYTHONPATH": str(transport),
+        "RESERVE_TEST_PARENT": str(tmp_path),
+        "RESERVE_TEST_DEVICE": str(namespace),
+    }
     df = """df() { printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 10000 6928 3072 70% /fake'; }
 export -f df
 """
@@ -27644,7 +27848,9 @@ while [ ! -e "$3" ]; do sleep 0.01; done
 """
         owner = subprocess.Popen(
             ["bash", "-c", shell, "reserve", str(exact), str(ready), str(retire)],
-            env={**isolated_env, "TZ": "UTC"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**isolated_env, "TZ": "UTC"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         try:
@@ -27657,8 +27863,10 @@ while [ ! -e "$3" ]; do sleep 0.01; done
             assert owner.poll() is None
             second = subprocess.run(
                 ["bash", "-c", shell.split(': > "$2"')[0], "reserve", str(tmp_path / "second")],
-                env={**isolated_env, "TZ": "America/Los_Angeles"}, text=True,
-                capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS,
+                env={**isolated_env, "TZ": "America/Los_Angeles"},
+                text=True,
+                capture_output=True,
+                timeout=FIXTURE_HOST_GUARD_SECONDS,
             )
             assert second.returncode != 0, "live owner's working floor was lost across TZ"
             assert not (tmp_path / "second").exists()
@@ -27692,9 +27900,14 @@ reserve_cleanup_disk_space
 """
         result = subprocess.run(
             ["bash", "-c", shell, "reserve", str(exact)],
-            env={**isolated_env, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
-                 "RESERVE_BIRTH_COUNTER": str(tmp_path / "birth-count")},
-            capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS,
+            env={
+                **isolated_env,
+                "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                "RESERVE_BIRTH_COUNTER": str(tmp_path / "birth-count"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=FIXTURE_HOST_GUARD_SECONDS,
         )
         assert result.returncode != 0, "reserve adopted a reused owner PID"
         assert not exact.exists()
@@ -27703,7 +27916,8 @@ reserve_cleanup_disk_space
 
 @pytest.mark.parametrize("peer_state", ["departed", "unassigned", "live"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_after_pending_member_departure(
-    tmp_path: Path, peer_state: str,
+    tmp_path: Path,
+    peer_state: str,
 ) -> None:
     """A retired unadmitted member cannot consume a survivor's disk floor."""
     import fcntl
@@ -27719,7 +27933,7 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_after_pending_member_depa
     transport.mkdir()
     # Isolate the accounting namespace from real concurrent fleet reservations.
     # Native reserve allocation, process births and lifetime locking stay real.
-    (transport / "sitecustomize.py").write_text('''
+    (transport / "sitecustomize.py").write_text("""
 import os
 from pathlib import Path
 original = Path.lstat
@@ -27731,7 +27945,7 @@ def isolated(self, *args, **kwargs):
         return os.stat_result(fields)
     return observed
 Path.lstat = isolated
-''')
+""")
     cohort = tmp_path / "cohorts" / "c001"
     cohort.mkdir(parents=True)
     lock = (cohort.parent / "parent.lock").open("w")
@@ -27748,10 +27962,15 @@ Path.lstat = isolated
         peer_pid = peer.pid
     else:
         peer_pid = None
-    (cohort / "manifest.json").write_text(json.dumps({
-        "cohort_id": "c001", "jobs": {"r001-j0001": None, "r002-j0002": peer_pid},
-    }))
-    shell = f'''set -uo pipefail
+    (cohort / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cohort_id": "c001",
+                "jobs": {"r001-j0001": None, "r002-j0002": peer_pid},
+            }
+        )
+    )
+    shell = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
 CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
@@ -27760,15 +27979,22 @@ df() {{ printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted o
 export -f df
 {reserve}
 reserve_cleanup_disk_space
-'''
+"""
     try:
         result = subprocess.run(
             ["bash", "-c", shell, "reserve", str(exact)],
-            env={**os.environ, "PYTHONPATH": str(transport),
-                 "RESERVE_TEST_PARENT": str(tmp_path), "RESERVE_TEST_DEVICE": str(namespace),
-                 "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(cohort),
-                 "RUN_BENCH_CAMPAIGN_COHORT": "c001", "RUN_BENCH_CAMPAIGN_JOB_ID": "r001-j0001"},
-            text=True, capture_output=True, timeout=60,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(transport),
+                "RESERVE_TEST_PARENT": str(tmp_path),
+                "RESERVE_TEST_DEVICE": str(namespace),
+                "RUN_BENCH_CAMPAIGN_BARRIER_DIR": str(cohort),
+                "RUN_BENCH_CAMPAIGN_COHORT": "c001",
+                "RUN_BENCH_CAMPAIGN_JOB_ID": "r001-j0001",
+            },
+            text=True,
+            capture_output=True,
+            timeout=60,
         )
         if peer_state == "departed":
             assert result.returncode == 0, "retired pending member retained disk floor: " + result.stderr
@@ -27791,17 +28017,13 @@ reserve_cleanup_disk_space
 
 
 @pytest.mark.parametrize("parent_state", ["missing", "root-private", "runtime-owned"])
-def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(
-    tmp_path, parent_state
-):
+def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, parent_state):
     """Exercise the real first cache consumer with kernel runtime-user permissions."""
     import pwd
     import stat
 
     if sys.platform != "linux" or os.geteuid() != 0:
-        pytest.skip(
-            "root Linux permission primitive is exercised by the native controller fixture"
-        )
+        pytest.skip("root Linux permission primitive is exercised by the native controller fixture")
     runtime = pwd.getpwnam("daemon")
     tmp_path.chmod(0o755)
     data = tmp_path / "data"
@@ -27853,16 +28075,10 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(
     )
     gosu.chmod(0o755)
     driver = DRIVER_SCRIPT.read_text()
-    fragment = driver[
-        driver.index("# Prisma's generated client") : driver.index(
-            "# ── 4. Pin a stable"
-        )
-    ]
+    fragment = driver[driver.index("# Prisma's generated client") : driver.index("# ── 4. Pin a stable")]
     fragment = fragment.replace(
         "/data/cloudbench-cache/playwright-browsers", str(cache / "playwright-browsers")
-    ).replace(
-        "/var/lib/rose-playwright-chromium-deps", str(tmp_path / "host-libraries.ready")
-    )
+    ).replace("/var/lib/rose-playwright-chromium-deps", str(tmp_path / "host-libraries.ready"))
     sync_prisma = tools / "sync-prisma.sh"
     sync_prisma.write_text("#!/bin/bash\nexit 0\n")
     environment = {
@@ -27878,22 +28094,17 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(
         [
             "bash",
             "-c",
-            'set -eu; umask 077; log() { :; }; step() { :; }; finish() { exit "$1"; };\n'
-            + fragment,
+            'set -eu; umask 077; log() { :; }; step() { :; }; finish() { exit "$1"; };\n' + fragment,
         ],
         env=environment,
         capture_output=True,
         text=True,
     )
-    assert completed.returncode == 0, (
-        "checkout browser cannot traverse the shared cache parent as its runtime user"
-    )
+    assert completed.returncode == 0, "checkout browser cannot traverse the shared cache parent as its runtime user"
     assert (cache / "playwright-browsers/.links/runtime-write").is_file()
     assert cache.stat().st_uid == runtime.pw_uid
     assert stat.S_IMODE(cache.stat().st_mode) == 0o700
     assert data.stat().st_uid == 0 and stat.S_IMODE(data.stat().st_mode) == 0o755
     if private is not None:
         assert private.read_bytes() == b"unchanged private control"
-        assert (
-            private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600
-        )
+        assert private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600

@@ -4820,8 +4820,20 @@ PY
             # could remain hung after DONE while the controller tried to exit.
             if {
                 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
-                    curl -fsS --max-time 6 \
-                        "http://127.0.0.1:$LOCAL_STATUS_PORT/repo/.context/cloudbench/report-card.json"
+                    # The parent can rotate its proxy after this mirror forks.
+                    # Consume its published current port on every observation.
+                    mirror_status_port=""
+                    if [ -f "$OUT_DIR/status-proxy.port" ] && [ ! -L "$OUT_DIR/status-proxy.port" ]; then
+                        mirror_status_port="$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)"
+                    fi
+                    case "$mirror_status_port" in
+                        ''|*[!0-9]*) false ;;
+                        *)
+                            [ "$mirror_status_port" -gt 0 ] && [ "$mirror_status_port" -le 65535 ] \
+                                && curl -fsS --max-time 6 \
+                                    "http://127.0.0.1:$mirror_status_port/repo/.context/cloudbench/report-card.json"
+                            ;;
+                    esac
                 else
                     ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null"
                 fi
@@ -4861,7 +4873,14 @@ if tasks.get("total") == expected_total and len(per_task) == expected_total and 
 raise SystemExit(1)
 PY
             then
-                mv "$tmp" "$DASH_DIR/report-card.json"
+                # An old proxy response may arrive after replacement was published.
+                if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ] \
+                    || { [ ! -L "$OUT_DIR/status-proxy.port" ] \
+                        && [ "$mirror_status_port" = "$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)" ]; }; then
+                    mv "$tmp" "$DASH_DIR/report-card.json"
+                else
+                    rm -f "$tmp"
+                fi
             else
                 rm -f "$tmp"
             fi
