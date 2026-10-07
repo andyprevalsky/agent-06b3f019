@@ -36,7 +36,7 @@ Two normal exact-image activation invocations then failed at the stopped donor
 update with registry `MANIFEST_UNKNOWN` HTTP 404. Neither allocated a benchmark
 fleet. The stopped donor retained its previous working Control3 digest.
 
-The missing original manifest digest is
+The originally rejected manifest digest is
 `sha256:52334631a382bb97097a119475dff338a4332ad52fd4fba6b7a154196cb28adf`.
 Original build/activation receipts remain under the private Control4 output;
 this interrupted diagnostic earns zero campaign credit.
@@ -57,8 +57,9 @@ publisher version, Depot/app scope, amd64 target and zstd settings agree. Both
 config blobs are present, Linux amd64, and have identical runtime configuration
 and history commands. OCI-only and Docker-only Accept requests still rejected
 the new manifest. These observations exclude a generic OCI or runtime-config
-explanation; they do not establish why the external registry lost an
-acknowledged manifest.
+explanation. They establish the responses visible to those requests, rather
+than a durable loss of the external artifact. Authentication context, refresh,
+and later registry visibility require separate controls.
 
 Fly's normal read-only app-image metadata query retained the exact new manifest.
 Restoring OCI struct field order and BuildKit's two-space JSON encoding,
@@ -74,11 +75,38 @@ Registry PUT rejected them with HTTP 400 and two `MANIFEST_BLOB_UNKNOWN` errors.
 Only those two error-identified blob references were inspected: both HEADs
 returned 404, neither belongs to the previous working manifest, and their
 declared sizes are 536,477,550 and 263,992,518 bytes. The tag remained 404 after
-the rejected PUT. This proves that the current output is missing referenced
-layers as well as its manifest. The external reason for that loss remains
-unproved. The original Fly-integrated Depot build exposes no established saved
-output handle, so manifest-only republication cannot recover this particular
-output. No layers were uploaded and no new build or activation was started.
+the rejected PUT. These are credential- and time-scoped missing-blob responses;
+they do not independently prove permanent storage loss. The original
+Fly-integrated Depot build exposes no established saved output handle, so that
+manifest-only attempt could not restore the output at that boundary. No layers
+were uploaded by the continuation.
+
+A separate normal uncached build on clean repair commit `2fd05622` ran from
+epoch 1791381929 through 1791382341 (412 seconds). Its producer again exited
+zero, while the repaired handoff returned 74 after exact-tag GET 404 and
+hash-bound manifest PUT 400 reporting six missing layer references. A
+destination-only diagnostic in a new owned app also failed after 485 seconds,
+reporting eleven missing layers and config; its app had no Machines or Volumes
+and was deleted. App scope changes both producer/cache namespace and registry
+repository, so this is not an isolated registry-repository experiment.
+
+Later, the original 412-second output became readable during the normal pinned
+client's `RequireSession` credential refresh flow. Its exact tag and digest
+both returned 200 with body SHA matching
+`sha256:7e73700c6343f9eddc347f59cdcc3e4b1d77af0ecc6595b85236cd3c1d6e0f0c`;
+one previously reported missing blob also returned HEAD 200. Paired reads using
+the same refreshed bundle's GraphQL and Docker selections both returned the
+same correct manifest. Docker subset normalization is therefore not a proven
+causal fix. No credential normalization patch, producer-content hook, layer
+upload, or additional build was used for these successful reads.
+
+The unchanged registry helper then repeated the exact normal
+`run-bench-cloud` credential resolver and pinned client flow on clean `2fd05622`.
+It exited zero from epoch 1791385498 through 1791385499, verified tag and digest,
+and did not republish the manifest. Earlier raw-config requests and the normal
+refreshed SDK flow are different observations; raw API rejection cannot prove
+donor absence or block the normal CLI. The external cause remains open because
+refresh and elapsed-time effects have not been isolated.
 
 Archive searches were `MANIFEST_UNKNOWN registry manifest unknown image-activate`
 and `image publication successful donor activation digest 404`. No literal
@@ -144,10 +172,36 @@ benchmark deployment gate; no new paid or large verification stage was added.
 Independent production review cleared the exact helper and three integration
 source hashes. The actual unchanged-output attempt ran from epoch 1791381668
 through 1791381676, returned 74 on the missing-blob response, and retained its
-5251-byte request with SHA matching the original published digest. The normal
-native activation was not started because the registry handoff is still absent.
-This case remains open for a complete actual publication/activation green;
-the original failed output and zero-credit diagnostic are preserved.
+5251-byte request with SHA matching the original published digest. The original
+failed CLI receipts remain failed even when later reads succeed.
+
+Automated review also found a compact response-shape defect: JSON null or a
+non-object GraphQL payload could raise an untyped exception instead of retaining
+the private handoff failure receipt. Explicit object guards and eight quick
+inverse cases preserve exit 74 and the receipt. The owning suite passed 74 tests;
+the unchanged malformed-provider command failed before those guards and passed
+afterward. This adds no provider or model verification lane.
+
+One unchanged normal `image-activate` of the original 412-second output began
+at epoch 1791385658 with `--ref 2fd05622`, after the later normal helper green.
+It exited zero at epoch 1791385826 after 168 seconds, with normal image update,
+guest readiness, source fetch and parking complete. The final normal native SDK
+observation confirmed donor `683e47df5094d8` stopped on the exact `7e73700c` digest.
+This qualification is retained separately from the independent native builder
+diagnostic and the original failed publication clock. Native builder attempts
+are not a qualified fast publication profile: all three failed with unexpected
+EOF during dependency installation, and the original CLI closed naturally at
+epoch 1791385524 after 2,830 seconds. Both automatic activation watchers were
+joined and their process absence verified before the selected activation; both
+native CLI collectors and their owned callers were also joined after terminal.
+
+This case remains open for the publication visibility cause and a fresh,
+uninterrupted ordinary cold pipeline. Later image-only qualification earns no
+campaign credit and does not erase the 411-second original or 412-second
+repair-trial failures. The latest user-requested campaign remains five consecutive runs of 50 random
+DAILY tasks with the unchanged 1,200-second task and 3,600-second whole-run limits;
+historical 50-task artifacts remain historical. Private request bodies, logs,
+credential material and all original scalar receipts remain outside the archive.
 
 ## Human feedback
 
@@ -161,3 +215,6 @@ the repair to the exact owned image and required private scalar evidence.
 
 Verify the actual immutable registry handoff and recover only hash-proven original
 manifest bytes before handing a successful publisher result to its consumer.
+Join each observation to its normal credential selection, refresh, exact image
+digest and original clock before interpreting a 404 as lost data or naming an
+authentication change as the cause.

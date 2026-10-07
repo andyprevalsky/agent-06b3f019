@@ -213,6 +213,79 @@ def test_cold_image_registry_handoff_preserves_exact_manifest_and_consumer_diges
         assert artifact.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(
+    ("phase", "payload"),
+    [
+        ("graphql", {"data": None, "errors": [{"message": "private-provider-error"}]}),
+        ("graphql", None),
+        ("graphql", []),
+        ("graphql", {"data": []}),
+        ("graphql", {"data": {"app": []}}),
+        ("graphql", {"data": {"app": {"image": []}}}),
+        ("auth", None),
+        ("auth", []),
+    ],
+)
+def test_cold_image_registry_main_invalid_provider_payload_retains_private_failure_receipt(
+    tmp_path, monkeypatch, capsys, phase, payload
+):
+    helper = runpy.run_path(str(ROOT / "scripts/lib/cloudbench-image-registry.py"))
+    app = "owned-benchmark-app"
+    image = f"registry.fly.io/{app}:cloudbench-warm-20261007-120000-123"
+    tag_path = f"/v2/{app}/manifests/" + image.split(":", 1)[1]
+    client = tmp_path / "fixture-client"
+    auth_payload = payload if phase == "auth" else {"token": "fixture-registry-token"}
+    client.write_text("#!/usr/bin/env bash\nprintf '%s\\n' " + shlex.quote(json.dumps(auth_payload)) + "\n")
+    client.chmod(0o700)
+    output = tmp_path / "handoff.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "registry-handoff",
+            "--client",
+            str(client),
+            "--app",
+            app,
+            "--image",
+            image,
+            "--expected-digest",
+            "sha256:" + "d" * 64,
+            "--out-file",
+            str(output),
+        ],
+    )
+
+    def response(method, path, _body):
+        if method == "POST":
+            assert path == "/graphql"
+            return 200, json.dumps(payload).encode(), {}
+        assert (method, path) == ("GET", tag_path)
+        return 404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', {}
+
+    original = helper["RegistryHandoff"]
+    with _manifest_registry(response) as (origin, requests):
+        monkeypatch.setitem(
+            helper["main"].__globals__,
+            "RegistryHandoff",
+            lambda token, path, selected_app: original(
+                token, path, selected_app, registry_origin=origin, graphql_origin=origin + "/graphql"
+            ),
+        )
+        assert helper["main"]() == 74
+    receipt = json.loads(output.read_text())
+    assert receipt["registry_handoff_verified"] is False
+    assert receipt["registry_handoff_error"]
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert requests == ([] if phase == "auth" else [("GET", tag_path), ("POST", "/graphql")])
+    emitted = capsys.readouterr()
+    assert "Traceback" not in emitted.err
+    assert "private-provider-error" not in output.read_text() + emitted.out + emitted.err
+    for directory in tmp_path.glob("handoff.json.*.private"):
+        assert directory.stat().st_mode & 0o777 == 0o700
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in directory.iterdir())
+
+
 def test_cold_image_registry_main_keeps_repeated_output_observations_private(tmp_path, monkeypatch):
     helper = runpy.run_path(str(ROOT / "scripts/lib/cloudbench-image-registry.py"))
     image = "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261007-120000-123"

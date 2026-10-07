@@ -185,8 +185,15 @@ class RegistryHandoff:
         if status != 200:
             raise HandoffError(f"Image metadata HTTP {status}")
         data = json.loads(raw)
-        image_metadata = (data.get("data", {}).get("app") or {}).get("image")
-        if data.get("errors") or not image_metadata:
+        app_data = data.get("data") if isinstance(data, dict) else None
+        app_metadata = app_data.get("app") if isinstance(app_data, dict) else None
+        image_metadata = app_metadata.get("image") if isinstance(app_metadata, dict) else None
+        if (
+            not isinstance(data, dict)
+            or data.get("errors")
+            or not isinstance(image_metadata, dict)
+            or not image_metadata
+        ):
             raise HandoffError("Exact published image metadata is unavailable")
         digest = image_metadata.get("digest")
         if expected and digest != expected:
@@ -285,7 +292,8 @@ def main():
         )
         if result.returncode != 0:
             raise HandoffError("Selected Fly session could not supply registry authentication")
-        token = json.loads(result.stdout).get("token")
+        auth_data = json.loads(result.stdout)
+        token = auth_data.get("token") if isinstance(auth_data, dict) else None
         if not isinstance(token, str) or not token:
             raise HandoffError("Selected Fly session returned no registry authentication")
         private_dir = tempfile.mkdtemp(prefix=target.name + ".", suffix=".private", dir=target.parent)
