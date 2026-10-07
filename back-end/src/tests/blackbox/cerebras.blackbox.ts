@@ -161,9 +161,7 @@ async function run(): Promise<void> {
           const queueExceeded =
             result.status === 429 ||
             result.status === 402 ||
-            /too_many_requests|queue_exceeded|high traffic|payment_required/i.test(
-              result.text
-            );
+            /too_many_requests|queue_exceeded|high traffic|payment_required/i.test(result.text);
           return !result.ok && result.status !== 404 && queueExceeded;
         },
         component: 'cerebras-chat-probe',
@@ -174,8 +172,7 @@ async function run(): Promise<void> {
       404,
       `chat model must not be archived: HTTP ${probe.status} ${probe.text.slice(0, 200)}`
     );
-    const quotaRejected =
-      probe.status === 402 || /payment_required|quota/i.test(probe.text);
+    const quotaRejected = probe.status === 402 || /payment_required|quota/i.test(probe.text);
     if (quotaRejected) {
       // Inventory already proved the configured chat model is listed and the
       // archived GLM id is gone. A 402 here is the shared Cerebras org quota
