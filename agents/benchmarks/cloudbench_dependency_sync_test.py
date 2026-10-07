@@ -10346,6 +10346,9 @@ exit "$reap_status"
         "complete",
         "task-fail",
         "large-catalog",
+        "late-native-autoscaler-padded",
+        "late-native-autoscaler-canonical",
+        "late-native-autoscaler-mismatched-birth",
         "wrong-ordinal",
         "wrong-catalog-binding",
         "missing-seal",
@@ -10498,6 +10501,68 @@ sys.addaudithook(catalog_open)
         )
     )
     native_status = 75 if fault == "native-pending" else 74
+    late_native = fault.startswith("late-native-autoscaler-")
+    native_setup = native_join = ""
+    birth_helper = (
+        f"cloudbench_pid_birth_state() {{ printf '%s\\n' {'live' if fault == 'live-autoscaler' else 'absent'}; }}"
+    )
+    if late_native:
+        (out / "autoscaler.completed-after-child").unlink()
+        birth_helper = _extract_fleet_function(ENV_HELPER_SCRIPT.read_text(), "cloudbench_pid_birth_state() {").replace(
+            "cloudbench_pid_birth_state() {", "fixture_native_birth_state() {", 1
+        )
+        birth_helper += """
+cloudbench_pid_birth_state() {
+  local fixture_state
+  fixture_state="$(fixture_native_birth_state "$@")"
+  printf '%s\\n' "$fixture_state" > "$TEST_ROOT/observed-birth-state"
+  printf '%s\\n' "$fixture_state"
+}
+"""
+        native_setup = f"""
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{_extract_fleet_function(source, "fleet_pid_start_time() {")}
+fixture_late_autoscaler() {{
+  while [ ! -e "$TEST_ROOT/release-autoscaler" ]; do sleep .02; done
+  cp "$FLEET_DIR/closed/benchmark-child.finished" "$FLEET_DIR/closed/autoscaler.completed-after-child"
+}}
+fixture_late_autoscaler & fixture_autoscaler=$!
+# Read a real legacy native birth. On macOS this is the unmodified fleet
+# producer spelling; on Linux it exercises compatibility with legacy records.
+if [ -r /proc/self/stat ]; then
+  fixture_birth="$(ps -p "$fixture_autoscaler" -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+else
+  fixture_birth="$(fleet_pid_start_time "$fixture_autoscaler")"
+fi
+case {fault} in
+  late-native-autoscaler-padded)
+    case "$fixture_birth" in *"  "*) ;; *) fixture_birth="$(printf '%s\\n' "$fixture_birth" | sed 's/ /  /')" ;; esac ;;
+  late-native-autoscaler-canonical)
+    fixture_birth="$(printf '%s\\n' "$fixture_birth" | awk '{{ $1=$1; print }}')" ;;
+  late-native-autoscaler-mismatched-birth) fixture_birth="$fixture_birth wrong-incarnation" ;;
+esac
+printf '%s|%s\\n' "$fixture_autoscaler" "$fixture_birth" > "$FLEET_DIR/closed/autoscaler.pid"
+(
+  while [ ! -s "$TEST_ROOT/observed-birth-state" ]; do sleep .02; done
+  # A false absence must finish its single callback before the delayed
+  # completion producer is released. A correct live observation keeps waiting.
+  if [ "$(cat "$TEST_ROOT/observed-birth-state")" != live ]; then
+    while [ ! -e "$TEST_ROOT/retirement-returned" ]; do sleep .02; done
+  fi
+  touch "$TEST_ROOT/release-autoscaler"
+) & fixture_release=$!
+printf '%s\\n' "$$" "$fixture_autoscaler" "$fixture_release" > "$TEST_ROOT/native-pids.safe.txt"
+fixture_join() {{
+  touch "$TEST_ROOT/retirement-returned" "$TEST_ROOT/release-autoscaler"
+  wait "$fixture_autoscaler"; wait "$fixture_release"
+}}
+trap fixture_join EXIT
+"""
+        native_join = """
+touch "$TEST_ROOT/retirement-returned"
+wait "$fixture_autoscaler"; wait "$fixture_release"
+trap - EXIT
+"""
     script = f"""set -uo pipefail
 FLEET_DIR={shlex.quote(str(fleet))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
@@ -10505,18 +10570,19 @@ FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
 FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
 FLEET_OWNER_TOKEN={owner}; RUN_ID={run_id}
 CLOUDBENCH_FLEET_RUN_TOKEN={token}; FLEET_REGISTRY_PUBLISHED=1; KEEP_CLONES=0
-AUTOSCALER_FINALIZATION_WAIT_SECONDS=0
+AUTOSCALER_FINALIZATION_WAIT_SECONDS={FIXTURE_HOST_GUARD_SECONDS if late_native else 0}
 TEST_ROOT={shlex.quote(str(tmp_path))}
 export CATALOG_READ_RECEIPT="$TEST_ROOT/catalog-read-count.safe.txt"
 python3() {{ PYTHONPATH={shlex.quote(str(catalog_audit))} {shlex.quote(sys.executable)} "$@"; }}
 registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
-cloudbench_pid_birth_state() {{ printf '%s\\n' {"live" if fault == "live-autoscaler" else "absent"}; }}
 registry_machine_details() {{ printf 'stopped cloudbench-%s\\n' "$1"; }}
 fleet_registry_reconcile_mounted_volume() {{ printf 'vol_%s\\n' "$3"; }}
 cloudbench_capture_worker_runtime_evidence() {{ test -f "$1/worker-runtime-evidence/$2/capture/manifest.json"; }}
 reap_machine() {{ printf '%s\\n' "$1" >> "$TEST_ROOT/native-calls"; return {native_status}; }}
 fleet_audit_update_registry_clone() {{ printf '%s\\n' "$2" >> "$TEST_ROOT/terminal-audits"; }}
 {helpers}
+{native_setup}
+{birth_helper}
 if ! fleet_validate_reap_cohort "$FLEET_REGISTRY_DIR" || ! fleet_retirement_index init; then
   case {fault} in duplicate-machine|duplicate-volume) exit 0 ;; *) exit 42 ;; esac
 fi
@@ -10550,11 +10616,45 @@ case {fault} in
 esac
 fleet_native_reap_open || exit 40
 fleet_retire_sealed_primary "$FLEET_DIR/closed"; retirement_status=$?
+{native_join}
 fleet_native_reap_close || exit 41
 exit "$retirement_status"
 """
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    should_retire = fault in {"complete", "task-fail", "large-catalog"}
+    process = subprocess.Popen(
+        ["bash", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS if late_native else 10)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=FIXTURE_DRAIN_SECONDS)
+    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    if late_native:
+        native_pids = [int(pid) for pid in (tmp_path / "native-pids.safe.txt").read_text().splitlines()]
+        for pid in native_pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+        assert (out / "autoscaler.completed-after-child").read_bytes() == (
+            out / "benchmark-child.finished"
+        ).read_bytes()
+    should_retire = fault in {
+        "complete",
+        "task-fail",
+        "large-catalog",
+        "late-native-autoscaler-padded",
+        "late-native-autoscaler-canonical",
+    }
     assert result.returncode == (75 if fault == "native-pending" else 0), result.stderr
     assert record.exists() != should_retire
     assert peer.read_bytes() == peer_original, "an independently running sibling changed"
