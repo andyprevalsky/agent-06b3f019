@@ -1017,7 +1017,13 @@ group; queued/startup rows need the original run timestamp, and genuine evaluate
 PASS/FAIL appears before teardown. Follow actual controller status even if a card
 or observation is stale. Retry transient observations with the original owner;
 do not restart a healthy run or reject microscopic intermediate timings. Stage
-handoffs must remain usable for their consumer. An early primary retirement
+handoffs must remain usable for their consumer. A rejected native start request
+is a warning while the existing current-run guest log and live data-plane proxy
+prove that the configured guest booted; a foreign, dead or unreadable guest still
+fails startup. A finished child without a benchmark result publishes an explicit
+infrastructure error in its original group immediately, without inventing an
+evaluation or agent archive. The existing compact deploy suite covers both
+startup admission and terminal placeholder publication. An early primary retirement
 receipt covers only that exact sealed scope; collector completion alone does
 not prove native release. Keep the original owner running through final native
 audit, and never rewrite PID birth records to force cleanup. Freeze sensible generous stage

@@ -13870,6 +13870,10 @@ for b in benches:
                "world_model_mode": default_mode, "infra_usd": None}
     row.setdefault("world_model_mode", default_mode)
     directory = Path(fleet) / name
+    if (row.get("status") in ("queued", "starting", "running")
+            and (directory / "benchmark-child.finished").is_file()
+            and not (directory / "cloudbench-run.json").is_file()):
+        row["status"] = "error"
     if (directory / "bench-e2e.finished-epoch").exists():
         row["lifecycle_stage"] = "released"
     elif (directory / "guest-shutdown.confirmed").exists() or (directory / "benchmark-child.finished").exists():

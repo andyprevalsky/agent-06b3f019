@@ -5180,6 +5180,129 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index('FLY machine start "$id"')
 
 
+@pytest.mark.parametrize(
+    ("run_stamp", "health", "complete_read", "proxy_survives", "expected_started"),
+    [
+        ("current-owner", 425, True, True, True),
+        ("current-owner", 204, True, True, True),
+        ("foreign-owner", 425, True, True, False),
+        ("current-owner", 410, True, True, False),
+        ("current-owner", 425, False, True, False),
+        ("current-owner", 425, True, False, False),
+    ],
+)
+def test_post_config_start_rejected_ack_requires_current_guest_proof(
+    tmp_path: Path, run_stamp: str, health: int, complete_read: bool,
+    proxy_survives: bool, expected_started: bool,
+) -> None:
+    """A real bounded log read owns admission after native start ACK rejection.
+
+    Native commands return the observed MIGRATING outcome. The configured
+    guest independently serves its current token, a foreign token, a dead
+    lifecycle, or an incomplete response through a real local HTTP boundary.
+    No fixture changes production retry counts, deadlines, or task policy.
+    """
+    requests: list[str] = []
+    body = f"RUNSTAMP-{run_stamp}\n[cloudbench] STEP bootstrap\n".encode()
+    proxy = subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
+
+    class Guest(BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            if self.path == "/driver-health":
+                if not proxy_survives:
+                    proxy.terminate()
+                    proxy.wait(timeout=FIXTURE_DRAIN_SECONDS)
+                self.send_response(health)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            assert self.path.startswith("/bench.log?offset=0&limit=")
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes 0-{len(body) - 1}/{len(body)}")
+            self.send_header("X-Cloudbench-Log-Size", str(len(body)))
+            self.send_header("X-Cloudbench-Log-Generation", "a" * 32)
+            self.send_header("X-Cloudbench-Log-Continuity", "1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body if complete_read else body[:8])
+            self.close_connection = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Guest)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    cloud = CLOUD_SCRIPT.read_text()
+    post_start = cloud[cloud.index("# The update above is explicitly `--skip-start`"):]
+    post_start = post_start.split("\nelse\n# ── 1.", 1)[0]
+    poll = cloud.split('while :; do\n    now="$(date +%s)"', 1)[1]
+    poll = poll.split("    # A later chunk", 1)[0]
+    native_calls = tmp_path / "native-start.calls"
+    script = f"""set -eu
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{_cloudbench_incremental_log_functions()}
+OUT_DIR="$1"
+mid=d89513dc560728
+APP=fixture-app
+CLOUDBENCH_BOOT_LAUNCH=1
+RUN_LOG_TOKEN=current-owner
+POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
+LOCAL_STATUS_PORT="$2"
+STATUS_PROXY_PID="$3"
+SSH_LOG="$OUT_DIR/controller.log"
+BENCH_LOG_CHUNK_FILE="$OUT_DIR/chunk"
+BENCH_LOG_HEADERS_FILE="$OUT_DIR/headers"
+BENCH_LOG_GENERATION_FILE="$OUT_DIR/generation"
+BENCH_LOG_PROGRESS_FILE="$OUT_DIR/progress"
+BENCH_LOG_CHUNKS_PER_POLL=4
+for file in "$SSH_LOG" "$BENCH_LOG_CHUNK_FILE" "$BENCH_LOG_HEADERS_FILE" \\
+    "$BENCH_LOG_GENERATION_FILE" "$BENCH_LOG_PROGRESS_FILE"; do : > "$file"; done
+_with_timeout() {{ shift; "$@"; }}
+flyctl() {{
+    [ "$*" = 'machine start d89513dc560728 -a fixture-app' ] || return 99
+    printf '%s\\n' "$*" >> "$OUT_DIR/native-start.calls"
+    printf 'unable to start machine: current state MIGRATING\\n' >&2
+    return 1
+}}
+# The native fixture completes synchronously; backoff has no causal role here.
+sleep() {{ :; }}
+stage_explicit_codex_auth() {{ return 0; }}
+ensure_status_proxy() {{ kill -0 "$STATUS_PROXY_PID"; }}
+{post_start}
+now="$(date +%s)"
+{poll}
+if [ -f "$POST_CONFIG_START_MARKER" ]; then
+    [ "$(cat "$POST_CONFIG_START_MARKER")" = "$mid" ]
+    printf 'owned-guest-started\\n'
+fi
+"""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script, "owning-post-config", str(tmp_path), str(server.server_port), str(proxy.pid)],
+            text=True, capture_output=True, check=False, timeout=FIXTURE_HOST_GUARD_SECONDS,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        serving.join()
+        if proxy.poll() is None:
+            proxy.terminate()
+        proxy.wait(timeout=FIXTURE_DRAIN_SECONDS)
+    assert native_calls.read_text().splitlines() == [
+        "machine start d89513dc560728 -a fixture-app"
+    ] * 4
+    marker = tmp_path / "post-config-start.accepted"
+    assert marker.is_file() is expected_started, result.stderr
+    if expected_started:
+        assert result.returncode == 0, result.stderr
+        assert "owned-guest-started" in result.stdout
+        assert any(path.startswith("/bench.log?") for path in requests)
+        assert "/driver-health" in requests
+    assert not list(tmp_path.glob("post-config-start.accepted.tmp.*"))
+
+
 def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = fleet_source_text()
