@@ -941,3 +941,124 @@ RED/GREEN receipts are retained under
 `.context/acceptance/proof90-rejection-replay-rca/`. The prepared campaign remained
 unlaunched and earns zero credit. The standard gate and fresh fleet proof remain
 required.
+
+### 2026-10-07 recurrence: payment and authentication waits missed explicit PAUSE
+
+Original Control6 `20261007-155532-35109`, clean source
+`5051c0594905da7f1170fd3d20c9d17cca160500`, retained five
+`missing single-root tree` query-verifier warnings. Each original owned snapshot
+had a finished attached browser recording, but one exact browser task lacked
+`task_complete`; the original durable archive wait reported `archive: TimeoutError`.
+The authentication task also contained another browser that closed normally.
+All six recordings across these five snapshots were present. The optional
+`logs.tree` warning alone does not establish lost model queries: the original
+correlator independently finds 202 completed LIVE queries on their explicit roots.
+The missing task terminal is a distinct, material durable publication gap.
+
+Four payment managers reached the initial approval wait and then received their
+exact root's PAUSE: Alchemy 16:20:36.953 to 16:20:58.064 UTC, IMAX 16:27:28.457
+to 16:27:39.707, OpenTable 16:25:07.001 to 16:25:23.982, and Toast
+16:21:49.917 to 16:22:14.403. The activity had deliberately deferred its
+terminal for a resume and had persisted its recording. Unlike the repaired
+write-approval branch above, the payment manager called the direct approval
+helper without observing PAUSE. It stayed parked until cleanup deleted the root;
+no approval-granted or manager terminal followed in the retained events.
+
+The authentication manager entered its own paused assistance wait at
+16:19:49.444 UTC. The same root later received explicit PAUSE at 16:24:35.752
+and 16:26:32.180. Its predicate only watched the owned response or a transition
+to unpaused. Because authentication had already set `is_paused=True`, these
+explicit signals made no observable change to that predicate. The final
+snapshot remained paused with the recording attached and no same-task terminal.
+This is separate from raw workflow cancellation and from an unfinished recording.
+
+Archive searches for `awaiting_payment_card_approval PAUSE recording task_complete`
+and `awaiting_auth_assistance explicit pause archive terminal` found this case
+and the September 6/11 manager abandonment cases. This recurrence is at the
+initial payment/authentication wait, before the already covered rejected or
+exhausted payment gates. The original activity's pending-resume behavior and
+strict recording-plus-terminal consumer contract are correct.
+
+The owning reproduction extends the existing real manager, direct approval
+helper, bound `AgentWorkflow.pause`, HTTP-persisted message/recording and actual
+archive refresh fixture. Only browser execution, scheduling and external I/O
+are substituted. The exact payment test fails on unchanged production source
+because the manager remains parked after PAUSE (6.38 seconds), then the identical
+command passes with the repair (7.54 seconds). The unchanged authentication test
+also fails at that owning boundary (45.26 seconds under host load), then passes
+with the repair (2.68 seconds). Initial import/fixture setup failures are retained
+separately and are not counted as causal RED evidence.
+
+The payment branch now uses the existing pause-aware browser approval helper.
+An explicit pause closes only its interrupted approval chip and emits the
+existing task-scoped abandoned-resume terminal. The same post-grant guard as
+the write branch prevents a pause during persisted `payment_card_ready` from
+starting another activity. Actual decisions and minted cards are preserved.
+
+Authentication now distinguishes its own paused wait from explicit PAUSE signals
+using a workflow-local sequence. The manager captures the sequence before its
+first suspension and only a later explicit signal ends the pending resume.
+The sequence travels in the existing continuation runtime; a parked auth resume
+also carries its original sequence. Thus a pause between parking and continuation
+cannot disappear when the manager re-enters. Owned authentication replies and
+ordinary resume still reuse the same task/session. Raw cancellation and generation
+handoff retain their existing behavior. The existing abandoned-resume event is
+excluded from model context and does not invent authentication or task success.
+
+Four permanent tests are registered in the ordinary browser blackbox runner:
+payment and auth pause-to-archive reproductions plus their successful-resume,
+foreign identity, simultaneous response, persistence, cancellation and handoff
+controls. The auth handoff control executes actual park, continuation serialization,
+restoration and manager re-entry, both with and without an intervening explicit
+pause. Existing production deadlines, recording readiness, benchmark tasks,
+prompts, models and evaluators remain unchanged. There is no provider/model call,
+fleet scan, new timer or historical transcript repair.
+
+Original Control6 remains failed and earns zero acceptance credit. Its original
+controller exited 1 with 49 sealed host artifacts and one host ENOSPC capture
+error; documented recovery recaptured that original guest artifact without a
+task rerun. All 50 original TaskResult grade acknowledgements match their exact
+owner packets and precede original child finish and guest shutdown. Final supported
+query diagnostics cover 45 artifacts and 841 completed correlated queries, with
+historical overlap lower bound 35; the five tree-shape warnings remain separately
+qualified. These are sealed completed-query diagnostics, not live concurrency or
+all-50 latency proof. No visual browser/pixel proof is available.
+
+Independent retained resource evidence confirms all 50 actual cleanup scopes,
+including the account task's nested `logs.post` root, sealed/deleted with zero
+cleanup errors. The 34 exact owned browser allocations have 32 absent HTTP404
+receipts and two successful canonical Steel release HTTP200 receipts. Normal
+native teardown and exact orphan-volume retirement completed at
+1791391681.430532, 3854.431 seconds after the original first image invocation.
+Resource release does not restore the five missing durable task terminals or
+recover the original one-hour acceptance failure.
+
+Private original joins, immutable RED/GREEN logs and source/test bindings are
+under `.context/control6-independent-observer-20261007/` in the owned diagnostic
+checkout and `.context/browser-payment-pause-rca-20261007/` in the isolated repair
+checkout. The independent resource receipt SHA256 is
+`dfc381951fe9e13b7f98f3945373b01bcb274f70bb6bc1fbbd0a7b83257b6194`;
+the final original/recovered query and publication join is
+`8b0847ac17ec50ad811e829af9241f8f5ac1acf0b0a647ebdf1e4770c2a52af8`.
+The canonical deployment gate and fresh unchanged CLI fleet outcome remain
+required; offline producer GREEN does not count toward the five consecutive
+50-task LIVE proofs.
+
+Final qualification used the identical frozen fixture on baseline
+`8b895022f541ed6481711168cd0961f8b0778396`: both payment and authentication
+checks failed because real PAUSE left the manager parked (2 failed, 3.87 seconds).
+The final repaired owning selection passed eight checks in 2.75 seconds, and two
+existing continuation controls passed in 1.63 seconds. Independent review passed
+three real manager/archive checks in 1.74 seconds. All 666 existing test bodies
+are unchanged; the four new checks are registered in the ordinary domain runner.
+Final syntax and same-path baseline/current lint checks report zero new diagnostics.
+
+The final replay-surface generation is `69be3fc881f1` across 273 files, compared
+with baseline `1ea6b130bacf`; both changed production modules are included. The
+existing deployment policy selects a new versioned queue for this changed hash,
+keeps old workers on their old histories, and moves cooperative handoffs through
+`continue_as_new`. This binds compatibility to the required generation cutover;
+no replay of old histories on the changed code was executed or claimed. Final
+source, unchanged-fixture RED/GREEN, registration and generation bindings are
+sealed in `final-qualified-handoff.safe.json` in the private repair directory.
+Canonical deployment and a fresh normal CLI LIVE50 outcome remain required.

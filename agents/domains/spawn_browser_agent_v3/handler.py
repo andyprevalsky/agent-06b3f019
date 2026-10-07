@@ -10645,6 +10645,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         # (continue_as_new). Its chip is still open; resume from the parked
         # state instead of starting a new browser task.
         resume_hint = take_tool_resume(workflow_instance, tool_call_id)
+        auth_pause_sequence = (resume_hint or {}).get(
+            "auth_pause_signal_sequence", getattr(workflow_instance, "_pause_signal_sequence", 0)
+        )
 
         logger.info(
             "Browser agent starting (v3)",
@@ -10882,10 +10885,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         url=result.get("current_url"),
                     )
 
-                    from tools.request_user_approval import (
-                        UserRejectedError,
-                        request_user_approval_direct,
-                    )
+                    from tools.request_user_approval import UserRejectedError
 
                     try:
                         approval_resume, parked_approval = parked_approval, None
@@ -11013,10 +11013,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_user_approval import (
-                        request_user_approval_direct,
-                        request_user_attention_direct,
-                    )
+                    from tools.request_user_approval import request_user_attention_direct
 
                     logger.info(
                         "Browser payment approval started",
@@ -11069,7 +11066,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # approval. Reuse still applies at mint; this only restores the
                     # approval UX / benchmark contract.
                     approval_resume, parked_approval = parked_approval, None
-                    approval_response = await request_user_approval_direct(
+                    approval_response = await _request_browser_write_approval_until_paused(
                         workflow_instance,
                         question=build_payment_question(payment_payload),
                         metadata={
@@ -11086,6 +11083,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         park=park_browser_approval("payment_approval"),
                         resume_request=approval_resume,
                     )
+                    if approval_response is None:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting payment approval.",
+                        )
+                        return
                     logger.info(
                         "Browser payment approval granted",
                         agent_id=workflow_instance.agent_id,
@@ -11547,6 +11550,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         },
                     )
+                    if workflow_instance.is_paused:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused before resuming the approved payment.",
+                        )
+                        return
 
                     continue
 
@@ -11601,6 +11610,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         return
 
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting authentication assistance.",
+                        )
+                        return
                     workflow_instance.is_paused = True
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
@@ -11610,6 +11625,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             lambda request_id=request_id: (
                                 request_id in getattr(workflow_instance, "_signal_responses", {})
                                 or not workflow_instance.is_paused
+                                or getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence
                             ),
                             workflow_instance,
                             workflow_mod=workflow,
@@ -11622,9 +11638,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "auth_assistance",
                             _payment_resume_fields(write_lock_resume_state),
                             parked_result=result,
+                            auth_pause_signal_sequence=auth_pause_sequence,
                         ):
                             raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
                         raise
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused while awaiting authentication assistance.",
+                        )
+                        return
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         workflow_instance._signal_responses.pop(request_id, None)
                         workflow_instance.is_paused = False
@@ -11671,6 +11694,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         },
                     )
+                    if getattr(workflow_instance, "_pause_signal_sequence", 0) != auth_pause_sequence:
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id,
+                            "Browser paused before resuming authentication assistance.",
+                        )
+                        return
 
                     continue
 

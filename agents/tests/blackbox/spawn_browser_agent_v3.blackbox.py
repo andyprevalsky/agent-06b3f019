@@ -22627,9 +22627,12 @@ async def test_manager_terminal_scope_and_pending_resumes():
 async def _drive_browser_write_pause_archive_boundary(
     *,
     pause: bool,
+    payment=False,
+    auth=False,
     concurrent_approval=False,
     cancel=False,
     handoff=False,
+    parked_handoff=False,
     pause_on_grant=False,
     pause_on_open=False,
     reply_phase=None,
@@ -22641,6 +22644,7 @@ async def _drive_browser_write_pause_archive_boundary(
     from domains.spawn_browser_agent_v3 import handler as browser
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
     from helpers.messages import post_agent_message
+    from helpers.llm import convert_context_to_messages
     from helpers.generation_handoff import GenerationHandoffRequested
     from domains.request_user_approval.config import REJECTION_SENTINEL
     from tools.base import MessageStatus
@@ -22666,6 +22670,11 @@ async def _drive_browser_write_pause_archive_boundary(
         _track_usage=AsyncMock(),
     )
     wf._handle_tool_event = AgentWorkflow._handle_tool_event.__get__(wf)
+    if parked_handoff:
+        wf._tool_parking_enabled = True
+        wf._active_tool_calls = {tool: ("spawn_browser_agent", {"goal": "Fixture write"})}
+        wf._pending_tool_resumes = []
+        wf._park_pending_tool = AgentWorkflow._park_pending_tool.__get__(wf)
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture.invalid", api_key="fixture-key"))
     real_client = httpx.AsyncClient
 
@@ -22690,6 +22699,12 @@ async def _drive_browser_write_pause_archive_boundary(
 
     async def execute_activity(function, *, args, **_kwargs):
         nonlocal reply_blocked
+        if function == "lookup_purchase_activity":
+            assert payment
+            return {"found": False, "reusable": False, "purchase": None}
+        if function == "mint_purchase_card_activity":
+            assert payment and not wf.is_paused, "paused payment minted a card"
+            return {"cardId": "fixture-card", "last4": "4242"}
         if function is post_agent_message:
             expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
             if (
@@ -22700,7 +22715,9 @@ async def _drive_browser_write_pause_archive_boundary(
                 reply_blocked = True
                 reply_pending.set()
                 await asyncio.Event().wait()
-            if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
+            if pause_on_grant and (args[3] or {}).get("action_type") == (
+                "payment_card_ready" if payment else "write_lock_granted"
+            ):
                 await AgentWorkflow.pause(wf)
             result = await function(*args)
             if (
@@ -22748,13 +22765,28 @@ async def _drive_browser_write_pause_archive_boundary(
             async def result():
                 if len(starts) == 1:
                     return {
-                        "status": "awaiting_write_approval",
+                        "status": (
+                            "awaiting_auth_assistance" if auth else
+                            "awaiting_payment_card_approval" if payment else
+                            "awaiting_write_approval"
+                        ),
+                        "request_id": "owned-approval",
                         "task_id": task_id,
                         "session_id": "owned-session",
                         "question": "Approve fixture write?",
                         "approval_type": "write",
                         "current_url": "https://fixture.invalid/",
                         "write_lock_approvals": {},
+                        "payment_request": {
+                            "merchant": "Fixture",
+                            "line_items": [{
+                                "name": "Fixture", "product_url": "https://fixture.invalid/item",
+                                "rating": "4.7 stars", "review_count": "84 reviews",
+                                "quantity": 1, "line_total_cents": 100,
+                            }],
+                            "subtotal_cents": 100,
+                            "total_cents": 100,
+                        },
                     }
                 return {
                     "status": "completed",
@@ -22851,24 +22883,63 @@ async def _drive_browser_write_pause_archive_boundary(
                     row for row in rows
                     if row.get("metadata", {}).get("action_type") == "task_complete"
                 ]
+                if parked_handoff:
+                    assert auth and handoff and not terminals
+                    assert len(wf._pending_tool_resumes) == 1
+                    if pause:
+                        await AgentWorkflow.pause(wf)
+                    carrier = AgentWorkflow()
+                    carrier.max_iterations, carrier.context_gates = None, {}
+                    carrier.is_paused = wf.is_paused
+                    carrier._pause_signal_sequence = getattr(wf, "_pause_signal_sequence", 0)
+                    carrier._pending_tool_resumes = wf._pending_tool_resumes
+                    state = carrier._continuation_resume_state(copy.deepcopy(wf.context))
+                    restored = AgentWorkflow()
+                    restored._restore_deployment_state(state)
+                    assert restored._pause_signal_sequence == (1 if pause else 0)
+                    resume = restored._pending_tool_resumes[0]["resume"]
+                    assert resume["auth_pause_signal_sequence"] == 0
+                    restored.user_id, restored.agent_id = wf.user_id, root
+                    restored._tool_resume_hints = {tool: resume}
+                    restored._update_tree_state = AsyncMock()
+                    restored._get_pending_child_workflow_ids = lambda: []
+                    restored._track_usage = AsyncMock()
+                    restored._check_generation_handoff = AsyncMock(return_value=None)
+                    wf = restored
+                    if not pause:
+                        wf._signal_responses["owned-approval"] = "authenticated"
+                    owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
+                    await asyncio.wait_for(asyncio.shield(owned), 10)
+                    assert len(starts) == (1 if pause else 2)
+                    terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
+                    assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+                    if pause:
+                        assert terminals[0]["metadata"]["excludeFromModel"] is True
+                        assert all(
+                            terminals[0]["message"] not in str(message)
+                            for message in convert_context_to_messages(rows, include_assistant=True)
+                        )
+                    await archive()
+                    return
                 if cancel:
                     assert not terminals, "raw cancellation fabricated a browser terminal"
-                    closed = next(
-                        row["metadata"]
-                        for row in rows
-                        if row.get("metadata", {}).get("title") == "Approval interrupted"
-                    )
-                    opened = next(
-                        row["metadata"]
-                        for row in rows
-                        if row.get("metadata", {}).get("toolName") == "request_user_approval"
-                    )
-                    assert closed == {
-                        **opened,
-                        "title": "Approval interrupted",
-                        "toolStatus": "FINISHED",
-                        "excludeFromModel": True,
-                    }
+                    if not auth:
+                        closed = next(
+                            row["metadata"]
+                            for row in rows
+                            if row.get("metadata", {}).get("title") == "Approval interrupted"
+                        )
+                        opened = next(
+                            row["metadata"]
+                            for row in rows
+                            if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                        )
+                        assert closed == {
+                            **opened,
+                            "title": "Approval interrupted",
+                            "toolStatus": "FINISHED",
+                            "excludeFromModel": True,
+                        }
                 else:
                     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
@@ -22886,7 +22957,14 @@ async def _drive_browser_write_pause_archive_boundary(
                 assert "owned-approval" not in wf._signal_responses, "specific decision was not consumed"
             if pause:
                 await AgentWorkflow.pause(wf)
-                wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
+                if auth:
+                    assert wf._update_tree_state.await_count == 2
+                    assert all(
+                        call.kwargs == {"status": "PAUSED"}
+                        for call in wf._update_tree_state.await_args_list
+                    )
+                else:
+                    wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
                 if concurrent_approval:
                     wf._signal_responses["owned-approval"] = "approved"
                 changed.set()
@@ -22900,8 +22978,14 @@ async def _drive_browser_write_pause_archive_boundary(
             assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+            if pause or pause_on_grant:
+                assert terminals[0]["metadata"]["excludeFromModel"] is True
+                assert all(
+                    terminals[0]["message"] not in str(message)
+                    for message in convert_context_to_messages(rows, include_assistant=True)
+                )
             assert len(starts) == (1 if pause or pause_on_grant else 2)
-            if pause and not concurrent_approval and not reply_phase:
+            if pause and not concurrent_approval and not reply_phase and not auth:
                 assert any(row.get("metadata", {}).get("title") == "Approval interrupted" for row in rows), (
                     "PAUSE after durable approval opening left its exact chip IN_PROGRESS"
                 )
@@ -23021,6 +23105,38 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
         )
         assert terminals[0].metadata["code"] == expected_code
         assert events[-1] is terminals[0]
+
+
+async def test_manager_payment_pause_seals_persisted_browser_for_archive():
+    """A real PAUSE must finish the pending payment browser before archival."""
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
+
+
+async def test_manager_payment_pause_preserves_approval_and_interruptions():
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, pause_on_open=True)
+    for phase in ("approved", "rejection-poll", "rejected", "rejected-persisted"):
+        await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, reply_phase=phase)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, handoff=True)
+
+
+async def test_manager_explicit_pause_seals_auth_browser_for_archive():
+    """An explicit PAUSE after auth's own pause must end that exact resume."""
+    await _drive_browser_write_pause_archive_boundary(pause=True, auth=True)
+
+
+async def test_manager_auth_pause_preserves_assistance_and_handoff():
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, auth=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True, handoff=True)
+    for pause in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=pause, auth=True, handoff=True, parked_handoff=True
+        )
 
 
 # ========================================
@@ -26056,6 +26172,22 @@ async def run_all_tests():
     await r.record_async(
         "manager_write_pause_seals_persisted_browser_for_archive",
         test_manager_write_pause_seals_persisted_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_payment_pause_seals_persisted_browser_for_archive",
+        test_manager_payment_pause_seals_persisted_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_payment_pause_preserves_approval_and_interruptions",
+        test_manager_payment_pause_preserves_approval_and_interruptions,
+    )
+    await r.record_async(
+        "manager_explicit_pause_seals_auth_browser_for_archive",
+        test_manager_explicit_pause_seals_auth_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_auth_pause_preserves_assistance_and_handoff",
+        test_manager_auth_pause_preserves_assistance_and_handoff,
     )
     await r.record_async(
         "manager_abandoned_payment_resume_terminal",
