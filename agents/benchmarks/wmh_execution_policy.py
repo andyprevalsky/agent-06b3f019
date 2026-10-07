@@ -1,7 +1,7 @@
 """Immutable Rose execution overlays, separate from native artifact identity.
 
 This module is shared by Python 3.11 and 3.12 and imports only the standard
-library. Changing any text requires a new version and snapshot approval.
+library. Changing any text requires a new immutable registered version.
 """
 
 from __future__ import annotations
@@ -31,6 +31,18 @@ Do not guarantee a form or successful action at every site. A plausible world ma
 A simple virtual name/email/message inquiry may be completed with established identities and a truthful message when the delegated goal authorizes it. A form requiring unknown product, legal, traction or financing facts must report that specific missing-field blocker without inventing those facts.
 
 Only completed virtual effects produce matching submission/send receipts and state changes. Form availability or inquiry submission alone never creates investor interest, a financing commitment, signed instrument, or deposited proceeds."""
+PUBLIC_AFFORDANCES_V2_POLICY = "rose-virtual-public-affordances-v2"
+PUBLIC_AFFORDANCES_V2_VERSION = "2"
+PUBLIC_AFFORDANCES_V2_SHA256 = "5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4"
+PUBLIC_AFFORDANCES_V2_EFFECTIVE_SYSTEM_SHA256 = "f344676e946d2b2fe435dcb81df353cd94aee8ec87394b39d69ca5ff9b2caac9"
+PUBLIC_AFFORDANCES_V2_TEXT = (
+    PUBLIC_AFFORDANCES_TEXT
+    + """
+
+Access to a private service, or a request to search it, does not establish its prior contents. Unless concretely established in this world's state or history, do not invent pre-existing private correspondence, introductions, applications, investor interest, private documents, citations or record IDs, or unknown company legal, product, traction, ownership, financial or financing facts. Return a bounded missing-record or unknown-fact result while preserving the stated connectivity. Retrieved real demonstrations are examples from other worlds; their private facts do not become facts of this world.
+
+An authorized new virtual send, submission or document may use established facts and clearly marked blanks. Plausible replies, introductions or investor decisions causally following a new authorized action may be simulated, with correct timing, matching receipts and consistent state changes. Do not backdate new effects into private history or imply they occurred without the initiating action. A public route or inquiry alone establishes neither investor interest, a financing commitment nor settled proceeds."""
+)
 
 
 def text_sha256(text: str) -> str:
@@ -80,6 +92,25 @@ _POLICIES = {
         PUBLIC_AFFORDANCES_TEXT,
         "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
     ),
+    PUBLIC_AFFORDANCES_V2_POLICY: ExecutionPolicy(
+        PUBLIC_AFFORDANCES_V2_POLICY,
+        PUBLIC_AFFORDANCES_V2_VERSION,
+        PUBLIC_AFFORDANCES_V2_TEXT,
+        PUBLIC_AFFORDANCES_V2_EFFECTIVE_SYSTEM_SHA256,
+    ),
+}
+_IMMUTABLE_IDENTITIES = {
+    DEFAULT_EXECUTION_POLICY: ("1", text_sha256(""), BASE_SYSTEM_SHA256),
+    PUBLIC_AFFORDANCES_POLICY: (
+        PUBLIC_AFFORDANCES_VERSION,
+        PUBLIC_AFFORDANCES_SHA256,
+        "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+    ),
+    PUBLIC_AFFORDANCES_V2_POLICY: (
+        PUBLIC_AFFORDANCES_V2_VERSION,
+        PUBLIC_AFFORDANCES_V2_SHA256,
+        PUBLIC_AFFORDANCES_V2_EFFECTIVE_SYSTEM_SHA256,
+    ),
 }
 
 
@@ -87,8 +118,16 @@ def execution_policy(name: str = DEFAULT_EXECUTION_POLICY) -> ExecutionPolicy:
     if name not in _POLICIES:
         raise ValueError("Unknown WMH execution policy; choose an immutable registered version")
     policy = _POLICIES[name]
-    if policy.name == PUBLIC_AFFORDANCES_POLICY and text_sha256(policy.text) != PUBLIC_AFFORDANCES_SHA256:
-        raise ValueError("WMH execution policy text changed without a new version")
+    if (
+        policy.name != name
+        or (
+            policy.version,
+            text_sha256(policy.text),
+            policy.effective_system_sha256,
+        )
+        != _IMMUTABLE_IDENTITIES[name]
+    ):
+        raise ValueError("WMH execution policy changed without a new version")
     return policy
 
 
@@ -169,7 +208,8 @@ def cache_policy_identity(messages: list[dict]) -> dict | None:
     if not messages or messages[0].get("role") != "system":
         return None
     digest = text_sha256(messages[0].get("content", ""))
-    for policy in _POLICIES.values():
+    for name in _POLICIES:
+        policy = execution_policy(name)
         if digest == policy.effective_system_sha256:
             return policy.metadata()
     return None

@@ -31,12 +31,24 @@ export function testRegisteredWmhExecutionPolicy(): void {
       assert.ok(match, `missing canonical Python metadata: ${name}`);
       return match[1];
     };
-    const policy = constant('PUBLIC_AFFORDANCES_POLICY');
-    const version = constant('PUBLIC_AFFORDANCES_VERSION');
-    const digest = constant('PUBLIC_AFFORDANCES_SHA256');
-    const text = registry.match(/PUBLIC_AFFORDANCES_TEXT = "{3}([\s\S]*?)"{3}/);
-    assert.ok(text, 'canonical policy text must remain available');
-    assert.strictEqual(createHash('sha256').update(text[1], 'utf8').digest('hex'), digest);
+    const baseText = registry.match(/PUBLIC_AFFORDANCES_TEXT = "{3}([\s\S]*?)"{3}/);
+    assert.ok(baseText, 'canonical v1 text must remain available');
+    const policies = ['PUBLIC_AFFORDANCES', 'PUBLIC_AFFORDANCES_V2'].map((prefix, i) => {
+      const policy = constant(`${prefix}_POLICY`);
+      const version = constant(`${prefix}_VERSION`);
+      const digest = constant(`${prefix}_SHA256`);
+      const text = registry.match(
+        new RegExp(
+          `${prefix}_TEXT = \\(?\\s*(?:(PUBLIC_AFFORDANCES_TEXT)\\s*\\+\\s*)?"{3}([\\s\\S]*?)"{3}`
+        )
+      );
+      assert.ok(text, 'canonical policy text must remain available');
+      const policyText = (text[1] ? baseText[1] : '') + text[2];
+      assert.strictEqual(createHash('sha256').update(policyText, 'utf8').digest('hex'), digest);
+      assert.strictEqual(policy, `rose-virtual-public-affordances-v${i + 1}`);
+      assert.strictEqual(version, String(i + 1));
+      return { policy, version, digest };
+    });
 
     process.env.BENCHMARK_WORLD_MODEL_MODE = 'real';
     process.env.WMH_MODEL_NAME = 'rose archive/v2';
@@ -49,10 +61,13 @@ export function testRegisteredWmhExecutionPolicy(): void {
       codexKeyFromHash('root-goal-hash', { messages: [] }),
     ];
     const real = keySet();
-    process.env.WMH_EXECUTION_POLICY = policy;
-    assert.deepStrictEqual(keySet(), real);
-    process.env.BENCHMARK_WORLD_MODEL_MODE = 'shadow';
-    assert.deepStrictEqual(keySet(), real);
+    for (const mode of ['real', 'shadow']) {
+      process.env.BENCHMARK_WORLD_MODEL_MODE = mode;
+      for (const { policy } of policies) {
+        process.env.WMH_EXECUTION_POLICY = policy;
+        assert.deepStrictEqual(keySet(), real);
+      }
+    }
 
     process.env.BENCHMARK_WORLD_MODEL_MODE = 'simulate';
     delete process.env.WMH_EXECUTION_POLICY;
@@ -61,16 +76,32 @@ export function testRegisteredWmhExecutionPolicy(): void {
     process.env.WMH_EXECUTION_POLICY = 'upstream';
     assert.deepStrictEqual(keySet(), baseline);
     const stale = new Map(baseline.map((key) => [key, 'baseline observation']));
-    process.env.WMH_EXECUTION_POLICY = policy;
-    assert.strictEqual(
-      worldModelCacheScope(),
-      `sim.rose-archive-v2.policy.${policy}.${version}.${digest.slice(0, 16)}:`
-    );
-    const activated = keySet();
-    assert.deepStrictEqual(keySet(), activated);
-    assert.ok(activated.every((key, i) => key !== baseline[i] && !stale.has(key)));
-    process.env.WMH_EXECUTION_POLICY = 'unregistered';
-    assert.throws(keySet, /Unknown WMH execution policy/);
+    const choices = [
+      undefined,
+      'auto',
+      'none',
+      'required',
+      { type: 'function', function: { name: 'set_plan' } },
+    ];
+    for (const { policy, version, digest } of policies) {
+      process.env.WMH_EXECUTION_POLICY = policy;
+      assert.strictEqual(
+        worldModelCacheScope(),
+        `sim.rose-archive-v2.policy.${policy}.${version}.${digest.slice(0, 16)}:`
+      );
+      const activated = keySet();
+      assert.deepStrictEqual(keySet(), activated);
+      assert.ok(activated.every((key, i) => key !== baseline[i] && !stale.has(key)));
+      for (const key of activated) stale.set(key, policy);
+      const choiceKeys = choices.map((tool_choice) =>
+        llmKey('goal', 'site', { messages: [], tool_choice })
+      );
+      assert.strictEqual(new Set(choiceKeys).size, choices.length);
+    }
+    for (const policy of ['unregistered', 'rose-virtual-public-affordances-v3', '__proto__']) {
+      process.env.WMH_EXECUTION_POLICY = policy;
+      assert.throws(keySet, /Unknown WMH execution policy/);
+    }
   } finally {
     keys.forEach((key, i) => {
       if (saved[i] === undefined) delete process.env[key];

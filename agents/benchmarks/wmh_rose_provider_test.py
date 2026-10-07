@@ -140,11 +140,17 @@ def test_native_cache_identity_preserves_correlated_call_ids():
     assert key(first, 10) != key(second, 10), "Native cached results are correlated to exact call IDs"
     assert key(first, 10) != key(first, 10, state_clock=31)
     assert key(first, 10) != key(first, 10, history_clock=41)
-    from benchmarks.wmh_execution_policy import PUBLIC_AFFORDANCES_TEXT
+    from benchmarks.wmh_execution_policy import PUBLIC_AFFORDANCES_TEXT, PUBLIC_AFFORDANCES_V2_TEXT
 
     assert key(first, 10) != key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT)
     assert key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT) == key(
         first, 20, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT
+    )
+    assert key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_TEXT) != key(
+        first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_V2_TEXT
+    )
+    assert key(first, 10, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_V2_TEXT) == key(
+        first, 20, system="Native protocol" + "\n\n" + PUBLIC_AFFORDANCES_V2_TEXT
     )
 
 
@@ -1321,9 +1327,16 @@ def test_provider_defaults_to_global_accumulator():
     assert provider._usage is wmh_rose_provider.GLOBAL_ROSE_USAGE
 
 
-@pytest.mark.parametrize("served_policy", ["upstream", "rose-virtual-public-affordances-v1"])
-def test_native_conformance_rejects_unexpected_execution_policy_before_inference(tmp_path, served_policy):
-    from benchmarks.wmh_execution_policy import bind_execution_suite, execution_identity
+@pytest.mark.parametrize(
+    "served_policy", ["upstream", "rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"]
+)
+@pytest.mark.parametrize("expected", ["rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"])
+def test_native_conformance_rejects_unexpected_execution_policy_before_inference(tmp_path, served_policy, expected):
+    import io
+    from contextlib import redirect_stdout
+
+    from benchmarks.run_world_model_conformance import main
+    from benchmarks.wmh_execution_policy import execution_identity
     from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
 
     class Client:
@@ -1368,15 +1381,22 @@ def test_native_conformance_rejects_unexpected_execution_policy_before_inference
         )
     )
     base_bytes = path.read_bytes()
-    expected = "rose-virtual-public-affordances-v1"
+    unbound_client = Client()
     with pytest.raises(ValueError, match="execution-bound"):
         asyncio.run(
             evaluate_world_model_conformance_suite(
-                path, world_model_name="test", client=Client(), execution_policy=expected
+                path, world_model_name="test", client=unbound_client, execution_policy=expected
             )
         )
+    assert unbound_client.predictions == 0
     bound_path = tmp_path / "bound.json"
-    bound = bind_execution_suite(path, bound_path, expected)
+    cli_output = io.StringIO()
+    with redirect_stdout(cli_output):
+        assert (
+            main(["--suite", str(path), "--bind-execution-suite", str(bound_path), "--execution-policy", expected]) == 0
+        )
+    bound = json.loads(bound_path.read_bytes())
+    assert json.loads(cli_output.getvalue())["native_execution_identity"] == bound["native_execution_identity"]
     assert path.read_bytes() == base_bytes
     assert bound["examples"] == json.loads(base_bytes)["examples"]
     path = bound_path
@@ -1400,7 +1420,8 @@ def test_native_conformance_rejects_unexpected_execution_policy_before_inference
 
 
 @pytest.mark.parametrize("descriptor_kind", ["missing", "altered", "wrong_system"])
-def test_provider_bridge_rejects_unbound_execution_before_provider_dispatch(descriptor_kind):
+@pytest.mark.parametrize("policy_name", ["rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"])
+def test_provider_bridge_rejects_unbound_execution_before_provider_dispatch(descriptor_kind, policy_name):
     import httpx
 
     from benchmarks.experiential_bridge import build_provider_bridge
@@ -1414,13 +1435,13 @@ def test_provider_bridge_rejects_unbound_execution_before_provider_dispatch(desc
             raise AssertionError("Invalid policy must not dispatch")
 
     async def run():
-        identity = execution_identity("rose-virtual-public-affordances-v1", "artifact-a", "a" * 64)
+        identity = execution_identity(policy_name, "artifact-a", "a" * 64)
         if descriptor_kind == "missing":
             identity = None
         elif descriptor_kind == "altered":
             identity["policy_version"] = "unapproved"
         provider = Provider()
-        app = build_provider_bridge(provider, "fixture-token", execution_policy="rose-virtual-public-affordances-v1")
+        app = build_provider_bridge(provider, "fixture-token", execution_policy=policy_name)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
             response = await client.post(
                 "/complete",

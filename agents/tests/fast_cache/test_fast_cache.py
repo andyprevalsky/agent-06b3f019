@@ -4469,18 +4469,23 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
     baseline_global = normalize.build_global_key("lookup", "same-request")
     assert baseline_scope == "sim.rose-archive:"
     old_cache = {baseline: "baseline no-route result", baseline_global: "baseline route lookup"}
-    monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v1")
-    scope = normalize.world_model_cache_scope()
-    candidate = normalize.content_key(
-        "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"role": "user", "content": "same goal"}]
-    )
-    candidate_global = normalize.build_global_key("lookup", "same-request")
-    assert scope != baseline_scope and ".rose-virtual-public-affordances-v1.1.49d9d1f0430a5d8e:" in scope
-    assert candidate not in old_cache and candidate_global not in old_cache
-    assert candidate == normalize.content_key(
-        "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"content": "same goal", "role": "user"}]
-    )
-    assert candidate_global == normalize.build_global_key("lookup", "same-request")
+    for policy, version, digest in (
+        ("rose-virtual-public-affordances-v1", "1", "49d9d1f0430a5d8e"),
+        ("rose-virtual-public-affordances-v2", "2", "5dd9924e9a1ff4c5"),
+    ):
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
+        scope = normalize.world_model_cache_scope()
+        candidate = normalize.content_key(
+            "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"role": "user", "content": "same goal"}]
+        )
+        candidate_global = normalize.build_global_key("lookup", "same-request")
+        assert scope == f"sim.rose-archive.policy.{policy}.{version}.{digest}:"
+        assert candidate not in old_cache and candidate_global not in old_cache
+        assert candidate == normalize.content_key(
+            "DEMO FIXTURE ONLY root goal", "root_gp_call", [{"content": "same goal", "role": "user"}]
+        )
+        assert candidate_global == normalize.build_global_key("lookup", "same-request")
+        old_cache.update({candidate: policy, candidate_global: policy})
     monkeypatch.setenv("WMH_EXECUTION_POLICY", "unapproved")
     with pytest.raises(ValueError, match="Unknown WMH execution policy"):
         normalize.world_model_cache_scope()
@@ -4489,3 +4494,63 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
     assert normalize.world_model_cache_scope() == ""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
     assert normalize.world_model_cache_scope() == ""
+
+
+@pytest.mark.parametrize("base_step", [None, 7], ids=["content", "position"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [None, "auto", {"type": "function", "function": {"name": "set_plan"}}],
+    ids=["default", "auto", "forced-function"],
+)
+def test_simulated_v2_cache_misses_v1_and_replays_its_own_tool_choice(mem, monkeypatch, base_step, tool_choice):
+    """Actual cache read/write/replay must preserve policy and tool-choice custody."""
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive")
+    monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
+    kwargs = {
+        "pool": "rose-1-ultra",
+        "messages": [{"role": "user", "content": "same goal"}],
+        "tool_choice": tool_choice,
+        "provider_fast_mode": True,
+    }
+
+    async def body():
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v1")
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        old_chunks = _full_stream()
+        old_chunks[1].data["text"] = "v1 stale "
+        old_rose = FakeRose(old_chunks)
+        await _drain(rose_cache.cached_complete(old_rose, call_site="response_schema", **kwargs))
+        assert old_rose.calls == 1 and mem.set_calls == 1
+        old_keys = set(mem.data)
+
+        monkeypatch.setenv("WMH_EXECUTION_POLICY", "rose-virtual-public-affordances-v2")
+        context = FastCacheContext(enabled=True, goal="g", base_step=base_step)
+        set_context(context)
+        material = rose_cache.request_key_material(kwargs)
+        assert material["tool_choice"] == tool_choice
+        key = context.llm_key("response_schema", material)
+        assert key not in old_keys
+        assert not old_keys.intersection(context.llm_lookup_keys("response_schema", material))
+        choices = [None, "auto", {"type": "function", "function": {"name": "set_plan"}}]
+        choice_keys = {
+            context.llm_key("response_schema", rose_cache.request_key_material({**kwargs, "tool_choice": choice}))
+            for choice in choices
+        }
+        assert len(choice_keys) == len(choices)
+
+        new_chunks = _full_stream()
+        new_chunks[1].data["text"] = "v2 fresh "
+        new_rose = FakeRose(new_chunks)
+        await _drain(rose_cache.cached_complete(new_rose, call_site="response_schema", **kwargs))
+        assert new_rose.calls == 1 and mem.set_calls == 2
+        assert mem.data[key]["content"] == "v2 fresh world"
+
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=base_step))
+        replay_rose = FakeRose(_full_stream())
+        replay = await _drain(rose_cache.cached_complete(replay_rose, call_site="response_schema", **kwargs))
+        assert replay_rose.calls == 0 and mem.set_calls == 2
+        assert "".join(c.data.get("text", "") for c in replay if c.kind == "content") == "v2 fresh world"
+        assert next(c for c in replay if c.kind == "metadata").data["from_fast_cache"] is True
+
+    asyncio.run(body())

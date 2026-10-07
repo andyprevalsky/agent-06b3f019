@@ -406,9 +406,35 @@ connect/read classifier before response headers. This is a transport failure,
 not a modeled rejection. The failed report is retained. All100 exact sessions
 produced joined retirement receipts and both serving processes retired. A
 minimal raw-SSL classifier correction reproduced3 owning failures and made
-those same3 controls pass, including no replay after partial output. A fresh
-full100-case run is required; no fundraiser success or deployment is claimed.
-See `wmh-evidence-20261006/native-policy-first-conformance-review.json`.
+those same3 controls pass, including no replay after partial output. The fresh
+policy-bound full100-case run passed with100 successful predictions, mean
+fidelity0.8609352 and content accuracy0.5846759 against unchanged thresholds.
+Independent official parsing/rescoring matched all100 cases. One existing
+protocol repair produced101 total attempts; all100 exact sessions joined and
+retired. This open-loop result does not establish fundraiser success or unknown
+Rose-fact preservation. The unchanged1800-second fundraiser is now running as
+`3730e4ca-2226-48bf-8434-78d56092b593`, root
+`1670690f-5245-4815-be93-fc15e1426629`, native session
+`7e7dd8b00d844bf9bade46b51e49269d`, source`64f856257`. The diagnostic
+was interrupted after583.5 seconds when revision3 fabricated prior private
+investor correspondence and conditional interest absent from the complete
+request, state, history and all five retrieved examples. It generated no
+investor-form submission. All owned resources retired; the frozen revision6
+receipt confirms joined retirement and process usage$0.73468/10 calls. This is
+not a full1800-second acceptance run or a passing fundraiser. The new local
+v2 policy preserves the six public-affordance paragraphs and adds a private
+history/unknown-company guard while allowing new causally subsequent replies.
+Ten same-model saved-request controls were independently reviewed: v1
+private-history fabrication1/2 versus v2 0/2; v2 simple public forms submitted2/2;
+unknown-required-field forms blocked2/2. Both causal-reply cases returned
+legitimate no reply, so positive future-response capability remains inconclusive.
+Native32/provider66/backend24/Python-cache7/cloud-config-and-launch11 owning
+checks pass, with150 old cache keys byte-identical. Fresh matching full
+conformance and clean fundraiser acceptance remain pending. See
+`wmh-evidence-20261006/native-policy-v2-local-review.json`.
+Deployment is held.
+See `wmh-evidence-20261006/native-policy-first-conformance-review.json` and
+`wmh-evidence-20261006/native-policy-conformance-qualification.json`.
 
 1. Read `CLAUDE.md`, `docs/testing.md`, and
    `agents/benchmarks/README.md` (World-model refresh conformance). Set up the

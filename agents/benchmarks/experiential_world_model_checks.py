@@ -1211,17 +1211,21 @@ def test_native_http_boundary_shares_root_world_and_keeps_retry_receipts():
     asyncio.run(run())
 
 
-def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair():
+@pytest.mark.parametrize("policy_name", ["rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"])
+def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair(policy_name, monkeypatch):
+    from dataclasses import replace
+
     import httpx
     from exp.simulation.engines.text.prompt import WORLD_MODEL_TEXT_SYSTEM_PROMPT
 
+    from benchmarks import wmh_execution_policy
     from benchmarks.serve_experiential_world_model import create_app
-    from benchmarks.wmh_execution_policy import PUBLIC_AFFORDANCES_TEXT, execution_identity, execution_policy
+    from benchmarks.wmh_execution_policy import execution_identity, execution_policy
 
     async def run():
         requests = []
         records = []
-        identity = execution_identity("rose-virtual-public-affordances-v1", "artifact-a", "a" * 64)
+        identity = execution_identity(policy_name, "artifact-a", "a" * 64)
 
         async def complete(request):
             requests.append(request)
@@ -1231,12 +1235,12 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
             return reply(request, {"unknown_product": None, "funds_cents": 0}, "missing required product field")
 
         with pytest.raises(ValueError, match="artifact-bound execution identity"):
-            ParallelWorldModel(complete, Retriever(), execution_policy="rose-virtual-public-affordances-v1")
+            ParallelWorldModel(complete, Retriever(), execution_policy=policy_name)
         assert requests == []
         model = ParallelWorldModel(
             complete,
             Retriever(),
-            execution_policy="rose-virtual-public-affordances-v1",
+            execution_policy=policy_name,
             execution_identity=identity,
             record_prediction=records.append,
         )
@@ -1248,7 +1252,7 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
             health = (await client.get("/healthz")).json()
             result = await model.step(session.id, action(1), "invocation")
             receipt = await model.end_session(session.id)
-        expected = WORLD_MODEL_TEXT_SYSTEM_PROMPT + "\n\n" + PUBLIC_AFFORDANCES_TEXT
+        expected = WORLD_MODEL_TEXT_SYSTEM_PROMPT + "\n\n" + execution_policy(policy_name).text
         assert len(requests) == 2 and all(r.messages[0].content == expected for r in requests)
         assert len({r["request_sha256"] for r in records}) == 2
         # An overlay must be counted before packing/admission, not appended after it.
@@ -1264,6 +1268,19 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
                 )
             }
         )
+        assert execution_policy("upstream").apply(baseline_request) is baseline_request
+        assert execution_policy("rose-virtual-public-affordances-v1").metadata() == {
+            "policy_id": "rose-virtual-public-affordances-v1",
+            "policy_version": "1",
+            "policy_sha256": "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79",
+            "base_system_sha256": "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce",
+            "effective_system_sha256": "fcb2596385c9456e62d6e21f3fe1ac6b64b693e833c3e4bb0a78e1f4fe21007f",
+        }
+        if policy_name == "rose-virtual-public-affordances-v2":
+            assert execution_policy(policy_name).text.startswith(
+                execution_policy("rose-virtual-public-affordances-v1").text + "\n\n"
+            )
+            assert len(execution_policy(policy_name).text.split("\n\n")) == 8
         capacity = Utf8UpperBoundTokenCounter().count(baseline_request) + baseline_request.maximum_output_tokens
         rejected_calls = []
 
@@ -1275,7 +1292,7 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
             forbidden,
             Retriever(),
             capabilities=ModelCapabilities(maximum_output_tokens=16384, context_window_tokens=capacity),
-            execution_policy="rose-virtual-public-affordances-v1",
+            execution_policy=policy_name,
             execution_identity=identity,
         )
         bounded_session = bounded.new_session("full root goal", {"unknown_product": None, "funds_cents": 0}, "root")
@@ -1297,5 +1314,21 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
         assert all(r["request"]["messages"][0]["content"] == expected for r in records)
         with pytest.raises(ValueError, match="Unknown WMH execution policy"):
             execution_policy("unknown")
+        for registered_name in ("upstream", "rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"):
+            original_policy = execution_policy(registered_name)
+            for changed_field in (
+                {"name": "unregistered"},
+                {"version": "changed"},
+                {"text": original_policy.text + " changed"},
+                {"effective_system_sha256": "0" * 64},
+            ):
+                with monkeypatch.context() as patcher:
+                    patcher.setitem(
+                        wmh_execution_policy._POLICIES, registered_name, replace(original_policy, **changed_field)
+                    )
+                    with pytest.raises(ValueError, match="without a new version"):
+                        execution_policy(registered_name)
+                    with pytest.raises(ValueError, match="without a new version"):
+                        execution_identity(registered_name, "artifact-a", "a" * 64)
 
     asyncio.run(run())

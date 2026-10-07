@@ -715,9 +715,75 @@
     "first_live100_mean_fidelity": 0.851895599578659,
     "first_live100_content_accuracy": 0.589477997893291,
     "tls_fix": "Only add raw ssl.SSLError to existing waterfall connect/read classifier, preserving existing next-model and partial-output guards; owning3red->3green",
-    "second_full100": "in progress; no acceptance claim",
-    "exact_fundraiser_rerun": "not started; waits matching full100success",
+    "second_full100": {
+      "status": "PASS",
+      "successful_predictions": 100,
+      "prediction_errors": 0,
+      "native_attempts": 101,
+      "mean_fidelity": 0.8609351795633334,
+      "content_accuracy": 0.584675897816665,
+      "independent_official_rescore_matches": 100,
+      "exact_sessions_joined_and_retired": 100,
+      "qualification_path": "docs/plans/active/wmh-evidence-20261006/native-policy-conformance-qualification.json",
+      "qualification_sha256": "375f1a64ae4f4f7da83e447bed228be34fec73ad80c6693439177a1680e7c588",
+      "scope": "Fixed-suite open-loop qualification; no full-loop fundraiser success claim."
+    },
+    "exact_fundraiser_rerun": {
+      "status": "CANCELLED diagnostic after private-history contamination",
+      "run_id": "3730e4ca-2226-48bf-8434-78d56092b593",
+      "root_agent_id": "1670690f-5245-4815-be93-fc15e1426629",
+      "session_id": "7e7dd8b00d844bf9bade46b51e49269d",
+      "timeout_seconds": 1800,
+      "source_commit": "64f856257b6dcdd4783296c76a13e7967c4fe875",
+      "task": "raise-5m-rose-labs-brex",
+      "acceptance": "failed private-prior-history contract before contact-submission test; no accepted benchmark pass",
+      "duration_seconds": 583.5,
+      "full_1800_second_acceptance": false,
+      "report_sha256": "374f200676ca2da2242b6379e5727389fa0e68cc4da21e0a9e69aa1a7b463193",
+      "earliest_invalid_commit_revision": 3,
+      "earliest_invalid_call_id": "93557448-5142-41ba-bf70-53c99fce92da",
+      "earliest_committed_capture_sha256": "35cb516f6c2b0c701a8f85acb986893cd27b51c1734f149fd63ae794aed45343",
+      "join_verified": true,
+      "frozen_revision": 6,
+      "retirement_sha256": "6cc15cf2a1a63927ae9b3a7430ab1e16a431cd97ec4acb5e52b62b13af2e4a77",
+      "retirement_usage": {
+        "total_cost_usd": 0.73468,
+        "calls": 10,
+        "input_tokens": 30,
+        "output_tokens": 73462
+      },
+      "usage_scope": "process aggregate, not settled task cost or invoice",
+      "owned_processes_and_db_retired": true,
+      "actual_investor_form_submission_count": 0,
+      "funds_raised_cents": 0,
+      "viewer": "durable root transcript verified through registered publisher; actual Chrome root renders; final child inspection pending"
+    },
     "native_cloud_qualification": "still unqualified",
-    "production": "no rollout"
+    "production": "no rollout",
+    "next_local_policy": {
+      "id": "rose-virtual-public-affordances-v2",
+      "version": "2",
+      "text_sha256": "5dd9924e9a1ff4c54a95ee53c78414961f83ae62deec84b1ed7a670d0d3083c4",
+      "effective_system_sha256": "f344676e946d2b2fe435dcb81df353cd94aee8ec87394b39d69ca5ff9b2caac9",
+      "purpose": "Preserve public route/form generation while prohibiting fabricated pre-existing private history and unknown company facts, and permitting causally subsequent new replies/effects.",
+      "controls": {
+        "status": "reviewed local saved-request controls",
+        "review": "docs/plans/active/wmh-evidence-20261006/native-policy-v2-local-review.json",
+        "review_sha256": "33d068b1e8804775a9264cc8fe2605a9b325f0c255653a565dfbeec29a6faaf3",
+        "private_v1_offending": "1/2",
+        "private_v2_offending": "0/2",
+        "simple_virtual_forms": "2/2submitted",
+        "unknown_legal_field_forms": "2/2blocked",
+        "new_reply_positive_capability": "INCONCLUSIVE;0/2replies",
+        "all10model_and_parser_match": true
+      },
+      "fresh_matching_live100": "pending",
+      "deployment": "explicitly held",
+      "native_owning_passed": 32,
+      "provider_owning_passed": 66,
+      "cache_backend_passed": 24,
+      "cache_python_passed": 7,
+      "cloud_configuration_launch_controls_passed": 11
+    }
   }
 }

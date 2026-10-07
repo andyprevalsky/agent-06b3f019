@@ -412,7 +412,42 @@ kept partial output terminal. All213 registered offline Rose checks passed.
 No model order, retry count, deadlines, output caps or network settings changed.
 The external origin of the TLS alert remains unproved. All100 conformance
 sessions then produced joined retirement receipts and both exact process owners
-retired. A fresh full100 run and exact fundraiser replay remain required; no
-benchmark success or production repair is claimed. The original failed report
+retired. The fresh policy-bound100-case run then passed:100 successful
+predictions, mean fidelity0.8609352 and content accuracy0.5846759, independently
+reproduced through the official parser/scorer. One protocol repair accounted
+for101 attempts; all100 exact sessions joined and retired. Its unchanged
+open-loop scoring limits still apply. The exact task was then run
+with the authorized1800-second maximum as3730e4ca-2226-48bf-8434-78d56092b593.
+It was interrupted after583.5 seconds because the committed revision3
+pipeline output fabricated private prior introductions, conversations, message
+IDs and conditional investor interest. Those facts were absent from the full
+66,981-character current user payload, state, earlier history and all five real
+demonstrations. Its rebase behaved correctly; the final generated content was
+the bad boundary. Stale initial predictions, including a purported Delaware
+certificate, are separate from committed effects. No investor-form submission
+occurred before interruption. Exact joined retirement froze revision6 with
+process aggregate usage$0.73468/10 calls; all owned processes and DB resources
+retired. This is a cancelled diagnostic, not a full1800-second benchmark pass.
+
+The six public-affordance paragraphs guarded unknown required fields on forms
+but did not define the private-read/search case. A local v2 correction retains
+those public rules and adds the missing distinction: do not fabricate private
+prior history or unknown company facts; permit new replies/effects caused by
+authorized new virtual actions. It remains a selection contract at the general
+native generation boundary. A generic output parser can validate schemas and
+receipts but cannot determine whether arbitrary natural-language private
+citations are fabricated; deleting history would erase valid observations.
+No firm-specific contact map or success oracle is introduced. Independent review of ten saved-request
+controls found1/2 v1 private-history failures and0/2 v2 failures,2/2 submitted
+virtual simple forms and2/2 valid unknown-required-field blockers. All10 used
+the same actual OpenRouter gpt-6-sol model and passed the public native parser.
+Both causally new reply cases returned legitimate no reply: positive future
+response capability remains inconclusive. No threshold or response was forced.
+Native32/provider66/backend24/Python-cache7/cloud-config-and-launch11 owning
+checks pass;150 captured old cache keys remain byte-identical. Fresh matching
+full conformance and the clean unchanged fundraiser remain required. The
+portable receipt is `native-policy-v2-local-review.json` in the existing plan
+evidence directory. No benchmark success or production
+repair is claimed. The original failed report
 is preserved in `native-policy-first-conformance-review.json` beside the
 existing handoff evidence.
