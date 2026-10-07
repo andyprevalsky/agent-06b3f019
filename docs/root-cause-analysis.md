@@ -404,6 +404,26 @@ faster to add a branch" is not a justification. Since this repo is pre-launch wi
 backwards-compatibility obligations, prefer the invasive simplification over the
 compatible patch whenever the simplification removes the bug class outright.
 
+### Step 6b: Check the golden references before choosing the fix
+
+The reference harnesses are heavily tested in production; this repo is not yet.
+Before settling on a fix, find how they handle the same problem:
+`claude-code-src/` (vendored), `openclaw/`, `hermes-agent/`, and `codex/` (run
+`bash scripts/sync-reference-repos.sh` when a clone is missing).
+
+1. Search each repo for the mechanism in question (tool-output limits, retries,
+   truncation, prompt wording, loop control, recovery) and open the code. Record
+   the `path:line` of every analog you find.
+2. State what each one does in a sentence, and what they have in common.
+3. Prefer the fix that brings Rose **closer** to that shared pattern. A fix that
+   moves away from all of them needs a stated reason their approach does not fit.
+4. Put the citations in the case file and in any approval request (the
+   `**Golden reference:**` Evidence field in `.claude/shared/approval-format.md`).
+
+Do this before designing the fix, so the references shape it rather than
+decorate it. When no reference repo has an analog, say which repos you searched
+and for what. Never cite a reference from memory.
+
 ## Step 7: Adversarial RCA review
 
 Before handing any RCA diagnosis back to the user, fire a sub-agent to

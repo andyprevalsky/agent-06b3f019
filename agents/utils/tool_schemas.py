@@ -494,7 +494,8 @@ class GrepTool(BaseModel):
         default=None,
         description=(
             "Regular expression over record text. Omit for agent_trajectories or "
-            "agent_network to list recent records using metadata filters."
+            "agent_network to list recent records using metadata filters. "
+            "Omit for calendar or drive to list a day or folder, or to read the one event or file a path names."
         ),
     )
     sources: Optional[
@@ -510,6 +511,8 @@ class GrepTool(BaseModel):
                 "agent_trajectories",
                 "transactions",
                 "documents",
+                "calendar",
+                "drive",
                 "summary",
             ]
         ]
@@ -535,6 +538,8 @@ class GrepTool(BaseModel):
             "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "calendar searches the user's Google Calendar events; drive searches Google Drive "
+            "file names, folders, and file text. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
             "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
             "aggregate questions such as total messages, date coverage, or most-contacted threads; "
@@ -557,6 +562,8 @@ class GrepTool(BaseModel):
             "agent_trajectories",
             "transactions",
             "documents",
+            "calendar",
+            "drive",
             "summary",
         ]
     ] = Field(
@@ -651,11 +658,16 @@ class GrepTool(BaseModel):
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"
+            "  calendar, drive: since, until, path\n"
             "documents is an umbrella corpus, so set document_source to the concrete provider "
             "(chatgpt, claude, apple_notes, or obsidian). "
             "`path` takes a path from an earlier result "
             "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
-            "to scope the search to that record or thread."
+            "to scope the search to that record or thread. "
+            "A calendar or drive path may also be a folder of a result path, such as "
+            "'calendar/<account>/2026-10-02' or 'drive/<account>/My Drive/Legal'. "
+            "Calendar since and until take a date (YYYY-MM-DD) and include that whole day; "
+            "with neither, calendar lists from yesterday onward."
         ),
     )
     person: Optional[str] = Field(
@@ -1370,7 +1382,7 @@ def get_planner_response_model() -> Type[BaseModel]:
 
     allowed = get_planner_assignable_tools()
     # Dynamic enum so structured-output schema cannot emit disabled aliases.
-    filtered_enum = Enum(  # type: ignore[misc]
+    filtered_enum = Enum(
         "PlanToolNameNoGP",
         {name: name for name in allowed},
         type=str,

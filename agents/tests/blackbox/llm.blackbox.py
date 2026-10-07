@@ -5816,14 +5816,64 @@ def test_build_verifier_context_messages_screenshot_emits_multimodal():
 
     blocks = multimodal_msgs[0]["content"]
     text_blocks = [b for b in blocks if b.get("type") == "text"]
-    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    # Rose's canonical (OpenAI) image shape; the transform layer adapts it.
+    image_blocks = [b for b in blocks if b.get("type") == "image_url"]
     assert len(text_blocks) == 1
     assert len(image_blocks) == 1
-    assert image_blocks[0]["source"]["type"] == "base64"
-    assert image_blocks[0]["source"]["media_type"] == "image/png"
-    assert image_blocks[0]["source"]["data"] == "iVBORw0KGgoAAAA..."
+    assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64,iVBORw0KGgoAAAA..."
     # Body text should describe, not include the b64
     assert "iVBORw0KGgoAAAA..." not in text_blocks[0]["text"]
+
+
+def test_build_verifier_context_screenshot_reaches_every_verifier_transport():
+    """The final-state screenshot must survive every route the verifier uses.
+
+    browser-smoke ec464455: claudeAuth 400'd, so the browser verifier ran on
+    the gpt-6-sol waterfall. An Anthropic-shaped image block is dropped by the
+    Responses (gpt_auth) converter, leaving a DOM-only judge that can never
+    confirm a visually grounded goal. Each transport must carry real pixels.
+    """
+    from helpers.llm import build_verifier_context_messages
+    from providers.rose.gpt_auth import _content_to_responses_parts
+    from providers.rose.transforms import transform_messages_for_anthropic, transform_messages_for_openai
+
+    b64 = "iVBORw0KGgoAAAANSUhEUg=="
+    ctx = [
+        {"role": "USER", "text": "Goal: name the colors visible on the page"},
+        {
+            "role": "TOOL",
+            "text": "Final-state screenshot attached",
+            "metadata": {"screenshot_b64": b64, "toolName": "final_screenshot", "toolStatus": "FINISHED"},
+        },
+    ]
+    msgs = build_verifier_context_messages(ctx, "You are a verifier.")
+    image_msg = next(m for m in msgs if isinstance(m.get("content"), list))
+
+    # claudeAuth / Anthropic API key
+    _, _, anthropic_msgs = transform_messages_for_anthropic(msgs)
+    anthropic_images = [
+        block
+        for m in anthropic_msgs
+        if isinstance(m.get("content"), list)
+        for block in m["content"]
+        if block.get("type") == "image"
+    ]
+    assert anthropic_images == [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}]
+
+    # gpt_auth / OpenAI Responses
+    parts = _content_to_responses_parts(image_msg["content"], role="user")
+    assert {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"} in parts
+
+    # OpenRouter waterfall
+    openai_msgs = transform_messages_for_openai(msgs, tools_declared=False)
+    openai_images = [
+        block
+        for m in openai_msgs
+        if isinstance(m.get("content"), list)
+        for block in m["content"]
+        if block.get("type") == "image_url"
+    ]
+    assert [block["image_url"]["url"] for block in openai_images] == [f"data:image/png;base64,{b64}"]
 
 
 def test_build_verifier_context_messages_screenshot_strips_b64_from_text():
@@ -9127,6 +9177,10 @@ async def run_all_tests():
         "verifier_schema_strict_when_closed", test_build_verifier_json_schema_strict_true_when_no_open_objects
     )
     r.record("verifier_ctx_screenshot_multimodal", test_build_verifier_context_messages_screenshot_emits_multimodal)
+    r.record(
+        "verifier_ctx_screenshot_reaches_every_transport",
+        test_build_verifier_context_screenshot_reaches_every_verifier_transport,
+    )
     r.record("verifier_ctx_screenshot_strips_b64", test_build_verifier_context_messages_screenshot_strips_b64_from_text)
     r.record("verifier_ctx_no_screenshot_text_only", test_build_verifier_context_messages_no_screenshot_stays_text)
     r.record("verifier_ctx_tool_result_payload", test_build_verifier_context_messages_formats_tool_result_payload)

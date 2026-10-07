@@ -35,7 +35,8 @@ export type ParsedGrepPath =
       messageId?: string;
     }
   | { source: 'transactions'; institution?: string; account?: string; transactionId?: string }
-  | { source: 'documents'; documentSource?: string; rest?: string };
+  | { source: 'documents'; documentSource?: string; rest?: string }
+  | { source: 'calendar' | 'drive'; rest?: string };
 
 // ── Build ──
 
@@ -87,6 +88,14 @@ export function buildTransactionPath(
 
 export function buildDocumentPath(documentSource: string, ...rest: string[]): string {
   return ['documents', pathSegment(documentSource), ...rest.map(pathSegment)].join('/');
+}
+
+/**
+ * `calendar/<account>/<date>/<event>` and `drive/<account>/<folders>/<file>`.
+ * `storedPath` is the row's `metadata.path`, already built from safe segments.
+ */
+export function buildGoogleSourcePath(source: 'calendar' | 'drive', storedPath: string): string {
+  return `${source}/${storedPath}`;
 }
 
 /** Split an account label back into the name and mask that produced it. */
@@ -174,6 +183,9 @@ export function parseGrepPath(value: string): ParsedGrepPath | null {
         ...(tail.length > 0 ? { rest: tail.join('/') } : {}),
       };
     }
+    case 'calendar':
+    case 'drive':
+      return { source: head, ...(rest.length > 0 ? { rest: rest.join('/') } : {}) };
     default:
       return null;
   }
