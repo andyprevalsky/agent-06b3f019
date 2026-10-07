@@ -49,7 +49,6 @@ REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 DEFAULT_SUITES=(
   "bash scripts/tests/cloudbench-env.test.sh"
   "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh"
-  "bash scripts/tests/cloudbench-status-service-shutdown.test.sh"
   "bash scripts/tests/fleet-infra-canary.test.sh"
   "bash scripts/tests/fleet-infra-stability-proof.test.sh"
   "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py"
@@ -57,6 +56,14 @@ DEFAULT_SUITES=(
   "bash scripts/tests/cloudbench-github-token.test.sh"
   "bash scripts/tests/seed-dump-toolchain.test.sh"
   "agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py"
+)
+
+# The status-service control exercises a root-only permission primitive against
+# the offline controller image's pinned toolchain, so its home is that image:
+# it runs here through its own dispatcher (native on Linux, the container on a
+# Mac), exactly as Step 4cb documents, and its result joins the machine's.
+CONTROLLER_IMAGE_SUITES=(
+  "python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown"
 )
 
 SUITES=()
@@ -70,6 +77,7 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 else
   SUITES=("${DEFAULT_SUITES[@]}")
+  RUN_CONTROLLER_IMAGE_SUITES=1
 fi
 
 if [ -z "${FLY_API_TOKEN:-}" ]; then
@@ -274,8 +282,26 @@ if [ -z "$result" ]; then
   exit 1
 fi
 code="${result##*=}"
-if [ "$code" = "0" ]; then
+controller_image_code=0
+if [ -n "${RUN_CONTROLLER_IMAGE_SUITES:-}" ]; then
+  for suite in "${CONTROLLER_IMAGE_SUITES[@]}"; do
+    suite_log="${MACHINE_LOG%.log}-controller-image.log"
+    echo "   GATE_STEP_START $suite"
+    rc=0
+    bash -c "$suite" > "$suite_log" 2>&1 || rc=$?
+    echo "   GATE_STEP $suite exit=$rc"
+    if [ "$rc" -ne 0 ]; then
+      controller_image_code=1
+      echo "   full output: $suite_log" >&2
+      tail -n 40 "$suite_log" | sed 's/^/     /' >&2
+    fi
+  done
+fi
+if [ "$code" = "0" ] && [ "$controller_image_code" = "0" ]; then
   echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
+elif [ "$code" = "0" ]; then
+  echo "❌ cloud-bench controller gate failed in the controller image (machine $MACHINE_ID passed)" >&2
+  exit 1
 else
   echo "❌ cloud-bench controller gate failed on Linux ($MACHINE_ID): $result" >&2
   # The machine waits for /tmp/gate/fetched before exiting, so the complete
