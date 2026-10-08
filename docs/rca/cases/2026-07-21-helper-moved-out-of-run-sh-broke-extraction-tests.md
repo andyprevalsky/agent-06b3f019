@@ -19,6 +19,7 @@ tags:
   - seed-cache
 sources:
   - PR #820
+  - PR #1450
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -112,3 +113,44 @@ changed. These controls continue to execute the real sourced shell helpers.
 The sixteen controls also belong in the existing compact deploy gate so a source
 location refactor is caught before funded coverage. Independent review and the
 final source-bound canonical coverage are required before merge.
+
+## Recurrence: terminal fleet projection and campaign defaults (2026-10-08)
+
+The composed deployment's normal compact benchmark command reported 515 passed,
+six failed, and four intentional skips. One pre-service admission control started
+before the independently certified source-policy entry was committed; both
+parameters passed with that existing-policy entry. The other failures were
+fixture composition defects introduced when the fleet's terminal projection
+became an explicit helper call. No failing fixture result qualifies a deployment.
+
+The dependency and runtime-retention fixtures extracted recovery or cleanup
+callers without `fleet_finalize_released_projection` or
+`fleet_publish_recovered_terminal_projection`. A provenance source assertion
+still searched for the finish-epoch write inside `cleanup`. The terminal Hub
+fixture sliced from `finalize_terminal_projection` to a later cleanup marker;
+when the function moved earlier, that slice also executed unrelated top-level
+maintenance and provisioning code. The separate normal Descend Command gate
+failed before its cancellation assertions because its mocked parser Namespace
+omitted newly supported retry defaults.
+
+The corrections compose the actual helper definitions, including metadata and
+exact registry retirement, and provide only the fixture's owned sealed audit,
+release epoch, and task manifest. The provenance control follows the real
+release helper's atomic finish write and verifies its call precedes final
+upload. The terminal upload fixture extracts each required function by its
+existing source boundary. The campaign fixture supplies the parser's ordinary
+flag-off defaults. Production code, provider behavior, task outcomes, cleanup
+invariants, negative controls, and all original test timers remain unchanged.
+
+The identical focused dependency selection reproduced three failures and four
+passes in 11.80 seconds, then passed all seven cases in 6.51 seconds. The two-case
+retention selection reproduced one failure and one pass, then passed both cases
+with its original evidence-before-destroy and no-repeat guest-shutdown
+assertions. The terminal Hub selection reproduced one failure and two passes in
+5.34 seconds; the corrected complete upload owner passed 34 controls in 10.77
+seconds. The same Descend Command script reproduced one parser error and two
+lifecycle passes, then passed its four, twenty-seven, and three-control groups.
+Independent review binds each correction to its exact patch and private normal
+RED/GREEN receipts. The complete mandatory command registry must still pass on
+the composed source; these focused results claim no fresh whole-suite coverage,
+paid task acceptance, native rollout, or LIVE50 credit.
