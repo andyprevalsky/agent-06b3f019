@@ -112,7 +112,11 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
   }
 }
 
-async function finalAheadOfQueuedSnapshots(): Promise<void> {
+async function queuedUploadAdmission(
+  bundle: Record<string, unknown> = { tasks: [] },
+  live = false,
+  expected = ['holder', 'final', 'snapshot-a', 'snapshot-b']
+): Promise<void> {
   const sender = S3Client.prototype as unknown as {
     send: (command: unknown) => Promise<unknown>;
   };
@@ -150,8 +154,11 @@ async function finalAheadOfQueuedSnapshots(): Promise<void> {
     objects.set(input.Key, input.Body!);
     return {};
   };
-  const upload = (name: string, live: boolean) =>
-    putRun({ run_id: `${prefix}-${name}`, tasks: [] }, { live });
+  const upload = (name: string, snapshot: boolean) =>
+    putRun(
+      { ...(name === 'final' ? bundle : { tasks: [] }), run_id: `${prefix}-${name}` },
+      { live: snapshot }
+    );
   let uploads: Promise<unknown> | undefined;
   try {
     const holder = upload('holder', true);
@@ -160,16 +167,16 @@ async function finalAheadOfQueuedSnapshots(): Promise<void> {
       holder,
       upload('snapshot-a', true),
       upload('snapshot-b', true),
-      upload('final', false),
+      upload('final', live),
     ]);
     releaseHolder.resolve();
     await uploads;
-    assert.deepEqual(bundleWrites, ['holder', 'final', 'snapshot-a', 'snapshot-b']);
+    assert.deepEqual(bundleWrites, expected);
     const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
       run_id: string;
       live: boolean;
     }>;
-    assert.equal(index.find((run) => run.run_id === `${prefix}-final`)?.live, false);
+    assert.equal(index.find((run) => run.run_id === `${prefix}-final`)?.live, live);
   } finally {
     releaseHolder.resolve();
     await Promise.allSettled([uploads]);
@@ -264,11 +271,39 @@ async function main(): Promise<void> {
       }
     }
     try {
-      await finalAheadOfQueuedSnapshots();
+      await queuedUploadAdmission();
       console.log('PASS: a final upload is admitted ahead of queued live snapshots');
     } catch (error: unknown) {
       failures.push(`final upload admission: ${String(error)}`);
       console.error(`FAIL: ${failures.at(-1)}`);
+    }
+    const starting = {
+      timestamp: '2026-10-07T23:52:38.764044+00:00',
+      suite: 'agent-payment-production-abandonment',
+      source: 'benchmark-runner',
+      tasks: [{ name: 'agent-payment-production-abandonment', status: 'starting' }],
+    };
+    const snapshotOrder = ['holder', 'snapshot-a', 'snapshot-b', 'final'];
+    for (const [label, bundle, expected] of [
+      ['required starting registration precedes queued snapshots', starting, undefined],
+      [
+        'already-owned starting progress retains snapshot admission',
+        { ...starting, tasks: [{ ...starting.tasks[0], agent_id: 'fixture-owned-agent' }] },
+        snapshotOrder,
+      ],
+      [
+        'mixed running progress retains snapshot admission',
+        { ...starting, tasks: [...starting.tasks, { name: 'fixture-running', status: 'running' }] },
+        snapshotOrder,
+      ],
+    ] as const) {
+      try {
+        await queuedUploadAdmission(bundle, true, expected);
+        console.log(`PASS: ${label}`);
+      } catch (error: unknown) {
+        failures.push(`${label}: ${String(error)}`);
+        console.error(`FAIL: ${failures.at(-1)}`);
+      }
     }
     for (const mode of ['error', 'legacy', 'stale'] as const) {
       try {

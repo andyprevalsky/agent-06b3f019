@@ -114,6 +114,59 @@ ceiling; it is not part of this repair.
 This case stays open until production runs the repaired store and a fresh
 saturated-fleet final upload completes within its client window.
 
+### 2026-10-07 recurrence: mandatory starting registration
+
+PR #1440's original production `agent-payment-production-abandonment` gate
+failed before creating a task. Its four unchanged required-upload attempts all
+timed out, and the exact run's four visibility reads returned 404. Native Render
+logs later show that same starting-only bundle committed 539.032 seconds after
+its original timestamp. A canonical read then returned the original suite and
+one `starting` row without an agent ID. The failed original remains failed.
+
+The earlier priority repair covered finals, deletes and readers, but `storeRun`
+still classified every `live:true` packet as a replaceable snapshot. Required
+pre-agent registration is also a one-shot publication: the caller cannot create
+an agent until it is visible. The existing blackbox now submits the actual
+timestamp/suite/source/starting-task shape behind a held writer and queued live
+snapshots. Against the original owner it writes holder, snapshots, registration
+(one failure, eight passing controls). The unchanged command against the repair
+writes holder, registration, snapshots (nine passing controls):
+
+```sh
+cd back-end
+# DATABASE_URL and DIRECT_URL both target the existing owned localhost database.
+node --import tsx src/tests/blackbox/benchmark-hub-index-read.blackbox.ts
+```
+
+The repair derives admission from canonical bundle state: a nonempty all-starting
+task list with no task-root or tree agent IDs uses the existing foreground queue.
+Already-owned starting progress, mixed running progress and empty snapshots keep
+snapshot admission. Final priority, same-priority FIFO, shared SQL/R2 locking,
+identical-packet coalescing, final absorption and all HTTP bounds are unchanged.
+There is no client priority flag or artificial phase marker. Deleting priority
+would reintroduce the proven final starvation; this change unifies the existing
+one-shot admission rule rather than adding another queue.
+
+Searches for `benchmark Hub upload failed read operation timed out starting
+registration` and `queued foreground live snapshot admission first registration`
+found this case, the SQL-pool admission case, and the ambiguous-commit case.
+This is a recurrence of incomplete one-shot classification, not a new pool or
+transport failure. Golden references were read: Claude Code's
+`src/utils/messageQueueManager.ts:158` preserves FIFO within priority while user
+input precedes task notifications; OpenClaw's `src/process/command-queue.ts:179`
+maps foreground and background to existing queue priorities. Codex's
+`codex-rs/core/src/session/input_queue.rs` and Hermes' gateway were searched for
+priority/coalescing; neither has this shared durable-Hub writer boundary.
+
+Private original HTTP/Render/canonical receipts, the RED log and unchanged GREEN
+log are hash-bound in `.context/hub-starting-registration-admission.private/` and
+the deployment's private evidence directory. A first repair attempt incorrectly
+used Set size for the existing array-returning ID helper and remained RED; its
+log is preserved. The final candidate uses the actual helper contract.
+These are owning-boundary proofs, not proof that the exact benchmark now passes.
+The case remains open pending final source review, rollout and the unchanged
+required production outcome; no original run or LIVE50 credit is changed.
+
 ## Human feedback
 
 The user asked for the full `/deploy` after the messaging-mock change. That
