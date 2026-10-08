@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { databasePoolLimit, runTransactionWithRetry } from './database';
+import { retryWithBackoff } from './retry';
 import {
   type StoreResult,
   archiveEnabled,
@@ -300,14 +301,32 @@ type ManifestLockOwnership = {
   reconcile: () => Promise<ManifestReconciliationResult>;
 };
 
-// Each manifest lock pins one pooled connection for its whole operation, and
-// the operation's own queries need another. Unbounded, the holders and the
-// callers queued behind them inside Postgres pin every connection, and no
-// holder can run a query until the pool timeout: two concurrent agent deletes
-// starved a 4-connection pool for about 105 s. Admission keeps the locks one
-// process has open to under half its pool, so their queries always find a
-// connection; later callers wait here in memory, holding nothing. Like the
-// advisory lock itself, it is not re-entrant.
+// Lock holders run nested queries on the shared pool (planner memory, trajectory
+// search). A same-root waiter therefore releases its connection between bounded
+// waits; otherwise waiters can fill the pool and starve the holder they wait on.
+const MANIFEST_LOCK_ATTEMPT_MS = 2_000;
+const MANIFEST_LOCK_WAIT_MS = 120_000;
+const MANIFEST_LOCK_RETRY_DELAY_MS = 100;
+const POSTGRES_LOCK_NOT_AVAILABLE = '55P03';
+
+class ArchiveManifestLockBusyError extends Error {
+  constructor(rootAgentId: string) {
+    super(`Trace archive manifest lock is busy for ${rootAgentId}`);
+    this.name = 'ArchiveManifestLockBusyError';
+  }
+}
+
+function isLockNotAvailable(error: unknown): boolean {
+  const meta = (error as { meta?: { code?: unknown } } | null)?.meta;
+  return meta?.code === POSTGRES_LOCK_NOT_AVAILABLE;
+}
+
+// Each attempt also pins one pooled connection for its whole operation while
+// the operation's own queries need another, so holders of different roots can
+// pin every connection between them and none can run a query until the pool
+// timeout. Admission keeps the attempts one process has open to under half its
+// pool; later callers wait here in memory, holding nothing. Like the advisory
+// lock itself, it is not re-entrant.
 let openManifestLocks = 0;
 const manifestLockWaiters: Array<() => void> = [];
 
@@ -333,14 +352,39 @@ export async function withArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
+  const deadline = Date.now() + MANIFEST_LOCK_WAIT_MS;
+  return retryWithBackoff(() => attemptArchiveManifestLock(rootAgentId, operation), {
+    maxRetries: Math.ceil(MANIFEST_LOCK_WAIT_MS / MANIFEST_LOCK_ATTEMPT_MS) + 1,
+    getBackoffDelayMs: () => MANIFEST_LOCK_RETRY_DELAY_MS,
+    isRetryable: (error) => error instanceof ArchiveManifestLockBusyError && Date.now() < deadline,
+    component: 'ArchiveManifestLock',
+  });
+}
+
+async function reportBusyLock<T>(rootAgentId: string, acquisition: Promise<T>): Promise<T> {
+  try {
+    return await acquisition;
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new ArchiveManifestLockBusyError(rootAgentId);
+    throw error;
+  }
+}
+
+async function attemptArchiveManifestLock<T>(
+  rootAgentId: string,
+  operation: (ownership: ManifestLockOwnership) => Promise<T>
+): Promise<T> {
   const release = await admitManifestLock();
   let enteredOperation: Promise<T> | undefined;
   try {
     return await runTransactionWithRetry(
       async (tx) => {
-        await tx.$queryRaw`
+        await reportBusyLock(
+          rootAgentId,
+          tx.$queryRaw`
           WITH settings AS MATERIALIZED (
-            SELECT set_config('idle_in_transaction_session_timeout', '120s', true)
+            SELECT set_config('idle_in_transaction_session_timeout', '120s', true),
+              set_config('lock_timeout', ${`${MANIFEST_LOCK_ATTEMPT_MS}ms`}, true)
           ), acquired AS MATERIALIZED (
             SELECT pg_advisory_xact_lock(
               hashtextextended(${`${rootAgentId}:trace-archive-manifest`}, ${TRACE_ARCHIVE_MANIFEST_LOCK_SEED})
@@ -348,7 +392,8 @@ export async function withArchiveManifestLock<T>(
             FROM settings
           )
           SELECT 1 AS locked FROM acquired
-        `;
+        `
+        );
         const assertOwned = async () => {
           // A timed-out/terminated interactive transaction no longer owns the lock.
           await tx.$queryRaw`SELECT 1 AS owned`;

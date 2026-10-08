@@ -245,8 +245,11 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                         p = case / f"{name}.pid"
                         if p.exists():
                             all_proxies = case / "proxy.pids"
-                            identifiers = (all_proxies.read_text().splitlines()
-                                           if name == "proxy" and all_proxies.exists() else [p.read_text()])
+                            source = all_proxies if name == "proxy" and all_proxies.exists() else p
+                            # The shell's `>`/`>>` creates the file before printf writes each
+                            # newline-terminated PID; parse only complete lines.
+                            text = source.read_text()
+                            identifiers = text.splitlines()[: text.count("\n")]
                             for identifier in identifiers:
                                 if not identifier.strip():
                                     continue

@@ -16,6 +16,21 @@ def test_backstop_default_and_explicit_override(monkeypatch):
     assert runner.benchmark_wall_clock_backstop_seconds() == 300
 
 
+def test_only_the_default_backstop_yields_to_a_longer_task_timeout(monkeypatch):
+    long_task = deepcopy(get_task_by_name("chat-mode"))
+    long_task.timeout_seconds = 12600
+    monkeypatch.delenv("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", raising=False)
+    assert runner.agent_execution_backstop_seconds(long_task) == 12600
+    long_task._resolved_timeout_seconds = 9000
+    assert runner.agent_execution_backstop_seconds(long_task) == 9000
+    long_task._resolved_timeout_seconds = 600
+    assert runner.agent_execution_backstop_seconds(long_task) == 7200
+    long_task._resolved_timeout_seconds = 9000
+    for operator_cap in ("300", "7200"):
+        monkeypatch.setenv("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", operator_cap)
+        assert runner.agent_execution_backstop_seconds(long_task) == int(operator_cap)
+
+
 def test_realtime_tree_capture_finishes_after_lost_first_cancellation():
     async def case():
         stop = asyncio.Event()
@@ -69,7 +84,7 @@ def test_backstop_cancels_active_poll_then_pauses_before_diagnostics(monkeypatch
         events.append("diagnostics")
         return {"agent": {"status": "PAUSED"}, "messages": []}
 
-    monkeypatch.setattr(runner, "benchmark_wall_clock_backstop_seconds", lambda: 0.02)
+    monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.02)
     monkeypatch.setattr(runner, "_poll_agent", progressing_poll)
     monkeypatch.setattr(runner, "pause_agent", pause)
     monkeypatch.setattr(runner, "get_agent", read)
@@ -104,7 +119,7 @@ def test_backstop_retries_cancellation_absorbed_by_provider(monkeypatch):
         events.append("diagnostics")
         return {"agent": {"status": "PAUSED"}, "messages": []}
 
-    monkeypatch.setattr(runner, "benchmark_wall_clock_backstop_seconds", lambda: 0.01)
+    monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.01)
     monkeypatch.setattr(runner, "_poll_agent", reconnecting_poll)
     monkeypatch.setattr(runner, "pause_agent", pause)
     monkeypatch.setattr(runner, "get_agent", read)
@@ -152,7 +167,7 @@ def test_backstop_cannot_report_normal_timeout_when_pause_fails(monkeypatch):
     async def reject_pause(*args):
         return False
 
-    monkeypatch.setattr(runner, "benchmark_wall_clock_backstop_seconds", lambda: 0.001)
+    monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.001)
     monkeypatch.setattr(runner, "_poll_agent", hang)
     monkeypatch.setattr(runner, "pause_agent", reject_pause)
     with pytest.raises(RuntimeError, match="Could not pause"):
@@ -214,7 +229,7 @@ def test_backstop_covers_real_task_preparation_and_checkpoint(monkeypatch, tmp_p
     monkeypatch.setattr(runner, "_poll_agent", unexpected_poll)
     for name in ("collect_logs", "finalize_archive_and_score_world_model", "delete_agent"):
         monkeypatch.setattr(runner, name, unexpected_poll)
-    monkeypatch.setattr(runner, "benchmark_wall_clock_backstop_seconds", lambda: 0.02)
+    monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.02)
     boundary = {
         "subscription": "subscribe_supabase_realtime_agent",
         "upload": "upload_attachment",

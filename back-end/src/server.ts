@@ -19,6 +19,7 @@ import toolUsageRouter from './domains/tool-usage/routes';
 import inviteCodesRouter from './domains/invite-codes/routes';
 import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
+import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
 import voicesRouter from './domains/voices/routes';
 import browserSessionRouter from './domains/browser-session/routes';
 import peopleRouter from './domains/people/routes';
@@ -603,7 +604,7 @@ if (process.env.COMPUTE_GRANT_AUTO_REMINT === '1') {
   });
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   const isProduction = process.env.NODE_ENV === 'production';
   log.info('Server started', {
     mode: isProduction ? 'PRODUCTION' : 'DEVELOPMENT',
@@ -638,6 +639,8 @@ app.listen(PORT, () => {
   // self-gates on its DISABLE_* env flag inside registerCronJobs.
   registerCronJobs(isProduction);
 });
+// wait_for_human: Twilio streams parked calls' hold audio to this server.
+attachHoldStreamServer(server);
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {

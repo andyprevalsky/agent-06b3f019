@@ -16,20 +16,22 @@ export default defineConfig(() => {
     '/api': {
       target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
       changeOrigin: true,
+      // Twilio hold-line media streams reach the backend through the tunnel.
+      ws: true,
     },
   };
 
   return {
     server: {
-    host: '::',
-    port: parseInt(process.env.VITE_DEV_PORT || '8080'),
-    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean),
-    proxy,
-    hmr: process.env.VITE_ALLOWED_HOSTS
-      ? {
-          clientPort: 443,
-        }
-      : undefined,
+      host: '::',
+      port: parseInt(process.env.VITE_DEV_PORT || '8080'),
+      allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean),
+      proxy,
+      hmr: process.env.VITE_ALLOWED_HOSTS
+        ? {
+            clientPort: 443,
+          }
+        : undefined,
     },
     preview: {
       host: '::',

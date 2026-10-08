@@ -6691,6 +6691,30 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     assert chat_limit < cuda_limit
 
 
+def test_in_progress_phone_call_counts_as_live_stall_activity():
+    """A connected hold must not trip tree-stall just because message_count is frozen."""
+    from benchmarks.benchmark_tasks import TASK_TIMEOUT_FLOORS, get_task_by_name, get_timeout_floor
+    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds, has_in_progress_phone_call
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    chat = get_task_by_name("chat-mode")
+
+    assert has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}]
+    )
+    assert not has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}]
+    )
+    assert not has_in_progress_phone_call([{"metadata": {"toolName": "web_search", "toolStatus": "IN_PROGRESS"}}])
+    assert not has_in_progress_phone_call([])
+    # Keep the default fail-fast budget for hold-queue tasks that never place a
+    # call; the live IN_PROGRESS chip is what keeps a connected hold alive.
+    assert agent_stall_limit_seconds(hold) == AGENT_STALL_SECONDS
+    assert agent_stall_limit_seconds(chat) == AGENT_STALL_SECONDS
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
+
+
 async def test_declared_evaluator_hydrates_claude_code_sessions():
     """Transcript static checks hydrate Claude Code sessions before grading."""
     from dataclasses import replace
@@ -17175,6 +17199,164 @@ def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
     assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
 
 
+def test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit():
+    """Hold-queue bench dials a recorded Air Canada queue for 2.5h, then a representative issues the credit."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name, get_timeout_floor
+    from benchmarks.phone_callee import HOLD_LINE_LEASE_MARGIN_SECONDS, PhoneCalleeSession
+    from benchmarks.phone_hold_line import HOLD_LINE_MAX_SECONDS, load_hold_audio_manifest
+    from domains.call_phone_number.config import (
+        ACTIVITY_TIMEOUT_MINUTES,
+        HEARTBEAT_TIMEOUT_SECONDS,
+        HTTP_TIMEOUT_POLL,
+        MAX_RETRY_ATTEMPTS,
+    )
+    from domains.call_phone_number.service import max_poll_coverage_seconds
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    assert hold.expected_tools == ["call_phone_number"]
+    assert hold.forbidden_tools == ["wait_for"]
+    assert hold.expected_tool_counts == {"call_phone_number": 1}
+    assert hold.approval_handling == "auto_approve"
+    assert hold.group == "daily" and "phone" in hold.tags
+    for phrase in (
+        "{callee_phone_number}",
+        "exactly once",
+        "Air Canada",
+        "flight credit",
+        "do not use wait_for",
+        "Preserve spelled letters in alphanumeric confirmation codes exactly",
+    ):
+        assert phrase in hold.prompt
+    # The real queue announces its own wait; the prompt must not script the hold.
+    for scripted in ("2:45", "3 hours", "system_prompt must", "estimated wait"):
+        assert scripted not in hold.prompt
+    assert hold.pinned_facts == {
+        "confirmation_code": "ACFC-2458",
+        "credit_amount_usd": "428.60",
+        "credit_expiry": "October 2, 2027",
+        "booking_reference": "L9K4QM",
+        "flight_number": "AC107",
+    }
+
+    persona = hold.phone_persona
+    assert "hold_success" not in persona
+    assert persona["hold_line"] == {"hold_seconds": 9000, "audio": "air-canada-2026-10-06"}
+    manifest = load_hold_audio_manifest(persona["hold_line"]["audio"])
+    assert manifest["clips"]["loop"]["duration_seconds"] >= 15 * 60
+    assert persona["first_message"].endswith("How can I help you today?")
+    assert "Air Canada" in persona["first_message"] and "Dana" in persona["first_message"]
+    for spoken in (persona["first_message"], persona["end_call_message"]):
+        assert "ACFC" not in spoken and "428" not in spoken and "letter A" not in spoken
+    for fact in ("ACFC-2458", "letter A", "digit 2", "428 dollars and 60 cents", "October 2, 2027", "L9K4QM", "AC107"):
+        assert fact in persona["system_prompt"]
+    assert "endCall" in persona["system_prompt"]
+    assert persona["max_duration_seconds"] == 900
+    assert "caller_stayed_on_hold" not in persona["structured_data_schema"]["properties"]
+    assert hold.callee_checks == {
+        "caller_stayed_on_hold": True,
+        "caller_requested_flight_credit": True,
+        "confirmation_code_given": True,
+        "confirmation_code": "ACFC-2458",
+        "credit_amount_usd": "428.60",
+        "credit_expiry": "October 2, 2027",
+    }
+    assert {"ACFC-2458", "428.60"} <= set(hold.expected_call_findings)
+    assert {"ACFC-2458", "428.60", "October 2, 2027"} <= set(hold.expected_final_findings)
+    assert "9000 seconds" in hold.environment["context_notes"]
+    assert {"vapi", "twilio"} <= set(hold.environment["live_targets"])
+
+    hold_seconds = persona["hold_line"]["hold_seconds"]
+    # The bench is the end-to-end test of wait_for_human: most of the queue must be parked.
+    assert hold.enforce_declared_evaluators is True
+    parked_checks = [
+        check
+        for evaluator in hold.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+        if check["type"] == "phone_call_parked_on_hold"
+    ]
+    assert parked_checks == [{"type": "phone_call_parked_on_hold", "min_seconds": int(hold_seconds * 0.9)}]
+    from benchmarks import local
+
+    assert local.needs_public_tunnel([hold.name]) is True
+    assert local.needs_public_tunnel(["phone-call-ivr-dtmf"]) is False
+    # The agent's single call must outlive the hold plus the representative conversation.
+    assert hold.timeout_seconds >= hold_seconds + persona["max_duration_seconds"] + 1200
+    assert hold_seconds + persona["max_duration_seconds"] <= HOLD_LINE_MAX_SECONDS
+    assert ACTIVITY_TIMEOUT_MINUTES * 60 >= hold.timeout_seconds
+    assert max_poll_coverage_seconds() >= hold.timeout_seconds
+    assert HTTP_TIMEOUT_POLL >= 30
+    assert HEARTBEAT_TIMEOUT_SECONDS >= 600 and HEARTBEAT_TIMEOUT_SECONDS > HTTP_TIMEOUT_POLL * 2
+    assert MAX_RETRY_ATTEMPTS >= 5
+    backend_hold_max = (bench.REPO_ROOT / "back-end/src/domains/vapi/config.ts").read_text()
+    assert "PHONE_HOLD_MAX_SECONDS ?? 3 * 60 * 60" in backend_hold_max
+    assert hold_seconds + persona["max_duration_seconds"] < 3 * 60 * 60
+
+    session = PhoneCalleeSession(hold.name, hold.phone_persona, api_key="test-key")
+    assert session._hold_line_config() == {"hold_seconds": 9000, "audio": "air-canada-2026-10-06"}
+    assert session.analysis_timeout_seconds() == 180
+    lease = hold_seconds + persona["max_duration_seconds"] + HOLD_LINE_LEASE_MARGIN_SECONDS
+    assert lease >= hold.timeout_seconds
+    assert "task._callee_phone_number = phone_callee.dial_number" in inspect.getsource(bench)
+
+    assert hold.timeout_seconds > 7200
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    short = get_task_by_name("phone-call-client-intake")
+    assert short.timeout_seconds < 7200
+    with patch.dict(os.environ):
+        os.environ.pop("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", None)
+        assert bench.agent_execution_backstop_seconds(hold) == hold.timeout_seconds
+        assert bench.agent_execution_backstop_seconds(short) == 7200
+        assert bench.agent_execution_backstop_seconds() == 7200
+        for operator_cap in ("300", "7200"):
+            os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"] = operator_cap
+            assert bench.agent_execution_backstop_seconds(hold) == int(operator_cap)
+            assert bench.agent_execution_backstop_seconds(short) == int(operator_cap)
+
+
+def test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card():
+    """Parked time comes from the finished call_phone_number card's holdSeconds, nothing else."""
+    from benchmarks.run_benchmark import _run_declared_static_check, phone_parked_hold_seconds
+
+    def card(**phone_call):
+        return {"role": "TOOL", "metadata": {"toolName": "call_phone_number", "phoneCall": phone_call}}
+
+    evaluator = {"checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]}
+    parked = {"messages": [card(status="in-progress"), card(status="on-hold"), card(status="ended", holdSeconds=8820)]}
+    assert phone_parked_hold_seconds(parked) == 8820
+    assert _run_declared_static_check(evaluator, parked) == (True, "All declared static checks passed")
+
+    stayed_live = {"messages": [card(status="ended", duration=9600)]}
+    assert _run_declared_static_check(evaluator, stayed_live) == (
+        False,
+        "Phone call was parked by wait_for_human for 0s; expected at least 8100s",
+    )
+    assert _run_declared_static_check(evaluator, {"messages": [card(status="ended", holdSeconds=600)]})[0] is False
+    foreign = {
+        "messages": [
+            {"metadata": {"toolName": "wait_for", "phoneCall": {"holdSeconds": 9000}}},
+            card(status="ended", holdSeconds=True),
+            card(status="ended", holdSeconds="9000"),
+        ]
+    }
+    assert phone_parked_hold_seconds(foreign) == 0
+
+
+def _run_pytest_style_case(case):
+    """Run a module-level pytest case off the runner's event loop, with monkeypatch when it asks."""
+    import inspect
+
+    import pytest
+
+    if "monkeypatch" in inspect.signature(case).parameters:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            return case(monkeypatch)
+    return case()
+
+
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     """Benchmark callees can end completed calls instead of waiting for max duration."""
     from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
@@ -17594,6 +17776,13 @@ def test_callee_check_failures_coerce_bools_and_match_strings_loosely():
     assert failures[0].startswith("caller_requested_name")
 
     assert callee_check_failures({"payment_completed": True}, {}) == ["payment_completed: expected True, got None"]
+    assert (
+        callee_check_failures(
+            {"credit_expiry": "October 2, 2027"},
+            {"credit_expiry": "October second two thousand twenty seven"},
+        )
+        == []
+    )
 
 
 def test_payment_audit_structured_data_since_returns_latest_successful_payment():
@@ -18805,6 +18994,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "phone-call-client-intake",
         "phone-call-payment",
         "phone-call-ivr-dtmf",
+        "phone-call-hold-queue",
         "response-schema-non-goal-feedback",
     } <= suite_names
     # This branch added four ready gate benchmarks (subscription free-credit,
@@ -20756,6 +20946,18 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
+    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit)
+    r.record(
+        "phone_call_parked_on_hold_static_check",
+        test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
+    )
+    from benchmarks import phone_callee_test, phone_hold_line_test
+
+    for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
+        for name in sorted(dir(module)):
+            if name.startswith("test_"):
+                case = getattr(module, name)
+                await r.record_async(prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case))
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",
@@ -21763,6 +21965,10 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
         test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
+    )
+    r.record(
+        "in_progress_phone_call_counts_as_live_stall_activity",
+        test_in_progress_phone_call_counts_as_live_stall_activity,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",

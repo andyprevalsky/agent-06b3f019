@@ -1,19 +1,28 @@
-export const VAPI_BASE_URL = 'https://api.vapi.ai';
+export const VAPI_BASE_URL = process.env.VAPI_API_BASE_URL ?? 'https://api.vapi.ai';
 export const VAPI_PRIVATE_KEY = process.env.VAPI_PRIVATE_KEY;
 
 type JsonObject = Record<string, unknown>;
 
+export interface OutboundPhoneNumber {
+  /** Vapi phone-number id (imported Twilio number). */
+  id: string;
+  /** Same number in E.164, used when the backend dials it on Twilio directly. */
+  number: string;
+}
+
 // Pool of outbound phone numbers for load distribution.
 // Randomly selecting from the pool helps avoid spam flags and per-number rate limits.
-export const OUTBOUND_PHONE_NUMBER_POOL = [
-  '632d5264-34f2-4bf4-a4e3-3822b11adcf1', // +1 (415) 449-8445
-  '2fe93786-c619-4a57-8a74-710f87b7b13b', // +1 (415) 941-6744
+export const OUTBOUND_PHONE_NUMBER_POOL: OutboundPhoneNumber[] = [
+  { id: '632d5264-34f2-4bf4-a4e3-3822b11adcf1', number: '+14154498445' },
+  { id: '2fe93786-c619-4a57-8a74-710f87b7b13b', number: '+14159416744' },
 ];
 
 // Default ElevenLabs voice ID for outbound calls — "Rose", the first preset
 // in mac-app/ui/features/onboarding/components/VoiceSelector.tsx
 // (PRESET_VOICES[0]). Used when the user has not selected a custom voice.
 export const DEFAULT_OUTBOUND_VOICE_ID = '6fZce9LFNG3iEITDfqZZ';
+
+export const OUTBOUND_ASSISTANT_MODEL = 'gpt-4.1-mini';
 
 // Base system prompt that gets combined with the LLM-defined system_prompt
 export const BASE_SYSTEM_PROMPT = `You are making an outbound phone call. Be polite, professional, and conversational.
@@ -45,7 +54,7 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   name: 'Rose Outbound Call Agent',
   model: {
     provider: 'openai',
-    model: 'gpt-4o',
+    model: OUTBOUND_ASSISTANT_MODEL,
     tools: [{ type: 'endCall' }, { type: 'dtmf' }],
   },
   voice: {
@@ -75,6 +84,113 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   clientMessages: ['transcript', 'hang', 'speech-update', 'metadata', 'conversation-update'],
 };
 
+// ── wait_for_human: park the call on a backend media stream while on hold ──
+
+export const WAIT_FOR_HUMAN_TOOL_NAME = 'wait_for_human';
+
+export const WAIT_FOR_HUMAN_TOOL_DESCRIPTION =
+  'Put this call on hold until a live person picks up. Use it as soon as you are waiting in a hold queue: hold music, recorded "please stay on the line" or estimated-wait announcements, and no live person talking with you. While on hold you stop listening, the line stays connected, and you are reconnected automatically, with what the person said, as soon as a live person starts talking. Do not use it while an automated menu is still asking you for input, and do not hang up just because the wait is long.';
+
+/** URL prefix of the hold webhooks; the router is mounted at /api/vapi. */
+export const HOLD_ROUTE_PREFIX = '/api/vapi/hold';
+export const HOLD_STREAM_PATH = `${HOLD_ROUTE_PREFIX}/stream`;
+
+/** Absolute hold ceiling: a parked call is hung up after this long. */
+export const HOLD_MAX_SECONDS = Number(process.env.PHONE_HOLD_MAX_SECONDS ?? 3 * 60 * 60);
+/** Hold transcripts kept per hold period (oldest dropped first). */
+export const HOLD_UTTERANCE_LIMIT = 40;
+/** Earlier hold utterances shown to the human detector with each new one. */
+export const HOLD_DETECTOR_CONTEXT_UTTERANCES = 12;
+/** Twilio <Redirect> re-connects of the hold stream before giving up. */
+export const HOLD_STREAM_RECONNECT_LIMIT = 30;
+/** Audio batched per realtime STT frame (Twilio sends 20 ms μ-law frames). */
+export const HOLD_STT_CHUNK_MS = 200;
+export const HOLD_PRIOR_TRANSCRIPT_CHAR_LIMIT = 12_000;
+
+export const TWILIO_API_BASE_URL = process.env.TWILIO_API_BASE_URL ?? 'https://api.twilio.com';
+export const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+export const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+export const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+export const ELEVENLABS_REALTIME_STT_URL =
+  process.env.ELEVENLABS_REALTIME_STT_URL ?? 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
+export const HUMAN_DETECTOR_MODEL = 'rose-labs/rose-1-mini';
+
+export interface HoldRuntimeConfig {
+  publicBaseUrl: string;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+  elevenLabsApiKey: string;
+  tokenSecret: string;
+}
+
+/**
+ * Public https origin that Twilio and Vapi can reach for hold webhooks.
+ * Local stacks expose the frontend tunnel (Vite proxies /api, including
+ * websockets); production uses the backend's own public URL. Loopback or
+ * plain-http values are unreachable from Twilio and disable hold parking.
+ */
+export function resolveHoldPublicBaseUrl(env: NodeJS.ProcessEnv = process.env): string | null {
+  const candidates = [
+    env.PHONE_HOLD_PUBLIC_URL,
+    env.PUBLIC_BASE_URL,
+    env.BACKEND_URL,
+    env.RENDER_EXTERNAL_URL,
+  ];
+  for (const raw of candidates) {
+    const value = (raw ?? '').trim().replace(/\/+$/, '');
+    if (value === '' || !value.startsWith('https://')) continue;
+    const host = value.slice('https://'.length).split(/[/:]/)[0].toLowerCase();
+    if (host === 'localhost' || host.startsWith('127.') || host === '0.0.0.0' || host === '[') {
+      continue;
+    }
+    return value;
+  }
+  return null;
+}
+
+/** Null when any dependency of hold parking is missing (calls then use Vapi directly). */
+export function resolveHoldRuntimeConfig(
+  env: NodeJS.ProcessEnv = process.env
+): HoldRuntimeConfig | null {
+  if (env.PHONE_HOLD_ENABLED === '0') return null;
+  const publicBaseUrl = resolveHoldPublicBaseUrl(env);
+  const twilioAccountSid = env.TWILIO_ACCOUNT_SID ?? '';
+  const twilioAuthToken = env.TWILIO_AUTH_TOKEN ?? '';
+  const elevenLabsApiKey = env.ELEVENLABS_API_KEY ?? '';
+  const tokenSecret = env.BACKEND_API_KEY ?? '';
+  if (
+    publicBaseUrl === null ||
+    twilioAccountSid === '' ||
+    twilioAuthToken === '' ||
+    elevenLabsApiKey === '' ||
+    tokenSecret === ''
+  ) {
+    return null;
+  }
+  return { publicBaseUrl, twilioAccountSid, twilioAuthToken, elevenLabsApiKey, tokenSecret };
+}
+
+export function buildWaitForHumanTool(serverUrl: string): JsonObject {
+  return {
+    type: 'function',
+    function: {
+      name: WAIT_FOR_HUMAN_TOOL_NAME,
+      description: WAIT_FOR_HUMAN_TOOL_DESCRIPTION,
+      parameters: {
+        type: 'object',
+        properties: {
+          heard: {
+            type: 'string',
+            description: 'What you heard that shows you are on hold.',
+          },
+        },
+        required: [],
+      },
+    },
+    server: { url: serverUrl, timeoutSeconds: 20 },
+  };
+}
+
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -98,7 +214,7 @@ export function buildCallAssistantConfig(
   systemPrompt: string,
   structuredDataSchema: Record<string, unknown>,
   voiceId?: string,
-  options?: { calleeSpeaksFirst?: boolean }
+  options?: { calleeSpeaksFirst?: boolean; waitForHumanToolUrl?: string }
 ): JsonObject {
   const configuredAssistant = DEFAULT_CALL_ASSISTANT_CONFIG;
   const configuredModel = isJsonObject(configuredAssistant.model) ? configuredAssistant.model : {};
@@ -106,6 +222,7 @@ export function buildCallAssistantConfig(
   const configuredAnalysisPlan = isJsonObject(configuredAssistant.analysisPlan)
     ? configuredAssistant.analysisPlan
     : {};
+  const configuredTools = Array.isArray(configuredModel.tools) ? configuredModel.tools : [];
   // IVR callees speak first (menu prompt). Greeting over the menu wastes the
   // turn and makes the outbound agent less likely to send DTMF immediately.
   // Detect from the caller-provided brief only (see isIvrNavigationPrompt).
@@ -123,6 +240,10 @@ export function buildCallAssistantConfig(
     model: {
       ...configuredModel,
       messages: [{ role: 'system', content: systemPrompt }],
+      tools:
+        options?.waitForHumanToolUrl !== undefined
+          ? [...configuredTools, buildWaitForHumanTool(options.waitForHumanToolUrl)]
+          : configuredTools,
     },
     voice: {
       ...configuredVoice,

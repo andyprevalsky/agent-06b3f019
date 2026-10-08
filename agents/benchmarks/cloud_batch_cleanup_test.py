@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -50,6 +51,8 @@ async def _assert_evaluated_before_teardown(monkeypatch, passed):
 
     class Callee:
         phone_number = "fixture-phone"
+        dial_number = "fixture-phone"
+        hold_line = None
         assistant_id = "fixture-assistant"
 
         def __init__(self, *_args):
@@ -379,6 +382,25 @@ async def test_archive_does_not_accept_terminal_without_recording():
     ):
         with pytest.raises(TimeoutError):
             await bench._refresh_browser_archive_snapshot("http://localhost:1", ROOT, {}, {}, timeout_seconds=0.01)
+
+
+@async_case
+async def test_archive_deadline_spent_during_readiness_is_a_timeout():
+    from benchmarks import browser_zero_allocation
+
+    real_receipts = browser_zero_allocation.preparation_cancelled_task_receipts
+
+    def slow_receipts(messages, agent_id):
+        time.sleep(0.6)
+        return real_receipts(messages, agent_id)
+
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}])),
+        patch.object(bench, "get_agent", AsyncMock(return_value={"messages": browser_rows(attached=False)})),
+        patch.object(browser_zero_allocation, "preparation_cancelled_task_receipts", slow_receipts),
+    ):
+        with pytest.raises(TimeoutError, match="did not become terminal with attached recordings"):
+            await bench._refresh_browser_archive_snapshot("http://localhost:1", ROOT, {}, {}, timeout_seconds=0.5)
 
 
 @async_case

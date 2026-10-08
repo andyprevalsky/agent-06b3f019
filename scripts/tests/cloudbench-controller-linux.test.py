@@ -183,7 +183,7 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(calls[2][2], identity + ":/tmp/.")
         self.assertEqual(calls[3], ["docker", "rm", identity])
 
-    def test_extracted_native_cache_controls_need_no_pytest_and_report_skips(self):
+    def test_extracted_native_cache_controls_need_no_pytest_and_never_skip(self):
         root = Path(__file__).resolve().parents[2]
         fixture = Path(__file__).with_name("cloudbench-status-service-shutdown.test.sh")
         block = fixture.read_text().split("<<'PY_CACHE_PARENT'\n", 1)[1].split(
@@ -200,9 +200,10 @@ class ContainerOwnership(unittest.TestCase):
             text=True,
             timeout=10,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count("SKIP: native cache parent "), 3)
-        self.assertIn("0 passed, 3 skipped", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("FAIL: native cache-parent controls need root Linux", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+        self.assertNotIn("SKIP", result.stdout)
         self.assertNotIn("PASS: native checkout cache parent", result.stdout)
 
     def test_foreign_identity_or_nonsealed_mounts_are_never_mutated(self):
@@ -245,6 +246,7 @@ class ContainerOwnership(unittest.TestCase):
         fixture=None,
         fixture_exit_code=0,
         platform="darwin",
+        euid=501,
         native_preflight=None,
     ):
         with tempfile.TemporaryDirectory() as temporary:
@@ -306,6 +308,12 @@ class ContainerOwnership(unittest.TestCase):
                     str(tests / "run-cloudbench-controller-linux.py"),
                 ),
                 patch.object(runner.sys, "platform", platform),
+                patch.object(runner.os, "geteuid", return_value=euid),
+                patch.object(
+                    runner.os,
+                    "execvp",
+                    side_effect=AssertionError("ran the fixture natively"),
+                ),
                 patch.object(
                     runner.sys,
                     "argv",
@@ -366,27 +374,20 @@ class ContainerOwnership(unittest.TestCase):
         self.assertEqual(self.check_dispatch(), ["join", "retire"])
         self.assertEqual(self.check_dispatch(fixture_exit_code=1), ["join", "retire"])
 
-    def test_status_shutdown_skips_pytest_native_branch_without_pytest(self):
+    def test_status_shutdown_runs_cache_parent_controls_without_a_pytest_gate(self):
         source = Path(__file__).with_name(
             "cloudbench-status-service-shutdown.test.sh"
         ).read_text()
-        probe = "python3 -c 'import pytest'"
-        skip = (
-            "SKIP: native cache parent permissions "
-            "(offline controller image has no pytest)"
-        )
-        self.assertIn(probe, source)
-        self.assertIn(skip, source)
-        self.assertLess(source.index(probe), source.index(skip))
-        self.assertNotIn("\nimport pytest", source)
+        self.assertNotIn("import pytest", source)
+        self.assertNotIn("SKIP: native cache parent", source)
 
-    def test_linux_unpinned_host_uses_offline_controller_image(self):
+    def test_root_linux_unpinned_host_uses_offline_controller_image(self):
         self.assertEqual(
-            self.check_dispatch(platform="linux", native_preflight=False),
+            self.check_dispatch(platform="linux", euid=0, native_preflight=False),
             ["join", "retire"],
         )
 
-    def test_linux_pinned_host_execs_native_fixture(self):
+    def test_root_linux_pinned_host_execs_native_fixture(self):
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(
@@ -398,6 +399,7 @@ class ContainerOwnership(unittest.TestCase):
                 ),
             ),
             patch.object(runner.sys, "platform", "linux"),
+            patch.object(runner.os, "geteuid", return_value=0),
             patch.object(
                 runner.sys,
                 "argv",
@@ -415,7 +417,9 @@ class ContainerOwnership(unittest.TestCase):
             with self.assertRaises(SystemExit) as exit_status:
                 runner.main()
             self.assertEqual(exit_status.exception.code, 0)
-            native.assert_called_once()
+            native.assert_called_once_with(
+                [runner.sys.executable, "-c", runner.TOOL_CHECK]
+            )
             self.assertEqual(execvp.call_args.args[0], "bash")
             self.assertTrue(
                 execvp.call_args.args[1][1].endswith(
@@ -430,6 +434,17 @@ class ContainerOwnership(unittest.TestCase):
                 self.assertEqual(
                     self.check_dispatch(fixture=fixture), ["join", "retire"]
                 )
+
+    def test_non_root_linux_uses_the_offline_root_container_even_when_pinned(self):
+        self.assertEqual(
+            self.check_dispatch(
+                platform="linux",
+                euid=1000,
+                native_preflight=True,
+                fixture="status-service-shutdown",
+            ),
+            ["join", "retire"],
+        )
 
     def test_invalid_fixture_is_rejected_before_any_docker_operation(self):
         for fixture in ("unknown", "../foreign"):
