@@ -74,7 +74,7 @@ def publish(path, value):
         os.close(fd)
 
 
-def binding(registry, machine, app, *, completed_original=False):
+def binding(registry, machine, app, *, completed_original=False, native_config=None, native_machines=None):
     assert re.fullmatch(r"[0-9a-f]{32}", registry.name)
     assert re.fullmatch(r"[0-9a-f]+", machine)
     assert registry.resolve() == registry and not registry.is_symlink()
@@ -178,6 +178,16 @@ def binding(registry, machine, app, *, completed_original=False):
     assert not validator["validate_run_file"](root / "run.json", [out.name], expected_execution_provenance=provenance, expected_world_model_mode=mode)
     terminal = json.loads(read(root / "run.json", 64 * 1024 * 1024))["tasks"][0]
     assert terminal["benchmark_status"] in ("PASSED", "FAILED")
+    if native_config is not None or native_machines is not None:
+        assert completed_original and native_config is not None and native_machines is not None
+        config = obj(native_config)
+        assert config["env"]["CLOUDBENCH_RUN_TOKEN"] == token
+        assert config["env"]["REF"] == provenance["base_sha"]
+        assert (config["env"].get("LOCAL_PATCH_SHA256") or "none") == provenance["workspace_patch_sha256"]
+        assert [mount["volume"] for mount in config["mounts"]] == [original["volume_id"]]
+        inventory = obj(native_machines, NATIVE_INVENTORY_LIMIT)
+        assert isinstance(inventory, list) and all(isinstance(row, dict) and isinstance(row.get("id"), str) for row in inventory)
+        assert machine not in {row["id"] for row in inventory}
     for p in (run / "execution-task-matrix.json", out / ".cid", out / "runtime-evidence.owner.json", root / "manifest.json", out / "guest-shutdown.confirmed", out / "cloudbench-run.json", out / "worker-clones.ids"):
         source_files[str(p)] = digest(read(p, 64 * 1024 * 1024))
     return {"schema": SCHEMA, "owner": owner, "run_id": meta["run_id"], "app": app, "task": out.name, "ordinal": ordinal, "run_token": token, "machine_id": machine, "clone_name": original["clone_name"], "volume_id": original["volume_id"], "full_task_count": len(tasks), "proof_credit": 0, "source_files_sha256": source_files}

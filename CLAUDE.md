@@ -1081,7 +1081,9 @@ shrinking registry. After the original CLI exits, use a verified current CLI for
 the documented exact-owner recovery while preserving its original guest source,
 owner and private evidence. A positively absent fresh primary with its exact
 original run ACK, complete seal and ownership/source binding can skip reconnect
-while the owner remains quarantined. This read-only recognition grants no reap
+while the owner remains quarantined. A destroyed native tombstone also requires
+the exact clone name, original config token/source/Volume, and current unlisted
+Machine identity. This read-only recognition grants no reap
 authority; normal guest acknowledgement, evidence and native reaper stages
 still own latch/policy transitions and full release. Recovery's local proxy lease adapter represents an
 absent preferred port as numeric zero; an explicit nonempty preference retains

@@ -1,14 +1,14 @@
 ---
 id: 2026-10-07-completed-absent-primary-blocked-guest-reconnect
 date: 2026-10-07
-title: Exact recovery rejected an absent completed primary before reconnecting remaining guests
+title: Exact recovery rejected a completed absent or destroyed primary before reconnecting remaining guests
 surface: harness
 component: run-bench-fleet
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: fleet_recovery_reconnect_guest_shutdowns rejected every nonzero registry_machine_details result before reading completed original guest evidence
+first_bad_boundary: fleet_recovery_reconnect_guest_shutdowns required native presence before reading completed originals, including an exact destroyed tombstone excluded from current inventory
 symptoms:
-  - exact owned Machine is absent or unreadable
+  - completed exact owned Machine is absent or returns a destroyed tombstone excluded from current inventory
   - complete original seal and guest shutdown ACK remain under an owned registry record
   - recovery stops before reconnecting remaining exact guests
 tags:
@@ -22,6 +22,9 @@ sources:
   - fleet run 20261007-224256-41245
   - memory:completed-guest-recovery.private/original-binding.safe.json
   - memory:completed-guest-recovery.private/red.safe.json
+  - commit 200fe31bd61df60bba88512e2d571a2481dd8d30
+  - memory:completed-guest-recovery.private/tombstone-red-v2.safe.json
+  - memory:completed-guest-recovery.private/original-tombstone-binding.safe.json
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_consumes_runtime_receipt_completed_absent_primary
 status: mitigated
 ---
@@ -33,7 +36,10 @@ The grep-agent-trajectories-isolation primary was positively absent from native
 inventory while its exact original allocation remained registered as owned.
 Its original run shutdown ACK, ordinal runtime owner, complete stopped-stack
 manifest and byte-identical canonical result remained intact. Supported recovery
-stopped at the absent-Machine reconnect guard before reaching remaining guests.
+stopped at the native-presence reconnect guard before reaching remaining guests.
+The retained exact native status later proved exit 0 with state destroyed and
+the exact clone name; current app inventory excluded that primary. Inventory
+absence must not be mistaken for the status command's exact-not-found result.
 
 At the parent observation there were seven started owned Machines and nine
 remaining Volumes. The frozen catalogue scan found 49 exact original run ACKs,
@@ -59,6 +65,18 @@ original ACK and seal. The existing sealed Machine-only retirement exception
 requires its own prior intent and retained-volume receipt; it does not describe
 this original state.
 
+The first partial repair, commit 200fe31, recognized only exact native status 1.
+Supported recovery attempt 02 still failed in 6.45 seconds on the actual status
+0/destroyed representation, reaching the existing unsafe-state guard. The
+retained original status was parsed again by the actual production parser:
+state destroyed, exact clone name, and no corresponding current inventory ID.
+Its status SHA256 is
+384cb41c90b7feec62370ed0534ea86250536d24409895f25a9e1685acfffaf2.
+The parent then captured its exact config once, SHA256
+7f9df411435f3440eed84680e51502bfa11eb927497a02d297404ff9387cea29.
+This is a native representation gap, not a timeout or evidence-publication
+failure. The partial repair and unsuccessful recovery receipt remain intact.
+
 The first incorrect predicate is therefore mandatory native presence for every
 still-registered guest. Allocation bookkeeping can outlive a positively absent
 native Machine. Its completed scope must be recognized from intact originals
@@ -75,14 +93,15 @@ error. Recognition and permission to reap are separate statements.
 The permanent owning control runs the actual extracted planner, reconnect loop,
 quarantine-state reader and normal ACK/latch consumer. It reuses the existing
 complete-original fixture and pure result/provenance builders. Exact native
-status and the remaining stopped guest's config are local boundaries; no paid,
+status parser and exact config reader use a local native transport boundary;
+the remaining stopped guest also reaches configuration. No paid,
 database or model operations participate. The main positive case has the actual
 retain policy and both latches. A second positive retains reap compatibility.
 The remaining exact guest must reach configuration, and every original authority,
 task, seal and failed outcome byte is preserved. Only the unchanged normal ACK
 consumer may change policy and discharge the guest latch.
 
-The frozen test SHA256 is
+The first frozen test SHA256 was
 3de73b4863b6cc1145f34bf74f9ff68a1b0465622f80990b03c6e2a25dda90de.
 The unchanged command, in an activated matching Python 3.11.9 venv, was:
 
@@ -103,6 +122,22 @@ task file hashes remained unchanged. Its private receipt SHA256 is
 1a7a706127332858fc91121f0d7bef1a25560acbf02dc0ecec7a02947b1a0a9e.
 It performs no native operation and grants zero proof credit.
 
+The refined frozen test SHA256 is
+617984c756bc9dd15bc53f68cd1d4f41137f0492c01076b0d01145eae07d7f89.
+The same owning command on partial 200fe31 produced one failed destroyed
+positive and 21 passed controls in 7.65 seconds; the identical test passed all
+22 in 6.22 seconds on the refinement. The added exact transport controls reject
+foreign tombstone name, run token, source REF or patch, mounted Volume, an ID
+still present in native inventory, and unreadable config. The parent independently
+ran the normal selection: 22 passed in 6.92 seconds.
+
+Read-only recognition of the actual original with the retained destroyed
+status/config/inventory binding passed under retain. All 217 captured original
+registry, audit, task and native-packet file hashes remained unchanged. Receipt
+SHA256 is b3628a826e0a99c556ddb448d7b22bcd3335f982a0b832b50dfbc06d8efaa151.
+It establishes exact completed-scope recognition, with no native operation,
+model/database call, retirement authority or benchmark credit.
+
 Archive searches included "recovery missing registry retired Machine",
 "completed task originals block active guest recovery",
 "absent completed primary guest reconnect sealed ACK" and
@@ -116,8 +151,9 @@ archive readiness from native release; those protections remain authoritative.
 
 ## Solution
 
-Only a fresh guest with exact native status 1 enters completed-original
-recognition. The caller uses the existing sealed Machine validator's binding
+Only a fresh guest with exact native status 1, or status 0/destroyed with the
+exact clone name, enters completed-original recognition. The caller uses the
+existing sealed Machine validator's binding
 function in a new explicit read-only mode. It keeps the original app, owner,
 run, catalogue ordinal, runtime token, source files, complete stopped-stack
 manifest, clean cleanup token, required backend/worker files, canonical result,
@@ -125,6 +161,11 @@ task matrix, mode and execution-provenance validation. Its additional joins
 require the exact by-Machine index and expected-fresh primary source intent,
 an original source outside the recorded allocation tree, and the exact parent
 run ACK. A child-token receipt alone cannot qualify.
+
+For a destroyed tombstone, its current exact-ID config must join the original
+runtime token, provenance REF and normalized patch hash, and sole original
+Volume mount. Current bounded native app inventory must omit that ID. These
+additional read-only joins cannot qualify a live, replaced or foreign scope.
 
 The matched task, clone, Volume and output must equal the already validated
 plan. Native unreadable status and pool guests stay on their existing refusal
@@ -144,10 +185,32 @@ native process and released its own snapshot. Private selection receipt SHA256:
 a18c6f018793fc60bf0f34343bcafdb98b87bb4e79298109158eaf1e0e81febd.
 No helper subcommand or original snapshot rewrite is required.
 
-The normal related selector passed 51 cases in 29.49 seconds, including original
+Before the partial commit, the normal related selector passed 51 cases in
+29.49 seconds, including original
 runtime-receipt, retired-mapping, child-ACK and snapshot contracts. The existing
 sealed Machine-only retirement runner passed 26 controls and retained its
-default receipt bounds. The existing benchmark-live-results deploy selector
+default receipt bounds; the refined helper reran those same 26 successfully.
+After partial 200fe31 was committed, the refined related selection recorded
+58 passes and one refusal in 42.13 seconds. The pre-service preservation fixture
+bound immutable git HEAD 200fe31, whose changed full controller recipe lacked
+phase registration. Its unchanged production attestation guard correctly
+refused that source fingerprint. With the existing fixture source override
+bound to reviewed original ccc4, both unchanged pre-service controls passed in
+5.20 seconds. That proves original-source compatibility, not qualification of
+the new default HEAD. The original failed command and source-bound diagnostic
+receipts remain preserved. The actual immutable candidate recipe is
+77b2cf34137ab2fe4feda08338e9b7123f5dbeed4eedff88c6f39752ae4329aa:
+38 of 39 inputs are unchanged from the reviewed original; only the full
+controller input changes. Root independently reviewed that reconnect-only delta
+outside the unchanged boot/index paths and certified only the existing
+before-stack-launch and agent-network-index-bootstrap phases. Its receipt
+SHA256 is f6999e60bc6223d0b1b916771b8c13c116b5b88e4321befce074bf06964f2bfe.
+Only that exact fingerprint is registered in the existing policy, preserving
+all prior entries and predicates. Normal committed-source qualification is
+required before publication; an uncommitted policy cannot satisfy the trusted
+committed-byte check.
+
+The existing benchmark-live-results deploy selector
 already discovers the new exact_recovery_consumes_runtime_receipt cases.
 No new runner, acceptance gate, polling loop, task window or production timer
 was introduced.
@@ -163,11 +226,18 @@ The local Codex snapshot was absent; no reference fetch or Codex behavior is
 claimed.
 
 This reuses the existing bounded local validator only for remaining registered
-absent primaries during failed-owner recovery. Its existing catalogue/audit
+absent or destroyed primaries during failed-owner recovery. Its existing catalogue/audit
 scan is repeated per such primary; no linear ten-thousand-task scaling claim
 is made. It adds no provider calls, execution-path work or concurrency.
-Status remains mitigated pending independent source review and integrated
-original-owner recovery. Local proof and read-only original validation supply
+Runtime and the 22 owning controls received the parent's independent source
+review. Its supported recovery attempt 03 then consumed all fifty genuine
+original run ACKs through the normal consumer and cleared the guest latch.
+It recaptured the second unsealed guest's normal runtime bundle and ended
+runtime-incomplete with 49 sealed originals; the remaining Minted original has
+no canonical run/seal. That separate original-volume forensic archive and
+resource reaper remain the parent's work. Status remains mitigated pending
+normal committed-source qualification, final independent review and actual remaining closure.
+Local proof and read-only original validation supply
 no fresh LIVE outcome, benchmark credit or full-release claim.
 
 ## Human feedback
