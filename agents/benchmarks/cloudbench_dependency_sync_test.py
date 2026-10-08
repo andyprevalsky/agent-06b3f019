@@ -29718,3 +29718,115 @@ fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"
     for name, value in preserved.items():
         p = Path(name)
         assert (("link", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes())) == value
+
+
+@pytest.mark.parametrize("fault", ["none", "existing", "partial-existing", "foreign-existing", "nonprefix-existing", "foreign-guest", "generation"])
+def test_boot_terminal_runtime_evidence_collects_complete_logs_recovery_driver(tmp_path: Path, fault: str) -> None:
+    """The normal late-recovery transfer owns its original driver log too."""
+    token, machine = "run-token", "fixture-machine"
+    guest = tmp_path / "guest"
+    context = guest / "repo/.context/cloudbench"
+    logs = context / "logs"
+    logs.mkdir(parents=True)
+    (context / "services.json").write_text(json.dumps({"status": "stopped", "env": {"worker_processes": 1}}))
+    (context / "run.json").write_text('{"tasks":[{"benchmark_status":"FAILED"}]}\n')
+    (context / "stack.log").write_text("stack stopped\n")
+    (context / f"cloudbench-stack-cleanup-{token}.status").write_text(f"state=clean\ntoken={token}\n")
+    (guest / f"cloudbench-driver-clean-{token}.ack").write_text(token + "\n")
+    (guest / "cloudbench-driver.state").write_text("exited\n")
+    (logs / "backend.log").write_text("original backend\n")
+    (logs / "worker.log").write_text("original worker\n")
+    raw = ("RUNSTAMP-" + ("foreign" if fault == "foreign-guest" else token) + "\n").encode() + b"original driver line\n" * 30000
+    (guest / "bench.log").write_bytes(raw)
+    output = tmp_path / "out"
+    destination = output / "remote-logs"
+    destination.mkdir(parents=True)
+    owner = {"version": 1, "run_token": token, "machine_id": machine}
+    for name in ("runtime-evidence.owner.json", "runtime-evidence.pending"):
+        (output / name).write_text(json.dumps(owner))
+    driver = destination / "cloudbench-driver.log"
+    existing = b"RUNSTAMP-foreign\nretained original\n" if fault == "foreign-existing" else raw
+    if fault == "partial-existing":
+        existing = raw[:256]
+    elif fault == "nonprefix-existing":
+        existing = raw[:255] + b"X"
+    if fault in ("existing", "partial-existing", "foreign-existing", "nonprefix-existing"):
+        driver.write_bytes(existing)
+        before = driver.stat()
+    ready = tmp_path / "port"
+    environment = {**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "secret-fixture", "FLY_MACHINE_ID": machine}
+    launcher = [sys.executable, str(STATUS_SERVER_SCRIPT)]
+    if fault == "generation":
+        launcher = [sys.executable, "-c", f"""
+import importlib.util
+spec = importlib.util.spec_from_file_location('status', {str(STATUS_SERVER_SCRIPT)!r})
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+native_server = module.ThreadingHTTPServer
+def server(address, handler):
+    class Changed(handler):
+        def send_header(self, name, value):
+            if name == 'X-Cloudbench-Log-Generation' and self.path.startswith('/bench.log?') and 'offset=0&' not in self.path:
+                value = 'f' * 32
+            super().send_header(name, value)
+    return native_server(address, Changed)
+module.ThreadingHTTPServer = server
+raise SystemExit(module.main())
+"""]
+    with (tmp_path / "server.log").open("w") as server_log:
+        process = subprocess.Popen([*launcher, "--directory", str(guest), "--port", "0", "--bind", "127.0.0.1",
+                                    "--run-token", token, "--ready-file", str(ready)],
+                                   env=environment, stdout=server_log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while not ready.exists():
+                assert process.poll() is None, (tmp_path / "server.log").read_text()
+                assert time.monotonic() < deadline, "local status server readiness guard"
+                time.sleep(0.01)
+            fleet = fleet_source_text()
+            start = fleet.index('            proxy_port="${recovery_proxy_ports[$recovery_index]}"',
+                                fleet.index('            # Exact recovery may have stopped this guest'))
+            end = fleet.index('        done\n    elif [ "$shutdown_status"', start)
+            actual_transfer = fleet[start:end]
+            script = f"""set -euo pipefail
+output={shlex.quote(str(output))}
+recovery_index=0
+recovery_proxy_ports=({int(ready.read_text())})
+recovery_guest_tokens=({token})
+recovery_machine_ids=({machine})
+recovery_benches=(fixture)
+RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-collect-runtime-evidence.py'))}
+CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS=30
+shutdown_status=0
+{actual_transfer}
+exit "$shutdown_status"
+"""
+            result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=40)
+            accepted = fault in ("none", "existing", "partial-existing")
+            if accepted:
+                assert result.returncode == 0, result.stderr
+                assert driver.is_file(), "late recovery sealed runtime but omitted the required original driver log"
+                assert driver.read_bytes() == raw
+                assert (destination / "runtime-evidence/manifest.json").is_file()
+            else:
+                assert result.returncode != 0, "late recovery accepted a foreign or replaced driver log"
+                assert not (destination / "runtime-evidence").exists()
+                assert not driver.exists() or fault in ("foreign-existing", "nonprefix-existing")
+            assert json.loads((output / "runtime-evidence.pending").read_text()) == owner
+            assert json.loads((output / "runtime-evidence.owner.json").read_text()) == owner
+            preserved = list(destination.glob(".cloudbench-driver-original-*/cloudbench-driver.log"))
+            if fault == "partial-existing":
+                assert len(preserved) == 1, "the interrupted original prefix must remain private and byte-identical"
+                retained = preserved[0]
+                after = retained.stat()
+                assert retained.read_bytes() == existing
+                assert retained.parent.stat().st_mode & 0o777 == 0o700
+                assert (before.st_ino, before.st_mtime_ns, before.st_size) == (after.st_ino, after.st_mtime_ns, after.st_size)
+            else:
+                assert not preserved
+            if fault in ("existing", "foreign-existing", "nonprefix-existing"):
+                after = driver.stat()
+                assert driver.read_bytes() == existing
+                assert (before.st_ino, before.st_mtime_ns, before.st_size) == (after.st_ino, after.st_mtime_ns, after.st_size)
+        finally:
+            process.terminate()
+            process.wait(timeout=30)
