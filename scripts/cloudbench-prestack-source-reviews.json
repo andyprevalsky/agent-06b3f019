@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_executable_sources": {
-    "ed4e71b45e1941f8048fef1d27d97849a24795fdbea989f64943ada6853e1269": [
+    "4b396e6248ff53254b2419f47d7575f59c1a6bef250ffea5ee4d17521cd8e5fa": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
     ],
