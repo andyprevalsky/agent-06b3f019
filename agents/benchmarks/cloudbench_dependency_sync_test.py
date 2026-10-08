@@ -8,6 +8,7 @@ import json
 import os
 import random
 import re
+import runpy
 import select
 import shlex
 import shutil
@@ -29537,3 +29538,183 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, pa
     if private is not None:
         assert private.read_bytes() == b"unchanged private control"
         assert private.stat().st_uid == 0 and stat.S_IMODE(private.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "policy,fault",
+    [("retain", None), ("reap", None), ("retain", "destroyed")]
+    + [("retain", fault) for fault in (
+        "unreadable", "missing-ack", "child-ack", "foreign-owner",
+        "foreign-source", "wrong-index", "pending", "worker",
+        "corrupt", "symlink", "canonical-result", "pool",
+        "destroyed-foreign-name", "destroyed-foreign-token",
+        "destroyed-foreign-volume", "destroyed-foreign-ref",
+        "destroyed-foreign-patch", "destroyed-listed", "destroyed-unreadable-config",
+    )],
+)
+def test_exact_recovery_consumes_runtime_receipt_completed_absent_primary(
+    tmp_path: Path, policy: str, fault: str | None,
+) -> None:
+    """A completed absent primary must not block the remaining exact guest."""
+    fixture = runpy.run_path(str(ROOT / "scripts/tests/cloudbench-sealed-machine-retirement.test.py"))
+    registry, run = fixture["fixture"](tmp_path.resolve(), inverse="two-sealed")
+    audit = tmp_path / "audits" / fixture["OWNER"]
+    mid, peer = fixture["MIDS"]
+    clone = "cloudbench-member-one"
+    out = run / "member-one"
+    meta = registry / "meta"
+    meta.write_text(meta.read_text().replace("cleanup_policy=reap", f"cleanup_policy={policy}"))
+    for name, machine in zip(("member-one", "member-two"), fixture["MIDS"]):
+        fixture["fields"](audit / "expected-fresh" / ("cloudbench-" + name),
+                          {"clone_name": "cloudbench-" + name, "source_machine_id": "abcdefabcdefab"})
+        fixture["write"](audit / "by-machine-id" / machine, "cloudbench-" + name + "\n")
+    if fault == "missing-ack":
+        (out / "guest-shutdown.confirmed").unlink()
+    elif fault == "child-ack":
+        (out / "guest-shutdown.confirmed").write_text(fixture["OWNER"] + "-0\n")
+    elif fault == "foreign-owner":
+        (out / "runtime-evidence.owner.json").write_text(json.dumps(
+            {"version": 1, "machine_id": mid, "run_token": "b" * 32 + "-0"}))
+    elif fault == "foreign-source":
+        p = audit / "expected-fresh" / clone
+        p.write_text(p.read_text().replace("abcdefabcdefab", "fedcbafedcbafe"))
+    elif fault == "wrong-index":
+        (audit / "by-machine-id" / mid).write_text("cloudbench-member-two\n")
+    elif fault == "pending":
+        fixture["write"](out / "runtime-evidence.pending", "unfinished original transfer\n")
+    elif fault == "worker":
+        (out / "worker-clones.ids").write_text(peer + "\n")
+    elif fault == "corrupt":
+        (out / "remote-logs/runtime-evidence/logs/backend.log").write_text("changed original\n")
+    elif fault == "symlink":
+        p = out / "remote-logs/runtime-evidence/logs/backend.log"
+        target = tmp_path / "foreign-original"
+        target.write_bytes(p.read_bytes())
+        p.unlink()
+        p.symlink_to(target)
+    elif fault == "canonical-result":
+        (out / "cloudbench-run.json").write_text("{}\n")
+    destroyed = bool(fault and fault.startswith("destroyed"))
+    native = json.loads((tmp_path / "native.json").read_text())
+    native["machines"][peer]["state"] = "stopped"
+    tombstone = native["machines"].pop(mid)
+    if destroyed:
+        tombstone["state"] = "destroyed"
+        if fault == "destroyed-foreign-name":
+            tombstone["name"] = "cloudbench-foreign"
+        for suffix, key, value in (
+            ("token", "CLOUDBENCH_RUN_TOKEN", "b" * 32 + "-0"),
+            ("ref", "REF", "6" * 40), ("patch", "LOCAL_PATCH_SHA256", "d" * 64),
+        ):
+            if fault == "destroyed-foreign-" + suffix:
+                tombstone["config"]["env"][key] = value
+        if fault == "destroyed-foreign-volume":
+            tombstone["config"]["mounts"] = [{"volume": fixture["VOLS"][1]}]
+        native["tombstones"] = {mid: tombstone}
+        if fault == "destroyed-listed":
+            native["machines"][mid] = tombstone
+    fixture["write"](tmp_path / "native.json", native)
+    fixture["write"](tmp_path / "fake.py", fixture["FAKE"])
+    # Capture all original bytes, including authority and evidence. Only the
+    # unchanged normal ACK/latch consumer may change meta and the guest latch.
+    preserved = {
+        str(p): ("link", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes())
+        for d in (registry, audit, run) for p in d.rglob("*")
+        if (p.is_file() or p.is_symlink()) and p not in (meta, registry / "guest-cleanup-unconfirmed")
+    }
+    original_meta = meta.read_bytes()
+    original_latch = (registry / "guest-cleanup-unconfirmed").read_bytes()
+    functions = "\n".join(fixture["extract"](fleet_source_text(), name) for name in (
+        "registry_meta_value", "fleet_registry_cleanup_state",
+        "fleet_registry_build_guest_recovery_plan", "fleet_recovery_reconnect_guest_shutdowns",
+        "cleanup_stale_owner_recovery_proxies", "cloudbench_confirm_guest_shutdowns",
+        "fleet_registry_confirm_guest_teardown", "cloudbench_fsync_directory",
+        "machine_status_exact_read", "registry_machine_details", "machine_config_exact_read",
+    ))
+    # Native exact state and guest transport are boundaries. The complete plan,
+    # original-byte validator, real admission state and latch consumer run
+    # unchanged. A stopped peer has its real original ACK and needs no proxy.
+    script = functions + r'''
+FLY() {
+    case "$1 $2" in
+        "machine status")
+            printf 'native-read %s\n' "$3" >> "$CALLS"
+            if [ "$3" = "$ABSENT" ]; then
+                [ "$ABSENT_STATUS" != 2 ] || return 2
+                if [ "$NATIVE_DESTROYED" = 0 ]; then
+                    printf 'failed to get VM %s: machine not found\n' "$3"
+                    return 1
+                fi
+            fi
+            if [ "${6:-}" = -d ]; then
+                printf 'config-read %s\n' "$3" >> "$CALLS"
+                [ "$3" != "$ABSENT" ] || [ "$UNREADABLE_CONFIG" = 0 ] || return 2
+                python3 "$FIXTURE_BASE/fake.py" config "$3"
+            else
+                python3 "$FIXTURE_BASE/fake.py" status "$3"
+            fi
+            ;;
+        "machines list") python3 "$FIXTURE_BASE/fake.py" native "$@" ;;
+        *) return 97 ;;
+    esac
+}
+fly_with_timeout() { shift; FLY "$@"; }
+machine_guest_recovery_configuration() {
+    printf 'config-read %s\n' "$1" >> "$CALLS"
+    [ "$1" = "$PEER" ] || return 1
+    printf 'exact-barrier\t%s-1\t8011\n' "$OWNER"
+}
+claim_recovery_status_proxy_ports() {
+    [ "$2" = 1 ] || return 1
+    printf '16001\n' > "$1"
+}
+release_recovery_status_proxy_ports() { return 0; }
+cloudbench_terminate_and_wait() { return 0; }
+cloudbench_recover_guest_cleanup_receipts() { return 99; }
+fleet_recovery_capture_startup_failure() { return 99; }
+'''
+    if fault == "pool":
+        # The native status branch must never spend a fresh-primary seal on a
+        # pool guest. Only the already-generated plan's kind changes here.
+        script += r'''
+original_plan="$(declare -f fleet_registry_build_guest_recovery_plan)"
+eval "${original_plan/fleet_registry_build_guest_recovery_plan/fresh_plan}"
+fleet_registry_build_guest_recovery_plan() {
+    fresh_plan "$@" || return
+    sed -i.bak 's/^guest	member-one/pool-guest	member-one/' "$2"
+    rm -f "$2.bak"
+}
+'''
+    script += r'''
+[ "$(fleet_registry_cleanup_state "$REGISTRY" "$POLICY")" = quarantined ] || exit 92
+fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"
+'''
+    env = dict(os.environ, APP=fixture["APP"], OWNER=fixture["OWNER"], REGISTRY=str(registry),
+               FLEET_OWNERSHIP_ROOT=str(registry.parent), FLEET_AUDIT_ROOT=str(audit.parent),
+               SEALED_MACHINE_RETIREMENT_HELPER=str(ROOT / "scripts/cloudbench-sealed-machine-retirement.py"),
+               SOURCE_HELPER="", POOL_CLAIMS_DIR="", RUN_ID="current-recovery-caller",
+               ABSENT=mid, ABSENT_STATUS="2" if fault == "unreadable" else "1",
+               NATIVE_DESTROYED="1" if destroyed else "0",
+               UNREADABLE_CONFIG="1" if fault == "destroyed-unreadable-config" else "0",
+               FIXTURE_BASE=str(tmp_path), FIXTURE_STATE=str(tmp_path / "native.json"),
+               PEER=peer, CALLS=str(tmp_path / "calls"), POLICY=policy,
+               FLEET_REGISTRY_DIR="", FLEET_REGISTRY_PUBLISHED="0", KEEP_CLONES="0",
+               STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN="", STALE_OWNER_RECOVERY_PLAN_FILE="",
+               STALE_OWNER_RECOVERY_PORTS_FILE="")
+    result = subprocess.run([fixture["BASH"], "-c", script], env=env, capture_output=True,
+                            text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    accepted = fault in (None, "destroyed")
+    assert (result.returncode == 0) == accepted, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    if accepted:
+        assert f"native-read {peer}\n" in calls and f"config-read {peer}\n" in calls
+        assert (f"config-read {mid}\n" in calls) == destroyed
+        assert not (registry / "guest-cleanup-unconfirmed").exists()
+        assert "cleanup_policy=reap\n" in meta.read_text()
+    else:
+        assert f"config-read {peer}\n" not in calls
+        assert meta.read_bytes() == original_meta
+        assert (registry / "guest-cleanup-unconfirmed").read_bytes() == original_latch
+    for name, value in preserved.items():
+        p = Path(name)
+        assert (("link", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes())) == value

@@ -1079,7 +1079,13 @@ completed task outputs as history and reconnects only current allocations; retai
 the exact native retirement audit instead of deleting old outputs to match a
 shrinking registry. After the original CLI exits, use a verified current CLI for
 the documented exact-owner recovery while preserving its original guest source,
-owner and private evidence. Recovery's local proxy lease adapter represents an
+owner and private evidence. A positively absent fresh primary with its exact
+original run ACK, complete seal and ownership/source binding can skip reconnect
+while the owner remains quarantined. A destroyed native tombstone also requires
+the exact clone name, original config token/source/Volume, and current unlisted
+Machine identity. This read-only recognition grants no reap
+authority; normal guest acknowledgement, evidence and native reaper stages
+still own latch/policy transitions and full release. Recovery's local proxy lease adapter represents an
 absent preferred port as numeric zero; an explicit nonempty preference retains
 the allocator's validation. A real started startup rejection can retain an exact
 runtime owner without local start acceptance; its supported zero-credit archive
