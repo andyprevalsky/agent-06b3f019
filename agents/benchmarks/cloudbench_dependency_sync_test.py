@@ -9386,7 +9386,10 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
     final_upload = fleet.index('python3 "$HUB_UPLOAD_HELPER" --upload-live', aggregate_acceptance)
     assert aggregate_acceptance < final_upload
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    assert cleanup.index('"$out/bench-e2e.finished-epoch"') < cleanup.index("hub_final_action=--upload-final")
+    release_projection = _extract_fleet_function(fleet, "fleet_finalize_released_projection() {")
+    assert 'output / "bench-e2e.finished-epoch"' in release_projection
+    assert "os.link(temporary, finish)" in release_projection
+    assert cleanup.index("fleet_finalize_released_projection 1") < cleanup.index("hub_final_action=--upload-final")
 
     assert "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT=" in cloud
     assert '--file-local "/cloudbench-execution-provenance.py=' in cloud
@@ -23883,6 +23886,15 @@ reserve_cleanup_disk_space
     handoff_events = tmp_path / "cleanup-handoff-events"
     handoff_root = tmp_path / "cleanup-handoff"
     handoff_root.mkdir()
+    handoff_output = handoff_root / "fixture-task"
+    handoff_output.mkdir()
+    (handoff_root / "_batch").mkdir()
+    (handoff_root / "_batch/benches.json").write_text('[{"name":"fixture-task"}]')
+    (handoff_output / "bench-e2e.started-epoch").write_text("100\n")
+    release_projection = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in ("registry_meta_value() {", "fleet_finalize_released_projection() {")
+    )
     handoff_script = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
 HANDOFF_EVENTS="$2"
@@ -23898,17 +23910,19 @@ CLAIMED_POOL_FILE="$FLEET_DIR/no-claims"
 LOCK_DIR="$FLEET_DIR/controller.lock"
 AUTOSCALER_PORT_LEASE_HELPER=/dev/null
 RUN_ID=reserve-handoff
+FLEET_OWNER_TOKEN={'a' * 32}
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
-CHILD_OUT=()
+CHILD_OUT=({shlex.quote(str(handoff_output))})
 {reserve}
 {release}
+{release_projection}
 {cleanup}
 for helper in cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown \\
     record_tainted_claimed_pool_machines reconcile_current_pool_transfer_claims \\
     reconcile_current_pool_claims fleet_native_reap_close capacity_release_owner_reservations \\
-    finalize_terminal_projection fleet_audit_finalize_provider_teardown \\
+    finalize_terminal_projection \\
     fleet_registry_remove_if_empty cloudbench_controller_lock_release cleanup_owned_script_snapshot; do
     eval "$helper() {{ return 0; }}"
 done
@@ -23920,6 +23934,13 @@ cloudbench_terminate_tree_and_wait() {{ observe_released_reserve native-drain; }
 cloudbench_terminate_and_wait() {{ observe_released_reserve native-drain; }}
 cloudbench_collect_remaining_runtime_evidence() {{ observe_released_reserve forensic-consumer; }}
 reap_registry_clones() {{ observe_released_reserve provider-retirement; }}
+fleet_audit_finalize_provider_teardown() {{
+    observe_released_reserve native-audit || return $?
+    mkdir -p "$FLEET_TEARDOWN_OWNERSHIP_DIR"
+    printf '%s\\n' status=provider-teardown-verified "fleet_owner_token=$FLEET_OWNER_TOKEN" \\
+        "run_id=$RUN_ID" > "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta"
+    printf '%s\\n' 123 > "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch"
+}}
 reserve_cleanup_disk_space || exit 91
 test -s "$CLEANUP_DISK_RESERVE_FILE" || exit 92
 trap cleanup EXIT
@@ -23936,6 +23957,7 @@ exit 0
     observed_handoffs = handoff_events.read_text().splitlines()
     assert {"native-drain", "forensic-consumer", "provider-retirement"}.issubset(observed_handoffs)
     assert not reserve_path.exists()
+    assert (handoff_output / "bench-e2e.finished-epoch").read_text() == "123\n"
 
     recovery = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries() {")
     stale_release = 'release_cleanup_disk_reserve "$registry/cleanup-disk-reserve"'
@@ -28032,6 +28054,8 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
     audit_record = tmp_path / "audits" / owner / "fresh/clone"
     meta = registry / "meta"
     meta.write_text(meta.read_text() + "host=fixture-host\n")
+    audit_meta = audit_record.parents[1] / "meta"
+    audit_meta.write_text(audit_meta.read_text() + f"workspace_root={tmp_path}\nruns_root={run.parent}\n")
     (registry / "runtime-evidence-unconfirmed").touch()
     (run / "_forensic/retirement-verified.json").unlink()
     machines, volumes = tmp_path / "machines.json", tmp_path / "volumes.json"
@@ -28049,6 +28073,10 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
             "fleet_recovery_confirm_forensic_retirement() {",
             "fleet_recovery_confirm_runtime_evidence() {",
             "recover_exact_stale_fleet_owner() {",
+            "fleet_registry_remove_if_empty() {",
+            "fleet_publish_recovered_terminal_projection() {",
+            "fleet_finalize_released_projection() {",
+            "finalize_terminal_projection() {",
         )
     )
     events = tmp_path / "events"
@@ -28056,7 +28084,7 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
 APP=bench-app
 FLEET_OWNER_HOST=fixture-host
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
-FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[1]))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[2]))}
 FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
 MACHINES_FIXTURE={shlex.quote(str(machines))}
 VOLUMES_FIXTURE={shlex.quote(str(volumes))}
@@ -28086,12 +28114,14 @@ fleet_audit_finalize_recovered_registry() {{
     grep -q disposition=destroyed-verified-absent "$AUDIT_RECORD" || return 1
     [ ! -e "$1/clones/clone" ] || return 1
     echo native-finalize >> "$EVENTS"
+    printf '%s\\n' status=provider-teardown-verified >> "$FLEET_AUDIT_ROOT/{owner}/meta"
 }}
-fleet_registry_remove_if_empty() {{ echo owner-closed >> "$EVENTS"; }}
 fly_with_timeout() {{
     case "$2" in machines) cat "$MACHINES_FIXTURE" ;; volumes) cat "$VOLUMES_FIXTURE" ;; *) return 90 ;; esac
 }}
-recover_exact_stale_fleet_owner {owner}
+recover_exact_stale_fleet_owner {owner} || exit $?
+[ ! -e "$FLEET_OWNERSHIP_ROOT/{owner}" ] || exit 91
+echo owner-closed >> "$EVENTS"
 """
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
     observed = events.read_text().splitlines() if events.exists() else []
