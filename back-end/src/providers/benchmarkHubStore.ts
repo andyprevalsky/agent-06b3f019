@@ -307,6 +307,10 @@ async function storeRun(
     ...(bundle.run_group !== undefined ? { run_group: runGroupSchedule(bundle) } : {}),
   };
   const agentIds = agentIdsFromHubBundle(bundle);
+  // This one-shot registration must be visible before the caller can create
+  // any agent; it cannot be replaced by an already-running progress stream.
+  const startingRegistration =
+    tasks.length > 0 && tasks.every((task) => task.status === 'starting') && agentIds.length === 0;
 
   let storedSummary = summary;
   let storedAgentIndexRevision: number | null = null;
@@ -431,7 +435,7 @@ async function storeRun(
       await putObject(`visibility/${runId}.json`, 'true');
       storedAgentIndexRevision = agentIndex.revision;
     },
-    summary.live ? 'snapshot' : 'foreground'
+    summary.live && !startingRegistration ? 'snapshot' : 'foreground'
   );
   log.info('Stored benchmark run bundle', {
     runId,
