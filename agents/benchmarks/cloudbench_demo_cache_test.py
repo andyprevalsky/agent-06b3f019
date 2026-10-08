@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+from benchmarks.hub_upload_test import _serve
 
 ROOT = Path(__file__).resolve().parents[2]
 READ_ONLY = "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"
@@ -31,25 +32,52 @@ def launch_probe(tmp_path: Path, *arguments: str):
         "}))\n"
         "PY\n"
     )
+    # The real campaign owns inventory and publication before its fake fleets
+    # launch. Supply those external collaborators rather than borrow host
+    # credentials or disable the production admission and cleanup paths.
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    fly = binary / "flyctl"
+    fly.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$1 $2" in\n'
+        ' "machines list"|"volumes list") printf \'[]\\n\' ;;\n'
+        " *) exit 91 ;;\n"
+        "esac\n"
+    )
+    fly.chmod(0o700)
+    server, hub_url = _serve([])
     env = dict(os.environ)
     env.pop("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", None)
     env.pop("BENCHMARK_FAST_MODE_CACHE", None)
     env.pop(PROBE, None)
     env.pop(TRANSPORT, None)
+    env.pop("BENCHMARK_HUB_GROUP_RUN_ID", None)
+    env.pop("BENCHMARK_HUB_PARENT_RUN_ID", None)
     env.update(
         {
             "DEMO_CACHE_TEST_RECEIPT": str(receipt),
             "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet),
             "RUN_BENCH_CAMPAIGN_ROOT": str(tmp_path / "campaigns"),
+            "PATH": str(binary) + os.pathsep + env["PATH"],
+            "FLY_BENCH_API_TOKEN": "offline-demo-fixture-token-only",
+            "BENCHMARK_HUB_UPLOAD_URL": hub_url,
+            "BENCHMARK_HUB_API_KEY": "offline-demo-fixture-key",
+            "BACKEND_API_KEY": "offline-demo-fixture-key",
+            "CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY": "1",
         }
     )
-    result = subprocess.run(
-        ["bash", str(ROOT / "scripts/run-bench"), *arguments],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=FIXTURE_HOST_GUARD_SECONDS,
-    )
+    try:
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/run-bench"), *arguments],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=FIXTURE_HOST_GUARD_SECONDS,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
     return result, json.loads(receipt.read_text()) if receipt.exists() else None
 
 
@@ -241,6 +269,8 @@ def test_demo_cache_probe_repeated_copies_keep_guard_and_existing_topology(tmp_p
     summary = json.loads(summaries[0].read_text())
     assert summary["total_jobs"] == 2
     assert summary["peak_concurrency"] == 2
+    assert not summary.get("shared_inventory_failed")
+    assert not (Path(summary["shared_inventory"]["directory"]) / "owner").exists()
     assert [job["task"] for job in summary["jobs"]] == ["demo-fleet-alpha"] * 2
     for job in summary["jobs"]:
         assert job["controller_exit_code"] == 0
