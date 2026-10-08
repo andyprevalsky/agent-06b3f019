@@ -16,6 +16,7 @@
  * and completed runs through one index.
  */
 
+import { validateGroupAttempt } from './benchmarkHubGroupAttempts';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
   deleteHubAncestorSkeletonsFromBundle,
@@ -324,7 +325,9 @@ async function storeRun(
         }
         if (
           existing?.run_group &&
-          JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
+          (JSON.stringify(existing.run_group.members) !==
+            JSON.stringify(summary.run_group!.members) ||
+            existing.timestamp !== summary.timestamp)
         ) {
           throw new Error('Benchmark Hub group schedule changed');
         }
@@ -351,7 +354,11 @@ async function storeRun(
       }
       if (existing?.group_run_id) {
         for (const field of HUB_GROUP_FIELDS) {
-          if (summary[field] !== undefined && summary[field] !== existing[field]) {
+          if (
+            summary[field] !== undefined &&
+            summary[field] !==
+              (field === 'group_attempt' ? (existing[field] ?? 1) : existing[field])
+          ) {
             throw new Error('Benchmark Hub group membership changed');
           }
         }
@@ -361,16 +368,7 @@ async function storeRun(
         const owner = index.find((run) => run.run_id === summary.group_run_id);
         if (owner && !owner.run_group)
           throw new Error('Benchmark Hub group ID collides with a physical run');
-        if (
-          index.some(
-            (run) =>
-              run.run_id !== runId &&
-              run.group_run_id === summary.group_run_id &&
-              run.group_member_id === summary.group_member_id
-          )
-        ) {
-          throw new Error('Benchmark Hub group member already belongs to another run');
-        }
+        validateGroupAttempt(summary, index, existing);
         if (owner?.run_group) {
           const member = owner.run_group.members.find(
             (item) => item.member_id === summary.group_member_id

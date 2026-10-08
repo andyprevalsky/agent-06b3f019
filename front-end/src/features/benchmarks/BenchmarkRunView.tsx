@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 import type { HubRunDetail, HubRunDispatch } from '@/lib/api/benchmarksHub';
 import { fetchHubRun } from '@/lib/api/benchmarksHub';
 import { TaskFlagIcons } from './TaskFlagIcons';
+import { AttemptHistory } from './AttemptHistory';
 
 const LIVE_POLL_MS = 5000;
 
@@ -382,6 +383,14 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                         <span className="ml-1.5 text-xs text-muted-foreground">
                           Run {task.run_number}
                         </span>
+                      )}
+                      {task.group_attempt != null && task.group_attempt > 1 && (
+                        <span className="ml-1.5 text-xs text-muted-foreground">
+                          Attempt {task.group_attempt}
+                        </span>
+                      )}
+                      {task.attempt_history && (
+                        <AttemptHistory attempts={task.attempt_history} onOpenAgent={onOpenAgent} />
                       )}
                       <TaskFlagIcons
                         simOn={task.world_model_mode === 'simulate'}

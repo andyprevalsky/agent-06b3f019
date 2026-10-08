@@ -1,15 +1,18 @@
 /** Normalize task summaries, validate campaign membership, and project grouped runs. */
 
 import type { HubRunSummary, HubRunTaskSummary } from './benchmarkHubTypes';
+import { groupAttempt, groupAttemptHistory, groupMembers } from './benchmarkHubGroupAttempts';
 
 export function normalizeAgentId(value: unknown): string | null {
   return (typeof value === 'string' ? value.trim() : '') || null;
 }
 
 export function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
-  const passed = typeof task.passed === 'boolean' ? task.passed : null;
-  // The verdict wins over the raw agent status (run bundles carry the AGENT
-  // status — e.g. ACTIVE at scoring time — which is not the task outcome).
+  const infrastructureError = task.status === 'INFRA_ERROR' || task.status === 'error';
+  const passed = !infrastructureError && typeof task.passed === 'boolean' ? task.passed : null;
+  // Explicit infrastructure terminals have no benchmark verdict; their archived
+  // false sentinel remains unchanged. Otherwise the verdict wins over AGENT
+  // status (e.g. ACTIVE at scoring time), which is not the task outcome.
   const status =
     passed !== null
       ? passed
@@ -40,6 +43,7 @@ export const HUB_GROUP_FIELDS = [
   'group_run_number',
   'group_timestamp',
   'group_total',
+  'group_attempt',
 ] as const;
 export const HUB_GROUP_PAGE_SIZE = 100;
 
@@ -53,7 +57,11 @@ export function finiteMetric(value: unknown): number | null {
 }
 
 export function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunSummary> {
-  if (bundle.group_run_id === undefined) return {};
+  if (bundle.group_run_id === undefined) {
+    if (bundle.group_attempt !== undefined)
+      throw new Error('Invalid Benchmark Hub group membership');
+    return {};
+  }
   if (
     typeof bundle.group_run_id !== 'string' ||
     !/^[A-Za-z0-9._-]{1,128}$/.test(bundle.group_run_id) ||
@@ -63,6 +71,10 @@ export function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunS
     typeof bundle.group_run_number !== 'number' ||
     !Number.isInteger(bundle.group_run_number) ||
     bundle.group_run_number < 1 ||
+    (bundle.group_attempt !== undefined &&
+      (typeof bundle.group_attempt !== 'number' ||
+        !Number.isSafeInteger(bundle.group_attempt) ||
+        bundle.group_attempt < 1)) ||
     typeof bundle.group_total !== 'number' ||
     !Number.isInteger(bundle.group_total) ||
     bundle.group_total < 1 ||
@@ -78,6 +90,9 @@ export function runGroupFields(bundle: Record<string, unknown>): Partial<HubRunS
     group_run_number: bundle.group_run_number,
     group_timestamp: bundle.group_timestamp,
     group_total: bundle.group_total,
+    ...(bundle.group_attempt !== undefined
+      ? { group_attempt: bundle.group_attempt as number }
+      : {}),
   };
 }
 
@@ -190,16 +205,20 @@ export function groupedRunCatalog(index: HubRunSummary[], preview = true): HubRu
     const children = (members.get(id) ?? []).sort((a, b) =>
       (a.group_member_id ?? a.run_id).localeCompare(b.group_member_id ?? b.run_id)
     );
-    const byMember = new Map(children.map((child) => [child.group_member_id!, child]));
+    const byMember = groupMembers(children);
     const schedule =
       owner?.run_group?.members ??
-      children.map((child) => ({
-        member_id: child.group_member_id!,
-        name: child.tasks[0]?.name ?? 'benchmark',
-        run_number: child.group_run_number ?? 1,
-      }));
+      [...byMember.values()].map((attempts) => {
+        const child = attempts[0];
+        return {
+          member_id: child.group_member_id!,
+          name: child.tasks[0]?.name ?? 'benchmark',
+          run_number: child.group_run_number ?? 1,
+        };
+      });
     const tasks: HubRunTaskSummary[] = schedule.flatMap((member) => {
-      const child = byMember.get(member.member_id);
+      const attempts = byMember.get(member.member_id) ?? [];
+      const child = attempts.at(-1);
       const rows = child?.tasks ?? [
         {
           name: member.name,
@@ -239,7 +258,8 @@ export function groupedRunCatalog(index: HubRunSummary[], preview = true): HubRu
           ...task,
           ...lifecycle,
           row_id: `${member.member_id}-${slot}`,
-          ...(child ? { child_run_id: child.run_id } : {}),
+          ...(child ? { child_run_id: child.run_id, group_attempt: groupAttempt(child) } : {}),
+          ...(attempts.length > 1 ? { attempt_history: groupAttemptHistory(attempts, slot) } : {}),
           run_number: member.run_number,
         };
       });
