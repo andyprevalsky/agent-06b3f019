@@ -157,7 +157,7 @@ function handleWhitespaceItem(s: RenderState, item: WordItem, index: number): vo
 }
 
 function formattingKey(item: WordItem): string {
-  return `${item.isBold || ''}-${item.isItalic || ''}-${item.isCode || ''}-${item.isLink || ''}-${item.href || ''}`;
+  return `${item.isBold || ''}-${item.isItalic || ''}-${item.isCode || ''}-${item.isLink || ''}-${item.href || ''}-${item.isImage || ''}-${item.src || ''}`;
 }
 
 function maybeSwitchListType(s: RenderState, item: WordItem): void {
