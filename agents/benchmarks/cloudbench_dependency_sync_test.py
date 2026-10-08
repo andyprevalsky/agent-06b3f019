@@ -8664,6 +8664,8 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
     cleanup = "\n".join(
         _extract_fleet_function(fleet_source, signature)
         for signature in (
+            "registry_meta_value() {",
+            "fleet_finalize_released_projection() {",
             "cloudbench_fsync_directory() {",
             "cloudbench_collect_remaining_runtime_evidence() {",
             "cleanup() {",
@@ -8677,6 +8679,9 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
         evidence_latch.touch()
         (fleet / "teardown-ownership").mkdir()
         (fleet / "teardown-ownership/source-audit").write_text("sha256=" + "a" * 64 + "\n")
+        (fleet / "_batch/benches.json").write_text("[]\n")
+        (fleet / "teardown-ownership/meta").write_text(
+            f"status=provider-teardown-verified\nfleet_owner_token={'a' * 32}\nrun_id={removal}\n")
         script = f"""set -uo pipefail
 FLEET_DIR={shlex.quote(str(fleet))}
 ROOT_DIR={shlex.quote(str(ROOT))}
@@ -20528,9 +20533,16 @@ def test_fleet_retained_resources_do_not_claim_release(tmp_path: Path) -> None:
     start = fleet.index("    # Report each bench's end-to-end duration")
     end = fleet.index("    # Keep the parent live while releasing resources.", start)
     fallback = fleet[start:end]
+    helpers = "\n".join(_extract_fleet_function(fleet, name) for name in (
+        "registry_meta_value() {", "fleet_finalize_released_projection() {"))
     for keep, failed, already_released in ((0, 0, False), (1, 0, False), (1, 0, True), (0, 1, False)):
         out = tmp_path / f"{keep}-{failed}-{already_released}"
-        out.mkdir()
+        run = out
+        out = run / "task"
+        out.mkdir(parents=True)
+        (run / "_batch").mkdir()
+        (run / "_batch/benches.json").write_text('[{"name":"task"}]')
+        (run / "meta").write_text(f"status=provider-teardown-verified\nfleet_owner_token={'a' * 32}\nrun_id={run.name}\n")
         (out / "bench-e2e.started-epoch").write_text("1\n")
         marker = out / "bench-e2e.finished-epoch"
         if already_released:
@@ -20540,7 +20552,11 @@ KEEP_CLONES={keep}
 teardown_failed={failed}
 ec=0
 CHILD_OUT=({shlex.quote(str(out))})
-FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(out))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(run))}
+FLEET_DIR={shlex.quote(str(run))}
+FLEET_OWNER_TOKEN={'a' * 32}
+RUN_ID={run.name}
+{helpers}
 finish_clock() {{
 {fallback}
 }}
@@ -20633,6 +20649,10 @@ date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
     start = fleet.index("    # Report each bench's end-to-end duration")
     end = fleet.index("    # Keep the parent live while releasing resources.", start)
     fallback = fleet[start:end]
+    (out.parent / "_batch").mkdir()
+    (out.parent / "_batch/benches.json").write_text('[{"name":"task"}]')
+    helpers = "\n".join(_extract_fleet_function(fleet, name) for name in (
+        "registry_meta_value() {", "fleet_finalize_released_projection() {"))
     completed = subprocess.run(
         [
             "bash",
@@ -20644,6 +20664,10 @@ ec=0
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300
 CHILD_RUN_TIMEOUT=300
 FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+FLEET_DIR={shlex.quote(str(out.parent))}
+FLEET_OWNER_TOKEN={registry.name}
+RUN_ID=fixture-run
+{helpers}
 CHILD_OUT=({shlex.quote(str(out))})
 date() {{ [ "$1" = +%s ] && printf '900\\n'; }}
 finish_clock() {{
@@ -29830,3 +29854,168 @@ exit "$shutdown_status"
         finally:
             process.terminate()
             process.wait(timeout=30)
+
+
+@pytest.mark.parametrize("disposition", [
+    "recovered", "already-recovered", "audit-failed", "foreign-ack", "clock-mismatch",
+    "wrong-owner", "unsealed-source", "publication-rejected",
+])
+def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release(tmp_path: Path, disposition: str) -> None:
+    """Exact native release must reach the original group without regrading it."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    owner, run_id, timestamp = "7c" * 16, "original-failed-run", "2026-10-07T22:42:56+00:00"
+    release = "1791419757"
+    ownership, audits = tmp_path / "ownership", tmp_path / "audits"
+    registry, audit = ownership / owner, audits / owner
+    audit.mkdir(parents=True)
+    run = tmp_path / "original/.context/fleet/runs" / run_id
+    batch = run / "_batch"
+    batch.mkdir(parents=True)
+    meta = (f"version=2\napp=bench-app\nfleet_owner_token={owner}\nhost=test-host\n"
+            f"pid=99999999\npid_start=Mon Jan 1 00:00:00 2001\ncleanup_policy=reap\n"
+            f"run_id={run_id}\nworkspace_root={run.parents[3]}\nruns_root={run.parent}\naudit_dir={audit}\n")
+    if disposition != "already-recovered":
+        registry.mkdir(parents=True)
+        (registry / "meta").write_text(meta)
+    (audit / "meta").write_text(meta + "status=provider-teardown-verified\n")
+    (audit / "provider-teardown-verified.epoch").write_text(release + "\n")
+    benches = [{"name": f"fixture-{index}", "mode": "REAL"} for index in range(50)]
+    (batch / "benches.json").write_text(json.dumps(benches))
+    (batch / "hub-live-publication.json").write_text(json.dumps({"epoch": 1791415838, "signature": [[b["name"], "failed", None, None, "teardown", None] for b in benches]}))
+    (batch / "report-card.json").write_text(json.dumps({"timestamp": timestamp}))
+    (run / "teardown-ownership").mkdir()
+    (run / "teardown-ownership/meta").write_text((audit / "meta").read_text())
+    (run / "teardown-ownership/provider-teardown-verified.epoch").write_text(release + "\n")
+    for index, bench in enumerate(benches):
+        directory = run / bench["name"]
+        directory.mkdir()
+        (directory / "bench-e2e.started-epoch").write_text("1791412976\n")
+        (directory / "benchmark-child.finished").write_text("1\n")
+        if index < 48:
+            task = {"name": bench["name"], "passed": index < 31,
+                    "status": "PASSED" if index < 31 else "FAILED", "world_model_mode": "real",
+                    "duration_seconds": 123, "cost_cents": 1,
+                    "logs": {"messages": [{"role": "USER", "message": "original fixture request"}]}}
+            (directory / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
+    original = subprocess.run([sys.executable, str(AGGREGATE_SCRIPT), str(run), str(batch / "run.json")],
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "CLOUDBENCH_CONTROLLER_EXIT_CODE": "1"})
+    assert original.returncode == 0, original.stderr
+    before = json.loads((batch / "run.json").read_text())
+    before["group_attempt"] = {"group_run_id": "original-group", "attempt": 1}
+    (batch / "run.json").write_text(json.dumps(before))
+    import hashlib
+    digest = hashlib.sha256()
+    for path in sorted(audit.rglob("*"), key=lambda item: str(item.relative_to(audit))):
+        if path.is_file():
+            for value in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+    (run / "teardown-ownership/source-audit").write_text(f"path={audit}\nsha256={digest.hexdigest()}\n")
+    if disposition == "foreign-ack":
+        (batch / "hub-live-publication.json").write_text(json.dumps({"epoch": 1791415838, "signature": [["foreign-task"]]}))
+    elif disposition == "clock-mismatch":
+        (run / "teardown-ownership/provider-teardown-verified.epoch").write_text("1791419758\n")
+    elif disposition == "wrong-owner":
+        (audit / "meta").write_text((audit / "meta").read_text().replace(owner, "8d" * 16))
+    elif disposition == "unsealed-source":
+        (run / "teardown-ownership/source-audit").write_text(f"path={audit}\nsha256={'0' * 64}\n")
+    early = run / benches[0]["name"] / "bench-e2e.finished-epoch"
+    early.write_text("1791414000\n")
+    from benchmarks.hub_upload import prepare_run_bundle_for_upload
+    expected_wire = prepare_run_bundle_for_upload(before, required=True)
+    received = []
+
+    class Hub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            bundle = json.loads(gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw)
+            received.append(bundle)
+            response = json.dumps({"run": bundle}).encode()
+            self.send_response(403 if disposition == "publication-rejected" else 201)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    fleet = fleet_source_text()
+    signatures = ["registry_meta_value() {", "fleet_registry_cleanup_state() {",
+                  "registry_owner_alive() {", "acquire_registry_recovery_lock() {",
+                  "release_cleanup_disk_reserve() {", "recover_exact_stale_fleet_owner() {",
+                  "finalize_terminal_projection() {"]
+    for signature in ("fleet_finalize_released_projection() {", "fleet_publish_recovered_terminal_projection() {"):
+        if signature in fleet:
+            signatures.append(signature)
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(_extract_fleet_function(fleet, signature) for signature in signatures)
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audits))}
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+ROOT_DIR={shlex.quote(str(ROOT))}
+FLEET_DIR={shlex.quote(str(run))}
+FLEET_OWNER_TOKEN={owner}
+RUN_ID={run_id}
+RUNS_ROOT={shlex.quote(str(run.parent))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+FLEET_CONTROLLER_STARTED_EPOCH=1791412976
+AGGREGATE_RUNS_SCRIPT={shlex.quote(str(AGGREGATE_SCRIPT))}
+HUB_UPLOAD_HELPER={shlex.quote(str(ROOT / 'agents/benchmarks/hub_upload.py'))}
+PROVISION_POOL=
+EXECUTION_PROVENANCE_FILE=
+EXECUTION_TASK_MATRIX_FILE=
+SELF_MANAGED_HUB_RUN=1
+BENCHMARK_HUB_PARENT_RUN_ID={run_id}
+CHILD_OUT=({' '.join(shlex.quote(str(run / b['name'])) for b in benches)})
+fleet_recovery_confirm_pool_claims() {{ return 0; }}
+recover_registry_audit_only_fresh() {{ return 0; }}
+reap_registry_clones() {{ return 0; }}
+recover_exact_pool_claims() {{ return 0; }}
+capacity_release_stale_owner_reservations() {{ return 0; }}
+fleet_audit_finalize_recovered_registry() {{ return {1 if disposition == 'audit-failed' else 0}; }}
+fleet_registry_remove_if_empty() {{ rm -rf "$1"; }}
+{functions}
+recover_exact_stale_fleet_owner {owner}
+"""
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(("BENCHMARK_HUB_", "RUN_BENCH_CAMPAIGN_"))}
+    environment.update({"RUN_BENCH_CAMPAIGN_JOB_ID": "foreign-new-caller", "BENCHMARK_HUB_GROUP_RUN_ID": "foreign-new-group", "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                        "BENCHMARK_HUB_API_KEY": "fixture-key"})
+    try:
+        result = subprocess.run(["bash", "-c", script], env=environment, capture_output=True, text=True, timeout=40)
+        if disposition in {"audit-failed", "foreign-ack", "clock-mismatch", "wrong-owner", "unsealed-source"}:
+            assert result.returncode != 0
+            assert not received and list(run.glob("*/bench-e2e.finished-epoch")) == [early]
+            assert (batch / "run.json").read_text() == json.dumps(before)
+        else:
+            if disposition == "publication-rejected":
+                assert result.returncode != 0
+            else:
+                assert result.returncode == 0, result.stderr
+            finished = list(run.glob("*/bench-e2e.finished-epoch"))
+            assert len(finished) == 50, "exact recovered native release omitted the original task release projection"
+            assert {p.read_text().strip() for p in finished} == {release, "1791414000"}
+            assert early.read_text() == "1791414000\n"
+            assert len(received) == 1, "exact recovered release never reached the original Hub group"
+            after = received[0]
+            assert after["run_id"] == run_id and after["timestamp"] == timestamp and after["status"] == "failed"
+            assert len(after["tasks"]) == 50 and sum(bool(t["passed"]) for t in after["tasks"]) == 31
+            assert {t["lifecycle_stage"] for t in after["tasks"]} == {"released"}
+            local_after = json.loads((batch / "run.json").read_text())
+            assert {k: v for k, v in local_after.items() if k != "tasks"} == {k: v for k, v in before.items() if k != "tasks"}
+            assert {t["lifecycle_stage"] for t in json.loads((batch / "report-card.json").read_text())["per_task"]} == {"released"}
+            assert [{k: v for k, v in t.items() if k != "lifecycle_stage"} for t in local_after["tasks"]] == [
+                {k: v for k, v in t.items() if k != "lifecycle_stage"} for t in before["tasks"]]
+            assert [{k: v for k, v in t.items() if k != "lifecycle_stage"} for t in after["tasks"]] == [
+                {k: v for k, v in t.items() if k != "lifecycle_stage"} for t in expected_wire["tasks"]]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
