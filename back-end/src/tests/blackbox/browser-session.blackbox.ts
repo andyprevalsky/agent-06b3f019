@@ -45,6 +45,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -615,6 +616,8 @@ async function testReproducibility_threeSequential() {
 // ==================== RUN ====================
 
 async function runAll() {
+  await runBrowserInitDisconnectCases();
+  if (process.argv.includes('--init-disconnect-only')) return;
   console.log('Browser Session Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);

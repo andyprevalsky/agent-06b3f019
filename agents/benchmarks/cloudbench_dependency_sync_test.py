@@ -27392,6 +27392,26 @@ wait "$signaller"
         "started-worker-terminal-bad",
         "missing-worker-log-verified",
         "missing-worker-log-unverified",
+        "retired-absent",
+        "retired-provider-retained",
+        "retired-terminal-volume",
+        "retired-live-machine",
+        "retired-live-volume",
+        "retired-missing-original",
+        "retired-corrupt-original",
+        "retired-foreign-owner",
+        "retired-foreign-source",
+        "retired-foreign-task",
+        "retired-failed-stack",
+        "retired-missing-worker",
+        "retired-pending",
+        "retired-active-clone",
+        "retired-audit-mismatch",
+        "retired-archive-mismatch",
+        "retired-unindexed-worker",
+        "retired-canonical-mismatch",
+        "retired-abnormal-collector",
+        "retired-audit-filename",
     ],
 )
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
@@ -27557,9 +27577,124 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             "worker.started-at": b"2026-09-28T22:00:00Z\n",
         }
     archive = run / "_forensic/originals.tar.gz"
+    retired_originals = {}
+    retired_row = None
+    retired_good = {"retired-absent", "retired-provider-retained", "retired-terminal-volume", "retired-abnormal-collector"}
+    if fault.startswith("retired-"):
+        retired_task, retired_machine, retired_volume = "retired-task", "e" * 14, "vol_retired123"
+        retired_token, retired_clone, donor = f"{owner}-1", "cloudbench-retired", "f" * 14
+        retired_out = run / retired_task
+        capture = retired_out / "remote-logs/runtime-evidence"
+        (capture / "logs").mkdir(parents=True)
+        tasks = [{"name": task, "mode": "REAL"}, {"name": retired_task, "mode": "REAL"}]
+        (run / "_batch/benches.json").write_text(json.dumps(tasks))
+        (audit / "expected-fresh").mkdir()
+        (audit / "by-machine-id").mkdir()
+        (audit / "expected-fresh" / retired_clone).write_text(
+            f"clone_name={retired_clone}\nsource_machine_id={donor}\n"
+        )
+        (audit / "by-machine-id" / retired_machine).write_text(retired_clone + "\n")
+        disposition = "destroyed-provider-retained" if fault in (
+            "retired-provider-retained", "retired-terminal-volume"
+        ) else "destroyed-verified-absent"
+        (audit / "fresh" / retired_clone).write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+            f"clone_name={retired_clone}\nsource=fresh-clone\nsource_machine_id={donor}\n"
+            f"machine_id={retired_machine}\nvolume_id={retired_volume}\ndisposition={disposition}\n"
+        )
+        (retired_out / ".cid").write_text(f"clone {retired_machine}\n")
+        (retired_out / "guest-shutdown.confirmed").write_text(run_id + "\n")
+        (retired_out / "benchmark-child.finished").write_text("125\n" if fault == "retired-abnormal-collector" else "0\n")
+        retired_owner = {"version": 1, "machine_id": retired_machine, "run_token": retired_token}
+        (retired_out / "runtime-evidence.owner.json").write_text(json.dumps(retired_owner))
+        _, _, provenance_path = _make_execution_provenance(tmp_path)
+        spec = importlib.util.spec_from_file_location("mixed_forensic_provenance", EXECUTION_PROVENANCE_SCRIPT)
+        contract = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(contract)
+        matrix = contract.build_task_matrix([row["name"] + "=real" for row in tasks])
+        provenance = json.loads(provenance_path.read_text())
+        provenance["config"] = contract.build_config("cloudbench-fleet-config-v1", [
+            "app=bench-app", "task_count=2", "task_matrix_sha256=" + matrix["sha256"]
+        ])
+        (run / "execution-task-matrix.json").write_text(json.dumps(matrix))
+        (run / "execution-provenance.json").write_text(json.dumps(provenance))
+        document = {
+            "execution_provenance": provenance,
+            "tasks": [{"name": retired_task, "world_model_mode": "real",
+                       "execution_provenance": provenance, "benchmark_status": "FAILED", "passed": False}],
+            "summary": {"total": 1, "passed": 0, "failed": 1},
+        }
+        if fault == "retired-foreign-source":
+            document = json.loads(json.dumps(document))
+            document["execution_provenance"]["base_sha"] = "c" * 40
+            document["tasks"][0]["execution_provenance"]["base_sha"] = "c" * 40
+        if fault == "retired-foreign-task":
+            document["tasks"][0]["name"] = "foreign-task"
+        captured_files = {
+            "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}).encode(),
+            "run.json": json.dumps(document).encode(),
+            "stack.log": b"original normally stopped stack\n",
+            "logs/backend.log": b"original normally stopped backend\n",
+            "logs/worker.log": b"original first stopped worker\n",
+            "logs/worker.1.log": b"original second stopped worker\n",
+            f"cloudbench-stack-cleanup-{retired_token}.status": f"state=clean\ntoken={retired_token}\n".encode(),
+        }
+        if fault == "retired-failed-stack":
+            captured_files["services.json"] = json.dumps({"status": "failed", "env": {"worker_processes": 2}}).encode()
+        for relative, content in captured_files.items():
+            (capture / relative).write_bytes(content)
+            retired_originals["repo/.context/cloudbench/" + relative] = content
+        (retired_out / "cloudbench-run.json").write_bytes(captured_files["run.json"])
+        capture_manifest = {**retired_owner, "files": {
+            relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            for relative, content in captured_files.items()
+        }}
+        manifest_bytes = json.dumps(capture_manifest).encode()
+        (capture / "manifest.json").write_bytes(manifest_bytes)
+        retired_originals["normal-primary/manifest.json"] = manifest_bytes
+        retired_originals["bench.log"] = b"original retained full driver log\n"
+        retired_row = {"task": retired_task, "ordinal": 1, "machine_id": retired_machine,
+                       "volume_id": retired_volume, "run_token": retired_token, "proof_credit": 0,
+                       "runtime_evidence_complete": False, "services_status": "stopped",
+                       "missing": [f"cloudbench-driver-clean-{retired_token}.ack"],
+                       "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                                 for relative, content in retired_originals.items()}}
+        if fault == "retired-missing-original":
+            (capture / "stack.log").unlink()
+        elif fault == "retired-corrupt-original":
+            (capture / "stack.log").write_bytes(b"corrupt original\n")
+        elif fault == "retired-missing-worker":
+            (capture / "logs/worker.1.log").unlink()
+        elif fault == "retired-foreign-owner":
+            capture_manifest["run_token"] = "foreign-owner-1"
+            (capture / "manifest.json").write_text(json.dumps(capture_manifest))
+        elif fault == "retired-pending":
+            (retired_out / "runtime-evidence.pending").write_text(json.dumps(retired_owner))
+        elif fault == "retired-active-clone":
+            (registry / "clones" / retired_clone).write_text(
+                f"name={retired_clone}\nid={retired_machine}\nvolume_id={retired_volume}\n"
+            )
+        elif fault == "retired-audit-mismatch":
+            (audit / "by-machine-id" / retired_machine).write_text("foreign-clone\n")
+        elif fault == "retired-unindexed-worker":
+            (retired_out / "worker-runtime-evidence" / ("d" * 14)).mkdir(parents=True)
+        elif fault == "retired-canonical-mismatch":
+            (retired_out / "cloudbench-run.json").write_text(json.dumps({"tasks": []}))
+        elif fault == "retired-audit-filename":
+            (audit / "fresh" / retired_clone).rename(audit / "fresh/foreign-clone")
+        elif fault == "retired-archive-mismatch":
+            retired_originals["repo/.context/cloudbench/stack.log"] = b"foreign archived stack\n"
+            retired_row["files"]["repo/.context/cloudbench/stack.log"] = {
+                "bytes": len(retired_originals["repo/.context/cloudbench/stack.log"]),
+                "sha256": hashlib.sha256(retired_originals["repo/.context/cloudbench/stack.log"]).hexdigest(),
+            }
     with tarfile.open(archive, "w:gz") as stream:
         for relative, content in originals.items():
             info = tarfile.TarInfo(f"{task}/{relative}")
+            info.size = len(content)
+            stream.addfile(info, io.BytesIO(content))
+        for relative, content in retired_originals.items():
+            info = tarfile.TarInfo(f"{retired_task}/{relative}")
             info.size = len(content)
             stream.addfile(info, io.BytesIO(content))
         if worker_proof is not None:
@@ -27578,7 +27713,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         "proof_credit": 0,
         "archive_bytes": archive.stat().st_size,
         "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        "uncompressed_bytes": sum(map(len, originals.values()))
+        "uncompressed_bytes": sum(map(len, originals.values())) + sum(map(len, retired_originals.values()))
         + (len(worker_proof) if worker_proof else 0)
         + (sum(map(len, started_files.values())) if started_files else 0),
         "tasks": [
@@ -27600,6 +27735,8 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             }
         ],
     }
+    if retired_row is not None:
+        manifest["tasks"].append(retired_row)
     if worker_proof is not None:
         manifest["unstarted_workers"] = [
             {
@@ -27663,6 +27800,12 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             else []
         )
     )
+    if fault == "retired-live-machine":
+        machines.write_text(json.dumps([{"id": retired_machine, "name": retired_clone, "state": "started"}]))
+    if fault in ("retired-live-volume", "retired-terminal-volume"):
+        volumes.write_text(json.dumps([{"id": retired_volume,
+            "state": "pending_destroy" if fault == "retired-terminal-volume" else "created",
+            "attached_machine_id": None}]))
     if fault == "archive":
         archive.write_bytes(archive.read_bytes() + b"corrupt")
     elif fault == "pending":
@@ -27695,7 +27838,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         str(volumes),
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in (
+    if fault in retired_good or fault in (
         "none",
         "unadmitted-absent",
         "unallocated-absent",
@@ -27739,7 +27882,7 @@ fly_with_timeout() {{
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 """
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in (
+    if fault in retired_good or fault in (
         "none",
         "unadmitted-absent",
         "unallocated-absent",
@@ -27750,7 +27893,7 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
     ):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
-        assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
+        assert receipt["proof_credit"] == 0 and receipt["tasks"] == (2 if retired_row else 1)
         assert receipt["unadmitted_clones"] == (fault == "unadmitted-absent")
         assert receipt["unallocated_attempts"] == (fault == "unallocated-absent")
         assert receipt["unstarted_workers"] == (fault == "unstarted-worker-absent")
@@ -27762,6 +27905,96 @@ fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
         assert (registry / "runtime-evidence-unconfirmed").exists()
         assert not (run / "_forensic/retirement-verified.json").exists()
     assert 'fleet_recovery_confirm_forensic_retirement "$registry"' in fleet
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-raw", "corrupt-normal", "foreign-owner", "missing-numbered-log", "original-log-absence"])
+def test_failed_fleet_forensic_archive_builder_preserves_mixed_originals(tmp_path: Path, fault: str) -> None:
+    """The existing builder feeds ordinary recovery without rewriting original history."""
+    test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path, "retired-absent")
+    owner, machine, retired_machine = "a" * 32, "b" * 14, "e" * 14
+    run, registry = tmp_path / "runs/fixture-run", tmp_path / "registries" / owner
+    audit = tmp_path / "audits" / owner
+    retained = tmp_path / "retained-original-forensic"
+    (run / "_forensic").rename(retained)
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (run / "fixture-task/.cid").write_text(f"clone {machine}\n")
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    absence = {
+        "version": 1, "machine_id": machine, "services_status": "running",
+        "missing": ["repo/.context/cloudbench/logs/worker.1.log"],
+    }
+    original_absence = json.dumps(absence, indent=2).encode()
+    with tarfile.open(retained / "originals.tar.gz", "r:gz") as original:
+        with tarfile.open(captures / f"{machine}.tar.gz", "w:gz") as raw:
+            for member in original:
+                if member.name.startswith("fixture-task/"):
+                    data = original.extractfile(member).read()
+                    if fault in ("missing-numbered-log", "original-log-absence") and member.name.endswith("/services.json"):
+                        services = json.loads(data)
+                        services["env"]["worker_processes"] = 3
+                        data = json.dumps(services).encode()
+                    info = tarfile.TarInfo(member.name.partition("/")[2])
+                    info.size = len(data)
+                    raw.addfile(info, io.BytesIO(data))
+            if fault in ("missing-numbered-log", "original-log-absence"):
+                data = b"original worker two log\n"
+                info = tarfile.TarInfo("repo/.context/cloudbench/logs/worker.2.log")
+                info.size = len(data)
+                raw.addfile(info, io.BytesIO(data))
+            if fault == "original-log-absence":
+                info = tarfile.TarInfo("worker-log-absence-original.json")
+                info.size = len(original_absence)
+                raw.addfile(info, io.BytesIO(original_absence))
+        driver = original.extractfile("retired-task/bench.log").read()
+    (run / "retired-task/remote-logs/cloudbench-driver.log").write_bytes(driver)
+    before_audit = {p.name: p.read_bytes() for p in (audit / "fresh").iterdir()}
+    original_hash = hashlib.sha256((captures / f"{machine}.tar.gz").read_bytes()).hexdigest()
+    if fault == "missing-raw":
+        (captures / f"{machine}.tar.gz").unlink()
+    elif fault == "corrupt-normal":
+        (run / "retired-task/remote-logs/runtime-evidence/stack.log").write_bytes(b"corrupt\n")
+    elif fault == "foreign-owner":
+        manifest_path = run / "retired-task/remote-logs/runtime-evidence/manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["machine_id"] = "f" * 14
+        manifest_path.write_text(json.dumps(manifest))
+    result = subprocess.run([
+        sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+        "--registry", str(registry), "--capture-dir", str(captures),
+    ], capture_output=True, text=True, timeout=10)
+    assert before_audit == {p.name: p.read_bytes() for p in (audit / "fresh").iterdir()}
+    assert (retained / "originals.tar.gz").is_file()
+    assert (registry / "runtime-evidence-unconfirmed").exists()
+    if fault not in ("none", "missing-numbered-log", "original-log-absence"):
+        assert result.returncode != 0, f"unsafe builder {fault} was admitted"
+        assert not (run / "_forensic/manifest.json").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    assert hashlib.sha256((captures / f"{machine}.tar.gz").read_bytes()).hexdigest() == original_hash
+    manifest = json.loads((run / "_forensic/manifest.json").read_text())
+    assert manifest["schema"] == "cloudbench-forensic-retirement-v1" and len(manifest["tasks"]) == 2
+    assert manifest["proof_credit"] == 0
+    expected_missing = ["repo/.context/cloudbench/run.json", "cloudbench-driver.pid"]
+    if fault in ("missing-numbered-log", "original-log-absence"):
+        expected_missing.extend(absence["missing"])
+    expected_missing.append(f"cloudbench-driver-clean-{owner}-0.ack")
+    assert manifest["tasks"][0]["missing"] == expected_missing
+    if fault in ("missing-numbered-log", "original-log-absence"):
+        with tarfile.open(run / "_forensic/originals.tar.gz", "r:gz") as built:
+            captured_absence = built.extractfile("fixture-task/worker-log-absence-original.json").read()
+        assert json.loads(captured_absence) == absence
+        if fault == "original-log-absence":
+            assert captured_absence == original_absence
+    assert {row["machine_id"] for row in manifest["tasks"]} == {machine, retired_machine}
+    verified = subprocess.run([
+        sys.executable, str(FORENSIC_RETIREMENT_SCRIPT), "--registry", str(registry), "--run", str(run),
+        "--manifest", str(run / "_forensic/manifest.json"), "--archive", str(run / "_forensic/originals.tar.gz"),
+        "--machines", str(tmp_path / "machines.json"), "--volumes", str(tmp_path / "volumes.json"),
+    ], capture_output=True, text=True, timeout=10)
+    assert verified.returncode == 0, verified.stderr
+    assert json.loads(verified.stdout)["proof_credit"] == 0 and json.loads(verified.stdout)["tasks"] == 2
+    assert not (run / "fixture-task" / f"cloudbench-driver-clean-{owner}-0.ack").exists()
 
 
 @pytest.mark.parametrize("fault", ["none", "archive", "native-release"])

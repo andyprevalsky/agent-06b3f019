@@ -34,6 +34,30 @@ fail() {
   exit 1
 }
 
+# Evaluate the actual stack imports and birth capture in a fresh shell. The
+# fixture's shared library below must not supply a missing production import.
+capture_probe="$TMP_ROOT/production-capture.sh"
+{
+  printf 'set -eo pipefail\nSCRIPT_DIR=%q\n' "$ROOT_DIR/scripts"
+  sed -n '/^\. "\$SCRIPT_DIR\/lib\//p' "$ROOT_DIR/scripts/run.sh"
+  cat <<'SH'
+sleep 120 &
+AGENTS_PID=$!
+cleanup() { kill "$AGENTS_PID" 2>/dev/null || true; wait "$AGENTS_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+SH
+  sed -n '/^AGENTS_BIRTH=/p' "$ROOT_DIR/scripts/run.sh"
+  cat <<'SH'
+[ -n "$AGENTS_BIRTH" ]
+[ "$AGENTS_BIRTH" = "$(cloudbench_pid_start_time "$AGENTS_PID")" ]
+run_wait_owned_agent_shutdown "$AGENTS_PID" "$AGENTS_BIRTH" 10 || exit 1
+SH
+} > "$capture_probe"
+if ! bash "$capture_probe" > "$TMP_ROOT/production-capture.log" 2>&1; then
+  cat "$TMP_ROOT/production-capture.log" >&2
+  fail "actual run.sh imports must provide the stack birth capture and drain"
+fi
+
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
@@ -166,6 +190,37 @@ lease_port="$(port_lease claim "$owner_pid" owner-lease)"
 lease_file="$TMP_ROOT/port-leases/$lease_port"
 [ -f "$lease_file" ] || fail "port lease was not published"
 
+# The service stack must use the same identity as the fleet. Exercise its
+# actual capture assignment and drain helper against one native owned child.
+source "$ROOT_DIR/scripts/lib/run-process-cleanup.sh"
+worker_ready="$TMP_ROOT/worker.ready"
+worker_terminated="$TMP_ROOT/worker.terminated"
+python3 - "$worker_ready" "$worker_terminated" <<'PY' &
+import pathlib
+import signal
+import sys
+
+ready, terminated = map(pathlib.Path, sys.argv[1:])
+
+def stop(_signum, _frame):
+    terminated.write_text("TERM\n")
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+ready.touch()
+while True:
+    signal.pause()
+PY
+AGENTS_PID=$!
+CHILD_PIDS+=("$AGENTS_PID")
+worker_ready_deadline=$((SECONDS + 10))
+while [ ! -f "$worker_ready" ] && [ "$SECONDS" -lt "$worker_ready_deadline" ]; do
+  kill -0 "$AGENTS_PID" 2>/dev/null || fail "owned worker fixture exited before readiness"
+  sleep 0.1
+done
+[ -f "$worker_ready" ] || fail "owned worker fixture did not become ready"
+eval "$(sed -n '/^AGENTS_BIRTH=/p' "$ROOT_DIR/scripts/run.sh")"
+
 step_clock
 [ "$(ps -p "$owner_pid" -o lstart=)" != "$("$REAL_PS" -p "$owner_pid" -o lstart=)" ] ||
   fail "ps shim did not replay the wall-clock step"
@@ -190,6 +245,12 @@ port_lease claim "$neighbor_pid" neighbor-lease >/dev/null
 port_lease release-owner "$owner_pid" owner-lease
 [ ! -f "$lease_file" ] ||
   fail "the live owner must still release its own lease after a wall-clock step"
+
+run_wait_owned_agent_shutdown "$AGENTS_PID" "$AGENTS_BIRTH" 10 ||
+  fail "the owned stack worker must drain across a wall-clock step"
+wait "$AGENTS_PID" || fail "the owned worker did not exit cleanly"
+[ "$(cat "$worker_terminated")" = TERM ] || fail "the owned worker missed its graceful signal"
+kill -0 "$neighbor_pid" 2>/dev/null || fail "worker drain signalled an unrelated sibling"
 
 kill "$owner_pid"
 wait "$owner_pid" 2>/dev/null || true

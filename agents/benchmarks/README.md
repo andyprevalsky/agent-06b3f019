@@ -82,7 +82,11 @@ with accepted LIVE latency. The existing stability wrapper's width-32 cap does
 not restrict this ordinary fleet; do not substitute smaller slices.
 
 Ordinary source-only runs reuse verified dependency images and completed
-snapshots. For an explicitly requested cold build/push measurement, use
+snapshots. Before an image-build-to-fleet measurement, complete CLAUDE.md's
+**Fresh clone setup (Andy’s Mac)** dependency reuse and actual backend seed-cache
+import check before recording the image clock. An image-only publication needs
+no backend dependency check. For an explicitly requested cold build/push
+measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
 from the repository root. The selected checkout supplies both Dockerfile and
 Fly config; the private receipt records pre-launch source/dirty status and

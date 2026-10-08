@@ -2590,6 +2590,76 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     assert cleanup_index < seal_index < archive_index
 
 
+async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof():
+    """Joined pre-action init can coexist with an earlier recorded browser task."""
+    import benchmarks.run_benchmark as bench
+    import pytest
+
+    root = "11111111-1111-4111-8111-111111111111"
+    task = "22222222-2222-5222-8222-222222222222"
+    session = "33333333-3333-4333-8333-333333333333"
+    receipt = {
+        "version": 1,
+        "agent_id": root,
+        "task_id": task,
+        "tool_call_id": "call-preparation",
+        "session_id": session,
+        "provider": "steel",
+        "phase": "initial_session_preparation",
+        "init_acknowledged": True,
+        "task_actions_started": False,
+    }
+    metadata = {
+        "toolName": "spawn_browser_agent", "action_type": "task_complete",
+        "toolStatus": "FINISHED", "task_id": task, "toolCallId": "call-preparation",
+        "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+    }
+    messages = [
+        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
+                      "action_type": "task_complete", "toolStatus": "FINISHED"}},
+        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
+                      "action_type": "recording", "toolStatus": "FINISHED",
+                      "recording_view_url": "https://recording.example/earlier"}},
+        {"metadata": metadata},
+    ]
+    owner = {
+        "root_exists": True, "tree_agent_ids": [root],
+        "browser_sessions": [{"agent_id": root, "provider": "steel", "session_id": session}],
+    }
+
+    async def refresh(rows, snapshot=owner):
+        logs = {}
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
+            patch.object(bench, "get_agent", AsyncMock(return_value={"messages": rows})),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot),
+        ):
+            await bench._refresh_browser_archive_snapshot(
+                "http://localhost:1", root, {}, logs, expected_agent_ids={root},
+                ownership_before=owner, timeout_seconds=0.05,
+            )
+        return logs
+
+    logs = await refresh(messages)
+    assert task in logs["browser_preparation_cancellation_receipt"]["task_ids_by_agent"][root]
+    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [
+        row["metadata"] for row in messages
+    ]
+
+    for poisoned in [
+        messages + [{"metadata": {"toolName": "spawn_browser_agent", "task_id": task,
+                                  "action_type": "read_browser_state", "toolStatus": "FINISHED"}}],
+        messages + [{"metadata": {"task_id": task, "action_type": "task_started"}}],
+        messages[:-1] + [{"metadata": {**metadata, "browser_preparation_cancellation": {
+            **receipt, "init_acknowledged": False,
+        }}}],
+    ]:
+        with pytest.raises(TimeoutError):
+            await refresh(poisoned)
+    with pytest.raises(TimeoutError):
+        await refresh(messages, {**owner, "browser_sessions": []})
+
+
 async def test_paused_browser_before_session_allocation_archives_with_exact_zero_proof():
     """Captured proof68 shape: pause cancels the tool before a session exists."""
     import benchmarks.run_benchmark as bench
@@ -21960,6 +22030,10 @@ async def run_all_tests():
     await r.record_async(
         "paused_browser_before_session_allocation_archives_with_exact_zero_proof",
         test_paused_browser_before_session_allocation_archives_with_exact_zero_proof,
+    )
+    await r.record_async(
+        "cancelled_preparation_archives_only_with_positive_task_and_owner_proof",
+        test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof,
     )
     r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",

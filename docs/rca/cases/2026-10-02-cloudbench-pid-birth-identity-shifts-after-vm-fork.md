@@ -129,9 +129,64 @@ Both were fixtures that still reached identity only through `ps`.
 captured and re-verified within one bounded teardown, so the exposure is a
 fork inside that teardown window rather than across a run.
 
+### Follow-up: the service stack's worker supervisor was still a sibling
+
+The October 7 original 50-task control left two service stacks in `failed`
+without a worker-drained acknowledgement. Their original driver logs refused
+to acknowledge release. The first effective worker shutdown signals appeared
+only during recovery, and the workers then finished promptly. Original service
+records retained worker PIDs, but did not retain the supervisor's captured birth
+or an observation of the failed pre-signal comparison. That is an attribution
+gap: the original control does not establish that a clock step caused these
+two failures. It exceeded its original one-hour E2E limit and earns no credit,
+regardless of subsequent recovery.
+
+The runtime evidence did lead to an unconverted producer/verifier pair:
+`run.sh` captured `AGENTS_BIRTH` with human `ps lstart`, and
+`run_wait_owned_agent_shutdown` compared that rendering before signalling the
+supervisor. The existing Linux clock-step blackbox now launches a real owned
+child, evaluates the shipped capture assignment, steps the existing `ps` shim,
+and calls the shipped drain helper. The original source fails with
+`the owned stack worker must drain across a wall-clock step`; the unchanged
+test passes after both boundaries use the existing shared process identity.
+It also verifies graceful TERM completion and an untouched sibling. This proves
+the known clock-step mechanism, not the missing original control attribution.
+
+The helper reads according to the recorded format, preserves legacy macOS
+identities, and sends one TERM to the supervisor rather than its worker tree.
+After signalling, an empty identity observation with a still-live PID must
+continue joining within the existing shutdown budget. It cannot certify exit.
+The existing process-cleanup blackbox faults that one read against a native
+child which exits only after the next observation. Restoring the premature
+empty-read return fails; the unchanged test passes with the join. It also
+preserves the unknown-birth, foreign-birth, already-reaped child, unrelated
+workspace, exact DB instance, and service/test-process controls.
+
+The shared identity library is loaded only by the drain helper when absent;
+unrelated consumers of the cleanup library do not acquire a new import-time
+dependency. Both owning tests remain in their existing normal deploy lanes.
+No stage budget, execution timeout, task, prompt, model, or evaluator changes.
+Complete original fleet release still requires the canonical recovery path;
+these local regressions do not substitute for a qualifying live 50-task run.
+
+Independent review also caught a fixture mask: the clock-step test loaded the
+shared identity library before evaluating the stack capture assignment, while
+the actual `run.sh` import list did not provide that function. A fresh-shell
+control now evaluates the shipped library import lines and exact capture and
+drain against its own native child. It fails with `cloudbench_pid_start_time:
+command not found` before the actual entrypoint imports the shared library, and
+passes unchanged after that import is added. This control runs before the Linux
+clock-step section, so macOS also checks the real dependency boundary.
+
+At 10,000 agents this change still reads only the local supervisor's fixed
+process record and joins that exact owner within the existing budget. It adds
+no fleet-wide scan, shared row, broadcast channel, or cross-agent lock.
+
 ## Human feedback
 
-None recorded.
+Keep broad stage completion and whole-run timing as the operational gates;
+avoid narrow internal timing assertions. A failed observation is a warning to
+continue monitoring, and cannot serve as proof that an owned resource is gone.
 
 ## Reusable lesson
 
