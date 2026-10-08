@@ -165,6 +165,39 @@ class StructuralGateInterpreterTests(unittest.TestCase):
             self.assertNotIn(str(venv_bin), module.gate_environment().get("PATH", ""))
 
 
+class LinuxGateFailedStepTests(unittest.TestCase):
+    """The Linux controller gate names its failed suites from the machine log.
+
+    A log read can miss the summary line, the per-step markers, or both. The
+    controller runs under `set -euo pipefail`, where an unmatched grep in a
+    command substitution used to end it before it told the machine its logs
+    were fetched, leaving the machine to wait out its 900-second window.
+    """
+
+    GATE = ROOT / "scripts" / "run-cloudbench-controller-gate"
+
+    def _failed_steps(self, log_text: str) -> subprocess.CompletedProcess[str]:
+        function = re.search(r"^gate_failed_steps\(\) \{\n.*?^\}\n", self.GATE.read_text(), re.M | re.S)
+        self.assertIsNotNone(function, "the gate script must keep gate_failed_steps()")
+        with tempfile.TemporaryDirectory(prefix="linux-gate-steps-") as temporary:
+            log = Path(temporary) / "machine.log"
+            log.write_text(log_text)
+            script = f'set -euo pipefail\n{function.group(0)}\nsteps="$(gate_failed_steps "$1")"\necho "steps:[$steps]"\n'
+            return subprocess.run(["bash", "-c", script, "gate", str(log)], capture_output=True, text=True, timeout=30)
+
+    def test_summary_line_names_the_failed_steps(self) -> None:
+        result = self._failed_steps("GATE_STEP_FAILED 9\nGATE_FAILED_STEPS 2 5\nGATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["steps:[", "2", "5]"]), result.stderr)
+
+    def test_step_markers_are_the_fallback(self) -> None:
+        result = self._failed_steps("GATE_STEP_FAILED 3\nGATE_STEP_FAILED 7\nGATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["steps:[3", "7]"]), result.stderr)
+
+    def test_a_log_with_neither_marker_is_an_empty_answer(self) -> None:
+        result = self._failed_steps("GATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[]"), result.stderr)
+
+
 class StructuralGateRunnerTests(unittest.TestCase):
     def test_default_admission_is_bounded_and_runs_every_gate_once(self) -> None:
         spec = importlib.util.spec_from_file_location("deploy_runner_admission", RUNNER)

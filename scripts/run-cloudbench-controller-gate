@@ -297,6 +297,17 @@ if [ -n "${RUN_CONTROLLER_IMAGE_SUITES:-}" ]; then
     fi
   done
 fi
+# Step numbers of the failed suites in a machine log: the summary line when the
+# log read caught it, else the per-step markers. A log with neither (a read that
+# missed both) is an empty answer, not a reason to exit before the machine is
+# told its logs were fetched.
+gate_failed_steps() {
+  local log="$1" steps
+  steps="$(grep -oE 'GATE_FAILED_STEPS( [0-9]+)*' "$log" | tail -1 | sed 's/GATE_FAILED_STEPS//' || true)"
+  [ -n "$steps" ] || steps="$(grep -oE 'GATE_STEP_FAILED [0-9]+' "$log" | awk '{print $2}' || true)"
+  printf '%s\n' "$steps"
+}
+
 if [ "$code" = "0" ] && [ "$controller_image_code" = "0" ]; then
   echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
 elif [ "$code" = "0" ]; then
@@ -308,8 +319,7 @@ else
   # output of every failed suite can be copied out here.
   # The summary line is printed right before GATE_RESULT, so it is always in the
   # final log read; per-step markers can scroll out when several suites fail.
-  failed_steps="$(grep -oE 'GATE_FAILED_STEPS( [0-9]+)*' "$MACHINE_LOG" | tail -1 | sed 's/GATE_FAILED_STEPS//')"
-  [ -n "$failed_steps" ] || failed_steps="$(grep -oE 'GATE_STEP_FAILED [0-9]+' "$MACHINE_LOG" | awk '{print $2}')"
+  failed_steps="$(gate_failed_steps "$MACHINE_LOG")"
   for n in $(printf '%s\n' $failed_steps | sort -un); do
     step_log="${MACHINE_LOG%.log}-step-$n.log"
     rm -f "$step_log"
