@@ -223,5 +223,9 @@ agent-network-index-bootstrap in root-independent-source-phase-review.safe.json
 (SHA256 f6999e60bc6223d0b1b916771b8c13c116b5b88e4321befce074bf06964f2bfe).
 The existing policy adds only that fingerprint with those same two phases.
 No input exclusion, source predicate, historical entry or phase is broadened.
-The unchanged default normal gate must pass on the committed source before push;
-original-source compatibility and local review alone supply no benchmark credit.
+The unchanged default related selection on committed ef4401d10 then passed all
+59 controls in 36.23 seconds without a fixture override, including both
+pre-service preservation controls, child-ACK/snapshot contracts and the 22
+reconnect controls. Original registration RED and reviewed-source compatibility
+receipts remain preserved. The parent independently confirmed source phases;
+this source qualification supplies no benchmark credit or original release proof.

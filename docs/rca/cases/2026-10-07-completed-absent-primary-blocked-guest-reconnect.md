@@ -206,9 +206,13 @@ outside the unchanged boot/index paths and certified only the existing
 before-stack-launch and agent-network-index-bootstrap phases. Its receipt
 SHA256 is f6999e60bc6223d0b1b916771b8c13c116b5b88e4321befce074bf06964f2bfe.
 Only that exact fingerprint is registered in the existing policy, preserving
-all prior entries and predicates. Normal committed-source qualification is
-required before publication; an uncommitted policy cannot satisfy the trusted
-committed-byte check.
+all prior entries and predicates. After runtime and policy were committed
+together as ef4401d10, the identical default related command passed all 59
+controls in 36.23 seconds, with no fixture override. Its preserved log SHA256
+is a6857c80981c07b92010a80f52faaa69954c11525915ff5ec7701de049998bf8.
+This includes both pre-service preservation controls, the 22 reconnect controls,
+child-ACK and snapshot contracts. An uncommitted policy cannot satisfy the
+trusted committed-byte check.
 
 The existing benchmark-live-results deploy selector
 already discovers the new exact_recovery_consumes_runtime_receipt cases.
@@ -236,7 +240,7 @@ It recaptured the second unsealed guest's normal runtime bundle and ended
 runtime-incomplete with 49 sealed originals; the remaining Minted original has
 no canonical run/seal. That separate original-volume forensic archive and
 resource reaper remain the parent's work. Status remains mitigated pending
-normal committed-source qualification, final independent review and actual remaining closure.
+final independent review and actual remaining closure.
 Local proof and read-only original validation supply
 no fresh LIVE outcome, benchmark credit or full-release claim.
 
