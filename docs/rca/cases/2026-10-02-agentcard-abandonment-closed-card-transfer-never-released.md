@@ -21,11 +21,13 @@ sources:
   - PR #1401
   - PR #1416
   - PR #1418
+  - PR #1436
   - agent 75ea1c1e-0b2a-49f5-b6f5-6fb2a67f5346
   - agent 536786c2-3213-4ffd-99d8-8853b9908bcb
   - agent 102b1ebe-c0da-48bb-a8f8-bb3ac91cbcb4
   - agent 8b054756-bf09-43b9-ab3a-8a6c782e15e8
   - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
+  - agent d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -227,12 +229,30 @@ release observation.
   held the Step 6b latency ratchet, a separate harness bug fixed in
   `2026-10-07-retained-recovery-stack-held-latency-ratchet`.
 
+`/deploy` Step 6a for PR #1436 (stabilization run `20261007-220502-355180`,
+HEAD `8f63c272e`, stack `1791413203-595722-63139`) failed
+`agent-payment-abandonment` (agent `d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc`)
+the same way after 538s. The other three lifecycle tasks passed. The same
+task passed earlier the same day in this deploy's Phase 1 6a run.
+
+- Transfer `owt_f46e484168f57370a4cda9c6` (card `card_5b1c41fe5dee8907e092e155`,
+  $43.96 mint, 4396 transferred) stayed `consumed` with `releasedCents: 0`.
+  The card was `CLOSED` with balance 0. Purchase stayed `HELD` and funding
+  stayed `RECLAIMING` through the 420s reconciliation wait and a later
+  post-timeout lifecycle read.
+- The unchanged-lane rerun at 23:33 on the same HEAD passed all four tasks
+  (Hub `4144392b-bff3-4d67-97ac-8be2e00c0237`). Abandonment (agent
+  `490787fb-fea5-4f08-9700-8ac6835ef966`) passed in 213s after
+  `Abandoned issued payment card and reconciled funding`.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
   `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
   `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
-  `card_0d8d820f72e50b35fd394b93`) to AgentCard with the ledger reads.
+  `card_0d8d820f72e50b35fd394b93`; `owt_…a52e`, card
+  `card_aec0bd2ceaea33cfb4e17c36`; `owt_f46e484168f57370a4cda9c6`, card
+  `card_5b1c41fe5dee8907e092e155`) to AgentCard with the ledger reads.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
