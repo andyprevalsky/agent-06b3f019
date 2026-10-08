@@ -14,6 +14,10 @@ import {
   applyHubRunToResolutionCaches,
   putRun,
 } from '../../providers/benchmarkHubStore';
+import {
+  delayedStartingRetryAcrossProcesses,
+  startingRetryWorker,
+} from './benchmark-hub-starting-retry.cases';
 
 function deferred() {
   let resolve!: () => void;
@@ -258,6 +262,17 @@ async function main(): Promise<void> {
   Object.assign(process.env, fixtureEnv);
   _resetForTests();
   try {
+    for (const advancement of ['status', 'root', 'tree'] as const) {
+      try {
+        const peers = await delayedStartingRetryAcrossProcesses(advancement);
+        console.log(
+          `PASS: delayed starting retry preserves ${advancement}; native peers ${peers.join(',')} joined`
+        );
+      } catch (error: unknown) {
+        failures.push(`delayed starting retry preserves ${advancement}: ${String(error)}`);
+        console.error(`FAIL: ${failures.at(-1)}`);
+      }
+    }
     for (const failIndexWrite of [false, true]) {
       const label = failIndexWrite
         ? 'failed publication remains retryable'
@@ -324,7 +339,8 @@ async function main(): Promise<void> {
     await prisma.$disconnect();
   }
 }
-main().catch((error: unknown) => {
+const run = process.env.BENCHMARK_HUB_STARTING_RETRY_WORKER === '1' ? startingRetryWorker : main;
+run().catch((error: unknown) => {
   console.error(error);
   process.exitCode = 1;
 });

@@ -167,6 +167,52 @@ These are owning-boundary proofs, not proof that the exact benchmark now passes.
 The case remains open pending final source review, rollout and the unchanged
 required production outcome; no original run or LIVE50 credit is changed.
 
+### 2026-10-08 review recurrence: delayed initial registration replay
+
+The final full review of PR #1442 found a distinct, existing store hazard: an
+original registration with an unknown HTTP acknowledgement can reach the shared
+writer after a peer retry has committed registration and subsequent progress.
+That delayed all-starting packet replaced the newer bundle and agent mapping.
+The same destructive path exists before this admission repair; local priority
+alone cannot prevent it across backend processes.
+
+The permanent normal `benchmark-hub-index-read.blackbox.ts` entrypoint now runs
+three two-process controls through the actual store and local PostgreSQL lock.
+The fixture replaces only R2 transport, holds the original request before store
+entry, positively reads the peer's registration, commits status/root-ID/tree-ID
+advancement, then releases the original. The frozen command above produced three
+failures and nine unchanged passes before the repair, and twelve passes after
+it. Every native child exits and is joined. Each case also proves that distinct
+pre-agent starting content still updates and a final all-starting `live:false`
+packet still commits. The existing sixteen admission/coalescing unit controls
+retain their assertions; their ID-helper fixture now returns the actual array
+type instead of a Set.
+
+The locked store now absorbs an incoming live, no-agent, all-starting packet
+only after the committed exact run has advanced task status, a root agent ID,
+or an existing compact-index agent mapping. It uses the index already read for
+the mutation, before any bundle/index/cache write. Group validation, ordinary
+live progress, pre-agent updates, final absorption, HTTP bounds and retries are
+unchanged. No new registry, queue, pool budget or client marker was added.
+Foreground priority remains local to each process; PostgreSQL serializes
+already-admitted cross-process writers without preempting them. Required first
+visibility remains the caller's launch prerequisite.
+
+The original pretask gate remains failed, with its same starting bundle's late
+commit preserved. Its exact controller exited before task creation, so it had
+no model/payment/provider allocation; this closure is not a passing gate.
+Private frozen source/test hashes, actual RED/GREEN logs and peer review are
+kept with the existing case's deployment evidence. This case stays open until
+the composed repaired source is reviewed, deployed and its required outcome
+is positively qualified. The full-review finding superseded an earlier
+transient clean observation; the private ledger preserves and corrects that
+invalid clean accounting to FINDINGS without backdating or changing any run.
+
+Independent source and adversarial reviews verified the frozen five-file
+candidate and original log/test hashes, then each reran the unchanged normal
+twelve-control command successfully. Production qualification remains pending;
+the immutable author receipt retains its original pending-review state.
+
 ## Human feedback
 
 The user asked for the full `/deploy` after the messaging-mock change. That
