@@ -214,8 +214,15 @@ This includes both pre-service preservation controls, the 22 reconnect controls,
 child-ACK and snapshot contracts. An uncommitted policy cannot satisfy the
 trusted committed-byte check.
 
-The existing benchmark-live-results deploy selector
-already discovers the new exact_recovery_consumes_runtime_receipt cases.
+The parent's composed-source audit found that the actual Step 4s selector
+omitted this new family, despite its direct normal pytest selection passing.
+Step 4s now explicitly includes
+exact_recovery_consumes_runtime_receipt_completed_absent_primary. Its identical
+normal five-file command with only --collect-only added selected 370 of 983
+controls before the wiring correction, including zero new controls; afterward
+it selected 392, including all 22 new controls. This proves actual deploy
+discovery, not execution of the full selected gate. The original direct owning
+and related execution results remain separate evidence.
 No new runner, acceptance gate, polling loop, task window or production timer
 was introduced.
 
