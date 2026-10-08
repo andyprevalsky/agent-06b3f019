@@ -190,6 +190,29 @@ names = eligible_pool(root, None, require_cloud_root=True)
 assert "phone-call-ivr-dtmf" not in names
 assert "phone-call-payment" in names
 PY
+shared_callee_pool="$(mktemp)"
+printf '["phone-call-hold-queue"]\n' > "$shared_callee_pool"
+shared_callee_mapping='phone-call-client-intake=fake-shared,phone-call-payment=fake-payment,phone-call-hold-queue=fake-shared'
+if BENCHMARK_CALLEE_PHONE_NUMBER_IDS="$shared_callee_mapping" \
+  "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$shared_callee_pool" >/tmp/infra-proof-shared-callee.out 2>&1; then
+  fail "capability proof must reject a phone persona whose callee number another task shares"
+fi
+grep -Fq 'unassigned phone tasks' /tmp/infra-proof-shared-callee.out \
+  || fail "shared callee rejection must explain why"
+BENCHMARK_CALLEE_PHONE_NUMBER_IDS="$shared_callee_mapping" \
+  python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must exclude phone callees sharing one number"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+names = eligible_pool(root, None, require_cloud_root=True)
+assert "phone-call-client-intake" not in names
+assert "phone-call-hold-queue" not in names
+assert "phone-call-payment" in names
+PY
+rm -f "$shared_callee_pool"
 rm -f "$unassigned_callee_pool"
 rm -f "$production_only_pool"
 rm -f "$mac_relay_pool"

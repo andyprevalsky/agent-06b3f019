@@ -8,6 +8,9 @@
 # that is still live. A generated run id embeds its benchmarks/local.py
 # controller PID, which covers the bootstrap before services.json exists; a
 # custom run id is live while its manifest is starting/running with a live run.sh.
+# A stack retained after failed owned cleanup keeps run.sh (and a "running"
+# manifest) only as recovery authority; once its recorded benchmark child has
+# exited it runs no agents and spends no model quota.
 live_isolated_benchmark_runs() {
   python3 - "$1" <<'PY'
 import glob
@@ -26,6 +29,20 @@ def command_of(pid):
         check=False,
     )
     return result.stdout.strip()
+
+
+def retained_after_benchmark_exit(run_dir):
+    try:
+        with open(os.path.join(run_dir, "local-benchmark-owner.json")) as handle:
+            owner = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(owner, dict) or owner.get("state") != "failed_retained":
+        return False
+    pid = owner.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    return not command_of(pid)
 
 
 root = os.path.join(sys.argv[1], ".context", "benchmarks")
@@ -47,7 +64,7 @@ for run_dir in sorted(glob.glob(os.path.join(root, "*", ""))):
     pid = manifest.get("run_sh_pid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         continue
-    if "run.sh" in command_of(pid):
+    if "run.sh" in command_of(pid) and not retained_after_benchmark_exit(run_dir):
         print(f"{run_id} (run.sh PID {pid})")
 PY
 }

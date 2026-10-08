@@ -231,6 +231,27 @@ def _finalize_interrupt_cleanup_status() -> None:
     )
 
 
+def has_in_progress_phone_call(messages: list | None) -> bool:
+    """True when a live ``call_phone_number`` chip is still in progress.
+
+    A connected hold updates one IN_PROGRESS message in place for hours and
+    does not increment ``message_count`` or tree LLM cost until the call ends.
+    Tree-stall early-fail must treat that chip as activity or it kills a
+    healthy hold after the default ~510s silence budget.
+    """
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "call_phone_number":
+            continue
+        if str(metadata.get("toolStatus") or "").upper() == "IN_PROGRESS":
+            return True
+    return False
+
+
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
 
@@ -1892,7 +1913,9 @@ async def _evaluate_phone_call_task(
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:
         try:
-            structured = await callee.fetch_callee_structured_data()
+            structured = await callee.fetch_callee_structured_data(
+                timeout_seconds=callee.analysis_timeout_seconds()
+            )
         except Exception as exc:
             return False, f"failed to fetch callee-side call analysis: {exc}"
         failures = callee_check_failures(task.callee_checks, structured)
@@ -1925,6 +1948,20 @@ def phone_final_result_text(data: dict) -> str:
         elif message.get("role") == "ASSISTANT":
             chunks.append(str(message.get("text") or message.get("message") or ""))
     return "\n".join(chunks)
+
+
+def phone_parked_hold_seconds(data: dict) -> int:
+    """Longest wait_for_human parking reported on a finished call_phone_number card."""
+    parked = 0
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict) or metadata.get("toolName") != "call_phone_number":
+            continue
+        phone_call = metadata.get("phoneCall")
+        hold_seconds = phone_call.get("holdSeconds") if isinstance(phone_call, dict) else None
+        if isinstance(hold_seconds, int) and not isinstance(hold_seconds, bool):
+            parked = max(parked, hold_seconds)
+    return parked
 
 
 def _flatten_pinned_call_findings(pinned_facts: Optional[dict]) -> list[str]:
@@ -4019,6 +4056,19 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def agent_execution_backstop_seconds(task: Optional[BenchmarkTask] = None) -> int:
+    """An operator-set backstop is a hard cap; only the default yields to a longer task timeout."""
+    seconds = benchmark_wall_clock_backstop_seconds()
+    if task is None or "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ:
+        return seconds
+    resolved = getattr(task, "_resolved_timeout_seconds", None)
+    if resolved is None:
+        resolved = task.timeout_seconds
+    if isinstance(resolved, (int, float)) and not isinstance(resolved, bool) and resolved > seconds:
+        return int(resolved)
+    return seconds
+
+
 async def poll_agent(
     base_url: str,
     agent_id: str,
@@ -4030,7 +4080,7 @@ async def poll_agent(
     async def execute(snapshot: dict):
         return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
-    return await _run_with_agent_execution_backstop(base_url, agent_id, execute)
+    return await _run_with_agent_execution_backstop(base_url, agent_id, execute, task=task)
 
 
 async def _run_with_agent_execution_backstop(
@@ -4038,9 +4088,10 @@ async def _run_with_agent_execution_backstop(
     agent_id: str,
     execute: Callable[[dict], Awaitable[Any]],
     started_at: Optional[float] = None,
+    task: Optional[BenchmarkTask] = None,
 ) -> Any:
     """Bound all post-create execution, including preparation and checkpoints."""
-    seconds = benchmark_wall_clock_backstop_seconds()
+    seconds = agent_execution_backstop_seconds(task)
     print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
     snapshot: dict = {}
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
@@ -4417,6 +4468,15 @@ async def _poll_agent(
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
         now = time.time()
+        live_phone_call = has_in_progress_phone_call(messages)
+        if live_phone_call:
+            last_activity_time = now
+            root_state = per_agent_state.get(agent_id)
+            if root_state is None:
+                per_agent_state[agent_id] = {"count": root_msg_count, "last_change_time": now, "status": status}
+            else:
+                root_state["last_change_time"] = now
+                root_state["status"] = status
         if now - last_tree_poll >= TREE_POLL_INTERVAL:
             last_tree_poll = now
             tree_stats = await _fetch_tree_stats(base_url, agent_id)
@@ -5875,7 +5935,7 @@ async def _refresh_browser_archive_snapshot(
                 logs.pop("browser_archive_observation", None)
                 return latest
             if time.monotonic() >= deadline:
-                raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
+                raise TimeoutError("browser evidence did not become terminal with attached recordings before archive")
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
@@ -12463,6 +12523,12 @@ def _run_declared_static_check(
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
             continue
+        if check_type == "phone_call_parked_on_hold":
+            parked = phone_parked_hold_seconds(data)
+            minimum = int(check.get("min_seconds", 1))
+            if parked < minimum:
+                return False, f"Phone call was parked by wait_for_human for {parked}s; expected at least {minimum}s"
+            continue
         if check_type == "explore_research_not_reject_loop":
             loops = _explore_reject_loop_failures(data, min_rejects=int(check.get("min_rejects", 3)))
             if loops:
@@ -13163,9 +13229,10 @@ async def _run_single_task_as_run_user(
     if task.phone_persona:
         phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
         await phone_callee.setup()
-        task._callee_phone_number = phone_callee.phone_number
+        task._callee_phone_number = phone_callee.dial_number
+        hold_note = f" via hold line {phone_callee.dial_number}" if phone_callee.hold_line else ""
         print(
-            f"    📞 Benchmark callee ready: {phone_callee.phone_number} "
+            f"    📞 Benchmark callee ready: {phone_callee.phone_number}{hold_note} "
             f"(persona assistant {phone_callee.assistant_id[:8]})"
         )
 
@@ -13379,7 +13446,7 @@ async def _run_single_task_as_run_user(
             return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
         execution_result = await _run_with_agent_execution_backstop(
-            base_url, agent_id, execute_agent, started_at=execution_started_at
+            base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
         )
         if isinstance(execution_result, TaskResult):
             return execution_result

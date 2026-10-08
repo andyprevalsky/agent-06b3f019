@@ -19,9 +19,12 @@ interface PhoneCallCardProps {
  * shows a timer and streams the audio; once ended it becomes expandable to
  * reveal the recording, summary, extracted data, and transcript.
  *
- * in-progress -> finished (collapsed)
- * finished + header click -> expanded details
- * expanded + callId -> first-party recording resolve
+ *   initiating ──▶ in-progress ──wait_for_human──▶ on-hold ──live person──▶ in-progress
+ *       │              │  (live audio)               (no live audio)            │
+ *       │              └──────────────▶ ended (collapsed) ◀───────────────────────┘
+ *       └──────────────────────────────▶ error
+ *
+ *   ended + header click ──▶ expanded details ──callId──▶ first-party recording resolve
  */
 export const PhoneCallCard = memo(function PhoneCallCard({
   phoneCall,
@@ -46,15 +49,18 @@ export const PhoneCallCard = memo(function PhoneCallCard({
     isMuted,
   });
 
-  const isInProgress = toolStatus === 'IN_PROGRESS' || phoneCall.status === 'in-progress';
   const isFinished = toolStatus === 'FINISHED' || phoneCall.status === 'ended';
   const isError = toolStatus === 'ERROR' || phoneCall.status === 'error';
+  const isOnHold = !isFinished && !isError && phoneCall.status === 'on-hold';
+  const isInProgress =
+    !isOnHold && (toolStatus === 'IN_PROGRESS' || phoneCall.status === 'in-progress');
 
   return (
     <div
       className={cn(
         'rounded-lg border overflow-hidden transition-all duration-200',
         isInProgress && 'border-green-500/50 bg-green-500/5',
+        isOnHold && 'border-amber-500/50 bg-amber-500/5',
         isFinished && 'border-border bg-card',
         isError && 'border-red-500/50 bg-red-500/5',
       )}
@@ -62,6 +68,7 @@ export const PhoneCallCard = memo(function PhoneCallCard({
       <PhoneCallHeader
         phoneCall={phoneCall}
         isInProgress={isInProgress}
+        isOnHold={isOnHold}
         isFinished={isFinished}
         isError={isError}
         isExpanded={isExpanded}

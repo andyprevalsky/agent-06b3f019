@@ -332,13 +332,14 @@ async function testBoundary_vapiCallCreation() {
   const outboundBody = JSON.parse(call.requestBody) as {
     phoneNumberId?: string;
     customer?: { number?: string };
+    phoneCallProviderBypassEnabled?: boolean;
     assistant?: {
       name?: string;
       model?: {
         provider?: string;
         model?: string;
         messages?: { role?: string; content?: string }[];
-        tools?: { type?: string }[];
+        tools?: { type?: string; function?: { name?: string }; server?: { url?: string } }[];
       };
       voice?: {
         provider?: string;
@@ -375,8 +376,17 @@ async function testBoundary_vapiCallCreation() {
   if (assistant.name !== 'Rose Outbound Call Agent') {
     throw new Error(`Expected assistant name to be code-controlled, got ${assistant.name}`);
   }
-  if (assistant.model?.provider !== 'openai' || assistant.model.model !== 'gpt-4o') {
-    throw new Error(`Expected openai/gpt-4o model, got ${JSON.stringify(assistant.model)}`);
+  if (assistant.model?.provider !== 'openai' || assistant.model.model !== 'gpt-4.1-mini') {
+    throw new Error(`Expected openai/gpt-4.1-mini model, got ${JSON.stringify(assistant.model)}`);
+  }
+  // Hold parking (backend-owned Twilio call) and the wait_for_human tool come together.
+  const holdTool = assistant.model.tools?.find((t) => t.function?.name === 'wait_for_human');
+  const holdToolMatchesPath =
+    outboundBody.phoneCallProviderBypassEnabled === true
+      ? holdTool?.server?.url?.includes('/api/vapi/hold/tool?session=') === true
+      : holdTool === undefined;
+  if (!holdToolMatchesPath) {
+    throw new Error(`Hold parking and wait_for_human disagree: ${JSON.stringify(holdTool)}`);
   }
   const systemMessage = assistant.model.messages?.find((m) => m.role === 'system')?.content;
   if (!systemMessage?.startsWith('You are Rose.')) {

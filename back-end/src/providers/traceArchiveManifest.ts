@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { runTransactionWithRetry } from './database';
+import { retryWithBackoff } from './retry';
 import {
   type StoreResult,
   archiveEnabled,
@@ -300,7 +301,49 @@ type ManifestLockOwnership = {
   reconcile: () => Promise<ManifestReconciliationResult>;
 };
 
+// Lock holders run nested queries on the shared pool (planner memory, trajectory
+// search). A same-root waiter therefore releases its connection between bounded
+// waits; otherwise waiters can fill the pool and starve the holder they wait on.
+const MANIFEST_LOCK_ATTEMPT_MS = 2_000;
+const MANIFEST_LOCK_WAIT_MS = 120_000;
+const MANIFEST_LOCK_RETRY_DELAY_MS = 100;
+const POSTGRES_LOCK_NOT_AVAILABLE = '55P03';
+
+class ArchiveManifestLockBusyError extends Error {
+  constructor(rootAgentId: string) {
+    super(`Trace archive manifest lock is busy for ${rootAgentId}`);
+    this.name = 'ArchiveManifestLockBusyError';
+  }
+}
+
+function isLockNotAvailable(error: unknown): boolean {
+  const meta = (error as { meta?: { code?: unknown } } | null)?.meta;
+  return meta?.code === POSTGRES_LOCK_NOT_AVAILABLE;
+}
+
 export async function withArchiveManifestLock<T>(
+  rootAgentId: string,
+  operation: (ownership: ManifestLockOwnership) => Promise<T>
+): Promise<T> {
+  const deadline = Date.now() + MANIFEST_LOCK_WAIT_MS;
+  return retryWithBackoff(() => attemptArchiveManifestLock(rootAgentId, operation), {
+    maxRetries: Math.ceil(MANIFEST_LOCK_WAIT_MS / MANIFEST_LOCK_ATTEMPT_MS) + 1,
+    getBackoffDelayMs: () => MANIFEST_LOCK_RETRY_DELAY_MS,
+    isRetryable: (error) => error instanceof ArchiveManifestLockBusyError && Date.now() < deadline,
+    component: 'ArchiveManifestLock',
+  });
+}
+
+async function reportBusyLock<T>(rootAgentId: string, acquisition: Promise<T>): Promise<T> {
+  try {
+    return await acquisition;
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new ArchiveManifestLockBusyError(rootAgentId);
+    throw error;
+  }
+}
+
+async function attemptArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
@@ -308,9 +351,12 @@ export async function withArchiveManifestLock<T>(
   try {
     return await runTransactionWithRetry(
       async (tx) => {
-        await tx.$queryRaw`
+        await reportBusyLock(
+          rootAgentId,
+          tx.$queryRaw`
           WITH settings AS MATERIALIZED (
-            SELECT set_config('idle_in_transaction_session_timeout', '120s', true)
+            SELECT set_config('idle_in_transaction_session_timeout', '120s', true),
+              set_config('lock_timeout', ${`${MANIFEST_LOCK_ATTEMPT_MS}ms`}, true)
           ), acquired AS MATERIALIZED (
             SELECT pg_advisory_xact_lock(
               hashtextextended(${`${rootAgentId}:trace-archive-manifest`}, ${TRACE_ARCHIVE_MANIFEST_LOCK_SEED})
@@ -318,7 +364,8 @@ export async function withArchiveManifestLock<T>(
             FROM settings
           )
           SELECT 1 AS locked FROM acquired
-        `;
+        `
+        );
         const assertOwned = async () => {
           // A timed-out/terminated interactive transaction no longer owns the lock.
           await tx.$queryRaw`SELECT 1 AS owned`;

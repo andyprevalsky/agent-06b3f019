@@ -78,6 +78,49 @@ describe('PhoneCallCard', () => {
     });
   });
 
+  describe('on-hold call', () => {
+    it('shows the hold status and hold timer without live audio controls', () => {
+      render(
+        <PhoneCallCard
+          phoneCall={makeCall({
+            status: 'on-hold',
+            startedAt: new Date(Date.now() - 3_600_000).toISOString(),
+            holdStartedAt: new Date(Date.now() - 65_000).toISOString(),
+            listenUrl: 'ws://example.test/audio',
+          })}
+          toolStatus="IN_PROGRESS"
+        />,
+      );
+      expect(screen.getByText('On hold, waiting for a live person...')).toBeInTheDocument();
+      expect(screen.queryByText('Call in progress...')).not.toBeInTheDocument();
+      // The timer counts the hold, not the whole call.
+      expect(document.querySelector('.tabular-nums')!.textContent).toMatch(/^1:0\d$/);
+      expect(screen.queryAllByRole('button')).toHaveLength(0);
+      expect(document.querySelector('.text-amber-500')).not.toBeNull();
+    });
+
+    it('returns to the live view when the call resumes', () => {
+      const { rerender } = render(
+        <PhoneCallCard
+          phoneCall={makeCall({ status: 'on-hold', startedAt: new Date().toISOString() })}
+          toolStatus="IN_PROGRESS"
+        />,
+      );
+      rerender(
+        <PhoneCallCard
+          phoneCall={makeCall({
+            status: 'in-progress',
+            startedAt: new Date().toISOString(),
+            listenUrl: 'ws://example.test/audio-2',
+          })}
+          toolStatus="IN_PROGRESS"
+        />,
+      );
+      expect(screen.getByText('Call in progress...')).toBeInTheDocument();
+      expect(screen.getAllByRole('button').length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
   describe('finished call', () => {
     it('formats duration as m:ss', () => {
       render(

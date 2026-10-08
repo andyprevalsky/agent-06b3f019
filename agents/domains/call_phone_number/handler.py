@@ -20,7 +20,6 @@ from temporalio.common import RetryPolicy
 
 from config import load_config
 from domains.call_phone_number.config import (
-    ACTIVE_POLL_INTERVAL_SECONDS,
     ACTIVITY_TIMEOUT_MINUTES,
     HEARTBEAT_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_INITIATE,
@@ -38,6 +37,10 @@ from domains.call_phone_number.service import (
     compute_service_usage,
     enrich_transcript_with_dtmf,
     format_phone_number,
+    live_call_update,
+    max_poll_coverage_seconds,
+    phone_hold_info,
+    poll_interval_seconds,
     save_phone_call_message,
 )
 from domains.call_phone_number.types import ExecuteActivityCallable
@@ -130,7 +133,12 @@ class CallPhoneNumberManager(ToolManager):
 
             # 3. Report usage based on call duration
             duration_seconds = result.get("duration", 0)
-            usage_items = [] if result.get("world_model_simulated") else compute_service_usage(duration_seconds)
+            hold_seconds = result.get("hold_seconds", 0)
+            usage_items = (
+                []
+                if result.get("world_model_simulated")
+                else compute_service_usage(duration_seconds, hold_seconds if isinstance(hold_seconds, int) else 0)
+            )
 
             await handle_tool_event(
                 event=ToolEvent(
@@ -330,6 +338,8 @@ async def _call_phone_number_activity_real(
     poll_interval = INITIAL_POLL_INTERVAL_SECONDS
     polls = 0
     call_started = False
+    last_hold_state: str | None = None
+    last_listen_url: str | None = None
 
     while polls < MAX_POLL_ATTEMPTS:
         activity.heartbeat(f"Polling call status (attempt {polls + 1})...")
@@ -337,116 +347,161 @@ async def _call_phone_number_activity_real(
         await asyncio.sleep(poll_interval)
         polls += 1
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_POLL) as client:
-            response = await client.get(
-                f"{config.backend.api_url}/api/vapi/call/{call_id}",
-                headers={"x-api-key": config.backend.api_key or ""},
+        try:
+            activity.heartbeat(f"Fetching call status (attempt {polls})...")
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_POLL) as client:
+                response = await client.get(
+                    f"{config.backend.api_url}/api/vapi/call/{call_id}",
+                    headers={"x-api-key": config.backend.api_key or ""},
+                )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # A 3-hour hold will see occasional Vapi/backend slowness. One
+            # timed-out poll must not fail the activity and abandon the call.
+            logger.warning(
+                "Poll request transport failed",
+                error=str(exc) or type(exc).__name__,
+                polls=polls,
+                call_id=call_id,
+            )
+            poll_interval = poll_interval_seconds(polls, call_started=call_started)
+            continue
+
+        if response.status_code != 200:
+            logger.warning("Poll request failed", status=response.status_code, text=response.text)
+            poll_interval = poll_interval_seconds(polls, call_started=call_started)
+            continue
+
+        poll_result = response.json()
+        status = poll_result.get("status", "")
+
+        logger.info("Vapi poll response", call_id=call_id, status=status, polls=polls)
+
+        # When call starts, send IN_PROGRESS message with live metadata
+        if status == "in-progress" and not call_started:
+            call_started = True
+
+            monitor = poll_result.get("monitor", {})
+            listen_url = monitor.get("listenUrl")
+            last_listen_url = listen_url
+            started_at = poll_result.get("startedAt")
+
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\U0001f4de Call in progress",
+                message=f"**Calling:** {formatted_phone}",
+                status=MessageStatus.IN_PROGRESS,
+                tool_call_id=tool_call_id,
+                phone_metadata={
+                    "status": "in-progress",
+                    "to": formatted_phone,
+                    "callId": call_id,
+                    "listenUrl": listen_url,
+                    "startedAt": started_at,
+                },
             )
 
-            if response.status_code != 200:
-                logger.warning("Poll request failed", status=response.status_code, text=response.text)
-                continue
+        # wait_for_human: the backend parks the line on hold and re-enters
+        # with a new Vapi segment (new listenUrl) when a live person answers.
+        hold_update = live_call_update(
+            poll_result,
+            last_hold_state=last_hold_state,
+            last_listen_url=last_listen_url,
+            formatted_phone=formatted_phone,
+            call_id=call_id,
+        )
+        if hold_update is not None and call_started:
+            on_hold = hold_update["status"] == "on-hold"
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\u23f8\ufe0f On hold, waiting for a live person" if on_hold else "\U0001f4de Call in progress",
+                message=f"**Calling:** {formatted_phone}",
+                status=MessageStatus.IN_PROGRESS,
+                tool_call_id=tool_call_id,
+                phone_metadata=hold_update,
+            )
+            if not on_hold:
+                last_listen_url = hold_update.get("listenUrl")
+        hold_info = phone_hold_info(poll_result)
+        if isinstance(hold_info.get("state"), str):
+            last_hold_state = hold_info["state"]
 
-            poll_result = response.json()
-            status = poll_result.get("status", "")
+        if status == "ended":
+            # Call completed - extract all results
+            transcript = poll_result.get("transcript", "") or ""
+            artifact = poll_result.get("artifact") or {}
+            messages = poll_result.get("messages")
+            if not messages and isinstance(artifact, dict):
+                messages = artifact.get("messages")
+            transcript = enrich_transcript_with_dtmf(
+                transcript,
+                messages if isinstance(messages, list) else None,
+            )
+            analysis = poll_result.get("analysis", {})
+            summary = poll_result.get("summary") or analysis.get("summary", "")
+            recording_url = poll_result.get("recordingUrl", "")
+            ended_reason = poll_result.get("endedReason", "unknown")
 
-            logger.info("Vapi poll response", call_id=call_id, status=status, polls=polls)
+            duration = calculate_duration_from_timestamps(
+                poll_result.get("startedAt"),
+                poll_result.get("endedAt"),
+            )
 
-            # When call starts, send IN_PROGRESS message with live metadata
-            if status == "in-progress" and not call_started:
-                call_started = True
-                poll_interval = ACTIVE_POLL_INTERVAL_SECONDS
+            structured_data = analysis.get("structuredData", {})
+            hold_seconds = hold_info.get("holdSeconds")
+            hold_seconds = hold_seconds if isinstance(hold_seconds, int) and hold_seconds > 0 else 0
+            completion_message = build_completion_message(
+                formatted_phone, duration, summary, structured_data, transcript, hold_seconds
+            )
 
-                monitor = poll_result.get("monitor", {})
-                listen_url = monitor.get("listenUrl")
-                started_at = poll_result.get("startedAt")
+            logger.info(
+                "Call completed",
+                call_id=call_id,
+                duration=duration,
+                ended_reason=ended_reason,
+                has_transcript=bool(transcript),
+                has_summary=bool(summary),
+                has_recording=bool(recording_url),
+            )
 
-                await save_phone_call_message(
-                    agent_id=agent_id,
-                    title="\U0001f4de Call in progress",
-                    message=f"**Calling:** {formatted_phone}",
-                    status=MessageStatus.IN_PROGRESS,
-                    tool_call_id=tool_call_id,
-                    phone_metadata={
-                        "status": "in-progress",
-                        "to": formatted_phone,
-                        "callId": call_id,
-                        "listenUrl": listen_url,
-                        "startedAt": started_at,
-                    },
-                )
-
-            if status == "ended":
-                # Call completed - extract all results
-                transcript = poll_result.get("transcript", "") or ""
-                artifact = poll_result.get("artifact") or {}
-                messages = poll_result.get("messages")
-                if not messages and isinstance(artifact, dict):
-                    messages = artifact.get("messages")
-                transcript = enrich_transcript_with_dtmf(
-                    transcript,
-                    messages if isinstance(messages, list) else None,
-                )
-                analysis = poll_result.get("analysis", {})
-                summary = poll_result.get("summary") or analysis.get("summary", "")
-                recording_url = poll_result.get("recordingUrl", "")
-                ended_reason = poll_result.get("endedReason", "unknown")
-
-                duration = calculate_duration_from_timestamps(
-                    poll_result.get("startedAt"),
-                    poll_result.get("endedAt"),
-                )
-
-                structured_data = analysis.get("structuredData", {})
-                completion_message = build_completion_message(
-                    formatted_phone, duration, summary, structured_data, transcript
-                )
-
-                logger.info(
-                    "Call completed",
-                    call_id=call_id,
-                    duration=duration,
-                    ended_reason=ended_reason,
-                    has_transcript=bool(transcript),
-                    has_summary=bool(summary),
-                    has_recording=bool(recording_url),
-                )
-
-                # Post FINISHED message with rich metadata
-                await save_phone_call_message(
-                    agent_id=agent_id,
-                    title="\u2705 Call completed",
-                    message=completion_message,
-                    status=MessageStatus.FINISHED,
-                    tool_call_id=tool_call_id,
-                    phone_metadata={
-                        "status": "ended",
-                        "to": formatted_phone,
-                        "callId": call_id,
-                        "duration": duration,
-                        "endedReason": ended_reason,
-                        "recordingUrl": recording_url,
-                        "transcript": transcript,
-                        "summary": summary,
-                        "structuredData": structured_data,
-                    },
-                )
-
-                return {
-                    "success": True,
-                    "message": completion_message,
-                    "call_id": call_id,
-                    "structured_data": structured_data,
+            # Post FINISHED message with rich metadata
+            await save_phone_call_message(
+                agent_id=agent_id,
+                title="\u2705 Call completed",
+                message=completion_message,
+                status=MessageStatus.FINISHED,
+                tool_call_id=tool_call_id,
+                phone_metadata={
+                    "status": "ended",
+                    "to": formatted_phone,
+                    "callId": call_id,
                     "duration": duration,
-                    "ended_reason": ended_reason,
+                    "endedReason": ended_reason,
+                    "recordingUrl": recording_url,
                     "transcript": transcript,
                     "summary": summary,
-                    "recording_url": recording_url,
-                    "to": to,
-                }
+                    "structuredData": structured_data,
+                    **({"holdSeconds": hold_seconds} if hold_seconds else {}),
+                },
+            )
+
+            return {
+                "success": True,
+                "message": completion_message,
+                "call_id": call_id,
+                "structured_data": structured_data,
+                "duration": duration,
+                "ended_reason": ended_reason,
+                "transcript": transcript,
+                "summary": summary,
+                "recording_url": recording_url,
+                "to": to,
+                "hold_seconds": hold_seconds,
+            }
+
+        poll_interval = poll_interval_seconds(polls, call_started=call_started)
 
     # Timeout
-    msg = f"Call timed out after {MAX_POLL_ATTEMPTS * poll_interval} seconds"
+    msg = f"Call timed out after {max_poll_coverage_seconds()} seconds"
     raise Exception(msg)  # noqa: TRY002
 
 
