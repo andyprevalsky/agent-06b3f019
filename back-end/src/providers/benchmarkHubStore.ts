@@ -249,9 +249,9 @@ let indexAdmissionHeld = false;
  * when an R2 operation throws.
  *
  * Live snapshots are superseded by the run's next snapshot, while a final
- * bundle, delete or index read is one-shot. Queued foreground work is admitted
- * ahead of queued snapshots, so a fleet's snapshot stream saturating this
- * single writer cannot starve the final upload behind every pending snapshot.
+ * bundle, delete or index read is one-shot. Each process admits its queued
+ * foreground work ahead of its snapshots. The shared SQL lock still orders
+ * other processes' already-admitted writes; it does not preempt those writes.
  */
 async function withIndexLock<T>(
   operation: () => Promise<T>,
@@ -423,6 +423,23 @@ async function storeRun(
         return;
       }
       const persisted = await readAgentRunIndexForMutation(index);
+      // An unknown-ACK registration retry can arrive after another process
+      // has committed progress. Preserve that durable handoff; distinct
+      // pre-agent starting packets may still update until ownership advances.
+      if (
+        existing !== undefined &&
+        summary.live &&
+        startingRegistration &&
+        (existing.tasks.some(
+          (task) =>
+            (typeof task.status === 'string' && task.status !== 'starting') ||
+            (typeof task.agent_id === 'string' && task.agent_id.length > 0)
+        ) ||
+          Array.from(persisted?.agents.values() ?? []).includes(runId))
+      ) {
+        storedSummary = existing;
+        return;
+      }
       const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
       await putObject(
         `runs/${runId}.json`,

@@ -99,7 +99,7 @@ function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {
     },
     listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
     readAgentRunIndexForMutation: async () => ({ revision }),
-    agentIdsFromHubBundle: () => new Set(['fixture-agent']),
+    agentIdsFromHubBundle: () => ['fixture-agent'],
     hubAgentIndexAfterPut: () => ({ revision: ++revision }),
     putObject: async (key: string, value: string) => {
       await beforeWrite(key);
