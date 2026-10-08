@@ -9508,6 +9508,176 @@ PY
     cloudbench_collect_remaining_runtime_evidence
 }
 
+finalize_terminal_projection() {  # finalize_terminal_projection <controller-exit-code>
+    local controller_exit_code="${1:-1}" preserve_outcomes="${2:-0}" now elapsed
+    local -a provenance_args
+    [ -z "$PROVISION_POOL" ] || return 0
+    [ -s "$FLEET_DIR/_batch/benches.json" ] || return 1
+    now="$(date +%s)"
+    elapsed=$((now - FLEET_CONTROLLER_STARTED_EPOCH))
+    [ "$elapsed" -ge 0 ] || return 1
+    provenance_args=()
+    if [ -s "${EXECUTION_PROVENANCE_FILE:-}" ] \
+        && [ -s "${EXECUTION_TASK_MATRIX_FILE:-}" ]; then
+        provenance_args=(
+            --expected-execution-provenance-file "$EXECUTION_PROVENANCE_FILE"
+            --expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"
+        )
+    fi
+    [ "$preserve_outcomes" != "1" ] || provenance_args+=(--preserve-terminal-outcomes)
+    if ! CLOUDBENCH_CONTROLLER_ELAPSED_SECONDS="$elapsed" \
+        CLOUDBENCH_CONTROLLER_EXIT_CODE="$controller_exit_code" \
+        python3 "$AGGREGATE_RUNS_SCRIPT" \
+            "$FLEET_DIR" "$FLEET_DIR/_batch/run.json" \
+            "${provenance_args[@]}"; then
+        return 1
+    fi
+}
+
+fleet_finalize_released_projection() {  # [normal legacy clock fallback]
+    local release_epoch allow_legacy_clock="${1:-0}"
+    [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)" = provider-teardown-verified ] \
+        && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" fleet_owner_token)" = "$FLEET_OWNER_TOKEN" ] \
+        && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" run_id)" = "$RUN_ID" ] || return 1
+    release_epoch="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch" 2>/dev/null || true)"
+    case "$release_epoch" in
+        ''|*[!0-9]*)
+            [ "$allow_legacy_clock" = "1" ] || return 0
+            release_epoch="$(date +%s)"
+            ;;
+    esac
+    python3 - "$FLEET_DIR" "$release_epoch" <<'PYRELEASE'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+root, epoch = Path(sys.argv[1]), sys.argv[2]
+for bench in json.loads((root / "_batch/benches.json").read_text()):
+    name = bench["name"]
+    if not isinstance(name, str) or name != Path(name).name or name in {"", ".", ".."}:
+        raise SystemExit(1)
+    output = root / name
+    start, finish = output / "bench-e2e.started-epoch", output / "bench-e2e.finished-epoch"
+    if start.is_file() and not finish.exists() and not finish.is_symlink():
+        descriptor, temporary = tempfile.mkstemp(prefix=".bench-e2e.finished.", dir=output)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(epoch + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, finish)
+        finally:
+            os.unlink(temporary)
+        descriptor = os.open(output, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+PYRELEASE
+}
+
+fleet_publish_recovered_terminal_projection() { (  # <sealed shared audit>; publication has its own failure
+    local audit="$1" original_owner original_run original_root original_runs original_dir original_ec
+    [ -d "$audit" ] && [ ! -L "$audit" ] || return 1
+    original_owner="${audit##*/}"
+    original_run="$(registry_meta_value "$audit/meta" run_id)"
+    original_root="$(registry_meta_value "$audit/meta" workspace_root)"
+    original_runs="$(registry_meta_value "$audit/meta" runs_root)"
+    [ -n "$original_runs" ] || original_runs="$original_root/.context/fleet/runs"
+    original_dir="$original_runs/$original_run"
+    [ "$audit" = "$FLEET_AUDIT_ROOT/$original_owner" ] \
+        && [ "$(registry_meta_value "$audit/meta" fleet_owner_token)" = "$original_owner" ] \
+        && [ "$(registry_meta_value "$audit/meta" app)" = "$APP" ] \
+        && [ "$(registry_meta_value "$audit/meta" status)" = provider-teardown-verified ] \
+        && [ ! -e "$FLEET_OWNERSHIP_ROOT/$original_owner" ] \
+        && [ ! -L "$FLEET_OWNERSHIP_ROOT/$original_owner" ] || return 1
+    # A deleted workspace has no local projection. Older runs without a
+    # canonical terminal bundle or an acknowledged self-managed publisher do
+    # not authorize creating a new Hub group during resource recovery.
+    [ -d "$original_dir" ] && [ ! -L "$original_dir" ] \
+        && [ -s "$original_dir/_batch/run.json" ] \
+        && [ -s "$original_dir/_batch/hub-live-publication.json" ] || return 0
+    original_ec="$(python3 - "$audit" "$original_dir" "$original_owner" "$original_run" <<'PYEXIT'
+import hashlib
+import json
+import math
+import sys
+from pathlib import Path
+
+audit, run = map(Path, sys.argv[1:3])
+owner, run_id = sys.argv[3:5]
+local = run / "teardown-ownership"
+
+def fields(path):
+    result = {}
+    for line in path.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in result:
+            raise SystemExit(1)
+        result[key] = value
+    return result
+
+def digest_tree(root):
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise SystemExit(1)
+        if path.is_file() and path.name != "source-audit":
+            relative, payload = str(path.relative_to(root)).encode(), path.read_bytes()
+            for value in (relative, payload):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+    return digest.hexdigest()
+
+if run.resolve() != run or audit.resolve() != audit or local.is_symlink() or not local.is_dir():
+    raise SystemExit(1)
+binding = fields(local / "source-audit")
+if binding != {"path": str(audit), "sha256": digest_tree(audit)} or digest_tree(local) != binding["sha256"]:
+    raise SystemExit(1)
+meta = fields(local / "meta")
+if meta.get("fleet_owner_token") != owner or meta.get("run_id") != run_id:
+    raise SystemExit(1)
+for name in ("run.json", "benches.json", "hub-live-publication.json"):
+    if (run / "_batch" / name).is_symlink():
+        raise SystemExit(1)
+record = json.loads((run / "_batch/run.json").read_text())
+names = [row["name"] for row in json.loads((run / "_batch/benches.json").read_text())]
+ack = json.loads((run / "_batch/hub-live-publication.json").read_text())
+epoch = ack.get("epoch")
+if (record.get("run_id") != run_id or not record.get("timestamp")
+        or record.get("status") not in {"passed", "failed"}
+        or [task["name"] for task in record["tasks"]] != names or len(set(names)) != len(names)
+        or [row[0] for row in ack.get("signature", [])] != names
+        or type(epoch) not in (int, float) or not math.isfinite(epoch) or epoch <= 0):
+    raise SystemExit(1)
+code = record.get("controller_exit_code", 1)
+if type(code) is not int or not 0 <= code <= 255:
+    raise SystemExit(1)
+if (run / "execution-provenance.json").exists() != (run / "execution-task-matrix.json").exists():
+    raise SystemExit(1)
+print(code)
+PYEXIT
+)" || return 1
+    FLEET_DIR="$original_dir"; ROOT_DIR="$original_root"; RUN_ID="$original_run"
+    FLEET_OWNER_TOKEN="$original_owner"; FLEET_TEARDOWN_OWNERSHIP_DIR="$audit"
+    EXECUTION_PROVENANCE_FILE="$original_dir/execution-provenance.json"
+    EXECUTION_TASK_MATRIX_FILE="$original_dir/execution-task-matrix.json"
+    PROVISION_POOL=""
+    # Never inherit a new caller's campaign grouping into a historical attempt.
+    unset BENCHMARK_HUB_GROUP_RUN_ID RUN_BENCH_CAMPAIGN_JOB_ID
+    export BENCHMARK_HUB_UPLOAD_URL="${BENCHMARK_HUB_UPLOAD_URL:-https://navi-j9a9.onrender.com}"
+    if [ -z "${BENCHMARK_HUB_API_KEY:-${BACKEND_API_KEY:-}}" ]; then
+        BENCHMARK_HUB_API_KEY="$(grep -E '^BACKEND_API_KEY=' "$ROOT_DIR/back-end/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+        export BENCHMARK_HUB_API_KEY
+    fi
+    fleet_finalize_released_projection || return 1
+    finalize_terminal_projection "$original_ec" 1 || return 1
+    python3 "$HUB_UPLOAD_HELPER" --upload-final "$FLEET_DIR/_batch/run.json" \
+        --run-id "$RUN_ID" --source direct-cloud-fleet
+)
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -9521,10 +9691,13 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
         # silently omitted from recovery.
         orphan_audit="$FLEET_AUDIT_ROOT/$token"
         [ -e "$orphan_audit" ] || return 0
-        [ -d "$orphan_audit" ] && [ ! -L "$orphan_audit" ] \
+        if [ -d "$orphan_audit" ] && [ ! -L "$orphan_audit" ] \
             && [ "$(registry_meta_value "$orphan_audit/meta" fleet_owner_token)" = "$token" ] \
             && [ "$(registry_meta_value "$orphan_audit/meta" status)" \
-                = "provider-teardown-verified" ] && return 0
+                = "provider-teardown-verified" ]; then
+            fleet_publish_recovered_terminal_projection "$orphan_audit"
+            return $?
+        fi
         echo "❌ exact owner $token has an incomplete shared audit but no recovery registry" >&2
         return 1
     fi
@@ -9661,7 +9834,8 @@ PY
         return 1
     fi
     rm -rf "$registry/recovery-lock"
-    fleet_registry_remove_if_empty "$registry"
+    fleet_registry_remove_if_empty "$registry" || return 1
+    fleet_publish_recovered_terminal_projection "$FLEET_AUDIT_ROOT/$token"
 }
 
 # ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
@@ -11239,31 +11413,6 @@ CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
 
-finalize_terminal_projection() {  # finalize_terminal_projection <controller-exit-code>
-    local controller_exit_code="${1:-1}" now elapsed
-    local -a provenance_args
-    [ -z "$PROVISION_POOL" ] || return 0
-    [ -s "$FLEET_DIR/_batch/benches.json" ] || return 1
-    now="$(date +%s)"
-    elapsed=$((now - FLEET_CONTROLLER_STARTED_EPOCH))
-    [ "$elapsed" -ge 0 ] || return 1
-    provenance_args=()
-    if [ -s "${EXECUTION_PROVENANCE_FILE:-}" ] \
-        && [ -s "${EXECUTION_TASK_MATRIX_FILE:-}" ]; then
-        provenance_args=(
-            --expected-execution-provenance-file "$EXECUTION_PROVENANCE_FILE"
-            --expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"
-        )
-    fi
-    if ! CLOUDBENCH_CONTROLLER_ELAPSED_SECONDS="$elapsed" \
-        CLOUDBENCH_CONTROLLER_EXIT_CODE="$controller_exit_code" \
-        python3 "$AGGREGATE_RUNS_SCRIPT" \
-            "$FLEET_DIR" "$FLEET_DIR/_batch/run.json" \
-            "${provenance_args[@]}"; then
-        return 1
-    fi
-}
-
 
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
@@ -11590,18 +11739,7 @@ cleanup() {
     # worker and exact-claim audit. An early pool return has a separate marker.
     # Legacy clockless audits retain a truthful post-verification fallback.
     if [ "$teardown_failed" = "0" ] && [ "$KEEP_CLONES" != "1" ]; then
-        local fleet_release_epoch
-        fleet_release_epoch="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/provider-teardown-verified.epoch" 2>/dev/null || true)"
-        case "$fleet_release_epoch" in
-            ''|*[!0-9]*) fleet_release_epoch="$(date +%s)" ;;
-        esac
-        for out in "${CHILD_OUT[@]}"; do
-            if [ -s "$out/bench-e2e.started-epoch" ] \
-                && [ ! -s "$out/bench-e2e.finished-epoch" ]; then
-                printf '%s\n' "$fleet_release_epoch" > "$out/bench-e2e.finished-epoch" \
-                    || { ec=1; teardown_failed=1; }
-            fi
-        done
+        fleet_finalize_released_projection 1 || { ec=1; teardown_failed=1; }
     fi
     # Keep the parent live while releasing resources. Only this post-release
     # projection closes dashboard polling and publishes the final transcripts.

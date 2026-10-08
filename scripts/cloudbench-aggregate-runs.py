@@ -119,6 +119,7 @@ def _terminal_report_card(result: dict, fleet_dir: Path) -> dict:
                 "agent_url": task.get("agent_url"),
                 "agent_id": task.get("agent_id"),
                 "failure_reason": task.get("failure_reason"),
+                "lifecycle_stage": task.get("lifecycle_stage"),
                 "tokens_in": int(task.get("tokens_in") or 0),
                 "tokens_out": int(task.get("tokens_out") or 0),
                 "world_model_mode": mode,
@@ -276,6 +277,7 @@ def aggregate(
                 "passed": False,
                 "status": "INFRA_ERROR",
                 "failure_reason": "no current run artifact produced",
+                "lifecycle_stage": _lifecycle_stage(fleet_dir / name),
             }
             if expected_execution_provenance is not None:
                 missing_task["execution_provenance"] = expected_execution_provenance
@@ -318,6 +320,7 @@ def aggregate(
                 "passed": False,
                 "status": "INFRA_ERROR",
                 "failure_reason": "run artifact did not contain the requested task",
+                "lifecycle_stage": _lifecycle_stage(fleet_dir / name),
             }
             if expected_execution_provenance is not None:
                 missing_task["execution_provenance"] = expected_execution_provenance
@@ -333,11 +336,7 @@ def aggregate(
                 )
             task = dict(task)
             directory = fleet_dir / name
-            task["lifecycle_stage"] = (
-                "released" if (directory / "bench-e2e.finished-epoch").is_file()
-                else "teardown" if (directory / "benchmark-child.finished").is_file()
-                else "evaluated"
-            )
+            task["lifecycle_stage"] = _lifecycle_stage(directory) or "evaluated"
             tasks.append(task)
     passed = sum(bool(task.get("passed")) for task in tasks)
     costs = sum(float(task.get("cost_cents") or 0) for task in tasks)
@@ -388,6 +387,33 @@ def aggregate(
     return result
 
 
+def _lifecycle_stage(directory: Path) -> str | None:
+    if (directory / "bench-e2e.finished-epoch").is_file():
+        return "released"
+    return "teardown" if (directory / "benchmark-child.finished").is_file() else None
+
+
+def _preserved_terminal_projection(args, expected_provenance, expected_matrix):
+    """Refresh cleanup metadata without re-reading or replacing task outcomes."""
+    if args.output.is_symlink():
+        raise ValueError("terminal outcome path is a symlink")
+    result = json.loads(args.output.read_text())
+    benches = json.loads((args.fleet_dir / "_batch/benches.json").read_text())
+    names = [row["name"] for row in benches]
+    if (result.get("run_id") != args.fleet_dir.name or not result.get("timestamp")
+            or result.get("status") not in {"passed", "failed"}
+            or [task["name"] for task in result["tasks"]] != names
+            or len(set(names)) != len(names)):
+        raise ValueError("terminal outcome identity does not match the original task list")
+    if expected_provenance is not None:
+        errors = validate_run_provenance(result, expected_provenance)
+        if errors or result.get("execution_task_matrix") != expected_matrix:
+            raise ValueError("terminal outcome execution provenance changed")
+    for task in result["tasks"]:
+        task["lifecycle_stage"] = _lifecycle_stage(args.fleet_dir / task["name"])
+    return result
+
+
 def _publish_aggregate(args: argparse.Namespace) -> int:
     expected_execution_provenance = None
     expected_execution_task_matrix = None
@@ -435,13 +461,18 @@ def _publish_aggregate(args: argparse.Namespace) -> int:
     fleet_dir = args.fleet_dir
     output = args.output
     try:
-        result = aggregate(
-            fleet_dir,
-            expected_execution_provenance,
-            expected_execution_task_matrix,
-            controller_elapsed_seconds,
-            controller_exit_code,
-        )
+        if args.preserve_terminal_outcomes:
+            result = _preserved_terminal_projection(
+                args, expected_execution_provenance, expected_execution_task_matrix
+            )
+        else:
+            result = aggregate(
+                fleet_dir,
+                expected_execution_provenance,
+                expected_execution_task_matrix,
+                controller_elapsed_seconds,
+                controller_exit_code,
+            )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"aggregate rejected child execution provenance: {exc}", file=sys.stderr)
         return 1
@@ -462,6 +493,7 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("--expected-execution-provenance-file", type=Path)
     parser.add_argument("--expected-execution-task-matrix-file", type=Path)
+    parser.add_argument("--preserve-terminal-outcomes", action="store_true")
     args = parser.parse_args()
     status = 1
     try:
@@ -469,7 +501,7 @@ def main() -> int:
     except (OSError, TypeError, ValueError) as exc:
         print(f"aggregate publication failed: {exc}", file=sys.stderr)
     finally:
-        if status != 0:
+        if status != 0 and not args.preserve_terminal_outcomes:
             for path in (args.output, args.output.with_name("report-card.json"), args.output.with_name("llm-usage.json")):
                 path.unlink(missing_ok=True)
     return status
