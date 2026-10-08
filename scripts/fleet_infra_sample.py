@@ -18,6 +18,7 @@ import os
 import random
 import runpy
 import sys
+from collections import Counter
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -47,7 +48,9 @@ def configured_callee_names(repo_root: Path) -> set[str] | None:
     """Mirror the benchmark's env lookup before admitting phone-callee tasks.
 
     An empty mapping leaves the benchmark's dynamic-number path available.
-    A nonempty mapping makes every phone persona require an exact assignment.
+    A nonempty mapping makes every phone persona require an exact assignment,
+    and tasks sharing one number are unassigned: a run attaches its persona to
+    that number, so concurrent runs would answer each other's calls.
     """
     key = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
     raw = os.environ.get(key, "")
@@ -63,13 +66,14 @@ def configured_callee_names(repo_root: Path) -> set[str] | None:
                     break
     if not raw:
         return None
-    names: set[str] = set()
+    assignments: dict[str, str] = {}
     for entry in raw.split(","):
         name, separator, number_id = entry.strip().partition("=")
-        if not separator or not name or not number_id or name in names:
+        if not separator or not name or not number_id or name in assignments:
             raise ValueError(f"invalid {key} task assignment")
-        names.add(name)
-    return names
+        assignments[name] = number_id
+    shared = Counter(assignments.values())
+    return {name for name, number_id in assignments.items() if shared[number_id] == 1}
 
 
 def eligible_pool(

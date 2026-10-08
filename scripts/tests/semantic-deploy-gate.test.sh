@@ -572,6 +572,35 @@ printf '{"status": "running", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/
 if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
   fail "a running custom-id manifest with a live run.sh must hold the latency ratchet"
 fi
+
+# A failed owned cleanup retains run.sh (manifest still "running") so the
+# backend reconciler keeps its financial recovery authority, possibly for hours
+# while AgentCard withholds a release. Once the recorded benchmark child has
+# exited, nothing in that stack is running agents. On 2026-10-07 such a stack
+# held the latency ratchet toward its 3600s failure.
+retained_owner="$bench_repo/.context/benchmarks/custom-run/local-benchmark-owner.json"
+python3 -c 'import time; time.sleep(30)' run_benchmark.py &
+retained_child_pid=$!
+bench_pids+=("$retained_child_pid")
+printf '{"version": 1, "state": "failed_retained", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "a retained stack whose benchmark child is still running must hold the latency ratchet"
+fi
+kill "$retained_child_pid" 2>/dev/null || true
+wait "$retained_child_pid" 2>/dev/null || true
+printf '{"version": 1, "state": "running", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "only a failed_retained owner record may release a running manifest with a live run.sh"
+fi
+printf '{"version": 1, "state": "failed_retained", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
+  || fail "a retained recovery stack whose benchmark child exited must not hold the latency ratchet"
+printf '{"version": 1, "state": "failed_retained", "pid": true}\n' > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "a retained owner record without an integer benchmark PID must hold the latency ratchet"
+fi
+rm -f "$retained_owner"
+
 printf '{"status": "stopped", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/.context/benchmarks/custom-run/services.json"
 wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
   || fail "a stopped manifest must not hold the latency ratchet"

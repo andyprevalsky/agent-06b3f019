@@ -1,4 +1,4 @@
-import { Phone, Volume2, VolumeX, ChevronDown, ChevronUp } from 'lucide-react';
+import { Phone, PhoneForwarded, Volume2, VolumeX, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { PhoneCallMetadata } from '../../types';
@@ -9,6 +9,7 @@ import { formatOptionalDuration } from './formatDuration';
 interface PhoneCallHeaderProps {
   phoneCall: PhoneCallMetadata;
   isInProgress: boolean;
+  isOnHold: boolean;
   isFinished: boolean;
   isError: boolean;
   isExpanded: boolean;
@@ -40,9 +41,17 @@ export function PhoneCallHeader(props: PhoneCallHeaderProps) {
 
 function StatusIcon({
   isInProgress,
+  isOnHold,
   isFinished,
   isError,
-}: Pick<PhoneCallHeaderProps, 'isInProgress' | 'isFinished' | 'isError'>) {
+}: Pick<PhoneCallHeaderProps, 'isInProgress' | 'isOnHold' | 'isFinished' | 'isError'>) {
+  if (isOnHold) {
+    return (
+      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-amber-500/20">
+        <PhoneForwarded className="h-4 w-4 text-amber-500" />
+      </div>
+    );
+  }
   return (
     <div
       className={cn(
@@ -67,18 +76,25 @@ function StatusIcon({
 function HeaderContent({
   phoneCall,
   isInProgress,
+  isOnHold,
   isFinished,
   isError,
-}: Pick<PhoneCallHeaderProps, 'phoneCall' | 'isInProgress' | 'isFinished' | 'isError'>) {
+}: Pick<
+  PhoneCallHeaderProps,
+  'phoneCall' | 'isInProgress' | 'isOnHold' | 'isFinished' | 'isError'
+>) {
   const durationText = formatOptionalDuration(phoneCall.duration);
+  const liveSince = isOnHold
+    ? (phoneCall.holdStartedAt ?? phoneCall.startedAt)
+    : phoneCall.startedAt;
   return (
     <div className="flex-1 min-w-0">
       <div className="flex items-center gap-2">
         <span className="font-medium text-sm truncate">{phoneCall.to}</span>
-        {isInProgress && phoneCall.startedAt && (
+        {(isInProgress || isOnHold) && liveSince && (
           <>
             <span className="text-muted-foreground">•</span>
-            <CallTimer startedAt={phoneCall.startedAt} />
+            <CallTimer startedAt={liveSince} />
           </>
         )}
         {isFinished && durationText && (
@@ -90,6 +106,7 @@ function HeaderContent({
       </div>
       <div className="text-xs text-muted-foreground">
         {isInProgress && 'Call in progress...'}
+        {isOnHold && 'On hold, waiting for a live person...'}
         {isFinished && phoneCall.endedReason && `Ended: ${phoneCall.endedReason}`}
         {isError && phoneCall.error}
       </div>

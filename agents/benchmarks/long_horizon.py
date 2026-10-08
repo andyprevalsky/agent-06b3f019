@@ -67,6 +67,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "expected_payment_lifecycle",
     "no_browser_agent_failures",
     "no_tool_failures",
+    "phone_call_parked_on_hold",
     "claude_code_session_output",
     "explore_research_not_reject_loop",
     "explore_completion_summary",

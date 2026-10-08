@@ -156,6 +156,10 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
 
 
 TASK_TIMEOUT_FLOORS: dict[str, int] = {
+    # Real 2h45m hold plus the post-hold credit conversation. History p95
+    # would otherwise clamp to CEIL_SECONDS (900) after the first pass and
+    # kill the next run mid-hold.
+    "phone-call-hold-queue": 12600,
     # Live palette trials took 175-397s with browser recordings and verifier
     # retries; old single-heading task history understates the needed time.
     "browser-smoke": 450,
