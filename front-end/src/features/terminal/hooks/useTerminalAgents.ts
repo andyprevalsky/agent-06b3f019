@@ -119,6 +119,7 @@ export function useTerminalAgents(
   useQuickQuery({
     selectedModel: messaging.selectedModel,
     canSubmitGoals,
+    authReady: !auth.loading,
     clientSource,
     pendingPriceLimitCents: messaging.pendingPriceLimitCents,
     setCurrentView,

@@ -124,7 +124,7 @@ export interface IPC {
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => void;
   onQuickQueryToggle: (callback: (state: QuickQueryToggleState) => void) => void;
-  onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => void;
+  onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => () => void;
   onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => void;
   onUpdateProgress: (callback: (percent: number) => void) => void;
   onFocusInput: (callback: () => void) => void;

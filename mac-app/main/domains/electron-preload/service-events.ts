@@ -26,7 +26,6 @@ export function buildEventBridge(
   IPC,
   | 'onProgress'
   | 'onQuickQueryToggle'
-  | 'onQuickQuerySubmit'
   | 'onUpdateStatus'
   | 'onUpdateProgress'
   | 'onFocusInput'
@@ -38,9 +37,6 @@ export function buildEventBridge(
     },
     onQuickQueryToggle: (callback: (state: QuickQueryToggleState) => void) => {
       ipcRenderer.on('quick-query:toggle', (_, state) => callback(state as QuickQueryToggleState));
-    },
-    onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => {
-      ipcRenderer.on('quick-query:submit', (_, payload) => callback(payload as QuickQueryPayload));
     },
     onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => {
       ipcRenderer.on('update:status', (_, payload) => callback(payload as UpdateStatusPayload));
@@ -59,11 +55,38 @@ export function buildEventBridge(
   };
 }
 
+/**
+ * Launcher submits wait in the main process until this renderer takes them,
+ * because the main window may have been (re)opened to receive one. Take once
+ * on subscribe and again whenever the main process says one is waiting.
+ */
+function buildQuickQuerySubmitSubscription(
+  ipcRenderer: IpcRenderer
+): (callback: (payload: QuickQueryPayload) => void) => () => void {
+  return (callback) => {
+    const take = (): void => {
+      (ipcRenderer.invoke('quick-query:take') as Promise<QuickQueryPayload[]>)
+        .then((payloads) => {
+          for (const payload of payloads) callback(payload);
+        })
+        .catch((error: unknown) => {
+          console.error('[QuickQuery] Failed to take pending submits', error);
+        });
+    };
+    ipcRenderer.on('quick-query:pending', take);
+    take();
+    return () => {
+      ipcRenderer.removeListener('quick-query:pending', take);
+    };
+  };
+}
+
 export function buildUnsubscribableEventBridge(
   ipcRenderer: IpcRenderer
 ): Pick<
   IPC,
   | 'onOpenAgent'
+  | 'onQuickQuerySubmit'
   | 'onClaudeSetupStatus'
   | 'onGptSetupStatus'
   | 'onWhatsAppQRCode'
@@ -92,6 +115,7 @@ export function buildUnsubscribableEventBridge(
         openAgentCallbacks.delete(callback);
       };
     },
+    onQuickQuerySubmit: buildQuickQuerySubmitSubscription(ipcRenderer),
     onClaudeSetupStatus: (callback: (status: string) => void) => {
       const handler = (_event: IpcRendererEvent, status: unknown) => callback(status as string);
       ipcRenderer.on('claude:setupStatus', handler);

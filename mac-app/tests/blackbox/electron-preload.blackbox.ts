@@ -346,7 +346,6 @@ describe('subscription channel routing', () => {
   const simpleCases: Array<[string, string, unknown]> = [
     ['onProgress', 'upload:progress', { type: 'cookies', percent: 50 }],
     ['onQuickQueryToggle', 'quick-query:toggle', { open: true }],
-    ['onQuickQuerySubmit', 'quick-query:submit', { query: 'q', submittedAt: 1 }],
     ['onUpdateStatus', 'update:status', { state: 'checking' }],
     ['onFocusInput', 'focus-input', undefined],
     ['onPaymentComplete', 'payment-complete', { success: true }],
@@ -407,6 +406,82 @@ describe('subscription channel routing', () => {
     unsubscribe();
     eagerOpenAgentHandler?.({}, 'ignored-agent');
     expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  describe('onQuickQuerySubmit', () => {
+    type Subscribe = (cb: (payload: unknown) => void) => () => void;
+    const flush = async (): Promise<void> => {
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+
+    beforeEach(() => {
+      rendererInvoke.mockReset();
+      rendererOn.mockClear();
+      rendererRemoveListener.mockClear();
+    });
+
+    // The main process holds launcher submits because this window may have
+    // been (re)opened to receive one, before anything here was listening.
+    it('takes the submits the main process is holding as soon as it subscribes', async () => {
+      rendererInvoke.mockResolvedValueOnce([
+        { query: 'first cold query', submittedAt: 1 },
+        { query: 'second cold query', submittedAt: 2 },
+      ]);
+      const callback = vi.fn();
+      (api.onQuickQuerySubmit as Subscribe)(callback);
+
+      expect(rendererInvoke.mock.calls).toEqual([['quick-query:take']]);
+      await flush();
+      expect(callback.mock.calls).toEqual([
+        [{ query: 'first cold query', submittedAt: 1 }],
+        [{ query: 'second cold query', submittedAt: 2 }],
+      ]);
+    });
+
+    it('takes again each time the main process says a submit is waiting', async () => {
+      rendererInvoke.mockResolvedValueOnce([]);
+      const callback = vi.fn();
+      (api.onQuickQuerySubmit as Subscribe)(callback);
+      await flush();
+      expect(callback).not.toHaveBeenCalled();
+
+      const pendingCall = rendererOn.mock.calls.find(
+        ([channel]) => channel === 'quick-query:pending'
+      );
+      expect(pendingCall).toBeDefined();
+      rendererInvoke.mockResolvedValueOnce([{ query: 'live query', submittedAt: 3 }]);
+      (pendingCall?.[1] as () => void)();
+
+      expect(rendererInvoke).toHaveBeenCalledTimes(2);
+      await flush();
+      expect(callback.mock.calls).toEqual([[{ query: 'live query', submittedAt: 3 }]]);
+    });
+
+    it('stops listening for waiting submits after unsubscribe', async () => {
+      rendererInvoke.mockResolvedValueOnce([]);
+      const unsubscribe = (api.onQuickQuerySubmit as Subscribe)(vi.fn());
+      await flush();
+      const pendingHandler = rendererOn.mock.calls.find(
+        ([channel]) => channel === 'quick-query:pending'
+      )?.[1];
+
+      unsubscribe();
+      expect(rendererRemoveListener.mock.calls).toEqual([['quick-query:pending', pendingHandler]]);
+    });
+
+    it('reports a failed take without throwing into the renderer', async () => {
+      const failure = new Error('main process is gone');
+      rendererInvoke.mockRejectedValueOnce(failure);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const callback = vi.fn();
+      (api.onQuickQuerySubmit as Subscribe)(callback);
+      await flush();
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith('[QuickQuery] Failed to take pending submits', failure);
+      errorSpy.mockRestore();
+    });
   });
 
   it('onTelegramAuthError forwards the error string payload', () => {
