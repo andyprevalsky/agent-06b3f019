@@ -16,7 +16,7 @@ from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
-@pytest.mark.parametrize("failure", ("infra", "infra-strict", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry"))
+@pytest.mark.parametrize("failure", ("infra", "infra-strict", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing"))
 def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
     scripts = tmp_path / "scripts"
@@ -59,7 +59,10 @@ meta = f'run_id={run_id}\nfleet_owner_token={owner}\nworkspace_root={root}\nstat
 fd = os.open(root / 'events.jsonl', os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 os.write(fd, (json.dumps({'task': task, 'attempt': attempt, 'event': 'started'}) + '\n').encode())
 os.close(fd)
-print(f'    {root}/scripts/run-bench monitor {fleet}', flush=True)
+if not (mode == 'retry-handle-missing' and task == 'broken' and attempt == 2):
+    print(f'    {root}/scripts/run-bench monitor {fleet}', flush=True)
+if mode == 'retry-unverified' and task == 'broken' and attempt == 2:
+    (audit / 'provider-teardown-verified.epoch').unlink()
 if os.environ.get('RUN_BENCH_CAMPAIGN_BARRIER_DIR') and status != 'INFRA_ERROR':
     subprocess.run([sys.executable, os.environ['FIXTURE_BARRIER'], '--deadline', str(time.time()+60),
                     '--controller-pid', str(os.getpid())], check=True)
@@ -105,12 +108,27 @@ sys.exit(0 if status == 'PASSED' else 1)
         assert not started and result.returncode != 0
         assert summary['e2e_timeout_exceeded']
         assert (summaries[0].parent / 'hub-group-publication-ack.private.json').is_file(), 'cutoff skipped terminal group publication'
-    elif failure in {'infra', 'infra-strict', 'exhausted'}:
+    elif failure in {'infra', 'infra-strict', 'exhausted', 'retry-unverified', 'retry-handle-missing'}:
         assert len([event for event in started if event['task'] == 'broken']) == 2
         assert len([event for event in started if event['task'] == 'healthy']) == 1
         assert len(broken['attempts']) == 2 and broken['attempts'][0]['task_status'] == 'INFRA_ERROR'
         assert len({attempt['log'] for attempt in broken['attempts']}) == 2
-        assert result.returncode == (1 if failure == 'exhausted' else 0), result.stdout + result.stderr
+        assert result.returncode == (0 if failure in {'infra', 'infra-strict'} else 1), result.stdout + result.stderr
+        if failure.startswith('retry-'):
+            previous, current = broken['attempts']
+            assert previous['attempt'] == 1 and current['attempt'] == 2
+            assert previous['run_id'] == previous['fleet_owner_token'] == 'broken-1'
+            assert previous['resources_released'] is True and previous['infra_failure'] is True
+            assert previous['released_at_epoch'] > 0 and previous['retry_blocked'] is None
+            assert current['controller_exit_code'] == 0 and current['resources_released'] is False
+            assert current['retry_blocked'] == (
+                'physical run handle unavailable' if failure == 'retry-handle-missing'
+                else 'terminal result or release remains unverified'
+            )
+            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'task_status',
+                        'infra_failure', 'terminal_task', 'released_at_epoch'):
+                assert current[key] is None, f'current attempt inherited prior {key}'
+                assert broken.get(key) is None, f'current job inherited prior {key}'
         if failure.startswith('infra'):
             retry = next(index for index, event in enumerate(events) if event['task'] == 'broken' and event['attempt'] == 2 and event['event'] == 'started')
             peer_end = next(index for index, event in enumerate(events) if event['task'] == 'healthy' and event['event'] == 'finished')

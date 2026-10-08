@@ -150,6 +150,51 @@ while projecting their logical member. A local Codex reference
 checkout is absent. No new registry, queue, or synthetic completion state was
 introduced; durable physical summaries remain the source of truth.
 
+## Review recurrence: stale physical-attempt disposition (2026-10-08)
+
+PR #1450 review `5460914923`, inline `4222491000`, identified a history
+ownership gap on exact source `9712327589e7ac51c5b8abb2cf1459e9e374ed8f`.
+The local scheduler's persistent logical job kept the first physical attempt's
+disposition. A second attempt whose printed monitor handle was absent, or whose
+terminal/release artifacts could not be verified, returned only a release
+refusal. Merging that partial result left the first attempt's run, owner,
+terminal status, and release epoch in the second attempt's history.
+
+This is our logical-state bug. The first bad boundary is the partial disposition
+merge immediately before appending physical-attempt history. Retry admission
+already checked the newly returned refusal, so this finding does not prove an
+unsafe third dispatch. It does prove incorrect attribution of release and
+terminal facts. Earlier coverage supplied complete dispositions and missed
+both partial-return siblings.
+
+The existing owning scheduler control now covers both second-attempt failures.
+Its unchanged assertions failed twice on the original production source with
+“current attempt inherited prior run_id” (1.49 seconds), then passed twice with
+the repair (1.71 seconds). The entire affected retry and original-clock family
+passed twelve controls in 5.60 seconds. These execute the actual scheduler with
+owned local child processes and artifacts; they make no provider/model calls.
+They preserve the first attempt's immutable history, refusal of genuine FAIL
+and retained resources, healthy-peer continuation, and the original time bound.
+The ordinary `benchmark-live-results` deploy gate already discovers this file.
+
+Before applying the new disposition, the scheduler removes the nine prior
+physical-attempt fields. The partial refusal therefore leaves unknown facts
+unknown; a complete verified result supplies only the current physical owner.
+This deletes stale state rather than adding a registry, fallback, or timer.
+The work is constant per completed physical attempt. Source-level controls do
+not establish deployed fifty-member acceptance or successful live retry.
+
+Archive searches used “retry attempt history stale disposition released_attempt”
+and “previous result fields current physical run ownership identity”; the
+campaign membership search selected this existing case. Local golden references
+support complete ownership boundaries: Hermes creates a fresh execution identity
+and finalizes only that execution in `hermes-agent/cron/executions.py:213` and
+`:312`; Codex rebuilds the complete request bundle after refresh in
+`codex/codex-rs/core/src/client.rs:1090`; Claude replaces the per-fetch result in
+`claude-code-src/src/services/teamMemorySync/index.ts:394`. The local OpenClaw
+retry helper preserves structured terminal failures, but supplies no exact fleet
+history analogue. Independent source review is required before integration.
+
 ## Human feedback
 
 The user required every CLI batch to remain together in the frontend viewer,
