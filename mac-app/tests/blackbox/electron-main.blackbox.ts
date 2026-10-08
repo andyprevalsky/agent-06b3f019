@@ -120,7 +120,7 @@ async function ipcHandleChannels(): Promise<string[]> {
 
 /** Pull one registered quick-query ipcMain handler. */
 async function quickQueryHandler(
-  channel: 'quick-query:submit' | 'quick-query:take'
+  channel: 'quick-query:submit' | 'quick-query:take' | 'quick-query:claim'
 ): Promise<(event: unknown, payload?: unknown) => unknown> {
   const electron = await import('electron');
   const handler = vi
@@ -364,6 +364,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
     for (const ch of [
       'quick-query:submit',
       'quick-query:take',
+      'quick-query:claim',
       'quick-query:hide',
       'quick-query:resize',
       'quick-query:file-drag',
@@ -646,10 +647,16 @@ describe('blackbox: electron-main (main-wiring)', () => {
     expect(reopenedMain.focus).toHaveBeenCalled();
 
     const take = await quickQueryHandler('quick-query:take');
+    const claim = await quickQueryHandler('quick-query:claim');
     expect(take({ sender: originalMain.webContents })).toEqual([]);
-    expect(take({ sender: reopenedMain.webContents })).toEqual([
+    const held = take({ sender: reopenedMain.webContents }) as Array<{
+      id: string;
+      payload: unknown;
+    }>;
+    expect(held.map((entry) => entry.payload)).toEqual([
       { query: 'book a table for two', submittedAt: 7 },
     ]);
+    expect(claim({ sender: reopenedMain.webContents }, held[0]?.id)).toEqual({ claimed: true });
     expect(take({ sender: reopenedMain.webContents })).toEqual([]);
   });
 
@@ -673,7 +680,8 @@ describe('blackbox: electron-main (main-wiring)', () => {
     expect(main.restore).toHaveBeenCalled();
     expect(main.webContents.send.mock.calls).toEqual([['quick-query:pending']]);
     const take = await quickQueryHandler('quick-query:take');
-    expect(take({ sender: main.webContents })).toEqual([
+    const held = take({ sender: main.webContents }) as Array<{ payload: unknown }>;
+    expect(held.map((entry) => entry.payload)).toEqual([
       { query: 'find my flight', submittedAt: 8 },
     ]);
   });

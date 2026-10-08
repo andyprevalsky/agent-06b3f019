@@ -2,7 +2,8 @@ import { app, BrowserWindow, globalShortcut, ipcMain, type WebContents } from 'e
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
-import type { QuickQueryPayload } from '../../shared/types/ipc';
+import type { QuickQueryHeldSubmit, QuickQueryPayload } from '../../shared/types/ipc';
+import { HeldQuickQuerySubmits } from './quickQueryHeldSubmits';
 import { normalizeQuickQueryPayload } from './quickQueryPayload';
 import { scheduleQuickQueryFocusAttempts } from './quickQueryFocus';
 import {
@@ -24,12 +25,6 @@ import {
  */
 export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 5_000;
 
-/**
- * Submits wait in the main process until the main window's renderer takes
- * them. Only a main window that never starts listening can reach this bound.
- */
-export const QUICK_QUERY_MAX_PENDING_SUBMITS = 20;
-
 interface QuickQueryControllerOptions {
   getMainWindow: () => BrowserWindow | null;
   /** Creates the main window when it was closed, then restores and focuses it. */
@@ -46,7 +41,7 @@ export class QuickQueryController {
   private shownAt = 0;
   private focusTimeouts: NodeJS.Timeout[] = [];
   private shortcutsEnabled = false;
-  private pendingSubmits: QuickQueryPayload[] = [];
+  private readonly heldSubmits = new HeldQuickQuerySubmits();
 
   constructor(private readonly options: QuickQueryControllerOptions) {}
 
@@ -107,7 +102,11 @@ export class QuickQueryController {
       return { success: true };
     });
 
-    ipcMain.handle('quick-query:take', (event) => this.takePendingSubmits(event.sender));
+    ipcMain.handle('quick-query:take', (event) => this.listPendingSubmits(event.sender));
+
+    ipcMain.handle('quick-query:claim', (event, id: unknown) => {
+      return { claimed: this.claimPendingSubmit(event.sender, id) };
+    });
 
     ipcMain.handle('quick-query:hide', () => {
       this.hideWindow({ focusMain: true });
@@ -177,15 +176,13 @@ export class QuickQueryController {
   /**
    * Rose keeps running on macOS after its main window is closed, so the
    * launcher can submit with no main window, or with one whose renderer is not
-   * listening yet. The submit waits here until that renderer takes it: it asks
-   * once when it starts listening and again each time it is told one is waiting.
+   * listening yet. The submit waits here until that window's consumer claims
+   * it: the renderer lists what is held when it starts listening and each time
+   * it is told one is waiting, and claims a submit only when it can act on it.
+   * A renderer that reloads or closes before claiming therefore loses nothing.
    */
   private holdForMainWindow(payload: QuickQueryPayload): void {
-    this.pendingSubmits.push(payload);
-    if (this.pendingSubmits.length > QUICK_QUERY_MAX_PENDING_SUBMITS) {
-      this.pendingSubmits.shift();
-      console.error('[QuickQuery] Oldest held submit dropped - main window never took it');
-    }
+    this.heldSubmits.add(payload);
     // The submit is already held. Failing the IPC here would re-enable the
     // launcher input, and a retry would queue the same query a second time.
     try {
@@ -196,7 +193,7 @@ export class QuickQueryController {
       console.log('[QuickQuery] Submit held for main window', {
         queryLength: payload.query.length,
         attachments: payload.attachments?.length ?? 0,
-        pending: this.pendingSubmits.length,
+        pending: this.heldSubmits.size,
         mainWindowOpen,
       });
       if (mainWindowOpen) {
@@ -207,17 +204,20 @@ export class QuickQueryController {
     }
   }
 
-  private takePendingSubmits(sender: WebContents): QuickQueryPayload[] {
+  private isMainWindowSender(sender: WebContents): boolean {
     const mainWindow = this.options.getMainWindow();
-    if (mainWindow === null || mainWindow.isDestroyed() || mainWindow.webContents !== sender) {
-      return [];
-    }
+    return mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.webContents === sender;
+  }
 
-    const taken = this.pendingSubmits.splice(0);
-    if (taken.length > 0) {
-      console.log('[QuickQuery] Submit delivered to main window', { count: taken.length });
-    }
-    return taken;
+  private listPendingSubmits(sender: WebContents): QuickQueryHeldSubmit[] {
+    return this.isMainWindowSender(sender) ? this.heldSubmits.list() : [];
+  }
+
+  private claimPendingSubmit(sender: WebContents, id: unknown): boolean {
+    if (!this.isMainWindowSender(sender) || !this.heldSubmits.claim(id)) return false;
+
+    console.log('[QuickQuery] Submit claimed by main window', { pending: this.heldSubmits.size });
+    return true;
   }
 
   private configureWindow(quickWindow: BrowserWindow): void {

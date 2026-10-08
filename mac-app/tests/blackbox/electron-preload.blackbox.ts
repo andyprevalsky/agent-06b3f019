@@ -409,10 +409,16 @@ describe('subscription channel routing', () => {
   });
 
   describe('onQuickQuerySubmit', () => {
-    type Subscribe = (cb: (payload: unknown) => void) => () => void;
+    type Claim = () => Promise<boolean>;
+    type Subscribe = (cb: (payload: unknown, claim: Claim) => void) => () => void;
     const flush = async (): Promise<void> => {
       await Promise.resolve();
       await Promise.resolve();
+    };
+    const pendingNudge = (): (() => void) => {
+      const call = rendererOn.mock.calls.find(([channel]) => channel === 'quick-query:pending');
+      expect(call).toBeDefined();
+      return call?.[1] as () => void;
     };
 
     beforeEach(() => {
@@ -421,50 +427,100 @@ describe('subscription channel routing', () => {
       rendererRemoveListener.mockClear();
     });
 
+    // Ids are unique per case: the preload forwards each held submit once per
+    // renderer, whichever subscription is listening.
+    //
     // The main process holds launcher submits because this window may have
     // been (re)opened to receive one, before anything here was listening.
     it('takes the submits the main process is holding as soon as it subscribes', async () => {
       rendererInvoke.mockResolvedValueOnce([
-        { query: 'first cold query', submittedAt: 1 },
-        { query: 'second cold query', submittedAt: 2 },
+        { id: 'a', payload: { query: 'first cold query', submittedAt: 1 } },
+        { id: 'b', payload: { query: 'second cold query', submittedAt: 2 } },
       ]);
       const callback = vi.fn();
       (api.onQuickQuerySubmit as Subscribe)(callback);
 
       expect(rendererInvoke.mock.calls).toEqual([['quick-query:take']]);
       await flush();
-      expect(callback.mock.calls).toEqual([
-        [{ query: 'first cold query', submittedAt: 1 }],
-        [{ query: 'second cold query', submittedAt: 2 }],
+      expect(callback.mock.calls.map(([payload]) => payload as unknown)).toEqual([
+        { query: 'first cold query', submittedAt: 1 },
+        { query: 'second cold query', submittedAt: 2 },
       ]);
     });
 
-    it('takes again each time the main process says a submit is waiting', async () => {
-      rendererInvoke.mockResolvedValueOnce([]);
+    // Listing leaves the submit with the main process; only the claim, made
+    // when the consumer is about to act, removes it there.
+    it('hands each submit a claim that asks the main process for that exact submit', async () => {
+      rendererInvoke.mockResolvedValueOnce([
+        { id: 'held-1', payload: { query: 'claim me', submittedAt: 5 } },
+      ]);
       const callback = vi.fn();
       (api.onQuickQuerySubmit as Subscribe)(callback);
       await flush();
-      expect(callback).not.toHaveBeenCalled();
+      expect(rendererInvoke).toHaveBeenCalledTimes(1);
 
-      const pendingCall = rendererOn.mock.calls.find(
-        ([channel]) => channel === 'quick-query:pending'
-      );
-      expect(pendingCall).toBeDefined();
-      rendererInvoke.mockResolvedValueOnce([{ query: 'live query', submittedAt: 3 }]);
-      (pendingCall?.[1] as () => void)();
+      const claim = callback.mock.calls[0]?.[1] as Claim;
+      rendererInvoke.mockResolvedValueOnce({ claimed: true });
+      await expect(claim()).resolves.toBe(true);
+      expect(rendererInvoke.mock.calls[1]).toEqual(['quick-query:claim', 'held-1']);
 
+      rendererInvoke.mockResolvedValueOnce({ claimed: false });
+      await expect(claim()).resolves.toBe(false);
+    });
+
+    it('takes again on each nudge without forwarding a still-held submit twice', async () => {
+      rendererInvoke.mockResolvedValueOnce([
+        { id: 'nudge-held', payload: { query: 'held, not claimed yet', submittedAt: 1 } },
+      ]);
+      const callback = vi.fn();
+      (api.onQuickQuerySubmit as Subscribe)(callback);
+      await flush();
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      rendererInvoke.mockResolvedValueOnce([
+        { id: 'nudge-held', payload: { query: 'held, not claimed yet', submittedAt: 1 } },
+        { id: 'nudge-live', payload: { query: 'live query', submittedAt: 3 } },
+      ]);
+      pendingNudge()();
       expect(rendererInvoke).toHaveBeenCalledTimes(2);
       await flush();
-      expect(callback.mock.calls).toEqual([[{ query: 'live query', submittedAt: 3 }]]);
+      expect(callback.mock.calls.map(([payload]) => payload as unknown)).toEqual([
+        { query: 'held, not claimed yet', submittedAt: 1 },
+        { query: 'live query', submittedAt: 3 },
+      ]);
+    });
+
+    it('offers a submit again after its claim could not reach the main process', async () => {
+      rendererInvoke.mockResolvedValueOnce([
+        { id: 'retry-held', payload: { query: 'claim will fail', submittedAt: 1 } },
+      ]);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const callback = vi.fn();
+      (api.onQuickQuerySubmit as Subscribe)(callback);
+      await flush();
+
+      const failure = new Error('ipc closed');
+      rendererInvoke.mockRejectedValueOnce(failure);
+      await expect((callback.mock.calls[0]?.[1] as Claim)()).resolves.toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[QuickQuery] Failed to claim a pending submit',
+        failure
+      );
+      errorSpy.mockRestore();
+
+      rendererInvoke.mockResolvedValueOnce([
+        { id: 'retry-held', payload: { query: 'claim will fail', submittedAt: 1 } },
+      ]);
+      pendingNudge()();
+      await flush();
+      expect(callback).toHaveBeenCalledTimes(2);
     });
 
     it('stops listening for waiting submits after unsubscribe', async () => {
       rendererInvoke.mockResolvedValueOnce([]);
       const unsubscribe = (api.onQuickQuerySubmit as Subscribe)(vi.fn());
       await flush();
-      const pendingHandler = rendererOn.mock.calls.find(
-        ([channel]) => channel === 'quick-query:pending'
-      )?.[1];
+      const pendingHandler = pendingNudge();
 
       unsubscribe();
       expect(rendererRemoveListener.mock.calls).toEqual([['quick-query:pending', pendingHandler]]);

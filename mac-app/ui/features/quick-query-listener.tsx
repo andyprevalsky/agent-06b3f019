@@ -3,12 +3,13 @@
  * front-end quick-query consumer (Terminal's useQuickQuery).
  *
  * STATE MACHINE:
- *   [mounted] --subscribe (takes submits held in the main process)--> [listening]
- *     [listening] --submit--> show Terminal route --> forward --> [listening]
+ *   [mounted] --subscribe (lists submits held in the main process)--> [listening]
+ *     [listening] --submit + claim--> show Terminal route --> forward --> [listening]
  *     [listening] --unmount--> [unsubscribed]
  *
- * forward = dispatchQuickQueryEvent, which holds the submit until Terminal is
- * ready (the main window may have been re-opened for this submit).
+ * forward = dispatchQuickQueryEvent(payload, claim). It waits until Terminal
+ * is ready, then claims the submit from the main process and delivers it. An
+ * unclaimed submit stays in the main process, so a reload here loses nothing.
  */
 import { useEffect } from 'react';
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
@@ -28,9 +29,9 @@ function showTerminalRoute(): void {
 
 export default function QuickQueryListener() {
   useEffect(() => {
-    const handler = (payload: QuickQueryPayload) => {
+    const handler = (payload: QuickQueryPayload, claim: () => Promise<boolean>) => {
       showTerminalRoute();
-      dispatchQuickQueryEvent(payload);
+      dispatchQuickQueryEvent(payload, claim);
     };
 
     return getElectronApi()?.onQuickQuerySubmit(handler);

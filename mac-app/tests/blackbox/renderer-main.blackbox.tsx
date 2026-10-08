@@ -617,6 +617,35 @@ describe('renderer-main blackbox', () => {
       window.history.replaceState({}, '', startUrl);
     });
 
+    // The main process keeps a submit until the consumer claims it, so the
+    // bridge must pass the claim along and act only once it is granted.
+    it('passes the claim through: a granted submit is delivered, a refused one is not', async () => {
+      let ipcSubmitCb: ((p: QuickQueryPayload, claim: () => Promise<boolean>) => void) | null =
+        null;
+      installIpcMock({
+        onQuickQuerySubmit: (cb) => {
+          ipcSubmitCb = cb;
+          return () => {};
+        },
+      } as Partial<IPC>);
+      const received: QuickQueryPayload[] = [];
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
+      renderWithProviders(<QuickQueryListener />);
+
+      const granted = vi.fn(() => Promise.resolve(true));
+      const refused = vi.fn(() => Promise.resolve(false));
+      await act(async () => {
+        ipcSubmitCb?.({ query: 'granted', submittedAt: 201 }, granted);
+        ipcSubmitCb?.({ query: 'already taken elsewhere', submittedAt: 202 }, refused);
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(received).toEqual([{ query: 'granted', submittedAt: 201 }]));
+      expect(granted).toHaveBeenCalledTimes(1);
+      expect(refused).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
     it('releases its preload subscription on unmount', () => {
       const unsubscribeIpc = vi.fn();
       installIpcMock({

@@ -12,11 +12,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { makeBrowserWindowStub, stubElectron } from './electron-stubs';
-import {
-  QUICK_QUERY_BLUR_HIDE_DELAY_MS,
-  QUICK_QUERY_MAX_PENDING_SUBMITS,
-  QuickQueryController,
-} from '../../main/app/quickQuery';
+import { QUICK_QUERY_BLUR_HIDE_DELAY_MS, QuickQueryController } from '../../main/app/quickQuery';
+import { QUICK_QUERY_MAX_PENDING_SUBMITS } from '../../main/app/quickQueryHeldSubmits';
 
 stubElectron();
 
@@ -47,6 +44,13 @@ type MainStub = WinStub & {
   isDestroyed: ReturnType<typeof vi.fn>;
   webContents: { send: ReturnType<typeof vi.fn> };
 };
+
+type HeldSubmit = { id: string; payload: { query: string; submittedAt: number } };
+
+/** The submits the main process is still holding for this window, without their ids. */
+function heldPayloads(result: unknown): Array<{ query: string; submittedAt: number }> {
+  return (result as HeldSubmit[]).map((held) => held.payload);
+}
 
 function windowEventHandler(win: WinStub, event: string): (() => void) | undefined {
   const match = win.on.mock.calls.find((call) => call[0] === event);
@@ -270,7 +274,10 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     expect(main.webContents.send.mock.calls).toEqual([['quick-query:pending']]);
 
     const take = await ipcHandler('quick-query:take');
-    expect(take?.({ sender: main.webContents })).toEqual([{ query: 'ship it', submittedAt: 1 }]);
+    const claim = await ipcHandler('quick-query:claim');
+    const held = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(held)).toEqual([{ query: 'ship it', submittedAt: 1 }]);
+    expect(claim?.({ sender: main.webContents }, held[0]?.id)).toEqual({ claimed: true });
     expect(take?.({ sender: main.webContents })).toEqual([]);
 
     // Re-open after the 2s re-show guard so hide IPC can run.
@@ -314,10 +321,50 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     // listening; delivery never depends on how far its page has loaded.
     const reopened = main as unknown as MainStub;
     const take = await ipcHandler('quick-query:take');
-    expect(take?.({ sender: reopened.webContents })).toEqual([
+    expect(heldPayloads(take?.({ sender: reopened.webContents }))).toEqual([
       { query: 'ship it', submittedAt: 3 },
     ]);
-    expect(take?.({ sender: reopened.webContents })).toEqual([]);
+  });
+
+  // Listing a submit must not give it up: a renderer that reloads or closes
+  // before its consumer acts would otherwise lose the query for good.
+  it('keeps a listed submit until it is claimed, and offers it to a re-created window', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    let main = makeBrowserWindowStub() as unknown as MainStub;
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => undefined,
+      getOnboardingComplete: () => true,
+    });
+    const launcher = controller.createWindow() as unknown as MainStub;
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    submit?.(null, { query: 'survives a reload', submittedAt: 11 });
+    const take = await ipcHandler('quick-query:take');
+    const claim = await ipcHandler('quick-query:claim');
+
+    const first = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(first)).toEqual([{ query: 'survives a reload', submittedAt: 11 }]);
+    // Listed twice, still held: nothing has claimed it.
+    expect(take?.({ sender: main.webContents })).toEqual(first);
+
+    // The window is replaced before its consumer claims anything.
+    const closed = main;
+    main = makeBrowserWindowStub() as unknown as MainStub;
+    expect(claim?.({ sender: closed.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(claim?.({ sender: launcher.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(take?.({ sender: main.webContents })).toEqual(first);
+
+    expect(claim?.({ sender: main.webContents }, first[0]?.id)).toEqual({ claimed: true });
+    // One claim only: a second consumer cannot launch the same query again.
+    expect(claim?.({ sender: main.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(claim?.({ sender: main.webContents }, 'not-a-held-id')).toEqual({ claimed: false });
+    expect(take?.({ sender: main.webContents })).toEqual([]);
   });
 
   it('keeps a submit held when no main window opened, for the next one to take', async () => {
@@ -348,7 +395,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const later = makeBrowserWindowStub() as unknown as MainStub;
     main = later;
-    expect(take?.({ sender: later.webContents })).toEqual([
+    expect(heldPayloads(take?.({ sender: later.webContents }))).toEqual([
       { query: 'nowhere to go yet', submittedAt: 5 },
     ]);
   });
@@ -385,10 +432,9 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     errorSpy.mockRestore();
 
     const take = await ipcHandler('quick-query:take');
-    expect(take?.({ sender: main.webContents })).toEqual([
+    expect(heldPayloads(take?.({ sender: main.webContents }))).toEqual([
       { query: 'held despite the failure', submittedAt: 9 },
     ]);
-    expect(take?.({ sender: main.webContents })).toEqual([]);
   });
 
   it('hands held submits over in order, exactly once, and only to the main window', async () => {
@@ -415,11 +461,20 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     ]);
 
     const take = await ipcHandler('quick-query:take');
+    const claim = await ipcHandler('quick-query:claim');
     expect(take?.({ sender: launcher.webContents })).toEqual([]);
-    expect(take?.({ sender: main.webContents })).toEqual([
+    const held = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(held)).toEqual([
       { query: 'first', submittedAt: 1 },
       { query: 'second', submittedAt: 2 },
     ]);
+    expect(new Set(held.map((entry) => entry.id)).size).toBe(2);
+
+    expect(claim?.({ sender: main.webContents }, held[0]?.id)).toEqual({ claimed: true });
+    expect(heldPayloads(take?.({ sender: main.webContents }))).toEqual([
+      { query: 'second', submittedAt: 2 },
+    ]);
+    expect(claim?.({ sender: main.webContents }, held[1]?.id)).toEqual({ claimed: true });
     expect(take?.({ sender: main.webContents })).toEqual([]);
   });
 
@@ -450,7 +505,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     errorSpy.mockRestore();
 
     const take = await ipcHandler('quick-query:take');
-    const taken = take?.({ sender: main.webContents }) as Array<{ query: string }>;
+    const taken = heldPayloads(take?.({ sender: main.webContents }));
     expect(taken).toHaveLength(QUICK_QUERY_MAX_PENDING_SUBMITS);
     expect(taken[0]?.query).toBe('query 1');
     expect(taken[taken.length - 1]?.query).toBe(`query ${QUICK_QUERY_MAX_PENDING_SUBMITS}`);

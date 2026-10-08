@@ -15,8 +15,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useQuickQuery, type QuickQueryDeps } from '@/features/terminal/hooks/useQuickQuery';
 import {
   QUICK_QUERY_LAUNCH_WINDOW_MS,
+  QUICK_QUERY_MAX_HELD,
   dispatchQuickQueryEvent,
   goalFromQuickLauncherPayload,
+  subscribeQuickQuery,
   type QuickLauncherPayload,
 } from '@/lib/quickQuery';
 
@@ -263,6 +265,60 @@ describe('quick-query cold start', () => {
     remount.unmount();
   });
 
+  // Two submits held during one cold start replay together. Started at once,
+  // the first to finish cleared the input and the sending state under the other.
+  it('launches held submits one at a time, in submit order', async () => {
+    let finishFirst: (() => void) | null = null;
+    createAgent.mockImplementationOnce(
+      () =>
+        new Promise<{ agent_id: string }>((resolve) => {
+          finishFirst = () => resolve({ agent_id: 'agent-first' });
+        }),
+    );
+    act(() => {
+      dispatchQuickQueryEvent({ query: 'first held', submittedAt: Date.now() });
+      dispatchQuickQueryEvent({ query: 'second held', submittedAt: Date.now() });
+    });
+
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await waitFor(() => expect(createAgent).toHaveBeenCalledTimes(1));
+    expect(createAgent.mock.calls[0]?.[0]).toMatchObject({ goal: 'first held' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(createAgent).toHaveBeenCalledTimes(1);
+    expect(deps.setIsSendingMessage).not.toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      finishFirst?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(createAgent).toHaveBeenCalledTimes(2));
+    expect(createAgent.mock.calls[1]?.[0]).toMatchObject({ goal: 'second held' });
+    unmount();
+  });
+
+  it('keeps every expired submit in the input, not only the last one', async () => {
+    const stale = Date.now() - QUICK_QUERY_LAUNCH_WINDOW_MS - 1;
+    act(() => {
+      dispatchQuickQueryEvent({ query: 'first expired', submittedAt: stale });
+      dispatchQuickQueryEvent({ query: 'second expired', submittedAt: stale });
+    });
+
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.setMessageInput).mock.lastCall?.[0]).toBe(
+      'first expired\n\nsecond expired',
+    );
+    unmount();
+  });
+
   // Launching an agent costs money. A submit that sat held (signed out, a
   // window that never loaded) must not start one long after it was asked for.
   it('shows a submit that waited past the launch window instead of launching it', async () => {
@@ -352,5 +408,68 @@ describe('quick-query cold start', () => {
       description: 'Rose took too long to open. Attach your files again to send them.',
     });
     unmount();
+  });
+});
+
+describe('quick-query hold queue', () => {
+  it('bounds held submits and reports the one it lets go', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    for (let n = 0; n <= QUICK_QUERY_MAX_HELD; n += 1) {
+      dispatchQuickQueryEvent({ query: `held ${n}`, submittedAt: n });
+    }
+
+    const received: string[] = [];
+    const unsubscribe = subscribeQuickQuery((payload) => received.push(payload.query));
+    expect(received).toHaveLength(QUICK_QUERY_MAX_HELD);
+    expect(received[0]).toBe('held 1');
+    expect(received[received.length - 1]).toBe(`held ${QUICK_QUERY_MAX_HELD}`);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    unsubscribe();
+  });
+
+  // The desktop main process keeps a submit until it is claimed. Claiming while
+  // nothing can act on it would strand the query in a renderer that may reload.
+  it('claims a held submit only once a consumer is ready, and acts only if the claim is granted', async () => {
+    const granted = vi.fn(() => Promise.resolve(true));
+    const refused = vi.fn(() => Promise.resolve(false));
+    const failing = vi.fn(() => Promise.reject(new Error('ipc closed')));
+    dispatchQuickQueryEvent({ query: 'granted', submittedAt: 1 }, granted);
+    dispatchQuickQueryEvent({ query: 'refused', submittedAt: 2 }, refused);
+    dispatchQuickQueryEvent({ query: 'failing', submittedAt: 3 }, failing);
+    await Promise.resolve();
+    expect(granted).not.toHaveBeenCalled();
+
+    const received: string[] = [];
+    const unsubscribe = subscribeQuickQuery((payload) => received.push(payload.query));
+    await waitFor(() => expect(failing).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    expect(received).toEqual(['granted']);
+    expect(granted).toHaveBeenCalledTimes(1);
+    expect(refused).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('keeps a submit that was claimed just as its consumer went away', async () => {
+    let grant: ((claimed: boolean) => void) | null = null;
+    const claim = () =>
+      new Promise<boolean>((resolve) => {
+        grant = resolve;
+      });
+
+    const early: string[] = [];
+    const unsubscribeEarly = subscribeQuickQuery((payload) => early.push(payload.query));
+    dispatchQuickQueryEvent({ query: 'claimed in flight', submittedAt: 1 }, claim);
+    await Promise.resolve();
+    unsubscribeEarly();
+    grant?.(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(early).toEqual([]);
+
+    const late: string[] = [];
+    const unsubscribeLate = subscribeQuickQuery((payload) => late.push(payload.query));
+    expect(late).toEqual(['claimed in flight']);
+    unsubscribeLate();
   });
 });

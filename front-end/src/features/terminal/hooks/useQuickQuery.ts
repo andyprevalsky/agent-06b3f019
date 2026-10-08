@@ -9,7 +9,8 @@
  *   [auth_resolving] --authReady--> [idle] (held submits replay as quick-query)
  *   [idle] --quick-query(text|files)--> [freshness_gate]
  *     [freshness_gate] --held past launch window--> [prefill_input + toast] --> [idle]
- *     [freshness_gate] --fresh--> [auth_gate]
+ *     [freshness_gate] --fresh--> [queued] (one launch at a time, in submit order)
+ *     [queued] --previous launch settled--> [auth_gate]
  *     [auth_gate] --!canSubmit--> [login_modal] --> stop
  *     [auth_gate] --ok--> [uploading_attachments?] --> [creating_agent]
  *       [creating_agent] --ok--> [agent_selected]
@@ -50,10 +51,22 @@ export interface QuickQueryDeps {
   toast: ReturnType<typeof useToast>['toast'];
 }
 
+/** Expired submits that surface this close together came from one cold start. */
+const EXPIRED_DRAFT_BATCH_MS = 5_000;
+
+interface ExpiredDrafts {
+  startedAt: number;
+  queries: string[];
+}
+
 export function useQuickQuery(deps: QuickQueryDeps) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
   const { authReady } = deps;
+  // One launch at a time: a second submit must not reset the input or the
+  // sending state while the first is still uploading or creating its agent.
+  const launchQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const expiredDraftsRef = useRef<ExpiredDrafts>({ startedAt: 0, queries: [] });
 
   useEffect(() => {
     // A launcher submit can open the main window itself. Until auth resolves,
@@ -64,10 +77,14 @@ export function useQuickQuery(deps: QuickQueryDeps) {
       const hasAttachments = (detail.attachments?.length ?? 0) > 0;
       if (!goal && !hasAttachments) return;
       if (Date.now() - detail.submittedAt > QUICK_QUERY_LAUNCH_WINDOW_MS) {
-        showExpiredQuickQuery(depsRef.current, detail);
+        showExpiredQuickQuery(depsRef.current, detail, expiredDraftsRef.current);
         return;
       }
-      void handleQuickQuery(depsRef.current, detail, goal);
+      launchQueueRef.current = launchQueueRef.current
+        .then(() => handleQuickQuery(depsRef.current, detail, goal))
+        .catch((error: unknown) => {
+          console.error('[QuickQuery] Launch failed', error);
+        });
     });
   }, [authReady]);
 
@@ -81,7 +98,11 @@ export function useQuickQuery(deps: QuickQueryDeps) {
 }
 
 /** Too old to launch unasked: keep the user's text and let them send it. */
-function showExpiredQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload) {
+function showExpiredQuickQuery(
+  d: QuickQueryDeps,
+  payload: QuickLauncherPayload,
+  drafts: ExpiredDrafts,
+) {
   const query = payload.query.trim();
   const hasAttachments = (payload.attachments?.length ?? 0) > 0;
   let description = 'Rose took too long to open. Attach your files again to send them.';
@@ -91,7 +112,16 @@ function showExpiredQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload)
       : 'Rose took too long to open. Your message is in the input.';
   }
   d.setCurrentView('agents');
-  if (query) d.setMessageInput(query);
+  if (query) {
+    // Several submits can expire in one cold start; keep each one's text.
+    const now = Date.now();
+    if (now - drafts.startedAt > EXPIRED_DRAFT_BATCH_MS) {
+      drafts.startedAt = now;
+      drafts.queries = [];
+    }
+    drafts.queries.push(query);
+    d.setMessageInput(drafts.queries.join('\n\n'));
+  }
   d.toast({ title: 'Quick launch was not sent', description });
 }
 

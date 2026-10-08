@@ -24,6 +24,7 @@ tags:
   - did-finish-load
 sources:
   - commit 996266553
+  - PR #1447
 repro: mac-app/tests/blackbox/electron-main.blackbox.ts
 status: fixed
 ---
@@ -83,32 +84,32 @@ Archive searches: `quick launcher submit dropped main window closed mac-app`; `q
 
 Golden reference: `hermes-agent/apps/desktop/electron/main.ts:19230-19234` holds a deep link in the main process (`_pendingDeepLink`) when the renderer is not ready or the main window is missing or destroyed; `:19249-19265` flushes it once when the renderer calls `hermes:deep-link-ready` after mounting its listener; `:15300-15306` resets readiness when the main window closes. The fix converges on that: the main process owns the queue and the renderer says when it can receive, here by taking. Hermes leaves the link pending when no window exists; Rose re-opens the window, because the user asked for the launcher to open the app. `claude-code-src/` and `openclaw/` have no Electron delivery code (`did-finish-load`, `webContents.send`, `ipcRenderer.on`: no matches). `codex/` was not on this host and was not cloned: the disk was at 99%. The Hermes and OpenClaw clones read were in `~/Developer/rose-daily50-final-control12-20261007/`.
 
-Adversarial review (Step 7) changed the fix: it found that held submits had no age bound, that Terminal is unmounted on the legal routes, that delivery was not logged, and that readiness was inferred. All four are addressed below. It also found three weak assertions, since corrected. A second independent review of the final diff found no blocking defect and three small issues (expired-toast wording with files, an unguarded throw path, a non-finite timestamp), also addressed below.
+Adversarial review (Step 7) changed the fix: it found that held submits had no age bound, that Terminal is unmounted on the legal routes, that delivery was not logged, and that readiness was inferred. All four are addressed below. It also found three weak assertions, since corrected. A second independent review of the final diff found no blocking defect and three small issues (expired-toast wording with files, an unguarded throw path, a non-finite timestamp), also addressed below. CodeRabbit's review of PR #1447 then asked for serialized launches, every expired draft kept, a bound on the renderer queue, and a submit retained until acknowledged; the take-and-claim protocol below is the result.
 
 ## Solution
 
-The main process holds each submit until the main window's renderer takes it:
+The main process holds each submit until the main window's consumer claims it:
 
-- `main/app/quickQuery.ts`: the submit handler queues the query, calls the new `openMainWindow` option (`handleActivate` in `main/index.ts`: re-create if closed, restore if minimized, show, focus) and sends `quick-query:pending`. A new `quick-query:take` handler returns and clears the queue, for the main window's renderer only. Both steps are logged. At most 20 submits are held.
-- `service-events.ts`: `onQuickQuerySubmit` takes on subscribe and again on every `quick-query:pending`, and returns a disposer. Delivery no longer depends on load events.
-- `ui/features/quick-query-listener.tsx`: returns to the Terminal route before forwarding.
-- `front-end/src/lib/quickQuery.ts`: `dispatchQuickQueryEvent` holds payloads until a consumer calls `subscribeQuickQuery`. `useQuickQuery` subscribes only once `authReady` (`!auth.loading`).
-- A submit held longer than 60 s (`QUICK_QUERY_LAUNCH_WINDOW_MS`) is not launched: its text is put in the input with a toast that says when attached files must be added again. An agent costs money, and a late one is not what the user asked for. `normalizeQuickQueryPayload` replaces a non-finite `submittedAt`, which would never expire.
-- The submit handler accepts and keeps the query even if opening the window throws; a rejected IPC would re-enable the launcher and a retry would queue the query twice.
+- `main/app/quickQuery.ts` + `quickQueryHeldSubmits.ts`: the submit handler queues the query with an id, calls the new `openMainWindow` option (`handleActivate` in `main/index.ts`: re-create if closed, restore if minimized, show, focus) and sends `quick-query:pending`. `quick-query:take` lists what is held without removing it; `quick-query:claim` removes one submit, once, for the main window's renderer only. Each step is logged. At most 20 submits are held. The handler accepts and keeps the query even if opening the window throws; a rejected IPC would re-enable the launcher and a retry would queue the query twice.
+- `service-events.ts`: `onQuickQuerySubmit` lists on subscribe and again on every `quick-query:pending`, forwards each held submit once with its claim, and returns a disposer. Delivery no longer depends on load events.
+- `ui/features/quick-query-listener.tsx`: returns to the Terminal route, then forwards the submit and its claim.
+- `front-end/src/lib/quickQuery.ts`: `dispatchQuickQueryEvent` holds submits (at most 20) until a consumer calls `subscribeQuickQuery`, and claims a submit only then, in order. `useQuickQuery` subscribes only once `authReady` (`!auth.loading`) and launches one submit at a time.
+- A submit held longer than 60 s (`QUICK_QUERY_LAUNCH_WINDOW_MS`) is not launched: its text is put in the input with a toast that says when attached files must be added again; several that expire together are all kept. An agent costs money, and a late one is not what the user asked for. `normalizeQuickQueryPayload` replaces a non-finite `submittedAt`, which would never expire.
 - `main/index.ts`: `openAppFromDeepLink` now checks `isLoadingMainFrame()`, which fixes the embedded-frame case for deep links.
+
+The claim is made before the consumer acts, so delivery is at most once: a renderer that reloads, crashes or closes before claiming leaves the submit in the main process for the next window. The loss window is the claim's own round trip. Acknowledging after the consumer acts would close that window but could launch the same paid query twice.
 
 Post-fix, the same tests pass unchanged, and the full mac-app and front-end suites pass.
 
 Not done:
 
 - Not exercised in the packaged app. Proof is the wiring-level blackbox suites plus the two runtime probes.
-- `openAppFromDeepLink` still waits on `did-finish-load`, so the sub-millisecond gap from the second probe remains on that path. Moving deep links to the same take model would close it.
+- `openAppFromDeepLink` still waits on `did-finish-load`, so the sub-millisecond gap from the second probe remains on that path. Moving deep links to the same take-and-claim model would close it.
 - Once the auth check has resolved as signed out, a held submit opens the login modal and keeps only its text, as a live submit always has.
-- The renderer takes a submit as soon as its bridge mounts, before Terminal is ready. Until Terminal subscribes the query is held only in that renderer, so a reload or crash in that interval loses it. An acknowledgement from the consumer back to the main process would close this.
 
 Also repaired because the mac-app structural suite was already red on main (5 violations from the connectivity chip): the chip portal moved to `ui/shared/bottom-left-chips`, and `connectivity-indicator` gained its `types.ts` and `api.ts` layers.
 
-10k-agent: nothing here scales with agent count. One submit is one queue entry, two IPC messages and one `createAgent`; both queues are bounded by what one user types.
+10k-agent: nothing here scales with agent count. One submit is one queue entry, three IPC messages and one `createAgent`; both queues are bounded at 20.
 
 ## Human feedback
 
