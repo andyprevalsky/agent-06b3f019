@@ -279,7 +279,7 @@ def _with_run_group(bundle: dict) -> dict:
     existing = bundle.get("group_run_id")
     if existing is not None and existing != group:
         raise ValueError("benchmark Hub group identity changed")
-    return {
+    fields = {
         **bundle,
         "group_run_id": group,
         "group_member_id": member,
@@ -287,6 +287,15 @@ def _with_run_group(bundle: dict) -> dict:
         "group_timestamp": os.environ.get("RUN_BENCH_CAMPAIGN_STARTED_AT", ""),
         "group_total": int(os.environ.get("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "0")),
     }
+    attempt = os.environ.get("RUN_BENCH_CAMPAIGN_ATTEMPT")
+    if attempt is not None:
+        attempt_number = int(attempt)
+        if attempt_number < 1:
+            raise ValueError("benchmark Hub attempt must be positive")
+        if bundle.get("group_attempt") not in (None, attempt_number):
+            raise ValueError("benchmark Hub attempt identity changed")
+        fields["group_attempt"] = attempt_number
+    return fields
 
 
 def _post_run_bundle(
