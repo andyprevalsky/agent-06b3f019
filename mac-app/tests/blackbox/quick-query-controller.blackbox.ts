@@ -353,6 +353,44 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     ]);
   });
 
+  // A rejected submit re-enables the launcher input; a retry would then queue
+  // the same query twice and start two agents.
+  it('accepts and keeps a submit even when opening the main window throws', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as MainStub;
+    const failure = new Error('window could not be created');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => {
+        throw failure;
+      },
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    expect(submit?.(null, { query: 'held despite the failure', submittedAt: 9 })).toEqual({
+      success: true,
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[QuickQuery] Could not open the main window; submit stays held',
+      failure
+    );
+    errorSpy.mockRestore();
+
+    const take = await ipcHandler('quick-query:take');
+    expect(take?.({ sender: main.webContents })).toEqual([
+      { query: 'held despite the failure', submittedAt: 9 },
+    ]);
+    expect(take?.({ sender: main.webContents })).toEqual([]);
+  });
+
   it('hands held submits over in order, exactly once, and only to the main window', async () => {
     const electron = await import('electron');
     vi.mocked(electron.BrowserWindow).mockImplementation(

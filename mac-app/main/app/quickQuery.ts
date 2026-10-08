@@ -186,18 +186,24 @@ export class QuickQueryController {
       this.pendingSubmits.shift();
       console.error('[QuickQuery] Oldest held submit dropped - main window never took it');
     }
-    this.options.openMainWindow();
+    // The submit is already held. Failing the IPC here would re-enable the
+    // launcher input, and a retry would queue the same query a second time.
+    try {
+      this.options.openMainWindow();
 
-    const mainWindow = this.options.getMainWindow();
-    const mainWindowOpen = mainWindow !== null && !mainWindow.isDestroyed();
-    console.log('[QuickQuery] Submit held for main window', {
-      queryLength: payload.query.length,
-      attachments: payload.attachments?.length ?? 0,
-      pending: this.pendingSubmits.length,
-      mainWindowOpen,
-    });
-    if (mainWindowOpen) {
-      mainWindow.webContents.send('quick-query:pending');
+      const mainWindow = this.options.getMainWindow();
+      const mainWindowOpen = mainWindow !== null && !mainWindow.isDestroyed();
+      console.log('[QuickQuery] Submit held for main window', {
+        queryLength: payload.query.length,
+        attachments: payload.attachments?.length ?? 0,
+        pending: this.pendingSubmits.length,
+        mainWindowOpen,
+      });
+      if (mainWindowOpen) {
+        mainWindow.webContents.send('quick-query:pending');
+      }
+    } catch (error) {
+      console.error('[QuickQuery] Could not open the main window; submit stays held', error);
     }
   }
 

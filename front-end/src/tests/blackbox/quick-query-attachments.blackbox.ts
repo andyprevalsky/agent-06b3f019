@@ -303,6 +303,32 @@ describe('quick-query cold start', () => {
     unmount();
   });
 
+  it('says the files were dropped when an expired submit carried text and attachments', async () => {
+    act(() => {
+      dispatchQuickQueryEvent({
+        query: 'summarize this pdf',
+        submittedAt: Date.now() - QUICK_QUERY_LAUNCH_WINDOW_MS - 1,
+        attachments: [attachment('report.pdf', 'pdf bytes', 'application/pdf')],
+      });
+    });
+
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(deps.setMessageInput).toHaveBeenCalledWith('summarize this pdf');
+    expect(deps.toast).toHaveBeenCalledWith({
+      title: 'Quick launch was not sent',
+      description:
+        'Rose took too long to open. Your message is in the input; attach your files again before sending.',
+    });
+    unmount();
+  });
+
   it('asks for files again when an expired submit carried only attachments', async () => {
     act(() => {
       dispatchQuickQueryEvent({

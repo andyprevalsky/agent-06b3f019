@@ -83,14 +83,16 @@ export function useQuickQuery(deps: QuickQueryDeps) {
 /** Too old to launch unasked: keep the user's text and let them send it. */
 function showExpiredQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload) {
   const query = payload.query.trim();
+  const hasAttachments = (payload.attachments?.length ?? 0) > 0;
+  let description = 'Rose took too long to open. Attach your files again to send them.';
+  if (query) {
+    description = hasAttachments
+      ? 'Rose took too long to open. Your message is in the input; attach your files again before sending.'
+      : 'Rose took too long to open. Your message is in the input.';
+  }
   d.setCurrentView('agents');
   if (query) d.setMessageInput(query);
-  d.toast({
-    title: 'Quick launch was not sent',
-    description: query
-      ? 'Rose took too long to open. Your message is in the input.'
-      : 'Rose took too long to open. Attach your files again to send them.',
-  });
+  d.toast({ title: 'Quick launch was not sent', description });
 }
 
 async function handleQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload, goal: string) {
