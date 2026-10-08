@@ -5,7 +5,7 @@
  *  - Plain text rendering
  *  - Escape-sequence normalization (\n, \t, \*, etc.)
  *  - breaks=true + shouldAnimate=false path (ReactMarkdown + remarkBreaks)
- *  - FadeInMarkdown path: static + animated
+ *  - FadeInMarkdown path: animated (static non-breaks now uses ReactMarkdown)
  *  - Headings, lists (ul/ol), code blocks, fenced code, inline code
  *  - Links, bold/italic, blockquotes
  *  - className passthrough
@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
+import { isAllowedImageSrc } from '@/features/terminal-component-group/components/markdown-text/isAllowedImageSrc';
 import { linkifyMarkdownText } from '@/features/terminal-component-group/components/markdown-text/linkifyMarkdownText';
 import { renderWords } from '@/features/terminal-component-group/components/markdown-text/renderWords';
 import { type WordItem } from '@/features/terminal-component-group/components/markdown-text/types';
@@ -110,10 +111,25 @@ describe('MarkdownText', () => {
     });
   });
 
-  it('passes className to FadeInMarkdown when not in breaks mode', async () => {
+  it('passes className on the static ReactMarkdown path', async () => {
     const { container } = render(<MarkdownText text="hello" className="my-prose" />);
     await waitFor(() => {
       expect(container.querySelector('.my-prose')).not.toBeNull();
+    });
+  });
+
+  it('keeps markdown photos on the animated FadeInMarkdown path', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={'![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'}
+        shouldAnimate={true}
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
     });
   });
 
@@ -146,6 +162,38 @@ describe('MarkdownText', () => {
     });
   });
 
+  it('drops javascript and data image sources on the static path', async () => {
+    const { container } = render(
+      <MarkdownText text={'![xss](javascript:alert(1))\n\n![pixel](data:image/gif;base64,AAAA)'} />,
+    );
+    await waitFor(() => expect(container.textContent).not.toBeUndefined());
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('drops javascript image sources on the animated path', async () => {
+    const { container } = render(
+      <MarkdownText text={'![xss](javascript:alert(1))'} shouldAnimate={true} />,
+    );
+    await waitFor(() => expect(container.textContent).not.toBeUndefined());
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('renders markdown photos on the default static path used by FYI attention bubbles', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={
+          'Cyber Racoon interior:\n\n![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'
+        }
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
+    });
+  });
+
   it('uses inline group keys that do not collide with interleaved whitespace children', () => {
     const words: WordItem[] = [
       { word: 'Best', isWord: true, isBold: true },
@@ -162,6 +210,15 @@ describe('MarkdownText', () => {
       .map((key) => key.match(/^group-\d+/)?.[0]);
 
     expect(groupKeys).toEqual(['group-0', 'group-1', 'group-2']);
+  });
+
+  it('does not render disallowed image sources through renderWords', () => {
+    const words: WordItem[] = [
+      { word: 'xss', isWord: true, isImage: true, src: 'javascript:alert(1)', alt: 'xss' },
+    ];
+    const nodes = renderWords(words, false, 0, words[0], vi.fn());
+    const { container } = render(<>{nodes}</>);
+    expect(container.querySelector('img')).toBeNull();
   });
 
   it('renders nested list items with multiple paragraphs correctly', async () => {
@@ -257,6 +314,26 @@ describe('MarkdownText', () => {
     const a = container.querySelector('a')!;
     expect(a.getAttribute('href')).toBe('https://bytescafesa.com/lounge');
     expect(a.textContent).toContain('Bytes');
+  });
+});
+
+describe('isAllowedImageSrc', () => {
+  it('allows http(s), same-origin paths, and blob URLs', () => {
+    expect(isAllowedImageSrc('https://www.cyberracoon.com/gallery/room.jpg')).toBe(true);
+    expect(isAllowedImageSrc('http://example.com/a.png')).toBe(true);
+    expect(isAllowedImageSrc('/api/files/photo.jpg')).toBe(true);
+    expect(isAllowedImageSrc('blob:https://roselabs.ai/11111111-1111-1111-1111-111111111111')).toBe(
+      true,
+    );
+  });
+
+  it('rejects javascript, data, file, and protocol-relative sources', () => {
+    expect(isAllowedImageSrc('javascript:alert(1)')).toBe(false);
+    expect(isAllowedImageSrc('data:image/gif;base64,AAAA')).toBe(false);
+    expect(isAllowedImageSrc('file:///etc/passwd')).toBe(false);
+    expect(isAllowedImageSrc('//evil.example/pixel.gif')).toBe(false);
+    expect(isAllowedImageSrc('')).toBe(false);
+    expect(isAllowedImageSrc(undefined)).toBe(false);
   });
 });
 

@@ -139,6 +139,13 @@ const MARKDOWN_STYLES = `
     -webkit-overflow-scrolling: touch;
     max-width: 100%;
   }
+
+  .prose img {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    margin: 0.5em 0;
+  }
 `;
 
 export function MarkdownStyles(): JSX.Element {

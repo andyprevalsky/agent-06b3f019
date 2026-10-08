@@ -738,6 +738,28 @@ describe('MessageBubble', () => {
     expect(screen.getByText('→ after 1')).toBeInTheDocument();
   });
 
+  it('renders markdown photos inside a finished FYI attention bubble', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'Cyber Racoon interior',
+      metadata: {
+        toolCallId: 'tc-photo-fyi',
+        toolName: 'send_message_to_user',
+        isUserAttentionMessage: true,
+        toolStatus: 'FINISHED',
+        attentionMessage:
+          'Cyber Racoon interior:\n\n![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)',
+        sendMessageToUser: { isQuestion: false, attentionKind: 'info', isWaitingForUser: false },
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => {
+      const img = container.querySelector('img[alt="Cyber Racoon PC Cafe"]');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+    });
+  });
+
   it('renders streaming attention message using StreamingText (isStreaming=true)', async () => {
     const msg = baseMessage({
       role: 'TOOL',

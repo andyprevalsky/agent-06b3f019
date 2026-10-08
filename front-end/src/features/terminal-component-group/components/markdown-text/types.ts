@@ -14,6 +14,9 @@ export interface WordItem {
   isLink?: boolean;
   href?: string;
   isCode?: boolean;
+  isImage?: boolean;
+  src?: string;
+  alt?: string;
   /** Block element this word belongs to. */
   blockType?: BlockType;
   /** Unique index for each block element instance. */
