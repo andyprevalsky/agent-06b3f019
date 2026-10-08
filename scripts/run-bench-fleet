@@ -8609,7 +8609,7 @@ PY
                     "$output/remote-logs" "$proxy_port" \
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
-                    "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}"; then
+                    "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}" --driver-log; then
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
             else
