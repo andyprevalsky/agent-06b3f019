@@ -366,11 +366,14 @@ LIVE_AMPLITUDE_OUTPUT=$(
 LIVE_AMPLITUDE_RC=$?
 set -e
 [ "$LIVE_AMPLITUDE_RC" -ne 0 ] || fail "/deploy live Amplitude probe must reject missing credentials"
-if printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq 'Cannot find module'; then
+# Match from a here-string, not a pipe: under `pipefail`, `printf | grep -q`
+# reports 141 when grep exits on its match while printf is still writing later
+# lines, so a loaded host failed this check with the message present.
+if grep -Fq 'Cannot find module' <<<"$LIVE_AMPLITUDE_OUTPUT"; then
   fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
 fi
-printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
-  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || {
+grep -Fq 'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' \
+  <<<"$LIVE_AMPLITUDE_OUTPUT" || {
   printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | tail -n 40 >&2
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
 }

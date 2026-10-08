@@ -70,6 +70,32 @@ message) and
 `scripts/tests/deploy-live-probes.test.py` (`credential-health` argv is
 workspace tsx, not npx).
 
+### 2026-10-08 relative: same FAIL line, message present, check itself failed
+
+During the quick-launcher deploy (`20261008-001746-55996`) the same line failed
+once, with eight structural suites and two coverage lanes running (load average
+40–50). This time the retained output held the fail-closed message as its first
+line, so the probe was correct and the assertion was wrong. The suite passed
+when re-run alone with the same PATH and Node.
+
+The assertion was `printf '%s\n' "$OUTPUT" | grep -Fq '<message>'` under
+`set -o pipefail`. Two facts, each reproduced locally:
+
+- Bash line-buffers builtin output. Redirecting the same 11-line `printf` to
+  `/dev/udp/127.0.0.1/<port>` produced 11 datagrams, one `write()` per line, on
+  both `/bin/bash` 3.2 and Homebrew bash 5.3.
+- `{ printf 'match line\n'; sleep 0.2; printf 'more\n'; } | grep -Fq match`
+  under `pipefail` exits 141: grep matched and exited, the writer took SIGPIPE.
+
+The message is line 1, so `grep -q` exits after the first write and the other
+ten race it. Unloaded, 3000 iterations never lost the race; the failure needs
+the writer descheduled between writes, which is what the load provided. It was
+not reproduced naturally — the proof is the mechanism plus the retained output.
+
+Fix: both checks on that output now read a here-string
+(`grep -Fq '<message>' <<<"$OUTPUT"`), which has no writer process to signal.
+Classification for this relative: test-bug.
+
 ## Human feedback
 
 None.
@@ -78,4 +104,5 @@ None.
 
 Never invoke a workspace-local binary through `npx` on Cloud/Linux. Prefer
 `node_modules/.bin/<cmd>`. A wrapper assertion about a child's output must
-retain that output on failure; otherwise a tool crash is misread as load.
+retain that output on failure; otherwise a tool crash is misread as load. Under
+`pipefail`, never assert with `printf ... | grep -q`; match a here-string.
