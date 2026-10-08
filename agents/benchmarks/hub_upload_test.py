@@ -551,6 +551,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
     from datetime import datetime, timezone
     from pathlib import Path
 
+    from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
     from benchmarks.hub_upload import live_bundle_from_report_card
 
     repo = (
@@ -596,10 +597,8 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
-        start = fleet.index("finalize_terminal_projection() {")
-        end = fleet.index("\ncleanup() {", start)
         command = (
-            fleet[start:end]
+            _extract_fleet_function(fleet, "finalize_terminal_projection() {")
             + "\n"
             + setup
             + "PROVISION_POOL=\n"
