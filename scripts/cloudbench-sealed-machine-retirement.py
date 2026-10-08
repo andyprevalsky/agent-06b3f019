@@ -74,14 +74,17 @@ def publish(path, value):
         os.close(fd)
 
 
-def binding(registry, machine, app):
+def binding(registry, machine, app, *, completed_original=False):
     assert re.fullmatch(r"[0-9a-f]{32}", registry.name)
     assert re.fullmatch(r"[0-9a-f]+", machine)
     assert registry.resolve() == registry and not registry.is_symlink()
     meta = fields(registry / "meta")
     owner = registry.name
     assert meta["version"] == "2" and meta["fleet_owner_token"] == owner
-    assert meta["app"] == app and meta["cleanup_policy"] == "reap"
+    assert meta["app"] == app
+    # Read-only recognition runs before the normal ACK consumer changes a
+    # quarantined retain policy. Retirement commands still require reap.
+    assert meta["cleanup_policy"] == "reap" or (completed_original and meta["cleanup_policy"] == "retain")
     run = Path(meta["runs_root"]) / meta["run_id"]
     audit = Path(meta["audit_dir"])
     assert run.resolve() == run and audit.resolve() == audit and audit.name == owner
@@ -124,6 +127,16 @@ def binding(registry, machine, app):
     assert original["source"] == "fresh-clone" and original["disposition"] == "owned"
     assert machine not in {row.get("source_machine_id") for row in fresh.values()}
     assert clones[original["clone_name"]] == {"name": original["clone_name"], "id": machine, "volume_id": original["volume_id"]}
+    if completed_original:
+        assert original["version"] == "1"
+        clone = original["clone_name"]
+        intent = fields(audit / "expected-fresh" / clone)
+        source = original["source_machine_id"]
+        assert intent == {"clone_name": clone, "source_machine_id": source}
+        assert re.fullmatch(r"[0-9a-f]+", source)
+        assert read(audit / "by-machine-id" / machine, 256) == (clone + "\n").encode()
+        source_index = audit / "by-machine-id" / source
+        assert not source_index.exists() and not source_index.is_symlink()
     outputs = [run / n for n in names if (run / n / ".cid").exists() and read(run / n / ".cid", 256).decode().split() == ["clone", machine]]
     assert len(outputs) == 1
     out = outputs[0]
@@ -131,6 +144,8 @@ def binding(registry, machine, app):
     token = f"{owner}-{ordinal}"
     assert obj(out / "runtime-evidence.owner.json") == {"version": 1, "machine_id": machine, "run_token": token}
     assert read(out / "guest-shutdown.confirmed", 256).decode().strip() in (token, meta["run_id"])
+    if completed_original:
+        assert read(out / "guest-shutdown.confirmed", 256) == (meta["run_id"] + "\n").encode()
     assert not (out / "runtime-evidence.pending").exists() and not (out / "runtime-evidence.pending").is_symlink()
     assert read(out / "worker-clones.ids", 65536).strip() == b""
     assert not any(row.get("source_machine_id") == machine and row.get("machine_id") for row in fresh.values())

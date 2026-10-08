@@ -8329,6 +8329,25 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 else
                     detail_status=$?
                 fi
+                if [ "$detail_status" -eq 1 ] && [ "$kind" = guest ]; then
+                    # A normal destroy may finish before its ledger transition.
+                    # Recognize intact originals only after positive native
+                    # absence; leave all authorization/latches to normal recovery.
+                    if python3 - "$SEALED_MACHINE_RETIREMENT_HELPER" "$registry" \
+                        "$machine_id" "$APP" "$bench" "$clone_name" "$volume_id" "$output" <<'PY'
+from pathlib import Path
+import runpy, sys
+helper, registry, machine, app, task, clone, volume, output = sys.argv[1:]
+module = runpy.run_path(helper)
+bound = module["binding"](Path(registry), machine, app, completed_original=True)
+assert (bound["task"], bound["clone_name"], bound["volume_id"]) == (task, clone, volume)
+meta = module["fields"](Path(registry) / "meta")
+assert Path(output) == Path(meta["runs_root"]) / bound["run_id"] / task
+PY
+                    then
+                        continue
+                    fi
+                fi
                 [ "$detail_status" -eq 0 ] || {
                     echo "❌ [$bench] exact owned Machine $machine_id is absent or unreadable" >&2
                     cleanup_stale_owner_recovery_proxies || true
