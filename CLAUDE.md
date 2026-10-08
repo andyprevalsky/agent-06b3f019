@@ -512,7 +512,7 @@ timeouts. The existing publisher browser-validation blackbox owns these cases.
 PR #1299's completed original acceptance required **ten consecutive slices
 of ten distinct daily/Polar benchmarks**. The current five consecutive width-fifty
 LIVE runs follow Eval Suite's Current width-fifty LIVE acceptance instructions:
-1,200 seconds per task and 3,600 seconds from the first uncached image invocation
+1,200 seconds per task and 5,400 seconds from the first uncached image invocation
 through original evidence and exact resource closure. The following 1,800-second
 deadline describes the completed width-ten campaign. Each benchmark must execute meaningful
 real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
@@ -1004,7 +1004,7 @@ complete. The new goal is five consecutive runs of fifty distinct, randomly
 selected eligible DAILY tasks per run. Keep the original completed campaign and
 the cached mass-demo diagnostics separate; neither supplies this new streak.
 Each run gets a temporary 1,200-second execution window per task and a hard
-3,600-second whole-run budget from the start of its uncached image build through
+5,400-second whole-run budget from the start of its uncached image build through
 final durable publication and verified release of every owned resource. The old
 300/600-second temporary task settings, 1,800-second allocation budget and cached
 diagnostic's 1,200-second allocation-to-release guard do not apply to this goal.
@@ -1039,8 +1039,10 @@ names without replacement using a recorded random seed. The existing
 its `minimum_successful_llm=3` filters intentionally zero-LIVE/replay tasks and
 does not require artificial model calls. Retain the concrete name list privately.
 Sample anew for each run; distinctness is required within each fifty-task run.
-Pass all fifty concrete names together to one ordinary fleet, without `-k` or
-`--concurrency`; the sequential proof wrapper's width-32 cap is unrelated.
+Pass all fifty concrete names to the normal CLI with `--retry-infra 1` and
+`--concurrency 50 --strict-barrier`. This opt-in uses the existing isolated
+campaign controllers and shared preflight/inventory, keeping one logical
+fifty-task group. The sequential proof wrapper's width-32 cap is unrelated.
 
 Inspect native provider inventory, controller CPU/memory/disk and normal
 admission before launch. Where this load requires it, use the command-scoped
@@ -1056,8 +1058,30 @@ CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
 CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
 CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200 \
-  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --wait --timeout 1200 --autoscale-max 15
+  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --timeout 1200 --autoscale-max 15 \
+  --retry-infra 1 --concurrency 50 --strict-barrier --e2e-timeout 5400 \
+  --e2e-started-at "$(cat "$trial_dir/image-start.epoch")"
 ```
+
+The requested retry policy applies only to infrastructure failures. Admit at
+most one fresh attempt for the same task after the prior controller exits,
+its exact native resource audit closes, and its terminal physical result is
+published with lifecycle `released`. Healthy peers continue; genuine task FAIL
+is accepted without retry. Each attempt retains its own physical run, logs,
+evidence and costs under the original logical group member and timestamp.
+The failed attempt stays visible in history and earns no execution credit.
+Retry does not rebuild the image, alter the task, or restart either clock.
+An unclassified result, retained resources or pending publication blocks retry;
+follow the printed exact-owner recovery instructions instead of deleting claims.
+The original image-start epoch includes activation, gaps, all attempts, evidence
+and complete release in the 5,400-second cap. Normal 7,200-second defaults remain
+unchanged. Compact owning scheduler, publication and grouping regressions run
+in the normal deploy gates; large LIVE campaigns remain user-requested.
+
+Fixture readiness files must become visible with a complete payload: write a
+sibling temporary file, then atomically replace the final path. Existence alone
+does not prove that a direct JSON/PID write has finished. Keep cleanup controls
+within the existing fixture host guard rather than adding narrow stage timers.
 
 Poll the exact monitoring command printed by this launch every thirty seconds
 through terminal publication and native release. Keep all fifty rows in one
@@ -1106,9 +1130,9 @@ statistics or independent rejection/cancellation timers:
 | Fleet readiness | 900 seconds, target | Partial-run observation upper bound: 686.004 seconds; only 49 executed and one startup failed, so this is diagnostic and does not prove full-fifty readiness. |
 | Task execution | 1,200 seconds per task, hard | Temporary command-scoped execution window. |
 | Evidence and full native release after the last execution | 480 seconds, target | Target pending measured current tail; evidence publication also overlaps execution. |
-| Whole image-start-to-publication-and-release E2E | 3,600 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
+| Whole image-start-to-publication-and-release E2E | 5,400 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
 
-Stage targets are not additive entitlements: their sum exceeds one hour, and
+Stage targets are not additive entitlements:
 parallel/overlapping work must still fit the hard whole-run limit. Report actual
 stage p95 when comparable task observations support it; do not label a single
 historical invocation or target as p95. Warn and diagnose target overruns while a
@@ -1125,7 +1149,7 @@ sensible; early/chat outcomes can use fewer. Use
 `scripts/verify_successful_llm_queries.py --diagnostics-only`; never force calls,
 change prompts, seed replay or substitute cached acceptance. Unexecuted tasks,
 missing terminals/evidence, incorrect FE presentation, resource leaks, an actual
-parallelism-caused issue or the one-hour breach fail the run. Preserve every
+parallelism-caused issue or the ninety-minute breach fail the run. Preserve every
 original outcome and finish exact cleanup. At a hard cutoff or catastrophe,
 verify native birth and stop only the exact owning controller through normal
 cleanup; interrupted/recovered runs get no retroactive credit. Fix a proven

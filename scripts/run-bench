@@ -155,8 +155,8 @@ if [[ "${1:-}" == "--local" ]]; then
     shift
     for arg in "$@"; do
         case "$arg" in
-            -k|--runs|--runs=*|-k=*|--concurrency|--concurrency=*)
-                echo "❌ -k/--runs and --concurrency currently require the default cloud fleet." >&2
+            -k|--runs|--runs=*|-k=*|--concurrency|--concurrency=*|--retry-infra|--retry-infra=*|--e2e-timeout|--e2e-timeout=*|--e2e-started-at|--e2e-started-at=*)
+                echo "❌ Campaign and whole-experiment flags require the default cloud fleet." >&2
                 exit 2
                 ;;
         esac
@@ -203,6 +203,14 @@ Campaign options:
                       Run every resolved task K times in separate fleet controllers
   --concurrency N, --concurrency=N
                       Keep at most N campaign copies active (default 1 with -k)
+  --retry-infra N     Retry each infrastructure failure at most N times, after
+                      full resource release and terminal publication. Genuine
+                      task FAIL is retained. Healthy tasks continue unchanged.
+                      Uses isolated campaign controllers; default concurrency
+                      is the resolved task count unless explicitly supplied.
+  --e2e-timeout SEC   Whole experiment limit, including evidence and full release.
+  --e2e-started-at EPOCH
+                      Original first image-build epoch; never reset for retries.
   --demo-cache        Read-only task replay for existing DEMO workloads. Declared
                       LLM judges still run and may spend. Zero LIVE proof credit.
 
@@ -242,6 +250,9 @@ EOF
 
 RUNS=1
 CONCURRENCY=1
+CONCURRENCY_EXPLICIT=0
+RETRY_INFRA=0
+E2E_ARGS=()
 CAMPAIGN_REQUESTED=0
 INTERNAL_OPERATION=0
 DEMO_CACHE_PROBE=0
@@ -258,10 +269,24 @@ while [ "$#" -gt 0 ]; do
             ;;
         --concurrency)
             [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
-            CONCURRENCY="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            CONCURRENCY="$2"; CONCURRENCY_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift 2
             ;;
         --concurrency=*)
-            CONCURRENCY="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            CONCURRENCY="${1#*=}"; CONCURRENCY_EXPLICIT=1; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --retry-infra)
+            [ "$#" -ge 2 ] || { echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2; }
+            RETRY_INFRA="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        --retry-infra=*)
+            RETRY_INFRA="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --e2e-timeout|--e2e-started-at)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            E2E_ARGS+=("$1=$2"); CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        --e2e-timeout=*|--e2e-started-at=*)
+            E2E_ARGS+=("$1"); CAMPAIGN_REQUESTED=1; shift
             ;;
         --demo-cache)
             DEMO_CACHE_PROBE=1; shift
@@ -308,6 +333,10 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+case "$RETRY_INFRA" in
+    ''|*[!0-9]*) echo "❌ --retry-infra requires a nonnegative integer" >&2; exit 2 ;;
+esac
 
 case "$RUNS" in
     ''|*[!0-9]*|0)
@@ -371,11 +400,18 @@ if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
 fi
 
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
+    if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ]; }; then
+        CONCURRENCY="${#RESOLVED_TASKS[@]}"
+    fi
     CAMPAIGN_ARGS=(
         "--root=$ROOT_DIR"
         "--runs=$RUNS"
         "--concurrency=$CONCURRENCY"
+        "--retry-infra=$RETRY_INFRA"
     )
+    if [ "${#E2E_ARGS[@]}" -gt 0 ]; then
+        CAMPAIGN_ARGS+=("${E2E_ARGS[@]}")
+    fi
     for task in "${RESOLVED_TASKS[@]}"; do
         CAMPAIGN_ARGS+=("--task=$task")
     done
