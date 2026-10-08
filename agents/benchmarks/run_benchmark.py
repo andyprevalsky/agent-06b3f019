@@ -5740,8 +5740,9 @@ def _agent_messages_ready_for_durable_browser_evidence(
     messages: Optional[List[dict]],
     *,
     zero_session_task_ids: set[str] | None = None,
+    preparation_cancelled_task_ids: set[str] | None = None,
 ) -> bool:
-    """Require terminal and attached recording for every browser, including no-row failures."""
+    """Require terminal recording or verified cancellation before browser actions."""
     states: dict[str, dict[str, bool]] = {}
     lifecycle = {
         "browser",
@@ -5775,7 +5776,10 @@ def _agent_messages_ready_for_durable_browser_evidence(
         state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
     return all(
         (state["code"] and not state["browser"])
-        or (state["complete"] and (state["recording"] or task_id in (zero_session_task_ids or set())))
+        or (state["complete"] and (
+            state["recording"] or task_id in (zero_session_task_ids or set())
+            or task_id in (preparation_cancelled_task_ids or set())
+        ))
         for task_id, state in states.items()
     )
 
@@ -5865,6 +5869,28 @@ async def _refresh_browser_archive_snapshot(
             if time.monotonic() >= deadline:
                 raise TimeoutError("browser archive refresh exceeded its readiness bound")
             zero_tasks_by_agent: dict[str, set[str]] = {}
+            from benchmarks.browser_zero_allocation import (
+                preparation_cancelled_task_receipts,
+                preparation_receipts_match_sessions,
+            )
+            preparation_by_agent = {
+                aid: preparation_cancelled_task_receipts(value.get("messages"), aid)
+                for aid, value in snapshots.items()
+            }
+            preparation_receipts = {
+                task_id: receipt for tasks in preparation_by_agent.values() for task_id, receipt in tasks.items()
+            }
+            preparation_snapshot = None
+            if preparation_receipts:
+                preparation_snapshot = await asyncio.to_thread(
+                    cloud_batch_cleanup.exact_root_sessions, base_url, agent_id
+                )
+                if (
+                    set(preparation_snapshot.get("tree_agent_ids") or []) != ids
+                    or not preparation_receipts_match_sessions(preparation_receipts, preparation_snapshot)
+                ):
+                    preparation_by_agent = {}
+                    preparation_receipts = {}
             if (
                 ownership_before is not None
                 and ownership_before.get("browser_sessions") == []
@@ -5883,6 +5909,7 @@ async def _refresh_browser_archive_snapshot(
                 _agent_messages_ready_for_durable_browser_evidence(
                     value.get("messages"),
                     zero_session_task_ids=zero_tasks_by_agent.get(aid),
+                    preparation_cancelled_task_ids=set(preparation_by_agent.get(aid, {})),
                 )
                 for aid, value in snapshots.items()
             ):
@@ -5896,6 +5923,16 @@ async def _refresh_browser_archive_snapshot(
                 latest["_benchmark"] = {**latest.get("_benchmark", {}), **data.get("_benchmark", {})}
                 logs["messages"] = extract_message_transcript(latest)
                 logs["tree"] = tree
+                if preparation_receipts:
+                    logs["browser_preparation_cancellation_receipt"] = {
+                        "root_agent_id": agent_id,
+                        "tree_agent_ids": sorted(ids),
+                        "task_ids_by_agent": {
+                            aid: sorted(tasks) for aid, tasks in preparation_by_agent.items() if tasks
+                        },
+                        "receipts": preparation_receipts,
+                        "archive_browser_sessions": preparation_snapshot["browser_sessions"],
+                    }
                 if any(zero_tasks_by_agent.values()):
                     logs["browser_zero_allocation_receipt"] = {
                         "root_agent_id": agent_id,

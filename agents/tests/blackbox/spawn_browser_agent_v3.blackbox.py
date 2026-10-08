@@ -6780,6 +6780,144 @@ async def test_take_steel_computer_screenshot_missing_image_raises():
 # repo: browser session init / fetch / close / upload
 # ========================================
 
+async def _exercise_browser_preparation_cancellation(init_outcome):
+    """A lost init acknowledgment must retain its exact task's session owner.
+
+    The original Minted run was canceled while backend credential preparation
+    still owned a created session. The worker had not received that session id
+    and therefore emitted terminals and completed cleanup without closing it.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    task_id = "11111111-1111-5111-8111-111111111111"
+    session_id = "22222222-2222-4222-8222-222222222222"
+    allocated = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "debug_url": "https://steel.example/session",
+        "browser_session_metadata": {"provider": "steel"},
+    }
+    calls = []
+    init_allocated = asyncio.Event()
+    init_response = asyncio.Event()
+
+    async def pending_init(_config, _user, _agent, _url, *, task_id):
+        assert task_id == allocated["task_id"]
+        calls.append("backend_allocated")
+        init_allocated.set()
+        await init_response.wait()
+        if init_outcome == "unknown":
+            raise RuntimeError("synthetic ambiguous initialization failure")
+        calls.append("original_init_acknowledged")
+        if init_outcome == "foreign":
+            return {**allocated, "task_id": "foreign-task"}
+        return allocated
+
+    async def exact_close(_config, requested_session_id, **_kwargs):
+        assert requested_session_id == session_id
+        calls.append("exact_session_close")
+
+    with (
+        patch.object(handler, "load_config", return_value=_fake_config()),
+        patch.object(handler, "init_browser_session", side_effect=pending_init),
+        patch.object(handler, "close_browser_session", side_effect=exact_close),
+        patch.object(handler, "save_browser_action_message", AsyncMock(return_value=True)) as save,
+    ):
+        activity_task = asyncio.create_task(
+            ActivityEnvironment().run(
+                handler._spawn_browser_agent_activity_v3_real,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Inspect a synthetic page",
+                tool_call_id="tool-1",
+                task_id=task_id,
+                start_url="https://example.com",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+            )
+        )
+        await init_allocated.wait()
+        activity_task.cancel()
+        init_response.set()
+        result = await activity_task
+        await handler.drain_background_browser_cleanups(timeout=5)
+
+    assert result["status"] == "cancelled"
+    if init_outcome == "acknowledged":
+        assert result["session_id"] == session_id, (
+            "preparation cancellation discarded the allocated session owner"
+        )
+        assert calls == ["backend_allocated", "original_init_acknowledged", "exact_session_close"]
+    else:
+        assert result["session_id"] is None
+        assert "exact_session_close" not in calls
+    from benchmarks.run_benchmark import _agent_messages_ready_for_durable_browser_evidence
+    from benchmarks.browser_zero_allocation import preparation_cancelled_task_receipts
+
+    serialized = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": call.kwargs["task_id"],
+                "action_type": call.kwargs["action_type"],
+                "toolStatus": call.kwargs["status"].value,
+                "toolCallId": call.kwargs["tool_call_id"],
+                **(call.kwargs.get("extra_metadata") or {}),
+            }
+        }
+        for call in save.await_args_list
+    ]
+    assert not _agent_messages_ready_for_durable_browser_evidence(serialized), (
+        "closing preparation alone must not invent the missing recording proof"
+    )
+    receipts = preparation_cancelled_task_receipts(serialized, "agent-1")
+    assert bool(receipts) == (init_outcome == "acknowledged")
+    assert _agent_messages_ready_for_durable_browser_evidence(
+        serialized, preparation_cancelled_task_ids=set(receipts),
+    ) == (init_outcome == "acknowledged")
+
+
+async def test_browser_preparation_cancellation_retains_exact_allocated_session():
+    await _exercise_browser_preparation_cancellation("acknowledged")
+
+
+async def test_browser_preparation_cancellation_does_not_certify_unknown_or_foreign_owner():
+    for init_outcome in ("unknown", "foreign"):
+        await _exercise_browser_preparation_cancellation(init_outcome)
+
+
+async def test_owned_initial_session_request_joins_duplicate_cancellation_without_replay():
+    from domains.spawn_browser_agent_v3 import handler
+
+    allocated = asyncio.Event()
+    settle = asyncio.Event()
+    calls = []
+    expected = {"task_id": "task-1", "session_id": "session-1"}
+
+    async def original_init(*_args, **_kwargs):
+        calls.append("original-init")
+        allocated.set()
+        await settle.wait()
+        return expected
+
+    with patch.object(handler, "init_browser_session", side_effect=original_init):
+        caller = asyncio.create_task(handler._init_browser_session_preserving_owner(
+            _fake_config(), "user-1", "agent-1", "https://example.com", task_id="task-1",
+        ))
+        await allocated.wait()
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done(), "cancellation must keep its init owner joined"
+        caller.cancel()
+        settle.set()
+        with pytest.raises(handler._BrowserSessionPreparationCancelled) as cancelled:
+            await caller
+    assert cancelled.value.session_data == expected
+    assert calls == ["original-init"]
+
+
 async def test_init_browser_session_success():
     from domains.spawn_browser_agent_v3.repo import init_browser_session
 
@@ -25141,6 +25279,18 @@ async def run_all_tests():
     )
 
     await r.record_async("init_browser_session_success", test_init_browser_session_success)
+    await r.record_async(
+        "browser_preparation_cancellation_retains_exact_allocated_session",
+        test_browser_preparation_cancellation_retains_exact_allocated_session,
+    )
+    await r.record_async(
+        "browser_preparation_cancellation_unknown_or_foreign_owner",
+        test_browser_preparation_cancellation_does_not_certify_unknown_or_foreign_owner,
+    )
+    await r.record_async(
+        "owned_initial_session_request_joins_duplicate_cancellation_without_replay",
+        test_owned_initial_session_request_joins_duplicate_cancellation_without_replay,
+    )
     await r.record_async("init_browser_session_rate_limited", test_init_browser_session_rate_limited)
     await r.record_async(
         "init_browser_session_transient_retryable",

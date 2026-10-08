@@ -104,6 +104,20 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       }
     },
   ],
+  [
+    'router prompt defines closed output media and satisfaction as emission',
+    () => {
+      for (const needle of [
+        'This surface cannot emit: images',
+        'Describing where that representation exists',
+        'A finished agent run does not shrink this rule',
+      ]) {
+        if (!ROUTER_SYSTEM_PROMPT.includes(needle)) {
+          throw new Error(`ROUTER_SYSTEM_PROMPT missing capability contract: ${needle}`);
+        }
+      }
+    },
+  ],
 ];
 
 async function main(): Promise<void> {

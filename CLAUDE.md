@@ -122,10 +122,22 @@ Python or make a Git pack appear empty even though `ls` reports its full logical
 size. Finder's **Keep Downloaded** does not repair an already stalled iCloud
 sync; a fresh clone on local storage avoids that dependency.
 
+Before installing anything, inspect an existing healthy Developer checkout
+(the installed trees in `~/Developer/rose-pr1299` were verified). Reuse them
+when the root/workspace `package.json` files, committed package lockfiles and
+`agents/requirements.txt` match, with the same platform and pinned toolchains.
+Preserve the installation's layout: npm workspaces may hoist packages such as
+`dotenv` into root `node_modules`, while package-local installs keep them under
+`back-end/node_modules`. Link the existing root tree **and** each existing
+package tree into the same relative paths, plus the matching `agents/venv`;
+package trees alone do not reproduce a hoisted installation. Keep healthy trees
+and lockfiles intact. Activate the reused venv so child `python3` uses it too.
+
 Start Docker Desktop. Use Python **3.11.9** for `agents/venv` and Node
 **20.10.0** for the Mac app (`source ~/.nvm/nvm.sh`, `nvm install 20.10.0`,
 `nvm use 20.10.0`). Select the installed Python 3.11.9 explicitly when an asdf
-shim points elsewhere. Install backend, frontend, and Mac app dependencies in
+shim points elsewhere. When no matching healthy installation is available,
+install backend, frontend, and Mac app dependencies in
 their package directories with `npm install`; create `agents/venv` with
 `python3.11 -m venv venv` from `agents/`, activate it, and run
 `pip install -r requirements.txt`. Run `bash scripts/sync-reference-repos.sh`.
@@ -154,6 +166,20 @@ After installing backend dependencies, run `npx prisma generate` from
 client used by the seed/index scripts.
 For direct agent tests, run from `agents/` with `source venv/bin/activate`;
 an absolute venv Python alone leaves subprocess `python3` on the asdf shim.
+Before a fleet run, or before starting an image-build-to-fleet measurement,
+select the installed backend/frontend Node (22.13.0 was verified), activate the
+agents venv, and run this cheap check from the repository root:
+
+```bash
+(cd back-end && node --import tsx -e "require('./scripts/seed-dump-cache.ts'); console.log('backend seed-cache imports ready')")
+```
+
+This imports the actual canonical seed-cache producer through its installed
+TypeScript loader and dependency graph, allowing both npm layouts. It does not
+invoke the seed CLI, read its env file, contact R2 or start a stack. Resolve a
+failure before starting the measurement; an image-only publication needs no
+backend import check. See RCA
+`2026-10-07-controller-worktree-omitted-hoisted-root-dependencies`.
 Install the matching browser once with `python -m playwright install chromium`
 inside that activated venv before browser blackbox tests.
 Use the browser-use version pinned in `agents/requirements.txt`: native
@@ -376,8 +402,13 @@ Review the complete rejected slice together: the fleet waits for every child
 before aggregating results. Batch independent infrastructure repairs and their
 owning regression checks before freezing the source for a fresh streak.
 For shell process ownership, capture births with `cloudbench_pid_start_time`;
-its reader uses the same whitespace normalization. Raw `ps lstart` pads
-single-digit days and can otherwise reject the live owner during cancellation.
+read them with `cloudbench_pid_start_time_like` for the recorded format. Linux
+uses the stable boot ID and process start tick; raw `ps lstart` can move after a
+VM clock step. The shared reader also normalizes legacy macOS day spacing.
+After signalling a supervisor, an empty observation with a still-live PID means
+keep joining within the existing shutdown budget, not successful release. The
+existing `cloudbench-pid-identity` and `run-process-cleanup` deploy controls cover
+these boundaries without adding per-step timing gates.
 If archive finalization reports `TimeoutError`, inspect the last
 `browser_archive_observation`, exact `cloud_cleanup_evidence` session snapshots,
 and worker cancellation timestamps before blaming recording upload. The
@@ -392,8 +423,20 @@ missing or corrupt sealed files remain INFRA and retain the owner.
 A browser tool canceled before allocating a session has no recording to attach; only a
 task-bound `browser_zero_allocation_receipt` plus zero sessions in the exact
 before/archive/after/final ownership reads and a clean provider receipt can
-establish that exception. Any allocated session still owes a playable recording.
-The durable publisher checks this proof; never synthesize a recording or waive
+establish that exception. If cancellation interrupts initial session preparation,
+inspect whether `_init_browser_session_preserving_owner` joined the same bounded
+init request, retained its returned task/session handle, and closed that exact
+session. Its existing FE-only cleanup terminal can carry a positive
+`browser_preparation_cancellation` receipt; archive capture and publication bind
+that receipt to exact owned inventory and native provider closure. Started or
+unknown-phase tasks still owe their playable recording. Missing action markers
+alone prove no exception, and missing original receipts must never be backfilled.
+An initial HTTP transport disconnect is separate from caller cancellation. The
+backend init route keeps the same allocation operation owned and closes its exact
+returned session if the response closes before `writableFinished`; normal response
+completion keeps the session. Failed close retains the existing terminal retry
+owner. It creates no preparation receipt or recording exception.
+The durable publisher checks these proofs; never synthesize a recording or waive
 its check to grant a slice credit. If the provider replay exists but the FINISHED
 recording message is missing, inspect `Failed to save browser action message` in
 the worker log. Required recording attachments retry pre-request connection/pool
@@ -1014,7 +1057,9 @@ minimal benign comment change in `agents/benchmarks/__init__.py` in its own
 checkout for each trial, record the resulting fetchable immutable ref, and build
 from that same checkout. This marker changes neither executable behavior nor the
 39 bootstrap/79 dependency inputs. Preserve any already-running control's source.
-Use the supported uncached image build and exact-image activation for every trial:
+Complete Fresh clone setup's backend import check before recording the image
+start clock. Use the supported uncached image build and exact-image activation
+for every trial:
 
 ```bash
 trial_dir=".context/daily-live50/$(date -u +%Y%m%d-%H%M%S)"

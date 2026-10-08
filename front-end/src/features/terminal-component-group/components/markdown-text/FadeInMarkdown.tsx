@@ -23,6 +23,7 @@ import { useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 
 import { extractWords } from './extractWords';
+import { MarkdownImage } from './MarkdownImage';
 import { MarkdownLink } from './MarkdownLink';
 import { MarkdownStyles } from './MarkdownStyles';
 import { renderWords } from './renderWords';
@@ -60,7 +61,10 @@ export function FadeInMarkdown({
   if (words.length === 0) {
     return (
       <div ref={tempRef} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MarkdownLink }}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{ a: MarkdownLink, img: MarkdownImage }}
+        >
           {markdown}
         </ReactMarkdown>
       </div>

@@ -4,6 +4,7 @@
  * word-by-word fade-in renderer.
  */
 
+import { isAllowedImageSrc } from './isAllowedImageSrc';
 import { type BlockType, type ListType, type WordItem } from './types';
 
 const BLOCK_TAGS: ReadonlySet<string> = new Set([
@@ -81,6 +82,20 @@ export function extractWords(root: Node): WordItem[] {
 
     const element = node as HTMLElement;
     const tagName = element.tagName.toLowerCase();
+    if (tagName === 'img') {
+      const src = element.getAttribute('src') || '';
+      const alt = element.getAttribute('alt') || '';
+      if (!isAllowedImageSrc(src)) return;
+      out.push({
+        word: alt,
+        isWord: true,
+        isImage: true,
+        src,
+        alt,
+        ...formatting,
+      });
+      return;
+    }
     const withInline = applyInlineFormatting(tagName, element, formatting);
     const withBlock = applyBlockFormatting(tagName, withInline, allocBlockIndex);
 

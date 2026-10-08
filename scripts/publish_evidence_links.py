@@ -324,8 +324,103 @@ def _probe_recording_file_pointer(
     return _probe_recording_view_url(signed, timeout=timeout)
 
 
+def verified_preparation_cancelled_tasks(bundle: dict, agent_id: str) -> set[str]:
+    """Bind positive pre-action phase evidence to terminal exact-provider cleanup."""
+    sys.path.insert(0, str(REPO_ROOT / "agents"))
+    from benchmarks.browser_zero_allocation import (
+        preparation_cancelled_task_receipts,
+        preparation_receipts_match_sessions,
+    )
+    projected = evidence_bundle_for_agent(bundle, agent_id)
+    matches = []
+    for task in projected.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        task_logs = task.get("logs")
+        task_tree = task_logs.get("tree") if isinstance(task_logs, dict) else None
+        if task.get("agent_id") == agent_id or (
+            isinstance(task_tree, dict) and agent_id in task_tree
+        ):
+            matches.append(task)
+    if len(matches) != 1:
+        return set()
+    invalid_receipt = "invalid exact pre-action browser cancellation receipt"
+    logs = matches[0].get("logs")
+    if logs is None:
+        return set()
+    if not isinstance(logs, dict):
+        raise SystemExit(invalid_receipt)
+    capture = logs.get("browser_preparation_cancellation_receipt")
+    if capture is None:
+        return set()
+    cleanup = logs.get("cloud_cleanup_evidence", {})
+    provider = logs.get("cloud_provider_cleanup", {})
+    tree = logs.get("tree", {})
+    if not all(isinstance(value, dict) for value in (cleanup, provider, tree)):
+        raise SystemExit(invalid_receipt)
+    if agent_id in tree:
+        node = tree[agent_id]
+        if not isinstance(node, dict):
+            raise SystemExit(invalid_receipt)
+        transcript = node.get("messages")
+    else:
+        transcript = logs.get("messages")
+    if not isinstance(transcript, list):
+        raise SystemExit(invalid_receipt)
+    expected = preparation_cancelled_task_receipts(transcript, agent_id)
+    receipts = capture.get("receipts") if isinstance(capture, dict) else None
+    task_map = capture.get("task_ids_by_agent") if isinstance(capture, dict) else None
+    ids = task_map.get(agent_id) if isinstance(task_map, dict) else None
+    tree_ids = capture.get("tree_agent_ids") if isinstance(capture, dict) else None
+    valid = (
+        isinstance(receipts, dict) and bool(expected) and isinstance(ids, list)
+        and all(isinstance(value, str) and value for value in ids)
+        and set(ids) == set(expected) and len(ids) == len(set(ids))
+        and all(receipts.get(task_id) == receipt for task_id, receipt in expected.items())
+        and isinstance(tree_ids, list) and all(isinstance(value, str) for value in tree_ids)
+        and agent_id in tree_ids and isinstance(capture.get("root_agent_id"), str)
+        and capture.get("root_agent_id") in tree_ids
+        and cleanup.get("errors") == []
+        and provider.get("tree_sealed") is True and provider.get("root_deleted") is True
+        and provider.get("root_agent_id") == capture.get("root_agent_id")
+        and preparation_receipts_match_sessions(
+            expected, {"browser_sessions": capture.get("archive_browser_sessions")}
+        )
+    )
+    for phase in ("after", "final"):
+        snapshot = cleanup.get(phase, {})
+        if not isinstance(snapshot, dict):
+            raise SystemExit(invalid_receipt)
+        snapshot_ids = snapshot.get("tree_agent_ids", [])
+        if not isinstance(snapshot_ids, list) or not all(
+            isinstance(value, str) for value in snapshot_ids
+        ):
+            raise SystemExit(invalid_receipt)
+        valid = valid and snapshot.get("root_exists") is True and snapshot.get("root_deleted") is True and (
+            sorted(snapshot_ids) == sorted(tree_ids or [])
+            and preparation_receipts_match_sessions(expected, snapshot)
+        )
+    native = provider.get("provider_receipts", [])
+    if not isinstance(native, list):
+        raise SystemExit(invalid_receipt)
+    closed_handles = {
+        (row["provider"], row["session_id"])
+        for row in native
+        if isinstance(row, dict)
+        and isinstance(row.get("provider"), str) and isinstance(row.get("session_id"), str)
+        and type(row.get("status")) is int
+        and row.get("status") in {200, 201, 204, 404}
+    }
+    for receipt in expected.values():
+        valid = valid and (receipt["provider"], receipt["session_id"]) in closed_handles
+    if not valid:
+        raise SystemExit(invalid_receipt)
+    return set(expected)
+
+
 def validate_browser_agents_terminated_with_recording(
     agent_id: str, messages: list, *, zero_session_task_ids: set[str] | None = None,
+    preparation_cancelled_task_ids: set[str] | None = None,
 ) -> list[str]:
     """Return failure reasons when any browser task is still live or missing recording.
 
@@ -334,17 +429,24 @@ def validate_browser_agents_terminated_with_recording(
       * ``action_type=task_complete`` (terminated for FE panels)
       * a FINISHED recording message with a reachable ``recording_view_url`` or a
         fetchable ``recording_file_pointer``
-    An exact owned zero-session receipt permits a task cancelled before its
-    session was allocated; an allocated browser still requires a recording.
+    Exact owned receipts permit cancellation before session allocation or task
+    actions. A preparation receipt also requires terminal exact-provider closure;
+    started and unknown-phase tasks require their existing recording.
     Agents with no browser tasks pass.
     Code agents share lifecycle action names with browsers. Explicit code
     identity exempts those tasks unless the same task also has browser evidence;
     lifecycle events with unknown identity retain the fail-closed checks.
     """
     sys.path.insert(0, str(REPO_ROOT / "agents"))
-    from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
+    from benchmarks.browser_zero_allocation import (
+        cancelled_before_session_task_ids,
+        preparation_cancelled_task_receipts,
+    )
 
     verified_zero = (zero_session_task_ids or set()) & cancelled_before_session_task_ids(messages)
+    verified_preparation = (preparation_cancelled_task_ids or set()) & set(
+        preparation_cancelled_task_receipts(messages, agent_id)
+    )
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
     for message in messages:
@@ -418,7 +520,7 @@ def validate_browser_agents_terminated_with_recording(
             ):
                 recording_ok = True
                 break
-        if not recording_ok and task_id not in verified_zero:
+        if not recording_ok and task_id not in verified_zero and task_id not in verified_preparation:
             failures.append(
                 f"browser task {task_id} has no correctly attached recording "
                 "(need reachable recording_view_url or fetchable recording_file_pointer)"
@@ -496,6 +598,7 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
 def verify_agent_reachable(
     agent_id: str, token: str, *, timeout: float = 60.0,
     zero_session_task_ids: set[str] | None = None,
+    preparation_cancelled_task_ids: set[str] | None = None,
 ) -> tuple[str, int]:
     """Probe archive-backed agent detail; return (status_label, message_count).
 
@@ -531,6 +634,7 @@ def verify_agent_reachable(
         )
     browser_failures = validate_browser_agents_terminated_with_recording(
         agent_id, messages, zero_session_task_ids=zero_session_task_ids,
+        preparation_cancelled_task_ids=preparation_cancelled_task_ids,
     )
     if browser_failures:
         raise SystemExit(
@@ -644,10 +748,12 @@ def main() -> int:
     agent_id = _normalize_agent_id(args.agent_id)
     run_id = args.run_id or ""
     zero_session_task_ids: set[str] = set()
+    preparation_cancelled_task_ids: set[str] = set()
     if args.run_json:
         run_path = args.run_json.resolve()
         bundle = json.loads(run_path.read_text(encoding="utf-8"))
         zero_session_task_ids = verified_zero_session_tasks(bundle, agent_id)
+        preparation_cancelled_task_ids = verified_preparation_cancelled_tasks(bundle, agent_id)
         if args.skip_hub_upload:
             run_id = str(evidence_bundle_for_agent(bundle, agent_id).get("run_id") or "")
         else:
@@ -663,6 +769,7 @@ def main() -> int:
     else:
         fe_status, message_count = verify_agent_reachable(
             agent_id, token, zero_session_task_ids=zero_session_task_ids,
+            preparation_cancelled_task_ids=preparation_cancelled_task_ids,
         )
     manifest = write_manifest(
         agent_id=agent_id,
