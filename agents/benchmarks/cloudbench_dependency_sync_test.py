@@ -30049,3 +30049,71 @@ recover_exact_stale_fleet_owner {owner}
         server.server_close()
         thread.join(timeout=30)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "passed, prior_stage, marker, expected_stage",
+    [
+        (True, "evaluated", None, "evaluated"),
+        (False, "evaluated", None, "evaluated"),
+        (False, None, None, None),
+        (False, "evaluated", "benchmark-child.finished", "teardown"),
+        (True, "evaluated", "bench-e2e.finished-epoch", "released"),
+        (True, "teardown", None, "teardown"),
+        (True, "released", None, "released"),
+    ],
+)
+def test_fleet_publishes_evaluation_before_teardown_preserves_markerless_stage(
+    tmp_path: Path, passed: bool, prior_stage: str | None,
+    marker: str | None, expected_stage: str | None,
+) -> None:
+    """Cleanup refresh retains known stages when marker files are unavailable."""
+    from benchmarks.hub_upload import prepare_run_bundle_for_upload
+
+    run = tmp_path / "original-run"
+    batch = run / "_batch"
+    batch.mkdir(parents=True)
+    (batch / "benches.json").write_text(json.dumps([{"name": "original-task"}]))
+    (batch / "report-card.json").write_text(json.dumps({"timestamp": "2026-10-08T00:00:00Z"}))
+    output = run / "original-task"
+    output.mkdir()
+    if marker:
+        (output / marker).write_text("123\n")
+    target = batch / "run.json"
+    original = {
+        "name": "original-task", "passed": passed,
+        "status": "PASSED" if passed else "FAILED",
+        "duration_seconds": 123, "cost_cents": 7, "world_model_mode": "real",
+    }
+    (output / "cloudbench-run.json").write_text(json.dumps({"tasks": [original]}))
+    initial = subprocess.run(
+        [sys.executable, str(AGGREGATE_SCRIPT), str(run), str(target)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert initial.returncode == 0, initial.stderr
+    before = json.loads(target.read_text())
+    before["tasks"][0]["lifecycle_stage"] = prior_stage
+    target.write_text(json.dumps(before))
+    # A later mutable task artifact must not replace the sealed original verdict.
+    (output / "cloudbench-run.json").write_text(json.dumps({"tasks": [{
+        **before["tasks"][0], "passed": not passed, "cost_cents": 999,
+    }]}))
+    result = subprocess.run(
+        [sys.executable, str(AGGREGATE_SCRIPT), str(run), str(target),
+         "--preserve-terminal-outcomes"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    after = json.loads(target.read_text())
+    assert after["tasks"][0]["lifecycle_stage"] == expected_stage
+    assert {k: v for k, v in after.items() if k != "tasks"} == {
+        k: v for k, v in before.items() if k != "tasks"
+    }
+    assert {k: v for k, v in after["tasks"][0].items() if k != "lifecycle_stage"} == {
+        k: v for k, v in before["tasks"][0].items() if k != "lifecycle_stage"
+    }
+    card = json.loads((batch / "report-card.json").read_text())
+    assert card["per_task"][0]["lifecycle_stage"] == expected_stage
+    wire = prepare_run_bundle_for_upload(after, required=True)
+    assert wire["tasks"][0]["lifecycle_stage"] == expected_stage
+    assert wire["tasks"][0]["passed"] == passed

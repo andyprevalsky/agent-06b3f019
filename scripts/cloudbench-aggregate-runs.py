@@ -410,7 +410,9 @@ def _preserved_terminal_projection(args, expected_provenance, expected_matrix):
         if errors or result.get("execution_task_matrix") != expected_matrix:
             raise ValueError("terminal outcome execution provenance changed")
     for task in result["tasks"]:
-        task["lifecycle_stage"] = _lifecycle_stage(args.fleet_dir / task["name"])
+        task["lifecycle_stage"] = (
+            _lifecycle_stage(args.fleet_dir / task["name"]) or task.get("lifecycle_stage")
+        )
     return result
 
 
