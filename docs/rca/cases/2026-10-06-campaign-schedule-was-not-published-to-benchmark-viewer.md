@@ -97,8 +97,12 @@ removing that guard would erase ownership and let genuine FAIL results be retrie
 Actual uploader inspection shows infrastructure bundles can carry `passed: false`
 alongside the explicit `INFRA_ERROR`/`error` terminal marker. The archived payload
 keeps that original sentinel. Canonical summaries normalize only those explicit
-infrastructure statuses to `passed: null`; ordinary task PASS/FAIL still wins over
-raw agent statuses such as ACTIVE.
+infrastructure statuses to `passed: null` only when the original verdict is not
+true. A genuine true verdict remains authoritative even if an infrastructure
+marker contradicts it; ordinary task PASS/FAIL still wins over raw agent statuses
+such as ACTIVE. Independent review exposed the contradictory-true sibling: its
+permanent refusal control failed with “Missing expected rejection,” then passed
+unchanged after preserving true. No benchmark outcome was changed.
 
 Optional `group_attempt` identifies a physical attempt of the same immutable
 logical member. Omitted metadata retains legacy attempt-one semantics. Under the

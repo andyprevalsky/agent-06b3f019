@@ -1092,6 +1092,7 @@ test("released infrastructure retry retains fifty logical members and every phys
 for (const variant of [
   "passed",
   "failed",
+  "contradictory-pass",
   "live",
   "not-released",
   "starting",
@@ -1108,6 +1109,7 @@ for (const variant of [
     const first: any = infraAttempt("reject-group", "m1");
     if (variant === "passed" || variant === "failed")
       first.tasks[0].passed = variant === "passed";
+    if (variant === "contradictory-pass") first.tasks[0].passed = true;
     if (variant === "passed" || variant === "failed")
       first.tasks[0].status = variant;
     if (variant === "not-released") first.tasks[0].lifecycle_stage = "teardown";

@@ -8,7 +8,8 @@ export function normalizeAgentId(value: unknown): string | null {
 }
 
 export function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
-  const infrastructureError = task.status === 'INFRA_ERROR' || task.status === 'error';
+  const infrastructureError =
+    task.passed !== true && (task.status === 'INFRA_ERROR' || task.status === 'error');
   const passed = !infrastructureError && typeof task.passed === 'boolean' ? task.passed : null;
   // Explicit infrastructure terminals have no benchmark verdict; their archived
   // false sentinel remains unchanged. Otherwise the verdict wins over AGENT
