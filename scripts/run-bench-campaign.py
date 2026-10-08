@@ -940,6 +940,10 @@ def main() -> int:
                 active.pop(process_id)
                 if args.retry_infra:
                     disposition = released_attempt(root, job)
+                    for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                                "resources_released", "infra_failure", "terminal_task",
+                                "released_at_epoch", "retry_blocked"):
+                        job.pop(key, None)
                     job.update(disposition)
                     job["attempts"].append({key: job.get(key) for key in (
                         "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
