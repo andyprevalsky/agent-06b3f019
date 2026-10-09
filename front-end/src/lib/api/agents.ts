@@ -245,12 +245,11 @@ export interface ReportAgentBugResult {
   success: true;
   name: string;
   url: string;
-  cursor_agent_id: string;
-  launch_source?: 'scm' | 'api';
+  run_id: string;
 }
 
 /**
- * Admin-only: launch a Cursor cloud agent to /rca this Rose agent.
+ * Admin-only: run the boxes.dev Bug Report automation to /rca this Rose agent.
  * Uses the admin token so the call still works while impersonating.
  */
 export async function reportAgentBug(
