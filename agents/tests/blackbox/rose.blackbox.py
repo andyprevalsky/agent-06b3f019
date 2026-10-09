@@ -151,7 +151,8 @@ def test_oss_pool_is_open_weights_only():
     assert oss.waterfall == ("moonshotai/kimi-k3",)
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
-    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
+    # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61"}
     for name, spec in POOL_REGISTRY.items():
         if name in auth_skipped:
             assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
