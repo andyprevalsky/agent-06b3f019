@@ -307,15 +307,14 @@ def test_native_world_retirement_owned_seed_recovers_exact_root_after_admission_
         )
 
 
-def test_native_world_retirement_caller_owned_admission_does_not_invent_a_root():
+@async_case
+async def test_native_world_retirement_caller_owned_admission_does_not_invent_a_root():
     with pytest.MonkeyPatch.context() as monkeypatch:
-        asyncio.run(
-            _assert_evaluated_before_teardown(
-                monkeypatch,
-                False,
-                terminal="error",
-                admission_failure=True,
-            )
+        await _assert_evaluated_before_teardown(
+            monkeypatch,
+            False,
+            terminal="error",
+            admission_failure=True,
         )
 
 
