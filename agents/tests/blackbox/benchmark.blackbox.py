@@ -10437,6 +10437,33 @@ def test_timeout_default_uses_task_config_when_history_is_missing():
     assert _default_timeout_for_task(task) == 120
 
 
+def test_normal_run_never_implicitly_shortens_the_benchmark_timeout():
+    """Only an explicit operator cap may stop a task before its own defined timeout."""
+    from pytest import MonkeyPatch
+
+    with MonkeyPatch.context() as monkeypatch:
+        _assert_benchmark_timeout_is_not_implicitly_shortened(monkeypatch)
+
+
+def _assert_benchmark_timeout_is_not_implicitly_shortened(monkeypatch):
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("job-applications")
+    assert task.timeout_seconds == 900
+    # Fast recent passes once derived a 104 s implicit kill for this 900 s task.
+    for p95 in (80, 5000):
+        monkeypatch.setattr(
+            bench,
+            "_history_summary",
+            lambda _name, max_seconds=None, p95=p95: {"count": 9, "recent_p95": p95, "recent_max": p95},
+        )
+        seconds, note = bench.resolve_task_execution_timeout(task)
+        assert seconds == task.timeout_seconds, note
+        assert f"recent_p95={p95}s" in note
+        assert bench.resolve_task_execution_timeout(task, bootstrap=True)[0] == task.timeout_seconds
+
+
 def test_timeout_default_respects_explicit_floor():
     """Configured fallback timeouts still honor task-specific minimum floors."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -21129,6 +21156,10 @@ async def run_all_tests():
     r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
     r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
     r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)
+    r.record(
+        "normal_run_never_implicitly_shortens_benchmark_timeout",
+        test_normal_run_never_implicitly_shortens_the_benchmark_timeout,
+    )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(

@@ -117,12 +117,6 @@ from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.spawn_contract import should_disable_saved_browser_auth
 from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.timeout_history import (
-    InsufficientHistoryError,
-)
-from benchmarks.timeout_history import (
-    get_timeout as _history_get_timeout,
-)
-from benchmarks.timeout_history import (
     summary as _history_summary,
 )
 from benchmarks.world_model_harness import (
@@ -1989,6 +1983,20 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
         timeout = min(timeout, max_seconds)
     floor = get_timeout_floor(task.name)
     return max(timeout, floor) if floor else timeout
+
+
+def resolve_task_execution_timeout(task: BenchmarkTask, *, bootstrap: bool = False) -> tuple[int, str]:
+    """Resolve one task's execution timeout and a short provenance note.
+
+    The benchmark definition owns the timeout. Recent pass history is reported
+    for diagnosis but never shortens or extends it; only an explicit operator
+    cap (--timeout / BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS) may stop a task early.
+    """
+    cap = get_smoke_cap(task.name)
+    seconds = _default_timeout_for_task(task, cap)
+    s = _history_summary(task.name, max_seconds=cap)
+    mode = "bootstrap; " if bootstrap else ""
+    return seconds, f"{mode}benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
 
 
 # ============================================================
@@ -4209,7 +4217,7 @@ async def _poll_agent(
         elapsed = time.time() - start
         if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
-                f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+                f"Timeout after {elapsed:.0f}s (task timeout={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
                 f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             )
@@ -15233,43 +15241,15 @@ async def main_async(args):
 
     await _update_world_model_before_simulation(args)
 
-    # Pre-flight: resolve per-task timeout from history corpus.
-    # In bootstrap mode, always use tasks.json timeout_seconds as the ceiling — passes
-    # recorded this run seed/extend the corpus for future dynamic caps. This lets
-    # bootstrap widen the cap when infra slowdown has pushed real durations past the
-    # existing p95 (otherwise the tight dynamic cap kills every run before it can pass).
-    # In non-bootstrap mode, incomplete history falls back to the configured task
-    # timeout so new or low-sample tasks can still run and accumulate pass data.
+    # Pre-flight: resolve each task's execution timeout.
     for t in tasks:
         if polar_wall_clock_disabled(t):
             budget = polar_browser_step_budget(t)
             t._resolved_timeout_seconds = 0
             print(f"  🧭 {t.name} → wall-clock disabled; browser step budget={budget if budget is not None else '—'}")
             continue
-        if args.bootstrap:
-            t._resolved_timeout_seconds = t.timeout_seconds
-            s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
-            print(
-                f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
-                f"(history n={s['count']}, recent_max={s['recent_max']}s)"
-            )
-            continue
-        cap = get_smoke_cap(t.name)
-        try:
-            history_timeout = _history_get_timeout(t.name, max_seconds=cap)
-        except InsufficientHistoryError as e:
-            t._resolved_timeout_seconds = _default_timeout_for_task(t, cap)
-            print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s (default; history n={e.have}/{e.need})")
-        else:
-            floor = get_timeout_floor(t.name)
-            t._resolved_timeout_seconds = max(history_timeout, floor) if floor else history_timeout
-            s = _history_summary(t.name, max_seconds=cap)
-            cap_note = f", cap={cap}s" if cap else ""
-            floor_note = f", floor={floor}s" if floor else ""
-            print(
-                f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note}{floor_note})"
-            )
+        t._resolved_timeout_seconds, note = resolve_task_execution_timeout(t, bootstrap=args.bootstrap)
+        print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
 
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()
