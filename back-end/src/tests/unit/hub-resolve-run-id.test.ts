@@ -33,10 +33,10 @@ import {
   parseHubAgentRunIndexRevision,
   parseHubRunBundle,
   peekHubResolutionForTest,
-  rebuildHubAgentRunIndex,
   recoverableHubAgentRunRevision,
   resolveHubRunIdFromAgentIndex,
   resolveHubRunIdFromIndexes,
+  salvagedHubAgentRunIndex,
 } from '../../providers/benchmarkHubStore';
 
 let passed = 0;
@@ -183,46 +183,81 @@ test('revision floor is strict while malformed-index revision salvage trusts no 
   assert.equal(recoverableHubAgentRunRevision('not-json'), 0);
 });
 
-asyncTest(
-  'mutation repair rebuilds every authoritative bundle above the durable floor',
-  async () => {
-    const rebuilt = await rebuildHubAgentRunIndex(
-      [
-        { ...runs[0], run_id: 'newer-run' },
-        { ...runs[0], run_id: 'older-run' },
-      ],
-      async (runId) => ({
-        tasks: [
-          {
-            agent_id: `${runId}-root`,
-            logs: {
-              tree: {
-                shared: { parent_agent_id: `${runId}-root` },
-                [`${runId}-child`]: { parent_agent_id: `${runId}-root` },
-              },
-            },
-          },
-        ],
-      }),
-      73
-    );
-    assert.equal(rebuilt.revision, 73);
-    assert.equal(rebuilt.complete, true);
-    assert.equal(rebuilt.agents.get('shared'), 'newer-run');
-    assert.equal(rebuilt.agents.get('older-run-child'), 'older-run');
-  }
-);
-
-asyncTest('mutation repair stays incomplete by rejecting an unreadable bundle', async () => {
-  await assert.rejects(
-    rebuildHubAgentRunIndex(
-      runs,
-      async () => {
-        throw new Error('synthetic unreadable authoritative bundle');
+test('mutation repair re-derives catalog roots and keeps live child mappings without bundles', () => {
+  const salvaged = salvagedHubAgentRunIndex(
+    {
+      revision: 72,
+      complete: true,
+      agents: new Map([
+        ['reused-root', 'older-run'],
+        ['older-child', 'older-run'],
+        ['deleted-agent', 'deleted-run'],
+      ]),
+    },
+    [
+      {
+        run_id: 'newer-run',
+        uploaded_at: '2026-10-08T22:49:30Z',
+        tasks: [{ agent_id: 'reused-root' }],
       },
-      73
+      {
+        run_id: 'older-run',
+        uploaded_at: '2026-10-08T22:40:00Z',
+        tasks: [{ agent_id: 'reused-root' }],
+      },
+      { run_id: 'error-run', uploaded_at: '2026-07-16T01:38:37Z', tasks: [] },
+    ],
+    73
+  );
+  assert.equal(salvaged.revision, 73);
+  assert.equal(salvaged.repairedRevision, 73);
+  assert.equal(salvaged.complete, false);
+  assert.deepEqual(Object.fromEntries(salvaged.agents), {
+    'reused-root': 'newer-run',
+    'older-child': 'older-run',
+  });
+});
+
+test('mutation repair of an unparseable index trusts only the catalog', () => {
+  assert.deepEqual(
+    salvagedHubAgentRunIndex(null, [{ run_id: 'run-1', tasks: [{ agent_id: 'root-1' }] }], 9),
+    { revision: 9, complete: false, repairedRevision: 9, agents: new Map([['root-1', 'run-1']]) }
+  );
+});
+
+test('a backfill scanned before the latest salvage cannot publish completion', () => {
+  const current = {
+    revision: 75,
+    complete: false,
+    repairedRevision: 73,
+    agents: new Map([['root', 'run-1']]),
+  };
+  const valid = new Set(['run-1']);
+  assert.equal(completedHubAgentBackfill(current, new Map(), valid, 72).complete, false);
+  assert.equal(completedHubAgentBackfill(current, new Map(), valid).complete, false);
+  const fresh = completedHubAgentBackfill(current, new Map(), valid, 74);
+  assert.equal(fresh.complete, true);
+  assert.equal(fresh.repairedRevision, 73);
+  assert.equal(
+    completedHubAgentBackfill({ ...current, repairedRevision: undefined }, new Map(), valid)
+      .complete,
+    true
+  );
+});
+
+test('the salvage revision round-trips and is validated', () => {
+  assert.deepEqual(
+    parseHubAgentRunIndex(
+      '{"version":1,"revision":4,"complete":false,"repaired_revision":3,"agents":{}}'
     ),
-    /synthetic unreadable authoritative bundle/
+    { revision: 4, complete: false, repairedRevision: 3, agents: new Map() }
+  );
+  assert.throws(
+    () =>
+      parseHubAgentRunIndex(
+        '{"version":1,"revision":4,"complete":false,"repaired_revision":-1,"agents":{}}'
+      ),
+    /Invalid Benchmark Hub agent-run index/
   );
 });
 
@@ -287,6 +322,23 @@ test('strict run bundle schema rejects valid JSON that cannot contain agent ids'
   assert.throws(() => parseHubRunBundle('{}'), /Invalid Benchmark Hub run bundle/);
   assert.throws(() => parseHubRunBundle('{"tasks":"corrupt"}'), /Invalid Benchmark Hub run bundle/);
   assert.deepEqual(parseHubRunBundle('{"tasks":[]}'), { tasks: [] });
+});
+
+test('only a zero-task catalog summary admits a legacy record without a task list', () => {
+  const legacy = '{"error":"dispatch failed","run_id":"hub-1","code":1}';
+  assert.deepEqual(parseHubRunBundle(legacy, { tasks: [] }), {
+    error: 'dispatch failed',
+    run_id: 'hub-1',
+    code: 1,
+    tasks: [],
+  });
+  assert.deepEqual(parseHubRunBundle('{"tasks":null}', { tasks: [] }), { tasks: [] });
+  assert.throws(
+    () => parseHubRunBundle(legacy, { tasks: [{ agent_id: 'root' }] }),
+    /Invalid Benchmark Hub run bundle/
+  );
+  assert.throws(() => parseHubRunBundle('[]', { tasks: [] }), /Invalid Benchmark Hub run bundle/);
+  assert.throws(() => parseHubRunBundle('{"run_id":', { tasks: [] }), SyntaxError);
 });
 
 test('authoritative refresh clears stale hit cache and rejects an older revision', () => {

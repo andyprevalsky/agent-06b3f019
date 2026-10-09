@@ -38,7 +38,7 @@ let latestAppliedRevision = 0;
 
 export type CompactIndexLoadResult =
   | { kind: 'ready' }
-  | { kind: 'legacy'; seed: Map<string, string> }
+  | { kind: 'legacy'; seed: Map<string, string>; revision: number }
   | { kind: 'stale' }
   | { kind: 'error' };
 
@@ -54,7 +54,7 @@ function yieldToEventLoop(): Promise<void> {
 /** Build the archived child-agent lookup without starving live HTTP requests. */
 export async function buildHubAgentIdIndex(
   index: HubRunSummary[],
-  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  loadBundle: (runId: string, summary: HubRunSummary) => Promise<Record<string, unknown> | null>,
   seed: Map<string, string> = new Map()
 ): Promise<Map<string, string>> {
   const map = new Map(seed);
@@ -64,7 +64,7 @@ export async function buildHubAgentIdIndex(
     // cannot monopolize the backend while a client-created agent UUID is still
     // racing its POST /api/agents commit.
     await yieldToEventLoop();
-    const bundle = await loadBundle(run.run_id);
+    const bundle = await loadBundle(run.run_id, run);
     if (bundle === null) continue;
     for (const id of agentIdsFromHubBundle(bundle)) {
       if (!map.has(id)) map.set(id, run.run_id);
@@ -76,7 +76,7 @@ export async function buildHubAgentIdIndex(
 /** Failed bundle reads reject before the completion callback can publish the migration. */
 export async function backfillHubAgentRunIndex(
   index: HubRunSummary[],
-  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  loadBundle: (runId: string, summary: HubRunSummary) => Promise<Record<string, unknown> | null>,
   seed: Map<string, string>,
   persist: (agents: Map<string, string>) => Promise<HubAgentRunIndexSnapshot>
 ): Promise<HubAgentRunIndexSnapshot> {
@@ -86,7 +86,7 @@ export async function backfillHubAgentRunIndex(
 /** Catalog faults reject before a migration can publish complete=true. */
 export async function backfillHubAgentRunIndexFromCatalog(
   loadRuns: () => Promise<HubRunSummary[]>,
-  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  loadBundle: (runId: string, summary: HubRunSummary) => Promise<Record<string, unknown> | null>,
   seed: Map<string, string>,
   persist: (agents: Map<string, string>) => Promise<HubAgentRunIndexSnapshot>
 ): Promise<HubAgentRunIndexSnapshot> {
@@ -111,7 +111,11 @@ export async function loadCompactHubAgentIndex(
   try {
     const persisted = await loadIndex();
     if (persisted === null || !persisted.complete) {
-      return { kind: 'legacy', seed: persisted?.agents ?? new Map() };
+      return {
+        kind: 'legacy',
+        seed: persisted?.agents ?? new Map(),
+        revision: persisted?.revision ?? 0,
+      };
     }
     return installHubAgentRunIndex(persisted) ? { kind: 'ready' } : { kind: 'stale' };
   } catch (error: unknown) {
@@ -141,7 +145,7 @@ function startCompactIndexLoad(): Promise<CompactIndexLoadResult> {
   return compactIndexLoadPromise;
 }
 
-function scheduleLegacyBackfill(seed: Map<string, string>): void {
+function scheduleLegacyBackfill(seed: Map<string, string>, seedRevision: number): void {
   if (legacyBackfillPromise !== null || Date.now() < legacyBackfillRetryAt) return;
   // Archives created before agent-run-index.json need exactly one cooperative
   // backfill. Persisting complete=true makes later process starts independent
@@ -151,7 +155,7 @@ function scheduleLegacyBackfill(seed: Map<string, string>): void {
       listRunsStrict,
       getRunBundleStrict,
       seed,
-      persistHubAgentRunBackfill
+      (agents) => persistHubAgentRunBackfill(agents, seedRevision)
     );
     installHubAgentRunIndex(stored);
     legacyBackfillFailureCount = 0;
@@ -175,7 +179,7 @@ function scheduleCompactIndexRefresh(): void {
   const fresh = childIdToRun !== null && Date.now() - childIdIndexLoadedAt < AGENT_INDEX_REFRESH_MS;
   if (fresh || compactIndexLoadPromise !== null || Date.now() < compactIndexRetryAt) return;
   void startCompactIndexLoad().then((result) => {
-    if (result.kind === 'legacy') scheduleLegacyBackfill(result.seed);
+    if (result.kind === 'legacy') scheduleLegacyBackfill(result.seed, result.revision);
   });
 }
 
@@ -285,7 +289,7 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
   }
   if (childIdToRun === null) {
     const load = await startCompactIndexLoad();
-    if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
+    if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed, load.revision);
     if (load.kind !== 'ready') {
       throw new BenchmarkHubUnavailableError(
         load.kind === 'legacy'

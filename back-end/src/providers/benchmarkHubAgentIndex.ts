@@ -4,6 +4,8 @@ export interface HubAgentRunIndexDocument {
   version: 1;
   revision: number;
   complete: boolean;
+  /** Revision of the last locked salvage; a backfill read before it is stale. */
+  repaired_revision?: number;
   agents: Record<string, string>;
 }
 
@@ -15,7 +17,23 @@ export interface HubAgentRunIndexRevisionDocument {
 export interface HubAgentRunIndexSnapshot {
   revision: number;
   complete: boolean;
+  repairedRevision?: number;
   agents: Map<string, string>;
+}
+
+/** Catalog fields a bundle-free repair may trust: run identity, upload order, root agents. */
+export interface HubAgentIndexCatalogRun {
+  run_id: string;
+  uploaded_at?: string;
+  tasks: Array<{ agent_id?: string | null }>;
+}
+
+function repairedRevisionOf(
+  snapshot: HubAgentRunIndexSnapshot | null
+): Pick<HubAgentRunIndexSnapshot, 'repairedRevision'> {
+  return snapshot?.repairedRevision === undefined
+    ? {}
+    : { repairedRevision: snapshot.repairedRevision };
 }
 
 export function hubAgentIndexAfterPut(
@@ -34,6 +52,7 @@ export function hubAgentIndexAfterPut(
   return {
     revision: (current?.revision ?? 0) + 1,
     complete: current?.complete ?? indexWasEmpty,
+    ...repairedRevisionOf(current),
     agents,
   };
 }
@@ -49,15 +68,21 @@ export function hubAgentIndexAfterDelete(
   return {
     revision: current.revision + 1,
     complete: current.complete,
+    ...repairedRevisionOf(current),
     agents,
   };
 }
 
-/** Current locked uploads win over a legacy scan; deleted runs stay absent. */
+/**
+ * Current locked uploads win over a legacy scan; deleted runs stay absent. A scan
+ * that started before the latest locked salvage may have missed the mappings
+ * that salvage lost, so it merges what it found but cannot declare completion.
+ */
 export function completedHubAgentBackfill(
   current: HubAgentRunIndexSnapshot | null,
   backfilled: Map<string, string>,
-  validRunIds: Set<string>
+  validRunIds: Set<string>,
+  scanStartRevision?: number
 ): HubAgentRunIndexSnapshot {
   const agents = new Map<string, string>();
   for (const [agentId, runId] of current?.agents ?? []) {
@@ -66,9 +91,13 @@ export function completedHubAgentBackfill(
   for (const [agentId, runId] of backfilled) {
     if (validRunIds.has(runId) && !agents.has(agentId)) agents.set(agentId, runId);
   }
+  const repairedRevision = current?.repairedRevision;
   return {
     revision: (current?.revision ?? 0) + 1,
-    complete: true,
+    complete:
+      repairedRevision === undefined ||
+      (scanStartRevision !== undefined && repairedRevision < scanStartRevision),
+    ...repairedRevisionOf(current),
     agents,
   };
 }
@@ -88,6 +117,12 @@ export function parseHubAgentRunIndex(raw: string | null): HubAgentRunIndexSnaps
   ) {
     throw new Error('Invalid Benchmark Hub agent-run index');
   }
+  if (
+    parsed.repaired_revision !== undefined &&
+    (!Number.isSafeInteger(parsed.repaired_revision) || parsed.repaired_revision < 0)
+  ) {
+    throw new Error('Invalid Benchmark Hub agent-run index');
+  }
   const agents = new Map<string, string>();
   for (const [agentId, runId] of Object.entries(parsed.agents)) {
     if (!agentId || typeof runId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(runId)) {
@@ -98,6 +133,9 @@ export function parseHubAgentRunIndex(raw: string | null): HubAgentRunIndexSnaps
   return {
     revision: parsed.revision as number,
     complete: parsed.complete,
+    ...(parsed.repaired_revision === undefined
+      ? {}
+      : { repairedRevision: parsed.repaired_revision }),
     agents,
   };
 }
@@ -128,20 +166,37 @@ export function recoverableHubAgentRunRevision(raw: string | null): number {
   }
 }
 
-/** Rebuild every mapping; any unreadable run aborts before complete can be published. */
-export async function rebuildHubAgentRunIndexWithExtractor(
-  index: Array<{ run_id: string }>,
-  loadBundle: (runId: string) => Promise<Record<string, unknown>>,
-  durableRevisionFloor: number,
-  extractAgentIds: (bundle: Record<string, unknown>) => string[]
-): Promise<HubAgentRunIndexSnapshot> {
+/**
+ * Repair an inconsistent index without reading run bundles. Root agents are
+ * re-derived from the catalog (newest upload wins, as for locked puts); child
+ * mappings that still point at catalog runs are kept. Whatever else a failed
+ * write lost is unknown, so the cooperative out-of-lock backfill restores it.
+ */
+export function salvagedHubAgentRunIndex(
+  persisted: HubAgentRunIndexSnapshot | null,
+  catalog: HubAgentIndexCatalogRun[],
+  durableRevisionFloor: number
+): HubAgentRunIndexSnapshot {
+  const validRunIds = new Set(catalog.map((run) => run.run_id));
   const agents = new Map<string, string>();
-  for (const run of index) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const bundle = await loadBundle(run.run_id);
-    for (const agentId of extractAgentIds(bundle)) {
-      if (!agents.has(agentId)) agents.set(agentId, run.run_id);
+  for (const [agentId, runId] of persisted?.agents ?? []) {
+    if (validRunIds.has(runId)) agents.set(agentId, runId);
+  }
+  const newestRoot = new Map<string, HubAgentIndexCatalogRun>();
+  for (const run of catalog) {
+    for (const task of run.tasks) {
+      if (!task.agent_id) continue;
+      const known = newestRoot.get(task.agent_id);
+      if (known === undefined || (run.uploaded_at ?? '') > (known.uploaded_at ?? '')) {
+        newestRoot.set(task.agent_id, run);
+      }
     }
   }
-  return { revision: durableRevisionFloor, complete: true, agents };
+  for (const [agentId, run] of newestRoot) agents.set(agentId, run.run_id);
+  return {
+    revision: durableRevisionFloor,
+    complete: false,
+    repairedRevision: durableRevisionFloor,
+    agents,
+  };
 }
