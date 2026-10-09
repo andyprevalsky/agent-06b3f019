@@ -49,6 +49,17 @@ OUTCOME_DISTRIBUTION_POLICY = "rose-outcome-distribution-v1"
 OUTCOME_DISTRIBUTION_VERSION = "1"
 OUTCOME_DISTRIBUTION_SHA256 = "650945bf68ee4ba66a6c9f9dca1c3d66be85dd50360f287cb5c924edb2c8ad70"
 OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256 = "9bc7c6e255737d202741cc50334bf06bf8428180cf90ae8c1cf32361e86f86b2"
+OUTCOME_DISTRIBUTION_V2_POLICY = "rose-outcome-distribution-v2"
+OUTCOME_DISTRIBUTION_V2_VERSION = "2"
+OUTCOME_DISTRIBUTION_V2_SHA256 = "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0"
+OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256 = "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470"
+OUTCOME_DISTRIBUTION_V2_TEXT = (
+    DISTRIBUTION_TEXT.replace('"description":"possible result"', '"description":"probability justification, not an event description"')
+    + "\n\nJustify each probability briefly from evidence and uncertainty, relative to the other outcomes."
+    + "\n\nIn this simulation, all approvals needed by the candidate tool are granted during its execution."
+    + "\nExplain probabilities against goal-implied alternatives; justify omitting plausible ones."
+    + "\nSimulate newly discovered public evidence; lack of input verification does not exclude an outcome."
+)
 
 
 def text_sha256(text: str) -> str:
@@ -115,6 +126,13 @@ _POLICIES = {
         OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256,
         DISTRIBUTION_PROTOCOL,
     ),
+    OUTCOME_DISTRIBUTION_V2_POLICY: ExecutionPolicy(
+        OUTCOME_DISTRIBUTION_V2_POLICY,
+        OUTCOME_DISTRIBUTION_V2_VERSION,
+        OUTCOME_DISTRIBUTION_V2_TEXT,
+        OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256,
+        DISTRIBUTION_PROTOCOL,
+    ),
 }
 _IMMUTABLE_IDENTITIES = {
     DEFAULT_EXECUTION_POLICY: ("1", text_sha256(""), BASE_SYSTEM_SHA256),
@@ -133,6 +151,11 @@ _IMMUTABLE_IDENTITIES = {
         OUTCOME_DISTRIBUTION_SHA256,
         OUTCOME_DISTRIBUTION_EFFECTIVE_SYSTEM_SHA256,
     ),
+    OUTCOME_DISTRIBUTION_V2_POLICY: (
+        OUTCOME_DISTRIBUTION_V2_VERSION,
+        OUTCOME_DISTRIBUTION_V2_SHA256,
+        OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256,
+    ),
 }
 
 
@@ -149,7 +172,11 @@ def execution_policy(name: str = DEFAULT_EXECUTION_POLICY) -> ExecutionPolicy:
         )
         != _IMMUTABLE_IDENTITIES[name]
         or policy.response_protocol
-        != (DISTRIBUTION_PROTOCOL if name == OUTCOME_DISTRIBUTION_POLICY else BASE_PROTOCOL_VERSION)
+        != (
+            DISTRIBUTION_PROTOCOL
+            if name in {OUTCOME_DISTRIBUTION_POLICY, OUTCOME_DISTRIBUTION_V2_POLICY}
+            else BASE_PROTOCOL_VERSION
+        )
     ):
         raise ValueError("WMH execution policy changed without a new version")
     return policy

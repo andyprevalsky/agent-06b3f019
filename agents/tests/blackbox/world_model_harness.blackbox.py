@@ -2053,13 +2053,15 @@ def test_index_refresh_parallel_embeddings_match_in_process():
             restore()
 
 
-def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
+def test_partial_run_recovers_completed_tool_results_from_llm_contexts(extra_messages=0):
     """Missing-end runs still export completed tool pairs captured by later LLM calls."""
 
     from benchmarks.world_model_harness import load_grounded_transitions
     from helpers.trace_archive import archive_json
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # Real archive writes can share a millisecond. Freeze that clock so the
+    # corpus must preserve observed context order without wall-clock spacing.
+    with tempfile.TemporaryDirectory() as tmp, patch("helpers.trace_archive.time.time", return_value=1700000000.0):
         restore = _with_archive_env(tmp)
         try:
             root = "root-partial-llm"
@@ -2131,6 +2133,7 @@ def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
                             "tool_call_id": "call-explore",
                             "content": "real explore result",
                         },
+                        *[{"role": "user", "content": "unrelated later turn"}] * extra_messages,
                     ],
                 },
             )
@@ -2151,6 +2154,10 @@ def test_partial_run_recovers_completed_tool_results_from_llm_contexts():
             )
         finally:
             restore()
+
+
+def test_partial_context_growth_preserves_observed_tool_result_order():
+    test_partial_run_recovers_completed_tool_results_from_llm_contexts(extra_messages=10)
 
 
 def test_index_records_survive_unicode_line_breaks_in_observations():
@@ -5432,6 +5439,10 @@ async def run_all_tests():
     r.record(
         "partial_run_recovers_completed_tool_results_from_llm_contexts",
         test_partial_run_recovers_completed_tool_results_from_llm_contexts,
+    )
+    r.record(
+        "partial_context_growth_preserves_observed_tool_result_order",
+        test_partial_context_growth_preserves_observed_tool_result_order,
     )
     r.record(
         "index_records_survive_unicode_line_breaks_in_observations",

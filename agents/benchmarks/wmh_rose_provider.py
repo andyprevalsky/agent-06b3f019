@@ -105,6 +105,18 @@ _WMH_CALL_SITES = {
 }
 
 
+def _prompt_text(content: object) -> str:
+    """Read pure text provider blocks without dropping any native evidence."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and all(
+        isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        for block in content
+    ):
+        return "".join(block["text"] for block in content)
+    raise TypeError("Native WMH evidence must contain only text")
+
+
 def _wmh_cache_key_material(request: object) -> object:
     """Ignore action-envelope timestamps in cache keys, never in model input.
 
@@ -121,13 +133,16 @@ def _wmh_cache_key_material(request: object) -> object:
         if (
             not isinstance(message, dict)
             or message.get("role") != "user"
-            or not isinstance(message.get("content"), str)
         ):
             messages.append(message)
             continue
         try:
-            native = json.loads(message["content"])
-        except (ValueError, TypeError):
+            text = _prompt_text(message.get("content"))
+            native = json.loads(text)
+        except TypeError:
+            messages.append(message)
+            continue
+        except ValueError:
             native = None
         if isinstance(native, dict) and "candidate_response" in native:
             calls = native.get("candidate_response", {}).get("tool_calls", [])
@@ -139,12 +154,19 @@ def _wmh_cache_key_material(request: object) -> object:
             )
             continue
         lines = []
-        for line in message["content"].splitlines(keepends=True):
+        for line in text.splitlines(keepends=True):
             if line.startswith("  arguments: ") or line.startswith("tool_call "):
                 line = _ACTION_TIMESTAMP_RE.sub(r"\g<1><timestamp_ms>", line)
             lines.append(line)
         messages.append({**message, "content": "".join(lines)})
-    return {**request, "messages": messages}
+    material = {**request, "messages": messages}
+    namespace = material.get("cache_namespace")
+    if isinstance(namespace, str) and namespace.startswith("wmh:session:"):
+        # Affinity is a provider routing hint, not simulation evidence. Retain
+        # the old None-valued key shape so a new native session can replay an
+        # otherwise exact request; call IDs, state and policy still bind it.
+        material["cache_namespace"] = None
+    return material
 
 
 class _WMHFastCacheContext(FastCacheContext):
@@ -194,7 +216,7 @@ def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
         if message.get("role") != "user":
             continue
         try:
-            evidence = json.loads(message["content"])
+            evidence = json.loads(_prompt_text(message["content"]))
         except (ValueError, TypeError, KeyError):
             continue
         if isinstance(evidence, dict) and isinstance(evidence.get("candidate_response"), dict):
@@ -215,7 +237,7 @@ def _native_environment_state(messages: list[dict]) -> dict | None:
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         try:
-            evidence = json.loads(message["content"])
+            evidence = json.loads(_prompt_text(message["content"]))
         except (ValueError, TypeError, KeyError):
             continue
         if not isinstance(evidence, dict) or "candidate_response" not in evidence:
@@ -604,7 +626,11 @@ class RoseWMHProvider:
                 raise ValueError("Native prediction ID reused for a different request")
             task = existing[1]
         else:
-            task = asyncio.create_task(self._complete_async(system, messages, max_tokens=max_tokens))
+            task = asyncio.create_task(
+                self._complete_async(
+                    system, messages, max_tokens=max_tokens, cache_namespace=f"wmh:session:{session_id}"
+                )
+            )
             operations[prediction_id] = (identity, task)
 
             def completed(done):
@@ -684,6 +710,7 @@ class RoseWMHProvider:
         messages: List["Message"],
         *,
         max_tokens: int,
+        cache_namespace: str | None = None,
     ) -> "Completion":
         # Import the vendored value types lazily so importing this module doesn't require
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
@@ -719,6 +746,7 @@ class RoseWMHProvider:
                 gpt_auth=gpt_auth,
                 call_site=_WMH_CALL_SITES[self._protocol],
                 dump_context=False,
+                cache_namespace=cache_namespace,
             )
         except _WMHInvalidPrediction as exc:
             self._record_usage(exc.usage, exc.actual_model)
@@ -814,5 +842,59 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
     if system:
         rose.append({"role": "system", "content": system})
     for m in messages:
-        rose.append({"role": m.role, "content": m.content})
+        content = m.content
+        if m.role == "user" and isinstance(content, str):
+            try:
+                native = json.loads(content)
+            except ValueError:
+                native = None
+            if (
+                isinstance(native, dict)
+                and "candidate_response" in native
+                and isinstance(native.get("task"), dict)
+            ):
+                # The upstream sorted JSON puts the changing action first.
+                # Keep all values, but place shared task context before it so
+                # provider prompt caching can reuse more than the system alone.
+                order = (
+                    "task",
+                    "grounding_schema_version",
+                    "environment_state",
+                    "visible_conversation",
+                    "grounding_contexts",
+                    "grounded_examples",
+                )
+                task = native["task"]
+                if all(key in task for key in ("initial_context", "instruction", "task_id")):
+                    # Mark the reusable task context explicitly. A short system
+                    # breakpoint and a changing whole-user breakpoint cannot
+                    # reliably reuse this partial JSON prefix on newer models.
+                    stable_keys = ("initial_context", "instruction", "task_id")
+                    def encode(value: object) -> str:
+                        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+                    stable = {key: task[key] for key in stable_keys}
+                    remainder = {key: value for key, value in task.items() if key not in stable}
+                    tail = {key: native[key] for key in order if key in native and key != "task"}
+                    tail.update({
+                        key: value for key, value in native.items()
+                        if key not in tail and key not in {"task", "candidate_response"}
+                    })
+                    tail["candidate_response"] = native["candidate_response"]
+                    prefix = '{"task":' + encode(stable)[:-1]
+                    task_end = "," + encode(remainder)[1:] if remainder else "}"
+                    content = [
+                        {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": task_end, "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "," + encode(tail)[1:]},
+                    ]
+                elif next(iter(native)) != "task":
+                    ordered = {key: native[key] for key in order if key in native}
+                    ordered.update({
+                        key: value for key, value in native.items()
+                        if key not in ordered and key != "candidate_response"
+                    })
+                    ordered["candidate_response"] = native["candidate_response"]
+                    content = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
+        rose.append({"role": m.role, "content": content})
     return rose

@@ -74,10 +74,9 @@ def distribution_reply(request, *, probability=0.05):
     )
 
 
-def distribution_model(complete, **kwargs):
+def distribution_model(complete, *, policy="rose-outcome-distribution-v1", **kwargs):
     from benchmarks.wmh_execution_policy import execution_identity
 
-    policy = "rose-outcome-distribution-v1"
     return ParallelWorldModel(
         complete,
         Retriever(),
@@ -87,7 +86,8 @@ def distribution_model(complete, **kwargs):
     )
 
 
-def test_distribution_samples_once_commits_only_selected_branch_and_retains_full_state():
+@pytest.mark.parametrize("policy", ["rose-outcome-distribution-v1", "rose-outcome-distribution-v2"])
+def test_distribution_samples_once_commits_only_selected_branch_and_retains_full_state(policy):
     async def run():
         requests, records, draws = [], [], []
 
@@ -99,7 +99,7 @@ def test_distribution_samples_once_commits_only_selected_branch_and_retains_full
             requests.append(request)
             return distribution_reply(request)
 
-        model = distribution_model(complete, sample_uniform=draw, record_prediction=records.append)
+        model = distribution_model(complete, policy=policy, sample_uniform=draw, record_prediction=records.append)
         seed = {"private_facts": {"company": None}, "receipts": ["prior"], "funds_cents": 0}
         session = model.new_session("Submit an inquiry; do not invent company facts", seed, "root")
         result = await model.step(session.id, action(1), "inv-1")

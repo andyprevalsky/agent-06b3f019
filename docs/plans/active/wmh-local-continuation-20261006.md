@@ -1,12 +1,121 @@
 # WMH build and fundraiser benchmark: local continuation
 
-Status: WIP snapshot on remote branch `codex/wmh-handoff-20261006` from the
-cloud `porto-novo` checkout on 2026-10-06. This branch preserves its tracked
-and untracked source changes. It is **not merged or deployed**. The October 1
+Status: WIP continuation on `codex/wmh-experiential-parallel-20261006`, descended
+from the October 6 cloud handoff `codex/wmh-handoff-20261006`. This branch
+preserves the original source and subsequent diagnostics. It is **not merged
+or deployed**. The October 1
 `/deploy` of `a4b605f` was a separate change and did not ship this WMH work.
 For a checkout from another branch, use the local Git worktree command in
 `WMH_HANDOFF.md`. Portable run records and reports are included under
 `docs/plans/active/wmh-evidence-20261006/`.
+
+## October 8 draft-PR continuation checkpoint
+
+The user requested publishing all WIP changes and continuation instructions.
+Read `WMH_HANDOFF.md` first for the current resume point and exact resource
+state. Portable evidence is in `wmh-evidence-20261006/cache-optimization-20261008/`.
+The original fundraiser acceptance remains unsuccessful; deployment and merge
+are held. Current main was fetched at `b1e8a47e3` and still needs careful
+integration (209 main-only / 30 branch-only commits before this checkpoint).
+
+The five-minute cache baseline completed: 1,367 cached / 16,341 metered WMH
+input tokens (8.365461%), 10,978 output tokens, one cached request of two metered
+requests, and DEMO 0/4 lookups with two stores. Two additional native attempts
+were cancelled without final provider usage. Both cleanup receipts are clean;
+native revision 2 joined, $0 settled, and the durable FE replay was verified
+with 20 messages. These totals do not include unknown cancelled usage.
+
+Iteration 1's full-task cache marker is applied and its registered WMH blackbox
+passed (89 provider / 37 native checks). Its benchmark was interrupted while
+the model loaded, before a root was allocated or the 300-second task window
+started; no measured iteration-1 result or clean receipt exists. Stopped owned
+Docker containers/volumes and original ownership metadata remain for recovery.
+Iterations 2 and 3 are reviewed, unapplied patches. Run iteration 1, then apply
+each patch sequentially, promote the history guards with iteration 2, and run
+the owning suite plus a fresh-cache 300-second benchmark for each condition.
+Preserve all simulation/model/policy inputs and parallelism. Offline estimates
+of prefix reuse are not live cache rates. The separate role diagnostic records
+two GPT-6.1 Sol xhigh public explanations; it does not prove original hidden
+role confusion and changed no runtime prompts.
+
+## October 8 fresh-cache distribution diagnostic
+
+The user's latest authorized run is complete. In isolated worktree
+`rose-wmh-experiential-parallel`, branch
+`codex/wmh-experiential-parallel-20261006`, the unchanged fundraiser ran with
+the explicit 1800-second timeout, a fresh goal-scoped DEMO cache, and
+GPT-6.1 Sol xhigh as the WMH model. Root/general-purpose model defaults,
+task prompt, price cap, evaluators, initial company facts and warm-network
+environment were unchanged. The new immutable local
+`rose-outcome-distribution-v2` policy activates the previously tested
+probability-justification, approval-assumption and public-evidence/omission
+instructions; this is not a deployment or full conformance qualification.
+
+Run `bbbdb300-bde5-4386-8463-cbef0cba9319`, root
+`f8065e19-2fc5-4557-82a8-62dfadde5382`, failed: the harness observed
+`Timeout after 1842s (dynamic cap=1800s)`. Reported task duration including
+fixture setup is 1972.5 seconds. The joined native retirement at revision 15
+confirms $0 settled proceeds, no commitments, signed instruments, pending
+wires or incoming Brex transfers. One internal email was simulated as sent
+after correcting the sender identity. No investor-form submission occurred.
+There were 75 native prediction attempts for 20 invocations and 15 committed
+transitions, with state rebases reaching six retries and actual provider /
+internal deadline errors. Proposal records are not commit evidence.
+
+Final WMH DEMO response-cache hit rate: **0/75 (0%)**, with 68 stored responses
+and no cache lookup failures. WMH provider prompt-cache reads:
+**0/1,813,251 input tokens (0%)**. The agent-tree cache metric of 40% measures
+different model calls and must not be substituted for either WMH rate.
+
+Benchmark and stack cleanup receipts are clean; the exact WMH session joined,
+the four-agent tree sealed/deleted, recorded serving processes retired, and
+the owned Docker container and volume are absent. The initial archive warning
+was resolved by publishing the frozen run bundle through
+`scripts/publish_evidence_links.py`; the share link rendered and reloaded in
+a fresh browser with 34 root messages. This verifies the cutoff transcript,
+not a successful fundraiser or completion of pending archived tool cards.
+The verified share-link manifest and independent final audit are under
+`.context/wmh-fundraiser-distribution-20261008/`; see `final-run-review.json`
+and `published/f8065e19-2fc5-4557-82a8-62dfadde5382/manifest.json`.
+The exact benchmark JSON is
+`agents/benchmarks/runs/20261008_035456_bbbdb300-bde5-4386-8463-cbef0cba9319_raise-5m-rose-labs-brex.json`.
+Portable outcome, cache, cleanup, exact Browser goals and verified share-link
+receipts are in `wmh-evidence-20261006/wmh-fundraiser-distribution-20261008.json`.
+Owning checks passed before execution: provider/pricing 88, native 37, and
+Ruff. Fresh full conformance, the broader fundraiser goal and the deferred
+nonzero warm-network environment remain open. Deployment remains held.
+
+## October 8 WMH provider-prefix cache correction
+
+The user requested a real prefix-cache hit test through Rose.complete. Six
+live GPT-6.1 Sol xhigh calls used two saved fundraiser inputs with DEMO replay
+disabled, unchanged logical evidence and the same 16384-token output budget.
+Original requests returned 0/2 hits. Moving shared task context first and
+passing session affinity also returned 0/2. With an explicit reusable-task
+text-block breakpoint, the cold request read zero and the warm request read
+**1368/13429 input tokens (10.187%)**. Final fixed-pair provider hit rate is
+**1/2 requests**, or **1368/15633 input tokens (8.7507%)**. No retry ran.
+
+The native adapter now supplies Rose's existing stable session namespace and
+marked shared prefix; complete task/action/state/retrieval values and system
+instructions remain intact. WMH-only replay keys ignore that routing hint
+while retaining exact call IDs, state and execution-policy identity. This
+uses existing central Rose cache controls. The full owning gate also exposed
+colliding inferred timestamps reversing recovered corpus results; its existing
+test now freezes archive milliseconds, and inferred timestamps remain
+monotonic per producing agent. Authoritative tool/browser timestamps are
+untouched. All changes remain local. No fundraiser rerun or deployment ran.
+
+Portable live receipts and limitations are in
+`wmh-evidence-20261006/wmh-provider-prefix-cache-20261008.json`; causal controls
+and owning-gate logs are in `.context/wmh-provider-prefix-cache-20261008/`.
+The affinity recurrence is recorded in
+`docs/rca/cases/2026-07-23-provider-cache-affinity-not-scoped-to-one-sequence.md`.
+Fresh full conformance, fundraiser acceptance and warm-network changes remain
+open. These two cache mechanisms must be reported separately on the next run.
+The full registered WMH blackbox passed, including provider 89/native 37 and
+both corpus-ordering guards. Pricing 7, Ruff, diff checks, independent wire
+audit, adversarial review and RCA archive validation also passed.
 
 ## October 6 user screenshot follow-up
 

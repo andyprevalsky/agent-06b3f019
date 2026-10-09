@@ -8,6 +8,16 @@ validation of the September 28 artifact or a new build.
 
 | File | Source | Purpose |
 | --- | --- | --- |
+| `cache-optimization-20261008/handoff.json` | October 8 continuation worktree | Completed baseline, interrupted iteration 1, unapplied iterations 2/3, exact controls and retained resources |
+| `cache-optimization-20261008/baseline.json` | Five-minute run `6b09942d-67f4-4896-8adc-cad4fdb0474b` | WMH metered cache/input/output totals, cancellation caveat, cleanup, native join and verified durable FE link |
+| `cache-optimization-20261008/iteration-2.patch`, `iteration-3.patch` | Reviewed adapter proposals | Apply sequentially only when resuming the experiment; not active runtime code |
+| `cache-optimization-20261008/history_cache_tests.py`, `history_prefix_contract_test.py`, `history-prefix-baseline-repro.log` | Offline history-prefix reproduction | Two failing baseline guards and preservation controls; promote expanded guards into the owning suite with iteration 2 |
+| `cache-optimization-20261008/candidate-invariance.json`, `layout-opportunity-audit.json` | 75 original native request captures | Logical JSON/system/DEMO identity preservation and estimated cache opportunity; not live reads |
+| `cache-optimization-20261008/patch-packaging-verification.json` | Sequential patches applied to temporary source copies | Both proposals pass 16 unchanged/expanded history guards; runtime source is unchanged |
+| `cache-optimization-20261008/model-preflight.json`, `verification-checkpoint.json` | Exact local model and owning checks | Immutable inference identities and tested/current versus pending acceptance |
+| `cache-optimization-20261008/role-confusion-diagnostic.json` | Two live GPT-6.1 Sol xhigh diagnostics | Exact browser goals, public model answers, validated quotes and limitations; no runtime edits |
+| `wmh-fundraiser-distribution-20261008.json` | October 8 1800-second fundraiser | Exact $0 result, native retirement, cache accounting and verified durable FE link |
+| `wmh-provider-prefix-cache-20261008.json` | Six controlled provider calls | Cold/warm cache mechanism proof through Rose.complete |
 | `latest-30m-run.json.gz` | `agents/benchmarks/runs/20260929_024443_raise-5m-rose-labs-brex.json` | Exact 22m27s failed diagnostic, root `89cb4dfb-551e-4dd5-a92c-94182274ef77` |
 | `previous-10m-run.json.gz` | `agents/benchmarks/runs/20260928_213636_raise-5m-rose-labs-brex.json` | Earlier 600-second timeout trajectory |
 | `corpus-conformance.json.gz` | `.context/world-model/conformance.json` | September 28 corpus coverage and 100 sampled cases |

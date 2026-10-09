@@ -1561,6 +1561,7 @@ def _transitions_from_llm_message_history(
 
     transitions: list[RoseTransition] = []
     seen_call_ids: set[tuple[str, str]] = set()
+    last_timestamp_by_agent: dict[str, int] = {}
     for created_at_ms, path, archive_agent_id, payload in contexts:
         messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
         actions: dict[str, tuple[str, JsonObject, int]] = {}
@@ -1590,9 +1591,15 @@ def _transitions_from_llm_message_history(
             if not content:
                 continue
             seen_call_ids.add(dedupe_key)
-            # The archive timestamp is the next LLM request, hence after every
-            # tool result in this context. Preserve context order just before it.
+            # The archive timestamp belongs to the next LLM request. These
+            # inferred ordering timestamps do not establish physical event times.
             timestamp_ms = max(0, created_at_ms - len(messages) + action_position) if created_at_ms else None
+            if timestamp_ms is not None:
+                # Close archive writes can yield equal or decreasing estimates
+                # as the cumulative context grows. Preserve observed result
+                # order for this agent when the final corpus sort uses time.
+                timestamp_ms = max(timestamp_ms, last_timestamp_by_agent.get(dedupe_key[0], -1) + 1)
+                last_timestamp_by_agent[dedupe_key[0]] = timestamp_ms
             artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
             category = canonical_category_for_tool(tool_name)
             transitions.append(

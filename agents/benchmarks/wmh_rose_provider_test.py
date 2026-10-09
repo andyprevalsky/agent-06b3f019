@@ -279,6 +279,152 @@ def test_message_conversion_puts_system_first():
     ]
 
 
+@pytest.mark.parametrize("change_world", [False, True])
+def test_native_provider_cache_prefix_precedes_changing_candidate(change_world):
+    from os.path import commonprefix
+
+    from benchmarks.wmh_rose_provider import _prompt_text
+    from providers.rose.waterfall import build_openrouter_body
+
+    task = {"initial_context": {"company": "Rose Labs"}, "instruction": "Raise funds", "task_id": "root"}
+    requests = [
+        {
+            "candidate_response": {"tool_calls": [{"call_id": call, "arguments": {"goal": goal}}]},
+            "environment_state": {"balance": 0},
+            "grounded_examples": [],
+            "grounding_contexts": [],
+            "grounding_schema_version": "test",
+            "task": task,
+            "visible_conversation": [],
+        }
+        for call, goal in (("first", "Find investors"), ("second", "Review account"))
+    ]
+    if change_world:
+        requests[1]["task"] = {**task, "tools": [{"name": "browser"}]}
+        requests[1]["environment_state"] = {"balance": 100, "timestamp_ms": 20}
+        requests[1]["visible_conversation"] = [{"content": "new observation"}]
+        requests[1]["grounded_examples"] = [{"content": "new example"}]
+        requests[1]["future_evidence_field"] = {"nested": "preserve me"}
+    outgoing = [
+        _to_rose_messages("unchanged system", [Message(role="user", content=json.dumps(request))])
+        for request in requests
+    ]
+    for original, messages in zip(requests, outgoing):
+        assert messages[0]["content"] == "unchanged system"
+        assert json.loads(_prompt_text(messages[1]["content"])) == original
+        assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in messages[1]["content"][-1]
+        wire = build_openrouter_body(
+            model="openai/gpt-6.1-sol", messages=messages, tools=None,
+            tool_choice=None, response_format=None, temperature=None,
+            max_tokens=16384, seed=None, cache_namespace="wmh:session:root",
+        )
+        assert wire["messages"][1]["content"] == messages[1]["content"]
+        assert wmh_rose_provider._native_call_ids(messages) == (
+            original["candidate_response"]["tool_calls"][0]["call_id"],
+        )
+        assert wmh_rose_provider._native_environment_state(messages) == original["environment_state"]
+        # Changing wire layout must not alter whole-response replay identity.
+        assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
+            wmh_rose_provider._wmh_cache_key_material({"messages": [
+                {"role": "system", "content": "unchanged system"},
+                {"role": "user", "content": json.dumps(original)},
+            ]})
+        )
+    assert outgoing[0][1]["content"][0] == outgoing[1][1]["content"][0]
+    prefix = commonprefix([_prompt_text(messages[1]["content"]) for messages in outgoing])
+    assert '"instruction":"Raise funds"' in prefix
+    if not change_world:
+        assert '"environment_state"' in prefix
+
+
+@pytest.mark.parametrize("content", [[], [{"type": "image_url", "image_url": {"url": "test"}}]])
+def test_native_prompt_blocks_never_discard_nontext_evidence(content):
+    messages = [{"role": "user", "content": content}]
+    with pytest.raises(TypeError):
+        wmh_rose_provider._prompt_text(content)
+    assert wmh_rose_provider._native_call_ids(messages) is None
+    assert wmh_rose_provider._native_environment_state(messages) is None
+    assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == {"messages": messages}
+
+
+def test_native_provider_uses_stable_isolated_rose_cache_namespaces(monkeypatch):
+    captured = []
+
+    class Client:
+        async def collect(self, **kwargs):
+            captured.append(kwargs)
+            return RoseResponse(
+                content=json.dumps({"message": "", "tool_results": [{"call_id": "test", "content": "complete", "is_error": False}],
+                                    "state": {}, "terminal": False}),
+                actual_model="openai/gpt-6.1-sol",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+            )
+
+    provider = RoseWMHProvider(client=Client(), usage=RoseUsageAccumulator(), protocol="text-world-model-v3")
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+
+    async def run():
+        for scope, prediction in (("world-a", "prediction-1"), ("world-a", "prediction-2"), ("world-b", "prediction-3")):
+            await provider.complete_scoped(scope, prediction, "System", [Message(role="user", content="Evidence")], max_tokens=16384)
+        for scope in ("world-a", "world-b"):
+            assert (await provider.retire_scope(scope))["join_verified"]
+
+    asyncio.run(run())
+    namespaces = [call.get("cache_namespace") for call in captured]
+    assert namespaces[0] and namespaces[0] == namespaces[1]
+    assert namespaces[0] != namespaces[2]
+    from providers.rose.waterfall import build_openrouter_body
+
+    for call, namespace in zip(captured, namespaces):
+        wire = build_openrouter_body(model="openai/gpt-6.1-sol", messages=call["messages"], tools=None,
+                                     tool_choice=None, response_format=None, temperature=None,
+                                     max_tokens=call["max_tokens"], seed=None, cache_namespace=namespace)
+        assert wire["session_id"] == namespace
+        assert wire["reasoning"]["effort"] == "xhigh"
+        assert wire["max_tokens"] == 16384
+
+
+def test_native_demo_replay_identity_excludes_only_session_routing():
+    from copy import deepcopy
+
+    from benchmarks.wmh_execution_policy import execution_policy
+    from providers.fast_cache.rose_cache import request_key_material
+
+    cache = wmh_rose_provider._WMHFastCacheContext(
+        enabled=True, goal="DEMO FIXTURE ONLY native provider cache", write_enabled=True,
+    )
+    request = outcome_request()
+    request["task"].update(initial_context={"company": "Rose Labs"}, task_id="root")
+    system = execution_policy("rose-outcome-distribution-v2").text
+
+    def key(payload, namespace=None, *, packed=True, max_tokens=16384):
+        message = Message(role="user", content=json.dumps(payload))
+        messages = _to_rose_messages(system, [message]) if packed else [
+            {"role": "system", "content": system}, {"role": "user", "content": message.content},
+        ]
+        return cache.llm_key("wmh_world_model_distribution_v1", request_key_material({
+            "messages": messages, "pool": "rose-wmh-gpt61", "max_tokens": max_tokens,
+            "cache_namespace": namespace,
+        }))
+
+    original = key(request, packed=False)
+    for namespace in (None, "wmh:session:" + "a" * 32, "wmh:session:" + "b" * 32):
+        assert key(request, namespace) == original
+    changed = deepcopy(request)
+    changed["candidate_response"]["tool_calls"][0]["call_id"] = "other-call"
+    assert key(changed) != original
+    changed = deepcopy(request)
+    changed["environment_state"]["receipts"].append("new receipt")
+    assert key(changed) != original
+    assert key(request, max_tokens=1024) != original
+    assert key(request, namespace="unrelated caller namespace") != original
+
+
 def test_native_protocol_uses_same_rose_transport_and_retains_actual_model(monkeypatch):
     text = json.dumps(
         {
@@ -434,7 +580,8 @@ def test_distribution_rejects_invalid_unchosen_branches(failure):
 
 
 @pytest.mark.parametrize("valid", [False, True])
-def test_distribution_is_validated_before_cache_write_and_on_cached_response(monkeypatch, valid):
+@pytest.mark.parametrize("full_task", [False, True])
+def test_distribution_is_validated_before_cache_write_and_on_cached_response(monkeypatch, valid, full_task):
     from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
     from providers.rose import RoseClient
     from providers.rose.types import StreamChunk
@@ -443,7 +590,11 @@ def test_distribution_is_validated_before_cache_write_and_on_cached_response(mon
     if not valid:
         payload["outcomes"][-1]["state_patch"] = [{"op": "remove", "path": "/nonexistent"}]
     text = json.dumps(payload)
-    messages = [{"role": "user", "content": json.dumps(outcome_request())}]
+    request = outcome_request()
+    if full_task:
+        request["task"].update(initial_context={"company": "Rose Labs"}, task_id="root")
+    message = Message(role="user", content=json.dumps(request))
+    messages = _to_rose_messages("distribution system", [message])
 
     async def stream(self, **kwargs):
         yield StreamChunk(kind="content", data={"text": text})
@@ -475,7 +626,7 @@ def test_distribution_is_validated_before_cache_write_and_on_cached_response(mon
         return None, None
 
     monkeypatch.setattr(provider, "_lease_auth", no_auth)
-    arguments = ("distribution system", [Message(role="user", content=messages[0]["content"])])
+    arguments = ("distribution system", [message])
     if valid:
         result = provider.complete(*arguments)
         assert result.text == text and result.actual_model == "claude-haiku-4-5-claude"
@@ -520,6 +671,32 @@ def test_distribution_cache_keys_bind_exact_action_state_and_policy():
     assert key(changed) != original
     assert key(request, site="wmh_world_model_v3") != original
     assert key(request, system="old single-transition contract") != original
+    assert key(request, system=execution_policy("rose-outcome-distribution-v2").text) != original
+
+
+def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():
+    from dataclasses import replace
+
+    from benchmarks import wmh_execution_policy as policies
+    from providers.rose.pools import get_pool
+
+    policy = policies.execution_policy("rose-outcome-distribution-v2")
+    assert policies.text_sha256(policy.text) == "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0"
+    assert policy.response_protocol == "rose-outcome-distribution-v1"
+    assert policy.effective_system_sha256 == "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470"
+    assert policies.cache_policy_identity(
+        [{"role": "system", "content": "incorrect base\n\n" + policy.text}]
+    ) is None
+    pool = get_pool("rose-wmh-gpt61")
+    assert pool.waterfall == ("openai/gpt-6.1-sol",)
+    assert pool.waterfall_reasoning_effort == "xhigh"
+    assert not pool.direct_auth_enabled and not pool.foundry_enabled and pool.cerebras_model is None
+    assert _cost_usd_for_call("openai/gpt-6.1-sol", 1000, 1000) == pytest.approx(0.012)
+    assert get_pool("rose-1-ultra").waterfall[0] == "openai/gpt-6-sol"
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setitem(policies._POLICIES, policy.name, replace(policy, text=policy.text + " changed"))
+        with pytest.raises(ValueError, match="without a new version"):
+            policies.execution_policy(policy.name)
 
 
 def test_native_cache_fingerprint_changes_only_current_action_timestamp():
