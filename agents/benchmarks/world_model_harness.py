@@ -1147,7 +1147,7 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
-        scratchpad=str(raw.get("scratchpad") or ""),
+        scratchpad=str(_maybe_redact(str(raw.get("scratchpad") or ""), redaction_mode)),
         action=action,
         observation=observation,
         raw_span_ids=[str(v) for v in raw.get("raw_span_ids") or []],
@@ -1418,7 +1418,7 @@ def _transitions_from_browser_observations(
                         transitions.append(
                             RoseTransition(
                                 state_before=state_before,
-                                scratchpad=str(entry.get("thinking") or ""),
+                                scratchpad=str(_maybe_redact(str(entry.get("thinking") or ""), redaction_mode)),
                                 action=CanonicalAction(
                                     category="browser",
                                     name="browser_action",
@@ -2699,7 +2699,8 @@ def export_archive_to_otel_jsonl(
     spans = transitions_to_otel_spans(
         root_agent_id,
         transitions,
-        task=str(root_goal or ""),
+        # Public corpora redact the goal like every argument and observation.
+        task=str(_maybe_redact(str(root_goal or ""), redaction_mode)),
         metadata={
             "benchmark_task_name": task_name,
             "db_start_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
@@ -2989,8 +2990,8 @@ def write_world_model_conformance_suite(
     # secret; the non-binding task/scratchpad/state keep the public redaction.
     examples = report.pop("examples")
     for example in examples:
-        for field in ("task", "scratchpad", "state_before"):
-            example[field] = _drop_secret_fields(_redact(example[field]))
+        for name in ("task", "scratchpad", "state_before"):
+            example[name] = _drop_secret_fields(_redact(example[name]))
     if _public_example_secret_violation(examples):
         raise ValueError("WMH conformance suite contains unredacted secret-looking content")
     redacted = _drop_secret_fields(_redact(report))

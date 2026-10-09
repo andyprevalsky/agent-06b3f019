@@ -1064,6 +1064,60 @@ def test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_resu
             restore()
 
 
+def test_public_export_redacts_root_goal_and_scratchpad_secrets():
+    """Public OTel already redacted arguments, observations and state, but wrote
+    the root goal (gen_ai.prompt / trace metadata) and scratchpads verbatim; a
+    real archived goal carried a Bearer JWT into the local corpus."""
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl
+    from helpers.trace_archive import archive_json
+
+    bearer = "Bearer eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl"
+    api_key = "sk-ant-api03-" + "A" * 24
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-public-goal-redaction"
+            fixture = {"root_agent_id": root, "user_id": "user", "agent_ids": [root], "rows": {"Agent": [{"id": root}]}}
+            archive_json(root_agent_id=root, path="db/start.fixture.json.gz.enc", payload=fixture)
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={"root_agent_id": root, "world_model_mode": "real", "run": {"root_goal": f"Log in with {bearer}"}},
+            )
+            archive_json(
+                root_agent_id=root,
+                path="trace/transitions.json.gz.enc",
+                payload={
+                    "transitions": [
+                        {
+                            "state_before": {},
+                            "scratchpad": f"remember {api_key}",
+                            "action": {
+                                "category": "tool",
+                                "name": "web_search",
+                                "arguments": {"query": "public"},
+                                "agent_id": root,
+                                "tool_call_id": "call-1",
+                                "timestamp_ms": 1784509200000,
+                            },
+                            "observation": {
+                                "category": "tool_result",
+                                "content": "result",
+                                "is_error": False,
+                                "metadata": {"source": "provider"},
+                                "timestamp_ms": 1784509200001,
+                            },
+                        }
+                    ]
+                },
+            )
+            text = export_archive_to_otel_jsonl(root, Path(out) / "trace.otel.jsonl").read_text(encoding="utf-8")
+            assert "eyJhbGciOiJIUzI1NiJ9" not in text and api_key not in text
+            assert "Log in with [REDACTED]" in text and "remember [REDACTED]" in text
+        finally:
+            restore()
+
+
 def _raw_conformance_otel(path, examples, *, task="Exercise exact conformance"):
     """Write canonical action/observation span pairs exactly as export lays them out."""
     from benchmarks.world_model_harness import _otel_attr
@@ -5584,6 +5638,10 @@ async def run_all_tests():
     r.record(
         "grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results",
         test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results,
+    )
+    r.record(
+        "public_export_redacts_root_goal_and_scratchpad_secrets",
+        test_public_export_redacts_root_goal_and_scratchpad_secrets,
     )
     r.record(
         "conformance_suite_examples_stay_exact_public_corpus_records",
