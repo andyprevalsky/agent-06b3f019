@@ -313,16 +313,23 @@ def seed_fixture(tmp_path, monkeypatch):
     body = b"local-complete-fixture-control\n" * 8192
     calls = []
 
+    def record(handler, method):
+        # Every storage call the system under test makes is a SigV4-signed S3
+        # request. Any local process can also reach this listener (a host port
+        # detector sends an unsigned `HEAD /`); those are not storage calls.
+        if handler.headers.get("Authorization", "").startswith("AWS4-HMAC-SHA256"):
+            calls.append((method, handler.path))
+
     class Storage(BaseHTTPRequestHandler):
         def do_GET(self):
-            calls.append(("GET", self.path))
+            record(self, "GET")
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def do_HEAD(self):
-            calls.append(("HEAD", self.path))
+            record(self, "HEAD")
             self.send_error(500)
 
         def log_message(self, *_args):
