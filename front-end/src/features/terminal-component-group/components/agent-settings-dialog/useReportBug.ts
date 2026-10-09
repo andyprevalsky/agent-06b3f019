@@ -9,8 +9,8 @@
  *      |                                        +-- err --> [COMPOSING]
  *      +-- (agent change / dialog close) --> reset to IDLE
  *
- * After launch we keep the deep link on-screen. Submit must not auto-open
- * Cursor; Open / Copy stay as explicit user-gesture buttons.
+ * After launch we keep the boxes.dev link on-screen. Submit must not auto-open
+ * it; Open / Copy stay as explicit user-gesture buttons.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -24,8 +24,7 @@ interface UseReportBugOptions {
 export interface LaunchedBugReport {
   name: string;
   url: string;
-  cursor_agent_id: string;
-  launch_source: 'scm' | 'api';
+  run_id: string;
 }
 
 export interface UseReportBugResult {
@@ -123,27 +122,18 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
       const result = await reportAgentBug(submittedAgentId, trimmed);
       if (submitGenerationRef.current !== generation) return;
       if (agent.agent_id !== submittedAgentId) return;
-      const launchSource = result.launch_source === 'api' ? 'api' : 'scm';
-      setLaunched({
-        name: result.name,
-        url: result.url,
-        cursor_agent_id: result.cursor_agent_id,
-        launch_source: launchSource,
-      });
+      setLaunched({ name: result.name, url: result.url, run_id: result.run_id });
       setShowComposer(false);
       setDescription('');
       toast({
         title: 'Bug report launched',
-        description:
-          launchSource === 'scm'
-            ? 'Check your Cursor mobile inbox, or tap Open below.'
-            : 'Tap Open below (API launch — enable Filter → Source → API if missing).',
+        description: 'A boxes.dev agent is investigating. Tap Open below to follow it.',
       });
     } catch (error) {
       if (submitGenerationRef.current !== generation) return;
       toast({
         title: 'Could not report bug',
-        description: error instanceof Error ? error.message : 'Failed to launch cloud agent',
+        description: error instanceof Error ? error.message : 'Failed to launch bug report agent',
         variant: 'destructive',
       });
     } finally {

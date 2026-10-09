@@ -2,12 +2,13 @@
 /**
  * Black-box HTTP gates for POST /api/agents/:id/report-bug.
  *
- * Happy-path Cursor launch is covered by unit tests with a mocked Cursor API.
+ * Happy-path boxes.dev launch is covered by unit tests with a mocked boxes.dev API.
  * This suite cements auth + validation surfaces against a live backend.
  */
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { retryWithBackoff } from '../../providers/retry';
 config();
 
 const BASE_URL =
@@ -110,7 +111,7 @@ async function testNonAdminForbidden(): Promise<void> {
     const res = await request(`${BASE_URL}/api/agents/${agentId}/report-bug`, {
       method: 'POST',
       headers: apiKeyHeaders(userId),
-      body: JSON.stringify({ description: 'non-admin should not launch cursor agents' }),
+      body: JSON.stringify({ description: 'non-admin should not launch bug report agents' }),
     });
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'non-admin');
@@ -134,12 +135,36 @@ async function testEmptyDescription(): Promise<void> {
   }
 }
 
+/** A fresh backend answers 503 + Retry-After while the Hub archive index warms. */
+class HubIndexWarmingError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super(`Hub archive index warming; Retry-After ${retryAfterMs}ms`);
+  }
+}
+
 async function testMissingAgent(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/agents/${FAKE_UUID}/report-bug`, {
-    method: 'POST',
-    headers: apiKeyHeaders(ANDY_USER_ID),
-    body: JSON.stringify({ description: 'agent does not exist' }),
-  });
+  // Honor the documented 503 + Retry-After warming contract, then require the real 404.
+  const res = await retryWithBackoff(
+    async () => {
+      const response = await fetch(`${BASE_URL}/api/agents/${FAKE_UUID}/report-bug`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...apiKeyHeaders(ANDY_USER_ID) },
+        body: JSON.stringify({ description: 'agent does not exist' }),
+      });
+      const data: unknown = await response.json();
+      const retryAfterSeconds = Number(response.headers.get('retry-after'));
+      if (response.status === 503 && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+        throw new HubIndexWarmingError(retryAfterSeconds * 1000);
+      }
+      return { status: response.status, data };
+    },
+    {
+      maxRetries: 12,
+      isRetryable: (error) => error instanceof HubIndexWarmingError,
+      getBackoffDelayMs: (error) => (error as HubIndexWarmingError).retryAfterMs,
+      component: 'ReportBugBlackbox',
+    }
+  );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'missing-agent');
 }
