@@ -4,6 +4,7 @@ import type {
   AgentTrajectoryGrepFilters,
 } from './types.agent';
 export type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters } from './types.agent';
+import type { GrepPageCharBounds } from './grepPageBounds';
 
 export const DATA_SOURCE_CONFIGS = {
   messages: {
@@ -248,7 +249,7 @@ export interface GrepMessageRecord {
   relation: 'before' | 'match' | 'after';
 }
 
-export interface GrepResult {
+export interface GrepResult extends GrepPageCharBounds {
   matches: GrepMatch[];
   total_matches: number;
   truncated: boolean;
@@ -259,10 +260,6 @@ export interface GrepResult {
   returned: number;
   has_more: boolean;
   next_offset: number | null;
-  /** Per-page cap on summed match content chars (MAX_RESULT_CHARS). */
-  applied_char_limit: number;
-  /** True when trailing matches were dropped (or the first cut) to fit the cap. */
-  char_truncated?: boolean;
   next_page_after?: string | null;
   display_order: 'oldest_first' | 'newest_first';
   context_unit: 'message_record' | 'logical_line' | 'mixed';

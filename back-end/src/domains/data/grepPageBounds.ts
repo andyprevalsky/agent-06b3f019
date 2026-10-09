@@ -7,6 +7,14 @@
  */
 import type { GrepMatch } from './types';
 
+/** Paging metadata that tells the caller how the character budget applied. */
+export interface GrepPageCharBounds {
+  /** Per-page cap on summed match content chars (MAX_RESULT_CHARS). */
+  applied_char_limit: number;
+  /** True when trailing matches were dropped (or the first cut) to fit the cap. */
+  char_truncated?: boolean;
+}
+
 /**
  * Keep whole matches in order while their content fits `maxChars`; a first
  * match that alone exceeds the budget is cut (never return an empty page for a
