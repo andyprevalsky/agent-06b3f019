@@ -341,4 +341,59 @@ describe('live view follows the backend session binding', () => {
       ),
     );
   });
+
+  it('resumes onto the rebound session even while a pre-resume read is in flight', async () => {
+    let releaseStaleRead: (() => void) | null = null;
+    let reads = 0;
+    server.use(
+      http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, async () => {
+        reads += 1;
+        if (reads === 1) {
+          // Mount read of the paused row, still in flight when the user resumes.
+          await new Promise<void>((resolve) => {
+            releaseStaleRead = resolve;
+          });
+          return HttpResponse.json(binding(REBOUND_STEEL, 1, { status: 'PAUSED', live: false }));
+        }
+        return HttpResponse.json(binding(PROMOTED_KERNEL, 3));
+      }),
+      http.post(`${API_BASE}/browser-session/resume`, () =>
+        HttpResponse.json({ success: true, debug_url: PROMOTED_KERNEL }),
+      ),
+      http.post(`${API_BASE}/browser-session/task/:taskId/control`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({
+          state: body.mode === 'user' ? 'user' : 'agent',
+          agentPaused: false,
+          debugUrl: PROMOTED_KERNEL,
+        });
+      }),
+    );
+    const paused = browserMessage('paused', '2026-10-09T20:40:00.000Z', {
+      toolCallId: 'pause-1',
+      toolStatus: 'FINISHED',
+      action_type: 'session_paused',
+      title: 'Paused',
+    });
+    const user = userEvent.setup();
+    renderWithProviders(
+      <AgentContext.Provider value={agentContext([sessionInit(REBOUND_STEEL), paused])}>
+        <BrowserStatusBar taskId={TASK_ID} browserUrl={REBOUND_STEEL} />
+      </AgentContext.Provider>,
+    );
+    await waitFor(() => expect(releaseStaleRead).not.toBeNull());
+
+    await user.click(await screen.findByRole('button', { name: 'Take Control' }));
+
+    await waitFor(() =>
+      expect(liveIframe()?.src).toBe(
+        'https://prod-iad-hypeman-28.kernel.sh:8443/browser/live/pmHw1BNYtFaS?interactive=true&showControls=true',
+      ),
+    );
+    await act(async () => {
+      releaseStaleRead?.();
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    });
+    expect(liveIframe()?.src).toContain('pmHw1BNYtFaS');
+  });
 });

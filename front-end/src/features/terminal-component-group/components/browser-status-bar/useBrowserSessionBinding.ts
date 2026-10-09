@@ -32,18 +32,25 @@ export interface BrowserSessionBindingView {
   isBound: boolean;
   /** False only when the backend reports the bound session closed or ended. */
   isLive: boolean;
-  /** Re-read the binding (e.g. right after a resume rebinds the task). */
+  /** Start a fresh binding read (e.g. right after a resume rebinds the task). */
   refresh: () => Promise<void>;
 }
 
 const inFlight = new Map<string, Promise<void>>();
 
-function readBinding(taskId: string): Promise<void> {
+/**
+ * Passive reads (mount, focus, transcript change) share one in-flight request.
+ * `fresh` starts a new one: after a resume, a read issued before the rebind
+ * committed cannot stand in for the post-resume binding.
+ */
+function readBinding(taskId: string, fresh: boolean): Promise<void> {
   const pending = inFlight.get(taskId);
-  if (pending !== undefined) return pending;
-  const request = readBrowserLiveView(taskId)
+  if (pending !== undefined && !fresh) return pending;
+  const request: Promise<void> = readBrowserLiveView(taskId)
     .then(publishBrowserSessionBinding)
-    .finally(() => inFlight.delete(taskId));
+    .finally(() => {
+      if (inFlight.get(taskId) === request) inFlight.delete(taskId);
+    });
   inFlight.set(taskId, request);
   return request;
 }
@@ -58,9 +65,9 @@ export function useBrowserSessionBinding(
   );
   const binding = useSyncExternalStore(subscribe, () => getBrowserSessionBinding(taskId));
   const reportedFailure = useRef(false);
-  const refresh = useCallback(
-    () =>
-      readBinding(taskId).then(
+  const read = useCallback(
+    (fresh: boolean) =>
+      readBinding(taskId, fresh).then(
         () => {
           reportedFailure.current = false;
         },
@@ -72,14 +79,15 @@ export function useBrowserSessionBinding(
       ),
     [taskId],
   );
+  const refresh = useCallback(() => read(true), [read]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh, transcriptUrl]);
+    void read(false);
+  }, [read, transcriptUrl]);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') void refresh();
+      if (document.visibilityState === 'visible') void read(false);
     };
     document.addEventListener('visibilitychange', refreshWhenVisible);
     window.addEventListener('focus', refreshWhenVisible);
@@ -87,7 +95,7 @@ export function useBrowserSessionBinding(
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       window.removeEventListener('focus', refreshWhenVisible);
     };
-  }, [refresh]);
+  }, [read]);
 
   const boundUrl = binding?.debugUrl ?? null;
   return {

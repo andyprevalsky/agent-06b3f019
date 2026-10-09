@@ -254,11 +254,13 @@ export async function broadcastAgentUpdate(
  * resume, rotation, reclaim) or closed, before the old provider session is
  * released, so the live view never keeps embedding a released session while
  * the worker has not yet posted the new URL. `asOf` orders events against the
- * live-view GET: consumers keep the newest observation per task.
+ * live-view GET: consumers keep the newest observation per task, so callers
+ * pass the time captured before they read the row.
  */
 export async function broadcastBrowserSessionBinding(
   agentId: string,
-  binding: { taskId: string; sessionId: string; debugUrl: string | null; status: string }
+  binding: { taskId: string; sessionId: string; debugUrl: string | null; status: string },
+  asOf: number
 ): Promise<void> {
   log.info('[Broadcast] BROWSER_SESSION', {
     agentId,
@@ -273,7 +275,7 @@ export async function broadcastBrowserSessionBinding(
       agentId,
       ...binding,
       live: binding.status === 'ACTIVE',
-      asOf: Date.now(),
+      asOf,
     },
   });
 }
