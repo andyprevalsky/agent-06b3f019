@@ -2384,6 +2384,13 @@ spec in one job with four Playwright workers and one shared authenticated
 session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
 
 ```bash
+# The boxes.dev gh wrapper replaces GH_TOKEN with an App token that cannot
+# dispatch workflows; call its binary with the repo's workflow-scoped token.
+if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
+  GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
+  export GH_TOKEN
+  gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
+fi
 python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
@@ -2409,6 +2416,20 @@ python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
 This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+
+If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
+`Resource not accessible by integration`. In that case, run the workflow's two
+steps locally against production with the same secrets from `back-end/.env`.
+Report the lane as `run locally` under SHIPPED WITH:
+
+```bash
+set -a && . back-end/.env && set +a
+export TEST_API_KEY="$BACKEND_API_KEY" BACKEND_URL=https://navi-j9a9.onrender.com \
+  FRONTEND_URL=https://www.roselabs.ai
+SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 \
+  bash front-end/scripts/run-semantic-tests.sh --prod
+SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-lifecycle-latency
+```
 
 ## Step 13c: AgentCard production lifecycle gate
 
@@ -2476,9 +2497,76 @@ Record the completed lifecycle before the final response:
 python3 scripts/record_factory_event.py deploy outcome completed
 ```
 
-After the new branch is created, report to the user:
+After the new branch is created, the final message is only this scorecard in a
+`text` block, with no prose before or after it. Fill every value from recorded
+evidence:
 
-- PR URL
-- Which services were deployed
-- Any review issues that were fixed along the way
-- The new branch name
+- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: use the wall
+  time of the final passing attempt. Production lane times come from
+  `.context/factory-events.jsonl`. Parallel lanes overlap.
+- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event.
+- `💸` is the summed benchmark `cost_cents` of this deploy's runs.
+
+Lane marks:
+
+- `✅` means the lane ran and passed.
+- `❌` means failed.
+- `⚠️` is reserved for a required check that was skipped, with the reason.
+- Omit lanes that did not apply, except TEMPORAL, which is always shown.
+
+TEMPORAL reports Step 13–13ab:
+
+- After a cutover: old → new generation, workflows drained, and force-migrated
+  count.
+- Otherwise: `no cutover needed` and the live pointer generation, read with
+  Step 13's queue-pointer `--read` query.
+
+SHIPPED WITH has one `▲` row per warning, override, skip, substitution, or
+unreviewed commit. Each row shows the wall time it wasted: stopped, failed or
+superseded attempts, review cycles that produced no review, retries, and detours
+around it. Use `0s` when it cost nothing, add a total row, or write `▲ none`.
+
+NOT SHIPPED has one `✖` row per piece of this workspace's work that is absent
+from `origin/main` after the merge:
+
+- Non-ignored uncommitted or untracked changes.
+- Reverted or unmerged commits on branches this workspace created or pushed.
+
+Ignore other workspaces' branches. Write `✖ none` if there is nothing.
+
+```text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🚀 DEPLOY SCORECARD                                  ✅ SHIPPED
+ #1456 · bounded Hub index repair · 014727c → main
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATIC     ✅  lint · tsc · structural · 45 gates            4m55s
+ COVERAGE   ✅  BE 190/190 domains · 89.2% lines             11m10s
+ LIVE       ✅  creds 6/7 · amplitude · failover · seed 156MB  2m15s
+ SMOKE      ✅  8/8 benches                                  18m14s
+ SEMANTIC   ✅  8/8 UI · latency p50 0.7–1.9s                10m06s
+ SANDBOX    ✅  Claude Code E2B 56/56                           37s
+ REVIEW     ⚠️  3 cycles · 1 fixed · last skipped (quota)    12m14s
+────────────────────────────────────────────────────────────────
+ PROD       ✅  Render live · 14/14 probes · 0 log errors     6m23s
+            ✅  semantic 6/6 · AgentCard $1 → refunded       11m14s
+ TEMPORAL   ✅  no cutover needed · gen 7d9946f524be live
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⏱ 1h54m45s   💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
+ 🔗 github.com/Rose-Ai-Labs/rose/pull/1456
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ▲ SHIPPED WITH                                          ⌛ wasted
+ ▲ last review cycle skipped · CodeRabbit + Claude quota      4m17s
+ ▲ history-ledger revert · GitHub merge conflict              2m27s
+ ▲ Anthropic API credits exhausted · warn-only                   0s
+ ▲ prod semantic run locally · GH token can't dispatch           0s
+                                                    total     6m44s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ✖ NOT SHIPPED · this workspace
+ ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans (reverted)
+ ✖ worktree   prod AgentCard history rows (uncommitted)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+That example is the PR #1456 deploy. Keep the layout and replace every value. For
+a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
+failing lane is listed first, and lanes that never ran are omitted.
