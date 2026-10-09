@@ -22,7 +22,7 @@
  *     |
  *     +--> [REPORT_BUG] <-- admin only; composer open for bug description
  *             |
- *             +--> (submit) --> Cursor cloud agent titled from description
+ *             +--> (submit) --> boxes.dev Bug Report run titled from description
  *             |                 (no SMS, no auto-open; Open/Copy stay explicit)
  *             +--> (cancel) --> [IDLE]
  *
