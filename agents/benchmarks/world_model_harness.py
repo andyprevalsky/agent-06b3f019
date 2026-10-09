@@ -790,6 +790,20 @@ def public_json_has_secret(value: Any) -> bool:
     return any(_SECRET_KEY_RE.search(key) for key in _json_keys(value))
 
 
+def _public_example_secret_violation(value: Any) -> bool:
+    """True when a public-corpus record still carries a secret value or field."""
+    if isinstance(value, dict):
+        return any(
+            (_SECRET_KEY_RE.search(str(key)) and inner != "[REDACTED]") or _public_example_secret_violation(inner)
+            for key, inner in value.items()
+        )
+    if isinstance(value, list):
+        return any(_public_example_secret_violation(inner) for inner in value)
+    if isinstance(value, str):
+        return bool(_HIGH_CONFIDENCE_SECRET_VALUE_RE.search(value.replace("[REDACTED]", "")))
+    return False
+
+
 def _json_keys(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
         for key, inner in value.items():
@@ -1133,7 +1147,7 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
-        scratchpad=str(raw.get("scratchpad") or ""),
+        scratchpad=str(_maybe_redact(str(raw.get("scratchpad") or ""), redaction_mode)),
         action=action,
         observation=observation,
         raw_span_ids=[str(v) for v in raw.get("raw_span_ids") or []],
@@ -1404,7 +1418,7 @@ def _transitions_from_browser_observations(
                         transitions.append(
                             RoseTransition(
                                 state_before=state_before,
-                                scratchpad=str(entry.get("thinking") or ""),
+                                scratchpad=str(_maybe_redact(str(entry.get("thinking") or ""), redaction_mode)),
                                 action=CanonicalAction(
                                     category="browser",
                                     name="browser_action",
@@ -2685,7 +2699,8 @@ def export_archive_to_otel_jsonl(
     spans = transitions_to_otel_spans(
         root_agent_id,
         transitions,
-        task=str(root_goal or ""),
+        # Public corpora redact the goal like every argument and observation.
+        task=str(_maybe_redact(str(root_goal or ""), redaction_mode)),
         metadata={
             "benchmark_task_name": task_name,
             "db_start_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
@@ -2968,9 +2983,21 @@ def write_world_model_conformance_suite(
         "invalid_examples": invalid_examples,
         "examples": selected,
     }
+    # Native binding hashes each example's action and observation against the
+    # corpus. A broad value pass rewrote non-secret artifact paths and
+    # fingerprints (>=32 base64-like characters), so the real case had no
+    # matching native record. Keep those exact and fail closed if they carry a
+    # secret; the non-binding task/scratchpad/state keep the public redaction.
+    examples = report.pop("examples")
+    for example in examples:
+        for name in ("task", "scratchpad", "state_before"):
+            example[name] = _drop_secret_fields(_redact(example[name]))
+    if _public_example_secret_violation(examples):
+        raise ValueError("WMH conformance suite contains unredacted secret-looking content")
     redacted = _drop_secret_fields(_redact(report))
     if public_json_has_secret(redacted):
         raise ValueError("WMH conformance suite contains unredacted secret-looking content")
+    redacted["examples"] = examples
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")

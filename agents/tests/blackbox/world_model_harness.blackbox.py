@@ -1064,6 +1064,157 @@ def test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_resu
             restore()
 
 
+def test_public_export_redacts_root_goal_and_scratchpad_secrets():
+    """Public OTel already redacted arguments, observations and state, but wrote
+    the root goal (gen_ai.prompt / trace metadata) and scratchpads verbatim; a
+    real archived goal carried a Bearer JWT into the local corpus."""
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl
+    from helpers.trace_archive import archive_json
+
+    bearer = "Bearer eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl"
+    api_key = "sk-ant-api03-" + "A" * 24
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-public-goal-redaction"
+            fixture = {"root_agent_id": root, "user_id": "user", "agent_ids": [root], "rows": {"Agent": [{"id": root}]}}
+            archive_json(root_agent_id=root, path="db/start.fixture.json.gz.enc", payload=fixture)
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={"root_agent_id": root, "world_model_mode": "real", "run": {"root_goal": f"Log in with {bearer}"}},
+            )
+            archive_json(
+                root_agent_id=root,
+                path="trace/transitions.json.gz.enc",
+                payload={
+                    "transitions": [
+                        {
+                            "state_before": {},
+                            "scratchpad": f"remember {api_key}",
+                            "action": {
+                                "category": "tool",
+                                "name": "web_search",
+                                "arguments": {"query": "public"},
+                                "agent_id": root,
+                                "tool_call_id": "call-1",
+                                "timestamp_ms": 1784509200000,
+                            },
+                            "observation": {
+                                "category": "tool_result",
+                                "content": "result",
+                                "is_error": False,
+                                "metadata": {"source": "provider"},
+                                "timestamp_ms": 1784509200001,
+                            },
+                        }
+                    ]
+                },
+            )
+            text = export_archive_to_otel_jsonl(root, Path(out) / "trace.otel.jsonl").read_text(encoding="utf-8")
+            assert "eyJhbGciOiJIUzI1NiJ9" not in text and api_key not in text
+            assert "Log in with [REDACTED]" in text and "remember [REDACTED]" in text
+        finally:
+            restore()
+
+
+def _raw_conformance_otel(path, examples, *, task="Exercise exact conformance"):
+    """Write canonical action/observation span pairs exactly as export lays them out."""
+    from benchmarks.world_model_harness import _otel_attr
+
+    lines = []
+    for index, (root, action, observation) in enumerate(examples):
+        trace_id, span_id = f"{index:032x}", f"{index:016x}"
+        lines.append({
+            "traceId": trace_id,
+            "spanId": span_id,
+            "name": f"chat {action['name']}",
+            "attributes": [
+                _otel_attr("gen_ai.tool.call.arguments", action),
+                _otel_attr("gen_ai.prompt", task),
+                _otel_attr("rose.root_agent_id", root),
+            ],
+        })
+        lines.append({
+            "traceId": trace_id,
+            "spanId": f"{index + 1000:016x}",
+            "parentSpanId": span_id,
+            "name": f"execute_tool {action['name']}",
+            "attributes": [
+                _otel_attr("gen_ai.tool.output", observation),
+                _otel_attr("rose.root_agent_id", root),
+            ],
+        })
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+
+def _conformance_pair(index, *, arguments=None, content="observed page", refs=()):
+    action = {
+        "schema": "rose.canonical_action.v1",
+        "category": "browser",
+        "name": f"browser_action_{index}",
+        "arguments": arguments if arguments is not None else {"step": index},
+        "artifact_refs": list(refs),
+    }
+    observation = {
+        "schema": "rose.canonical_observation.v1",
+        "category": "browser",
+        "content": content,
+        "metadata": {"source": "browser"},
+        "artifact_refs": list(refs),
+    }
+    return f"root-{index}", action, observation
+
+
+def test_conformance_suite_examples_stay_exact_public_corpus_records():
+    """Native binding hashes suite examples against the corpus. A second broad
+    value redaction rewrote non-secret artifact paths (>=32 base64-like chars)
+    into [REDACTED], so the real case had no matching native record."""
+    from benchmarks.world_model_harness import _iter_canonical_otel_examples, write_world_model_conformance_suite
+
+    long_path = "media/browser/b54ab168-4963-5f2e-bc08-0b2711f62737/observations/iteration_0010.json"
+    pairs = [
+        _conformance_pair(0, refs=[long_path]),
+        _conformance_pair(1, arguments={"password": "[REDACTED]", "step": 1}),
+        _conformance_pair(2),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        trace = Path(tmp) / "traces.otel.jsonl"
+        _raw_conformance_otel(trace, pairs, task="Use Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature to log in")
+        corpus = {example["fingerprint"]: example for example, _ in _iter_canonical_otel_examples(trace)}
+        report = write_world_model_conformance_suite(
+            trace, Path(tmp) / "conformance.json", example_count=3, min_trajectories=1, min_categories=1, min_tool_names=1
+        )
+        assert report["status"] == "passed"
+        for example in report["examples"]:
+            source = corpus[example["fingerprint"]]
+            assert example["action"] == source["action"] and example["observation"] == source["observation"]
+        assert any(long_path in example["action"]["artifact_refs"] for example in report["examples"])
+        # Non-binding request context keeps the public redaction.
+        assert all("eyJ" not in example["task"] and "[REDACTED]" in example["task"] for example in report["examples"])
+
+
+def test_conformance_suite_fails_closed_on_unredacted_secrets():
+    from benchmarks.world_model_harness import write_world_model_conformance_suite
+
+    for pair in (
+        _conformance_pair(0, content="key sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"),
+        _conformance_pair(0, arguments={"password": "hunter2"}),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp) / "traces.otel.jsonl"
+            _raw_conformance_otel(trace, [pair])
+            try:
+                write_world_model_conformance_suite(
+                    trace, Path(tmp) / "conformance.json", example_count=1, min_trajectories=1, min_categories=1, min_tool_names=1
+                )
+            except ValueError as exc:
+                assert "secret" in str(exc)
+            else:
+                raise AssertionError("conformance suite admitted an unredacted secret")
+            assert not (Path(tmp) / "conformance.json").exists()
+
+
 async def test_prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity():
     from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
 
@@ -5490,6 +5641,18 @@ async def run_all_tests():
     r.record(
         "grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results",
         test_grounded_export_and_conformance_suite_cover_100_real_terminal_tool_results,
+    )
+    r.record(
+        "public_export_redacts_root_goal_and_scratchpad_secrets",
+        test_public_export_redacts_root_goal_and_scratchpad_secrets,
+    )
+    r.record(
+        "conformance_suite_examples_stay_exact_public_corpus_records",
+        test_conformance_suite_examples_stay_exact_public_corpus_records,
+    )
+    r.record(
+        "conformance_suite_fails_closed_on_unredacted_secrets",
+        test_conformance_suite_fails_closed_on_unredacted_secrets,
     )
     await r.record_async(
         "prediction_conformance_replays_expected_observations_and_fails_on_low_fidelity",
