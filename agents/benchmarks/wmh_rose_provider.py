@@ -891,7 +891,7 @@ def _native_prompt_blocks(native: dict) -> List[dict]:
     text = '{"task":' + encode(stable)[:-1]
     cuts = [len(text)]
     text += "," + encode(remainder)[1:] if remainder else "}"
-    cuts.append(len(text))
+    # Retrieval replaces the full-task marker to keep at most four.
     emitted = {"task"}
 
     def field(key: str) -> None:
@@ -901,7 +901,9 @@ def _native_prompt_blocks(native: dict) -> List[dict]:
             emitted.add(key)
 
     field("grounding_schema_version")
-    # Retrieval follows history for this measured layout.
+    field("grounding_contexts")
+    field("grounded_examples")
+    cuts.append(len(text))
     history = native.get("visible_conversation")
     if isinstance(history, list) and all(isinstance(entry, dict) for entry in history):
         # A boundary after each of the last two complete result batches retains
@@ -938,8 +940,7 @@ def _native_prompt_blocks(native: dict) -> List[dict]:
     else:
         field("visible_conversation")
     field("environment_state")
-    field("grounding_contexts")
-    field("grounded_examples")
+    # Retrieval already precedes history.
     for key in native:
         if key not in emitted and key != "candidate_response":
             field(key)
