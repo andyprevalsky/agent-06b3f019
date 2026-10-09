@@ -3,7 +3,7 @@ import { prisma } from './database';
 
 const log = createLogger('VapiRecordings');
 
-export const VAPI_RECORDING_BASE_URL = 'https://api.vapi.ai';
+export const VAPI_RECORDING_BASE_URL = process.env.VAPI_API_BASE_URL ?? 'https://api.vapi.ai';
 export const VAPI_RECORDING_ARTIFACT_PATHS = ['mono-recording', 'stereo-recording'] as const;
 export const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
 
@@ -48,6 +48,22 @@ export async function findToolSideEffectOperationKey(
   return record?.operationKey ?? null;
 }
 
+/**
+ * A hold-capable call is addressed by its root Vapi call id but spans one Vapi
+ * call per segment; its recording is the final segment's, as in its status.
+ */
+export async function resolveRecordingCallId(callId: string): Promise<string> {
+  const session = await prisma.phoneCallSession.findUnique({
+    where: { rootVapiCallId: callId },
+    select: { segments: true },
+  });
+  const segments = Array.isArray(session?.segments) ? session.segments : [];
+  const last = segments[segments.length - 1];
+  const segmentCallId =
+    typeof last === 'object' && last !== null && !Array.isArray(last) ? last.vapiCallId : undefined;
+  return typeof segmentCallId === 'string' && segmentCallId !== '' ? segmentCallId : callId;
+}
+
 function getVapiPrivateKey(): string {
   const vapiPrivateKey = process.env.VAPI_PRIVATE_KEY;
   if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
@@ -69,8 +85,9 @@ export async function downloadVapiCallRecording(
   callId: string
 ): Promise<VapiRecordingBytes | null> {
   const vapiPrivateKey = getVapiPrivateKey();
+  const recordingCallId = await resolveRecordingCallId(callId);
   for (const artifact of VAPI_RECORDING_ARTIFACT_PATHS) {
-    const url = `${VAPI_RECORDING_BASE_URL}/call/${callId}/${artifact}`;
+    const url = `${VAPI_RECORDING_BASE_URL}/call/${recordingCallId}/${artifact}`;
     try {
       const response = await fetch(url, {
         method: 'GET',

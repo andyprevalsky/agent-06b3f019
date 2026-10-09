@@ -610,7 +610,7 @@ cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
 [
   {"name":"bench-alpha"},
   {"name":"bench-beta"},
-  {"name":"bench-default-detach"},
+  {"name":"bench-default-detach","timeout_seconds":9000},
   {"name":"bench-detached-wait"},
   {"name":"bench-invalid-recovery"},
   {"name":"bench-detached-cancel"},
@@ -2117,6 +2117,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     # redirect this worktree's ownership roots into a foreign sandbox.
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+        -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
         PATH="$FAKE_BIN:$PATH" \
         TMPDIR="$SCRIPT_SNAPSHOT_TMP" \
         FLY_BENCH_API_TOKEN="fake-offline-fleet-token" \
@@ -3791,6 +3792,12 @@ grep -qF "1/1 passed" "$detached_log" ||
 if kill -0 "$detached_pid" 2>/dev/null; then
     fail "detached fleet controller did not exit after terminal cleanup"
 fi
+# The task's 9000s catalog timeout extends the unset default backstop across
+# the detach re-exec, while the operator's --timeout 240 stays a hard cap.
+grep -qF "[bench-default-detach] catalog timeout 9000s: run timeout 240s, execution backstop 9000s" "$detached_log" ||
+    fail "detached fleet did not derive the catalog task's execution budget"
+grep -qF "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=9000" "$FAKE_DIR/journal.log" ||
+    fail "detached fleet did not hand the catalog backstop to the guest"
 # The detached PID has been reaped. Hubs remain isolated behind immutable
 # owner records and never enter the raw controller-PID cleanup list.
 PIDS=()

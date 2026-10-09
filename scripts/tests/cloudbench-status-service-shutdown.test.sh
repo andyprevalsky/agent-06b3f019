@@ -43,9 +43,9 @@ print('PASS: native cohort owner, wrong parent/publisher ticks and legacy birth 
 PY_COHORT_OWNER
 
 # Reuse the permanent cache-parent permission controls in this root Linux
-# namespace; derive their cases from the actual pytest decorator.
-# The offline controller image has no pytest; skip this native-only branch.
-if python3 -c 'import pytest' >/dev/null 2>&1; then
+# namespace; derive their cases from the actual pytest decorator. Non-root
+# hosts reach this fixture through the root controller container, so a skip
+# here would only hide the permission control.
 python3 - "$ROOT" <<'PY_CACHE_PARENT'
 import ast
 import os
@@ -54,14 +54,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
-from unittest import SkipTest
 
-# The extracted owner only needs pytest's skip primitive. Keep the offline
-# controller image independent of the test framework and preserve that signal.
-class NativeSkip:
-    def __call__(self, reason):
-        raise SkipTest(reason)
+if sys.platform != 'linux' or os.geteuid() != 0:
+    sys.exit('FAIL: native cache-parent controls need root Linux; '
+             'run scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown')
 
 root = Path(sys.argv[1])
 source = root / 'agents/benchmarks/cloudbench_dependency_sync_test.py'
@@ -73,31 +69,18 @@ assert ast.literal_eval(parameter.args[0]) == 'parent_state'
 cases = ast.literal_eval(parameter.args[1])
 function.decorator_list = []
 namespace = {'os': os, 'sys': sys, 'subprocess': subprocess,
-             'pytest': SimpleNamespace(skip=NativeSkip()),
              'DRIVER_SCRIPT': root / 'scripts/cloudbench-run.sh'}
 exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
-passed_count = 0
-skipped_count = 0
 for state in cases:
     # The native control's runtime user needs a traversable fixture root.
     # Keep it separate from this fixture's private status/authentication files.
     scope = Path(tempfile.mkdtemp(prefix='rose-cache-parent-'))
     try:
         namespace[name](scope, state)
-    except SkipTest as skipped:
-        skipped_count += 1
-        print(f'SKIP: native cache parent {state}: {skipped}')
-    else:
-        passed_count += 1
     finally:
         shutil.rmtree(scope)
-print(f'Native cache parent controls: {passed_count} passed, {skipped_count} skipped')
-if skipped_count == 0:
-    print('PASS: native checkout cache parent permissions in all permanent states')
+print('PASS: native checkout cache parent permissions in all permanent states')
 PY_CACHE_PARENT
-else
-    echo "SKIP: native cache parent permissions (offline controller image has no pytest)"
-fi
 
 # Exercise the actual server at the create-before-write boundary. A killed
 # writer and concurrent readers must never expose a partial generation.

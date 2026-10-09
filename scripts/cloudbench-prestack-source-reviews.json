@@ -96,6 +96,22 @@
     "f1288b99c0b3cc1b8b89fd655fc0427d9874cf790ae5aaee90dc0b661f346501": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "9923e4f2975ef3bde91e951eca94a12123fa7aaabade1af87b23cc380084188a": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "a5aecd18beb190813e7c1de224c55bb12e619035cf717baf351b4988743da6c7": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "eac153420641f6d606612d2ee156ebd510cd9c3c9abe5d1bf17e9211d7f23d03": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "d21090dd9ec2b0a472ef39ba617874ea583e8674a4d7769da1e6fe98f5ee4cb9": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   }
 }

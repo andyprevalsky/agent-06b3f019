@@ -502,6 +502,81 @@ fi
 kill_pid_tree "$controller_pid"
 [ -n "$isolated_runsh_pid" ] && kill_pid_tree "$isolated_runsh_pid"
 
+# ── An isolated stack retained after unverified cleanup outlives its controller ─
+#
+# Regression (2026-10-07): AgentCard payment cleanup timed out, so `local.py`
+# recorded `failed_retained` and kept the isolated run.sh, services and database
+# as exact-owner recovery authority, then exited. With no benchmark-controller
+# ancestor left, stopping the shared deploy stack ran this sweep, which matched
+# the orphaned run.sh and SIGTERMed it; its EXIT trap dropped the retained
+# database. A live run.sh matching its `local-stack-owner.json` identity, and
+# every descendant, is reaped only through that owner. A stale record grants nothing.
+cat > "$WORKTREE/scripts/run.sh" <<'ISOLATED'
+#!/usr/bin/env bash
+( cd "$(dirname "$0")/../agents" && exec python3 worker.py ) &
+wait
+ISOLATED
+chmod +x "$WORKTREE/scripts/run.sh"
+
+start_owned_isolated_stack() {
+    local run_id="$1" identity_override="${2:-}" stack_pid identity
+    (cd "$WORKTREE" && exec bash scripts/run.sh --benchmark) > /dev/null 2>&1 &
+    stack_pid=$!
+    identity="$(python3 "$WORKTREE/scripts/process-identity.py" "$stack_pid")"
+    [ -n "$identity" ] || {
+        echo "FAIL: could not capture isolated stack identity" >&2
+        exit 1
+    }
+    mkdir -p "$WORKTREE/.context/benchmarks/$run_id"
+    python3 - "$WORKTREE/.context/benchmarks/$run_id/local-stack-owner.json" \
+        "$run_id" "$stack_pid" "${identity_override:-$identity}" <<'PY'
+import json
+import sys
+
+path, run_id, pid, identity = sys.argv[1:]
+with open(path, "w") as handle:
+    json.dump(
+        {"version": 1, "run_id": run_id, "token": "fixture", "pid": int(pid),
+         "native_identity": identity, "birth": "fixture"},
+        handle,
+    )
+PY
+    printf '%s' "$stack_pid"
+}
+
+wait_for_child() {
+    local parent="$1" child attempt
+    for attempt in $(seq 1 30); do
+        child="$(pgrep -P "$parent" -f 'worker\.py' 2>/dev/null | head -1 || true)"
+        if [ -n "$child" ]; then
+            printf '%s' "$child"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: isolated stack $parent did not start its worker" >&2
+    exit 1
+}
+
+retained_stack_pid="$(start_owned_isolated_stack retained-fixture)"
+PIDS+=("$retained_stack_pid")
+retained_worker_pid="$(wait_for_child "$retained_stack_pid")"
+PIDS+=("$retained_worker_pid")
+stale_stack_pid="$(start_owned_isolated_stack stale-fixture 'linux:stale-boot:1')"
+PIDS+=("$stale_stack_pid")
+stale_worker_pid="$(wait_for_child "$stale_stack_pid")"
+PIDS+=("$stale_worker_pid")
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/retained-sweep.log" 2>&1) || true
+
+assert_alive "$retained_stack_pid" "retained isolated run.sh with a matching owner record"
+assert_alive "$retained_worker_pid" "retained isolated stack's worker"
+assert_dead "$stale_stack_pid" "run.sh whose owner record names a different process"
+assert_dead "$stale_worker_pid" "worker under a stale isolated owner record"
+echo "PASS: retained isolated stacks are reaped only through their owner record"
+
+kill_pid_tree "$retained_stack_pid"
+
 # The protection walk must not stop before classifying PID 1. On a Fly cloudbench
 # guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
 # bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor

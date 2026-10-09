@@ -326,7 +326,18 @@ source "$1"
 fixture="$2"
 mode="$3"
 ls() { [[ "$*" == /usr/lib/postgresql ]]; printf '15\n'; }
-dpkg-query() { [[ "$*" == '-W -f=${Version} postgresql-15' ]]; printf '15.18-0+deb12u1'; }
+current_version() {
+    if [[ -e "$fixture/upgraded" ]]; then printf '15.19-0+deb12u1'; else printf '15.18-0+deb12u1'; fi
+}
+dpkg-query() {
+    if [[ "$*" == '-W -f=${Version} postgresql-15' ]]; then
+        if [[ "$mode" == withdrawn-pin-held-server ]]; then printf '15.18-0+deb12u1'; else current_version; fi
+    elif [[ "$*" == '-W -f=${Version} postgresql-server-dev-15' ]]; then
+        current_version
+    else
+        return 1
+    fi
+}
 test() {
     if [[ "$*" == '-f /usr/share/postgresql/15/extension/vector.control' ]]; then
         builtin test -f "$fixture/control"
@@ -343,8 +354,11 @@ apt-get() {
     if [[ "$*" == *postgresql-15-pgvector* ]]; then
         printf 'postgresql-15-pgvector : Breaks: postgresql-15-jit-llvm (< 19)\n' >&2
         return 100
-    elif [[ "$1" == install ]]; then
-        [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1' ]]
+    elif [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1' ]]; then
+        [[ "$mode" != withdrawn-pin* ]] || return 100
+    elif [[ "$*" == 'install -y --no-install-recommends build-essential postgresql-server-dev-15 postgresql-15' ]]; then
+        [[ "$mode" == withdrawn-pin* ]] || return 1
+        touch "$fixture/upgraded"
     else
         [[ "$*" == update ]]
     fi
@@ -385,6 +399,8 @@ cloudbench_install_pgvector
         "build-failure",
         "missing-control",
         "missing-library",
+        "withdrawn-pin",
+        "withdrawn-pin-held-server",
     ):
         fixture = tmp_path / mode
         fixture.mkdir()
@@ -404,15 +420,23 @@ cloudbench_install_pgvector
             timeout=5,
         )
         assert not (fixture / "temporary").exists(), "source-build cleanup was abandoned"
-        if mode != "complete":
+        if mode not in {"complete", "withdrawn-pin"}:
             assert result.returncode != 0, mode
             assert not ((fixture / "control").exists() and (fixture / "library").exists())
+            if mode == "withdrawn-pin-held-server":
+                assert not (fixture / "build-calls").exists(), "built against headers from another server build"
             continue
         assert result.returncode == 0, result.stdout + result.stderr
-        assert (fixture / "apt-calls").read_text().splitlines() == [
-            "update",
-            "install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1",
-        ]
+        pinned = "install -y --no-install-recommends build-essential postgresql-server-dev-15=15.18-0+deb12u1 postgresql-15=15.18-0+deb12u1"
+        if mode == "withdrawn-pin":
+            assert "exact PostgreSQL 15.18-0+deb12u1 packages unavailable" in result.stderr
+            assert (fixture / "apt-calls").read_text().splitlines() == [
+                "update",
+                pinned,
+                "install -y --no-install-recommends build-essential postgresql-server-dev-15 postgresql-15",
+            ]
+        else:
+            assert (fixture / "apt-calls").read_text().splitlines() == ["update", pinned]
         builds = (fixture / "build-calls").read_text().splitlines()
         assert len(builds) == 2 and builds[1] == builds[0] + " install"
 
@@ -1556,6 +1580,81 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     assert 'attempts="$(isolated_backend_ready_attempts)"' in stack
 
 
+def test_fleet_gives_a_long_catalog_task_its_own_default_budget() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    budget_fn = _extract_fleet_function(fleet, "bench_execution_budget() {")
+    script = f"""set -euo pipefail
+ROOT_DIR={shlex.quote(str(ROOT))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+{catalog_fn}
+{budget_fn}
+_catalog_modes_for_batch phone-call-hold-queue phone-call-client-intake
+for operator_set in 0 1; do
+    for budget in 7200 300; do
+        printf 'budget %s %s %s %s\\n' "$operator_set" "$budget" \\
+            "$(bench_execution_budget 12600 "$budget" "$operator_set")" \\
+            "$(bench_execution_budget 600 "$budget" "$operator_set")"
+    done
+done
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    catalog = {task["name"]: task for task in json.loads(TASKS_JSON.read_text())}
+    hold_timeout = catalog["phone-call-hold-queue"]["timeout_seconds"]
+    intake_timeout = catalog["phone-call-client-intake"]["timeout_seconds"]
+    assert hold_timeout > 7200 > intake_timeout
+    assert lines[:2] == [f"real\tplain\t{hold_timeout}", f"real\tplain\t{intake_timeout}"]
+    assert lines[2:] == [
+        "budget 0 7200 12600 7200",
+        "budget 0 300 12600 600",
+        "budget 1 7200 7200 7200",
+        "budget 1 300 300 300",
+    ]
+    assert 'BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="$bench_backstop" \\' in fleet
+    assert '[ -n "${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS+x}" ] && BACKSTOP_OPERATOR_SET="1"' in fleet
+    assert 'RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"' in fleet
+    assert "DETACH_ENV_UNSET=(-u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS)" in fleet
+
+
+def test_fleet_catalog_preflight_rejects_timeouts_shell_arithmetic_cannot_hold(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    catalog_fn = _extract_fleet_function(fleet, "_catalog_modes_for_batch() {")
+    benchmarks = tmp_path / "agents" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    shutil.copy(TASKS_JSON.with_name("polar_tasks.json"), benchmarks / "polar_tasks.json")
+    tasks = json.loads(TASKS_JSON.read_text())
+
+    def preflight(timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+        for task in tasks:
+            if task["name"] == "phone-call-hold-queue":
+                task["timeout_seconds"] = timeout_seconds
+        (benchmarks / "tasks.json").write_text(json.dumps(tasks))
+        script = f"""set -euo pipefail
+ROOT_DIR={shlex.quote(str(tmp_path))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
+{catalog_fn}
+_catalog_modes_for_batch phone-call-hold-queue
+"""
+        return subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=60
+        )
+
+    accepted = preflight(2**31 - 1)
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.splitlines() == [f"real\tplain\t{2**31 - 1}"]
+    # Beyond Bash's integer range `-gt` errors out, and near it the barrier
+    # allowance added to the budget wraps negative; neither may reach the shell.
+    for timeout_seconds in (2**63, 2**63 - 1):
+        rejected = preflight(timeout_seconds)
+        assert rejected.returncode == 1, rejected.stdout
+        assert "invalid timeout_seconds for phone-call-hold-queue" in rejected.stderr
+        assert rejected.stdout == ""
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
@@ -1566,8 +1665,9 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS" in cloud
     assert 'START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"' in fleet
     assert "CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))" in fleet
+    assert "bench_child_timeout=$((bench_run_timeout + START_BARRIER_WAIT_SECONDS))" in fleet
     assert 'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"' in fleet
-    assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
+    assert '--timeout "$bench_child_timeout"' in fleet
     assert "deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     # The barrier now tolerates infra failures (see
@@ -2745,7 +2845,36 @@ cloudbench_env_value() { return 0; }
             "driver cleanup evidence interrupt_status=1 cleanup_ack=1"
         )
     finally:
-        _terminate_boot_fixture_tree(boot)
+        with ExitStack() as cleanup:
+            cleanup.callback(_reap_fixture_status_server, status_pid_file, status_wrapper)
+            _terminate_boot_fixture_tree(boot)
+
+
+def _reap_fixture_status_server(pid_file: Path, wrapper: Path) -> None:
+    """The driver relaunches the status server as its own setsid child, so it is
+    reparented away from the boot tree once the driver exits."""
+    text = pid_file.read_text() if pid_file.exists() else ""
+    if not text.endswith("\n"):
+        return
+    pid = int(text)
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        return
+    if str(wrapper).encode() not in argv:
+        return
+    os.kill(pid, signal.SIGKILL)
+
+    def live() -> bool:
+        try:
+            return ") Z " not in Path(f"/proc/{pid}/stat").read_text()
+        except FileNotFoundError:
+            return False
+
+    deadline = time.monotonic() + 10
+    while live() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not live(), "fixture status server survived cleanup"
 
 
 def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
@@ -9471,6 +9600,19 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     raise ValueError(f"unterminated shell function: {signature}")
 
 
+def _fleet_registry_reaper_helpers(source: str) -> str:
+    """Registry reaper functions without the inventory library's top-level setup.
+    The shared library sits between its helpers and the fleet's registry block,
+    so a text span would also run controller initialization."""
+    shared = "".join(
+        _extract_fleet_function(source, signature)
+        for signature in ("registry_meta_value() {", "fly_with_timeout() {")
+    )
+    block_start = source.index("cloudbench_record_worker_evidence_owner() {")
+    block_end = source.index("\nfleet_registry_remove_if_empty() {", block_start)
+    return shared + source[block_start:block_end]
+
+
 def _fleet_pid_identity_helpers(source: str) -> str:
     """Birth helpers for extracted fleet and shared inventory owner/lock callers.
     A missing helper otherwise silently reads every owner as dead."""
@@ -11056,12 +11198,7 @@ exit "$retirement_status"
         start_new_session=True,
     )
     try:
-        # large-catalog writes 10k ordinal files with per-file fsync. That is
-        # real fixture I/O, not a synthetic hang, so it inherits the shared
-        # host guard used by late-native birth observation.
-        stdout, stderr = process.communicate(
-            timeout=FIXTURE_HOST_GUARD_SECONDS if late_native or fault == "large-catalog" else 10
-        )
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
@@ -15986,9 +16123,7 @@ def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
     clone-data volumes. Attached neighbors and other volume names are not
     ownership candidates and must remain untouched."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _fleet_registry_reaper_helpers(fleet)
     ownership_root = tmp_path / "ownership"
     registry = ownership_root / ("b" * 32)
     clones = registry / "clones"
@@ -16056,9 +16191,7 @@ def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proo
     """A live exact name, an unattached clone-data volume, or malformed volume
     inventory each invalidates the legacy-record absence proof."""
     fleet = fleet_source_text()
-    helpers_start = fleet.index("registry_meta_value() {")
-    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
-    helpers = fleet[helpers_start:helpers_end]
+    helpers = _fleet_registry_reaper_helpers(fleet)
     cases = (
         (
             "live-name",
@@ -19885,6 +20018,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
             f"""set -uo pipefail
 FLEET_DIR="$FD"
 RUN_ID=test-run
+FLEET_CONTROLLER_STARTED_EPOCH=1791331200
 BENCHES=(alpha beta)
 CATALOG_MODES=(real simulate)
 SIM_ON_CSV=
@@ -19900,6 +20034,7 @@ write_startup_card "healing warm snapshot (dep trees)"
     assert result.returncode == 0, result.stderr
     card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
     assert card["status"] == "starting"
+    assert card["timestamp"] == "2026-10-07T00:00:00+00:00"
     assert "healing warm snapshot" in card["phase"]
     assert card["summary"]["total"] == 2
     assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
@@ -28554,9 +28689,13 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     launch = launch.split('for bench in "${BENCHES[@]}"; do', 1)[1].split("    CHILD_PIDS+=(", 1)[0]
     supervisor = "\n".join(
         _extract_fleet_function(source, name + "() {")
-        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised")
+        for name in ("terminate_fleet_runner_group", "run_fleet_child_supervised", "bench_execution_budget")
     )
     parameters = {
+        "RUN_TIMEOUT": "10",
+        "RUN_TIMEOUT_OPERATOR_SET": "1",
+        "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS": "7200",
+        "BACKSTOP_OPERATOR_SET": "0",
         "FLEET_DIR": str(tmp_path),
         "DASH_BASE": "41000",
         "FLEET_OWNER_TOKEN": "fixture-owner",
@@ -28584,7 +28723,7 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
     }
     assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in parameters.items())
     script = f"""set -uo pipefail
-FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}
+FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); CATALOG_TIMEOUTS=(0); SIM_ON_CSV={shlex.quote(sim_on)}
 CHILD_MACHINE=(); i=0
 {assignments}
 export ENV_CAPTURE

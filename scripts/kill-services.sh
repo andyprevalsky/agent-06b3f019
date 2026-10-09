@@ -248,6 +248,56 @@ is_protected_benchmark_tree() {
     [ -z "$self_controller" ] || [ "$target_controller" != "$self_controller" ]
 }
 
+# Isolated benchmark stacks are reaped only through the exact identity in their
+# `.context/benchmarks/<run>/local-stack-owner.json` (local.py stop_services).
+# A stack retained after unverified cleanup is recovery authority that outlives
+# its benchmark controller, so controller ancestry alone cannot protect it.
+ISOLATED_STACK_OWNERS=""
+load_isolated_stack_owners() {
+    ISOLATED_STACK_OWNERS=$(python3 - "$WORKTREE_DIR/.context/benchmarks" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+for path in sorted(Path(sys.argv[1]).glob("*/local-stack-owner.json")):
+    if path.is_symlink() or not path.is_file():
+        continue
+    try:
+        owner = json.loads(path.read_text())
+    except (OSError, ValueError):
+        continue
+    if not isinstance(owner, dict):
+        continue
+    pid, identity = owner.get("pid"), owner.get("native_identity")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        continue
+    if not isinstance(identity, str) or not identity or any(c in identity for c in "\t\n"):
+        continue
+    print(f"{pid}\t{identity}")
+PY
+)
+}
+
+is_owned_isolated_stack() {
+    local pid=$1 owner_pid owner_identity
+    while IFS=$'\t' read -r owner_pid owner_identity; do
+        [ "$owner_pid" = "$pid" ] && identity_matches "$pid" "$owner_identity" && return 0
+    done <<< "$ISOLATED_STACK_OWNERS"
+    return 1
+}
+
+is_protected_isolated_stack_tree() {
+    local current=$1
+    [ -n "$ISOLATED_STACK_OWNERS" ] || return 1
+    while true; do
+        is_owned_isolated_stack "$current" && return 0
+        local ppid
+        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ] && return 1
+        current="$ppid"
+    done
+}
+
 # The tmux server is a same-cwd ancestor of every pane started in this
 # worktree. Walking ancestors from Step 5 services and signalling it
 # destroys every session — including an isolated smoke supervisor that
@@ -261,7 +311,8 @@ is_tmux_process() {
 }
 
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" || is_tmux_process "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" \
+        || is_protected_isolated_stack_tree "$1" || is_tmux_process "$1"
 }
 
 service_like_process() {
@@ -399,6 +450,7 @@ KEPT_FILE=$(mktemp)
 SCRATCH_FILE=$(mktemp)
 SURVIVORS_FILE=$(mktemp)
 trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE"' EXIT
+load_isolated_stack_owners
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory. Capture identity at the
@@ -471,8 +523,8 @@ done < "$ROOTS_FILE"
 # `IDENTITY_CONFLICT` during the walk.
 reduce_stable_identities "$ALL_FILE" > "$TARGETS_FILE"
 
-# Final backstop: drop any PID in a foreign benchmark-controller tree that
-# entered the set as a descendant. `pid_tree` walks downward and does not
+# Final backstop: drop any PID in a foreign benchmark-controller tree or an
+# owner-recorded isolated stack that entered the set as a descendant. `pid_tree` walks downward and does not
 # consult `is_protected_process`, so the ancestor guard alone cannot catch
 # this path — and a shared-stack EXIT sweep must not harvest isolated smoke.
 while IFS=$'\t' read -r pid start_time; do
@@ -480,6 +532,10 @@ while IFS=$'\t' read -r pid start_time; do
     identity_matches "$pid" "$start_time" || continue
     if is_protected_benchmark_tree "$pid"; then
         echo "🛡️  Refusing to kill benchmark controller tree PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        continue
+    fi
+    if is_protected_isolated_stack_tree "$pid"; then
+        echo "🛡️  Refusing to kill owner-recorded isolated stack PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
         continue
     fi
     printf '%s\t%s\n' "$pid" "$start_time" >> "$KEPT_FILE"
