@@ -275,6 +275,9 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 
 **Benchmarks:** `scripts/run-bench` is the one supported entrypoint for humans,
 `/benchmark`, and `/descend`; see `agents/benchmarks/README.md` for the full CLI.
+The [PR #1450 continuation checkpoint](docs/benchmark-pr1450-continuation.md)
+records the current deployment gaps, source-bound verification and the pending
+five consecutive LIVE 50-task runs. Read it when continuing that work.
 Use `scripts/run-bench list` to inspect tasks, then run a named slice or explicit
 tasks with `scripts/run-bench <slice-or-task...>`. It defaults to the cloud
 fleet, one isolated machine/world/queue per task. Use
