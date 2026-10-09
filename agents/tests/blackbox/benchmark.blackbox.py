@@ -184,7 +184,7 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
 
     post_attempts = []
     visible_runs = set()
-    hold_post_response = threading.Event()
+    visibility_served = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -195,7 +195,9 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             run_id = body["run_id"]
             post_attempts.append(run_id)
             visible_runs.add(run_id)
-            hold_post_response.wait(0.2)
+            # Commit first, then withhold the response until the client has
+            # proven visibility, so the timeout is ambiguous on any host load.
+            visibility_served.wait(60)
             payload = json.dumps({"run": {"run_id": run_id}}).encode()
             try:
                 self.send_response(201)
@@ -219,6 +221,7 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            visibility_served.set()
 
         def log_message(self, *_args):
             return
@@ -235,11 +238,13 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             "suite": "blackbox",
             "tasks": [{"name": "task-a", "status": "starting"}],
         }
+        # The POST still times out; the visibility GET gets the client's normal
+        # five-second ceiling instead of a budget host load can exhaust.
         with patch("benchmarks.hub_upload.time.sleep", lambda _delay: None):
-            require_run_visible(bundle, timeout=0.03)
+            require_run_visible(bundle, timeout=5.0)
         assert post_attempts == ["blackbox-ambiguous-commit"]
     finally:
-        hold_post_response.set()
+        visibility_served.set()
         server.shutdown()
         server.server_close()
         for name, value in prior.items():
