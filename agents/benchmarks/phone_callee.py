@@ -29,6 +29,11 @@ via its `call_phone_number` tool, the two AIs talk, and we verify BOTH sides:
     6. PhoneCalleeSession.cleanup(): end live persona calls, detach, then delete
        persona assistant/tools
 
+With phone_persona.hold_line the agent dials a leased Twilio hold line
+instead (benchmarks/phone_hold_line.py): recorded airline queue audio for
+hold_seconds, then a <Dial> transfer to the persona number above, so the
+persona is the representative who picks up after the wait.
+
 Each session owns a transient inbound number. Cloud fleet benchmarks run in
 separate processes and machines, so an in-process lock cannot protect one
 mutable phone-number-to-assistant attachment across distributed runners.
@@ -46,17 +51,25 @@ from typing import List, Optional
 import httpx
 
 from benchmarks.logs import load_env_var
+from benchmarks.phone_hold_line import HoldLineSession, load_hold_audio_manifest
 
 VAPI_BASE_URL = "https://api.vapi.ai"
 CALLEE_NUMBER_NAME = "rose-benchmark-callee"
 CALLEE_SESSION_NUMBER_PREFIX = f"{CALLEE_NUMBER_NAME}-session-"
 CALLEE_NUMBER_ID_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_ID"
 CALLEE_NUMBER_IDS_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
-CALLEE_SESSION_NUMBER_TTL = timedelta(hours=2)
+CALLEE_ASSISTANT_NAME_PREFIX = "benchmark-callee-"
+# Longer than any phone task's session, so an older session resource is a leak.
+CALLEE_SESSION_NUMBER_TTL = timedelta(hours=5)
 # Vapi documents a "couple of minutes" before free numbers become functional;
 # keep a small propagation margin so benchmark calls never race that boundary.
 CALLEE_SESSION_NUMBER_ACTIVATION_DELAY = timedelta(minutes=3)
 VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
+# The hold line lease outlives the hold plus the representative conversation;
+# the margin covers planning before the call and post-call analysis.
+HOLD_LINE_LEASE_MARGIN_SECONDS = 3600
+CALLEE_ANALYSIS_TIMEOUT_SECONDS = 180
+CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS = 900
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND_ENV = str(_REPO_ROOT / "back-end" / ".env")
@@ -106,7 +119,14 @@ def _configured_number_id_for_task(task_name: str) -> str:
         assignments[name] = number_id
     if task_name not in assignments:
         raise RuntimeError(f"{CALLEE_NUMBER_IDS_ENV} has no assignment for {task_name}")
-    return assignments[task_name]
+    number_id = assignments[task_name]
+    sharing = sorted(name for name, assigned in assignments.items() if assigned == number_id)
+    if len(sharing) > 1:
+        raise RuntimeError(
+            f"{CALLEE_NUMBER_IDS_ENV} assigns callee number {number_id[:8]} to {', '.join(sharing)}; "
+            "each phone task needs its own number"
+        )
+    return number_id
 
 
 def _session_phone_number_name() -> str:
@@ -183,6 +203,145 @@ def _normalize_spoken_digit_sequences(text: str) -> str:
     return _DIGIT_WORD_PATTERN.sub(replace, text)
 
 
+_ONES_UNDER_TEN = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+}
+_TENS_UNDER_HUNDRED = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_ORDINAL_DAY_WORDS = {
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+    "thirteenth": "13",
+    "fourteenth": "14",
+    "fifteenth": "15",
+    "sixteenth": "16",
+    "seventeenth": "17",
+    "eighteenth": "18",
+    "nineteenth": "19",
+    "twentieth": "20",
+    "twenty-first": "21",
+    "twenty first": "21",
+    "twenty-second": "22",
+    "twenty second": "22",
+    "twenty-third": "23",
+    "twenty third": "23",
+    "twenty-fourth": "24",
+    "twenty fourth": "24",
+    "twenty-fifth": "25",
+    "twenty fifth": "25",
+    "twenty-sixth": "26",
+    "twenty sixth": "26",
+    "twenty-seventh": "27",
+    "twenty seventh": "27",
+    "twenty-eighth": "28",
+    "twenty eighth": "28",
+    "twenty-ninth": "29",
+    "twenty ninth": "29",
+    "thirtieth": "30",
+    "thirty-first": "31",
+    "thirty first": "31",
+}
+_MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+_SPOKEN_0_99_ALT = (
+    "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+    "one|two|three|four|five|six|seven|eight|nine"
+)
+_SPOKEN_YEAR_THOUSAND_PATTERN = re.compile(
+    rf"\btwo thousand(?: and)?((?:[\s-]+(?:and|{_SPOKEN_0_99_ALT}))*)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_YEAR_20XX_PATTERN = re.compile(
+    r"\btwenty[\s-]+((?:twenty|thirty)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_MONTH_DATE_PATTERN = re.compile(
+    rf"\b({'|'.join(_MONTH_NAMES)})[\s,]+(?:the\s+)?("
+    rf"{'|'.join(sorted(_ORDINAL_DAY_WORDS, key=len, reverse=True))}|\d{{1,2}}"
+    rf")(?:st|nd|rd|th)?[\s,]+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+
+
+def _spoken_0_99(words: list[str]) -> int | None:
+    if not words:
+        return 0
+    if len(words) == 1:
+        if words[0] in _TENS_UNDER_HUNDRED:
+            return _TENS_UNDER_HUNDRED[words[0]]
+        return _ONES_UNDER_TEN.get(words[0])
+    if len(words) == 2 and words[0] in _TENS_UNDER_HUNDRED and words[1] in _ONES_UNDER_TEN:
+        return _TENS_UNDER_HUNDRED[words[0]] + _ONES_UNDER_TEN[words[1]]
+    return None
+
+
+def _normalize_spoken_years(text: str) -> str:
+    """Turn 'two thousand twenty seven' / 'twenty twenty-seven' into 2027."""
+
+    def from_thousand(match: re.Match[str]) -> str:
+        rest = [part.lower() for part in re.split(r"[\s-]+", match.group(1) or "") if part and part.lower() != "and"]
+        parsed = _spoken_0_99(rest)
+        return str(2000 + parsed) if parsed is not None else match.group(0)
+
+    def from_20xx(match: re.Match[str]) -> str:
+        rest = [part.lower() for part in re.split(r"[\s-]+", match.group(1) or "") if part]
+        parsed = _spoken_0_99(rest)
+        return str(2000 + parsed) if parsed is not None else match.group(0)
+
+    text = _SPOKEN_YEAR_THOUSAND_PATTERN.sub(from_thousand, text)
+    return _SPOKEN_YEAR_20XX_PATTERN.sub(from_20xx, text)
+
+
+def _normalize_spoken_calendar_dates(text: str) -> str:
+    """Turn 'October second 2027' into 'October 2, 2027' after years are digitized."""
+
+    def replace(match: re.Match[str]) -> str:
+        month, day, year = match.group(1), match.group(2), match.group(3)
+        day_key = re.sub(r"\s+", " ", day.lower())
+        day_n = _ORDINAL_DAY_WORDS.get(day_key) or _ORDINAL_DAY_WORDS.get(day_key.replace(" ", "-")) or day
+        return f"{month} {day_n}, {year}"
+
+    return _SPOKEN_MONTH_DATE_PATTERN.sub(replace, text)
+
+
 def _normalize_spoken_code_separators(text: str) -> str:
     """Treat spoken dash words like punctuation in codes such as R-O-S-E-4471."""
     return re.sub(r"\b(?:dash|hyphen|minus)\b", "-", text, flags=re.IGNORECASE)
@@ -190,7 +349,8 @@ def _normalize_spoken_code_separators(text: str) -> str:
 
 def _squash(text: str) -> str:
     """Lowercase and drop separators so spoken/extracted phone facts can match."""
-    normalized = _normalize_spoken_code_separators(_normalize_spoken_digit_sequences(text))
+    normalized = _normalize_spoken_calendar_dates(_normalize_spoken_years(text))
+    normalized = _normalize_spoken_code_separators(_normalize_spoken_digit_sequences(normalized))
     return re.sub(r"[\s\-().,/]", "", normalized.lower())
 
 
@@ -199,6 +359,96 @@ def missing_call_findings(findings: List[str], haystack: str) -> List[str]:
     lowered = haystack.lower()
     squashed = _squash(haystack)
     return [f for f in findings if f.lower() not in lowered and _squash(f) not in squashed]
+
+
+def finished_phone_calls(data: dict) -> list[dict]:
+    """FINISHED call_phone_number messages that carry phoneCall metadata."""
+    calls: list[dict] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "call_phone_number":
+            continue
+        if metadata.get("toolStatus") != "FINISHED":
+            continue
+        phone = metadata.get("phoneCall")
+        if isinstance(phone, dict):
+            calls.append(phone)
+    return calls
+
+
+def first_party_phone_recording_path(agent_id: str, call_id: str) -> str:
+    return f"/api/agents/{agent_id}/phone-calls/{call_id}/recording"
+
+
+def phone_recording_looks_like_audio(body: bytes, content_type: str) -> bool:
+    """True when the FE would receive a real audio container, not an error page."""
+    lowered = content_type.lower()
+    if "application/json" in lowered or "text/html" in lowered or "application/xml" in lowered:
+        return False
+    if len(body) < 16:
+        return False
+    if body.startswith(b"RIFF") or body.startswith(b"ID3") or body.startswith(b"OggS"):
+        return True
+    if body[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3"}:
+        return True
+    if len(body) >= 12 and body[4:8] == b"ftyp":
+        return True
+    return lowered.startswith("audio/")
+
+
+async def phone_recording_playback_failures(
+    data: dict,
+    *,
+    base_url: str,
+    agent_id: str,
+    headers: dict,
+    get=None,
+) -> list[str]:
+    """Fail when the FE first-party recording URL is missing or not playable audio."""
+    calls = finished_phone_calls(data)
+    if not calls:
+        return ["no finished call_phone_number message with phoneCall metadata"]
+    if not agent_id:
+        return ["phone recording playback check missing agent_id"]
+    failures: list[str] = []
+    client_get = get
+    if client_get is None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            return await phone_recording_playback_failures(
+                data,
+                base_url=base_url,
+                agent_id=agent_id,
+                headers=headers,
+                get=client.get,
+            )
+    for phone in calls:
+        call_id = phone.get("callId")
+        if not isinstance(call_id, str) or not call_id:
+            failures.append("finished phone call missing callId")
+            continue
+        url = f"{base_url.rstrip('/')}{first_party_phone_recording_path(agent_id, call_id)}"
+        try:
+            response = await client_get(url, headers=headers)
+        except Exception as exc:
+            failures.append(f"FE recording GET failed for call {call_id}: {exc}")
+            continue
+        status = getattr(response, "status_code", None)
+        if status != 200:
+            failures.append(f"FE recording GET {status} for call {call_id}")
+            continue
+        headers_map = getattr(response, "headers", {}) or {}
+        content_type = str(headers_map.get("content-type") or headers_map.get("Content-Type") or "")
+        body = getattr(response, "content", b"") or b""
+        if not phone_recording_looks_like_audio(body, content_type):
+            failures.append(
+                f"FE recording for call {call_id} is not playable audio "
+                f"(content-type={content_type!r}, bytes={len(body)})"
+            )
+    return failures
 
 
 def phone_search_text(data: dict) -> str:
@@ -239,6 +489,10 @@ def callee_check_failures(expected: dict, actual: dict) -> List[str]:
 def phone_payment_audit_path() -> Path:
     override = os.environ.get(_PAYMENT_AUDIT_PATH_ENV, "").strip()
     return Path(override).expanduser().resolve() if override else _PAYMENT_AUDIT_JSONL
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _parse_audit_timestamp(value: object) -> Optional[datetime]:
@@ -324,6 +578,13 @@ class PhoneCalleeSession:
         self.started_at: Optional[datetime] = None
         self._keypad_success_task: Optional[asyncio.Task] = None
         self._keypad_success_announced = False
+        self.hold_line: Optional[HoldLineSession] = None
+        self._hold_line_task: Optional[asyncio.Task] = None
+
+    @property
+    def dial_number(self) -> str:
+        """The number the benchmark agent calls: the hold line when one is leased."""
+        return self.hold_line.number if self.hold_line else self.phone_number
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
@@ -345,6 +606,40 @@ class PhoneCalleeSession:
             return None
         return {"tracking_number": tracking_number, "say": say}
 
+    def _hold_line_config(self) -> Optional[dict]:
+        """phone_persona.hold_line: {"hold_seconds": N, "audio": "<manifest name>"}."""
+        config = self.persona.get("hold_line")
+        if config is None:
+            return None
+        if not isinstance(config, dict) or not str(config.get("audio") or "").strip():
+            raise ValueError(f"Task '{self.task_name}' phone_persona.hold_line needs hold_seconds and audio")
+        return {"hold_seconds": config.get("hold_seconds"), "audio": str(config["audio"]).strip()}
+
+    def _new_hold_line(self) -> Optional[HoldLineSession]:
+        config = self._hold_line_config()
+        if config is None:
+            return None
+        max_duration = self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
+        hold_seconds = config["hold_seconds"]
+        lease_seconds = (hold_seconds if isinstance(hold_seconds, (int, float)) else 0) + max_duration
+        return HoldLineSession(
+            hold_seconds=hold_seconds,
+            audio_manifest=load_hold_audio_manifest(config["audio"]),
+            representative_number=self.phone_number,
+            lease_seconds=lease_seconds + HOLD_LINE_LEASE_MARGIN_SECONDS,
+        )
+
+    def analysis_timeout_seconds(self) -> int:
+        """How long to wait for Vapi structuredData after the inbound call ends.
+
+        Short IVR/payment calls finish analysis inside the default 180s window.
+        An hour-long persona call leaves a large artifact; give Vapi 15 minutes.
+        """
+        max_duration = self.persona.get("max_duration_seconds") or 0
+        if isinstance(max_duration, (int, float)) and max_duration >= 3600:
+            return CALLEE_ANALYSIS_TIMEOUT_LONG_SECONDS
+        return CALLEE_ANALYSIS_TIMEOUT_SECONDS
+
     async def setup(self) -> None:
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=45) as client:
@@ -352,12 +647,18 @@ class PhoneCalleeSession:
                 await self._create_persona_tools(client)
                 await self._create_persona_assistant(client)
                 await self._attach_assistant(client, self.assistant_id)
-            self.started_at = datetime.now(timezone.utc)
+                await self._reclaim_leaked_prior_assistant(client)
+            self.hold_line = self._new_hold_line()
+            if self.hold_line is not None:
+                await self.hold_line.acquire()
+            self.started_at = _utcnow()
             if self._keypad_success_config() is not None:
                 self._keypad_success_task = asyncio.create_task(
                     self._watch_keypad_success_announcement(),
                     name=f"keypad-success-{self.task_name}",
                 )
+            if self.hold_line is not None:
+                self._hold_line_task = asyncio.create_task(self.hold_line.run(), name=f"hold-line-{self.task_name}")
         except BaseException:
             await self.cleanup()
             raise
@@ -443,6 +744,34 @@ class PhoneCalleeSession:
             if response.status_code != 200:
                 print(f"    ⚠ Failed to reclaim stale callee number {number_id[:8]}: {response.status_code}")
 
+    async def _reclaim_leaked_prior_assistant(self, client: httpx.AsyncClient) -> None:
+        """A persona assistant older than any session is a leak: delete it instead of restoring it later."""
+        prior_id = self._prior_assistant_id
+        if not prior_id or prior_id == self.assistant_id:
+            return
+        try:
+            resp = await client.get(f"/assistant/{prior_id}")
+            if resp.status_code == 404:
+                self._prior_assistant_id = None
+                return
+            resp.raise_for_status()
+            prior = resp.json() or {}
+            created_at = _parse_audit_timestamp(prior.get("createdAt"))
+            if not (
+                str(prior.get("name") or "").startswith(CALLEE_ASSISTANT_NAME_PREFIX)
+                and created_at is not None
+                and created_at < datetime.now(timezone.utc) - CALLEE_SESSION_NUMBER_TTL
+            ):
+                return
+            self._prior_assistant_id = None
+            deleted = await client.delete(f"/assistant/{prior_id}")
+            if deleted.status_code >= 300:
+                print(f"    ⚠ Failed to delete leaked callee assistant {prior_id[:8]}: {deleted.status_code}")
+                return
+            print(f"    🧹 Reclaimed leaked callee assistant {prior_id[:8]} created {prior.get('createdAt')}")
+        except httpx.HTTPError as exc:
+            print(f"    ⚠ Could not inspect prior callee assistant {prior_id[:8]}: {type(exc).__name__}: {exc}")
+
     async def _create_persona_tools(self, client: httpx.AsyncClient) -> None:
         tool_specs = self.persona.get("tools") or []
         if "complete_test_payment" not in tool_specs:
@@ -487,7 +816,7 @@ class PhoneCalleeSession:
 
     async def _create_persona_assistant(self, client: httpx.AsyncClient) -> None:
         config = dict(_CALLEE_ASSISTANT_BASE)
-        config["name"] = f"benchmark-callee-{self.task_name}"[:40]  # Vapi caps assistant names at 40 chars
+        config["name"] = f"{CALLEE_ASSISTANT_NAME_PREFIX}{self.task_name}"[:40]  # Vapi caps assistant names at 40 chars
         config["model"] = {
             **_CALLEE_ASSISTANT_BASE["model"],
             "messages": [{"role": "system", "content": self.persona["system_prompt"]}],
@@ -568,22 +897,8 @@ class PhoneCalleeSession:
                         if not control_url:
                             # controlUrl can lag a moment after the call becomes in-progress
                             continue
-                        async with httpx.AsyncClient(timeout=30) as control_client:
-                            say_resp = await control_client.post(
-                                control_url,
-                                json={
-                                    "type": "say",
-                                    "content": say,
-                                    "endCallAfterSpoken": True,
-                                },
-                            )
-                            if say_resp.status_code >= 300:
-                                print(
-                                    f"    ⚠ keypad_success say failed for call "
-                                    f"{call_id[:8]}: "
-                                    f"{say_resp.status_code} {say_resp.text[:200]}"
-                                )
-                                continue
+                        if not await self._inject_control_say(control_url, say, call_id, "keypad_success"):
+                            continue
                         self._keypad_success_announced = True
                         print(
                             f"    ✓ Injected keypad_success announcement for tracking "
@@ -595,6 +910,26 @@ class PhoneCalleeSession:
             raise
         except Exception as exc:
             print(f"    ⚠ keypad_success watcher error: {exc}")
+
+    async def _inject_control_say(self, control_url: str, say: str, call_id: str, label: str) -> bool:
+        """Speak a canned closing line on a live call, then hang up."""
+        async with httpx.AsyncClient(timeout=30) as control_client:
+            say_resp = await control_client.post(
+                control_url,
+                json={
+                    "type": "say",
+                    "content": say,
+                    "endCallAfterSpoken": True,
+                },
+            )
+            if say_resp.status_code >= 300:
+                print(
+                    f"    ⚠ {label} say failed for call "
+                    f"{call_id[:8]}: "
+                    f"{say_resp.status_code} {say_resp.text[:200]}"
+                )
+                return False
+        return True
 
     @staticmethod
     def _call_messages_contain_keypad_tracking(call: dict, tracking_number: str) -> bool:
@@ -628,12 +963,20 @@ class PhoneCalleeSession:
                 f"{resp.status_code} {resp.text}"
             )
 
-    async def fetch_callee_structured_data(self, timeout_seconds: int = 180) -> dict:
+    async def fetch_callee_structured_data(self, timeout_seconds: Optional[int] = None) -> dict:
         """Poll Vapi for the inbound call answered by this session's persona.
 
         Call analysis (summary + structuredData) is produced asynchronously after
         the call ends, so poll until it appears or the timeout elapses.
         """
+        hold_evidence = self._hold_line_structured_data()
+        if hold_evidence:
+            print(f"    📞 Hold line evidence: {json.dumps(hold_evidence['hold_line'])}")
+            if self.hold_line is not None and self.hold_line.transferred_at is None:
+                # Nobody reached the representative, so there is no persona call to analyze.
+                return hold_evidence
+        if timeout_seconds is None:
+            timeout_seconds = self.analysis_timeout_seconds()
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         last_state = "no inbound call observed"
         async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
@@ -654,11 +997,17 @@ class PhoneCalleeSession:
                     analysis = call.get("analysis") or {}
                     structured = analysis.get("structuredData")
                     if isinstance(structured, dict):
-                        return {**structured, **payment_audit_structured_data_since(self.started_at)}
+                        return {**structured, **payment_audit_structured_data_since(self.started_at), **hold_evidence}
                     last_state = f"call {call.get('id')} status={call.get('status')} awaiting analysis"
                 if asyncio.get_event_loop().time() >= deadline:
                     raise RuntimeError(f"Timed out waiting for callee-side call analysis ({last_state})")
                 await asyncio.sleep(5)
+
+    def _hold_line_structured_data(self) -> dict:
+        """Callee-check fields observed on the hold line itself, not inferred by the persona."""
+        if self.hold_line is None:
+            return {}
+        return {"caller_stayed_on_hold": self.hold_line.stayed_on_hold(), "hold_line": self.hold_line.evidence()}
 
     async def _end_active_persona_calls(self, client: httpx.AsyncClient) -> None:
         if not (self.phone_number_id and self.assistant_id):
@@ -685,7 +1034,9 @@ class PhoneCalleeSession:
                 async with httpx.AsyncClient(timeout=30) as control_client:
                     await control_client.post(control_url, json={"type": "end-call"})
             except Exception as exc:
-                print(f"    ⚠ Failed to end active callee call {str(call.get('id', ''))[:8]}: {exc}")
+                print(
+                    f"    ⚠ Failed to end active callee call {str(call.get('id', ''))[:8]}: {type(exc).__name__}: {exc}"
+                )
 
     async def _delete_owned_phone_number(self, client: httpx.AsyncClient) -> None:
         if not (self._owns_phone_number and self.phone_number_id):
@@ -700,17 +1051,25 @@ class PhoneCalleeSession:
         self.phone_number_id = ""
         self.phone_number = ""
 
+    async def _cancel_background_task(self, task: Optional[asyncio.Task], label: str) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"    ⚠ {label} watcher cleanup error: {exc}")
+
     async def cleanup(self) -> None:
         """Best-effort: detach and delete every resource owned by this session."""
-        if self._keypad_success_task is not None and not self._keypad_success_task.done():
-            self._keypad_success_task.cancel()
-            try:
-                await self._keypad_success_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                print(f"    ⚠ keypad_success watcher cleanup error: {exc}")
-            self._keypad_success_task = None
+        await self._cancel_background_task(self._keypad_success_task, "keypad_success")
+        self._keypad_success_task = None
+        await self._cancel_background_task(self._hold_line_task, "hold_line")
+        self._hold_line_task = None
+        if self.hold_line is not None:
+            await self.hold_line.release()
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
                 try:
@@ -724,7 +1083,12 @@ class PhoneCalleeSession:
                         print(f"    ⚠ Failed to detach callee assistant: {exc}")
                 if self.assistant_id:
                     try:
-                        await client.delete(f"/assistant/{self.assistant_id}")
+                        deleted = await client.delete(f"/assistant/{self.assistant_id}")
+                        if deleted.status_code >= 300 and deleted.status_code != 404:
+                            print(
+                                f"    ⚠ Failed to delete callee assistant {self.assistant_id[:8]}: "
+                                f"{deleted.status_code} {deleted.text[:200]}"
+                            )
                     except Exception as exc:
                         print(f"    ⚠ Failed to delete callee assistant {self.assistant_id[:8]}: {exc}")
                     self.assistant_id = ""

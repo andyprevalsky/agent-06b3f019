@@ -21,11 +21,13 @@ sources:
   - PR #1401
   - PR #1416
   - PR #1418
+  - PR #1436
   - agent 75ea1c1e-0b2a-49f5-b6f5-6fb2a67f5346
   - agent 536786c2-3213-4ffd-99d8-8853b9908bcb
   - agent 102b1ebe-c0da-48bb-a8f8-bb3ac91cbcb4
   - agent 8b054756-bf09-43b9-ab3a-8a6c782e15e8
   - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
+  - agent d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -206,12 +208,51 @@ The unchanged lane rerun at 22:00 on HEAD `e93e406e5` (runtime identical to
   the stall is confined to the busy shared cardholder. This supports the
   exclusive-cardholder remedy below.
 
+### Recurrence on 2026-10-07
+
+`/deploy` Step 6a for PR #1417 (deploy run `20261007-023453-343760`, HEAD
+`e2b20fa1a`, stack `1791396285-2126832-43519`) failed
+`agent-payment-abandonment` (agent `7effdfe9-3999-493b-86b3-e5c9e3ba3b5f`)
+the same way. The other three tasks passed. The same lane passed 4/4 earlier in
+this deploy on HEAD `731627b37`; the runtime change since then is the merge of
+`main` and the zero-grace teardown floor, neither of which touches reclaim or
+release observation.
+
+- Transfer `owt_…a52e` (card `card_aec0bd2ceaea33cfb4e17c36`, $43.96 mint,
+  4396 transferred). `close_card` succeeded at 18:15:34 and `recover_funds` ran
+  after each of the first five release reads. The stale-lease retry requested
+  the release again every two to three minutes from 18:18 to 18:43. All 65
+  release reads through 18:43:52 returned `consumed`, `released_cents=0`.
+- The benchmark's owned payment drain then timed out after 180 seconds. The
+  runner recorded `failed_retained` and kept the stack and database as recovery
+  authority, which correctly withheld cleanup credit. That retained stack also
+  held the Step 6b latency ratchet, a separate harness bug fixed in
+  `2026-10-07-retained-recovery-stack-held-latency-ratchet`.
+
+`/deploy` Step 6a for PR #1436 (stabilization run `20261007-220502-355180`,
+HEAD `8f63c272e`, stack `1791413203-595722-63139`) failed
+`agent-payment-abandonment` (agent `d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc`)
+the same way after 538s. The other three lifecycle tasks passed. The same
+task passed earlier the same day in this deploy's Phase 1 6a run.
+
+- Transfer `owt_f46e484168f57370a4cda9c6` (card `card_5b1c41fe5dee8907e092e155`,
+  $43.96 mint, 4396 transferred) stayed `consumed` with `releasedCents: 0`.
+  The card was `CLOSED` with balance 0. Purchase stayed `HELD` and funding
+  stayed `RECLAIMING` through the 420s reconciliation wait and a later
+  post-timeout lifecycle read.
+- The unchanged-lane rerun at 23:33 on the same HEAD passed all four tasks
+  (Hub `4144392b-bff3-4d67-97ac-8be2e00c0237`). Abandonment (agent
+  `490787fb-fea5-4f08-9700-8ac6835ef966`) passed in 213s after
+  `Abandoned issued payment card and reconciled funding`.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
   `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
   `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
-  `card_0d8d820f72e50b35fd394b93`) to AgentCard with the ledger reads.
+  `card_0d8d820f72e50b35fd394b93`; `owt_…a52e`, card
+  `card_aec0bd2ceaea33cfb4e17c36`; `owt_f46e484168f57370a4cda9c6`, card
+  `card_5b1c41fe5dee8907e092e155`) to AgentCard with the ledger reads.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
@@ -226,3 +267,35 @@ When a benchmark waits on a third-party ledger, its failure has to print that
 ledger's rows next to ours. "Expected VOIDED, got HELD" points at our
 reconciler. The provider rows show the card closed and the provider never
 releasing it.
+
+
+## Retained original financial gate, October 6
+
+The earlier failed local AgentCard gate retains its exact isolated database and
+services while the existing reconciler owns financial cleanup. A fresh native,
+read-only database observation at02:10:23UTC found the root deleted, the purchase
+HELD and funding RECLAIMING for4396cents, with no persisted funding error. This
+is not financial release or a successful gate.
+
+Exact purchase-bound backend logs retained498 observations of `status=consumed`
+through00:32:03UTC. The next204 observations reported `status=undefined` beginning
+00:34:05UTC. That is a visibility gap, not evidence of provider release. Archive
+searches covered `list_transfers status undefined limit100` and `closed card
+funding RECLAIMING release pending`; the latter identified this open case.
+
+Fresh read-only capability discovery at02:12:54UTC exposed26 tools and confirmed
+that the transfer reader accepts only `status` and `limit` (maximum100), with
+no exact transfer-ID tool or pagination. Five bounded status-page reads at
+02:13:17–02:13:19UTC found the exact original transfer on the consumed page.
+Its card identity matched the retained purchase, amount and transferred value
+were4396cents, and released value was0. Thus losing the record from the
+unfiltered first100 results did not establish closure; the provider transfer
+was still visibly unreleased. Only scalar results are reported. Full responses,
+identifiers, database receipts and logs remain private and uncommitted.
+
+No refund, card mutation, provider recovery mutation or production source edit
+was made for this observation. The original gate remains failed and its owned
+stack remains available to the existing reconciler. The normal terminal wallet
+state and exact native resource release are still pending. There is no new
+causal reproduction or completed fix here; this is updated runtime evidence in
+the existing open case, independent of the five-run DAILY50 acceptance streak.

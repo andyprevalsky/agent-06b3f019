@@ -407,23 +407,34 @@ start_machines_snapshot_loop() {
 
 inventory_index_healthy() {
     local pid="${SNAPSHOT_LOOP_PID:-}" expected_token="${SNAPSHOT_LOOP_TOKEN:-}"
-    local key value publisher_token="" valid_until="" now
+    local key value publisher_token="" valid_until="" now status=0 health="$INVENTORY_INDEX/current/health"
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$pid" 2>/dev/null || return 1
+    if [ -n "${SNAPSHOT_LOOP_PID_START:-}" ]; then
+        inventory_pid_matches_start "$pid" "$SNAPSHOT_LOOP_PID_START" || return 1
+    fi
     if [ "${INVENTORY_PUBLISHER_BORROWED:-0}" = 1 ]; then
         kill -0 "$INVENTORY_CAMPAIGN_PARENT_PID" 2>/dev/null || return 1
+        inventory_pid_matches_start "$INVENTORY_CAMPAIGN_PARENT_PID" \
+            "$INVENTORY_CAMPAIGN_PARENT_START" || return 1
     fi
-    [ -n "$expected_token" ] && [ -s "$INVENTORY_INDEX/current/health" ] || return 1
+    [ -n "$expected_token" ] && [ ! -L "$health" ] || return 1
+    # A live, birth-fenced publisher can be between usable generations. Only
+    # availability/freshness is retryable; malformed ownership remains fatal.
+    [ -e "$health" ] || return 75
+    [ -f "$health" ] && [ -s "$health" ] || return 1
+    [ -r "$health" ] || return 75
     while IFS='=' read -r key value; do
         case "$key" in
             publisher_token) publisher_token="$value" ;;
             valid_until) valid_until="$value" ;;
         esac
-    done < "$INVENTORY_INDEX/current/health"
+    done < "$health" || return 75
     case "$valid_until" in ''|*[!0-9]*) return 1 ;; esac
     [ "$publisher_token" = "$expected_token" ] || return 1
     now=$((INVENTORY_CLOCK_EPOCH + SECONDS - INVENTORY_CLOCK_SECONDS))
-    [ "$valid_until" -ge "$now" ]
+    [ "$valid_until" -ge "$now" ] || status=$?
+    case "$status" in 0) return 0 ;; 1) return 75 ;; *) return 1 ;; esac
 }
 
 _fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
@@ -490,11 +501,13 @@ inventory_machine_field() {  # inventory_machine_field <id> <field>
 }
 
 inventory_machine_exists() {
-    local path
+    local path status=0
+    path="$(inventory_machine_record_path "$1")" || return 2
     # A stale publisher cannot establish Machine absence. Preserve that
     # distinction for autoscaler diagnostics and exact-owner recovery.
-    inventory_index_healthy || return 2
-    path="$(inventory_machine_record_path "$1")" || return 2
+    inventory_index_healthy || status=$?
+    [ "$status" -ne 75 ] || return 75
+    [ "$status" -eq 0 ] || return 2
     [ -s "$path" ]
 }
 

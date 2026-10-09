@@ -563,6 +563,50 @@ if grep -q -- '-KILL' "$identity_signal_log"; then
   fail "tree cleanup SIGKILLed a reused PID"
 fi
 
+# SIGKILL completes asynchronously. With a zero TERM grace, a loaded host can
+# still show the exact birth running on the first post-KILL read; teardown must
+# re-observe it rather than report a survivor at delivery time.
+slow_exit_state="$TMP_ROOT/slow-exit-state"
+slow_exit_reads="$TMP_ROOT/slow-exit-reads"
+printf 'running\n' > "$slow_exit_state"
+printf '0\n' > "$slow_exit_reads"
+if ! (
+  jobs() {
+    printf '4194301\n'
+  }
+  cloudbench_process_birth_table() {
+    printf '4194301 1 birth-test:slow-exit\n'
+  }
+  cloudbench_pid_start_time() { printf 'birth-test:slow-exit\n'; }
+  cloudbench_pid_start_time_like() { printf 'birth-test:slow-exit\n'; }
+  cloudbench_pid_observation_like() {
+    [ "$(cat "$slow_exit_state")" = killed ] || {
+      printf 'birth-test:slow-exit\tS\n'
+      return 0
+    }
+    reads="$(cat "$slow_exit_reads")"
+    reads=$((reads + 1))
+    printf '%s\n' "$reads" > "$slow_exit_reads"
+    [ "$reads" -le 2 ] || return 1
+    printf 'birth-test:slow-exit\tR\n'
+  }
+  kill() {
+    case "$1" in
+      -KILL) printf 'killed\n' > "$slow_exit_state" ;;
+      -0) [ "$(cat "$slow_exit_reads")" -le 2 ] ;;
+    esac
+  }
+  wait() {
+    return 0
+  }
+  cloudbench_terminate_tree_and_wait 0 4194301
+) 2> "$TMP_ROOT/slow-exit.err"; then
+  cat "$TMP_ROOT/slow-exit.err" >&2
+  fail "zero-grace tree cleanup judged a SIGKILLed birth before the kernel finished its exit"
+fi
+[ "$(cat "$slow_exit_reads")" -gt 2 ] ||
+  fail "zero-grace tree cleanup did not re-observe the SIGKILLed birth"
+
 # A local bind collision is not a remote/DNS readiness failure. The proxy
 # launcher must classify it immediately so its caller can abandon the poisoned
 # lease and choose another port instead of retrying that port until the barrier

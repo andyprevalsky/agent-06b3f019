@@ -401,13 +401,18 @@ async function run(): Promise<void> {
         data: {
           agentId: priorChild.id,
           role: 'TOOL',
-          text: '**Status**: ❌ FAILED\nOrchid deploy error: missing banner_mode',
+          text: '**Goal**: Ship the release\n\nwith rollback notes\n\n**Status**: ❌ FAILED\nOrchid deploy error: missing banner_mode',
         },
       }),
     ]);
     await prisma.message.createMany({
       data: [
         { agentId: sms.id, role: 'USER', text: 'Orchid SMS instruction: dispatch at noon' },
+        {
+          agentId: sms.id,
+          role: 'TOOL',
+          text: '**Status**: ✅ SUCCESS\nHeron status-first result',
+        },
         { agentId: currentChild.id, role: 'TOOL', text: 'Orchid current-only decoy' },
         { agentId: foreign.id, role: 'ASSISTANT', text: 'Orchid foreign-only decoy' },
         { agentId: prior.id, role: 'SYSTEM', text: 'Orchid system-only decoy' },
@@ -444,6 +449,13 @@ async function run(): Promise<void> {
     }
     if (!String(tool.content).includes('tool_status: ❌ FAILED')) {
       throw new Error(`Tool status was lost from the matching snippet: ${JSON.stringify(tool)}`);
+    }
+    const [statusFirstTool] = requireResult(
+      await grep(ownerId, { source: 'agent_trajectories', pattern: 'Heron' }),
+      1
+    );
+    if (!String(statusFirstTool.content).includes('tool_status: ✅ SUCCESS')) {
+      throw new Error(`Status-first tool status was lost: ${JSON.stringify(statusFirstTool)}`);
     }
     if (
       !String(tool.content).includes(`trace_path: ${tool.path}\nmessage_role: TOOL\nagent_title:`)

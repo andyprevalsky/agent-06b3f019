@@ -9,6 +9,8 @@ vi.mock('@/lib/realtime', async (importOriginal) => {
   };
 });
 
+import { composerCanSubmit } from '@/features/terminal/components/composerCanSubmit';
+import { applyAgentBackfill } from '@/features/agent-context/hooks/agentBackfill';
 import {
   cleanupSubscription,
   handleAssistantStream,
@@ -17,6 +19,7 @@ import {
   handlePlanStream,
   handleToolStream,
   handleUpdateAgent,
+  isChatCapableAgent,
   type RealtimeSetters,
 } from '@/features/agent-context/hooks/realtimeHandlers';
 import type {
@@ -208,6 +211,95 @@ describe('realtimeHandlers', () => {
     expect(s.state.agent.title).toBe('Generated Agent Title');
     expect(s.state.isChatMode).toBe(true);
     expect(onLoad).toHaveBeenCalled();
+  });
+
+  it('composerCanSubmit: ACTIVE plus sticky !isChatMode is Stop; restoring chat mode is Send', () => {
+    expect(
+      composerCanSubmit({
+        selectedAgentId: '3be856d5-e4fe-4eb5-b30e-ea99d44793fe',
+        status: 'ACTIVE',
+        isChatMode: false,
+      }),
+    ).toBe(false);
+    expect(
+      composerCanSubmit({
+        selectedAgentId: '3be856d5-e4fe-4eb5-b30e-ea99d44793fe',
+        status: 'ACTIVE',
+        isChatMode: true,
+      }),
+    ).toBe(true);
+    expect(
+      composerCanSubmit({
+        selectedAgentId: '3be856d5-e4fe-4eb5-b30e-ea99d44793fe',
+        status: 'COMPLETED',
+        isChatMode: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('handleUpdateAgent: a terminal status without temporalWorkflowId restores chat mode', () => {
+    // Prod status broadcasts omit temporalWorkflowId. After AGENT_MODE_STARTED
+    // the composer stays on Stop unless COMPLETED itself restores chat mode.
+    const s = mkSetters();
+    s.state.agent = {
+      title: null,
+      progress: 1,
+      status: 'ACTIVE',
+      temporal_workflow_id: 'wf-old',
+    } as never;
+    s.state.isChatMode = false;
+    handleUpdateAgent(
+      { status: 'COMPLETED', progress: 1 } as never,
+      s.setAgent as never,
+      s.setIsChatMode as never,
+    );
+    expect(s.state.agent.status).toBe('COMPLETED');
+    expect(s.state.isChatMode).toBe(true);
+  });
+
+  it('handleUpdateAgent: a leftover workflow id on COMPLETED still restores chat mode', () => {
+    const s = mkSetters();
+    s.state.agent = {
+      title: null,
+      progress: 1,
+      status: 'ACTIVE',
+      temporal_workflow_id: 'wf-old',
+    } as never;
+    s.state.isChatMode = false;
+    handleUpdateAgent(
+      { status: 'COMPLETED', temporalWorkflowId: 'wf-old' } as never,
+      s.setAgent as never,
+      s.setIsChatMode as never,
+    );
+    expect(s.state.isChatMode).toBe(true);
+  });
+
+  it('isChatCapableAgent: terminal leftover workflow id and live ACTIVE stay distinct', () => {
+    expect(isChatCapableAgent({ status: 'COMPLETED', temporal_workflow_id: 'wf-old' })).toBe(true);
+    expect(isChatCapableAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-live' })).toBe(false);
+    expect(isChatCapableAgent({ status: 'ACTIVE', temporal_workflow_id: null })).toBe(true);
+  });
+
+  it('applyAgentBackfill: a COMPLETED snapshot restores chat even with a leftover workflow id', () => {
+    const s = mkSetters();
+    s.state.isChatMode = false;
+    applyAgentBackfill(
+      {
+        agent: {
+          status: 'COMPLETED',
+          temporal_workflow_id: 'wf-old',
+        },
+        messages: [],
+      } as never,
+      s.setMessages as never,
+      s.setAgent as never,
+      s.setIsChatMode as never,
+    );
+    expect(s.state.isChatMode).toBe(true);
+    expect(s.state.agent).toMatchObject({
+      status: 'COMPLETED',
+      temporal_workflow_id: 'wf-old',
+    });
   });
 
   it('handleUpdateAgent: no-ops when prev is null', () => {

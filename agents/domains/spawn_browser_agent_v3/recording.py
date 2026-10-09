@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional
@@ -30,6 +31,7 @@ from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 import httpx
 import structlog
 
+import helpers.trace_archive as trace_archive
 from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
 
@@ -43,10 +45,80 @@ _BACKGROUND_RECORDING_ARCHIVE_TASKS: set[asyncio.Task[Any]] = set()
 _BACKGROUND_RECORDING_ARCHIVE_SLOTS = threading.BoundedSemaphore(4)
 
 
+_CLOSED_RECORDING_LOCK = threading.Lock()
+_CLOSED_RECORDING_FILES: dict[tuple[str, str, str], dict[str, Future[Optional[dict[str, str]]]]] = {}
+_CLOSED_RECORDING_WAITING: dict[tuple[str, str, str], list[tuple[str, tuple[str, Path, str, Optional[bool]], int]]] = {}
+
+
+def _queue_closed_recording_file(output_dir: Path, root_agent_id: str, task_id: str, file_path: Path) -> None:
+    """Publish native batches during capture without queuing any source bodies."""
+    if not archive_enabled():
+        return
+    try:
+        relative = file_path.relative_to(output_dir).as_posix()
+        key = (str(output_dir.resolve()), root_agent_id, task_id)
+        path = f"media/browser/{task_id}/{relative}"
+        reservation = trace_archive.closed_file_archive_reservation(path, file_path)
+        if reservation is None or reservation > trace_archive._BATCH_MAX_BYTES:
+            return
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        descriptor = (
+            path,
+            file_path,
+            content_type,
+            False if content_type.startswith(("image/", "video/", "audio/")) else None,
+        )
+        with _CLOSED_RECORDING_LOCK:
+            waiting = _CLOSED_RECORDING_WAITING.setdefault(key, [])
+
+            def flush_waiting() -> None:
+                batch = list(waiting)
+                waiting.clear()
+                future = trace_archive.archive_closed_files_in_background(
+                    root_agent_id=root_agent_id, artifacts=[item[1] for item in batch]
+                )
+                if future is not None:
+                    for item in batch:
+                        _CLOSED_RECORDING_FILES.setdefault(key, {})[item[0]] = future
+
+            if waiting and sum(item[2] for item in waiting) + reservation > trace_archive._BATCH_MAX_BYTES:
+                flush_waiting()
+            waiting.append((relative, descriptor, reservation))
+            if len(waiting) >= trace_archive._BATCH_MAX_RECORDS:
+                flush_waiting()
+    except Exception:
+        # Source files survive failed admission and follow the final fallback.
+        pass
+
+
+def _closed_recording_hash(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: str) -> bool:
+    key = (str(output_dir.resolve()), root_agent_id, task_id)
+    with _CLOSED_RECORDING_LOCK:
+        closed = dict(_CLOSED_RECORDING_FILES.get(key, {}))
+        _CLOSED_RECORDING_WAITING.pop(key, None)
+    acknowledged = {}
+    for relative, future in closed.items():
+        try:
+            hashes = future.result()
+            if hashes is not None:
+                acknowledged[relative] = hashes.get(f"media/browser/{task_id}/{relative}")
+        except Exception:
+            pass
+
     def artifacts():
         for file_path in output_dir.rglob("*"):
             if file_path.is_file():
+                relative = file_path.relative_to(output_dir).as_posix()
+                if relative in acknowledged and acknowledged[relative] == _closed_recording_hash(file_path):
+                    continue
                 content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
                 yield (
                     f"media/browser/{task_id}/{file_path.relative_to(output_dir).as_posix()}",
@@ -55,7 +127,16 @@ def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: 
                     False if content_type.startswith(("image/", "video/", "audio/")) else None,
                 )
 
-    return archive_files(root_agent_id=root_agent_id, artifacts=artifacts())
+    try:
+        return archive_files(root_agent_id=root_agent_id, artifacts=artifacts())
+    finally:
+        with _CLOSED_RECORDING_LOCK:
+            current = _CLOSED_RECORDING_FILES.get(key, {})
+            for relative, future in closed.items():
+                if current.get(relative) is future:
+                    current.pop(relative)
+            if not current:
+                _CLOSED_RECORDING_FILES.pop(key, None)
 
 
 def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool) -> bool:
@@ -3710,6 +3791,9 @@ class BrowserNetworkRecorder:
                 extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
                 body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
                 body_path.write_bytes(body_bytes)
+                _queue_closed_recording_file(
+                    self.output_dir, current_root_agent_id() or self.agent_id, self.task_id, body_path
+                )
                 entry["body_file"] = body_path.name
                 logger.info(
                     "Browser network response body captured",
@@ -3869,9 +3953,7 @@ class BrowserNetworkRecorder:
                 self._api_challenge_provider_exits = max(0, api_exits - 1)
                 with contextlib.suppress(TypeError, ValueError):
                     generation = int(rejection.get("browser_generation"))
-                    rejected_generations = set(
-                        getattr(self, "_rejected_network_generations", set()) or set()
-                    )
+                    rejected_generations = set(getattr(self, "_rejected_network_generations", set()) or set())
                     rejected_generations.discard(generation)
                     self._rejected_network_generations = rejected_generations
                 logger.info(

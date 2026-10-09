@@ -19,6 +19,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def workspace_tsx() -> str:
+    """Return the installed tsx binary. Do not call through npx: the Cloud
+    VM's /exec-daemon/npx (npm 11) crashes before the local binary starts.
+    """
+    for candidate in (ROOT / "node_modules/.bin/tsx", ROOT / "back-end/node_modules/.bin/tsx"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise FileNotFoundError("tsx is not installed in node_modules/.bin")
+
+
 @dataclass(frozen=True)
 class Command:
     name: str
@@ -106,8 +116,7 @@ def deploy_commands() -> tuple[Command, ...]:
                 "../scripts/run-deploy-stage",
                 "credential-health",
                 "--",
-                "npx",
-                "tsx",
+                workspace_tsx(),
                 "src/tests/blackbox/integration-health.blackbox.ts",
             ),
             ROOT / "back-end",

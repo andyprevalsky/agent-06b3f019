@@ -496,6 +496,23 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=40.0s');
   });
 
+  it('leads the result with the goal and judges status from the Status line', () => {
+    const goalFirst = (status: string) =>
+      `**Goal**: Find the error banner and report what failed\n\n**Status**: ${status}\n\n**Outcome**: Banner says the upload failed`;
+    const success = { ...anchorMsg, text: goalFirst('✅ SUCCESS') };
+    const { unmount } = renderChip([success], success);
+    const header = screen.getByTestId('browser-agent-chip-header');
+    expect(header).toHaveTextContent('Done');
+    expect(header).not.toHaveTextContent('Failed');
+    const collapsed = screen.getByText(/^\*\*Goal\*\*: Find the error banner/);
+    expect(collapsed.textContent?.startsWith('**Goal**: Find the error banner')).toBe(true);
+    unmount();
+
+    const failure = { ...anchorMsg, text: goalFirst('❌ FAILED') };
+    renderChip([failure], failure);
+    expect(screen.getByTestId('browser-agent-chip-header')).toHaveTextContent('Failed');
+  });
+
   it('exposes only Result and Recording tabs (trajectory lives inside Recording)', async () => {
     const messages = [anchorMsg, recordingMsg({ recording_view_url: KERNEL_VIEW_URL })];
     renderChip(messages, anchorMsg);

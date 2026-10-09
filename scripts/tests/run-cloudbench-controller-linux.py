@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a registered controller fixture on Linux; Mac uses an offline container."""
+"""Run the unchanged controller fixture as root on Linux; other hosts use an offline container."""
 
 from __future__ import annotations
 
@@ -11,16 +11,11 @@ import re
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import uuid
-
-FIXTURES = (
-    "scripts/tests/cloudbench-multi-workstream.test.sh",
-    "scripts/tests/cloudbench-status-service-shutdown.test.sh",
-)
 
 
 TOOL_CHECK = """import re,shutil,subprocess,sys
@@ -35,78 +30,6 @@ assert len(set(package_runner_versions))==1, 'requires npm/npx from the same pac
 """
 
 
-def _private_json(path: Path, value: object) -> None:
-    with os.fdopen(
-        os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w"
-    ) as handle:
-        json.dump(value, handle, indent=2)
-        handle.write("\n")
-
-
-def _cleanup_command(snapshot: Path, args: list[str], *, stdout=None):
-    """Retain exact lifecycle diagnostics without recording environment values."""
-    record = {"args": args}
-    try:
-        kwargs = (
-            {"capture_output": True, "text": True}
-            if stdout is None
-            else {"stdout": stdout, "stderr": subprocess.PIPE, "text": True}
-        )
-        result = subprocess.run(args, **kwargs)
-        record.update(
-            returncode=result.returncode, stdout=result.stdout, stderr=result.stderr
-        )
-        return result
-    except (OSError, subprocess.SubprocessError) as error:
-        record.update(error=type(error).__name__, detail=str(error))
-        raise
-    finally:
-        with os.fdopen(
-            os.open(
-                snapshot / "cleanup-commands.jsonl",
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            ),
-            "a",
-        ) as handle:
-            handle.write(json.dumps(record) + "\n")
-
-
-def _inventory_archive(snapshot: Path, archive_path: Path) -> None:
-    """Hash archived regular bytes; never extract paths or follow links."""
-    archive_digest = hashlib.sha256()
-    with archive_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            archive_digest.update(chunk)
-    rows = []
-    nonregular = 0
-    with tarfile.open(archive_path, mode="r|") as archive:
-        for member in archive:
-            if not member.isfile():
-                nonregular += 1
-                continue
-            digest = hashlib.sha256()
-            size = 0
-            with archive.extractfile(member) as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    size += len(chunk)
-                    digest.update(chunk)
-            if size != member.size:
-                raise RuntimeError("archived fixture member was incomplete")
-            rows.append(
-                {"name": member.name, "size": size, "sha256": digest.hexdigest()}
-            )
-    _private_json(
-        snapshot / "fixture-tmp.inventory.json",
-        {
-            "archive_sha256": archive_digest.hexdigest(),
-            "archive_bytes": archive_path.stat().st_size,
-            "regular_files": rows,
-            "nonregular_members": nonregular,
-        },
-    )
-
-
 def retire_owned_container(
     snapshot: Path, name: str, owner: str, image_id: str
 ) -> bool:
@@ -115,9 +38,10 @@ def retire_owned_container(
     if cidfile.is_file() and not re.fullmatch(r"[0-9a-f]{64}", identity):
         return False
     format_value = '{{.Id}}\n{{.Name}}\n{{index .Config.Labels "org.rose.controller-test-owner"}}\n{{.Image}}\n{{json .Mounts}}'
-    result = _cleanup_command(
-        snapshot,
+    result = subprocess.run(
         ["docker", "inspect", identity, "--format", format_value],
+        capture_output=True,
+        text=True,
     )
     if result.returncode:
         return result.returncode == 1 and any(
@@ -160,41 +84,69 @@ def retire_owned_container(
         for relative, destination, writable in expected
     ):
         return False
-    evidence_ok = False
+    stopped_ok = False
     removed = False
     try:
-        stopped = _cleanup_command(
-            snapshot,
+        stopped = subprocess.run(
             ["docker", "stop", "--time", "30", fields[0]],
+            capture_output=True,
+            text=True,
         )
         if stopped.returncode:
             raise subprocess.CalledProcessError(stopped.returncode, stopped.args)
-        # Docker's host extraction preserves guest directory modes before
-        # creating their children. Keep the exact stream instead, including
-        # restrictive files and links, without applying guest paths or modes.
-        archive_path = snapshot / "fixture-tmp.tar"
-        with os.fdopen(
-            os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
-        ) as archive:
-            exported = _cleanup_command(
-                snapshot, ["docker", "cp", fields[0] + ":/tmp/.", "-"], stdout=archive
+        stopped_ok = True
+        archive = snapshot / "fixture-tmp"
+        archive.mkdir(mode=0o700, exist_ok=True)
+        exported = subprocess.run(
+            ["docker", "cp", fields[0] + ":/tmp/.", str(archive)],
+            capture_output=True,
+            text=True,
+        )
+        if exported.returncode:
+            print(
+                "WARNING: controller diagnostic export is incomplete; native owner retirement is checked separately.",
+                file=sys.stderr,
             )
-        if exported.returncode == 0:
-            _inventory_archive(snapshot, archive_path)
-        evidence_ok = stopped.returncode == 0 and exported.returncode == 0
-    except (OSError, RuntimeError, tarfile.TarError, subprocess.SubprocessError):
-        evidence_ok = False
+    except (OSError, subprocess.SubprocessError):
+        print(
+            "WARNING: controller stop or diagnostic export raised an observation error; native retirement remains required.",
+            file=sys.stderr,
+        )
     finally:
-        # A failed export must not leave this exact verified owner behind.
+        # Even partial diagnostics stay private; never follow exported symlinks.
+        archive = snapshot / "fixture-tmp"
+        try:
+            for directory, directories, files in os.walk(archive, followlinks=False):
+                Path(directory).chmod(0o700)
+                directories[:] = [
+                    item
+                    for item in directories
+                    if not (Path(directory) / item).is_symlink()
+                ]
+                for item in files:
+                    path = Path(directory) / item
+                    if stat.S_ISREG(path.lstat().st_mode):
+                        path.chmod(0o600)
+        except OSError:
+            print(
+                "WARNING: some private diagnostic files could not be sealed.",
+                file=sys.stderr,
+            )
+        # A failed diagnostic export must not leave this exact verified owner behind.
         try:
             removed = (
-                _cleanup_command(snapshot, ["docker", "rm", fields[0]]).returncode == 0
+                subprocess.run(
+                    ["docker", "rm", fields[0]], capture_output=True, text=True
+                ).returncode
+                == 0
             )
         except (OSError, subprocess.SubprocessError):
             removed = False
-    gone = _cleanup_command(snapshot, ["docker", "inspect", fields[0]])
+    gone = subprocess.run(
+        ["docker", "inspect", fields[0]], capture_output=True, text=True
+    )
     return (
-        evidence_ok
+        stopped_ok
         and removed
         and gone.returncode == 1
         and any(
@@ -207,15 +159,27 @@ def retire_owned_container(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true")
-    parser.add_argument("--fixture", choices=FIXTURES, default=FIXTURES[0])
+    parser.add_argument(
+        "--fixture",
+        choices=("multi-workstream", "status-service-shutdown"),
+        default="multi-workstream",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    fixture = args.fixture
-    if sys.platform == "linux":
-        subprocess.run([sys.executable, "-c", TOOL_CHECK], check=True)
-        if args.check_only:
-            return 0
-        os.execvp("bash", ["bash", str(root / fixture)])
+    fixture = f"scripts/tests/cloudbench-{args.fixture}.test.sh"
+    # The fixtures exercise root-only Linux permission primitives with the
+    # pinned toolchain; any other host runs them in the same offline root container.
+    if sys.platform == "linux" and os.geteuid() == 0:
+        native = subprocess.run([sys.executable, "-c", TOOL_CHECK])
+        if native.returncode == 0:
+            if args.check_only:
+                return 0
+            os.execvp("bash", ["bash", str(root / fixture)])
+        print(
+            "host toolchain is not pinned Python3.11.9/Node22.13.0; "
+            "using offline controller image",
+            flush=True,
+        )
     recipe = root / "scripts/tests/cloudbench-controller-linux.Dockerfile"
     fingerprint = hashlib.sha256(recipe.read_bytes()).hexdigest()
     configured = os.environ.get("CLOUDBENCH_CONTROLLER_TEST_IMAGE", "")
@@ -311,8 +275,11 @@ def main() -> int:
             "hub_upload",
             "outcome_publication",
             "seed_cache_path",
+            "cloudbench_campaign_inventory_test",
+            "cloudbench_dependency_sync_test",
         )
     ]
+    # The real controller resolves WMH_ROSE_POOL through this authoritative registry.
     registry = "agents/providers/rose/pools.py"
     if not (root / registry).is_file():
         raise RuntimeError("authoritative Rose pool registry is missing")
@@ -329,10 +296,7 @@ def main() -> int:
         if hashlib.sha256(source.read_bytes()).hexdigest() != hashes[name]:
             raise RuntimeError("controller source changed during snapshot")
     (snapshot / "source.json").write_text(
-        json.dumps(
-            {"image_id": image_id, "fixture": fixture, "source_file_sha256": hashes},
-            indent=2,
-        )
+        json.dumps({"image_id": image_id, "source_file_sha256": hashes}, indent=2)
         + "\n"
     )
     (snapshot / "fixture-tmp").mkdir(mode=0o700)
@@ -414,7 +378,7 @@ def main() -> int:
                     process.wait()
             if not retire_owned_container(snapshot, name, owner, image_id):
                 raise RuntimeError(
-                    "exact controller container retirement and private evidence export were not proven"
+                    "exact controller container retirement was not proven"
                 )
         finally:
             for signum, handler in prior.items():

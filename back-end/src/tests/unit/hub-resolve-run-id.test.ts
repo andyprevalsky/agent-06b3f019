@@ -418,7 +418,11 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
     join(process.cwd(), 'src/providers/benchmarkHubAgentIndex.ts'),
     'utf8'
   );
-  assert.match(storeSource, /node:fs\/promises/);
+  const storageSource = readFileSync(
+    join(process.cwd(), 'src/providers/benchmarkHubStorage.ts'),
+    'utf8'
+  );
+  assert.match(storageSource, /node:fs\/promises/);
   assert.match(storeSource, /agent-run-index\.json/);
   assert.match(storeSource, /agent-run-index-revision\.json/);
   assert.match(storeSource, /index\.revision < durableRevisionFloor/);
@@ -429,7 +433,7 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
   assert.match(storeSource, /getObjectStrict/);
   assert.match(storeSource, /getRunBundleStrict/);
   assert.match(storeSource, /export async function listRunsStrict/);
-  assert.doesNotMatch(storeSource, /fs\.(?:readFile|writeFile|mkdir|rename)Sync/);
+  assert.doesNotMatch(storageSource, /fs\.(?:readFile|writeFile|mkdir|rename)Sync/);
 
   assert.match(storeSource, /export const putRun = coalesceHubRunPuts\(storeRun\)/);
   const putStart = storeSource.indexOf('async function storeRun');
@@ -445,17 +449,16 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
   const deleteStart = storeSource.indexOf('export async function deleteRun');
   const deleteBody = storeSource.slice(deleteStart);
   assert.match(deleteBody, /await listRunsStrict\(\)/);
+  const bundleRead = deleteBody.indexOf('getRunBundleStrict(run.run_id)');
+  const tombstone = deleteBody.indexOf("putObject(`visibility/${target.run_id}.json`, 'false')");
+  const catalogWrite = deleteBody.indexOf("putObject('index.json'");
+  assert.ok(bundleRead >= 0 && tombstone >= 0 && catalogWrite >= 0);
   assert.ok(
-    deleteBody.indexOf('getRunBundleStrict(runId)') <
-      deleteBody.indexOf("putObject(`visibility/${runId}.json`, 'false')"),
+    bundleRead < tombstone,
     'delete must validate the bundle before publishing its tombstone'
   );
   assert.match(deleteBody, /readAgentRunIndexForMutation\(next\)/);
-  assert.ok(
-    deleteBody.indexOf("putObject(`visibility/${runId}.json`, 'false')") <
-      deleteBody.indexOf("putObject('index.json'"),
-    'delete tombstone must publish before catalog removal'
-  );
+  assert.ok(tombstone < catalogWrite, 'delete tombstone must publish before catalog removal');
 });
 
 test('GET /ancestors does not walk the hub archive on an empty live CTE', () => {

@@ -16,9 +16,6 @@
  * and completed runs through one index.
  */
 
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import * as fs from 'node:fs/promises';
-import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
   deleteHubAncestorSkeletonsFromBundle,
@@ -44,6 +41,23 @@ import {
 } from './benchmarkHubLookup';
 import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { coalesceHubRunPuts } from './benchmarkHubInFlight';
+import {
+  finiteMetric,
+  normalizeAgentId,
+  taskSummary,
+  groupedRunCatalog,
+  HUB_GROUP_FIELDS,
+  HUB_GROUP_PAGE_SIZE,
+  runGroupFields,
+  runGroupSchedule,
+} from './benchmarkHubRunProjection';
+import {
+  getObject,
+  getObjectStrict,
+  putObject,
+  resetHubObjectStorageForTests,
+} from './benchmarkHubStorage';
+import type { HubRunSummary } from './benchmarkHubTypes';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -75,27 +89,18 @@ export {
   type HubAgentRunIndexSnapshot,
 } from './benchmarkHubAgentIndex';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
+export { getRunDetail } from './benchmarkHubRunDetail';
+export type {
+  HubAgentView,
+  HubRunCost,
+  HubRunDetail,
+  HubRunSummary,
+  HubRunTaskDetail,
+  HubRunTaskSummary,
+} from './benchmarkHubTypes';
 
 const log = createLogger('BenchmarkHubStore');
 
-const KEY_PREFIX = 'benchmark-hub';
-const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
-const isolatedRunId =
-  process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
-if (
-  process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
-  (isolatedRunId === '.' ||
-    isolatedRunId === '..' ||
-    !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? ''))
-) {
-  throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
-}
-// Each isolated stack has its own database. Keep its local Hub index in the
-// same isolation boundary so parallel stacks cannot overwrite one another's
-// run registrations before the terminal bundles are mirrored to the durable Hub.
-const LOCAL_DIR = isolatedRunId
-  ? path.join(LOCAL_HUB_ROOT, 'isolated-runs', isolatedRunId)
-  : LOCAL_HUB_ROOT;
 const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
 const AGENT_RUN_INDEX_REVISION_KEY = 'agent-run-index-revision.json';
 
@@ -113,145 +118,8 @@ export function canReadBenchmarkArchive(req: { isInternal?: boolean; userId?: st
   return req.userId !== undefined && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId);
 }
 
-export interface HubRunTaskSummary {
-  name: string;
-  passed: boolean | null;
-  status: string;
-  agent_id: string | null;
-  duration_seconds: number | null;
-  cost_cents: number | null;
-  world_model_mode: string | null;
-  fast_mode: boolean;
-  tree_agent_count: number | null;
-  failure_reason: string | null;
-  lifecycle_stage?: string;
-  startup_label?: string;
-}
-
-export interface HubRunSummary {
-  run_id: string;
-  timestamp: string;
-  suite: string | null;
-  source: string | null;
-  live: boolean;
-  uploaded_at: string;
-  tasks: HubRunTaskSummary[];
-}
-
-export interface HubAgentView {
-  agent: Record<string, unknown>;
-  messages: Array<Record<string, unknown>>;
-  tree: Array<Record<string, unknown>>;
-}
-
 export function hubRunVisibleFromMarker(marker: string | null): boolean {
   return marker === null || marker === 'true';
-}
-
-let s3Client: S3Client | null = null;
-
-function r2Configured(): boolean {
-  // Local workspaces have production R2 credentials available for trace
-  // diagnostics, but Benchmark Hub writes must stay worktree-local. Otherwise
-  // independent test databases race through one production index and local
-  // cleanup can hide real runs. Use Render's deployment identity rather than
-  // NODE_ENV: local production-mode builds must remain isolated too.
-  const useR2 = process.env.BENCHMARK_HUB_STORAGE !== 'local' && process.env.RENDER === 'true';
-  return Boolean(
-    useR2 &&
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET_TRACE_ARCHIVE
-  );
-}
-
-function getS3Client(): S3Client {
-  if (s3Client !== null) return s3Client;
-  const accountId = process.env.R2_ACCOUNT_ID || '';
-  s3Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-    },
-  });
-  return s3Client;
-}
-
-async function streamToBuffer(body: unknown): Promise<Buffer> {
-  if (body instanceof Buffer) return body;
-  const stream = body as AsyncIterable<Uint8Array>;
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
-async function putObject(key: string, data: string): Promise<void> {
-  if (r2Configured()) {
-    await getS3Client().send(
-      new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-        Key: `${KEY_PREFIX}/${key}`,
-        Body: data,
-        ContentType: 'application/json',
-      })
-    );
-    return;
-  }
-  const target = path.join(LOCAL_DIR, key);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, data);
-  await fs.rename(tmp, target);
-}
-
-function isObjectNotFound(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as {
-    code?: unknown;
-    name?: unknown;
-    $metadata?: { httpStatusCode?: unknown };
-  };
-  return (
-    record.code === 'ENOENT' ||
-    record.name === 'NoSuchKey' ||
-    record.name === 'NotFound' ||
-    record.$metadata?.httpStatusCode === 404
-  );
-}
-
-/** Null means a confirmed missing object; transport/permission faults throw. */
-async function getObjectStrict(key: string): Promise<string | null> {
-  if (r2Configured()) {
-    try {
-      const response = await getS3Client().send(
-        new GetObjectCommand({
-          Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-          Key: `${KEY_PREFIX}/${key}`,
-        })
-      );
-      return (await streamToBuffer(response.Body)).toString('utf-8');
-    } catch (error: unknown) {
-      if (isObjectNotFound(error)) return null;
-      throw error;
-    }
-  }
-  try {
-    return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
-  } catch (error: unknown) {
-    if (isObjectNotFound(error)) return null;
-    throw error;
-  }
-}
-
-async function getObject(key: string): Promise<string | null> {
-  try {
-    return await getObjectStrict(key);
-  } catch {
-    return null;
-  }
 }
 
 async function readAgentRunIndexStrict(): Promise<HubAgentRunIndexSnapshot | null> {
@@ -415,41 +283,7 @@ async function withIndexLock<T>(
   }
 }
 
-function normalizeAgentId(value: unknown): string | null {
-  return (typeof value === 'string' ? value.trim() : '') || null;
-}
-
-function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
-  const passed = typeof task.passed === 'boolean' ? task.passed : null;
-  // The verdict wins over the raw agent status (run bundles carry the AGENT
-  // status — e.g. ACTIVE at scoring time — which is not the task outcome).
-  const status =
-    passed !== null
-      ? passed
-        ? 'passed'
-        : 'failed'
-      : typeof task.status === 'string' && task.status
-        ? task.status
-        : 'running';
-  return {
-    name: String(task.name ?? ''),
-    passed,
-    status,
-    agent_id: normalizeAgentId(task.agent_id),
-    duration_seconds: typeof task.duration_seconds === 'number' ? task.duration_seconds : null,
-    cost_cents: typeof task.cost_cents === 'number' ? task.cost_cents : null,
-    world_model_mode: typeof task.world_model_mode === 'string' ? task.world_model_mode : null,
-    fast_mode: task.fast_mode_cache_enabled === true || task.fast_mode === true,
-    tree_agent_count: typeof task.tree_agent_count === 'number' ? task.tree_agent_count : null,
-    failure_reason: typeof task.failure_reason === 'string' ? task.failure_reason : null,
-    ...(typeof task.lifecycle_stage === 'string' ? { lifecycle_stage: task.lifecycle_stage } : {}),
-    ...(typeof task.startup_label === 'string' ? { startup_label: task.startup_label } : {}),
-  };
-}
-
-/**
- * Upsert a run bundle (live snapshot or final). Returns the stored summary.
- */
+/** Upsert a run bundle (live snapshot or final), returning the stored summary. */
 export const putRun = coalesceHubRunPuts(storeRun);
 
 async function storeRun(
@@ -469,6 +303,8 @@ async function storeRun(
     live: options.live === true,
     uploaded_at: new Date().toISOString(),
     tasks: tasks.map(taskSummary),
+    ...runGroupFields(bundle),
+    ...(bundle.run_group !== undefined ? { run_group: runGroupSchedule(bundle) } : {}),
   };
   const agentIds = agentIdsFromHubBundle(bundle);
 
@@ -478,6 +314,103 @@ async function storeRun(
     async () => {
       const index = await listRunsStrict();
       const existing = index.find((run) => run.run_id === runId);
+      if (existing?.run_group || summary.run_group) {
+        if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
+          throw new Error('Benchmark Hub group ID collides with a physical run');
+        }
+        if (
+          existing?.run_group &&
+          JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
+        ) {
+          throw new Error('Benchmark Hub group schedule changed');
+        }
+        if (summary.run_group) {
+          const scheduled = new Map(
+            summary.run_group.members.map((member) => [member.member_id, member])
+          );
+          for (const child of index.filter((run) => run.group_run_id === runId)) {
+            const member = scheduled.get(child.group_member_id!);
+            if (
+              !member ||
+              member.run_number !== child.group_run_number ||
+              child.tasks.length !== 1 ||
+              child.tasks[0]?.name !== member.name ||
+              summary.run_group.members.length !== child.group_total
+            ) {
+              throw new Error('Existing Benchmark Hub child differs from its group schedule');
+            }
+          }
+        }
+      }
+      if (!summary.run_group && index.some((run) => run.group_run_id === runId)) {
+        throw new Error('Benchmark Hub group ID collides with a physical run');
+      }
+      if (existing?.group_run_id) {
+        for (const field of HUB_GROUP_FIELDS) {
+          if (summary[field] !== undefined && summary[field] !== existing[field]) {
+            throw new Error('Benchmark Hub group membership changed');
+          }
+        }
+        Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
+      }
+      if (summary.group_run_id) {
+        const owner = index.find((run) => run.run_id === summary.group_run_id);
+        if (owner && !owner.run_group)
+          throw new Error('Benchmark Hub group ID collides with a physical run');
+        if (
+          index.some(
+            (run) =>
+              run.run_id !== runId &&
+              run.group_run_id === summary.group_run_id &&
+              run.group_member_id === summary.group_member_id
+          )
+        ) {
+          throw new Error('Benchmark Hub group member already belongs to another run');
+        }
+        if (owner?.run_group) {
+          const member = owner.run_group.members.find(
+            (item) => item.member_id === summary.group_member_id
+          );
+          if (
+            !member ||
+            member.run_number !== summary.group_run_number ||
+            tasks.length !== 1 ||
+            tasks[0]?.name !== member.name ||
+            owner.run_group.members.length !== summary.group_total
+          ) {
+            throw new Error('Benchmark Hub group member differs from its schedule');
+          }
+        }
+        summary.tasks = tasks.map((task) => ({
+          ...taskSummary(task),
+          cost_cents: finiteMetric(task.cost_cents),
+          duration_seconds: finiteMetric(task.duration_seconds),
+          tree_agent_count: finiteMetric(task.tree_agent_count),
+          tokens_in: finiteMetric(task.tokens_in),
+          tokens_out: finiteMetric(task.tokens_out),
+          cache_hit_pct: finiteMetric(task.cache_hit_pct),
+          llm_call_count: finiteMetric(task.llm_call_count),
+          message_count: finiteMetric(task.message_count),
+        }));
+        summary.code =
+          typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
+        summary.elapsed_s = finiteMetric(bundle.elapsed_s);
+        summary.cost =
+          typeof bundle.cost === 'object' && bundle.cost !== null
+            ? Object.fromEntries(
+                [
+                  'agents_llm_usd',
+                  'wmh_grounding_usd',
+                  'infra_usd',
+                  'total_usd',
+                  'fast_cache_hit_rate',
+                ].map((field) => [
+                  field,
+                  finiteMetric((bundle.cost as Record<string, unknown>)[field]),
+                ])
+              )
+            : null;
+      }
       // Final is an absorbing state. A snapshot loop already in flight may
       // arrive after completion; it must not regress either the bundle or index
       // back to live/running.
@@ -487,7 +420,10 @@ async function storeRun(
       }
       const persisted = await readAgentRunIndexForMutation(index);
       const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
-      await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
+      await putObject(
+        `runs/${runId}.json`,
+        JSON.stringify({ ...bundle, ...runGroupFields({ ...summary, run_id: runId }) })
+      );
       const next = [summary, ...index.filter((r) => r.run_id !== runId)];
       next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
       await putObject('index.json', JSON.stringify(next));
@@ -526,14 +462,31 @@ export async function persistHubAgentRunBackfill(
   });
 }
 
-export async function listRuns(): Promise<HubRunSummary[]> {
+export async function listRuns(options: { grouped?: boolean } = {}): Promise<HubRunSummary[]> {
   const raw = await getObject('index.json');
   if (!raw) return [];
   try {
-    return parseRunCatalog(raw);
+    const runs = parseRunCatalog(raw);
+    return options.grouped === true ? groupedRunCatalog(runs) : runs;
   } catch {
     return [];
   }
+}
+
+export async function listRunPage(page: { offset?: number; limit?: number } = {}): Promise<{
+  runs: HubRunSummary[];
+  pagination: { offset: number; limit: number; total: number };
+}> {
+  const runs = await listRuns({ grouped: true });
+  const offset = Number.isInteger(page.offset) && page.offset! >= 0 ? page.offset! : 0;
+  const limit =
+    Number.isInteger(page.limit) && page.limit! > 0
+      ? Math.min(page.limit!, HUB_GROUP_PAGE_SIZE)
+      : HUB_GROUP_PAGE_SIZE;
+  return {
+    runs: runs.slice(offset, offset + limit),
+    pagination: { offset, limit, total: runs.length },
+  };
 }
 
 function parseRunCatalog(raw: string): HubRunSummary[] {
@@ -630,31 +583,43 @@ export async function getRunBundleStrict(runId: string): Promise<Record<string, 
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
-  let bundle: Record<string, unknown> | null = null;
+  const retired: Array<{ runId: string; bundle: Record<string, unknown> }> = [];
   const removed = await withIndexLock(async () => {
     const index = await listRunsStrict();
-    const next = index.filter((r) => r.run_id !== runId);
-    if (next.length === index.length) return false;
-    // Validate the authoritative bundle before publishing any visibility or
-    // index mutation; otherwise its DB ancestor skeletons cannot be cleaned.
-    bundle = await getRunBundleStrict(runId);
-    const agentIndex = await readAgentRunIndexForMutation(next);
-    await putObject(`visibility/${runId}.json`, 'false');
-    await putObject('index.json', JSON.stringify(next));
-    if (agentIndex !== null) {
-      await writeAgentRunIndex(hubAgentIndexAfterDelete(agentIndex, runId));
+    const targets = index.filter((run) => run.run_id === runId || run.group_run_id === runId);
+    if (!targets.length) return false;
+    // Validate every exact owned bundle before the catalog becomes invisible.
+    for (let start = 0; start < targets.length; start += 4) {
+      retired.push(
+        ...(await Promise.all(
+          targets.slice(start, start + 4).map(async (run) => ({
+            runId: run.run_id,
+            bundle: await getRunBundleStrict(run.run_id),
+          }))
+        ))
+      );
     }
+    const ids = new Set(targets.map((run) => run.run_id));
+    const next = index.filter((run) => !ids.has(run.run_id));
+    let agentIndex = await readAgentRunIndexForMutation(next);
+    for (const target of targets) {
+      await putObject(`visibility/${target.run_id}.json`, 'false');
+      if (agentIndex !== null) agentIndex = hubAgentIndexAfterDelete(agentIndex, target.run_id);
+    }
+    await putObject('index.json', JSON.stringify(next));
+    if (agentIndex !== null) await writeAgentRunIndex(agentIndex);
     return true;
   });
-  if (removed && bundle !== null) {
-    await deleteHubAncestorSkeletonsFromBundle(bundle);
-    forgetHubRunFromResolutionCaches(runId, agentIdsFromHubBundle(bundle));
-  }
+  if (removed)
+    for (const target of retired) {
+      await deleteHubAncestorSkeletonsFromBundle(target.bundle);
+      forgetHubRunFromResolutionCaches(target.runId, agentIdsFromHubBundle(target.bundle));
+    }
   return removed;
 }
 
 /** Test-only: reset in-process state (local dir is controlled by the caller). */
 export function _resetForTests(): void {
-  s3Client = null;
+  resetHubObjectStorageForTests();
   __resetHubResolutionCachesForTest();
 }

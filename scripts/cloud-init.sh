@@ -249,6 +249,7 @@ esac
 # Everything our test suites + cloud benchmark runner need beyond the base image:
 #   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
 #   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
+#   lsof   — local stack/benchmark cleanup finds listener PIDs and process cwds
 #   time   — GNU /usr/bin/time for seed-memory RSS ratchet (bash builtin has no RSS)
 #   py3.11 — pinned interpreter for agents/venv (base python may be newer)
 #   flyctl — REQUIRED by scripts/run-bench (the cloud Fly benchmark fleet)
@@ -267,6 +268,7 @@ ensure_apt() {  # <binary-to-check> <apt-packages...>
 }
 ensure_apt ruby ruby
 ensure_apt rsync rsync
+ensure_apt lsof lsof
 # Prefer the real /usr/bin/time binary; `command -v time` hits the bash builtin.
 if [ ! -x /usr/bin/time ]; then
     ensure_apt /usr/bin/time time
@@ -346,10 +348,28 @@ bash scripts/cloud-build.sh || log "WARN: cloud-build.sh returned non-zero"
 # writes into the LOCAL DATABASE_URL we pass here — the same contract run.sh and
 # setup-db.sh use. Requires the prod-backed back-end/.env from step 1; without it
 # the DB keeps schema only (WARN, no abort).
-seeded="$(PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc \
+# localhost:5432 is run.sh's database only on its system-Postgres fallback
+# (ROSE_USE_SYSTEM_PG=true, or no Docker daemon — the predicate cloud-build.sh
+# uses to provision that cluster). With Docker, run.sh creates and first-run
+# seeds its workspace container on LOCAL_DB_PORT, so a snapshot's stopped system
+# cluster must not be started and seeded in its place.
+seed_system_pg=true
+if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && timeout 10 docker info >/dev/null 2>&1; then
+    seed_system_pg=false
+fi
+if $seed_system_pg && ! pg_isready -h localhost -p 5432 -q 2>/dev/null && command -v pg_ctlcluster >/dev/null 2>&1; then
+    log "starting the installed system Postgres on localhost:5432…"
+    $SUDO service postgresql start >/dev/null 2>&1 || log "WARN: system Postgres did not start"
+fi
+seeded=""
+$seed_system_pg && seeded="$(PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc \
     "SELECT 1 FROM \"User\" WHERE \"userId\"='$DEV_USER_ID' LIMIT 1" 2>/dev/null | tr -d '[:space:]' || true)"
-if [ "$seeded" = "1" ]; then
+if ! $seed_system_pg; then
+    log "Docker is available: run.sh creates and seeds its workspace database on first start — skipping the system-Postgres seed"
+elif [ "$seeded" = "1" ]; then
     log "DB already seeded (dev user present) — skipping"
+elif ! pg_isready -h localhost -p 5432 -q 2>/dev/null; then
+    log "WARN: no Postgres is reachable at localhost:5432 — skipping the seed. DB is empty."
 else
     log "seeding local DB (schema + prod data)…"
     # --no-install: when dependency setup failed, npx would otherwise wait on a

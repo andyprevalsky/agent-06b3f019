@@ -6,6 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -46,6 +48,34 @@ def test_fleet_monitor_terminal_task_is_not_controller_completion(tmp_path: Path
     assert result["occupancy"]["running"] == 1
     assert result["task_outcomes"] == {"failed": 1, "running": 1}
     assert "MUST_NOT_PRINT" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("child_exit", [0, 1, 125, 143])
+@pytest.mark.parametrize("invalid_rows", [False, True])
+def test_fleet_monitor_surfaces_abnormal_child_exit_without_rejecting_outcomes(
+    tmp_path: Path, child_exit: int, invalid_rows: bool
+):
+    write(
+        tmp_path,
+        "report-card.json",
+        {"per_task": [
+            {"name": "task-a", "status": "failed", "lifecycle_stage": "teardown"},
+            {"name": "task-b", "status": "running", "lifecycle_stage": "running"},
+        ] + ([None] if invalid_rows else [])},
+    )
+    task = tmp_path / "task-a"
+    task.mkdir()
+    (task / "benchmark-child.finished").write_text(f"{child_exit}\n")
+    result = observe(tmp_path)
+    warnings = result.get("task_controller_warnings", [])
+    assert result["next_action"] == ("inspect_task_warnings_and_continue" if child_exit > 1 and not invalid_rows else "observe_again")
+    if invalid_rows:
+        assert result["observation_warning"] == "invalid task rows; inspect this exact owner"
+    assert warnings == ([{"task": "task-a", "exit_code": child_exit}] if child_exit > 1 else [])
+    assert result["controller_terminal"] is False
+    assert result["task_outcomes"] == {"failed": 1, "running": 1}
+    assert result["occupancy"]["teardown"] == result["occupancy"]["running"] == 1
+    assert result["occupancy"]["rejected"] == 0
 
 
 def test_fleet_monitor_checks_terminal_receipt_even_when_card_is_stale(tmp_path: Path):
@@ -145,7 +175,10 @@ def test_fleet_monitor_preserves_caller_relative_paths(tmp_path: Path):
     assert value["controller_exit_code"] == 0
 
 
-def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: Path):
+@pytest.mark.parametrize("wait", [False, True], ids=["detach", "wait"])
+def test_fleet_monitor_detached_launch_retains_actual_controller_exit(
+    tmp_path: Path, wait: bool
+):
     runs = tmp_path / "runs"
     snapshots = tmp_path / "snapshots"
     runs.mkdir()
@@ -159,13 +192,20 @@ def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: P
         "TMPDIR": str(snapshots),
     }
     result = subprocess.run(
-        ["bash", str(ROOT / "scripts/run-bench"), "spawn-sub-agents", "--ref", "origin/main"],
+        [
+            "bash",
+            str(ROOT / "scripts/run-bench"),
+            "spawn-sub-agents",
+            "--ref",
+            "origin/main",
+            *(["--wait"] if wait else []),
+        ],
         env=env,
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == (7 if wait else 0), result.stdout + result.stderr
     deadline = time.monotonic() + 10
     statuses = []
     while time.monotonic() < deadline:
@@ -173,9 +213,15 @@ def test_fleet_monitor_default_detach_records_actual_controller_exit(tmp_path: P
         if statuses:
             break
         time.sleep(0.05)
-    assert len(statuses) == 1, "default detached launch lost its actual exit status"
+    assert len(statuses) == 1, "detached launch lost its actual exit status"
     assert statuses[0].read_text().strip() == "7"
     assert "monitor every 30s" in result.stdout
+    terminal = observe(runs / "not-allocated", "--controller-status", str(statuses[0]))
+    assert terminal["controller_exit_code"] == 7
+    assert terminal["controller_terminal"] is True
+    assert terminal["cleanup_status"] == "unknown"
+    if wait:
+        assert not list(runs.glob("detached-*.owner")), "waiter retained its live ownership rendezvous"
 
 
 def test_fleet_monitor_snapshot_already_removed_is_a_clean_exit(tmp_path: Path):

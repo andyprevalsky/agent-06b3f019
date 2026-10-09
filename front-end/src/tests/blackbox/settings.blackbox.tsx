@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { act, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -7,6 +7,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Settings from '@/pages/Settings';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
+import { useSaveCustomization } from '@/features/settings/hooks/useSaveCustomization';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -97,8 +98,25 @@ describe('Settings page', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     localStorage.clear();
     resetFastModeSessionOverride();
+  });
+
+  it('retires the customization success callback when its owner unmounts', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { result, unmount } = renderHook(() =>
+      useSaveCustomization(
+        { systemName: 'Rose', profilePicture: null, customSystemPrompt: 'Be helpful' },
+        vi.fn(),
+      ),
+    );
+    await act(async () => {
+      await result.current.saveCustomization();
+    });
+    expect(result.current.savedCustomization).toBe(true);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   // ---------------------------------------------------------------------------

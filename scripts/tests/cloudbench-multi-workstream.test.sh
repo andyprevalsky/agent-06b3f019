@@ -612,7 +612,7 @@ cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
 [
   {"name":"bench-alpha"},
   {"name":"bench-beta"},
-  {"name":"bench-default-detach"},
+  {"name":"bench-default-detach","timeout_seconds":9000},
   {"name":"bench-detached-wait"},
   {"name":"bench-invalid-recovery"},
   {"name":"bench-detached-cancel"},
@@ -2119,6 +2119,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     # redirect this worktree's ownership roots into a foreign sandbox.
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+        -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
         PATH="$FAKE_BIN:$PATH" \
         TMPDIR="$SCRIPT_SNAPSHOT_TMP" \
         FLY_BENCH_API_TOKEN="fake-offline-fleet-token" \
@@ -3793,6 +3794,12 @@ grep -qF "1/1 passed" "$detached_log" ||
 if kill -0 "$detached_pid" 2>/dev/null; then
     fail "detached fleet controller did not exit after terminal cleanup"
 fi
+# The task's 9000s catalog timeout extends the unset default backstop across
+# the detach re-exec, while the operator's --timeout 240 stays a hard cap.
+grep -qF "[bench-default-detach] catalog timeout 9000s: run timeout 240s, execution backstop 9000s" "$detached_log" ||
+    fail "detached fleet did not derive the catalog task's execution budget"
+grep -qF "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=9000" "$FAKE_DIR/journal.log" ||
+    fail "detached fleet did not hand the catalog backstop to the guest"
 # The detached PID has been reaped. Hubs remain isolated behind immutable
 # owner records and never enter the raw controller-PID cleanup list.
 PIDS=()
@@ -3815,8 +3822,8 @@ PY
 if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
     fail "default-detached fleet left durable ownership records after cleanup"
 fi
-# Without --wait nothing consumes the exit marker: it must remain as the
-# controller's exact exit status for `run-bench monitor --controller-status`.
+# The exit marker remains as the controller's exact exit status for
+# `run-bench monitor --controller-status`, independently of launcher waiting.
 for _ in $(seq 1 50); do
     [ -s "$detached_status_marker" ] && break
     sleep 0.1
@@ -3875,9 +3882,10 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
 fi
 [ "$wait_status_marker" != "$detached_status_marker" ] ||
     fail "detached wait launch reused the earlier controller exit marker"
-if [ -e "$wait_status_marker" ]; then
-    fail "detached wait fleet left a consumed status rendezvous"
-fi
+[ "$(cat "$wait_status_marker" 2>/dev/null)" = "0" ] ||
+    fail "detached wait fleet did not retain its exact successful terminal monitor status"
+[ ! -e "${wait_status_marker%.status}.owner" ] ||
+    fail "detached wait fleet left its live ownership rendezvous"
 [ "$(cat "$detached_status_marker" 2>/dev/null)" = "0" ] ||
     fail "detached wait cleanup consumed an earlier fleet's terminal monitor status"
 assert_no_controller_script_snapshots "detached-wait terminal cleanup"
@@ -3969,7 +3977,11 @@ PIDS+=("$cancel_launcher_pid")
 
 cancel_target_registry=""
 cancel_recovery_ready=0
-for _ in $(seq 1 400); do
+# Startup includes real host-side packaging and readiness publication even in
+# this offline provider fixture. Bound that whole infrastructure phase by time
+# while preserving the exact identity checks required before cancellation.
+cancel_ready_deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$cancel_ready_deadline" ]; do
     for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
         [ -d "$registry" ] || continue
         [ "$registry" = "$neighbor_registry" ] && continue
@@ -4196,7 +4208,9 @@ reset_fake_state
 : > "$FAKE_DIR/delay-machine-update"
 : > "$FAKE_DIR/metrics-require-started"
 boot_wait_status=0
-CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=2 \
+# This positive startup case uses the ordinary infrastructure readiness budget.
+# Its usable stage handoff is the assertion, rather than a two-second substep.
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-boot-wait.log" \
     autoscaler-waits-for-boot-release --timeout 240 || boot_wait_status=$?
 rm -f "$FAKE_DIR/delay-machine-update" "$FAKE_DIR/metrics-require-started"

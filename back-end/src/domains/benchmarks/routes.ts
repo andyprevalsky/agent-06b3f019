@@ -195,7 +195,11 @@ router.get(
   auth,
   requireHubAdmin,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
-    res.json({ runs: await hubStore.listRuns() });
+    res.json(
+      req.query.grouped === '1'
+        ? await hubStore.listRunPage({ offset: Number(req.query.offset ?? 0) })
+        : { runs: await hubStore.listRuns() }
+    );
   })
 );
 
@@ -205,7 +209,7 @@ router.get(
   auth,
   requireHubAdmin,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
-    const run = await service.getRunView(req.params.id);
+    const run = await service.getRunView(req.params.id, { offset: Number(req.query.offset ?? 0) });
     if (run === null) {
       res.status(404).json({ error: 'Run not found' });
       return;

@@ -11,6 +11,19 @@ Use the repository entrypoint for benchmark and eval runs, from the repository r
 scripts/run-bench $ARGUMENTS
 ```
 
+For the current user-requested five consecutive LIVE DAILY runs of fifty,
+follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+uses fifty distinct randomly selected eligible names together in one ordinary
+fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
+hard image-build-start through final publication/native release 3,600 seconds.
+Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
+exact-image activation every trial. LIVE autoscale remains 15; the cached mass
+profile's maximum 2 and allocation deadline do not apply. Keep the original
+hundred-task result complete, exact thirty-second monitoring, grouped early
+verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
+with accepted LIVE latency. The existing stability wrapper's width-32 cap does
+not restrict this ordinary fleet; do not substitute smaller slices.
+
 Behavior:
 
 - `scripts/run-bench list` prints the benchmark catalog.
@@ -26,6 +39,11 @@ Behavior:
 Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
+
+Before an image-build-to-fleet measurement, complete CLAUDE.md's **Fresh clone
+setup (Andy’s Mac)** dependency reuse and actual backend seed-cache import check
+before recording the image clock. The image-only publisher needs no backend
+dependency check.
 
 An explicitly requested uncached image measurement uses
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
@@ -50,6 +68,9 @@ For the existing recorded mass-demo cache diagnostic, from the repository root:
 
 ```bash
 CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
@@ -98,8 +119,25 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
-`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+For a retained failed owner, follow CLAUDE.md's exact-owner recovery route.
+An `archive-verified.json` receipt preserves originals with zero proof credit;
+keep monitoring the supported CLI through the final native release audit.
+Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The start precedes provisioning and is conservative.
+Use the earliest retained fresh native Machine/volume `created_at` for newly
+allocated exact resources; pooled allocation needs an immutable exact original
+claim receipt. Never use inode ctime, a pooled Machine's historical creation time,
+or first observation to start/reset the 1,200-second budget. Without an original
+allocation clock, qualify the original start as a conservative operator budget;
+on cutoff use `conservative-provisioning-operator-budget` and
+`deadline_breached=false`. A native breach needs genuine original allocation
+evidence showing over 1,200 seconds without full verified release. Never
+substitute the 7,200-second execution default. Release follows complete
+primary/worker/claim verification; `pool-primary.returned-epoch` is only the
+earlier borrowed-primary return. The immutable audit's
+`provider-teardown-verified.epoch` is the producer clock, bound to the same
+owner/run by `source-audit`; legacy clockless audits keep their post-verification
+fallback. The run's `teardown-ownership.path` identifies its
 exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process
@@ -116,9 +154,12 @@ provider spend, or LIVE acceptance credit. Do not edit tasks, prompts or evaluat
 to create a cheaper passing fixture. The compact mode/handoff controls run in
 the existing deploy gate; this large diagnostic remains user-requested.
 With repeated copies, `--strict-barrier` releases a bounded cohort only after
-every copy finishes its normal stack and autoscaler readiness. Startup failure
-aborts the cohort through owned cleanup; non-strict sliding scheduling remains
-unchanged. Report actual task start/terminal overlap, not controller count.
+every surviving eligible copy finishes its normal stack and autoscaler readiness.
+Ordinary terminal member failures stay failed while healthy peers and later
+cohorts continue. Keep the original requested count and actual released/failed
+counts; partial release never earns full-width credit. Shared publisher or parent
+loss, invalid readiness ownership or release membership, and explicit cancellation
+retain owned abort handling. Non-strict sliding scheduling remains unchanged. Report actual task start/terminal overlap, not controller count.
 
 Follow the exact monitoring command printed by every launch. Poll every 30 seconds;
 check controller terminal status even when the card is stale, and continue through

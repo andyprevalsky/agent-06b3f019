@@ -12,8 +12,12 @@ interface RecordingPlayerState {
 /**
  * Encapsulates audio playback state (play/pause, current time, seek) for a
  * given recording URL.
+ *
+ * idle --src set--> ready
+ * ready --toggle--> playing | paused
+ * playing --ended--> paused
  */
-export function useRecordingPlayer(): RecordingPlayerState {
+export function useRecordingPlayer(src: string | null): RecordingPlayerState {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -21,10 +25,15 @@ export function useRecordingPlayer(): RecordingPlayerState {
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || !src) {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      return;
+    }
 
     const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
-    const handleDurationChange = () => setDuration(audio.duration);
+    const handleDurationChange = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const handleEnded = () => setIsPlaying(false);
 
     audio.addEventListener('timeupdate', handleTimeUpdate);
@@ -36,7 +45,7 @@ export function useRecordingPlayer(): RecordingPlayerState {
       audio.removeEventListener('durationchange', handleDurationChange);
       audio.removeEventListener('ended', handleEnded);
     };
-  }, []);
+  }, [src]);
 
   const togglePlay = () => {
     const audio = audioRef.current;

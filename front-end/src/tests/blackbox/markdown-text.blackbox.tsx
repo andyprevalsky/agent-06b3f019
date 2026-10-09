@@ -5,17 +5,27 @@
  *  - Plain text rendering
  *  - Escape-sequence normalization (\n, \t, \*, etc.)
  *  - breaks=true + shouldAnimate=false path (ReactMarkdown + remarkBreaks)
- *  - FadeInMarkdown path: static + animated
+ *  - FadeInMarkdown path: animated (static non-breaks now uses ReactMarkdown)
  *  - Headings, lists (ul/ol), code blocks, fenced code, inline code
  *  - Links, bold/italic, blockquotes
  *  - className passthrough
  *  - onComplete callback (animated path)
  */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
+import { isAllowedImageSrc } from '@/features/terminal-component-group/components/markdown-text/isAllowedImageSrc';
+import { linkifyMarkdownText } from '@/features/terminal-component-group/components/markdown-text/linkifyMarkdownText';
 import { renderWords } from '@/features/terminal-component-group/components/markdown-text/renderWords';
 import { type WordItem } from '@/features/terminal-component-group/components/markdown-text/types';
+
+const CAPTURED_ATTENTION_TEXT = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'fixtures/agent-3be856d5-attention.txt'),
+  'utf8',
+);
 
 describe('MarkdownText', () => {
   it('renders plain text', async () => {
@@ -101,10 +111,25 @@ describe('MarkdownText', () => {
     });
   });
 
-  it('passes className to FadeInMarkdown when not in breaks mode', async () => {
+  it('passes className on the static ReactMarkdown path', async () => {
     const { container } = render(<MarkdownText text="hello" className="my-prose" />);
     await waitFor(() => {
       expect(container.querySelector('.my-prose')).not.toBeNull();
+    });
+  });
+
+  it('keeps markdown photos on the animated FadeInMarkdown path', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={'![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'}
+        shouldAnimate={true}
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
     });
   });
 
@@ -137,6 +162,38 @@ describe('MarkdownText', () => {
     });
   });
 
+  it('drops javascript and data image sources on the static path', async () => {
+    const { container } = render(
+      <MarkdownText text={'![xss](javascript:alert(1))\n\n![pixel](data:image/gif;base64,AAAA)'} />,
+    );
+    await waitFor(() => expect(container.textContent).not.toBeUndefined());
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('drops javascript image sources on the animated path', async () => {
+    const { container } = render(
+      <MarkdownText text={'![xss](javascript:alert(1))'} shouldAnimate={true} />,
+    );
+    await waitFor(() => expect(container.textContent).not.toBeUndefined());
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('renders markdown photos on the default static path used by FYI attention bubbles', async () => {
+    const { container } = render(
+      <MarkdownText
+        text={
+          'Cyber Racoon interior:\n\n![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)'
+        }
+      />,
+    );
+    await waitFor(() => {
+      const img = container.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
+      expect(img).toHaveAttribute('alt', 'Cyber Racoon PC Cafe');
+    });
+  });
+
   it('uses inline group keys that do not collide with interleaved whitespace children', () => {
     const words: WordItem[] = [
       { word: 'Best', isWord: true, isBold: true },
@@ -153,6 +210,15 @@ describe('MarkdownText', () => {
       .map((key) => key.match(/^group-\d+/)?.[0]);
 
     expect(groupKeys).toEqual(['group-0', 'group-1', 'group-2']);
+  });
+
+  it('does not render disallowed image sources through renderWords', () => {
+    const words: WordItem[] = [
+      { word: 'xss', isWord: true, isImage: true, src: 'javascript:alert(1)', alt: 'xss' },
+    ];
+    const nodes = renderWords(words, false, 0, words[0], vi.fn());
+    const { container } = render(<>{nodes}</>);
+    expect(container.querySelector('img')).toBeNull();
   });
 
   it('renders nested list items with multiple paragraphs correctly', async () => {
@@ -178,5 +244,125 @@ describe('MarkdownText', () => {
       // After normalization \* → *, producing **literal** semantics in markdown (emphasis).
       expect(container.textContent).toContain('literal');
     });
+  });
+
+  function hrefs(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('a'))
+      .map((anchor) => anchor.getAttribute('href') || '')
+      .filter(Boolean);
+  }
+
+  it('hyperlinks bare hostnames in captured send_message_to_user text', async () => {
+    const { container } = render(<MarkdownText text={CAPTURED_ATTENTION_TEXT} />);
+    await waitFor(() => {
+      expect(container.textContent).toContain('bytescafesa.com');
+    });
+    expect(hrefs(container)).toEqual(
+      expect.arrayContaining([
+        'https://bytescafesa.com',
+        'https://mixeresports.com',
+        'https://jbgamingcafe.com',
+      ]),
+    );
+    const bytes = Array.from(container.querySelectorAll('a')).find((anchor) =>
+      (anchor.getAttribute('href') || '').includes('bytescafesa.com'),
+    );
+    expect(bytes?.textContent).toContain('bytescafesa.com');
+    expect(bytes?.getAttribute('target')).toBe('_blank');
+    expect(bytes?.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('hyperlinks the same captured hostnames on the static breaks path', async () => {
+    const { container } = render(<MarkdownText text={CAPTURED_ATTENTION_TEXT} breaks />);
+    await waitFor(() => expect(container.textContent).toContain('bytescafesa.com'));
+    expect(hrefs(container)).toEqual(
+      expect.arrayContaining([
+        'https://bytescafesa.com',
+        'https://mixeresports.com',
+        'https://jbgamingcafe.com',
+      ]),
+    );
+  });
+
+  it('hyperlinks scheme-prefixed URLs without markdown wrappers', async () => {
+    const { container } = render(
+      <MarkdownText text="See https://bytescafesa.com/lounge for hours." />,
+    );
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    expect(hrefs(container)).toContain('https://bytescafesa.com/lounge');
+  });
+
+  it('hyperlinks www hosts without a scheme', async () => {
+    const { container } = render(<MarkdownText text="Visit www.jbgamingcafe.com tonight." />);
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    expect(hrefs(container)).toContain('https://www.jbgamingcafe.com');
+  });
+
+  it('does not linkify hostnames inside inline code or fences', async () => {
+    const { container } = render(
+      <MarkdownText text={'Use `bytescafesa.com` and\n\n```\nmixeresports.com\n```\n'} />,
+    );
+    await waitFor(() => expect(container.textContent).toContain('bytescafesa.com'));
+    expect(hrefs(container)).toEqual([]);
+  });
+
+  it('leaves explicit markdown links unchanged', async () => {
+    const { container } = render(
+      <MarkdownText text="Go to [Bytes](https://bytescafesa.com/lounge) now." />,
+    );
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    const a = container.querySelector('a')!;
+    expect(a.getAttribute('href')).toBe('https://bytescafesa.com/lounge');
+    expect(a.textContent).toContain('Bytes');
+  });
+});
+
+describe('isAllowedImageSrc', () => {
+  it('allows http(s), same-origin paths, and blob URLs', () => {
+    expect(isAllowedImageSrc('https://www.cyberracoon.com/gallery/room.jpg')).toBe(true);
+    expect(isAllowedImageSrc('http://example.com/a.png')).toBe(true);
+    expect(isAllowedImageSrc('/api/files/photo.jpg')).toBe(true);
+    expect(isAllowedImageSrc('blob:https://roselabs.ai/11111111-1111-1111-1111-111111111111')).toBe(
+      true,
+    );
+  });
+
+  it('rejects javascript, data, file, and protocol-relative sources', () => {
+    expect(isAllowedImageSrc('javascript:alert(1)')).toBe(false);
+    expect(isAllowedImageSrc('data:image/gif;base64,AAAA')).toBe(false);
+    expect(isAllowedImageSrc('file:///etc/passwd')).toBe(false);
+    expect(isAllowedImageSrc('//evil.example/pixel.gif')).toBe(false);
+    expect(isAllowedImageSrc('')).toBe(false);
+    expect(isAllowedImageSrc(undefined)).toBe(false);
+  });
+});
+
+describe('linkifyMarkdownText', () => {
+  it('wraps parenthetical hostnames from the captured attention text', () => {
+    expect(linkifyMarkdownText('**Bytes Cyber Café** (bytescafesa.com)')).toBe(
+      '**Bytes Cyber Café** ([bytescafesa.com](https://bytescafesa.com))',
+    );
+  });
+
+  it('leaves schemed URLs, code, and existing markdown links alone', () => {
+    expect(linkifyMarkdownText('See https://bytescafesa.com/lounge')).toBe(
+      'See https://bytescafesa.com/lounge',
+    );
+    expect(linkifyMarkdownText('Use `bytescafesa.com` now')).toBe('Use `bytescafesa.com` now');
+    expect(linkifyMarkdownText('Go [Bytes](https://bytescafesa.com) now')).toBe(
+      'Go [Bytes](https://bytescafesa.com) now',
+    );
+    expect(linkifyMarkdownText('contact user@bytescafesa.com')).toBe(
+      'contact user@bytescafesa.com',
+    );
+    expect(linkifyMarkdownText('do not link node.js or package.json')).toBe(
+      'do not link node.js or package.json',
+    );
+  });
+
+  it('linkifies non-com country hosts and leaves dotted versions alone', () => {
+    expect(linkifyMarkdownText('See google.de and 1.2.3')).toBe(
+      'See [google.de](https://google.de) and 1.2.3',
+    );
   });
 });

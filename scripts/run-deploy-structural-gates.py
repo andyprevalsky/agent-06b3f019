@@ -58,13 +58,9 @@ GATES = (
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh")),
     Gate("auto-rca-workflow", ("bash", "scripts/tests/auto-rca-workflow.test.sh")),
-    Gate(
-        "benchmark-live-results",
-        ("python3", "scripts/tests/benchmark-live-results.test.py"),
-    ),
-    Gate(
-        "cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")
-    ),
+    Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py")),
+    Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),

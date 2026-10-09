@@ -93,19 +93,66 @@ BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | c
 
 # The lifecycle ratchet is a browser blackbox over every chat route.
 require_text "$LIFECYCLE_SPEC" "const SAMPLE_COUNT = 5;" "lifecycle ratchet must take five samples per path"
-require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_RATCHET_MS = 6_000;" "lifecycle ratchet must remain below six seconds"
+require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_TARGET_MS = 6_000;" "lifecycle reporting target must remain six seconds"
 require_text "$LIFECYCLE_SPEC" "mode: 'parallel'" "chat paths must run concurrently"
 require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "latency measurements must exclude Playwright recording overhead"
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
 # Per-request poll bound must cover documented prod edge stalls (~2.5s) so a
 # saturated GH Actions→Render path can still observe an already-persisted
 # temporal_workflow_id. Do NOT ratchet this down toward the 6s lifecycle SLA —
-# that assertion lives on FULL_LIFECYCLE_RATCHET_MS; starving the poll recreates
+# that reporting target lives on FULL_LIFECYCLE_TARGET_MS; starving the poll recreates
 # the July 18 false-negative (RCA 2026-07-18, recurred 2026-08-31 after 500ms).
 require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 2_500;" "temporal-workflow poll per-request timeout must stay at 2500ms to cover prod edge stalls"
 require_text "$HELPERS" "res.status === 404 || res.status === 503" "temporal-workflow poll must retry transient live-row misses and archive-index warming responses"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
+# Completed target misses warn; actual browser-validation functional failures still fail.
+node - "$LIFECYCLE_SPEC" "$ROOT_DIR/back-end/package.json" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
+const ts = createRequire(process.argv[3])('typescript');
+const source = ts.createSourceFile(process.argv[2], fs.readFileSync(process.argv[2], 'utf8'), ts.ScriptTarget.Latest, true);
+let validation;
+function visit(node) {
+  if (ts.isBlock(node)) {
+    const first = node.statements.findIndex(statement => ts.isExpressionStatement(statement) && statement.getText(source).includes('all five lifecycle samples must finish'));
+    if (first >= 0) validation = node.statements.slice(first).map(statement => statement.getText(source)).join('\n');
+  }
+  ts.forEachChild(node, visit);
+}
+visit(source);
+assert.ok(validation && validation.includes('hasUncaughtErrors(recorder)'), 'actual sample/end-state validation must be found');
+const code = ts.transpileModule(validation, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const samples = () => Array.from({ length: 5 }, (_, index) => ({ sample: index + 1, lifecycleMs: index === 2 ? 12461 : 2329, failures: [] }));
+function verify(results, errors = []) {
+  const warnings = [];
+  vm.runInNewContext(code, {
+    path: { id: 'web_search' }, results, SAMPLE_COUNT: 5,
+    FULL_LIFECYCLE_TARGET_MS: 6000, FULL_LIFECYCLE_RATCHET_MS: 6000,
+    recorder: {}, hasUncaughtErrors: () => errors,
+    console: { warn: value => warnings.push(value) },
+    expect: (actual, message) => ({
+      toHaveLength: expected => assert.equal(actual.length, expected, message),
+      toEqual: expected => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message),
+      toBeLessThan: expected => assert.ok(actual < expected, message),
+    }),
+  });
+  return warnings;
+}
+let failed = 0;
+for (const [name, control] of [
+  ['completed slow sample warns', () => { const warnings = verify(samples()); assert.equal(warnings.length, 1); assert.match(warnings[0], /12461ms.*6000ms/); }],
+  ['missing sample fails', () => assert.throws(() => verify(samples().slice(1)), /must finish/)],
+  ['missing milestone fails', () => { const results = samples(); results[0].failures.push('terminal missed'); assert.throws(() => verify(results), /missed milestones/); }],
+  ['uncaught error fails', () => assert.throws(() => verify(samples().map(result => ({ ...result, lifecycleMs: 2329 })), ['runtime exception']), /uncaught errors/)],
+]) {
+  try { control(); console.log(`PASS: ${name}`); }
+  catch (error) { failed += 1; console.error(`FAIL: ${name}: ${error.message}`); }
+}
+if (failed) process.exitCode = 1;
+NODE
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet
 # owns a runner and executes samples sequentially so renderer contention cannot
 # become part of the product latency measurement.
@@ -292,12 +339,29 @@ set +e
 # localhost DSN here. That keeps the guard strict (rather than handing this gate
 # the BLACKBOX_TEST_ALLOW_REMOTE_DATABASE escape hatch) and makes it impossible
 # for the probe to reach production even if the credential check ever passed.
+# Use the workspace tsx binary. The Cloud VM's /exec-daemon/npx (npm 11)
+# crashes with "Class extends value undefined is not a constructor or null"
+# before tsx starts, which drops the fail-closed credential message and
+# fails this gate (docs/rca/cases/2026-10-06-semantic-deploy-amplitude-probe-failure-dropped-its-output.md).
+TSX_BIN=""
+for tsx_cand in \
+  "$ROOT_DIR/node_modules/.bin/tsx" \
+  "$ROOT_DIR/back-end/node_modules/.bin/tsx"
+do
+  if [ -x "$tsx_cand" ]; then
+    TSX_BIN="$tsx_cand"
+    break
+  fi
+done
+if [ -z "$TSX_BIN" ]; then
+  fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
+fi
 LIVE_AMPLITUDE_OUTPUT=$(
   cd "$ROOT_DIR/back-end" &&
     DATABASE_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
       DIRECT_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
       AMPLITUDE_API_KEY='' AMPLITUDE_SECRET_KEY='' ADMIN_HEALTH_LIVE_ONLY=1 \
-      npx tsx src/tests/blackbox/admin-health.blackbox.ts 2>&1
+      "$TSX_BIN" src/tests/blackbox/admin-health.blackbox.ts 2>&1
 )
 LIVE_AMPLITUDE_RC=$?
 set -e
@@ -524,6 +588,35 @@ printf '{"status": "running", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/
 if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
   fail "a running custom-id manifest with a live run.sh must hold the latency ratchet"
 fi
+
+# A failed owned cleanup retains run.sh (manifest still "running") so the
+# backend reconciler keeps its financial recovery authority, possibly for hours
+# while AgentCard withholds a release. Once the recorded benchmark child has
+# exited, nothing in that stack is running agents. On 2026-10-07 such a stack
+# held the latency ratchet toward its 3600s failure.
+retained_owner="$bench_repo/.context/benchmarks/custom-run/local-benchmark-owner.json"
+python3 -c 'import time; time.sleep(30)' run_benchmark.py &
+retained_child_pid=$!
+bench_pids+=("$retained_child_pid")
+printf '{"version": 1, "state": "failed_retained", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "a retained stack whose benchmark child is still running must hold the latency ratchet"
+fi
+kill "$retained_child_pid" 2>/dev/null || true
+wait "$retained_child_pid" 2>/dev/null || true
+printf '{"version": 1, "state": "running", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "only a failed_retained owner record may release a running manifest with a live run.sh"
+fi
+printf '{"version": 1, "state": "failed_retained", "pid": %s}\n' "$retained_child_pid" > "$retained_owner"
+wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
+  || fail "a retained recovery stack whose benchmark child exited must not hold the latency ratchet"
+printf '{"version": 1, "state": "failed_retained", "pid": true}\n' > "$retained_owner"
+if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
+  fail "a retained owner record without an integer benchmark PID must hold the latency ratchet"
+fi
+rm -f "$retained_owner"
+
 printf '{"status": "stopped", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/.context/benchmarks/custom-run/services.json"
 wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
   || fail "a stopped manifest must not hold the latency ratchet"

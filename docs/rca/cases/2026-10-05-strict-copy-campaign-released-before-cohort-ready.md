@@ -108,3 +108,25 @@ scheduler's independent controllers. Process occupancy alone cannot prove
 execution overlap. Scope new coordination to the requested mode and reuse
 established readiness, startup budgets and owned cleanup; do not turn a startup
 diagnostic into a fabricated task result or a new aggressive teardown deadline.
+
+
+## October 6 non-strict fixture recurrence
+
+The normal structural gate on immutable `85070617776b8355565266bf16f08a58093c1072`
+failed the existing ordinary sliding-launch inverse: the first observed execute
+occurred after the last ready event. The fixture delayed a later child with a
+one-second sleep, which did not establish ordering on the loaded host. The
+original output retains that inverted event order; it does not establish a
+production scheduler regression.
+
+The later non-strict fixture child now waits for the first actual transport
+execute event before publishing readiness. Strict fixtures continue to use the
+real complete-cohort rendezvous. Original first-execute/last-ready assertions,
+strict outcome checks, failed-child controls and ordinary topology are retained.
+The local campaign outer guard uses the shared generous fixture host guard;
+production release endpoints and execution budgets are unchanged. The same
+owning inverse and existing strict controls passed in the final sixteen-case command, and the existing compact
+selector still discovers it. Original/final private proofs are under
+`.context/fresh-basic-claude-final50-20261006/deploy/root-structural-fixture-repair/`.
+This establishes the intended offline ordering scenario, with no LIVE proof
+credit or benchmark behavior change.

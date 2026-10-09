@@ -226,3 +226,38 @@ at 10,000 agents. Private evidence is sealed in
 `/data/proof87-review-rca/worker-stop-publication.private.tar.gz`, SHA-256
 `56a81e55b5c3eab3cd229a1b1567f985354813ab7e4c10ffe7890f1f0cbb9426`.
 The source change resets fleet acceptance; these fixtures grant zero fleet credit.
+
+
+### October 6 recurrence in autoscaler capacity-loop observation
+
+The ordinary deploy structural `benchmark-live-results` gate on committed
+`7872fa3d78d7ba38d2556d5b354fe0fc0400ee95` failed the existing actual-autoscaler
+control. Seven of eight modes passed; `inventory_dead_publisher` raised
+`ValueError: invalid literal for int() with base 10: ''` while the observer
+parsed a newly opened PID file. The fixture producer uses shell redirection,
+which creates the final path before `printf` completes. The actual invalid
+publisher assertion had not yet been reached. The production scaler's recorded
+143 was the observer's finally cleanup, not a production verdict. No capacity
+mutation occurred, and all recorded native owners were absent after cleanup.
+
+Two archive searches used the exact empty-integer symptom and the broader PID
+publication handoff. This case and the October 3 setup-db case describe the same
+create-before-payload contract; their earlier producer fixes remain intact.
+This is a new fixture recurrence, not evidence that production inventory
+ownership validation failed.
+
+The observer now treats an empty publication as pending inside its unchanged
+30-second whole-case bound. A complete malformed PID still raises rather than
+being accepted. No production function, readiness budget, timeout, or verdict
+changed. All 30 assertion ASTs are identical. The same eight actual-autoscaler
+modes passed in 11.339 seconds, with every Popen child reaped and every recorded
+native owner absent. The existing compact deploy family and benchmark blackbox
+already discover this control. Private original and candidate receipts are in
+`.context/fresh-basic-claude-final50-20261006/deploy/merged-structural-fixture-repair.private/`;
+full final normal qualification remains pending. This supplies no live-task or
+fleet acceptance credit.
+
+The user's current guidance treats intermediate observations as pending while
+requiring usable stage handoffs, exact resource retirement, and overall bounds.
+An observer must not mistake an incomplete fixture publication for a terminal
+producer failure.

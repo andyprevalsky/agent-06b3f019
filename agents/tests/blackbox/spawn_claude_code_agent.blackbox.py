@@ -4761,8 +4761,12 @@ async def test_run_agentic_loop_reconnect_replay_does_not_duplicate_events():
 
     async def handler(request):
         nonlocal connections
-        connections += 1
         ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            # Dev-box port forwarders probe every new local listener (e.g. a
+            # sprite-daemon `HEAD /`); only the client's WebSocket upgrades count.
+            return web.Response(status=400)
+        connections += 1
         await ws.prepare(request)
         if connections == 1:
             await ws.send_str(json.dumps({"type": "code_agent_events", "data": first_events}))

@@ -105,6 +105,7 @@ from benchmarks.phone_callee import (
     PhoneCalleeSession,
     callee_check_failures,
     missing_call_findings,
+    phone_recording_playback_failures,
     phone_search_text,
     resolve_callee_prompt,
 )
@@ -232,6 +233,27 @@ def _finalize_interrupt_cleanup_status() -> None:
         f"state={state} started={_INTERRUPT_CLEANUP_STARTED} "
         f"completed={_INTERRUPT_CLEANUP_COMPLETED}"
     )
+
+
+def has_in_progress_phone_call(messages: list | None) -> bool:
+    """True when a live ``call_phone_number`` chip is still in progress.
+
+    A connected hold updates one IN_PROGRESS message in place for hours and
+    does not increment ``message_count`` or tree LLM cost until the call ends.
+    Tree-stall early-fail must treat that chip as activity or it kills a
+    healthy hold after the default ~510s silence budget.
+    """
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "call_phone_number":
+            continue
+        if str(metadata.get("toolStatus") or "").upper() == "IN_PROGRESS":
+            return True
+    return False
 
 
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
@@ -1921,8 +1943,11 @@ async def _evaluate_phone_call_task(
     task: BenchmarkTask,
     data: dict,
     callee: PhoneCalleeSession,
+    *,
+    base_url: str,
+    agent_id: str,
 ) -> tuple[bool, str | None]:
-    """Two-sided phone verification: agent-side findings + callee-side analysis."""
+    """Two-sided phone verification: agent-side findings + callee-side analysis + FE playback."""
     pinned_findings = _flatten_pinned_call_findings(task.pinned_facts)
     expected_findings = [*(task.expected_call_findings or []), *pinned_findings]
     missing = missing_call_findings(expected_findings, phone_search_text(data))
@@ -1933,12 +1958,22 @@ async def _evaluate_phone_call_task(
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:
         try:
-            structured = await callee.fetch_callee_structured_data()
+            structured = await callee.fetch_callee_structured_data(
+                timeout_seconds=callee.analysis_timeout_seconds()
+            )
         except Exception as exc:
             return False, f"failed to fetch callee-side call analysis: {exc}"
         failures = callee_check_failures(task.callee_checks, structured)
         if failures:
             return False, "callee-side checks failed: " + "; ".join(failures)
+    playback_failures = await phone_recording_playback_failures(
+        data,
+        base_url=base_url,
+        agent_id=agent_id,
+        headers=await _api_headers(),
+    )
+    if playback_failures:
+        return False, "FE phone recording playback failed: " + "; ".join(playback_failures)
     return True, None
 
 
@@ -1958,6 +1993,20 @@ def phone_final_result_text(data: dict) -> str:
         elif message.get("role") == "ASSISTANT":
             chunks.append(str(message.get("text") or message.get("message") or ""))
     return "\n".join(chunks)
+
+
+def phone_parked_hold_seconds(data: dict) -> int:
+    """Longest wait_for_human parking reported on a finished call_phone_number card."""
+    parked = 0
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict) or metadata.get("toolName") != "call_phone_number":
+            continue
+        phone_call = metadata.get("phoneCall")
+        hold_seconds = phone_call.get("holdSeconds") if isinstance(phone_call, dict) else None
+        if isinstance(hold_seconds, int) and not isinstance(hold_seconds, bool):
+            parked = max(parked, hold_seconds)
+    return parked
 
 
 def _flatten_pinned_call_findings(pinned_facts: Optional[dict]) -> list[str]:
@@ -3755,24 +3804,29 @@ async def _judge_output_recovers_expected_fields(
         return None
 
     claude_auth = await _benchmark_judge_claude_auth_kwargs()
-    judged = await check_progress(
-        context=[
-            {
-                "role": "USER",
-                "text": (
-                    "Populate each required output field from the agent's produced output below. A "
-                    "field is populatable when its value is recoverable by MEANING (any key name) or "
-                    "the output honestly reports no data for it."
-                ),
-            },
-            {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
-        ],
-        verifier_system_prompt=build_verifier_prompt(expected_schema),
-        response_schema=expected_schema,
-        call_site="semantic_output_field_recovery_judge",
-        agent_id=root_agent_id,
-        **claude_auth,
-    )
+    verifier_prompt = build_verifier_prompt(expected_schema)
+
+    async def judge() -> dict:
+        return await check_progress(
+            context=[
+                {
+                    "role": "USER",
+                    "text": (
+                        "Populate each required output field from the agent's produced output below. A "
+                        "field is populatable when its value is recoverable by MEANING (any key name) or "
+                        "the output honestly reports no data for it."
+                    ),
+                },
+                {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
+            ],
+            verifier_system_prompt=verifier_prompt,
+            response_schema=expected_schema,
+            call_site="semantic_output_field_recovery_judge",
+            agent_id=root_agent_id,
+            **claude_auth,
+        )
+
+    judged = await _judge_until_verdict(judge)
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
         return None
@@ -4218,6 +4272,19 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def agent_execution_backstop_seconds(task: Optional[BenchmarkTask] = None) -> int:
+    """An operator-set backstop is a hard cap; only the default yields to a longer task timeout."""
+    seconds = benchmark_wall_clock_backstop_seconds()
+    if task is None or "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ:
+        return seconds
+    resolved = getattr(task, "_resolved_timeout_seconds", None)
+    if resolved is None:
+        resolved = task.timeout_seconds
+    if isinstance(resolved, (int, float)) and not isinstance(resolved, bool) and resolved > seconds:
+        return int(resolved)
+    return seconds
+
+
 async def poll_agent(
     base_url: str,
     agent_id: str,
@@ -4229,7 +4296,7 @@ async def poll_agent(
     async def execute(snapshot: dict):
         return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
-    return await _run_with_agent_execution_backstop(base_url, agent_id, execute)
+    return await _run_with_agent_execution_backstop(base_url, agent_id, execute, task=task)
 
 
 async def _run_with_agent_execution_backstop(
@@ -4237,9 +4304,10 @@ async def _run_with_agent_execution_backstop(
     agent_id: str,
     execute: Callable[[dict], Awaitable[Any]],
     started_at: Optional[float] = None,
+    task: Optional[BenchmarkTask] = None,
 ) -> Any:
     """Bound all post-create execution, including preparation and checkpoints."""
-    seconds = benchmark_wall_clock_backstop_seconds()
+    seconds = agent_execution_backstop_seconds(task)
     print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
     snapshot: dict = {}
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
@@ -4621,6 +4689,15 @@ async def _poll_agent(
         # ── Tree-level stall detection ──────────────────────────────
         # Periodically fetch tree stats (every TREE_POLL_INTERVAL seconds)
         now = time.time()
+        live_phone_call = has_in_progress_phone_call(messages)
+        if live_phone_call:
+            last_activity_time = now
+            root_state = per_agent_state.get(agent_id)
+            if root_state is None:
+                per_agent_state[agent_id] = {"count": root_msg_count, "last_change_time": now, "status": status}
+            else:
+                root_state["last_change_time"] = now
+                root_state["status"] = status
         if now - last_tree_poll >= TREE_POLL_INTERVAL:
             last_tree_poll = now
             tree_stats = await _fetch_tree_stats(base_url, agent_id)
@@ -5872,8 +5949,9 @@ def _agent_messages_ready_for_durable_browser_evidence(
     messages: Optional[List[dict]],
     *,
     zero_session_task_ids: set[str] | None = None,
+    preparation_cancelled_task_ids: set[str] | None = None,
 ) -> bool:
-    """Require terminal and attached recording for every browser, including no-row failures."""
+    """Require terminal recording or verified cancellation before browser actions."""
     states: dict[str, dict[str, bool]] = {}
     lifecycle = {
         "browser",
@@ -5907,7 +5985,10 @@ def _agent_messages_ready_for_durable_browser_evidence(
         state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
     return all(
         (state["code"] and not state["browser"])
-        or (state["complete"] and (state["recording"] or task_id in (zero_session_task_ids or set())))
+        or (state["complete"] and (
+            state["recording"] or task_id in (zero_session_task_ids or set())
+            or task_id in (preparation_cancelled_task_ids or set())
+        ))
         for task_id, state in states.items()
     )
 
@@ -5997,6 +6078,28 @@ async def _refresh_browser_archive_snapshot(
             if time.monotonic() >= deadline:
                 raise TimeoutError("browser archive refresh exceeded its readiness bound")
             zero_tasks_by_agent: dict[str, set[str]] = {}
+            from benchmarks.browser_zero_allocation import (
+                preparation_cancelled_task_receipts,
+                preparation_receipts_match_sessions,
+            )
+            preparation_by_agent = {
+                aid: preparation_cancelled_task_receipts(value.get("messages"), aid)
+                for aid, value in snapshots.items()
+            }
+            preparation_receipts = {
+                task_id: receipt for tasks in preparation_by_agent.values() for task_id, receipt in tasks.items()
+            }
+            preparation_snapshot = None
+            if preparation_receipts:
+                preparation_snapshot = await asyncio.to_thread(
+                    cloud_batch_cleanup.exact_root_sessions, base_url, agent_id
+                )
+                if (
+                    set(preparation_snapshot.get("tree_agent_ids") or []) != ids
+                    or not preparation_receipts_match_sessions(preparation_receipts, preparation_snapshot)
+                ):
+                    preparation_by_agent = {}
+                    preparation_receipts = {}
             if (
                 ownership_before is not None
                 and ownership_before.get("browser_sessions") == []
@@ -6015,6 +6118,7 @@ async def _refresh_browser_archive_snapshot(
                 _agent_messages_ready_for_durable_browser_evidence(
                     value.get("messages"),
                     zero_session_task_ids=zero_tasks_by_agent.get(aid),
+                    preparation_cancelled_task_ids=set(preparation_by_agent.get(aid, {})),
                 )
                 for aid, value in snapshots.items()
             ):
@@ -6028,6 +6132,16 @@ async def _refresh_browser_archive_snapshot(
                 latest["_benchmark"] = {**latest.get("_benchmark", {}), **data.get("_benchmark", {})}
                 logs["messages"] = extract_message_transcript(latest)
                 logs["tree"] = tree
+                if preparation_receipts:
+                    logs["browser_preparation_cancellation_receipt"] = {
+                        "root_agent_id": agent_id,
+                        "tree_agent_ids": sorted(ids),
+                        "task_ids_by_agent": {
+                            aid: sorted(tasks) for aid, tasks in preparation_by_agent.items() if tasks
+                        },
+                        "receipts": preparation_receipts,
+                        "archive_browser_sessions": preparation_snapshot["browser_sessions"],
+                    }
                 if any(zero_tasks_by_agent.values()):
                     logs["browser_zero_allocation_receipt"] = {
                         "root_agent_id": agent_id,
@@ -6042,7 +6156,7 @@ async def _refresh_browser_archive_snapshot(
                 logs.pop("browser_archive_observation", None)
                 return latest
             if time.monotonic() >= deadline:
-                raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
+                raise TimeoutError("browser evidence did not become terminal with attached recordings before archive")
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
@@ -11045,7 +11159,7 @@ async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dic
         return {}
     try:
         token_data = await fetch_claude_max_token(resolved_user_id)
-    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+    except Exception as exc:  # judge still runs; auth is best-effort
         print(f"    ⚠ Declared-judge Claude auth fetch failed: {exc}")
         return {}
     if not token_data or not token_data.get("accessToken"):
@@ -11075,7 +11189,7 @@ async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
         return {}
     try:
         token_data = await fetch_gpt_code_token_activity(resolved_user_id)
-    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+    except Exception as exc:  # judge still runs; auth is best-effort
         print(f"    ⚠ Declared-judge GPT auth fetch failed: {exc}")
         return {}
     if not token_data or not token_data.get("accessToken"):
@@ -11087,6 +11201,63 @@ async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
         "gpt_token_pool_id": token_data.get("poolTokenId"),
         "gpt_token_user_id": resolved_user_id,
     }
+
+
+class BenchmarkJudgeUnavailable(RuntimeError):
+    """A harness-side LLM judge produced no verdict, so the run was never evaluated."""
+
+
+# check_progress already retries six times inside one VERIFIER_TOTAL_TIMEOUT_S
+# fence, but its in-call backoff totals only ~6s, so a provider 429 burst
+# exhausts it within ~25s. Re-invoking after 30s and then 60s keeps the judge
+# retrying across ~165s of rate limiting, close to Claude Code's withRetry window.
+BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S = (30.0, 60.0)
+
+
+def _judge_no_verdict_summary(judged: dict) -> str:
+    summary = str(judged.get("reasoning") or "judge returned no verdict")
+    judge_error = judged.get("judge_error")
+    provider = judge_error.get("provider") if isinstance(judge_error, dict) else None
+    if isinstance(provider, dict):
+        statuses = sorted({str(step.get("status")) for step in provider.get("steps") or []})
+        detail = f"{provider.get('type')}: {provider.get('message')}"
+        if statuses:
+            detail += f"; step statuses {', '.join(statuses)}"
+        summary += f" [{detail}]"
+    return summary
+
+
+async def _judge_until_verdict(
+    call_judge: Callable[[], Awaitable[dict]],
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict:
+    """Invoke an idempotent harness judge until check_progress yields a verdict.
+
+    Raises BenchmarkJudgeUnavailable when every bounded re-invocation ends
+    without one; callers surface that as a harness ERROR, never a FAIL.
+    """
+    from helpers.llm import VERIFIER_TOTAL_TIMEOUT_S
+
+    # A re-invocation starts only while a whole verifier deadline still fits, so
+    # one judge spends at most two verifier deadlines even if every call stalls.
+    budget_s = 2 * VERIFIER_TOTAL_TIMEOUT_S
+    started = monotonic()
+    delays = iter(BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    attempts = 0
+    while True:
+        judged = await call_judge()
+        attempts += 1
+        if judged.get("verdict_available") is not False:
+            return judged
+        summary = _judge_no_verdict_summary(judged)
+        delay_s = next(delays, None)
+        if delay_s is None or monotonic() - started + delay_s + VERIFIER_TOTAL_TIMEOUT_S > budget_s:
+            raise BenchmarkJudgeUnavailable(
+                f"LLM judge produced no verdict after {attempts} judge attempt(s) (judge unavailable): {summary}"
+            )
+        print(f"    ⚠ LLM judge produced no verdict ({summary}); re-judging in {delay_s:.0f}s")
+        await asyncio.sleep(delay_s)
 
 
 async def _call_declared_llm_judge(
@@ -11142,24 +11313,29 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
     judge_user_id = agent.get("userId") or agent.get("user_id") or _current_benchmark_user_id()
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
-    return await check_progress(
-        context=[
-            {
-                "role": "USER",
-                "text": "Evaluate the supplied run evidence against the benchmark requirements.",
-            },
-            {
-                "role": "TOOL",
-                "text": json.dumps(evidence, default=str),
-            },
-        ],
-        verifier_system_prompt=verifier_prompt,
-        response_schema=None,
-        call_site="benchmark_declared_evaluator",
-        agent_id=agent.get("agent_id") or agent.get("id"),
-        **claude_auth,
-        **gpt_auth,
-    )
+    evidence_text = json.dumps(evidence, default=str)
+
+    async def judge() -> dict:
+        return await check_progress(
+            context=[
+                {
+                    "role": "USER",
+                    "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+                },
+                {
+                    "role": "TOOL",
+                    "text": evidence_text,
+                },
+            ],
+            verifier_system_prompt=verifier_prompt,
+            response_schema=None,
+            call_site="benchmark_declared_evaluator",
+            agent_id=agent.get("agent_id") or agent.get("id"),
+            **claude_auth,
+            **gpt_auth,
+        )
+
+    return await _judge_until_verdict(judge)
 
 
 def _iter_benchmark_messages(data: dict) -> list[dict]:
@@ -12649,6 +12825,12 @@ def _run_declared_static_check(
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
             continue
+        if check_type == "phone_call_parked_on_hold":
+            parked = phone_parked_hold_seconds(data)
+            minimum = int(check.get("min_seconds", 1))
+            if parked < minimum:
+                return False, f"Phone call was parked by wait_for_human for {parked}s; expected at least {minimum}s"
+            continue
         if check_type == "explore_research_not_reject_loop":
             loops = _explore_reject_loop_failures(data, min_rejects=int(check.get("min_rejects", 3)))
             if loops:
@@ -13364,9 +13546,10 @@ async def _run_single_task_as_run_user(
     if task.phone_persona:
         phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
         await phone_callee.setup()
-        task._callee_phone_number = phone_callee.phone_number
+        task._callee_phone_number = phone_callee.dial_number
+        hold_note = f" via hold line {phone_callee.dial_number}" if phone_callee.hold_line else ""
         print(
-            f"    📞 Benchmark callee ready: {phone_callee.phone_number} "
+            f"    📞 Benchmark callee ready: {phone_callee.phone_number}{hold_note} "
             f"(persona assistant {phone_callee.assistant_id[:8]})"
         )
 
@@ -13580,7 +13763,7 @@ async def _run_single_task_as_run_user(
             return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
 
         execution_result = await _run_with_agent_execution_backstop(
-            base_url, agent_id, execute_agent, started_at=execution_started_at
+            base_url, agent_id, execute_agent, started_at=execution_started_at, task=task
         )
         if isinstance(execution_result, TaskResult):
             return execution_result
@@ -13703,7 +13886,13 @@ async def _run_single_task_as_run_user(
                 passed = False
                 failure_reason = grep_reason
         if phone_callee is not None and passed:
-            phone_passed, phone_reason = await _evaluate_phone_call_task(task, data, phone_callee)
+            phone_passed, phone_reason = await _evaluate_phone_call_task(
+                task,
+                data,
+                phone_callee,
+                base_url=base_url,
+                agent_id=agent_id,
+            )
             if not phone_passed:
                 passed = False
                 failure_reason = phone_reason
@@ -13800,6 +13989,8 @@ async def _run_single_task_as_run_user(
                 if prod_grep_contract_error:
                     passed = False
                     failure_reason = prod_grep_contract_error
+            except BenchmarkJudgeUnavailable:
+                raise
             except Exception as e:
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
@@ -13810,6 +14001,8 @@ async def _run_single_task_as_run_user(
                 if payment_confirmation_error:
                     passed = False
                     failure_reason = payment_confirmation_error
+            except BenchmarkJudgeUnavailable:
+                raise
             except Exception as e:
                 passed = False
                 failure_reason = f"Agent payment confirmation contract check failed: {e}"
@@ -15609,7 +15802,7 @@ async def main_async(args):
             contract = cloud_batch_cleanup.contract()
             pending = None
             try:
-                pending = prepare(result, contract[0].parent, contract[1]) if contract else None
+                pending = prepare(result, contract[0].parent, contract[1]) if contract and result.agent_id else None
             except (OSError, ValueError) as exc:
                 print(f"  ⚠ outcome acknowledgment preparation unavailable: {type(exc).__name__}")
             if pending:
@@ -15619,9 +15812,12 @@ async def main_async(args):
             await wait_for_publication(pending)
 
         try:
-            return await run_single_task(
+            result = await run_single_task(
                 base_url, task, on_agent_created=remember_agent, on_task_evaluated=evaluated, **kwargs
             )
+            if token not in _evaluated_task_results:
+                await evaluated(result)
+            return result
         finally:
             _admitted_tasks.pop(token, None)
             _admitted_agent_ids.pop(token, None)

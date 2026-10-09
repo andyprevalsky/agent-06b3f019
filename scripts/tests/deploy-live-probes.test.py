@@ -129,6 +129,14 @@ class DeployLiveProbeTests(unittest.TestCase):
         self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", "chat-router-failover"))
         self.assertEqual(probe.cwd, ROOT / "back-end")
 
+    def test_credential_health_uses_workspace_tsx_not_npx(self) -> None:
+        module = _load_module()
+        commands = {command.name: command for command in module.deploy_commands()}
+        probe = commands["credential-health"]
+        tsx = module.workspace_tsx()
+        self.assertEqual(probe.argv[-2:], (tsx, "src/tests/blackbox/integration-health.blackbox.ts"))
+        self.assertNotIn("npx", probe.argv)
+
 
 if __name__ == "__main__":
     unittest.main()

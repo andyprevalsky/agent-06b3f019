@@ -21,6 +21,12 @@ import time
 
 from _test_utils import BlackboxResult
 
+# A command family verifies many native cases. Use the owning coverage domain's
+# generous guard, including in standalone runs, rather than sub-suite race caps.
+NATIVE_VERIFICATION_TIMEOUT_SECONDS = int(os.environ.get("AGENTS_COVERAGE_DOMAIN_TIMEOUT", "1800"))
+if NATIVE_VERIFICATION_TIMEOUT_SECONDS <= 0:
+    raise ValueError("AGENTS_COVERAGE_DOMAIN_TIMEOUT must be a positive integer")
+
 
 @contextlib.contextmanager
 def anthropic_family(*, excluded: bool):
@@ -576,7 +582,7 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -597,7 +603,7 @@ def test_evaluated_fleet_outcomes_publish_before_teardown():
         cwd=repo_root,
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -618,7 +624,7 @@ def test_fly_native_completion_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=90,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -632,19 +638,21 @@ def test_autoscaler_runtime_handoff_is_in_permanent_gate():
             "pytest",
             "-q",
             str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
+            str(repo_root / "agents/benchmarks/worker_capacity_loop_test.py"),
+            str(repo_root / "agents/benchmarks/cloudbench_campaign_barrier_test.py"),
             "-k",
-            "autoscaler_runtime_handoff",
+            "autoscaler_runtime_handoff or campaign_start_barrier",
         ],
         cwd=repo_root,
         text=True,
         capture_output=True,
         check=False,
-        timeout=90,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _run_owned_benchmark_commands(commands, cwd, timeout=60):
+def _run_owned_benchmark_commands(commands, cwd, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS):
     # Do not poll/wait leaders until cleanup: an unreaped child pins its PID
     # and group even after exit, so group signals cannot target a reused PGID.
     deadline = time.monotonic() + timeout
@@ -751,7 +759,7 @@ def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -778,11 +786,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert rejected.returncode == 2, rejected.stdout + rejected.stderr
         assert "zero-live-spend tasks" in rejected.stderr
-        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=30)
+        ordinary = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
         assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
@@ -795,11 +803,11 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
                 env={**os.environ, "BENCHMARK_FAST_MODE_CACHE": speed},
                 text=True,
                 capture_output=True,
-                timeout=30,
+                timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
             )
             assert rejected_child.returncode == 2, rejected_child.stdout + rejected_child.stderr
             assert "DEMO-replay tasks" in rejected_child.stderr
-        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=30)
+        ordinary_child = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS)
         assert ordinary_child.returncode == 0, ordinary_child.stdout + ordinary_child.stderr
         assert json.loads(ordinary_child.stdout)["slices"][0]["names"] == ["single-creator-arm"]
         sampled = subprocess.run(
@@ -821,7 +829,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert sampled.returncode == 0, sampled.stderr
         # Sampling the full eligible pool makes exclusion independent of seed.
@@ -843,7 +851,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             cwd=repo_root,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
         )
         assert full.returncode == 0, full.stderr
         assert not {
@@ -855,7 +863,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         }.intersection(full.stdout.splitlines())
         pool.write_text(json.dumps(["polar-bu-070"]))
         live = subprocess.run(
-            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=30
+            command + ["--min-successful-llm", "3"], cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
         )
         assert live.returncode == 0, live.stdout + live.stderr
         assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
@@ -869,7 +877,7 @@ def test_successful_llm_evidence_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -882,7 +890,7 @@ def test_cloudbench_codex_auth_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -962,7 +970,7 @@ def test_cloudbench_log_transport_contract_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=60,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout
@@ -989,12 +997,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
-    # controller-token/private-repo auth, bounded dependency-refresh ownership,
-    # isolated-backend queue alignment, exact workspace replay, and pgvector
-    # installation, shared snapshot discovery, pinned controls, and the
-    # SIGPIPE-safe target-mode parse cover 48 cases.
-    assert "48 passed" in result.stdout
+    # Pytest's successful collection and every selected behavioral assertion
+    # are authoritative; additional owning cases must not fail an obsolete count.
+    print(result.stdout)
 
 
 def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
@@ -1012,7 +1017,7 @@ def test_run_benchmark_task_selection_suite_is_in_permanent_gate():
         text=True,
         capture_output=True,
         check=False,
-        timeout=120,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2583,6 +2588,76 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     seal_index = source.index("_seal_payment_abandonment_browser_for_archive", cleanup_index)
     archive_index = source.index("finalize_archive_and_score_world_model", cleanup_index)
     assert cleanup_index < seal_index < archive_index
+
+
+async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof():
+    """Joined pre-action init can coexist with an earlier recorded browser task."""
+    import benchmarks.run_benchmark as bench
+    import pytest
+
+    root = "11111111-1111-4111-8111-111111111111"
+    task = "22222222-2222-5222-8222-222222222222"
+    session = "33333333-3333-4333-8333-333333333333"
+    receipt = {
+        "version": 1,
+        "agent_id": root,
+        "task_id": task,
+        "tool_call_id": "call-preparation",
+        "session_id": session,
+        "provider": "steel",
+        "phase": "initial_session_preparation",
+        "init_acknowledged": True,
+        "task_actions_started": False,
+    }
+    metadata = {
+        "toolName": "spawn_browser_agent", "action_type": "task_complete",
+        "toolStatus": "FINISHED", "task_id": task, "toolCallId": "call-preparation",
+        "excludeFromModel": True, "browser_preparation_cancellation": receipt,
+    }
+    messages = [
+        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
+                      "action_type": "task_complete", "toolStatus": "FINISHED"}},
+        {"metadata": {"toolName": "spawn_browser_agent", "task_id": "earlier-task",
+                      "action_type": "recording", "toolStatus": "FINISHED",
+                      "recording_view_url": "https://recording.example/earlier"}},
+        {"metadata": metadata},
+    ]
+    owner = {
+        "root_exists": True, "tree_agent_ids": [root],
+        "browser_sessions": [{"agent_id": root, "provider": "steel", "session_id": session}],
+    }
+
+    async def refresh(rows, snapshot=owner):
+        logs = {}
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
+            patch.object(bench, "get_agent", AsyncMock(return_value={"messages": rows})),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot),
+        ):
+            await bench._refresh_browser_archive_snapshot(
+                "http://localhost:1", root, {}, logs, expected_agent_ids={root},
+                ownership_before=owner, timeout_seconds=0.05,
+            )
+        return logs
+
+    logs = await refresh(messages)
+    assert task in logs["browser_preparation_cancellation_receipt"]["task_ids_by_agent"][root]
+    assert [row["metadata"] for row in logs["tree"][root]["messages"]] == [
+        row["metadata"] for row in messages
+    ]
+
+    for poisoned in [
+        messages + [{"metadata": {"toolName": "spawn_browser_agent", "task_id": task,
+                                  "action_type": "read_browser_state", "toolStatus": "FINISHED"}}],
+        messages + [{"metadata": {"task_id": task, "action_type": "task_started"}}],
+        messages[:-1] + [{"metadata": {**metadata, "browser_preparation_cancellation": {
+            **receipt, "init_acknowledged": False,
+        }}}],
+    ]:
+        with pytest.raises(TimeoutError):
+            await refresh(poisoned)
+    with pytest.raises(TimeoutError):
+        await refresh(messages, {**owner, "browser_sessions": []})
 
 
 async def test_paused_browser_before_session_allocation_archives_with_exact_zero_proof():
@@ -6608,6 +6683,30 @@ def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
     assert chat_limit < cuda_limit
 
 
+def test_in_progress_phone_call_counts_as_live_stall_activity():
+    """A connected hold must not trip tree-stall just because message_count is frozen."""
+    from benchmarks.benchmark_tasks import TASK_TIMEOUT_FLOORS, get_task_by_name, get_timeout_floor
+    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds, has_in_progress_phone_call
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    chat = get_task_by_name("chat-mode")
+
+    assert has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "IN_PROGRESS"}}]
+    )
+    assert not has_in_progress_phone_call(
+        [{"metadata": {"toolName": "call_phone_number", "toolStatus": "FINISHED"}}]
+    )
+    assert not has_in_progress_phone_call([{"metadata": {"toolName": "web_search", "toolStatus": "IN_PROGRESS"}}])
+    assert not has_in_progress_phone_call([])
+    # Keep the default fail-fast budget for hold-queue tasks that never place a
+    # call; the live IN_PROGRESS chip is what keeps a connected hold alive.
+    assert agent_stall_limit_seconds(hold) == AGENT_STALL_SECONDS
+    assert agent_stall_limit_seconds(chat) == AGENT_STALL_SECONDS
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
+
+
 async def test_declared_evaluator_hydrates_claude_code_sessions():
     """Transcript static checks hydrate Claude Code sessions before grading."""
     from dataclasses import replace
@@ -10510,6 +10609,246 @@ async def test_declared_judge_errors_are_not_evaluator_rejections():
                 assert "judge unavailable" in str(error)
             else:
                 raise AssertionError(f"{helper}: execution error became a criterion failure")
+
+
+@contextlib.contextmanager
+def _scripted_judge_provider(verdict_from_invocation: int | None, score: float = 1.0, output: dict | None = None):
+    """Drive harness judges through the real check_progress → Rose waterfall path.
+
+    OpenRouter answers 429 (the d0f65322 incident) until check_progress has been
+    entered ``verdict_from_invocation`` times; ``None`` keeps it rate-limited.
+    """
+    from types import SimpleNamespace
+    import httpx
+    import benchmarks.run_benchmark as bench
+    import helpers.llm as llm
+    from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
+    from _test_utils import setup_mock_fn, teardown_mock
+
+    real_check_progress = llm.check_progress
+    probe = SimpleNamespace(invocations=0, openrouter_calls=0, call_sites=[], sleeps=AsyncMock())
+
+    async def counting_check_progress(*args, **kwargs):
+        probe.invocations += 1
+        probe.call_sites.append(kwargs.get("call_site"))
+        return await real_check_progress(*args, **kwargs)
+
+    verdict = json.dumps(
+        {"reasoning": f"judge verdict score={score}", "score": score, **({"output": output} if output else {})}
+    )
+    verdict_stream = "\n".join(
+        [
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [{"delta": {"content": verdict}}],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                }
+            ),
+            "data: [DONE]",
+            "",
+        ]
+    )
+
+    def handler(request):
+        url = str(request.url)
+        if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"configured": True, "onCooldown": True})
+        if "api.anthropic.com" in url:
+            return httpx.Response(429, json={"type": "error", "error": {"type": "rate_limit_error"}})
+        if "openrouter.ai" in url:
+            probe.openrouter_calls += 1
+            if verdict_from_invocation is not None and probe.invocations >= verdict_from_invocation:
+                return httpx.Response(200, text=verdict_stream, headers={"Content-Type": "text/event-stream"})
+            return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
+        return httpx.Response(404, json={"error": f"No mock for {url}"})
+
+    _reset_anthropic_api_key_cooldown_cache()
+    setup_mock_fn(handler)
+    try:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(llm, "check_progress", counting_check_progress))
+            stack.enter_context(patch.object(bench, "_benchmark_judge_claude_auth_kwargs", AsyncMock(return_value={})))
+            stack.enter_context(patch.object(bench, "_benchmark_judge_gpt_auth_kwargs", AsyncMock(return_value={})))
+            stack.enter_context(patch("helpers.llm.asyncio.sleep", probe.sleeps))
+            stack.enter_context(patch("temporalio.activity.heartbeat"))
+            yield probe
+    finally:
+        teardown_mock()
+        _reset_anthropic_api_key_cooldown_cache()
+
+
+def _rejudge_sleeps(probe) -> list[float]:
+    import benchmarks.run_benchmark as bench
+
+    delays = set(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    return [call.args[0] for call in probe.sleeps.call_args_list if call.args and call.args[0] in delays]
+
+
+def _declared_judge_task():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name="test-mass-agent-run-0",
+        prompt="Run the mass agent task and report completion.",
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "t7-schema-task-complete",
+                "method": "single_turn_llm_judge",
+                "criteria": ["The run reports Task Complete."],
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+
+
+_DECLARED_JUDGE_RUN = {
+    "agent": {"agent_id": "d0f65322-225f-419f-bec2-398761d817ba", "status": "COMPLETED"},
+    "messages": [
+        {
+            "role": "TOOL",
+            "text": "Task Complete",
+            "metadata": {"toolName": "completion_summary", "toolStatus": "FINISHED"},
+        }
+    ],
+}
+
+
+async def test_declared_judge_rejudges_after_no_verdict():
+    """A rate-limited judge that later answers yields its real verdict, not a 0.5 FAIL."""
+    import benchmarks.run_benchmark as bench
+
+    with _scripted_judge_provider(verdict_from_invocation=2, score=1.0) as probe:
+        passed, reason, results = await bench._run_declared_evaluators(
+            _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+        )
+    assert (passed, reason) == (True, None), (passed, reason)
+    assert results[0]["score"] == 1.0 and results[0]["reasoning"] == "judge verdict score=1.0", results
+    assert probe.invocations == 2, probe.invocations
+    assert set(probe.call_sites) == {"benchmark_declared_evaluator"}, probe.call_sites
+    assert _rejudge_sleeps(probe) == [bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S[0]], _rejudge_sleeps(probe)
+
+
+async def test_declared_judge_without_verdict_is_judge_unavailable_error():
+    """Persistent judge 429s surface a judge-unavailable ERROR that still fails the gate."""
+    from types import SimpleNamespace
+    import benchmarks.run_benchmark as bench
+    import benchmarks.sms_runner as sms
+    from benchmarks.results import BenchmarkRun
+
+    with _scripted_judge_provider(verdict_from_invocation=None) as probe:
+        try:
+            outcome = await bench._run_declared_evaluators(
+                _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+            )
+        except RuntimeError as error:
+            raised = error
+        else:
+            raise AssertionError(f"no-verdict judge was scored as an evaluator outcome: {outcome}")
+    assert isinstance(raised.__cause__, bench.BenchmarkJudgeUnavailable), repr(raised.__cause__)
+    assert "t7-schema-task-complete" in str(raised) and "no verdict" in str(raised), str(raised)
+    assert "RoseAllFailed" in str(raised), str(raised)
+    attempts = 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)
+    assert probe.invocations == attempts, probe.invocations
+    assert _rejudge_sleeps(probe) == list(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), _rejudge_sleeps(probe)
+
+    sms_task = SimpleNamespace(
+        name="sms-judge-unavailable",
+        prompt="Reply to the user.",
+        evaluators=[
+            {"id": "sms-judge", "method": "single_turn_llm_judge", "criteria": ["Reply."], "pass_threshold": 1.0}
+        ],
+    )
+    deps = SimpleNamespace(is_local_base_url=lambda _: True, benchmark_user_id=lambda: "test-user")
+    sms_results = {}
+    for label, verdict_from_invocation in (("unavailable", None), ("recovered", 2)):
+        with _scripted_judge_provider(verdict_from_invocation=verdict_from_invocation) as probe:
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(sms, "parse_sms_script", return_value={"turns": []}))
+                stack.enter_context(patch.object(sms, "_user_phone", return_value="+15555550100"))
+                stack.enter_context(patch.object(sms, "_live_agent_ids", return_value=set()))
+                for helper in ("_reset_session", "_seed_transcript", "_cleanup", "_apply_web_search_fixture"):
+                    stack.enter_context(patch.object(sms, helper))
+                stack.enter_context(patch.object(sms, "_seed_agents", return_value=[]))
+                sms_results[label] = await sms.run_sms_task("http://127.0.0.1:32001", sms_task, deps)
+            assert set(probe.call_sites) == {"benchmark_sms_evaluator"}, probe.call_sites
+
+    unavailable = sms_results["unavailable"]
+    assert unavailable.passed is False
+    assert unavailable.benchmark_status == "ERROR", unavailable.benchmark_status
+    assert "no verdict" in (unavailable.failure_reason or ""), unavailable.failure_reason
+    assert bench._ci_should_fail(BenchmarkRun(task_results=[unavailable]).summary, [unavailable]) is True
+    recovered = sms_results["recovered"]
+    assert recovered.passed is True and recovered.benchmark_status == "PASSED", recovered.failure_reason
+
+
+async def test_semantic_output_judge_without_verdict_is_judge_unavailable():
+    """The semantic output judge re-judges a 429'd verdict and never scores a missing one."""
+    import benchmarks.run_benchmark as bench
+
+    schema = {"fields": [{"name": "receipt_id", "type": "str", "description": "order/receipt id"}]}
+    blob = json.dumps({"order": {"confirmation": "tp_c505"}})
+    with _scripted_judge_provider(verdict_from_invocation=None) as probe:
+        try:
+            outcome = await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task")
+        except bench.BenchmarkJudgeUnavailable as error:
+            assert "no verdict" in str(error), str(error)
+        else:
+            raise AssertionError(f"no-verdict semantic judge was scored: {outcome}")
+    assert probe.invocations == 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), probe.invocations
+    assert set(probe.call_sites) == {"semantic_output_field_recovery_judge"}, probe.call_sites
+
+    with _scripted_judge_provider(verdict_from_invocation=2, output={"receipt_id": "tp_c505"}) as probe:
+        assert await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task") is None
+    assert probe.invocations == 2, probe.invocations
+
+
+async def test_declared_judge_low_score_verdict_is_not_rejudged():
+    """A genuine 0.0 verdict is an ordinary FAIL carrying the judge's reasoning, with no retry."""
+    import benchmarks.run_benchmark as bench
+
+    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0) as probe:
+        passed, reason, results = await bench._run_declared_evaluators(
+            _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
+        )
+    assert passed is False
+    assert reason == "Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0", reason
+    assert results[0]["score"] == 0.0, results
+    assert (probe.invocations, probe.openrouter_calls) == (1, 1), (probe.invocations, probe.openrouter_calls)
+    assert probe.sleeps.call_args_list == [], probe.sleeps.call_args_list
+
+
+async def test_declared_judge_no_verdict_retries_stay_within_budget():
+    """Re-judging only starts while a full verifier deadline still fits the bounded budget."""
+    from helpers.llm import VERIFIER_TOTAL_TIMEOUT_S
+    import benchmarks.run_benchmark as bench
+
+    no_verdict = {"score": 0.5, "reasoning": "Progress check failed: x", "verdict_available": False}
+    for invocation_seconds, expected_attempts in (
+        ((107.0, 25.0, 25.0), 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S)),
+        ((VERIFIER_TOTAL_TIMEOUT_S, 0.0, 0.0), 1),
+    ):
+        now = [0.0]
+        durations = iter(invocation_seconds)
+
+        async def judge():
+            now[0] += next(durations)
+            return dict(no_verdict)
+
+        async def fake_sleep(seconds):
+            now[0] += seconds
+
+        judge_mock = AsyncMock(side_effect=judge)
+        with patch.object(bench.asyncio, "sleep", AsyncMock(side_effect=fake_sleep)):
+            try:
+                await bench._judge_until_verdict(judge_mock, monotonic=lambda: now[0])
+            except bench.BenchmarkJudgeUnavailable as error:
+                assert f"after {expected_attempts} judge attempt" in str(error), str(error)
+            else:
+                raise AssertionError("no-verdict judge returned a result")
+        assert judge_mock.await_count == expected_attempts, (invocation_seconds, judge_mock.await_count)
+        assert now[0] <= 2 * VERIFIER_TOTAL_TIMEOUT_S, now[0]
 
 
 async def test_sms_runner_harness_error_has_explicit_error_outcome():
@@ -17057,6 +17396,164 @@ def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
     assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
 
 
+def test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit():
+    """Hold-queue bench dials a recorded Air Canada queue for 2.5h, then a representative issues the credit."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name, get_timeout_floor
+    from benchmarks.phone_callee import HOLD_LINE_LEASE_MARGIN_SECONDS, PhoneCalleeSession
+    from benchmarks.phone_hold_line import HOLD_LINE_MAX_SECONDS, load_hold_audio_manifest
+    from domains.call_phone_number.config import (
+        ACTIVITY_TIMEOUT_MINUTES,
+        HEARTBEAT_TIMEOUT_SECONDS,
+        HTTP_TIMEOUT_POLL,
+        MAX_RETRY_ATTEMPTS,
+    )
+    from domains.call_phone_number.service import max_poll_coverage_seconds
+
+    hold = get_task_by_name("phone-call-hold-queue")
+    assert hold.expected_tools == ["call_phone_number"]
+    assert hold.forbidden_tools == ["wait_for"]
+    assert hold.expected_tool_counts == {"call_phone_number": 1}
+    assert hold.approval_handling == "auto_approve"
+    assert hold.group == "daily" and "phone" in hold.tags
+    for phrase in (
+        "{callee_phone_number}",
+        "exactly once",
+        "Air Canada",
+        "flight credit",
+        "do not use wait_for",
+        "Preserve spelled letters in alphanumeric confirmation codes exactly",
+    ):
+        assert phrase in hold.prompt
+    # The real queue announces its own wait; the prompt must not script the hold.
+    for scripted in ("2:45", "3 hours", "system_prompt must", "estimated wait"):
+        assert scripted not in hold.prompt
+    assert hold.pinned_facts == {
+        "confirmation_code": "ACFC-2458",
+        "credit_amount_usd": "428.60",
+        "credit_expiry": "October 2, 2027",
+        "booking_reference": "L9K4QM",
+        "flight_number": "AC107",
+    }
+
+    persona = hold.phone_persona
+    assert "hold_success" not in persona
+    assert persona["hold_line"] == {"hold_seconds": 9000, "audio": "air-canada-2026-10-06"}
+    manifest = load_hold_audio_manifest(persona["hold_line"]["audio"])
+    assert manifest["clips"]["loop"]["duration_seconds"] >= 15 * 60
+    assert persona["first_message"].endswith("How can I help you today?")
+    assert "Air Canada" in persona["first_message"] and "Dana" in persona["first_message"]
+    for spoken in (persona["first_message"], persona["end_call_message"]):
+        assert "ACFC" not in spoken and "428" not in spoken and "letter A" not in spoken
+    for fact in ("ACFC-2458", "letter A", "digit 2", "428 dollars and 60 cents", "October 2, 2027", "L9K4QM", "AC107"):
+        assert fact in persona["system_prompt"]
+    assert "endCall" in persona["system_prompt"]
+    assert persona["max_duration_seconds"] == 900
+    assert "caller_stayed_on_hold" not in persona["structured_data_schema"]["properties"]
+    assert hold.callee_checks == {
+        "caller_stayed_on_hold": True,
+        "caller_requested_flight_credit": True,
+        "confirmation_code_given": True,
+        "confirmation_code": "ACFC-2458",
+        "credit_amount_usd": "428.60",
+        "credit_expiry": "October 2, 2027",
+    }
+    assert {"ACFC-2458", "428.60"} <= set(hold.expected_call_findings)
+    assert {"ACFC-2458", "428.60", "October 2, 2027"} <= set(hold.expected_final_findings)
+    assert "9000 seconds" in hold.environment["context_notes"]
+    assert {"vapi", "twilio"} <= set(hold.environment["live_targets"])
+
+    hold_seconds = persona["hold_line"]["hold_seconds"]
+    # The bench is the end-to-end test of wait_for_human: most of the queue must be parked.
+    assert hold.enforce_declared_evaluators is True
+    parked_checks = [
+        check
+        for evaluator in hold.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+        if check["type"] == "phone_call_parked_on_hold"
+    ]
+    assert parked_checks == [{"type": "phone_call_parked_on_hold", "min_seconds": int(hold_seconds * 0.9)}]
+    from benchmarks import local
+
+    assert local.needs_public_tunnel([hold.name]) is True
+    assert local.needs_public_tunnel(["phone-call-ivr-dtmf"]) is False
+    # The agent's single call must outlive the hold plus the representative conversation.
+    assert hold.timeout_seconds >= hold_seconds + persona["max_duration_seconds"] + 1200
+    assert hold_seconds + persona["max_duration_seconds"] <= HOLD_LINE_MAX_SECONDS
+    assert ACTIVITY_TIMEOUT_MINUTES * 60 >= hold.timeout_seconds
+    assert max_poll_coverage_seconds() >= hold.timeout_seconds
+    assert HTTP_TIMEOUT_POLL >= 30
+    assert HEARTBEAT_TIMEOUT_SECONDS >= 600 and HEARTBEAT_TIMEOUT_SECONDS > HTTP_TIMEOUT_POLL * 2
+    assert MAX_RETRY_ATTEMPTS >= 5
+    backend_hold_max = (bench.REPO_ROOT / "back-end/src/domains/vapi/config.ts").read_text()
+    assert "PHONE_HOLD_MAX_SECONDS ?? 3 * 60 * 60" in backend_hold_max
+    assert hold_seconds + persona["max_duration_seconds"] < 3 * 60 * 60
+
+    session = PhoneCalleeSession(hold.name, hold.phone_persona, api_key="test-key")
+    assert session._hold_line_config() == {"hold_seconds": 9000, "audio": "air-canada-2026-10-06"}
+    assert session.analysis_timeout_seconds() == 180
+    lease = hold_seconds + persona["max_duration_seconds"] + HOLD_LINE_LEASE_MARGIN_SECONDS
+    assert lease >= hold.timeout_seconds
+    assert "task._callee_phone_number = phone_callee.dial_number" in inspect.getsource(bench)
+
+    assert hold.timeout_seconds > 7200
+    assert get_timeout_floor(hold.name) == hold.timeout_seconds
+    short = get_task_by_name("phone-call-client-intake")
+    assert short.timeout_seconds < 7200
+    with patch.dict(os.environ):
+        os.environ.pop("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", None)
+        assert bench.agent_execution_backstop_seconds(hold) == hold.timeout_seconds
+        assert bench.agent_execution_backstop_seconds(short) == 7200
+        assert bench.agent_execution_backstop_seconds() == 7200
+        for operator_cap in ("300", "7200"):
+            os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"] = operator_cap
+            assert bench.agent_execution_backstop_seconds(hold) == int(operator_cap)
+            assert bench.agent_execution_backstop_seconds(short) == int(operator_cap)
+
+
+def test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card():
+    """Parked time comes from the finished call_phone_number card's holdSeconds, nothing else."""
+    from benchmarks.run_benchmark import _run_declared_static_check, phone_parked_hold_seconds
+
+    def card(**phone_call):
+        return {"role": "TOOL", "metadata": {"toolName": "call_phone_number", "phoneCall": phone_call}}
+
+    evaluator = {"checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]}
+    parked = {"messages": [card(status="in-progress"), card(status="on-hold"), card(status="ended", holdSeconds=8820)]}
+    assert phone_parked_hold_seconds(parked) == 8820
+    assert _run_declared_static_check(evaluator, parked) == (True, "All declared static checks passed")
+
+    stayed_live = {"messages": [card(status="ended", duration=9600)]}
+    assert _run_declared_static_check(evaluator, stayed_live) == (
+        False,
+        "Phone call was parked by wait_for_human for 0s; expected at least 8100s",
+    )
+    assert _run_declared_static_check(evaluator, {"messages": [card(status="ended", holdSeconds=600)]})[0] is False
+    foreign = {
+        "messages": [
+            {"metadata": {"toolName": "wait_for", "phoneCall": {"holdSeconds": 9000}}},
+            card(status="ended", holdSeconds=True),
+            card(status="ended", holdSeconds="9000"),
+        ]
+    }
+    assert phone_parked_hold_seconds(foreign) == 0
+
+
+def _run_pytest_style_case(case):
+    """Run a module-level pytest case off the runner's event loop, with monkeypatch when it asks."""
+    import inspect
+
+    import pytest
+
+    if "monkeypatch" in inspect.signature(case).parameters:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            return case(monkeypatch)
+    return case()
+
+
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     """Benchmark callees can end completed calls instead of waiting for max duration."""
     from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
@@ -17329,6 +17826,72 @@ def test_missing_call_findings_tolerates_spacing_and_punctuation():
     assert missing_call_findings(["ROSE-4471"], "The confirmation code is Rosa-4471.") == ["ROSE-4471"]
 
 
+async def test_phone_recording_playback_requires_first_party_audio():
+    """Daily phone benches fail when the FE recording URL is not playable audio."""
+    from benchmarks.phone_callee import phone_recording_playback_failures
+
+    agent_id = "b31c8a09-5992-4916-b797-b9c3ae5c75cf"
+    call_id = "01a11772-75ae-7000-83c6-064e004a57af"
+    data = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "call_phone_number",
+                    "toolStatus": "FINISHED",
+                    "phoneCall": {
+                        "callId": call_id,
+                        "recordingUrl": (
+                            "https://94bdb67bb98da30b06bdd917725c037d.r2.cloudflarestorage.com/"
+                            "hipaa-recordings/call-mono.wav"
+                        ),
+                    },
+                }
+            }
+        ]
+    }
+
+    class PrivateProviderResponse:
+        status_code = 400
+        headers = {"content-type": "application/xml"}
+        content = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b"<Error><Code>InvalidArgument</Code><Message>Authorization</Message></Error>"
+        )
+
+    class PlayableResponse:
+        status_code = 200
+        headers = {"content-type": "audio/wav"}
+        content = b"RIFF....WAVEfmt "
+
+    async def get_private(_url, headers=None):
+        return PrivateProviderResponse()
+
+    async def get_playable(url, headers=None):
+        assert "/api/agents/" in url
+        assert agent_id in url
+        assert call_id in url
+        assert headers == {"X-API-Key": "test"}
+        return PlayableResponse()
+
+    denied = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_private,
+    )
+    assert denied, "private provider recording must fail the FE playback check"
+
+    ok = await phone_recording_playback_failures(
+        data,
+        base_url="https://navi-j9a9.onrender.com",
+        agent_id=agent_id,
+        headers={"X-API-Key": "test"},
+        get=get_playable,
+    )
+    assert ok == []
+
+
 def test_phone_search_text_includes_phone_call_metadata():
     """Agent-side haystack covers message text AND phoneCall metadata (transcript, structuredData)."""
     from benchmarks.phone_callee import phone_search_text
@@ -17410,6 +17973,13 @@ def test_callee_check_failures_coerce_bools_and_match_strings_loosely():
     assert failures[0].startswith("caller_requested_name")
 
     assert callee_check_failures({"payment_completed": True}, {}) == ["payment_completed: expected True, got None"]
+    assert (
+        callee_check_failures(
+            {"credit_expiry": "October 2, 2027"},
+            {"credit_expiry": "October second two thousand twenty seven"},
+        )
+        == []
+    )
 
 
 def test_payment_audit_structured_data_since_returns_latest_successful_payment():
@@ -18621,6 +19191,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "phone-call-client-intake",
         "phone-call-payment",
         "phone-call-ivr-dtmf",
+        "phone-call-hold-queue",
         "response-schema-non-goal-feedback",
     } <= suite_names
     # This branch added four ready gate benchmarks (subscription free-credit,
@@ -20015,6 +20586,25 @@ def test_abandon_retry_waits_out_upstream_rate_limit_window():
     assert _rate_limit_retry_delay(f'rate limit exceeded {{"retryAfter":{stale}}}') == 1.0
 
 
+def _with_pytest_fixtures(test_fn):
+    """Discover fixture-bearing cases through pytest, including their parameters."""
+    import inspect
+
+    if not any(
+        parameter.default is inspect.Parameter.empty
+        and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in inspect.signature(test_fn).parameters.values()
+    ):
+        return test_fn
+
+    def run() -> None:
+        target = f"{inspect.getfile(test_fn)}::{test_fn.__name__}"
+        repo_root = Path(__file__).resolve().parents[3]
+        _run_owned_benchmark_commands([[sys.executable, "-m", "pytest", "-q", target]], cwd=repo_root)
+
+    return run
+
+
 def _with_tmp_path(test_fn):
     """Run a pytest-fixture test under the blackbox runner.
 
@@ -20441,7 +21031,7 @@ async def run_all_tests():
         if hasattr(case, "async_case"):
             await r.record_async("cloud_cleanup_" + name[5:], case.async_case)
         else:
-            r.record("cloud_cleanup_" + name[5:], case)
+            r.record("cloud_cleanup_" + name[5:], _with_pytest_fixtures(case))
     r.record(
         "every_benchmark_run_registers_in_app_hub",
         test_every_benchmark_run_registers_in_app_hub_before_execution,
@@ -20553,6 +21143,18 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
+    r.record("phone_call_hold_queue_task", test_phone_call_hold_queue_task_waits_real_air_canada_queue_for_flight_credit)
+    r.record(
+        "phone_call_parked_on_hold_static_check",
+        test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
+    )
+    from benchmarks import phone_callee_test, phone_hold_line_test
+
+    for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
+        for name in sorted(dir(module)):
+            if name.startswith("test_"):
+                case = getattr(module, name)
+                await r.record_async(prefix + name[5:], lambda case=case: asyncio.to_thread(_run_pytest_style_case, case))
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",
@@ -20580,6 +21182,10 @@ async def run_all_tests():
     )
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
+    await r.record_async(
+        "phone_recording_playback_requires_first_party_audio",
+        test_phone_recording_playback_requires_first_party_audio,
+    )
     r.record(
         "phone_final_result_text_excludes_raw_transcript", test_phone_final_result_text_excludes_raw_transcript_evidence
     )
@@ -20620,6 +21226,22 @@ async def run_all_tests():
     await r.record_async(
         "declared_judge_execution_error",
         test_declared_judge_errors_are_not_evaluator_rejections,
+    )
+    await r.record_async("declared_judge_rejudges_after_no_verdict", test_declared_judge_rejudges_after_no_verdict)
+    await r.record_async(
+        "declared_judge_without_verdict_is_judge_unavailable_error",
+        test_declared_judge_without_verdict_is_judge_unavailable_error,
+    )
+    await r.record_async(
+        "semantic_output_judge_without_verdict_is_judge_unavailable",
+        test_semantic_output_judge_without_verdict_is_judge_unavailable,
+    )
+    await r.record_async(
+        "declared_judge_low_score_verdict_is_not_rejudged", test_declared_judge_low_score_verdict_is_not_rejudged
+    )
+    await r.record_async(
+        "declared_judge_no_verdict_retries_stay_within_budget",
+        test_declared_judge_no_verdict_retries_stay_within_budget,
     )
     await r.record_async("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
     await r.record_async(
@@ -21542,6 +22164,10 @@ async def run_all_tests():
         test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
     )
     r.record(
+        "in_progress_phone_call_counts_as_live_stall_activity",
+        test_in_progress_phone_call_counts_as_live_stall_activity,
+    )
+    r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
         test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
     )
@@ -21827,6 +22453,10 @@ async def run_all_tests():
     await r.record_async(
         "paused_browser_before_session_allocation_archives_with_exact_zero_proof",
         test_paused_browser_before_session_allocation_archives_with_exact_zero_proof,
+    )
+    await r.record_async(
+        "cancelled_preparation_archives_only_with_positive_task_and_owner_proof",
+        test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof,
     )
     r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",

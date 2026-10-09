@@ -460,6 +460,70 @@ async function testRecoveryCreateRejectionAllowsEmailFallback() {
   });
 }
 
+async function testConfirmedCleanupDoesNotForceRecoveryScan() {
+  await withUser(async (userId) => {
+    await prisma.agentIdentity.create({
+      data: { userId, email: `${userId}@example.test` },
+    });
+
+    const liveAgents = new Set<string>();
+    let agentCreates = 0;
+    const calls = installProvider((url, method) => {
+      if (method === 'GET' && url.includes('/agents?limit=100&offset=')) {
+        return oversizedAccountPage(Number(new URL(url).searchParams.get('offset')));
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/agents') {
+        agentCreates += 1;
+        const id = `agt-cleaned-${agentCreates}`;
+        liveAgents.add(id);
+        return Response.json({ id });
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
+        return Response.json(
+          { detail: 'Number limit reached (50/50). Contact us for more.' },
+          { status: 409 }
+        );
+      }
+      const agentId = url.startsWith('https://agentphone.test/v1/agents/')
+        ? url.slice('https://agentphone.test/v1/agents/'.length)
+        : null;
+      if (agentId !== null && method === 'GET') {
+        return liveAgents.has(agentId)
+          ? Response.json({ id: agentId, numbers: [] })
+          : Response.json({ detail: 'not found' }, { status: 404 });
+      }
+      if (agentId !== null && method === 'DELETE') {
+        liveAgents.delete(agentId);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+    });
+
+    for (const attempt of [1, 2]) {
+      try {
+        await createAgentPhoneNumber({ userId });
+        assert.fail(`attempt ${attempt}: expected number creation to be rejected`);
+      } catch (error) {
+        assert.match(String(error), /provider-agent cleanup was confirmed/, `attempt ${attempt}`);
+        assert.equal(isAgentPhoneEmailFallbackSafe(error), true, `attempt ${attempt}`);
+      }
+      const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+      assert.equal(
+        identity.phoneProviderAgentId,
+        null,
+        `attempt ${attempt}: a deleted provider agent id must not turn the next claim into recovery`
+      );
+    }
+    assert.equal(agentCreates, 2, 'each attempt provisions afresh after a confirmed cleanup');
+    assert.equal(liveAgents.size, 0, 'every created provider agent is deleted');
+    assert.equal(
+      calls.filter((call) => call.url.includes('/agents?limit=100&offset=')).length,
+      0,
+      'a confirmed cleanup must not force a shared-account recovery scan'
+    );
+  });
+}
+
 async function main(): Promise<void> {
   const results: Array<{ name: string; error?: string }> = [];
   for (const [name, fn] of [
@@ -494,6 +558,10 @@ async function main(): Promise<void> {
     [
       'stored-number 500 does not create a successor AgentPhone number',
       testStoredNumberLookup500DoesNotCreateNumber,
+    ],
+    [
+      'confirmed provider-agent cleanup does not force a recovery scan on the next attempt',
+      testConfirmedCleanupDoesNotForceRecoveryScan,
     ],
   ] as const) {
     try {

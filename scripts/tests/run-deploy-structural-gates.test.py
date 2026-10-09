@@ -65,6 +65,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
             {
                 "bash scripts/tests/descend-command.test.sh",
                 "python3 scripts/tests/benchmark-live-results.test.py",
+                "bash scripts/tests/campaign-hub-grouping.test.sh",
                 "bash scripts/tests/cloudbench-fetch-ref.test.sh",
                 "python3 scripts/tests/verify-successful-llm-queries.test.py",
                 "python3 scripts/tests/cloudbench-exact-session-multi-root.test.py",
@@ -72,6 +73,32 @@ class StructuralGateDocumentationTests(unittest.TestCase):
                 "python3 scripts/tests/cloudbench-bootstrap-recovery.test.py",
             }.issubset(_registry_commands())
         )
+
+    def test_pytest_gate_wrapper_signals_reach_pytest(self) -> None:
+        """Stopping the gate's PID must stop pytest, not orphan it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper = root / "scripts/tests/benchmark-live-results.test.py"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text((ROOT / "scripts/tests/benchmark-live-results.test.py").read_text())
+            pid_file = root / "pytest.pid"
+            fake_python = root / "agents/venv/bin/python"
+            fake_python.parent.mkdir(parents=True)
+            fake_python.write_text(f'#!/bin/sh\necho $$ > "{pid_file}"\nexec sleep 60\n')
+            fake_python.chmod(0o755)
+            process = subprocess.Popen([sys.executable, str(wrapper)], start_new_session=True)
+            try:
+                deadline = time.monotonic() + 60
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pid_file.exists(), "fake pytest never started")
+                self.assertEqual(int(pid_file.read_text()), process.pid, "wrapper must exec pytest in place")
+                process.terminate()
+                self.assertEqual(process.wait(timeout=60), -signal.SIGTERM)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=60)
 
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
@@ -83,12 +110,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
     def test_deploy_md_lists_no_unregistered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         registry = _registry_commands()
-        documented = {
-            match.group(1)
-            for match in re.finditer(
-                r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md
-            )
-        }
+        documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
         stale = sorted(documented - registry)
         self.assertEqual(
             stale, [], f"deploy.md names gate(s) absent from the registry: {stale}"
@@ -139,14 +161,11 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
                 for low_a, high_a in ranges[first]:
                     for low_b, high_b in ranges[second]:
                         if low_a <= high_b and low_b <= high_a:
-                            overlaps.append(
-                                f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]"
-                            )
+                            overlaps.append(f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]")
         self.assertEqual(
             overlaps,
             [],
-            "concurrently-run gates share a port range; check-then-bind will race:\n"
-            + "\n".join(overlaps),
+            "concurrently-run gates share a port range; check-then-bind will race:\n" + "\n".join(overlaps),
         )
 
 

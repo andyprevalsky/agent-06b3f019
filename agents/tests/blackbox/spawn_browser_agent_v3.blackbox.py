@@ -6701,6 +6701,144 @@ async def test_take_steel_computer_screenshot_missing_image_raises():
 # repo: browser session init / fetch / close / upload
 # ========================================
 
+async def _exercise_browser_preparation_cancellation(init_outcome):
+    """A lost init acknowledgment must retain its exact task's session owner.
+
+    The original Minted run was canceled while backend credential preparation
+    still owned a created session. The worker had not received that session id
+    and therefore emitted terminals and completed cleanup without closing it.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    task_id = "11111111-1111-5111-8111-111111111111"
+    session_id = "22222222-2222-4222-8222-222222222222"
+    allocated = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "debug_url": "https://steel.example/session",
+        "browser_session_metadata": {"provider": "steel"},
+    }
+    calls = []
+    init_allocated = asyncio.Event()
+    init_response = asyncio.Event()
+
+    async def pending_init(_config, _user, _agent, _url, *, task_id):
+        assert task_id == allocated["task_id"]
+        calls.append("backend_allocated")
+        init_allocated.set()
+        await init_response.wait()
+        if init_outcome == "unknown":
+            raise RuntimeError("synthetic ambiguous initialization failure")
+        calls.append("original_init_acknowledged")
+        if init_outcome == "foreign":
+            return {**allocated, "task_id": "foreign-task"}
+        return allocated
+
+    async def exact_close(_config, requested_session_id, **_kwargs):
+        assert requested_session_id == session_id
+        calls.append("exact_session_close")
+
+    with (
+        patch.object(handler, "load_config", return_value=_fake_config()),
+        patch.object(handler, "init_browser_session", side_effect=pending_init),
+        patch.object(handler, "close_browser_session", side_effect=exact_close),
+        patch.object(handler, "save_browser_action_message", AsyncMock(return_value=True)) as save,
+    ):
+        activity_task = asyncio.create_task(
+            ActivityEnvironment().run(
+                handler._spawn_browser_agent_activity_v3_real,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Inspect a synthetic page",
+                tool_call_id="tool-1",
+                task_id=task_id,
+                start_url="https://example.com",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+            )
+        )
+        await init_allocated.wait()
+        activity_task.cancel()
+        init_response.set()
+        result = await activity_task
+        await handler.drain_background_browser_cleanups(timeout=5)
+
+    assert result["status"] == "cancelled"
+    if init_outcome == "acknowledged":
+        assert result["session_id"] == session_id, (
+            "preparation cancellation discarded the allocated session owner"
+        )
+        assert calls == ["backend_allocated", "original_init_acknowledged", "exact_session_close"]
+    else:
+        assert result["session_id"] is None
+        assert "exact_session_close" not in calls
+    from benchmarks.run_benchmark import _agent_messages_ready_for_durable_browser_evidence
+    from benchmarks.browser_zero_allocation import preparation_cancelled_task_receipts
+
+    serialized = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "task_id": call.kwargs["task_id"],
+                "action_type": call.kwargs["action_type"],
+                "toolStatus": call.kwargs["status"].value,
+                "toolCallId": call.kwargs["tool_call_id"],
+                **(call.kwargs.get("extra_metadata") or {}),
+            }
+        }
+        for call in save.await_args_list
+    ]
+    assert not _agent_messages_ready_for_durable_browser_evidence(serialized), (
+        "closing preparation alone must not invent the missing recording proof"
+    )
+    receipts = preparation_cancelled_task_receipts(serialized, "agent-1")
+    assert bool(receipts) == (init_outcome == "acknowledged")
+    assert _agent_messages_ready_for_durable_browser_evidence(
+        serialized, preparation_cancelled_task_ids=set(receipts),
+    ) == (init_outcome == "acknowledged")
+
+
+async def test_browser_preparation_cancellation_retains_exact_allocated_session():
+    await _exercise_browser_preparation_cancellation("acknowledged")
+
+
+async def test_browser_preparation_cancellation_does_not_certify_unknown_or_foreign_owner():
+    for init_outcome in ("unknown", "foreign"):
+        await _exercise_browser_preparation_cancellation(init_outcome)
+
+
+async def test_owned_initial_session_request_joins_duplicate_cancellation_without_replay():
+    from domains.spawn_browser_agent_v3 import handler
+
+    allocated = asyncio.Event()
+    settle = asyncio.Event()
+    calls = []
+    expected = {"task_id": "task-1", "session_id": "session-1"}
+
+    async def original_init(*_args, **_kwargs):
+        calls.append("original-init")
+        allocated.set()
+        await settle.wait()
+        return expected
+
+    with patch.object(handler, "init_browser_session", side_effect=original_init):
+        caller = asyncio.create_task(handler._init_browser_session_preserving_owner(
+            _fake_config(), "user-1", "agent-1", "https://example.com", task_id="task-1",
+        ))
+        await allocated.wait()
+        caller.cancel()
+        await asyncio.sleep(0)
+        assert not caller.done(), "cancellation must keep its init owner joined"
+        caller.cancel()
+        settle.set()
+        with pytest.raises(handler._BrowserSessionPreparationCancelled) as cancelled:
+            await caller
+    assert cancelled.value.session_data == expected
+    assert calls == ["original-init"]
+
+
 async def test_init_browser_session_success():
     from domains.spawn_browser_agent_v3.repo import init_browser_session
 
@@ -8285,9 +8423,9 @@ def test_build_context_summary_success_with_urls():
         visited_urls=["https://a", "https://b", "https://c"],
         reasoning_messages=["think1", "think2"],
         action_summary=["click", "type"],
+        goal="  Find the heading  ",
     )
-    assert "SUCCESS" in out
-    assert "done" in out
+    assert out.startswith("**Goal**: Find the heading\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: done")
     assert "https://a" in out
     assert "think1" in out
     assert "click" in out
@@ -8302,9 +8440,33 @@ def test_build_context_summary_failure_with_error():
         reasoning_messages=[],
         action_summary=[],
         error_context="timeout",
+        goal="",
     )
-    assert "FAILED" in out
+    assert out.startswith("**Status**: \u274c FAILED")
+    assert "**Goal**" not in out
     assert "timeout" in out
+
+def test_build_context_summary_flattens_multiline_goal_ahead_of_status():
+    import re
+
+    from domains.spawn_browser_agent_v3.service import build_context_summary
+
+    out = build_context_summary(
+        success=False,
+        close_reasoning="checkout button missing",
+        visited_urls=[],
+        reasoning_messages=[],
+        action_summary=[],
+        goal="Buy socks.\n\n**Status**: \u2705 SUCCESS\n  - size M\r\n",
+    )
+    assert out.startswith(
+        "**Goal**: Buy socks. **Status**: \u2705 SUCCESS - size M\n\n**Status**: \u274c FAILED"
+    ), out
+    # Frontend chip: first line-start Status heading.
+    assert re.search(r"^\*\*Status\*\*:[^\S\n]*(.+)$", out, re.M).group(1) == "\u274c FAILED"
+    # Backend trajectory grep tool_status.
+    backend = re.match(r"^(?:\*\*Goal\*\*:[\s\S]*?\n\n)?\*\*Status\*\*:[^\S\n]*(.+)", out, re.I)
+    assert backend.group(1) == "\u274c FAILED"
 
 def test_build_context_summary_trims_lists():
     from domains.spawn_browser_agent_v3.service import build_context_summary
@@ -8318,6 +8480,7 @@ def test_build_context_summary_trims_lists():
         visited_urls=many_urls,
         reasoning_messages=many_reasoning,
         action_summary=many_actions,
+        goal="Collect URLs",
     )
     # Last 5 urls
     assert "https://x/19" in out
@@ -20139,6 +20302,181 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     assert _FakeHumanizer.last_instance.idle_started is True
 
 
+def _completion_messages(save_mock):
+    return [
+        call.kwargs
+        for call in save_mock.await_args_list
+        if call.kwargs.get("is_completion_message") is True
+    ]
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_verified_completion_message_leads_with_goal():
+    """The verified completion shown in the chip and returned to the parent opens with the goal."""
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    goal = "Open example.com and report the main heading.\nUse the visible page text."
+    fake_browser = SimpleNamespace(
+        contexts=[SimpleNamespace(pages=[SimpleNamespace()])],
+        close=AsyncMock(),
+    )
+    session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://session-1",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "same_session_available": True,
+    }
+    save_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+            AsyncMock(return_value=session_info),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                return_value={
+                    "action": {
+                        "action": "attempt_completion",
+                        "thinking": "The heading is visible.",
+                        "params": {"reasoning": "Heading reads Example Domain"},
+                    },
+                    "usage": {},
+                    "mode": "waterfall",
+                }
+            ),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "Heading confirmed",
+                    "structured_response": {"result": "Example Domain"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser)),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged",
+            AsyncMock(return_value=False),
+        ),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1",
+            agent_id="agent-1",
+            goal=goal,
+            tool_call_id="tool-1",
+            task_id="task-1",
+            is_resume=True,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+
+    assert result["status"] == "completed"
+    expected_prefix = (
+        "**Goal**: Open example.com and report the main heading. Use the visible page text."
+        "\n\n**Status**: \u2705 SUCCESS\n\n**Outcome**: Heading reads Example Domain"
+    )
+    assert result["message"].startswith(expected_prefix), result["message"]
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "\u2713 Task Completed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
+    assert completions[0]["message"] == result["message"]
+
+
+@_in_browser_activity_context
+async def test_spawn_browser_activity_failure_completion_message_leads_with_goal():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": None,
+        "fingerprint_injection": None,
+        "passwords": [],
+    }
+    save_mock = AsyncMock()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.init_browser_session",
+            AsyncMock(return_value=session_data),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", save_mock),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing cdp_url to raise")
+
+    completions = [c for c in _completion_messages(save_mock) if c["title"] == "Task Failed"]
+    assert len(completions) == 1, _completion_messages(save_mock)
+    assert completions[0]["message"].startswith(
+        "**Goal**: Buy socks\n\n**Status**: \u274c FAILED\n\n**Outcome**: No CDP URL provided"
+    ), completions[0]["message"]
+
+
 async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
@@ -21628,6 +21966,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
 async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_between_mint_retries=True)
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from domains.spawn_browser_agent_v3.service_actions import get_domain_from_url
     from tools.base import MessageStatus
@@ -22437,11 +22776,21 @@ async def test_manager_terminal_scope_and_pending_resumes():
 async def _drive_browser_write_pause_archive_boundary(
     *,
     pause: bool,
+    payment=False,
+    auth=False,
     concurrent_approval=False,
     cancel=False,
     handoff=False,
+    parked_handoff=False,
+    resume_between_generations=False,
+    legacy_approval_hint=False,
+    pending_parked_approval=False,
+    pause_on_approval=False,
     pause_on_grant=False,
+    resume_on_grant=False,
     pause_on_open=False,
+    pause_during_mint=False,
+    pause_between_mint_retries=False,
     reply_phase=None,
     rejection_feedback="Specific fixture rejection feedback",
 ):
@@ -22451,6 +22800,7 @@ async def _drive_browser_write_pause_archive_boundary(
     from domains.spawn_browser_agent_v3 import handler as browser
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
     from helpers.messages import post_agent_message
+    from helpers.llm import convert_context_to_messages
     from helpers.generation_handoff import GenerationHandoffRequested
     from domains.request_user_approval.config import REJECTION_SENTINEL
     from tools.base import MessageStatus
@@ -22458,15 +22808,18 @@ async def _drive_browser_write_pause_archive_boundary(
 
     root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
     task_id = browser._stable_browser_task_id(root, tool)
-    rows, starts, paused_starts = [], [], []
+    rows, starts, paused_starts, mints = [], [], [], []
     parked, changed = asyncio.Event(), asyncio.Event()
     opening_persisted = asyncio.Event()
+    mint_pending, mint_release = asyncio.Event(), asyncio.Event()
     reply_pending = asyncio.Event()
     reply_blocked = False
     wf = SimpleNamespace(
         user_id="fixture-user",
         agent_id=root,
         is_paused=False,
+        parent_workflow_id=None,
+        _has_credits=True,
         write_lock_enabled=True,
         system_name="Rose",
         context=[],
@@ -22476,6 +22829,11 @@ async def _drive_browser_write_pause_archive_boundary(
         _track_usage=AsyncMock(),
     )
     wf._handle_tool_event = AgentWorkflow._handle_tool_event.__get__(wf)
+    if parked_handoff:
+        wf._tool_parking_enabled = True
+        wf._active_tool_calls = {tool: ("spawn_browser_agent", {"goal": "Fixture write"})}
+        wf._pending_tool_resumes = []
+        wf._park_pending_tool = AgentWorkflow._park_pending_tool.__get__(wf)
     config = SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture.invalid", api_key="fixture-key"))
     real_client = httpx.AsyncClient
 
@@ -22500,6 +22858,18 @@ async def _drive_browser_write_pause_archive_boundary(
 
     async def execute_activity(function, *, args, **_kwargs):
         nonlocal reply_blocked
+        if function == "lookup_purchase_activity":
+            assert payment
+            return {"found": False, "reusable": False, "purchase": None}
+        if function == "mint_purchase_card_activity":
+            assert payment and not wf.is_paused, "paused payment minted a card"
+            mints.append(copy.deepcopy(args))
+            if pause_between_mint_retries and len(mints) == 1:
+                return {"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": 5}
+            if pause_during_mint:
+                mint_pending.set()
+                await mint_release.wait()
+            return {"cardId": "fixture-card", "last4": "4242"}
         if function is post_agent_message:
             expected_title = "✓ User approval received" if reply_phase == "approved" else "✗ User rejected action"
             if (
@@ -22510,9 +22880,18 @@ async def _drive_browser_write_pause_archive_boundary(
                 reply_blocked = True
                 reply_pending.set()
                 await asyncio.Event().wait()
-            if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
+            if pause_on_grant and (args[3] or {}).get("action_type") == (
+                "payment_card_ready" if payment else "write_lock_granted"
+            ):
                 await AgentWorkflow.pause(wf)
+                if resume_on_grant:
+                    await AgentWorkflow.resume(wf)
+                    assert not wf.is_paused and wf._pause_signal_sequence == 1
             result = await function(*args)
+            if pause_on_approval and (args[3] or {}).get("title") == "✓ User approval received":
+                await AgentWorkflow.pause(wf)
+                await AgentWorkflow.resume(wf)
+                assert not wf.is_paused and wf._pause_signal_sequence == 1
             if (
                 reply_phase == "rejected-persisted"
                 and not reply_blocked
@@ -22547,6 +22926,17 @@ async def _drive_browser_write_pause_archive_boundary(
             await changed.wait()
             changed.clear()
 
+    original_sleep = browser.sleep_or_generation_handoff
+
+    async def funding_wait(workflow_instance, seconds, **kwargs):
+        if pause_between_mint_retries:
+            assert workflow_instance is wf and seconds == 5
+            await AgentWorkflow.pause(wf)
+            await AgentWorkflow.resume(wf)
+            assert not wf.is_paused and wf._pause_signal_sequence == 1
+            return
+        return await original_sleep(workflow_instance, seconds, **kwargs)
+
     class Handle:
         def done(self):
             return True
@@ -22558,13 +22948,28 @@ async def _drive_browser_write_pause_archive_boundary(
             async def result():
                 if len(starts) == 1:
                     return {
-                        "status": "awaiting_write_approval",
+                        "status": (
+                            "awaiting_auth_assistance" if auth else
+                            "awaiting_payment_card_approval" if payment else
+                            "awaiting_write_approval"
+                        ),
+                        "request_id": "owned-approval",
                         "task_id": task_id,
                         "session_id": "owned-session",
                         "question": "Approve fixture write?",
                         "approval_type": "write",
                         "current_url": "https://fixture.invalid/",
                         "write_lock_approvals": {},
+                        "payment_request": {
+                            "merchant": "Fixture",
+                            "line_items": [{
+                                "name": "Fixture", "product_url": "https://fixture.invalid/item",
+                                "rating": "4.7 stars", "review_count": "84 reviews",
+                                "quantity": 1, "line_total_cents": 100,
+                            }],
+                            "subtotal_cents": 100,
+                            "total_cents": 100,
+                        },
                     }
                 return {
                     "status": "completed",
@@ -22608,6 +23013,7 @@ async def _drive_browser_write_pause_archive_boundary(
         patch.object(browser.workflow, "start_activity", side_effect=start_activity),
         patch.object(browser.workflow, "execute_activity", side_effect=execute_activity),
         patch.object(browser.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(browser, "sleep_or_generation_handoff", side_effect=funding_wait),
         patch.object(browser, "get_manager", return_value=browser.SpawnBrowserAgentManagerV3()),
     ):
         assert await save_browser_action_message(
@@ -22661,24 +23067,86 @@ async def _drive_browser_write_pause_archive_boundary(
                     row for row in rows
                     if row.get("metadata", {}).get("action_type") == "task_complete"
                 ]
+                if parked_handoff:
+                    assert handoff and not terminals
+                    assert len(wf._pending_tool_resumes) == 1
+                    if pause:
+                        await AgentWorkflow.pause(wf)
+                        if resume_between_generations:
+                            await AgentWorkflow.resume(wf)
+                            assert not wf.is_paused and wf._pause_signal_sequence == 1
+                    carrier = AgentWorkflow()
+                    carrier.max_iterations, carrier.context_gates = None, {}
+                    carrier.is_paused = wf.is_paused
+                    carrier._pause_signal_sequence = getattr(wf, "_pause_signal_sequence", 0)
+                    carrier._pending_tool_resumes = wf._pending_tool_resumes
+                    state = carrier._continuation_resume_state(copy.deepcopy(wf.context))
+                    restored = AgentWorkflow()
+                    restored._restore_deployment_state(state)
+                    assert restored._pause_signal_sequence == (1 if pause else 0)
+                    resume = restored._pending_tool_resumes[0]["resume"]
+                    if auth:
+                        assert resume["auth_pause_signal_sequence"] == 0
+                    elif legacy_approval_hint:
+                        resume.pop("approval_pause_signal_sequence", None)
+                    restored.user_id, restored.agent_id = wf.user_id, root
+                    restored._tool_resume_hints = {tool: resume}
+                    restored._update_tree_state = AsyncMock()
+                    restored._get_pending_child_workflow_ids = lambda: []
+                    restored._track_usage = AsyncMock()
+                    restored._check_generation_handoff = AsyncMock(return_value=None)
+                    wf = restored
+                    if (not pause or resume_between_generations) and not pending_parked_approval:
+                        wf._signal_responses["owned-approval"] = "authenticated" if auth else "approved"
+                    owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
+                    await asyncio.wait_for(asyncio.shield(owned), 10)
+                    assert len(starts) == (1 if pause else 2)
+                    if payment:
+                        assert len(mints) == (0 if pause else 1), "abandoned parked payment minted a card"
+                    if not auth and pause:
+                        assert not any(
+                            row.get("metadata", {}).get("action_type") == "write_lock_granted"
+                            for row in rows
+                        ), "abandoned parked write granted permission"
+                        if resume_between_generations and not pending_parked_approval:
+                            assert any(
+                                row.get("metadata", {}).get("title") == "✓ User approval received"
+                                for row in rows
+                            ), "abandonment discarded the original approval decision"
+                    if pending_parked_approval:
+                        assert any(
+                            row.get("metadata", {}).get("title") == "Approval interrupted"
+                            for row in rows
+                        ), "abandoned parked approval left its original chip open"
+                    terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
+                    assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+                    if pause:
+                        assert terminals[0]["metadata"]["excludeFromModel"] is True
+                        assert all(
+                            terminals[0]["message"] not in str(message)
+                            for message in convert_context_to_messages(rows, include_assistant=True)
+                        )
+                    await archive()
+                    return
                 if cancel:
                     assert not terminals, "raw cancellation fabricated a browser terminal"
-                    closed = next(
-                        row["metadata"]
-                        for row in rows
-                        if row.get("metadata", {}).get("title") == "Approval interrupted"
-                    )
-                    opened = next(
-                        row["metadata"]
-                        for row in rows
-                        if row.get("metadata", {}).get("toolName") == "request_user_approval"
-                    )
-                    assert closed == {
-                        **opened,
-                        "title": "Approval interrupted",
-                        "toolStatus": "FINISHED",
-                        "excludeFromModel": True,
-                    }
+                    if not auth:
+                        closed = next(
+                            row["metadata"]
+                            for row in rows
+                            if row.get("metadata", {}).get("title") == "Approval interrupted"
+                        )
+                        opened = next(
+                            row["metadata"]
+                            for row in rows
+                            if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                        )
+                        assert closed == {
+                            **opened,
+                            "title": "Approval interrupted",
+                            "toolStatus": "FINISHED",
+                            "excludeFromModel": True,
+                        }
                 else:
                     from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
 
@@ -22696,7 +23164,14 @@ async def _drive_browser_write_pause_archive_boundary(
                 assert "owned-approval" not in wf._signal_responses, "specific decision was not consumed"
             if pause:
                 await AgentWorkflow.pause(wf)
-                wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
+                if auth:
+                    assert wf._update_tree_state.await_count == 2
+                    assert all(
+                        call.kwargs == {"status": "PAUSED"}
+                        for call in wf._update_tree_state.await_args_list
+                    )
+                else:
+                    wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
                 if concurrent_approval:
                     wf._signal_responses["owned-approval"] = "approved"
                 changed.set()
@@ -22705,13 +23180,35 @@ async def _drive_browser_write_pause_archive_boundary(
             else:
                 wf._signal_responses["owned-approval"] = "approved"
                 changed.set()
+                if pause_during_mint:
+                    await asyncio.wait_for(mint_pending.wait(), 10)
+                    assert not owned.done() and len(starts) == 1
+                    await AgentWorkflow.pause(wf)
+                    await AgentWorkflow.resume(wf)
+                    assert not wf.is_paused and wf._pause_signal_sequence == 1
+                    mint_release.set()
                 await asyncio.wait_for(asyncio.shield(owned), 10)
             await owned
             assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
+            abandoned = pause or pause_on_grant or pause_during_mint or pause_on_approval or pause_between_mint_retries
+            if pause_between_mint_retries:
+                assert len(mints) == 1, "abandoned funding retry issued another mint activity"
+            if pause_on_approval:
+                assert not mints, "payment minted after approval persistence observed PAUSE and RESUME"
+                assert any(
+                    row.get("metadata", {}).get("title") == "✓ User approval received"
+                    for row in rows
+                ), "pause rewrote the original approval decision"
+            assert len(starts) == (1 if abandoned else 2), "explicit PAUSE resumed an abandoned browser"
             terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
             assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
-            assert len(starts) == (1 if pause or pause_on_grant else 2)
-            if pause and not concurrent_approval and not reply_phase:
+            if abandoned:
+                assert terminals[0]["metadata"]["excludeFromModel"] is True
+                assert all(
+                    terminals[0]["message"] not in str(message)
+                    for message in convert_context_to_messages(rows, include_assistant=True)
+                )
+            if pause and not concurrent_approval and not reply_phase and not auth:
                 assert any(row.get("metadata", {}).get("title") == "Approval interrupted" for row in rows), (
                     "PAUSE after durable approval opening left its exact chip IN_PROGRESS"
                 )
@@ -22787,6 +23284,7 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
     await _drive_browser_write_pause_archive_boundary(pause=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, concurrent_approval=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True, resume_on_grant=True)
     await _drive_browser_write_pause_archive_boundary(pause=True, pause_on_open=True)
     for phase in ("approved", "rejection-poll", "rejected"):
         await _drive_browser_write_pause_archive_boundary(pause=True, reply_phase=phase)
@@ -22796,11 +23294,31 @@ async def test_manager_write_pause_seals_persisted_browser_for_archive():
         )
     await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
     await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
+    for legacy in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=False, handoff=True, parked_handoff=True, legacy_approval_hint=legacy
+        )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, handoff=True, parked_handoff=True, resume_between_generations=True
+    )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, handoff=True, parked_handoff=True,
+        resume_between_generations=True, pending_parked_approval=True
+    )
+    import inspect
     from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused
 
     with patch("tools.request_user_approval.request_user_approval_direct", new_callable=AsyncMock) as request:
-        assert await _request_browser_write_approval_until_paused(SimpleNamespace(is_paused=True)) is None
+        assert await _request_browser_write_approval_until_paused(
+            SimpleNamespace(is_paused=True), pause_sequence=0
+        ) is None
+        assert await _request_browser_write_approval_until_paused(
+            SimpleNamespace(is_paused=False, _pause_signal_sequence=1), pause_sequence=0
+        ) is None
         request.assert_not_awaited()
+    assert inspect.signature(_request_browser_write_approval_until_paused).parameters[
+        "pause_sequence"
+    ].default is inspect.Parameter.empty, "approval caller can silently omit its original pause sequence"
 
 
 async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
@@ -22831,6 +23349,51 @@ async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
         )
         assert terminals[0].metadata["code"] == expected_code
         assert events[-1] is terminals[0]
+
+
+async def test_manager_payment_pause_seals_persisted_browser_for_archive():
+    """A real PAUSE must finish the pending payment browser before archival."""
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_during_mint=True)
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, payment=True, handoff=True, parked_handoff=True, resume_between_generations=True
+    )
+    await _drive_browser_write_pause_archive_boundary(
+        pause=True, payment=True, handoff=True, parked_handoff=True,
+        resume_between_generations=True, pending_parked_approval=True
+    )
+
+
+async def test_manager_payment_pause_preserves_approval_and_interruptions():
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, pause_on_open=True)
+    for phase in ("approved", "rejection-poll", "rejected", "rejected-persisted"):
+        await _drive_browser_write_pause_archive_boundary(pause=True, payment=True, reply_phase=phase)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, payment=True, handoff=True)
+    for legacy in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=False, payment=True, handoff=True, parked_handoff=True, legacy_approval_hint=legacy
+        )
+
+
+async def test_manager_explicit_pause_seals_auth_browser_for_archive():
+    """An explicit PAUSE after auth's own pause must end that exact resume."""
+    await _drive_browser_write_pause_archive_boundary(pause=True, auth=True)
+
+
+async def test_manager_auth_pause_preserves_assistance_and_handoff():
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, auth=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, auth=True, handoff=True)
+    for pause in (False, True):
+        await _drive_browser_write_pause_archive_boundary(
+            pause=pause, auth=True, handoff=True, parked_handoff=True
+        )
 
 
 # ========================================
@@ -24287,6 +24850,18 @@ async def run_all_tests():
     )
 
     await r.record_async("init_browser_session_success", test_init_browser_session_success)
+    await r.record_async(
+        "browser_preparation_cancellation_retains_exact_allocated_session",
+        test_browser_preparation_cancellation_retains_exact_allocated_session,
+    )
+    await r.record_async(
+        "browser_preparation_cancellation_unknown_or_foreign_owner",
+        test_browser_preparation_cancellation_does_not_certify_unknown_or_foreign_owner,
+    )
+    await r.record_async(
+        "owned_initial_session_request_joins_duplicate_cancellation_without_replay",
+        test_owned_initial_session_request_joins_duplicate_cancellation_without_replay,
+    )
     await r.record_async("init_browser_session_rate_limited", test_init_browser_session_rate_limited)
     await r.record_async(
         "init_browser_session_transient_retryable",
@@ -24505,6 +25080,10 @@ async def run_all_tests():
     r.record("safe_time_swallows_errors", test_safe_time_swallows_errors)
     r.record("build_context_summary_success", test_build_context_summary_success_with_urls)
     r.record("build_context_summary_failure", test_build_context_summary_failure_with_error)
+    r.record(
+        "build_context_summary_flattens_multiline_goal",
+        test_build_context_summary_flattens_multiline_goal_ahead_of_status,
+    )
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
     r.record(
@@ -25724,6 +26303,14 @@ async def run_all_tests():
         test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
     )
     await r.record_async(
+        "activity_verified_completion_message_leads_with_goal",
+        test_spawn_browser_activity_verified_completion_message_leads_with_goal,
+    )
+    await r.record_async(
+        "activity_failure_completion_message_leads_with_goal",
+        test_spawn_browser_activity_failure_completion_message_leads_with_goal,
+    )
+    await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
@@ -25854,6 +26441,22 @@ async def run_all_tests():
     await r.record_async(
         "manager_write_pause_seals_persisted_browser_for_archive",
         test_manager_write_pause_seals_persisted_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_payment_pause_seals_persisted_browser_for_archive",
+        test_manager_payment_pause_seals_persisted_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_payment_pause_preserves_approval_and_interruptions",
+        test_manager_payment_pause_preserves_approval_and_interruptions,
+    )
+    await r.record_async(
+        "manager_explicit_pause_seals_auth_browser_for_archive",
+        test_manager_explicit_pause_seals_auth_browser_for_archive,
+    )
+    await r.record_async(
+        "manager_auth_pause_preserves_assistance_and_handoff",
+        test_manager_auth_pause_preserves_assistance_and_handoff,
     )
     await r.record_async(
         "manager_abandoned_payment_resume_terminal",

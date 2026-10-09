@@ -314,6 +314,35 @@ model ToolSideEffect {
   @@index([externalId])
 }
 
+/// One outbound phone call that the backend owns on Twilio. Each Vapi
+/// assistant conversation is a segment; wait_for_human parks the Twilio call
+/// on a backend media stream (no Vapi minutes) until a live person speaks.
+model PhoneCallSession {
+  id               String    @id @default(uuid())
+  operationKey     String?
+  agentId          String?
+  userId           String?
+  rootVapiCallId   String?   @unique
+  activeVapiCallId String?
+  twilioCallSid    String?   @unique
+  phoneNumberId    String
+  fromNumber       String
+  toNumber         String
+  /// dialing | connected | on_hold | reconnecting | ended
+  state            String    @default("dialing")
+  assistantConfig  Json
+  segments         Json      @default("[]")
+  holds            Json      @default("[]")
+  endedReason      String?
+  endedAt          DateTime?
+  /// Bumped on every write; read-modify-write callers compare-and-set on it.
+  version          Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([agentId])
+}
+
 model User {
   id                          String                      @id @default(uuid())
   userId                      String                      @unique

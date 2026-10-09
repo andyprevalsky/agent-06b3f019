@@ -4,10 +4,15 @@
  * Thin wrapper that normalizes LLM-escape-sequence input and dispatches to one
  * of two render paths:
  *
- *   breaks=true && !shouldAnimate  -> ReactMarkdown + remarkBreaks (static; the
- *                                     FadeInMarkdown DOM-extraction pipeline
- *                                     does not preserve <br> from remark-breaks)
- *   otherwise                      -> FadeInMarkdown (word-by-word fade-in)
+ *   !shouldAnimate  -> ReactMarkdown (+ remarkBreaks when breaks=true).
+ *                      Static FYI / tool / plan bubbles keep every GFM node,
+ *                      including photos. FadeInMarkdown's word extractor is
+ *                      text-only and must not own the static path.
+ *   shouldAnimate   -> FadeInMarkdown (word-by-word fade-in, including images)
+ *
+ * STATE MACHINE:
+ *   [STATIC]     -- shouldAnimate=false --> ReactMarkdown
+ *   [ANIMATING]  -- shouldAnimate=true  --> FadeInMarkdown
  *
  * See `./markdown-text/FadeInMarkdown.tsx` for the animation state machine.
  */
@@ -18,7 +23,12 @@ import remarkBreaks from 'remark-breaks';
 
 import { cn } from '@/lib/utils';
 
-import { FadeInMarkdown, normalizeMarkdownText } from './markdown-text';
+import {
+  FadeInMarkdown,
+  MarkdownImage,
+  MarkdownLink,
+  normalizeMarkdownText,
+} from './markdown-text';
 import { MarkdownStyles } from './markdown-text/MarkdownStyles';
 
 interface MarkdownTextProps {
@@ -38,11 +48,16 @@ export const MarkdownText = memo(function MarkdownText({
 }: MarkdownTextProps) {
   const normalizedText = normalizeMarkdownText(text);
 
-  if (breaks && !shouldAnimate) {
+  if (!shouldAnimate) {
     return (
       <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
         <MarkdownStyles />
-        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{normalizedText}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
+          components={{ a: MarkdownLink, img: MarkdownImage }}
+        >
+          {normalizedText}
+        </ReactMarkdown>
       </div>
     );
   }

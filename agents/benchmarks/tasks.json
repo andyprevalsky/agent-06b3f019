@@ -4624,6 +4624,119 @@
     ]
   },
   {
+    "name": "phone-call-hold-queue",
+    "title": "Wait Out A 2.5 Hour Air Canada Hold Then Claim A Flight Credit",
+    "prompt": "Call Air Canada at {callee_phone_number} exactly once and claim a flight credit for my cancelled, unused ticket. Flight AC107 from Toronto Pearson (YYZ) to Vancouver (YVR) on October 2, 2026 was cancelled. Passenger name Jordan Miles. Booking reference L9K4QM. I want the unused ticket value stored as a travel credit I can use on a future flight. Air Canada's phone queue can take hours; stay on that single call until a representative answers, however long it takes. Do not hang up, do not call back, and do not use wait_for to skip the hold. When a representative answers, give the booking details, ask them to issue the unused-ticket flight credit, and collect the confirmation code, credit amount, and expiry. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report those exact details back to me.",
+    "timeout_seconds": 12600,
+    "is_chat_mode": false,
+    "expected_tools": ["call_phone_number"],
+    "forbidden_tools": ["wait_for"],
+    "tags": ["phone"],
+    "price_limit_cents": 8000,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "expected_tool_counts": {
+      "call_phone_number": 1
+    },
+    "pinned_facts": {
+      "confirmation_code": "ACFC-2458",
+      "credit_amount_usd": "428.60",
+      "credit_expiry": "October 2, 2027",
+      "booking_reference": "L9K4QM",
+      "flight_number": "AC107"
+    },
+    "phone_persona": {
+      "first_message": "Hi, thanks for holding, you've reached Air Canada, my name is Dana. How can I help you today?",
+      "end_call_message": "Thank you for calling Air Canada. Have a great day.",
+      "hold_line": {
+        "hold_seconds": 9000,
+        "audio": "air-canada-2026-10-06"
+      },
+      "silence_timeout_seconds": 60,
+      "max_duration_seconds": 900,
+      "system_prompt": "You are Dana, a customer care agent at Air Canada. You just picked up a caller who waited in the phone queue. This is a sandbox call: the booking below is the only booking you can see.\n\nBooking on file: booking reference L9K4QM, passenger Jordan Miles, flight AC107 from Toronto Pearson (YYZ) to Vancouver (YVR) on October 2, 2026. Air Canada cancelled that flight and the ticket was never used.\n\nSpeak like a real phone agent: short, friendly sentences and one question at a time. If the caller does not answer right after your greeting, ask whether they can hear you.\n\nBefore you change anything, ask for the booking reference and the passenger's name unless the caller already gave them. If they do not match the booking on file, say you cannot find that booking and ask the caller to check it.\n\nWhen the caller asks for a flight credit or travel credit for the unused ticket, issue it: confirmation code ACFC-2458, read as letter A, letter C, letter F, letter C, dash, digit 2, digit 4, digit 5, digit 8; credit amount 428 dollars and 60 cents; expiry October 2, 2027. Repeat any detail the caller asks you to repeat. Do not issue a credit unless the caller asks for one.\n\nAfter you have given all three details and the caller has no other questions, say goodbye once and use the endCall tool.",
+      "structured_data_schema": {
+        "type": "object",
+        "properties": {
+          "caller_requested_flight_credit": {
+            "type": "boolean",
+            "description": "Did the caller ask the representative to claim or issue a flight credit / unused ticket credit?"
+          },
+          "confirmation_code_given": {
+            "type": "boolean",
+            "description": "Did the representative give the caller confirmation code ACFC-2458?"
+          },
+          "confirmation_code": {
+            "type": "string",
+            "description": "Confirmation code the representative announced, empty if none."
+          },
+          "credit_amount_usd": {
+            "type": "string",
+            "description": "Flight credit amount in USD the representative announced, empty if none."
+          },
+          "credit_expiry": {
+            "type": "string",
+            "description": "Flight credit expiry the representative announced, empty if none."
+          }
+        }
+      }
+    },
+    "expected_call_findings": ["ACFC-2458", "428.60", "2027"],
+    "expected_final_findings": ["ACFC-2458", "428.60", "October 2, 2027"],
+    "callee_checks": {
+      "caller_stayed_on_hold": true,
+      "caller_requested_flight_credit": true,
+      "confirmation_code_given": true,
+      "confirmation_code": "ACFC-2458",
+      "credit_amount_usd": "428.60",
+      "credit_expiry": "October 2, 2027"
+    },
+    "evaluators": [
+      {
+        "id": "hold-parked-by-wait-for-human",
+        "method": "static_check",
+        "criteria": [
+          "The voice agent parked the call with wait_for_human for at least 90% of the 2.5 hour queue instead of keeping a live voice assistant on the hold music"
+        ],
+        "checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "description": "Real outbound phone call into a controlled Air Canada hold queue. The line plays the recorded Air Canada greeting and queue announcement, then the recorded hold music on loop for 9000 seconds (2.5 hours) before transferring the live call to a representative persona who issues the flight credit.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["vapi", "twilio", "elevenlabs", "r2"],
+      "secrets": [
+        "VAPI_PRIVATE_KEY",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "ELEVENLABS_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "live_targets": ["vapi", "twilio"],
+      "context_notes": "Real wall-clock hold on a leased Twilio hold line (friendly name rose-benchmark-hold-line*). phone_persona.hold_line plays the air-canada-2026-10-06 recording from private R2 (benchmarks/fixtures/phone_hold manifest) and transfers the connected caller to the persona Vapi number after 9000 seconds (2.5 hours). The agent's voice call must survive the queue on one connected call, parked by the backend's wait_for_human hold line: the finished call card must report at least 8100 seconds parked (90% of the hold). caller_stayed_on_hold comes from the hold line's own record (transfer after the full hold with no earlier hang-up), not from the persona. Twilio must reach the backend's hold webhooks and media stream, so local stacks for hold-line tasks open the public tunnel (PUBLIC_BASE_URL); PHONE_HOLD_PUBLIC_URL overrides it. Catalog timeout is 12600s (3.5 hours). Cloud fleet requires a BENCHMARK_CALLEE_PHONE_NUMBER_IDS assignment for phone-call-hold-queue. Pass when the single call is transferred after the full hold and the final answer reports ACFC-2458, $428.60, and October 2, 2027."
+    },
+    "group": "daily",
+    "human_time": "2.5h",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls the Air Canada hold line exactly once; stays connected through the real 2.5-hour recorded queue, parked by wait_for_human for at least 90% of it; final answer reports ACFC-2458, $428.60, and October 2, 2027.",
+    "label_notes": "Phone hold-queue harness. The wait is a real 9000s live call on recorded Air Canada queue audio, not a compressed simulation. The representative picks up only after the full hold.",
+    "bench": "pipeline-e2e",
+    "source": [
+      "phone-benchmark:hold-queue",
+      "user-label:daily-phone-hold-queue",
+      "recording:air-canada-2026-10-06"
+    ]
+  },
+  {
     "name": "browser-rotate-ip-escalation",
     "title": "Browser rotate_ip recovery ladder (Kernel residential \u2192 Kernel mobile \u2192 Steel)",
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",

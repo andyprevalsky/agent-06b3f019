@@ -72,6 +72,17 @@ function startsCloudAgentMode(data: InsertMessagePayload, agentId: string): bool
   );
 }
 
+function endsCloudAgentMode(data: InsertMessagePayload, agentId: string): boolean {
+  const metadata = data.metadata;
+  return (
+    data.agentId === agentId &&
+    metadata?.toolName === 'completion_summary' &&
+    metadata.toolStatus === 'FINISHED' &&
+    metadata.isFinalSummary === true &&
+    (metadata.subAgentId === undefined || metadata.subAgentId === null)
+  );
+}
+
 function createRealtimeHandlers(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
@@ -90,6 +101,7 @@ function createRealtimeHandlers(
     onInsert: (data: InsertMessagePayload) => {
       if (!active()) return;
       if (startsCloudAgentMode(data, scope.agentId)) setIsChatMode(false);
+      if (endsCloudAgentMode(data, scope.agentId)) setIsChatMode(true);
       handleInsertMessage(data, scope.agentId, {
         ...deps,
         setStreamingBubbles,

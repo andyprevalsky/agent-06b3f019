@@ -1,16 +1,21 @@
 """Strict copies must rendezvous before the existing fleet data-plane release."""
 
+import fcntl
 import json
 import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+
 ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", str(ROOT / "scripts/run-bench-fleet"))).resolve().parents[1]
 
 
-def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0):
+def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job=0, fail_jobs=()):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     binary = tmp_path / "bin"
@@ -26,6 +31,8 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         "'cohort': os.environ.get('RUN_BENCH_CAMPAIGN_COHORT'), 'at': time.monotonic_ns()}\n"
         "fd = os.open(os.environ['FIXTURE_EVENTS'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
         "os.write(fd, (json.dumps(value) + '\\n').encode()); os.close(fd)\n"
+        "if value['event'] == 'execute' and value['job'] == 'r001-j0001':\n"
+        " open(os.path.join(os.environ['FIXTURE_ROOT'], 'first-execute'), 'w').close()\n"
     )
     (binary / "curl").write_text(
         f"#!{sys.executable}\n"
@@ -41,8 +48,12 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         "trap 'event teardown' EXIT\n"
         "trap 'event signalled; exit 143' TERM\n"
         "index=${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}\nindex=$((10#$index))\n"
-        "if [ $((index % 2)) -eq 0 ]; then sleep 1; fi\n"
-        'if [ "$index" -eq "$FIXTURE_FAIL_JOB" ]; then sleep 1; exit 7; fi\n'
+        "if [ $((index % 2)) -eq 0 ]; then\n"
+        ' if [ "$FIXTURE_STRICT" = 0 ] && [ "$index" = 2 ]; then\n'
+        '  while [ ! -e "$FIXTURE_ROOT/first-execute" ]; do sleep 0.05; done\n'
+        " else sleep 1; fi\n"
+        "fi\n"
+        'case " $FIXTURE_FAIL_JOBS " in *" $index "*) sleep 1; exit 7 ;; esac\n'
         'out=$FIXTURE_ROOT/$RUN_BENCH_CAMPAIGN_JOB_ID\nmkdir -p "$out"\n'
         "RUN_ID=$RUN_BENCH_CAMPAIGN_JOB_ID\n"
         'printf \'synchronized start barrier ready: %s\\n\' "$RUN_ID" > "$out/fleet-child.log"\n'
@@ -66,7 +77,8 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
         FIXTURE_ROOT=str(tmp_path),
         FIXTURE_EVENTS=str(events),
-        FIXTURE_FAIL_JOB=str(fail_job),
+        FIXTURE_FAIL_JOBS=" ".join(map(str, fail_jobs or (fail_job,))),
+        FIXTURE_STRICT=str(int(strict)),
     )
     command = [
         sys.executable,
@@ -82,7 +94,7 @@ def run_campaign(tmp_path: Path, *, strict=True, runs=3, concurrency=3, fail_job
     ]
     if strict:
         command.append("--forward-arg=--strict-barrier")
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=40)
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     summary = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
     records = [json.loads(line) for line in events.read_text().splitlines()]
     return result, summary, records
@@ -98,13 +110,69 @@ def test_campaign_start_barrier_waits_for_every_ready_copy(tmp_path):
     assert summary["peak_concurrency"] == 3
 
 
-def test_campaign_start_barrier_child_failure_aborts_without_partial_release_or_signals(tmp_path):
+def test_campaign_start_barrier_child_failure_releases_only_ready_survivors(tmp_path):
     result, summary, events = run_campaign(tmp_path, fail_job=3)
     assert result.returncode != 0
-    assert not [event for event in events if event["event"] in {"execute", "signalled"}]
+    executed = [event for event in events if event["event"] == "execute"]
+    ready = [event for event in events if event["event"] == "ready"]
+    assert len(executed) == len(ready) == 2, "failed-member-aborted-healthy-survivors"
+    assert min(event["at"] for event in executed) > max(event["at"] for event in ready)
+    assert not [event for event in events if event["event"] == "signalled"]
     assert len([event for event in events if event["event"] == "teardown"]) == 3
     assert summary["status"] == "failed"
     assert all(job["finished_at"] for job in summary["jobs"])
+    assert [job["status"] for job in summary["jobs"]] == ["passed", "passed", "failed"]
+    cohort = summary["startup_cohorts"][0]
+    assert cohort["expected_count"] == 3 and cohort["released_count"] == 2
+    assert cohort["failed_count"] == 1 and cohort["ready_count"] == 2
+    manifest = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/manifest.json")).read_text())
+    assert len(manifest["jobs"]) == 3, "failed-member-removed-from-custody-manifest"
+    release = json.loads(next((tmp_path / ".context/benchmarks/campaigns").glob("*/startup-cohorts/*/release.json")).read_text())
+    assert len(release["jobs"]) == 2
+    assert summary["jobs"][2]["job_id"] not in release["jobs"]
+
+
+def test_campaign_start_barrier_all_failed_cohort_settles_and_later_cohort_progresses(tmp_path):
+    result, summary, events = run_campaign(tmp_path, runs=4, concurrency=2, fail_jobs=(1, 2))
+    assert result.returncode != 0
+    assert summary["status"] == "failed"
+    assert [job["status"] for job in summary["jobs"]] == ["failed", "failed", "passed", "passed"]
+    cohorts = summary["startup_cohorts"]
+    assert cohorts[0]["expected_count"] == cohorts[0]["failed_count"] == 2
+    assert cohorts[0]["ready_count"] == cohorts[0]["released_count"] == 0
+    assert cohorts[0]["status"] == "failed" and cohorts[0]["released_at"] is None
+    assert cohorts[1]["released_count"] == cohorts[1]["expected_count"] == 2
+    assert len([event for event in events if event["event"] == "execute"]) == 2
+    assert len([event for event in events if event["event"] == "teardown"]) == 4
+    assert not [event for event in events if event["event"] == "signalled"]
+
+
+def test_campaign_start_barrier_rejects_excluded_job_and_wrong_pid_release(tmp_path):
+    """A live parent cannot release a member absent from the exact release set."""
+    parent = tmp_path / "startup-cohorts"
+    parent.mkdir()
+    job_id = "r001-j0001"
+    controller_pid = os.getpid()
+    with (parent / "parent.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for name, release_jobs in [("excluded", {}), ("wrong-pid", {job_id: controller_pid + 1})]:
+            directory = parent / name
+            (directory / "ready").mkdir(parents=True)
+            (directory / "manifest.json").write_text(
+                json.dumps({"cohort_id": name, "jobs": {job_id: controller_pid}})
+            )
+            (directory / "release.json").write_text(
+                json.dumps({"cohort_id": name, "jobs": release_jobs})
+            )
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/cloudbench-campaign-barrier.py"),
+                 "--deadline", str(time.time() + 20), "--controller-pid", str(controller_pid)],
+                env=dict(os.environ, RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(directory),
+                         RUN_BENCH_CAMPAIGN_JOB_ID=job_id, RUN_BENCH_CAMPAIGN_COHORT=name),
+                capture_output=True, text=True, timeout=40,
+            )
+            assert result.returncode != 0, f"{name}-release-accepted"
+            assert "campaign release does not own this controller" in result.stderr
 
 
 def test_campaign_start_barrier_preserves_non_strict_sliding_launch(tmp_path):

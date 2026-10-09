@@ -75,8 +75,11 @@ def main() -> int:
                 return 1
             release = directory / "release.json"
             if release.is_file():
-                if json.loads(release.read_text())["cohort_id"] != cohort_id:
+                receipt = json.loads(release.read_text())
+                if receipt["cohort_id"] != cohort_id:
                     raise ValueError("campaign release belongs to a different cohort")
+                if receipt["jobs"].get(job_id) != args.controller_pid:
+                    raise ValueError("campaign release does not own this controller")
                 return 0
             time.sleep(0.1)
     print("campaign startup barrier exhausted the existing startup budget", flush=True)

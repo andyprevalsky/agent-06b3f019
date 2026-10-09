@@ -70,8 +70,25 @@ exact owned-volume `pending_destroy` or `destroyed` terminal receipt qualifies
 release even when the provider retains that object; request acceptance alone
 does not.
 
+For the current user-requested five consecutive LIVE DAILY runs of fifty,
+follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
+uses fifty distinct randomly selected eligible names together in one ordinary
+fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
+hard image-build-start through final publication/native release 3,600 seconds.
+Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
+exact-image activation every trial. LIVE autoscale remains 15; the cached mass
+profile's maximum 2 and allocation deadline do not apply. Keep the original
+hundred-task result complete, exact thirty-second monitoring, grouped early
+verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
+with accepted LIVE latency. The existing stability wrapper's width-32 cap does
+not restrict this ordinary fleet; do not substitute smaller slices.
+
 Ordinary source-only runs reuse verified dependency images and completed
-snapshots. For an explicitly requested cold build/push measurement, use
+snapshots. Before an image-build-to-fleet measurement, complete CLAUDE.md's
+**Fresh clone setup (Andy’s Mac)** dependency reuse and actual backend seed-cache
+import check before recording the image clock. An image-only publication needs
+no backend dependency check. For an explicitly requested cold build/push
+measurement, use
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`
 from the repository root. The selected checkout supplies both Dockerfile and
 Fly config; the private receipt records pre-launch source/dirty status and
@@ -83,6 +100,12 @@ dependencies and home assets except npm download caches/logs.
 records those requested options. Independent `807edee9f` no-cache build/push completed
 in 493.6 seconds in one attempt, excluding activation/fleet startup. Activate the
 exact receipt image and verify guest digest/runtime consumption before the cohort.
+The successful receipt's `image_ref` includes the verified registry digest. The
+publisher reads the exact tag and digest through the registry before handing it
+to activation. If an acknowledged manifest is missing, it republishes only
+manifest bytes matching the original build's digest, then verifies that same
+handoff. This continuation uploads no layers and repeats no dependency build;
+unverified output stops the image stage with its private observations retained.
 Image publication automatically caches a checksum-verified pinned Fly client in
 the Git common directory. Native publishing uses child-only classic Docker over
 HTTPS (`DOCKER_BUILDKIT=0`, `--wg=false`); shared Fly/PATH and the benchmark
@@ -94,6 +117,9 @@ The existing recorded mass-demo cache diagnostic uses:
 
 ```bash
 CLOUDBENCH_APP_MACHINE_CEILING=138 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300 \
   scripts/run-bench test-mass-agent-run-0 --demo-cache \
   -k 50 --concurrency 50 --strict-barrier --autoscale-max 2 --timeout 300
@@ -111,10 +137,17 @@ An exact fresh infra canary canceled during database/dependency bootstrap may
 have no service PID ledger, backend log, or driver cleanup ACK. Preserve its
 stopped Machine and volume while capturing the original files through an inert
 boot and restoring its exact original config. This is a pre-service case:
-`run.sh` and an isolated database may already have run. The source-specific
-archival validator supports only the attested task-free infra recipe and checks
-the original owner/slot, complete original logs, missing service files, clean
-source hashes, and current stopped native Machine/attached-volume config:
+`run.sh` and an isolated database may already have run. The archival validator
+binds the original owner/slot, complete logs, missing service files, immutable
+clean checkout and every native injected executable to the captured source
+recipe. The exact source commit must be available in the owning workspace's
+Git objects. This recovery path supports clean committed recipes with no
+worktree patch; uncommitted or unsealed recipes fail closed. Its current stopped
+Machine/attached-volume config must still
+match. Before publication, an independent reviewer records the exact source
+ref, computed recipe hash and reviewed pre-service phases in
+`source-boundary-reviewed.safe.json` alongside the capture. This is causal
+source review, not permission to grant benchmark credit:
 
 ```bash
 python3 scripts/cloudbench-prestack-recovery.py \
@@ -122,7 +155,7 @@ python3 scripts/cloudbench-prestack-recovery.py \
   --capture-dir <absolute-private-original-capture-directory> \
   --machines-json <private-current-native-Machines-json> \
   --volumes-json <private-current-native-volumes-json> --publish
-scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>
+scripts/run-bench --recover-stale-owner <exact-owner-token>
 ```
 
 The capture directory retains `<machine>.originals.private.tar.gz`,
@@ -131,8 +164,20 @@ The distinct `guest-bootstrap.confirmed` receipt reports isolated DB creation,
 zero provider allocation and zero benchmark credit. It creates no standard
 provider manifest or guest shutdown ACK. Exact recovery rechecks the original
 capture and fresh native inventory before its existing fresh-resource reaper;
-unknown source recipes, service launch, incomplete capture and foreign owners
-stay quarantined. Continue monitoring through exact Machine/volume release.
+unreviewed source recipes, service launch, incomplete capture and foreign owners
+stay quarantined. A genuine pre-stack cancellation also requires its original
+cleanup ACK and proven stack-log absence; index-bootstrap cancellation retains
+its own source/absence checks. Older captures without the full immutable input
+binding are not silently accepted. The quick bootstrap and existing prestack
+controls run in the ordinary deploy process. Continue monitoring through exact
+Machine/volume release.
+
+For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
+complete originals with `native_release_verified=false` and zero proof credit.
+Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through
+its exact resource reaper and final native provider audit. Archive readiness is
+not release; follow CLAUDE.md's recovery guidance instead of calling the archive
+verifier directly. Other forensic receipt modes keep their existing contracts.
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
@@ -163,8 +208,22 @@ Foreground campaigns may print no `--controller-status` marker; use only the
 actual printed handle and read each copy's controller exit separately from
 `summary.json` → `jobs[].controller_exit_code`, keyed by `job_id`. The monitor's
 null controller fields alone do not establish liveness or completion.
-Allocation timestamps are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
-`bench-e2e.finished-epoch`. The run's `teardown-ownership.path` identifies its
+Lifecycle clocks are `<fleet-run>/<task-name>/bench-e2e.started-epoch` and
+`bench-e2e.finished-epoch`. The start precedes provisioning and is conservative.
+Use the earliest retained fresh native Machine/volume `created_at` for newly
+allocated exact resources; pooled allocation needs an immutable exact original
+claim receipt. Never use inode ctime, a pooled Machine's historical creation time,
+or first observation to start/reset the 1,200-second budget. Without an original
+allocation clock, qualify the original start as a conservative operator budget;
+on cutoff use `conservative-provisioning-operator-budget` and
+`deadline_breached=false`. A native breach needs genuine original allocation
+evidence showing over 1,200 seconds without full verified release. Never
+substitute the 7,200-second execution default. Release follows complete
+primary/worker/claim verification; `pool-primary.returned-epoch` is only the
+earlier borrowed-primary return. The immutable audit's
+`provider-teardown-verified.epoch` is the producer clock, bound to the same
+owner/run by `source-audit`; legacy clockless audits keep their post-verification
+fallback. The run's `teardown-ownership.path` identifies its
 exact audit/token; while live, capture `pid` and `pid_start` from
 `<git-common>/cloudbench-fleet-ownership/<token>/meta`. Normal cleanup removes
 that active claim, so retain the captured identity and verify native process
@@ -179,10 +238,14 @@ is not a recorded hit, and cached diagnostics earn zero LIVE acceptance credit.
 Keep tasks, prompts and evaluators unchanged and follow the printed monitor command.
 These compact regression controls run in the existing deploy gate; large cached
 campaigns remain explicitly requested experiments.
-Repeated `--strict-barrier` campaigns wait for every copy’s unchanged stack and
-autoscaler readiness before releasing each bounded cohort. A startup failure
-aborts through owned cleanup; ordinary non-strict sliding scheduling remains
-unchanged. Measure execution overlap from task start/terminal intervals rather
+Repeated `--strict-barrier` campaigns wait for every surviving eligible copy’s
+unchanged stack and autoscaler readiness before releasing each bounded cohort.
+An ordinary terminal member failure stays failed while healthy peers and later
+cohorts continue. Preserve the original requested count alongside released and
+failed counts; partial release never earns full-width credit. Shared publisher
+or parent loss, invalid readiness ownership or release membership, and explicit
+cancellation retain owned abort handling. Ordinary non-strict sliding scheduling
+remains unchanged. Measure execution overlap from task start/terminal intervals rather
 than the campaign’s active controller count.
 
 The controller regression command is `bash scripts/tests/cloudbench-multi-workstream.test.sh`.

@@ -969,7 +969,9 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     fi
   fi
   status="$(head -1 "$status_file" 2>/dev/null || true)"
-  rm -f "$owner_file" "$status_file" "$owner_file".tmp.* "$status_file".tmp.* \
+  # Ownership rendezvous is retired after group drain; the printed terminal
+  # receipt remains available to the independent monitor after --wait returns.
+  rm -f "$owner_file" "$owner_file".tmp.* "$status_file".tmp.* \
     2>/dev/null || true
   case "$status" in
     ''|*[!0-9]*)
@@ -1516,7 +1518,7 @@ cloudbench_terminate_tree_and_wait() {
 
   local pid job_pid start deadline live i actual_start state unresolved
   local observation process_stat expected_start process_table target_snapshot
-  local captured_root still_job
+  local captured_root still_job kill_verify_seconds
   local roots=() active_roots=() active_jobs=() targets=() target_starts=()
   local target_states=() remaining_roots=()
   for pid in "$@"; do
@@ -1718,7 +1720,11 @@ for pid, start in ordered:
   # bounded grace period. A different non-empty birth means PID reuse and is
   # deliberately terminal for the original process; an empty/malformed birth
   # while kill -0 still sees the PID is unknown and therefore fails closed.
-  deadline=$((SECONDS + timeout_seconds))
+  # The kernel completes a SIGKILL asynchronously, so a zero TERM grace still
+  # re-observes the captured births instead of judging them at delivery time.
+  kill_verify_seconds="$timeout_seconds"
+  [ "$kill_verify_seconds" -ge 5 ] || kill_verify_seconds=5
+  deadline=$((SECONDS + kill_verify_seconds))
   while :; do
     unresolved=0
     target_states=()

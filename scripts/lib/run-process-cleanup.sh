@@ -3,13 +3,21 @@
 run_wait_owned_agent_shutdown() {  # <pid> <birth> <deadline-seconds>
   local pid="$1" birth="$2" timeout="$3" current state deadline
   [ -n "$pid" ] || return 1
-  current="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
-  if [ -z "$current" ]; then
-    ! kill -0 "$pid" 2>/dev/null
-    return $?
+  if ! declare -F cloudbench_pid_start_time_like >/dev/null; then
+    . "${BASH_SOURCE[0]%/*}/cloudbench-env.sh" || return 1
   fi
-  [ -n "$birth" ] || return 1
-  [ "$current" = "$birth" ] || return 1
+  case "$birth" in
+    proc-start:*) ;;
+    *) birth="$(printf '%s\n' "$birth" | awk '{$1=$1; print}')" ;;
+  esac
+  current="$(cloudbench_pid_start_time_like "$pid" "$birth")"
+  if [ -z "$current" ]; then
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    echo "❌ Owned worker birth observation is unavailable: pid=$pid" >&2
+    return 1
+  fi
+  [ -n "$birth" ] || { echo "❌ Owned worker birth was not captured: pid=$pid" >&2; return 1; }
+  [ "$current" = "$birth" ] || { echo "❌ Owned worker birth does not match: pid=$pid recorded=$birth observed=$current" >&2; return 1; }
   # The supervisor owns worker cancellation. A group/tree signal would also
   # reach its workers, producing the second signal that requests forced exit.
   if [ "${RUN_AGENT_SIGNALLED_IDENTITY:-}" != "$pid:$birth" ]; then
@@ -18,8 +26,14 @@ run_wait_owned_agent_shutdown() {  # <pid> <birth> <deadline-seconds>
   fi
   deadline=$((SECONDS + timeout))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    current="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
-    [ -n "$current" ] || return 0
+    current="$(cloudbench_pid_start_time_like "$pid" "$birth")"
+    if [ -z "$current" ]; then
+      if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+      # A missing observation is not proof of termination. Keep joining the
+      # exact owner within the existing graceful-shutdown budget.
+      sleep 0.1
+      continue
+    fi
     [ "$current" = "$birth" ] || return 0
     state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d ' ')"
     case "$state" in Z*) return 0 ;; esac

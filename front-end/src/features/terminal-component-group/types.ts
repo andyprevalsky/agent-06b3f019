@@ -87,11 +87,13 @@ export interface WaitForCheck {
 // ─── Phone Call Card ──────────────────────────────────────────────────────
 
 export interface PhoneCallMetadata {
-  status: 'initiating' | 'in-progress' | 'ended' | 'error';
+  status: 'initiating' | 'in-progress' | 'on-hold' | 'ended' | 'error';
   to: string;
   callId?: string;
   listenUrl?: string;
   startedAt?: string;
+  /** When the current hold began (status `on-hold`). */
+  holdStartedAt?: string;
   duration?: number;
   endedReason?: string;
   recordingUrl?: string;
