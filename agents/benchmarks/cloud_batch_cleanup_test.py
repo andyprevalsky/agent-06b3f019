@@ -662,7 +662,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "_finalize_owned_cloud_batch": finalizer,
         "_complete_interrupt_cleanup": lambda: events.append("batch-closed"),
         "_live_task_agent_ids": live_ids,
-        "_fetch_wmh_retrieval_audit": lambda: None,
+        "_wmh_evidence": SimpleNamespace(finalize=lambda: None),
         "Path": Path,
         "os": os,
     }

@@ -202,7 +202,7 @@ if [ -n "$WMH_CONTEXT_TOKENS" ] && ! [[ "$WMH_CONTEXT_TOKENS" =~ ^[1-9][0-9]*$ ]
 fi
 WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-upstream}"
 case "$WMH_EXECUTION_POLICY" in
-    upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1) ;;
+    upstream|rose-virtual-public-affordances-v1|rose-virtual-public-affordances-v2|rose-outcome-distribution-v1|rose-outcome-distribution-v2) ;;
     *) echo "Invalid WMH_EXECUTION_POLICY: expected an immutable registered policy" >&2; exit 2 ;;
 esac
 if [ "$WMH_ENGINE" != experiential ] && [ "$WMH_EXECUTION_POLICY" != upstream ]; then

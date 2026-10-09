@@ -133,6 +133,24 @@ class WorldModelLaunch(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertEqual(run(":", {key: value}).returncode, 2)
 
+    def test_execution_policy_allowlist_admits_every_registered_policy(self):
+        # The cloud launch must accept each immutable registered policy and
+        # nothing else; a stale allowlist rejects a reviewed local policy.
+        import runpy
+        sys.path.insert(0, str(root / "agents"))
+        try:
+            policies = runpy.run_path(str(root / "agents/benchmarks/wmh_execution_policy.py"))["_POLICIES"]
+        finally:
+            sys.path.remove(str(root / "agents"))
+        self.assertIn("rose-outcome-distribution-v2", policies)
+        for name in policies:
+            with self.subTest(policy=name):
+                result = run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name})
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("rose-outcome-distribution-v3", "upstream;id"):
+            with self.subTest(policy=name):
+                self.assertEqual(run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name}).returncode, 2)
+
     def test_setup_uses_linux_hash_and_keeps_runtime_validation(self):
         with tempfile.TemporaryDirectory(prefix="wmh-linux-checksum-") as temporary:
             scratch = Path(temporary)
