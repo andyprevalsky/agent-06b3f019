@@ -38,7 +38,6 @@ new_case() {
 
 # 1. Nothing in flight, terminal demand unallocated → settle without new workers.
 AUTOSCALER_FINALIZATION_WAIT_SECONDS=600
-CLOUDBENCH_POST_CHILD_SETTLE_SECONDS=1
 new_case short 1
 SECONDS=0
 rc=0; complete_autoscaler_after_child || rc=$?

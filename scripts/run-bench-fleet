@@ -13492,17 +13492,6 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
         # provisioners alive and reconcile their durable outcomes until the same
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
-        # Capacity that is not in flight can never arrive after the child
-        # finished: the primary tears its stack down when the bench ends, so no
-        # later worker can reach queue readiness. Once no provisioner is
-        # pending, settle after a short grace instead of idling the paid
-        # primary for the full finalization budget (~86 min: observed
-        # 2026-09-08, raise-5m-rose-labs-brex, worker removed at +6 min, then
-        # nothing to wait for). Fail-closed semantics are unchanged.
-        local child_finished_at post_child_settle_seconds
-        child_finished_at="$(stat -c %Y "$out/benchmark-child.finished" 2>/dev/null \
-            || stat -f %m "$out/benchmark-child.finished" 2>/dev/null || date +%s)"
-        post_child_settle_seconds="${CLOUDBENCH_POST_CHILD_SETTLE_SECONDS:-120}"
         while :; do
             ready_reconcile_rc=0
             # Finalization owns the retry deadline. Use one ledger-lock attempt
