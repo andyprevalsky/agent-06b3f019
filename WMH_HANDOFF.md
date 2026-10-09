@@ -78,7 +78,8 @@ agents blackbox domains including WMH; `benchmark-live-results` (505 passed);
 `cloudbench-env`; every structural deploy gate (with `lsof` installed); and
 full agents coverage (109/109 blackbox domains, 82% against the 80% floor)
 after converting one branch cleanup control to `async_case` so it runs inside
-the blackbox event loop. Backend coverage is still pending.
+the blackbox event loop; and full backend coverage (260 unit files, 190/190
+blackbox domains; 89.23% lines, 80.73% branches, 92.47% functions).
 
 Open cloud follow-ups from the independent review (fail closed; not
 exercised by local runs): `run-bench-cloud` validates `WMH_ROSE_POOL` against
