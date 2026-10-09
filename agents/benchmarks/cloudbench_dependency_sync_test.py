@@ -25564,6 +25564,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "fleet_audit_update_registry_clone() {",
             "fleet_registry_remove_if_empty() {",
             "fleet_audit_finalize_provider_teardown() {",
+            "fleet_finalize_released_projection() {",
             "reap_machine() {",
             "reap_volume() {",
             "volume_inventory_contains_id() {",

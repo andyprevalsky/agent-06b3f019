@@ -9578,6 +9578,8 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 
 fleet_finalize_released_projection() {  # [normal legacy clock fallback]
     local release_epoch allow_legacy_clock="${1:-0}"
+    # Pool provisioning admits no benchmark, so it has no batch or E2E clocks.
+    [ -z "${PROVISION_POOL:-}" ] || return 0
     [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" status)" = provider-teardown-verified ] \
         && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" fleet_owner_token)" = "$FLEET_OWNER_TOKEN" ] \
         && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" run_id)" = "$RUN_ID" ] || return 1
