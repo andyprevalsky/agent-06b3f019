@@ -52,8 +52,8 @@ Runtime evidence, read-only:
   `agent-run-index-revision.json` (revision 14184) were both last written at
   22:49:33. `agent-run-index.json` was still revision 14183 (22:49:26,
   `complete: false`, 19,878 agents).
-- HEAD of every catalog bundle: 39.2 GB in total, mean 6.6 MB, max 63 MB. A
-  strict parse of every bundle under 4 KB found 11 July 2026 hub-poller
+- HEAD of every catalog bundle: 39.2 GB in total, mean 7.3 MB, largest 103 MB.
+  A strict parse of every bundle under 4 KB found 11 July 2026 hub-poller
   dispatch-error bundles (`{error, run_id, source, code, ...}`) with no `tasks`
   array, at catalog positions 5198–5293 (the oldest end).
 - Production Postgres role defaults: `idle_in_transaction_session_timeout=1min`,
