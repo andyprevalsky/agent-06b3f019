@@ -2,7 +2,8 @@
  * boxes.dev thread-automation API client (configurable API trigger).
  * POST <runUrl> with `{ prompt, threadTitle }`; omitted `execution` and
  * `target` use the automation's saved agent settings and a new devbox.
- * An accepted request returns 202 with the run id and a status URL.
+ * An accepted request returns 202 with `runPublicId`, `statusUrl` and the
+ * `effective` thread title/agent controls (the prompt is not echoed).
  */
 
 import { createLogger } from './logger';
@@ -74,21 +75,21 @@ export async function runBoxesThreadAutomation(
     throw new Error(`boxes.dev API ${response.status}: ${detail || 'run request failed'}`);
   }
 
-  const run =
-    payload.run !== null && typeof payload.run === 'object'
-      ? (payload.run as Record<string, unknown>)
-      : payload;
-  const runId = stringField(run, 'runId') ?? stringField(run, 'id');
+  const runId = stringField(payload, 'runPublicId');
   if (runId === undefined) {
     log.error('boxes.dev accepted the run without a run id', {
       status: response.status,
-      keys: Object.keys(run).join(','),
+      keys: Object.keys(payload).join(','),
     });
     throw new Error(`boxes.dev API ${response.status}: accepted the run but returned no run id`);
   }
 
-  const statusUrl = stringField(run, 'statusUrl') ?? null;
-  const threadTitle = stringField(run, 'threadTitle') ?? input.threadTitle;
+  const effective =
+    payload.effective !== null && typeof payload.effective === 'object'
+      ? (payload.effective as Record<string, unknown>)
+      : {};
+  const statusUrl = stringField(payload, 'statusUrl') ?? null;
+  const threadTitle = stringField(effective, 'threadTitle') ?? input.threadTitle;
   log.info('boxes.dev automation run started', { run_id: runId, status_url: statusUrl });
   return { runId, statusUrl, threadTitle };
 }

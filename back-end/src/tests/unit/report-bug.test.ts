@@ -162,11 +162,30 @@ async function testBoxesRunPostsConfigurableRequest(): Promise<void> {
     idempotencyKey: 'rose-report-bug-abc',
     fetchImpl: captureFetch(
       202,
+      // Shape observed from the live API on 2026-10-09 (tar_3e6b90197e3c487d8edd116b).
       {
-        runId: 'run_123',
-        statusUrl: `${RUN_URL}s/run_123`,
+        runPublicId: 'tar_123',
+        backend: 'claude',
+        status: 'starting',
+        statusUrl: `${RUN_URL}s/tar_123`,
+        effective: {
+          promptSource: 'api_request',
+          threadTitle: 'stalled (server)',
+          backend: 'claude',
+          model: 'claude-opus-5-5',
+          reasoningEffort: 'xhigh',
+          serviceTier: null,
+        },
+        statusReasonCode: null,
+        statusReasonMessage: null,
+        startupAttemptPhase: 'provisioning_execution',
+        hasChildThread: true,
+        clientThreadId: 'client-thread-1',
         devboxId: null,
-        threadTitle: 'stalled',
+        backendThreadId: null,
+        threadReadyAt: null,
+        idempotentReplay: false,
+        requestId: 'req-1',
       },
       captured
     ),
@@ -184,9 +203,9 @@ async function testBoxesRunPostsConfigurableRequest(): Promise<void> {
   });
   assert.ok(request.signal instanceof AbortSignal, 'boxes.dev fetch must pass AbortSignal');
   assert.deepEqual(result, {
-    runId: 'run_123',
-    statusUrl: `${RUN_URL}s/run_123`,
-    threadTitle: 'stalled',
+    runId: 'tar_123',
+    statusUrl: `${RUN_URL}s/tar_123`,
+    threadTitle: 'stalled (server)',
   });
 }
 
@@ -218,7 +237,8 @@ async function testBoxesRunWithoutRunIdFailsLoudly(): Promise<void> {
         prompt: 'p',
         threadTitle: 't',
         idempotencyKey: 'k',
-        fetchImpl: captureFetch(202, { accepted: true }, []),
+        // A legacy/guessed `runId` key is not the contract; only runPublicId counts.
+        fetchImpl: captureFetch(202, { runId: 'tar_wrong_key', status: 'starting' }, []),
       }),
     /accepted the run but returned no run id/
   );
