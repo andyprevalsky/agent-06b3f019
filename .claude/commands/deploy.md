@@ -2384,6 +2384,13 @@ spec in one job with four Playwright workers and one shared authenticated
 session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
 
 ```bash
+# The boxes.dev gh wrapper replaces GH_TOKEN with an App token that cannot
+# dispatch workflows; call its binary with the repo's workflow-scoped token.
+if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
+  GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
+  export GH_TOKEN
+  gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
+fi
 python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
@@ -2410,11 +2417,10 @@ python3 scripts/record_factory_event.py deploy production-finish semantic
 
 This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
-A token that cannot dispatch workflows makes `gh workflow run` return HTTP 403
-`Resource not accessible by integration`. The boxes.dev GitHub App token on cloud
-devboxes is one such token. In that case, run the workflow's two steps locally
-against production with the same secrets from `back-end/.env`. Report the lane as
-`run locally` under SHIPPED WITH:
+If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
+`Resource not accessible by integration`. In that case, run the workflow's two
+steps locally against production with the same secrets from `back-end/.env`.
+Report the lane as `run locally` under SHIPPED WITH:
 
 ```bash
 set -a && . back-end/.env && set +a
