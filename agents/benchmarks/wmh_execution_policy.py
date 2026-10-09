@@ -159,6 +159,11 @@ _IMMUTABLE_IDENTITIES = {
 }
 
 
+def registered_execution_policies() -> tuple[str, ...]:
+    """Every immutable policy name a caller may select."""
+    return tuple(_POLICIES)
+
+
 def execution_policy(name: str = DEFAULT_EXECUTION_POLICY) -> ExecutionPolicy:
     if name not in _POLICIES:
         raise ValueError("Unknown WMH execution policy; choose an immutable registered version")

@@ -1812,6 +1812,39 @@ def test_provider_defaults_to_global_accumulator():
     assert provider._usage is wmh_rose_provider.GLOBAL_ROSE_USAGE
 
 
+def _registered_policy_names():
+    from benchmarks import wmh_execution_policy as policies
+
+    return list(policies._POLICIES)
+
+
+@pytest.mark.parametrize("policy", _registered_policy_names())
+def test_conformance_cli_binds_every_registered_execution_policy(tmp_path, policy):
+    """A stale CLI allowlist must not block matching conformance for a reviewed policy."""
+    import io
+    from contextlib import redirect_stdout
+
+    from benchmarks.run_world_model_conformance import main
+
+    suite = tmp_path / "suite.json"
+    suite.write_text(
+        json.dumps(
+            {
+                "schema": "rose.wmh_conformance_suite.v1",
+                "status": "passed",
+                "requested_examples": 1,
+                "native_world_model_id": "artifact-a",
+                "native_world_model_manifest_sha256": "a" * 64,
+                "examples": [{"task": "root"}],
+            }
+        )
+    )
+    bound = tmp_path / "bound.json"
+    with redirect_stdout(io.StringIO()):
+        assert main(["--suite", str(suite), "--execution-policy", policy, "--bind-execution-suite", str(bound)]) == 0
+    assert json.loads(bound.read_text())["native_execution_identity"]["policy_id"] == policy
+
+
 @pytest.mark.parametrize(
     "served_policy", ["upstream", "rose-virtual-public-affordances-v1", "rose-virtual-public-affordances-v2"]
 )

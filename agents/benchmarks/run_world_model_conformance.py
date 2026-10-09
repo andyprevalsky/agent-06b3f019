@@ -9,10 +9,8 @@ from pathlib import Path
 
 from benchmarks.wmh_execution_policy import (
     DEFAULT_EXECUTION_POLICY,
-    OUTCOME_DISTRIBUTION_POLICY,
-    PUBLIC_AFFORDANCES_POLICY,
-    PUBLIC_AFFORDANCES_V2_POLICY,
     bind_execution_suite,
+    registered_execution_policies,
 )
 from benchmarks.world_model_harness import evaluate_world_model_conformance_suite
 
@@ -30,12 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-content-accuracy", type=float, default=0.25)
     parser.add_argument(
         "--execution-policy",
-        choices=(
-            DEFAULT_EXECUTION_POLICY,
-            PUBLIC_AFFORDANCES_POLICY,
-            PUBLIC_AFFORDANCES_V2_POLICY,
-            OUTCOME_DISTRIBUTION_POLICY,
-        ),
+        choices=registered_execution_policies(),
         default=DEFAULT_EXECUTION_POLICY,
         help="Expected native runtime policy; never inferred from the server.",
     )
