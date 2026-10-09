@@ -18,6 +18,71 @@ corpus reports, and build metadata are in
 `docs/plans/active/wmh-evidence-20261006/README.md` and the adjacent files.
 This branch is WIP; its WMH changes have not been deployed.
 
+## October 9 Linux devbox continuation
+
+Work moved to a boxes.dev Linux devbox (8 vCPU, 15 GB RAM). The Mac-only model
+artifact, October 6 fixture dump and stopped containers are not reachable
+there, so the user chose a 44 GB swapfile (`/swapfile-wmh`, not persistent)
+and a fresh native rebuild from the complete eligible R2 archive. The
+cache baseline must therefore be re-measured on this infrastructure.
+
+Cache conditions are exact commits on `wmh-resume` (each passed the registered
+WMH blackbox, native 37 / provider 89 or 100):
+
+| Condition | Commit | Provider source SHA-256 |
+| --- | --- | --- |
+| i0 stable-task marker only | `dceea3f14` | `9186ce17…` |
+| i1 + full-task marker | `cd6292196` | `f4f37226…` (reviewed) |
+| i2 completed history batches | `58b889713` | `9cb78043…` (reviewed) |
+| i3 retrieval before history | `44f60d04e` | `424415aa…` (reviewed) |
+
+The original Mac baseline source (`6996f338…`) is not recoverable from Git;
+i0 differs from i1 only by the full-task marker. The unchanged history-prefix
+reproduction failed 2/5 on i1 and passes 5/5 on i2/i3; its 11 guards are now
+in `wmh_rose_provider_test.py`. Every run uses one frozen fixture source
+(canonical PG16 base `fc9dc500…-pg16-victoria-prod-sync-v1-whatsapp-v2` plus a
+read-only prod sync of Tamy's account rows, dump SHA-256 `d84ce812…`), a fresh
+per-run DEMO cache in the run's own `victoria_bench_<run>` database (the
+canonical base has zero cache rows), Temporal Cloud with a per-run queue, and
+`.context/wmh-resume-20261009/{launch.sh,measure.py}`.
+
+### Current main integration (`wmh-resume-merge`)
+
+`origin/main` `470925c93` (214 main-only commits) is merged on
+`wmh-resume-merge`. The cache conditions above stay pre-merge. Conflict
+resolutions keep main's implementations where both sides solved the same
+problem (controller dispatcher, structural gate wrapper, registry reaper
+helper) and port only the branch's WMH-specific contracts (read-only
+`pools.py` controller mount, `--init`, native retirement gate selectors,
+`ssl.SSLError` pre-output classification). Integration defects fixed with
+owning tests:
+
+- `run-bench-cloud` and `run_world_model_conformance` rejected the reviewed
+  `rose-outcome-distribution-v2` policy; both now admit every registered
+  policy, and the conformance CLI derives its choices from the registry.
+- `providers/fast_cache/normalize.py` imported benchmark modules into the
+  Temporal workflow replay surface (pre-existing on the branch; failed the
+  `agent-surface-hash` gate). It now uses a static policy-identity table with
+  a registry parity test; cache keys are byte-identical.
+- Main's pool invariants now record the pinned `rose-wmh-gpt61` runner's
+  intentional direct-auth skip; `openai/gpt-6.1-sol` (OpenRouter modalities:
+  file/image/text) joined `VISION_MODELS`.
+- Branch fields pushed `back-end/src/domains/data/types.ts` over `max-lines`;
+  they moved to `GrepPageCharBounds`. Unread post-child settle variables were
+  removed from `run-bench-fleet`.
+- Pre-service source `1cd26ad7…` is registered after an independent review.
+
+Merge verification so far: backend tsc, 260 unit files and 9 affected
+blackbox domains; frontend tsc, lint and all 150 vitest files; 17 affected
+agents blackbox domains including WMH; `benchmark-live-results` (505 passed);
+`cloudbench-env`; every structural deploy gate (with `lsof` installed).
+
+Open cloud follow-ups from the independent review (fail closed; not
+exercised by local runs): `run-bench-cloud` validates `WMH_ROSE_POOL` against
+the live checkout's `pools.py` rather than the guest's exact ref, and an
+uncapped `--refresh-wmh` can exceed its 1,800-second `ssh_exec` bound while
+holding the app-env lock.
+
 ## October 8 checkpoint: resume here
 
 The user requested publishing all current work and instructions to a draft PR.
