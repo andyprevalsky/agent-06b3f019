@@ -885,7 +885,7 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                     task_end = "," + encode(remainder)[1:] if remainder else "}"
                     content = [
                         {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
-                        {"type": "text", "text": task_end},
+                        {"type": "text", "text": task_end, "cache_control": {"type": "ephemeral"}},
                         {"type": "text", "text": "," + encode(tail)[1:]},
                     ]
                 elif next(iter(native)) != "task":
