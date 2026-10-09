@@ -17,7 +17,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 PYTHON_BIN="$(python3 -c 'import sys; print(sys.executable)')"
 STUB_BIN="$TMP_ROOT/bin"
 mkdir -p "$STUB_BIN" "$TMP_ROOT/home"
-for tool in ruby rsync python3.11 flyctl ngrok cloudflared shlock apt-get add-apt-repository; do
+for tool in ruby rsync lsof python3.11 flyctl ngrok cloudflared shlock apt-get add-apt-repository; do
   printf '#!/bin/sh\nexit 0\n' >"$STUB_BIN/$tool"
 done
 # Refuse network and privilege escalation; report the dev user as already seeded.

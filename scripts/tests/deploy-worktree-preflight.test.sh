@@ -421,4 +421,38 @@ set -e
   || fail "system Postgres missing-marker failure must be explicit"
 echo "PASS: system Postgres missing marker fails the deploy preflight"
 
+# Cloud dev boxes: the primary checkout carries a self-rooted .cloud-env and no
+# Conductor-provided CONDUCTOR_WORKSPACE_PATH.
+write_cloud_env_fixture() {
+  printf '# rose-cloud-env\nexport CONDUCTOR_PORT=3001\nexport CONDUCTOR_WORKSPACE_NAME=cloud-fixture\nexport CONDUCTOR_ROOT_PATH=%s\n' \
+    "$2" >"$1/.cloud-env"
+}
+write_cloud_env_fixture "$controller" "$controller"
+cloud_primary_output="$(
+  cd "$controller"
+  env -u CONDUCTOR_WORKSPACE_PATH bash "$PREFLIGHT" --check 2>&1
+)" || fail "primary cloud workspace --check must pass without deploy-worktree.env"
+[[ "$cloud_primary_output" == *"Primary cloud workspace"* ]] \
+  || fail "primary cloud workspace pass must be explicit"
+echo "PASS: primary cloud workspace passes the deploy preflight"
+
+cloud_linked="$TMP_ROOT/cloud-linked"
+git -C "$controller" worktree add -q -b cloud-linked "$cloud_linked"
+cloud_linked="$(cd "$cloud_linked" && pwd -P)"
+for cloud_root in "$cloud_linked" "$controller"; do
+  write_cloud_env_fixture "$cloud_linked" "$cloud_root"
+  set +e
+  cloud_linked_output="$(
+    cd "$cloud_linked"
+    env -u CONDUCTOR_WORKSPACE_PATH bash "$PREFLIGHT" --check 2>&1
+  )"
+  cloud_linked_status=$?
+  set -e
+  [ "$cloud_linked_status" -ne 0 ] \
+    || fail "linked worktree with .cloud-env rooted at $cloud_root must still require isolated preparation"
+  [[ "$cloud_linked_output" == *"missing .context/deploy-worktree.env"* ]] \
+    || fail "linked cloud worktree failure must name the missing preparation"
+done
+echo "PASS: a copied .cloud-env cannot make a linked worktree pass as primary"
+
 echo "All deploy-worktree preflight tests passed."
