@@ -361,11 +361,11 @@ PREFLIGHT="$(sed -n '/^CLOUDBENCH_GUEST_PG_MAJOR=/,/^echo "✅ Canonical seed du
 SEED_FAILURE="$(printf '%s\n' "$PREFLIGHT" | sed -n '/if ! bash.*cloudbench-seed-get.sh/,/^    fi/p')"
 PREFLIGHT_LINE="$(grep -n '^CLOUDBENCH_GUEST_PG_MAJOR=' "$FLEET" | cut -d: -f1)"
 PROVISION_LINE="$(grep -n '^echo "⏳ provisioning ' "$FLEET" | cut -d: -f1)"
-if printf '%s\n' "$PREFLIGHT" | grep -q -- '--pg-major "$CLOUDBENCH_GUEST_PG_MAJOR"' \
-   && printf '%s\n' "$PREFLIGHT" | grep -q 'if ! bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-seed-get.sh"' \
-   && printf '%s\n' "$PREFLIGHT" | grep -q '"$ROOT_DIR" "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"; then' \
-   && printf '%s\n' "$SEED_FAILURE" | grep -q 'Missing canonical base fixture for cloud guests' \
-   && printf '%s\n' "$SEED_FAILURE" | grep -q 'exit 1' \
+if grep -q -- '--pg-major "$CLOUDBENCH_GUEST_PG_MAJOR"' <<<"$PREFLIGHT" \
+   && grep -q 'if ! bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-seed-get.sh"' <<<"$PREFLIGHT" \
+   && grep -q '"$ROOT_DIR" "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"; then' <<<"$PREFLIGHT" \
+   && grep -q 'Missing canonical base fixture for cloud guests' <<<"$SEED_FAILURE" \
+   && grep -q 'exit 1' <<<"$SEED_FAILURE" \
    && [ -n "$PREFLIGHT_LINE" ] && [ -n "$PROVISION_LINE" ] \
    && [ "$PREFLIGHT_LINE" -lt "$PROVISION_LINE" ] \
    && grep -q 'seed-dump-cache.ts get' "$SEED_GET" \
