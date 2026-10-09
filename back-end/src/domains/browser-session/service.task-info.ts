@@ -37,7 +37,7 @@ type TaskInfoResponse = {
   steel_session_health?: BrowserSessionHealth;
 };
 
-function isLiveBrowserStatus(status: string | null): boolean {
+export function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
   return ['live', 'active', 'running'].includes(status.toLowerCase());
 }

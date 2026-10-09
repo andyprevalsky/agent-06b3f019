@@ -7,6 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { configure } from '@testing-library/dom';
 import { server } from './msw/server';
 import { clearCaptures, installCapture } from './msw/capture';
+import { clearBrowserSessionBindings } from '@/lib/browserSessionBindings';
 
 // Allow async UI transitions to settle under full coverage instrumentation,
 // while retaining a finite deadline for missing elements and stuck effects.
@@ -296,6 +297,8 @@ afterEach(() => {
   MockWebSocket.disposeAll();
   server.resetHandlers();
   clearCaptures();
+  // Module-level live-view bindings are keyed by task id; tests reuse ids.
+  clearBrowserSessionBindings();
 });
 
 // Clean up after all tests

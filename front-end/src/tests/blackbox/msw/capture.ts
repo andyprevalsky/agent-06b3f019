@@ -3,6 +3,8 @@
  * Records every API request intercepted by MSW for assertion in tests.
  */
 
+import type { SetupServer } from 'msw/node';
+
 export interface CapturedRequest {
   url: string;
   method: string;
@@ -21,10 +23,8 @@ export function clearCaptures(): void {
  * Install capture listener on the MSW server.
  * Call this in the test setup file.
  */
-export function installCapture(server: {
-  events: { on: (event: string, handler: (args: { request: Request }) => void) => void };
-}): void {
-  server.events.on('request:start', async ({ request }: { request: Request }) => {
+export function installCapture(server: Pick<SetupServer, 'events'>): void {
+  server.events.on('request:start', async ({ request }) => {
     // Only capture API requests, not static assets
     if (!request.url.includes('/api/')) return;
 

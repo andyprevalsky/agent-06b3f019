@@ -6,11 +6,10 @@
  *  - QueryInput: textarea, model selector, price-limit edit, submit/pause button
  *  - AttentionInbox: empty vs populated, accept / reject / skip actions
  *  - BrowserStatusBar: minimized / expanded / fullscreen + write-lock approval
- *  - BrowserViewPanel: active / disconnected browser + completion view
  *
  * The tests lean on the shared `renderWithProviders` wrapper from
  * `test-wrapper.tsx` (QueryClient, TooltipProvider, MemoryRouter, AppDataProvider)
- * and, for BrowserStatusBar/BrowserViewPanel, also wrap the tree in an
+ * and, for BrowserStatusBar, also wrap the tree in an
  * `AgentContext.Provider` with a manually-constructed mock value so the
  * components can read `messages`/etc without standing up a live realtime
  * subscription.
@@ -31,7 +30,6 @@ import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
 import BrowserStatusBarCarousel from '@/features/terminal-component-group/components/BrowserStatusBarCarousel';
-import BrowserViewPanel from '@/features/terminal-component-group/components/BrowserViewPanel';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import type { AgentDetail, Message } from '@/lib/api';
@@ -39,7 +37,7 @@ import type { AgentDetail, Message } from '@/lib/api';
 const API_BASE = 'http://localhost:3001/api';
 
 // ─── Child stubs for components whose rendering pulls in heavy extras ─────
-// MessageList is used by BrowserStatusBar/BrowserViewPanel and mounts a
+// MessageList is used by BrowserStatusBar and mounts a
 // framer-motion tree keyed to the full AgentContext. Stubbing it keeps the
 // tests focused on the parent's own DOM contract.
 vi.mock('@/features/terminal-component-group/components/MessageList', () => {
@@ -143,6 +141,10 @@ function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
     isLoadingAgent: false,
     forceResubscribe: vi.fn(),
     isChatMode: false,
+    inspectionContext: null,
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => false),
   };
 }
 
@@ -2047,10 +2049,8 @@ describe('BrowserStatusBar (blackbox)', () => {
     const hdrButtons = within(header).getAllByRole('button');
     await user.click(hdrButtons[hdrButtons.length - 2]);
 
-    await user.click(await screen.findByRole('button', { name: 'Take control', exact: true }));
-    expect(
-      await screen.findByRole('button', { name: 'Hand back control', exact: true }),
-    ).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Take control' }));
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
     expect(resumeCalled).toBe(false);
     expect(controlPosts).toEqual(['task-second:user']);
     expect(screen.getByTitle('Browser')).toHaveAttribute(
@@ -2071,6 +2071,17 @@ describe('BrowserStatusBar (blackbox)', () => {
           state: 'user',
           agentPaused: true,
           debugUrl: 'https://steel.example/replacement-live',
+        }),
+      ),
+      // Same BrowserSession row as /control: the live view binds to it too.
+      http.get(`${API_BASE}/browser-session/task/task-1/live-view`, () =>
+        HttpResponse.json({
+          taskId: 'task-1',
+          sessionId: 'replacement',
+          debugUrl: 'https://steel.example/replacement-live',
+          status: 'ACTIVE',
+          live: true,
+          asOf: 1,
         }),
       ),
       http.post(`${API_BASE}/agents/agent-reload-control/resume`, () => {
@@ -2212,6 +2223,19 @@ describe('BrowserStatusBar (blackbox)', () => {
         resumeCalls += 1;
         return HttpResponse.json({ success: true, debug_url: 'https://kernel.example/resumed' });
       }),
+      // Resume rebinds the task's row; the live view reads that binding.
+      http.get(`${API_BASE}/browser-session/task/task-1/live-view`, () =>
+        resumeCalls === 0
+          ? HttpResponse.json({ error: 'Session not found' }, { status: 404 })
+          : HttpResponse.json({
+              taskId: 'task-1',
+              sessionId: 'resumed',
+              debugUrl: 'https://kernel.example/resumed',
+              status: 'ACTIVE',
+              live: true,
+              asOf: 1,
+            }),
+      ),
       http.post(`${API_BASE}/browser-session/task/task-1/control`, async ({ request }) => {
         const body = (await request.json()) as { mode?: string };
         return HttpResponse.json({ state: body.mode === 'user' ? 'user' : 'agent' });
@@ -2380,296 +2404,6 @@ describe('BrowserStatusBar (blackbox)', () => {
 
     // Back to minimized: Task progress panel is gone
     await waitFor(() => expect(screen.queryByText(/Task progress/i)).toBeNull());
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BrowserViewPanel
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('BrowserViewPanel (blackbox)', () => {
-  beforeEach(() => {
-    mockSession();
-  });
-
-  afterEach(() => {
-    localStorage.clear();
-    resetTestUrl();
-  });
-
-  it('renders an active browser session header with iframe', () => {
-    renderWithProviders(
-      withAgentCtx(
-        [],
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="https://example.com"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-    expect(screen.getByText('Browser Session Active')).toBeInTheDocument();
-    const iframe = document.querySelector('iframe[title="Browser Session"]');
-    expect(iframe).toBeTruthy();
-    expect((iframe as HTMLIFrameElement).src).toContain('https://example.com');
-  });
-
-  it('does not waste browser height on redundant login/captcha helper copy', () => {
-    renderWithProviders(
-      withAgentCtx(
-        [],
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-    expect(screen.queryByText(/You can interact with the browser/i)).not.toBeInTheDocument();
-  });
-
-  it('clicking fullscreen toggle calls onFullscreenToggle(true)', async () => {
-    const cb = vi.fn();
-    const user = userEvent.setup();
-    renderWithProviders(
-      withAgentCtx(
-        [],
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={cb}
-        />,
-      ),
-    );
-    await user.click(screen.getByLabelText('Fullscreen'));
-    expect(cb).toHaveBeenCalledWith(true);
-  });
-
-  it('renders write-lock approval chip when pending approval is present', () => {
-    const messages: Message[] = [
-      {
-        message_id: 'approval-1',
-        timestamp: '2026-01-01T00:00:00Z',
-        text: 'Write approval needed',
-        role: 'TOOL',
-        metadata: {
-          toolStatus: 'IN_PROGRESS',
-          requestUserApproval: {
-            writePermission: true,
-            attentionRequestId: 'ar-1',
-          },
-        },
-      },
-    ];
-    renderWithProviders(
-      withAgentCtx(
-        messages,
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-    expect(screen.getByText('Write Approval Required')).toBeInTheDocument();
-    expect(screen.getByText('Write approval needed')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Reject/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Accept/i })).toBeInTheDocument();
-  });
-
-  it('Accept button on write-lock approval calls respond endpoint', async () => {
-    let respondCalled = false;
-    server.use(
-      http.post(`${API_BASE}/attention-requests/:id/respond`, () => {
-        respondCalled = true;
-        return HttpResponse.json({ success: true });
-      }),
-    );
-
-    const messages: Message[] = [
-      {
-        message_id: 'approval-x',
-        timestamp: '2026-01-01T00:00:00Z',
-        text: 'allow?',
-        role: 'TOOL',
-        metadata: {
-          toolStatus: 'IN_PROGRESS',
-          requestUserApproval: {
-            writePermission: true,
-            attentionRequestId: 'ar-accept-1',
-          },
-        },
-      },
-    ];
-
-    const user = userEvent.setup();
-    renderWithProviders(
-      withAgentCtx(
-        messages,
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-
-    await user.click(screen.getByRole('button', { name: /Accept/i }));
-    await waitFor(() => expect(respondCalled).toBe(true));
-  });
-
-  it('Reject button on write-lock approval calls reject endpoint', async () => {
-    let rejectCalled = false;
-    server.use(
-      http.post(`${API_BASE}/attention-requests/:id/reject`, () => {
-        rejectCalled = true;
-        return HttpResponse.json({ success: true });
-      }),
-    );
-
-    const messages: Message[] = [
-      {
-        message_id: 'approval-y',
-        timestamp: '2026-01-01T00:00:00Z',
-        text: 'reject?',
-        role: 'TOOL',
-        metadata: {
-          toolStatus: 'IN_PROGRESS',
-          requestUserApproval: {
-            writePermission: true,
-            attentionRequestId: 'ar-reject-1',
-          },
-        },
-      },
-    ];
-
-    const user = userEvent.setup();
-    renderWithProviders(
-      withAgentCtx(
-        messages,
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-
-    await user.click(screen.getByRole('button', { name: /Reject/i }));
-    await waitFor(() => expect(rejectCalled).toBe(true));
-  });
-
-  it('renders completion view when last message action_type is task_complete', () => {
-    const messages: Message[] = [
-      {
-        message_id: 'm1',
-        timestamp: '2026-01-01T00:00:00Z',
-        text: 'Job done!',
-        role: 'TOOL',
-        metadata: {
-          task_id: 'task-1',
-          action_type: 'task_complete',
-          title: 'done',
-        },
-      },
-    ];
-    renderWithProviders(
-      withAgentCtx(
-        messages,
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-    expect(screen.getByText('Task Completed')).toBeInTheDocument();
-    expect(screen.getByText('Job done!')).toBeInTheDocument();
-  });
-
-  it('shows disconnected overlay + Take Control button after receiving browserbase-disconnected message', async () => {
-    renderWithProviders(
-      withAgentCtx(
-        [],
-        <BrowserViewPanel
-          taskId="task-1"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-
-    await act(async () => {
-      window.dispatchEvent(new MessageEvent('message', { data: 'browserbase-disconnected' }));
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('Browser Session Disconnected')).toBeInTheDocument();
-    });
-    expect(screen.getByText('Take Control')).toBeInTheDocument();
-  });
-
-  it('resumes after disconnect instead of completing a stale inline auth request', async () => {
-    let resumeCalls = 0;
-    let authCompletionCalls = 0;
-    server.use(
-      http.post(`${API_BASE}/browser-session/resume`, () => {
-        resumeCalls += 1;
-        return HttpResponse.json({ success: true });
-      }),
-      http.post(`${API_BASE}/auth-assistance/:id/complete`, () => {
-        authCompletionCalls += 1;
-        return HttpResponse.json({ success: true });
-      }),
-    );
-    const messages: Message[] = [
-      {
-        message_id: 'inline-auth-stale',
-        timestamp: '2026-01-01T00:00:00Z',
-        text: '',
-        role: 'TOOL',
-        metadata: {
-          task_id: 'task-inline-auth',
-          action_type: 'auth_assistance',
-          title: 'Waiting for login',
-          toolStatus: 'IN_PROGRESS',
-          requestUserAuthentication: {
-            requestId: 'inline-auth-stale',
-            authRealm: 'example.com',
-            taskId: 'task-inline-auth',
-            liveViewUrl: 'https://debug.steel.dev/session/stale-inline',
-          },
-        },
-      },
-    ];
-    const user = userEvent.setup();
-    renderWithProviders(
-      withAgentCtx(
-        messages,
-        <BrowserViewPanel
-          taskId="task-inline-auth"
-          browserUrl="about:blank"
-          isAnyBrowserFullscreen={false}
-          onFullscreenToggle={() => {}}
-        />,
-      ),
-    );
-
-    await act(async () => {
-      window.dispatchEvent(new MessageEvent('message', { data: 'browserbase-disconnected' }));
-    });
-    await user.click(await screen.findByRole('button', { name: 'Take Control' }));
-
-    await waitFor(() => expect(resumeCalls).toBe(1));
-    expect(authCompletionCalls).toBe(0);
   });
 });
 

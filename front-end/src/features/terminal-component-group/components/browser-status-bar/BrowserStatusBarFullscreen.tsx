@@ -55,6 +55,8 @@ interface FullscreenProps {
   agentId?: string | null;
   taskId: string;
   browserUrl: string;
+  /** False when the bound session is closed or ended: loading screen, no iframe. */
+  browserLive?: boolean;
   messages: Message[];
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
@@ -146,6 +148,7 @@ type PaneProps = Pick<
   | 'agentId'
   | 'taskId'
   | 'browserUrl'
+  | 'browserLive'
   | 'messages'
   | 'authAssistanceRequest'
   | 'isResuming'
@@ -161,6 +164,7 @@ function BrowserPaneBody({
   agentId,
   taskId,
   browserUrl,
+  browserLive = true,
   messages,
   controlState,
   authAssistanceRequest,
@@ -173,6 +177,7 @@ function BrowserPaneBody({
   return (
     <LiveViewFrame
       url={browserUrl}
+      live={browserLive}
       title="Browser"
       interactive={isUserControlling || controlState === 'waiting'}
       iframeKey={`${taskId}:${browserUrl}`}
@@ -278,6 +283,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       agentId={props.agentId}
       taskId={props.taskId}
       browserUrl={props.browserUrl}
+      browserLive={props.browserLive}
       messages={props.messages}
       controlState={controlState}
       authAssistanceRequest={props.authAssistanceRequest}

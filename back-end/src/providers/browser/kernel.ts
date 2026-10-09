@@ -40,6 +40,7 @@ import {
 import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
 import { kernelClient } from './kernelClient';
 import { releaseKernelRemoteSession } from './kernelSessionDelete';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 export { releaseKernelRemoteSession } from './kernelSessionDelete';
 import {
   captureKernelScreenshot,
@@ -489,6 +490,7 @@ export async function closeKernelSession(
       currentUrl: currentUrl || undefined,
     },
   });
+  await announceBrowserSessionBinding({ sessionId });
 
   if (releaseError !== null) throw releaseError;
 }
@@ -559,6 +561,8 @@ async function recreateKernelSession(
     ]);
     throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
   }
+  // Announce before evicting the superseded session so the live view switches first.
+  await announceBrowserSessionBinding({ id: taskId });
   if (remote.profileId !== null) {
     await markBenchmarkKernelProfileBound(oldSession.agentId, remote.profileId);
   }

@@ -1,8 +1,12 @@
+import { getBrowserSessionHealth } from '../../providers/browser';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
+import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { SessionNotFoundError } from './service.local-storage';
+import { isLiveBrowserStatus } from './service.task-info';
 import { BrowserControlState as PrismaControlState, BrowserSessionStatus } from './types';
 
+const log = createLogger('BrowserControl');
 const { ACTIVE } = BrowserSessionStatus;
 const { AGENT, USER_REQUESTED, USER } = PrismaControlState;
 const CONTROL_LEASE_MS = 90_000;
@@ -46,6 +50,68 @@ export async function getBrowserControlState(taskId: string, userId?: string) {
     state: publicControlState(session.controlState),
     agentPaused: agent?.status === 'PAUSED',
     debugUrl: session.debugUrl,
+  };
+}
+
+export interface BrowserLiveView {
+  taskId: string;
+  sessionId: string;
+  debugUrl: string | null;
+  status: string;
+  /** false: closed or provider reports it ended; null: provider health unknown. */
+  live: boolean | null;
+  /** Server time before the read; orders this against BROWSER_SESSION broadcasts. */
+  asOf: number;
+}
+
+export interface BrowserLiveViewDeps {
+  findRecord?: typeof repo.findBrowserLiveViewRecord;
+  health?: typeof getBrowserSessionHealth;
+}
+
+async function providerLiveness(
+  sessionId: string,
+  health: typeof getBrowserSessionHealth
+): Promise<boolean | null> {
+  try {
+    const observed = await health(sessionId);
+    if (observed.ttlMs !== null && observed.ttlMs <= 0) return false;
+    return isLiveBrowserStatus(observed.status);
+  } catch (error) {
+    log.warn('Live-view provider health check failed', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * The live view's binding read (mount, focus, transcript change). Same owner
+ * check as control, no lease side effects. An ACTIVE row can still name a
+ * session the provider already ended (e.g. an idle auth handoff), so ACTIVE
+ * rows are confirmed against provider health.
+ */
+export async function getBrowserLiveView(
+  taskId: string,
+  userId?: string,
+  deps: BrowserLiveViewDeps = {}
+): Promise<BrowserLiveView> {
+  const asOf = Date.now();
+  const session = await (deps.findRecord ?? repo.findBrowserLiveViewRecord)(taskId);
+  if (session === null || (userId !== undefined && session.context.userId !== userId)) {
+    throw new SessionNotFoundError();
+  }
+  return {
+    taskId: session.id,
+    sessionId: session.sessionId,
+    debugUrl: session.debugUrl,
+    status: session.status,
+    live:
+      session.status === ACTIVE
+        ? await providerLiveness(session.sessionId, deps.health ?? getBrowserSessionHealth)
+        : false,
+    asOf,
   };
 }
 

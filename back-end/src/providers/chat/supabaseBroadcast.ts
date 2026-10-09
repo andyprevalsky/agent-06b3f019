@@ -248,6 +248,37 @@ export async function broadcastAgentUpdate(
 }
 
 /**
+ * Broadcast BROWSER_SESSION - the provider session a browser task is bound to.
+ *
+ * Sent whenever a task's BrowserSession row is rebound (challenge recovery,
+ * resume, rotation, reclaim) or closed, before the old provider session is
+ * released, so the live view never keeps embedding a released session while
+ * the worker has not yet posted the new URL. `asOf` orders events against the
+ * live-view GET: consumers keep the newest observation per task.
+ */
+export async function broadcastBrowserSessionBinding(
+  agentId: string,
+  binding: { taskId: string; sessionId: string; debugUrl: string | null; status: string }
+): Promise<void> {
+  log.info('[Broadcast] BROWSER_SESSION', {
+    agentId,
+    taskId: binding.taskId,
+    sessionId: binding.sessionId,
+    status: binding.status,
+  });
+  await broadcast({
+    topic: `agent:${agentId}`,
+    event: 'BROWSER_SESSION',
+    payload: {
+      agentId,
+      ...binding,
+      live: binding.status === 'ACTIVE',
+      asOf: Date.now(),
+    },
+  });
+}
+
+/**
  * Broadcast message INSERT event - notifies frontend of new message
  * This is the "true message" that shows in the chat (clears thinking bubble)
  *

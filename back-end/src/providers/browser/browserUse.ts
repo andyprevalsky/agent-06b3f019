@@ -10,6 +10,7 @@ import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsola
 import { browserUseEnabled } from './config';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
   BrowserProviderRateLimitError,
   type BrowserProviderResumeSession,
@@ -383,6 +384,7 @@ export async function closeBrowserUseSession(
       currentUrl: currentUrl || undefined,
     },
   });
+  await announceBrowserSessionBinding({ sessionId });
   if (releaseError) throw releaseError;
 }
 
@@ -429,6 +431,7 @@ async function replaceSession(taskId: string): Promise<
       },
     });
     if (replaced.count !== 1) throw new Error(`Browser task ${taskId} changed during replacement`);
+    await announceBrowserSessionBinding({ id: taskId });
     const savedUrl = old.currentUrl || old.startUrl || undefined;
     if (savedUrl) {
       try {
