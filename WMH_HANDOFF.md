@@ -75,7 +75,10 @@ owning tests:
 Merge verification so far: backend tsc, 260 unit files and 9 affected
 blackbox domains; frontend tsc, lint and all 150 vitest files; 17 affected
 agents blackbox domains including WMH; `benchmark-live-results` (505 passed);
-`cloudbench-env`; every structural deploy gate (with `lsof` installed).
+`cloudbench-env`; every structural deploy gate (with `lsof` installed); and
+full agents coverage (109/109 blackbox domains, 82% against the 80% floor)
+after converting one branch cleanup control to `async_case` so it runs inside
+the blackbox event loop. Backend coverage is still pending.
 
 Open cloud follow-ups from the independent review (fail closed; not
 exercised by local runs): `run-bench-cloud` validates `WMH_ROSE_POOL` against
