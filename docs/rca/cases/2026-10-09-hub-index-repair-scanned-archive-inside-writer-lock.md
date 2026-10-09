@@ -134,10 +134,22 @@ The locked repair is now bundle-free (`salvagedHubAgentRunIndex`):
 The whole-archive rebuild is deleted. The single out-of-lock backfill is the
 only way lost child mappings are restored. It may publish `complete: true`
 only if its scan started after the latest salvage revision; an older scan
-merges what it found and leaves the index incomplete for another pass. The
-review found this race: without the guard, a scan whose catalog read preceded
-a salvage could mark a lost run's children complete and leave them
-permanently missing.
+merges what it found and leaves the index incomplete for another pass. Its
+merge applies the locked-put rule, newest catalog upload wins, to every agent
+id: the scan records each agent's newest scanned run, and the merge compares
+it with the current mapping by `uploaded_at`. A concurrent upload therefore
+beats the scan, and the scan beats a stale salvaged mapping for a reused child
+id (evidence-only projections repeat child ids under a new run).
+
+Two adversarial reviews found the races this closes:
+
+- Without the revision guard, a scan whose catalog read preceded a salvage
+  could mark a lost run's children complete and leave them permanently
+  missing.
+- Without newest-upload merging, a reused child id stayed on the older run
+  after a salvage and a completed backfill.
+
+Both have checked-in assertions.
 
 Bundle contract:
 

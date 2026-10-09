@@ -134,6 +134,7 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
   const summary = (runId: string, minute: number, agentId?: string) => ({
     run_id: runId,
     timestamp: `2026-10-08T22:${String(minute).padStart(2, '0')}:00.000Z`,
+    uploaded_at: `2026-10-08T22:${String(minute).padStart(2, '0')}:30.000Z`,
     live: false,
     tasks: agentId === undefined ? [] : [{ name: 'task', agent_id: agentId }],
   });
@@ -154,6 +155,7 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
             complete: true,
             agents: {
               ...Object.fromEntries(archived.map((runId, i) => [`agent-${i}`, runId])),
+              'child-shared': archived[0],
               'agent-deleted': `${prefix}-deleted`,
             },
           })
@@ -166,14 +168,30 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
         tasks: [
           {
             agent_id: 'agent-unindexed',
-            logs: { tree: { 'child-unindexed': { parent_agent_id: 'agent-unindexed' } } },
+            logs: {
+              tree: {
+                'child-unindexed': { parent_agent_id: 'agent-unindexed' },
+                // An evidence projection reuses a child id from an older run.
+                'child-shared': { parent_agent_id: 'agent-unindexed' },
+              },
+            },
           },
         ],
       }),
     ],
     ...archived.map((runId, i): [string, string] => [
       `benchmark-hub/runs/${runId}.json`,
-      JSON.stringify({ run_id: runId, tasks: [{ agent_id: `agent-${i}` }] }),
+      JSON.stringify({
+        run_id: runId,
+        tasks: [
+          {
+            agent_id: `agent-${i}`,
+            ...(i === 0
+              ? { logs: { tree: { 'child-shared': { parent_agent_id: 'agent-0' } } } }
+              : {}),
+          },
+        ],
+      }),
     ]),
     // Shape of the 2026-07 hub-poller error bundles still in the production archive.
     [
@@ -230,6 +248,11 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
     assert.equal(backfilled.complete, true, 'backfill completes over legacy task-less bundles');
     assert.equal(backfilled.revision, 11);
     assert.equal(backfilled.agents.get('child-unindexed'), `${prefix}-unindexed`);
+    assert.equal(
+      backfilled.agents.get('child-shared'),
+      `${prefix}-unindexed`,
+      'the newest upload wins a reused child id over a stale salvaged mapping'
+    );
     assert.equal(backfilled.agents.get('agent-39'), archived[39]);
     assert.equal(backfilled.agents.get('agent-next'), `${prefix}-next`);
     assert.equal(backfilled.agents.has('agent-deleted'), false);

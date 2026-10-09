@@ -57,7 +57,9 @@ export async function buildHubAgentIdIndex(
   loadBundle: (runId: string, summary: HubRunSummary) => Promise<Record<string, unknown> | null>,
   seed: Map<string, string> = new Map()
 ): Promise<Map<string, string>> {
-  const map = new Map(seed);
+  // The catalog is newest-first, so the first run seen per agent is its newest
+  // upload; seed mappings only fill agents the scan did not find.
+  const map = new Map<string, string>();
   for (const run of index) {
     // Local Hub bundles can exceed 50 MB and old workspaces can hold hundreds
     // of them. Yield before each async read/parse so this background migration
@@ -69,6 +71,9 @@ export async function buildHubAgentIdIndex(
     for (const id of agentIdsFromHubBundle(bundle)) {
       if (!map.has(id)) map.set(id, run.run_id);
     }
+  }
+  for (const [id, runId] of seed) {
+    if (!map.has(id)) map.set(id, runId);
   }
   return map;
 }

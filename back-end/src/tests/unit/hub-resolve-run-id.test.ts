@@ -232,7 +232,7 @@ test('a backfill scanned before the latest salvage cannot publish completion', (
     repairedRevision: 73,
     agents: new Map([['root', 'run-1']]),
   };
-  const valid = new Set(['run-1']);
+  const valid = [{ run_id: 'run-1' }];
   assert.equal(completedHubAgentBackfill(current, new Map(), valid, 72).complete, false);
   assert.equal(completedHubAgentBackfill(current, new Map(), valid).complete, false);
   const fresh = completedHubAgentBackfill(current, new Map(), valid, 74);
@@ -276,12 +276,43 @@ test('legacy completion merges concurrent uploads and excludes concurrent delete
       ['legacy-agent', 'run-legacy'],
       ['deleted-agent', 'run-deleted'],
     ]),
-    new Set(['run-new', 'run-current', 'run-legacy'])
+    [
+      { run_id: 'run-new', uploaded_at: '2026-10-08T22:50:00Z' },
+      { run_id: 'run-current', uploaded_at: '2026-10-08T22:45:00Z' },
+      { run_id: 'run-legacy', uploaded_at: '2026-07-16T01:38:37Z' },
+    ]
   );
   assert.equal(merged.complete, true);
   assert.equal(merged.agents.get('reused-agent'), 'run-new');
   assert.equal(merged.agents.get('legacy-agent'), 'run-legacy');
   assert.equal(merged.agents.has('deleted-agent'), false);
+});
+
+test('legacy completion replaces a stale salvaged mapping with the newest scanned upload', () => {
+  const merged = completedHubAgentBackfill(
+    {
+      revision: 9,
+      complete: false,
+      repairedRevision: 8,
+      agents: new Map([
+        ['reused-child', 'older-run'],
+        ['concurrent-child', 'concurrent-run'],
+      ]),
+    },
+    new Map([
+      ['reused-child', 'newer-run'],
+      ['concurrent-child', 'newer-run'],
+    ]),
+    [
+      { run_id: 'concurrent-run', uploaded_at: '2026-10-09T03:00:00Z' },
+      { run_id: 'newer-run', uploaded_at: '2026-10-08T22:49:30Z' },
+      { run_id: 'older-run', uploaded_at: '2026-10-08T22:40:00Z' },
+    ],
+    9
+  );
+  assert.equal(merged.complete, true);
+  assert.equal(merged.agents.get('reused-child'), 'newer-run');
+  assert.equal(merged.agents.get('concurrent-child'), 'concurrent-run');
 });
 
 test('visibility markers preserve legacy runs and fail closed on malformed values', () => {

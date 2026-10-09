@@ -459,9 +459,8 @@ export async function persistHubAgentRunBackfill(
 ): Promise<HubAgentRunIndexSnapshot> {
   return withIndexLock(async () => {
     const runs = await listRunsStrict();
-    const validRunIds = new Set(runs.map((run) => run.run_id));
     const current = await readAgentRunIndexForMutation(runs);
-    const snapshot = completedHubAgentBackfill(current, backfilled, validRunIds, scanStartRevision);
+    const snapshot = completedHubAgentBackfill(current, backfilled, runs, scanStartRevision);
     await writeAgentRunIndex(snapshot);
     return snapshot;
   });

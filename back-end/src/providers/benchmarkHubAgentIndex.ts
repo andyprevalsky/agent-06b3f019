@@ -74,22 +74,29 @@ export function hubAgentIndexAfterDelete(
 }
 
 /**
- * Current locked uploads win over a legacy scan; deleted runs stay absent. A scan
- * that started before the latest locked salvage may have missed the mappings
- * that salvage lost, so it merges what it found but cannot declare completion.
+ * Merge a legacy scan into the current locked index. The newest catalog upload
+ * wins for an agent id, as for locked puts, so a concurrent upload beats the
+ * scan and the scan beats a stale salvaged mapping; deleted runs stay absent.
+ * A scan that started before the latest locked salvage may have missed the
+ * mappings that salvage lost, so it merges what it found but cannot declare
+ * completion.
  */
 export function completedHubAgentBackfill(
   current: HubAgentRunIndexSnapshot | null,
   backfilled: Map<string, string>,
-  validRunIds: Set<string>,
+  catalog: Array<{ run_id: string; uploaded_at?: string }>,
   scanStartRevision?: number
 ): HubAgentRunIndexSnapshot {
+  const uploadedAt = new Map(catalog.map((run) => [run.run_id, run.uploaded_at ?? '']));
   const agents = new Map<string, string>();
   for (const [agentId, runId] of current?.agents ?? []) {
-    if (validRunIds.has(runId)) agents.set(agentId, runId);
+    if (uploadedAt.has(runId)) agents.set(agentId, runId);
   }
   for (const [agentId, runId] of backfilled) {
-    if (validRunIds.has(runId) && !agents.has(agentId)) agents.set(agentId, runId);
+    const scanned = uploadedAt.get(runId);
+    if (scanned === undefined) continue;
+    const kept = agents.get(agentId);
+    if (kept === undefined || scanned > (uploadedAt.get(kept) ?? '')) agents.set(agentId, runId);
   }
   const repairedRevision = current?.repairedRevision;
   return {
