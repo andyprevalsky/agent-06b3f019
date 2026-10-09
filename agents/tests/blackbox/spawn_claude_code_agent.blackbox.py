@@ -4490,10 +4490,14 @@ async def test_claude_code_reattach_survives_a_transient_probe_failure():
 
     async def flaky(request):
         nonlocal requests
+        ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            # Count only the client's WebSocket handshakes; another local process
+            # (e.g. a host port detector's `HEAD /`) must not take the 503 slot.
+            return web.Response(status=400)
         requests += 1
         if requests == 1:
             return web.Response(status=503, text="proxy warming up")
-        ws = web.WebSocketResponse()
         await ws.prepare(request)
         await ws.close()
         return ws
@@ -4761,8 +4765,11 @@ async def test_run_agentic_loop_reconnect_replay_does_not_duplicate_events():
 
     async def handler(request):
         nonlocal connections
-        connections += 1
         ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            # Count only WebSocket sessions; a host port detector's `HEAD /` is not one.
+            return web.Response(status=400)
+        connections += 1
         await ws.prepare(request)
         if connections == 1:
             await ws.send_str(json.dumps({"type": "code_agent_events", "data": first_events}))
