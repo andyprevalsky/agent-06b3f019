@@ -249,7 +249,7 @@ esac
 # Everything our test suites + cloud benchmark runner need beyond the base image:
 #   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
 #   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
-#   lsof   — listener/PID ownership in run.sh, kill-services.sh and their tests
+#   lsof   — local stack/benchmark cleanup finds listener PIDs and process cwds
 #   time   — GNU /usr/bin/time for seed-memory RSS ratchet (bash builtin has no RSS)
 #   py3.11 — pinned interpreter for agents/venv (base python may be newer)
 #   flyctl — REQUIRED by scripts/run-bench (the cloud Fly benchmark fleet)
