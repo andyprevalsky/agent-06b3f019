@@ -778,6 +778,17 @@ def _canonical_request_body(body: Any) -> str:
     return canonical_messages(body)
 
 
+# Immutable WMH execution-policy identities: (version, policy_sha256[:16]).
+# Kept here so the workflow replay surface never imports benchmark modules; a
+# fast-cache parity test binds every entry to benchmarks.wmh_execution_policy.
+WMH_POLICY_CACHE_IDENTITIES: dict[str, tuple[str, str]] = {
+    "rose-virtual-public-affordances-v1": ("1", "49d9d1f0430a5d8e"),
+    "rose-virtual-public-affordances-v2": ("2", "5dd9924e9a1ff4c5"),
+    "rose-outcome-distribution-v1": ("1", "650945bf68ee4ba6"),
+    "rose-outcome-distribution-v2": ("2", "23feae1291f883f0"),
+}
+
+
 def world_model_cache_scope() -> str:
     """Cache-key namespace segment for world-model-simulated runs.
 
@@ -794,10 +805,10 @@ def world_model_cache_scope() -> str:
     scope = f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}"
     policy_name = os.environ.get("WMH_EXECUTION_POLICY", "upstream")
     if policy_name != "upstream":
-        from benchmarks.wmh_execution_policy import execution_policy
-
-        policy = execution_policy(policy_name)
-        scope += f".policy.{policy.name}.{policy.version}.{policy.metadata()['policy_sha256'][:16]}"
+        if policy_name not in WMH_POLICY_CACHE_IDENTITIES:
+            raise ValueError("Unknown WMH execution policy; choose an immutable registered version")
+        version, digest = WMH_POLICY_CACHE_IDENTITIES[policy_name]
+        scope += f".policy.{policy_name}.{version}.{digest}"
     return scope + ":"
 
 

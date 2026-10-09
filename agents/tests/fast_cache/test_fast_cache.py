@@ -4473,6 +4473,7 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
         ("rose-virtual-public-affordances-v1", "1", "49d9d1f0430a5d8e"),
         ("rose-virtual-public-affordances-v2", "2", "5dd9924e9a1ff4c5"),
         ("rose-outcome-distribution-v1", "1", "650945bf68ee4ba6"),
+        ("rose-outcome-distribution-v2", "2", "23feae1291f883f0"),
     ):
         monkeypatch.setenv("WMH_EXECUTION_POLICY", policy)
         scope = normalize.world_model_cache_scope()
@@ -4495,6 +4496,20 @@ def test_simulated_root_and_gp_cache_isolates_immutable_execution_policy(monkeyp
     assert normalize.world_model_cache_scope() == ""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
     assert normalize.world_model_cache_scope() == ""
+
+
+def test_world_model_policy_cache_identities_match_the_immutable_registry():
+    """The runtime cache scope must not import benchmark modules, yet it must
+    reproduce each registered policy's exact (version, sha256 prefix)."""
+    from benchmarks import wmh_execution_policy as policies
+
+    registered = {}
+    for name in policies._POLICIES:
+        if name == policies.DEFAULT_EXECUTION_POLICY:
+            continue
+        policy = policies.execution_policy(name)
+        registered[name] = (policy.version, policy.metadata()["policy_sha256"][:16])
+    assert normalize.WMH_POLICY_CACHE_IDENTITIES == registered
 
 
 @pytest.mark.parametrize("base_step", [None, 7], ids=["content", "position"])
