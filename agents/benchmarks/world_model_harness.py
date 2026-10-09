@@ -790,6 +790,20 @@ def public_json_has_secret(value: Any) -> bool:
     return any(_SECRET_KEY_RE.search(key) for key in _json_keys(value))
 
 
+def _public_example_secret_violation(value: Any) -> bool:
+    """True when a public-corpus record still carries a secret value or field."""
+    if isinstance(value, dict):
+        return any(
+            (_SECRET_KEY_RE.search(str(key)) and inner != "[REDACTED]") or _public_example_secret_violation(inner)
+            for key, inner in value.items()
+        )
+    if isinstance(value, list):
+        return any(_public_example_secret_violation(inner) for inner in value)
+    if isinstance(value, str):
+        return bool(_HIGH_CONFIDENCE_SECRET_VALUE_RE.search(value.replace("[REDACTED]", "")))
+    return False
+
+
 def _json_keys(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
         for key, inner in value.items():
@@ -2968,9 +2982,21 @@ def write_world_model_conformance_suite(
         "invalid_examples": invalid_examples,
         "examples": selected,
     }
+    # Native binding hashes each example's action and observation against the
+    # corpus. A broad value pass rewrote non-secret artifact paths and
+    # fingerprints (>=32 base64-like characters), so the real case had no
+    # matching native record. Keep those exact and fail closed if they carry a
+    # secret; the non-binding task/scratchpad/state keep the public redaction.
+    examples = report.pop("examples")
+    for example in examples:
+        for field in ("task", "scratchpad", "state_before"):
+            example[field] = _drop_secret_fields(_redact(example[field]))
+    if _public_example_secret_violation(examples):
+        raise ValueError("WMH conformance suite contains unredacted secret-looking content")
     redacted = _drop_secret_fields(_redact(report))
     if public_json_has_secret(redacted):
         raise ValueError("WMH conformance suite contains unredacted secret-looking content")
+    redacted["examples"] = examples
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(redacted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
