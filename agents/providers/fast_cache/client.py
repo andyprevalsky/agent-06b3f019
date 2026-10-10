@@ -22,6 +22,7 @@ from helpers.trace_archive import archive_json_deferred
 from helpers.tracing import backend_api_headers, current_root_agent_id, current_span_id, span
 
 from . import normalize
+from .context import demo_recording_enabled
 
 logger = structlog.get_logger(__name__)
 
@@ -856,6 +857,10 @@ async def cache_set(
     blob_path: Optional[str] = None,
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
+    if goal_hash in normalize.demo_cache_goal_hashes() and not demo_recording_enabled():
+        # DEMO replay namespaces are frozen recordings (FAST_MODE_CACHE_RECORD_DEMO=1 re-records).
+        logger.info("fast_cache.set_skipped_demo_namespace", key=key)
+        return False
     sanitized_value = normalize.strip_secrets(value)
     await _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
     try:
