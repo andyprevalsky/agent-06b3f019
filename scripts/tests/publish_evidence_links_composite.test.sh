@@ -62,5 +62,18 @@ except SystemExit as exc:
 else:
     raise AssertionError("missing transcript must fail closed")
 
+# Evidence renders stay private under the checkout on hosts without Cursor's
+# artifact mount; the default used to fail after the Hub upload with EACCES.
+repo = mod.REPO_ROOT
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=False) == repo / ".context" / "rca_evidence"
+assert mod.evidence_artifacts_root({}, cursor_mount_exists=True) == Path("/opt/cursor/artifacts/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"CURSOR_ARTIFACTS_DIR": "/tmp/cursor"}, cursor_mount_exists=False
+) == Path("/tmp/cursor/rca_evidence")
+assert mod.evidence_artifacts_root(
+    {"RCA_EVIDENCE_ARTIFACTS_ROOT": "/tmp/explicit", "CURSOR_ARTIFACTS_DIR": "/tmp/cursor"},
+    cursor_mount_exists=True,
+) == Path("/tmp/explicit")
+
 print("publish_evidence_links composite projection checks passed")
 PY

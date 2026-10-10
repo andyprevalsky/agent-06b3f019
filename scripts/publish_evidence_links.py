@@ -9,7 +9,8 @@ cited in approvals must outlive that stack:
     (``/open-agent?agent-id=…`` is an alias that redirects to the same URL).
     Verification fails closed unless every browser agent on that FE link has
     terminated (``task_complete``) with a correctly attached recording.
-  * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/``
+  * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/`` (or
+    ``RCA_EVIDENCE_ARTIFACTS_ROOT``; ``.context/rca_evidence`` without the Cursor mount)
     (Cursor uploads these for multi-day reachability in the agent UI)
 
 Usage:
@@ -56,10 +57,21 @@ def _ensure_agents_site_packages() -> None:
         return
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
-ARTIFACTS_ROOT = Path(
-    os.getenv("RCA_EVIDENCE_ARTIFACTS_ROOT")
-    or Path(os.getenv("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts")) / "rca_evidence"
-)
+_CURSOR_ARTIFACTS = Path("/opt/cursor/artifacts")
+
+
+def evidence_artifacts_root(env, *, cursor_mount_exists: bool) -> Path:
+    """Explicit root, then Cursor's artifact mount, else private checkout storage."""
+    if env.get("RCA_EVIDENCE_ARTIFACTS_ROOT"):
+        return Path(env["RCA_EVIDENCE_ARTIFACTS_ROOT"])
+    if env.get("CURSOR_ARTIFACTS_DIR"):
+        return Path(env["CURSOR_ARTIFACTS_DIR"]) / "rca_evidence"
+    if cursor_mount_exists:
+        return _CURSOR_ARTIFACTS / "rca_evidence"
+    return REPO_ROOT / ".context" / "rca_evidence"
+
+
+ARTIFACTS_ROOT = evidence_artifacts_root(os.environ, cursor_mount_exists=_CURSOR_ARTIFACTS.is_dir())
 _AGENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
