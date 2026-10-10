@@ -202,14 +202,17 @@ class LinuxGateFailedStepTests(unittest.TestCase):
 
     GATE = ROOT / "scripts" / "run-cloudbench-controller-gate"
 
-    def _failed_steps(self, log_text: str) -> subprocess.CompletedProcess[str]:
-        function = re.search(r"^gate_failed_steps\(\) \{\n.*?^\}\n", self.GATE.read_text(), re.M | re.S)
-        self.assertIsNotNone(function, "the gate script must keep gate_failed_steps()")
+    def _parse(self, name: str, log_text: str) -> subprocess.CompletedProcess[str]:
+        function = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", self.GATE.read_text(), re.M | re.S)
+        self.assertIsNotNone(function, f"the gate script must keep {name}()")
         with tempfile.TemporaryDirectory(prefix="linux-gate-steps-") as temporary:
             log = Path(temporary) / "machine.log"
             log.write_text(log_text)
-            script = f'set -euo pipefail\n{function.group(0)}\nsteps="$(gate_failed_steps "$1")"\necho "steps:[$steps]"\n'
+            script = f'set -euo pipefail\n{function.group(0)}\nsteps="$({name} "$1")"\necho "steps:[$steps]"\n'
             return subprocess.run(["bash", "-c", script, "gate", str(log)], capture_output=True, text=True, timeout=30)
+
+    def _failed_steps(self, log_text: str) -> subprocess.CompletedProcess[str]:
+        return self._parse("gate_failed_steps", log_text)
 
     def test_summary_line_names_the_failed_steps(self) -> None:
         result = self._failed_steps("GATE_STEP_FAILED 9\nGATE_FAILED_STEPS 2 5\nGATE_RESULT exit=1\n")
@@ -222,6 +225,19 @@ class LinuxGateFailedStepTests(unittest.TestCase):
     def test_a_log_with_neither_marker_is_an_empty_answer(self) -> None:
         result = self._failed_steps("GATE_RESULT exit=1\n")
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[]"), result.stderr)
+
+    def test_running_suite_is_the_latest_numbered_start_marker(self) -> None:
+        # Fly returns about 100 lines per read, so the markers for suites 1-5
+        # can be missing from the log by the time suite 6 times out.
+        result = self._parse("gate_running_step", "GATE_STEP bash a exit=0\nGATE_STEP_START #6 bash b\npartial output\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[6]"), result.stderr)
+
+    def test_a_log_without_a_start_marker_names_no_running_suite(self) -> None:
+        result = self._parse("gate_running_step", "GATE_ENV backend_env=yes\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[0]"), result.stderr)
+
+    def test_remote_runner_numbers_its_start_markers(self) -> None:
+        self.assertIn('echo "GATE_STEP_START #$n %s"', self.GATE.read_text())
 
 
 class StructuralGateRunnerTests(unittest.TestCase):

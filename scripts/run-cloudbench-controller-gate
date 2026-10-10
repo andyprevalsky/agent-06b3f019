@@ -189,7 +189,7 @@ trap 'exit 143' TERM
   echo 'failed_steps=""'
   echo 'n=0'
   for suite in "${SUITES[@]}"; do
-    printf 'n=$((n+1)); echo "GATE_STEP_START %s"\n' "$suite"
+    printf 'n=$((n+1)); echo "GATE_STEP_START #$n %s"\n' "$suite"
     # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
     printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
     printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
@@ -267,10 +267,20 @@ print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["M
     break
   fi
 done
+# Number of the suite that was running where a machine log ends. The remote
+# runner numbers each start marker, so the latest one is the answer even when
+# earlier markers fell outside the ~100-line windows the log was read in; no
+# numbered marker is suite 0.
+gate_running_step() {
+  local log="$1" step
+  step="$(grep -oE 'GATE_STEP_START #[0-9]+' "$log" | tail -1 | tr -dc '0-9' || true)"
+  printf '%s\n' "${step:-0}"
+}
+
 if [ -z "$result" ]; then
   # Keep the evidence: the suite still running when the budget ran out is the
   # one to diagnose, and --rm destroys the machine the moment this script exits.
-  running_step="$(grep -oE 'GATE_STEP_START .*' "$MACHINE_LOG" | wc -l | tr -d ' ')"
+  running_step="$(gate_running_step "$MACHINE_LOG")"
   if [ "$running_step" -gt 0 ]; then
     step_log="${MACHINE_LOG%.log}-step-$running_step.partial.log"
     if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
