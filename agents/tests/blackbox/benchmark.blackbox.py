@@ -13902,6 +13902,39 @@ def test_local_simulate_wmh_env_uses_complete_corpus_and_skips_gepa():
     # No explicit model: the worker still needs a name at fork time (its WMH
     # adapter reads WMH_MODEL_NAME from its process env at the first boundary).
     assert pinned["WMH_MODEL_NAME"] == "rose-archive"
+    assert "BENCHMARK_SKIP_WMH_BUILD" not in env
+
+    # An operator-owned, already-healthy WMH replaces run.sh's served port for
+    # the worker and the benchmark runner; run.sh then neither serves nor owns it.
+    from benchmarks.local import apply_manifest_environment
+
+    saved = {key: os.environ.get(key) for key in ("WMH_EXTERNAL_BASE_URL", "WMH_BASE_URL", "WMH_MODEL_NAME")}
+    try:
+        os.environ["WMH_EXTERNAL_BASE_URL"] = "http://127.0.0.1:28690/"
+        external: dict = {}
+        apply_local_simulate_wmh_env(external, base_port=54100, world_model_name="rose-archive")
+        assert external["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        assert external["BENCHMARK_SKIP_WMH_BUILD"] == "1"
+        os.environ.pop("WMH_BASE_URL", None)
+        apply_manifest_environment({"urls": {}})
+        assert os.environ["WMH_BASE_URL"] == "http://127.0.0.1:28690"
+        # A run.sh-served WMH in the manifest stays authoritative.
+        apply_manifest_environment({"urls": {"wmh": "http://localhost:54106"}})
+        assert os.environ["WMH_BASE_URL"] == "http://localhost:54106"
+        for invalid in ("http://10.0.0.5:28690", "https://127.0.0.1:28690", "http://127.0.0.1"):
+            os.environ["WMH_EXTERNAL_BASE_URL"] = invalid
+            try:
+                apply_local_simulate_wmh_env({}, base_port=54100)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted non-loopback external WMH {invalid}")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_local_service_start_timeout_extends_only_for_first_wmh_build():

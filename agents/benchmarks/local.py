@@ -1969,7 +1969,7 @@ def apply_manifest_environment(manifest: dict) -> None:
     # World Model Harness: when run.sh served the WMH (benchmark/simulate builds),
     # the manifest carries its URL. Inject WMH_BASE_URL/WMH_MODEL_NAME so the
     # benchmark subprocess (run_benchmark.py) resolves the auto-served server.
-    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or ""
+    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or external_wmh_base_url()
     if wmh_url:
         os.environ["WMH_BASE_URL"] = str(wmh_url).rstrip("/")
         wmh_model = manifest.get("wmh_model_name") if isinstance(manifest, dict) else None
@@ -2572,6 +2572,14 @@ def resolve_simulate_mode(simulate_flag: bool, task_names: Sequence[str]) -> boo
     return False
 
 
+def external_wmh_base_url() -> str:
+    """Opt-in loopback URL of an already-served WMH (WMH_EXTERNAL_BASE_URL)."""
+    value = (os.environ.get("WMH_EXTERNAL_BASE_URL") or "").strip().rstrip("/")
+    if value and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):[1-9][0-9]{1,4}", value):
+        raise ValueError("WMH_EXTERNAL_BASE_URL must be a loopback http://host:port URL")
+    return value
+
+
 def apply_local_simulate_wmh_env(
     env: dict[str, str],
     *,
@@ -2585,7 +2593,15 @@ def apply_local_simulate_wmh_env(
     +6 offset.
     """
     env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
-    env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
+    external = external_wmh_base_url()
+    if external:
+        # An operator-owned WMH that is already healthy (for example a native
+        # model loaded in a RAM-bounded scope whose cold load exceeds run.sh's
+        # readiness bound). run.sh neither serves nor owns it.
+        env["WMH_BASE_URL"] = external
+        env["BENCHMARK_SKIP_WMH_BUILD"] = "1"
+    else:
+        env["WMH_BASE_URL"] = f"http://localhost:{base_port + 6}"
     # The worker's WMH adapter (helpers/world_model_runtime.py:from_env) needs
     # WMH_MODEL_NAME at fork time or the first simulated boundary tool raises
     # "WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME". run.sh only
