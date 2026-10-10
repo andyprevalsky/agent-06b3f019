@@ -6707,6 +6707,45 @@ def test_in_progress_phone_call_counts_as_live_stall_activity():
     assert TASK_TIMEOUT_FLOORS[hold.name] == 12600
 
 
+async def test_in_flight_world_model_prediction_counts_as_live_stall_activity():
+    """A leaf waiting on a simulated tool must not trip tree-stall while the WMH predicts it.
+
+    Local repro (raise-5m-rose-labs-brex, 2026-10-10, run ee95747b): the run failed
+    at 1099s with ``tree stalled ... silent for 525s (threshold=510s)`` while the
+    native WMH session was still predicting a queued explore (19 predictions,
+    revisions advancing). The runner reads the seeded session's activity.
+    """
+    import httpx
+
+    from benchmarks.run_benchmark import tree_stall_exceeded, world_model_operations_in_flight
+
+    owned = {"base_url": "http://wmh:28690/", "model_name": "rose-archive", "session_id": "s1"}
+    replies = {"activity": (200, {"revision": 7, "operations_in_flight": 2})}
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        status, body = replies["activity"]
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await world_model_operations_in_flight(owned, client=client) == 2
+        assert seen == ["http://wmh:28690/world_models/rose-archive/sessions/s1/activity"]
+        replies["activity"] = (200, {"revision": 7, "operations_in_flight": 0})
+        assert await world_model_operations_in_flight(owned, client=client) == 0
+        for status, body in ((404, {"detail": "Unknown session"}), (200, {"operations_in_flight": True}), (200, [])):
+            replies["activity"] = (status, body)
+            assert await world_model_operations_in_flight(owned, client=client) is None
+    assert await world_model_operations_in_flight(None) is None
+
+    limit = 510
+    # The leaf and tree cost are silent, but the world model is still predicting.
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=15, limit=limit)
+    # A genuinely dead tree still fails fast.
+    assert tree_stall_exceeded(tree_idle=525, cost_idle=525, world_model_idle=525, limit=limit)
+    assert not tree_stall_exceeded(tree_idle=525, cost_idle=30, world_model_idle=525, limit=limit)
+
+
 async def test_declared_evaluator_hydrates_claude_code_sessions():
     """Transcript static checks hydrate Claude Code sessions before grading."""
     from dataclasses import replace
@@ -22199,6 +22238,10 @@ async def run_all_tests():
     r.record(
         "in_progress_phone_call_counts_as_live_stall_activity",
         test_in_progress_phone_call_counts_as_live_stall_activity,
+    )
+    await r.record_async(
+        "in_flight_world_model_prediction_counts_as_live_stall_activity",
+        test_in_flight_world_model_prediction_counts_as_live_stall_activity,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",

@@ -20,7 +20,9 @@ every such call:
 Each abandoned attempt is followed by one ``restart`` chunk telling the consumer
 to drop what it accumulated. Only consumers that understand ``restart`` opt in
 (``RoseClient.collect`` does, for every collected call); a plain-text reply is
-never retried here, since a cut-off answer is still a partial answer.
+never retried here, since a cut-off answer is still a partial answer, unless
+its caller declares the whole reply to be the result (``result_required``,
+e.g. a world-model JSON document).
 """
 
 from __future__ import annotations
@@ -60,9 +62,9 @@ def model_key(model: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", name)
 
 
-def needs_result(*, tools: Any, tool_choice: Any, response_model: Any) -> bool:
+def needs_result(*, tools: Any, tool_choice: Any, response_model: Any, result_required: bool = False) -> bool:
     """True for calls whose reply is only usable as a tool call or structured result."""
-    if response_model is not None:
+    if response_model is not None or result_required:
         return True
     return bool(tools) and tool_choice != "none"
 
@@ -82,10 +84,13 @@ async def recover_truncated(
     kwargs: Dict[str, Any],
 ) -> AsyncIterator[StreamChunk]:
     """Run ``attempt(**kwargs)`` under the cut-off policy above, streaming live."""
+    kwargs = dict(kwargs)
+    result_required = bool(kwargs.pop("result_required", False))
     if not needs_result(
         tools=kwargs.get("tools"),
         tool_choice=kwargs.get("tool_choice"),
         response_model=kwargs.get("response_model"),
+        result_required=result_required,
     ):
         async with aclosing(attempt(**kwargs)) as stream:
             async for chunk in stream:

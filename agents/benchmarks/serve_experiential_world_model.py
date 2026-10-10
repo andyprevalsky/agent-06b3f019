@@ -158,6 +158,15 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
                 "revision": session.revision,
             }
 
+    @app.get("/world_models/{model_name}/sessions/{session_id}/activity")
+    def session_activity(model_name: str, session_id: str):
+        # Cheap liveness for benchmark stall detection; never the world state.
+        if model_name != name or session_id not in model.sessions:
+            raise HTTPException(404, "Unknown session")
+        session = model.sessions[session_id]
+        in_flight = sum(1 for _, operation in session.receipts.values() if not operation.done())
+        return {"revision": session.revision, "operations_in_flight": in_flight}
+
     @app.delete("/world_models/{model_name}/sessions/{session_id}")
     async def end_session(model_name: str, session_id: str):
         if model_name != name or (session_id not in model.sessions and session_id not in model.retired):

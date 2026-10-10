@@ -347,7 +347,10 @@ class _WMHCacheSafeRoseClient(RoseClient):
         actual_model = ""
         async for chunk in super()._complete_impl(**kwargs):
             if is_wmh:
-                if chunk.kind == "content":
+                if chunk.kind == "restart":
+                    # Rose abandoned a cut-off attempt; validate only its replacement.
+                    content_parts, usage, actual_model = [], {}, ""
+                elif chunk.kind == "content":
                     content_parts.append(chunk.data.get("text", ""))
                 elif chunk.kind == "metadata":
                     actual_model = chunk.data.get("actual_model", "")
@@ -747,6 +750,9 @@ class RoseWMHProvider:
                 call_site=_WMH_CALL_SITES[self._protocol],
                 dump_context=False,
                 cache_namespace=cache_namespace,
+                # The whole reply is one JSON transition: a cut-off gets Rose's
+                # shared recovery (larger output limit, then the next model).
+                result_required=True,
             )
         except _WMHInvalidPrediction as exc:
             self._record_usage(exc.usage, exc.actual_model)

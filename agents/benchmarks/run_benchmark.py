@@ -256,6 +256,39 @@ def has_in_progress_phone_call(messages: list | None) -> bool:
     return False
 
 
+async def world_model_operations_in_flight(
+    owned: Optional[dict], *, client: Optional[httpx.AsyncClient] = None
+) -> Optional[int]:
+    """Live native WMH operations in this run's seeded world, or None when unknown.
+
+    A simulated tool is one blocking WMH step: its waiting leaf emits nothing and
+    tree LLM cost does not move while the world model predicts it, so tree-stall
+    early-fail must count an in-flight prediction as activity.
+    """
+    if not owned:
+        return None
+    url = (
+        f"{str(owned['base_url']).rstrip('/')}/world_models/{owned['model_name']}"
+        f"/sessions/{owned['session_id']}/activity"
+    )
+    try:
+        if client is None:
+            async with httpx.AsyncClient(timeout=5) as owned_client:
+                response = await owned_client.get(url)
+        else:
+            response = await client.get(url, timeout=5)
+        body = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    value = body.get("operations_in_flight") if isinstance(body, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def tree_stall_exceeded(*, tree_idle: float, cost_idle: float, world_model_idle: float, limit: float) -> bool:
+    """Every progress signal (leaf messages, tree LLM cost, WMH predictions) is quiet past the limit."""
+    return min(tree_idle, cost_idle, world_model_idle) > limit
+
+
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
 
@@ -4388,6 +4421,7 @@ async def _poll_agent(
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
     last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
+    last_world_model_activity_time = start  # in-flight WMH predictions (simulated tools)
     prev_tree_message_count = 0
     prev_tree_agent_count = 0
     prev_tree_cost = 0
@@ -4738,6 +4772,10 @@ async def _poll_agent(
                 prev_tree_cost = tree_cost
                 last_cost_change_time = now
 
+            if await world_model_operations_in_flight(getattr(task, "_wmh_owned_session", None)):
+                activity_detected = True
+                last_world_model_activity_time = now
+
             if activity_detected:
                 last_activity_time = now
             prev_root_message_count = root_msg_count
@@ -4815,7 +4853,13 @@ async def _poll_agent(
                 max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
                 cost_idle = now - last_cost_change_time
-                if tree_idle > stall_limit_seconds and cost_idle > stall_limit_seconds:
+                world_model_idle = now - last_world_model_activity_time
+                if tree_stall_exceeded(
+                    tree_idle=tree_idle,
+                    cost_idle=cost_idle,
+                    world_model_idle=world_model_idle,
+                    limit=stall_limit_seconds,
+                ):
                     # All leaves silent — pick the staffer leaf (most recent
                     # activity) to surface in the error message.
                     stuck_aid = max(
@@ -4828,6 +4872,7 @@ async def _poll_agent(
                         f"tree stalled — newest-active {role} {stuck_aid[:12]} "
                         f"silent for {tree_idle:.0f}s (threshold={stall_limit_seconds}s, "
                         f"cost_idle={cost_idle:.0f}s, "
+                        f"world_model_idle={world_model_idle:.0f}s, "
                         f"status={stuck_st.get('status', '?')}, "
                         f"messages={stuck_st.get('count', '?')}, "
                         f"non_terminal_leaves={len(leaves)})"

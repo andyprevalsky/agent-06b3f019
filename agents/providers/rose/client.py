@@ -891,6 +891,7 @@ class RoseClient:
         chunks; everyone else gets exactly one attempt, as before.
         """
         if not kwargs.pop("recover_truncation", False):
+            kwargs.pop("result_required", None)
             async with aclosing(self._complete_once(**kwargs)) as stream:
                 async for chunk in stream:
                     yield chunk
@@ -2251,9 +2252,14 @@ class RoseClient:
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        result_required: bool = False,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
-        non-streaming callers who don't care about incremental chunks."""
+        non-streaming callers who don't care about incremental chunks.
+
+        `result_required` declares a plain reply that is itself the result (for
+        example a JSON document), so an output-limit cut-off gets the shared
+        recovery in `providers/rose/truncation.py` instead of a partial reply."""
         result = RoseResponse()
         structured_output = StructuredOutputAccumulator() if response_model is not None else None
         async for chunk in self.complete(
@@ -2276,6 +2282,7 @@ class RoseClient:
             dump_extra=dump_extra,
             cache_namespace=cache_namespace,
             recover_truncation=True,
+            result_required=result_required,
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()

@@ -1303,6 +1303,38 @@ def test_invalid_prediction_is_rejected_before_cache_done(monkeypatch, content, 
     assert not any(chunk.kind == "done" for chunk in observed), "invalid output reached the cache write marker"
 
 
+def test_cut_off_attempt_is_dropped_before_validating_the_recovered_prediction(monkeypatch):
+    from providers.rose import RoseClient
+    from providers.rose.types import StreamChunk
+
+    transition = json.dumps(
+        {
+            "message": "",
+            "tool_results": [{"call_id": "call-1", "content": "research memo", "is_error": False}],
+            "state": {},
+            "terminal": False,
+        }
+    )
+
+    async def fake_complete_impl(self, **kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-6.1-sol"})
+        yield StreamChunk(kind="content", data={"text": transition[:40]})
+        yield StreamChunk(kind="restart", data={"reason": "output_limit", "stage": "larger_limit"})
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-6.1-sol"})
+        yield StreamChunk(kind="content", data={"text": transition})
+        yield StreamChunk(kind="usage", data={"completion_tokens": 20000, "finish_reason": "stop"})
+        yield StreamChunk(kind="done")
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", fake_complete_impl)
+    client = object.__new__(wmh_rose_provider._WMHCacheSafeRoseClient)
+
+    async def run():
+        return [chunk async for chunk in client._complete_impl(call_site="wmh_world_model_v3")]
+
+    chunks = asyncio.run(run())
+    assert [chunk.kind for chunk in chunks][-1] == "done"
+
+
 def test_stream_rejection_retains_usage_without_credentials(monkeypatch):
     error = wmh_rose_provider._WMHInvalidPrediction(
         "empty visible content",
@@ -1349,6 +1381,9 @@ def test_default_budget_leaves_room_for_reasoning_and_terminal_json(monkeypatch,
     assert completion.text == content
     assert _WMH_MAX_TOKENS == 16_384
     assert fake_client.calls[0]["max_tokens"] == 16_384
+    # A world-model reply is one JSON document: a cut-off is unusable, so Rose's
+    # shared cut-off recovery (larger limit, then next model) must apply.
+    assert fake_client.calls[0]["result_required"] is True
 
 
 def test_rose_wmh_provider_allows_overlapping_llm_calls(monkeypatch):

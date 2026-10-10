@@ -793,6 +793,80 @@ def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations()
     asyncio.run(run())
 
 
+def test_slow_operation_outlives_its_first_caller_and_the_retry_rejoins_it():
+    """A long prediction is not killed by an operation deadline; the caller's retry joins it."""
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def complete(request):
+            calls.append(request)
+            entered.set()
+            await release.wait()
+            return reply(request, {"researched": True}, "memo")
+
+        model = ParallelWorldModel(complete, Retriever())
+        s = model.new_session("Explore investors", {}, "root")
+        first = asyncio.create_task(model.step(s.id, action(1), "explore"))
+        await asyncio.wait_for(entered.wait(), 2)
+        # The first HTTP caller times out and Temporal retries the activity.
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        loop = asyncio.get_running_loop()
+        clock = loop.time
+        loop.time = lambda: clock() + 3600
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+        finally:
+            del loop.time
+        retry = asyncio.create_task(model.step(s.id, action(1), "explore"))
+        release.set()
+        result = await asyncio.wait_for(retry, 2)
+        assert result["content"] == "memo" and len(calls) == 1 and s.revision == 1
+
+    asyncio.run(run())
+
+
+def test_served_activity_reports_operations_still_in_flight():
+    """Benchmark stall detection reads this: a leaf waiting on a prediction is not stalled."""
+    import httpx
+
+    from benchmarks.serve_experiential_world_model import create_app
+
+    async def run():
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def complete(request):
+            entered.set()
+            await release.wait()
+            e = json.loads(request.messages[1].content)
+            state = deepcopy(e["environment_state"])
+            state["count"] = state.get("count", 0) + 1
+            return reply(request, state)
+
+        model = ParallelWorldModel(complete, Retriever())
+        s = model.new_session("Explore", {}, "root")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app("rose", model)), base_url="http://wmh"
+        ) as http:
+            url = f"/world_models/rose/sessions/{s.id}/activity"
+            assert (await http.get(url)).json() == {"revision": 0, "operations_in_flight": 0}
+            work = [asyncio.create_task(model.step(s.id, action(n), f"inv-{n}")) for n in (1, 2)]
+            await asyncio.wait_for(entered.wait(), 2)
+            assert (await http.get(url)).json() == {"revision": 0, "operations_in_flight": 2}
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*work), 2)
+            assert (await http.get(url)).json() == {"revision": 2, "operations_in_flight": 0}
+            assert (await http.get("/world_models/rose/sessions/missing/activity")).status_code == 404
+            assert (await http.get(f"/world_models/other/sessions/{s.id}/activity")).status_code == 404
+
+    asyncio.run(run())
+
+
 def test_declared_capacity_rejects_required_context_without_truncation():
     from exp.common.models import ModelCapabilities
     from exp.simulation.world_model.runtime import WorldModelCapacityError

@@ -290,9 +290,12 @@ class ParallelWorldModel:
         return deepcopy(await asyncio.shield(operation))
 
     async def _step(self, session, key, action, candidate, draw):
+        # No operation deadline: every provider call carries Rose's own deadline,
+        # an operation rebases at most once and repairs its protocol once, and the
+        # turn queue only waits on such bounded operations. A caller whose HTTP
+        # request timed out rejoins the same operation through its invocation.
         try:
-            async with asyncio.timeout(600):
-                return await self._step_with_rebase(session, key, action, candidate, draw)
+            return await self._step_with_rebase(session, key, action, candidate, draw)
         finally:
             # Synchronous on the session's loop, so a second cancellation cannot
             # strand the turn on a finished operation.
@@ -316,8 +319,7 @@ class ParallelWorldModel:
         intervals = []
         # Conflicts are resolved oldest first: a discarded operation predicts
         # again only when it owns the turn, and no other operation commits
-        # meanwhile, so each operation rebases at most once. The enclosing
-        # 600-second budget bounds waiting for the turn.
+        # meanwhile, so each operation rebases at most once.
         for attempt in count():
             while True:
                 async with session.lock:

@@ -5750,6 +5750,31 @@ async def test_collect_stops_retrying_once_the_larger_limit_is_enough():
     assert response.content == '{"answer":"ok"}', response.content
 
 
+async def test_collect_recovers_a_cut_off_reply_that_is_itself_the_result():
+    """A plain reply declared as the whole result (a JSON document) is unusable when cut off."""
+    seen: list = []
+    set_mock_handler(
+        _cut_off_recovery_handler(
+            {
+                ("qwen/qwen3.8-27b", 16384): ('{"outcomes": [{"tool_results": "cut', "length"),
+                ("qwen/qwen3.8-27b", 32000): ('{"outcomes": []}', "stop"),
+            },
+            seen,
+        )
+    )
+    response = await RoseClient(openrouter_key="ork-x").collect(
+        pool="rose-1-flash",
+        messages=[{"role": "user", "content": "simulate"}],
+        max_tokens=16384,
+        call_site="test-cut-off-whole-result",
+        result_required=True,
+    )
+
+    assert seen == [("qwen/qwen3.8-27b", 16384), ("qwen/qwen3.8-27b", 32000)], seen
+    assert response.content == '{"outcomes": []}', response.content
+    assert len(response.usage.get("abandoned_attempts") or []) == 1, response.usage
+
+
 async def test_cut_off_recovery_leaves_plain_text_and_non_opted_streams_alone():
     """A cut-off answer in prose is still a partial answer; streams that cannot restart get one attempt."""
     from pydantic import BaseModel
@@ -8377,6 +8402,9 @@ async def run_all_tests():
     )
     await r.record_async(
         "collect_cut_off_larger_limit_is_enough", test_collect_stops_retrying_once_the_larger_limit_is_enough
+    )
+    await r.record_async(
+        "collect_cut_off_whole_result_reply", test_collect_recovers_a_cut_off_reply_that_is_itself_the_result
     )
     await r.record_async(
         "cut_off_recovery_skips_plain_text_and_plain_streams",
