@@ -22,6 +22,11 @@ from pathlib import Path
 
 # Bound for the native child to retire open sessions through the bridge on shutdown.
 _CHILD_RETIRE_SECONDS = 60
+# The child drops idle bridge connections before the bridge closes them. With
+# equal idle timeouts a reused connection can close mid-request ("Server
+# disconnected without sending a response").
+PROVIDER_CLIENT_KEEPALIVE_SECONDS = 5.0
+PROVIDER_SERVER_KEEPALIVE_SECONDS = 30
 
 
 def pool_sha256(pool):
@@ -158,6 +163,7 @@ def serve_native(name, root, pool, port):
         host="127.0.0.1",
         log_level="warning",
         timeout_graceful_shutdown=10,
+        timeout_keep_alive=PROVIDER_SERVER_KEEPALIVE_SECONDS,
     )
 
     class OwnedServer(uvicorn.Server):

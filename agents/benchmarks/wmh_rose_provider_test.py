@@ -1137,6 +1137,25 @@ def test_native_provider_bridge_returns_typed_protocol_feedback():
         assert response.status_code == 422 and response.json()["detail"]["kind"] == "invalid_prediction"
 
 
+def test_native_child_drops_idle_bridge_connections_before_the_bridge_closes_them():
+    """Equal 5-second idle timeouts let a reused connection close mid-request.
+
+    Fundraiser run 291bb810 (2026-10-10) logged ``Server disconnected without
+    sending a response`` on a child-to-bridge call; a local uvicorn/httpx loop
+    with equal idle timeouts failed 2-4 of 40 boundary-spaced requests and 0 of
+    40 once the server idle timeout outlived the client's.
+    """
+    import inspect
+    from pathlib import Path
+
+    from benchmarks import experiential_bridge
+
+    assert experiential_bridge.PROVIDER_SERVER_KEEPALIVE_SECONDS >= 2 * experiential_bridge.PROVIDER_CLIENT_KEEPALIVE_SECONDS
+    assert "timeout_keep_alive=PROVIDER_SERVER_KEEPALIVE_SECONDS" in inspect.getsource(experiential_bridge.serve_native)
+    child = (Path(__file__).parent / "serve_experiential_world_model.py").read_text()
+    assert "keepalive_expiry=PROVIDER_CLIENT_KEEPALIVE_SECONDS" in child
+
+
 def test_native_service_owner_joins_child_on_shutdown(tmp_path):
     import os
     import socket

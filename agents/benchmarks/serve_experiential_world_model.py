@@ -26,6 +26,7 @@ from benchmarks.build_experiential_world_model import (
     model_snapshot,
     redact_archive,
 )
+from benchmarks.experiential_bridge import PROVIDER_CLIENT_KEEPALIVE_SECONDS
 from benchmarks.experiential_world_model import ParallelWorldModel, RetiredWorldModelScope, RoseNativeRetriever
 from benchmarks.wmh_execution_policy import DEFAULT_EXECUTION_POLICY, execution_identity, execution_policy
 
@@ -218,6 +219,7 @@ def main():
         base_url=args.provider_url,
         headers={"X-Rose-Provider-Token": os.environ["WMH_PROVIDER_BRIDGE_TOKEN"]},
         timeout=660,
+        limits=httpx.Limits(keepalive_expiry=PROVIDER_CLIENT_KEEPALIVE_SECONDS),
         trust_env=False,
     )
 
