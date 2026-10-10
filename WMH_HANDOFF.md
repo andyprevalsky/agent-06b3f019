@@ -1,6 +1,7 @@
 # WMH continuation branch
 
-Current continuation branch: `codex/wmh-experiential-parallel-20261006`.
+Current continuation branch: `codex/wmh-experiential-parallel-20261006`
+(continued from the `wmh-resume` devbox worktree; resume at the October 9-10 section).
 The original diagnostic handoff was `codex/wmh-handoff-20261006`; that is an
 ancestor, not the latest continuation checkpoint.
 
@@ -18,33 +19,113 @@ corpus reports, and build metadata are in
 `docs/plans/active/wmh-evidence-20261006/README.md` and the adjacent files.
 This branch is WIP; its WMH changes have not been deployed.
 
-## October 9 Linux devbox continuation
+## October 9-10 Linux devbox continuation: resume here
 
-Work moved to a boxes.dev Linux devbox (8 vCPU, 15 GB RAM). The Mac-only model
-artifact, October 6 fixture dump and stopped containers are not reachable
-there, so the user chose a 44 GB swapfile (`/swapfile-wmh`, not persistent)
-and a fresh native rebuild from the complete eligible R2 archive. The
-cache baseline must therefore be re-measured on this infrastructure.
+Work moved to a boxes.dev Linux devbox (8 vCPU, 15.6 GB RAM). The Mac-only model,
+October 6 fixture dump and stopped containers were unreachable, so the native
+model was rebuilt from the complete eligible R2 archive and the cache baseline
+was re-measured on identical devbox infrastructure. Nothing was deployed or merged.
 
-Cache conditions are exact commits on `wmh-resume` (each passed the registered
-WMH blackbox, native 37 / provider 89 or 100):
+### Devbox memory protocol
 
-| Condition | Commit | Provider source SHA-256 |
-| --- | --- | --- |
-| i0 stable-task marker only | `dceea3f14` | `9186ce17…` |
-| i1 + full-task marker | `cd6292196` | `f4f37226…` (reviewed) |
-| i2 completed history batches | `58b889713` | `9cb78043…` (reviewed) |
-| i3 retrieval before history | `44f60d04e` | `424415aa…` (reviewed) |
+The devbox's `oom-score-watcher` SIGTERMs the largest workload process once the
+workload cgroup nears its 15.17 GB limit, regardless of swap; it killed the first
+native build at 13.6 GB RSS. Run memory-heavy WMH work in its own scope outside
+the workload slice: `sudo systemd-run --scope -p MemoryHigh=10G
+-p MemorySwapMax=infinity --uid=boxes --gid=boxes -- <script>`, with
+`/swapfile-wmh` (44 GB) and `/swapfile-wmh2` (10 GB) enabled and zswap on (none
+are persistent). Keep machine `MemAvailable` above ~1.1 GB (lower the scope's
+`MemoryHigh` live with `systemctl set-property --runtime`). A cold native WMH load
+takes 728-799 s here, longer than `run.sh`'s 600-second WMH readiness bound, so
+each run uses an external WMH: start `serve_world_model` in a scope with the
+env `run.sh` would pass (run backend on the run's base port, simulate cache
+scope, write-through disabled), wait for `/healthz`, then launch the unchanged
+benchmark with `WMH_EXTERNAL_BASE_URL=http://127.0.0.1:<port>`. Stop it by
+sending TERM to the exact `serve_world_model` owner PID listed in the scope's
+`cgroup.procs` (a transient scope has no main PID, so `systemctl kill
+--kill-whom=main` does nothing; `systemctl stop` kills the native child before it
+can retire sessions). Helpers and logs: `.context/wmh-resume-20261009/`.
 
-The original Mac baseline source (`6996f338…`) is not recoverable from Git;
-i0 differs from i1 only by the full-task marker. The unchanged history-prefix
-reproduction failed 2/5 on i1 and passes 5/5 on i2/i3; its 11 guards are now
-in `wmh_rose_provider_test.py`. Every run uses one frozen fixture source
-(canonical PG16 base `fc9dc500…-pg16-victoria-prod-sync-v1-whatsapp-v2` plus a
-read-only prod sync of Tamy's account rows, dump SHA-256 `d84ce812…`), a fresh
-per-run DEMO cache in the run's own `victoria_bench_<run>` database (the
-canonical base has zero cache rows), Temporal Cloud with a per-run queue, and
-`.context/wmh-resume-20261009/{launch.sh,measure.py}`.
+### Rebuilt model
+
+`grounded-world-model-785e30597233ee43e354` (manifest `cdc82bf8…`, RAG
+`trace-rag-5e34d90680843a762f86`): 13,857 trajectories / 201,546 observations
+(13,866 exported; 9 DEMO-fixture trajectories excluded; 108 bundles excluded for
+the known ciphertext checksum mismatch). Corpus conformance passed (100 samples,
+10 categories, 47 tools, 0 invalid); `conformance.native.json` binds all 100
+cases. The first full build failed at binding: the suite writer's broad base64
+redaction rewrote non-secret artifact paths and fingerprints. Examples now stay
+exact (non-binding task/scratchpad/state keep public redaction; real secrets
+fail closed), and public exports now redact root goals and scratchpads (a real
+archived goal carried a Bearer JWT; the native import had already kept it out
+of the served dataset).
+
+### Five-minute cache experiment (complete)
+
+Run commits are each cache condition plus the external-WMH runner commit;
+provider sources match the reviewed SHAs. Same model, fixture, fresh DEMO cache,
+Temporal Cloud queue and external-WMH serving for all four. Rates use `llm.cache`
+rows for `wmh_world_model_distribution_v1` with `cache_total_input` as the
+denominator; each run also had one cancelled native call without final usage.
+
+| Condition | Provider cached / input | Rate | Cached requests | Output | DEMO hits / lookups (stores) | Root / verified FE messages |
+| --- | --- | --- | --- | --- | --- | --- |
+| i0 stable-task marker | 5,468 / 56,331 | 9.71% | 4/5 | 40,607 | 0/6 (5) | `df2c1cc5` / 20 |
+| i1 + full-task marker | 2,879 / 31,073 | 9.27% | 2/3 | 20,332 | 0/4 (3) | `4cb095f0` / 17 |
+| i2 + history batches | 7,119 / 57,247 | 12.44% | 4/5 | 36,788 | 0/6 (5) | `76cc9168` / 20 |
+| i3 retrieval before history | 2,726 / 27,092 | 10.06% | 2/3 | 22,074 | 0/4 (3) | `351f7070` / 17 |
+
+All four timed out at the authorized 300-second cap with $0 settled, joined
+native retirement and clean benchmark/stack cleanup. With 3-5 metered calls per
+window these are single-sample diagnostics: reads were mostly the ~1.36k-token
+stable prefix (i2 read 1,918 three times), and none approaches the offline
+31-57% estimates, which assumed a 30-minute run's long history. The branch keeps
+the i3 layout. Exact identities and links:
+`docs/plans/active/wmh-evidence-20261006/cache-optimization-20261009/results.json`.
+
+### Merged-code acceptance (October 10)
+
+Run on `wmh-resume-merge` with the rebuilt model and an external WMH; portable
+receipts in `docs/plans/active/wmh-evidence-20261006/merged-acceptance-20261010.json`.
+
+- **Matching conformance passed**: the v2-bound suite
+  (`rose-outcome-distribution-v2`, execution `a856573d…`) scored 100/100
+  successful predictions, mean fidelity 0.8569 and content accuracy 0.5147
+  (floors 0.70/0.25), schema 1.0, state transitions 1.0, artifact refs 0.92,
+  error behaviour 0.85; 101 calls, $4.69 accumulator cost, 917 s at concurrency 8.
+  Session retirement receipts are not proven for this run: the evaluator never
+  ends its sessions and the server was stopped cgroup-wide. The underlying
+  shutdown-order defect is fixed (below); a rerun with an exact-owner stop
+  would produce the receipts.
+- **Fundraiser failed**: run `35efd4de-f23e-40db-b5d4-92002e79e715`, root
+  `6f3597a6-2fb4-4f29-9a9b-e07420259eb2`, `Timeout after 1802s (dynamic
+  cap=1800s)`, $0 settled, no commitments, instruments, wires or deposits.
+  The native world joined at revision 22 (15 explore, 4 browser, 2 SMS notify,
+  1 email). The root emailed Andy for investor introductions and answered the
+  simulated reply and introduction thread; Brex stayed at $0. WMH provider
+  prompt cache **254,756 / 1,246,273 metered input tokens (20.44%)**, 40/41
+  metered requests (October 8: 0/1,813,251); DEMO cache **0/44** lookups, 41
+  stores; 44 native attempts, 5 cancelled. Benchmark and stack cleanup clean;
+  the WMH retired after an exact-owner TERM.
+- **Viewer replay verified**: every durable share link above (four cache runs
+  and the fundraiser) rendered in a fresh browser via
+  `scripts/publish_evidence_links.py`. The fundraiser link is
+  https://www.roselabs.ai/?agent-id=6f3597a6-2fb4-4f29-9a9b-e07420259eb2#benchmark-share=35efd4de-f23e-40db-b5d4-92002e79e715.1794192914.e968e2b1eb4de66f430a17818b045c32ac04e78221cc6ca791e2eafaed977c46
+  (33 messages). The archive-lookup fix for share-less `?agent-id=` links is
+  still undeployed.
+
+Additional fixes from this continuation, each with an owning test: native
+service shutdown now retires open sessions before its provider bridge stops;
+local simulate runs accept an operator-owned `WMH_EXTERNAL_BASE_URL`; and
+`publish_evidence_links.py` keeps renders under `.context/rca_evidence` when the
+Cursor artifact mount is absent.
+
+### Still open
+
+- The $5M fundraiser goal is unmet; deployment and merge remain held.
+- Conformance session-retirement receipts (rerun with an exact-owner stop).
+- The 108 remote checksum exclusions; deferred nonzero warm-network environment.
+- Cloud follow-ups from the pre-service review (below).
 
 ### Current main integration (`wmh-resume-merge`)
 
@@ -87,7 +168,10 @@ the live checkout's `pools.py` rather than the guest's exact ref, and an
 uncapped `--refresh-wmh` can exceed its 1,800-second `ssh_exec` bound while
 holding the app-env lock.
 
-## October 8 checkpoint: resume here
+## October 8 checkpoint (superseded)
+
+The cache experiment, native rebuild, matching conformance and 1800-second
+fundraiser below were completed on October 9-10; see the section above.
 
 The user requested publishing all current work and instructions to a draft PR.
 **Do not deploy or merge.** The original $5M benchmark is still unsuccessful.

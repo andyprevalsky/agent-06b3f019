@@ -9,6 +9,19 @@ For a checkout from another branch, use the local Git worktree command in
 `WMH_HANDOFF.md`. Portable run records and reports are included under
 `docs/plans/active/wmh-evidence-20261006/`.
 
+## October 9-10 Linux devbox continuation
+
+`WMH_HANDOFF.md` is the resume point. On a 15.6 GB devbox the native model was
+rebuilt in a RAM-bounded systemd scope with swap (13,857 trajectories / 201,546
+observations, `grounded-world-model-785e30597233ee43e354`), and the four
+five-minute cache conditions were re-measured on identical infrastructure
+(provider prompt cache 9.71% / 9.27% / 12.44% / 10.06%; DEMO 0 hits each). Current
+main `470925c93` is integrated with full backend, agents and frontend coverage
+and every structural gate green. On the merged code the matching v2 conformance
+passed (100/100, fidelity 0.8569, content 0.5147) and the unchanged 1800-second
+fundraiser failed with $0 settled (provider prompt cache 20.44%, DEMO 0/44); all
+durable replays were verified in a fresh browser. Deployment and merge remain held.
+
 ## October 8 draft-PR continuation checkpoint
 
 The user requested publishing all WIP changes and continuation instructions.
