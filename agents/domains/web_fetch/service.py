@@ -253,9 +253,15 @@ async def _download_files_with_fast_cache(
         return results
 
     live = await download_files_batch(misses)
+    # A frozen DEMO namespace must not gain blobs or rows from a live miss.
+    write_allowed = fast_cache_client.cache_write_allowed(
+        fast_cache_normalize.goal_hash(fast_mode_goal), goal=fast_mode_goal
+    )
     for url in misses:
         body = live.get(url)
         results[url] = body
+        if not write_allowed:
+            continue
         key = fast_cache_normalize.file_key(fast_mode_goal, url)
         if body is None:
             await fast_cache_client.cache_set(

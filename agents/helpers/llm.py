@@ -2806,6 +2806,7 @@ async def call_llm_structured_streaming(
         deferred_fast_cache_key: Optional[str] = None
         deferred_fast_cache_goal_hash: Optional[str] = None
         deferred_fast_cache_goal_str: Optional[str] = None
+        deferred_fast_cache_root_goal_str: Optional[str] = None
         deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
         fast_cache_accumulate = None
         try:
@@ -2848,6 +2849,7 @@ async def call_llm_structured_streaming(
                 )
                 deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
                 deferred_fast_cache_goal_str = fast_cache_context.goal
+                deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
                 deferred_fast_cache_acc = fast_cache_empty_response()
         except Exception as exc:
             logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
@@ -3603,6 +3605,7 @@ async def call_llm_structured_streaming(
                     deferred_fast_cache_goal_hash,
                     deferred_fast_cache_acc,
                     goal=deferred_fast_cache_goal_str,
+                    root_goal=deferred_fast_cache_root_goal_str,
                 )
                 # Diagnostic: the goal STRING behind the goal_hash. A trajectory whose
                 # terminal call caches under a run-unique goal (timestamp/uuid leaking
@@ -4414,6 +4417,7 @@ async def _call_llm_verifier(
     deferred_fast_cache_key: Optional[str] = None
     deferred_fast_cache_goal_hash: Optional[str] = None
     deferred_fast_cache_goal_str: Optional[str] = None
+    deferred_fast_cache_root_goal_str: Optional[str] = None
     deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
     fast_cache_accumulate = None
     try:
@@ -4452,6 +4456,7 @@ async def _call_llm_verifier(
             )
             deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
             deferred_fast_cache_goal_str = fast_cache_context.goal
+            deferred_fast_cache_root_goal_str = fast_cache_context.root_goal
             deferred_fast_cache_acc = fast_cache_empty_response()
     except Exception as exc:
         logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
@@ -4604,6 +4609,7 @@ async def _call_llm_verifier(
                 deferred_fast_cache_goal_hash,
                 deferred_fast_cache_acc,
                 goal=deferred_fast_cache_goal_str,
+                root_goal=deferred_fast_cache_root_goal_str,
             )
             goal_preview = (deferred_fast_cache_goal_str or "")[:160]
             if stored_ok:

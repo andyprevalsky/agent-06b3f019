@@ -849,6 +849,14 @@ async def resolve_provider_fast_mode(agent_id: Optional[str]) -> bool:
         return True
 
 
+def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal: Optional[str] = None) -> bool:
+    """False for a DEMO replay namespace unless a deliberate re-recording is enabled."""
+    demo_namespace = goal_hash in normalize.demo_cache_goal_hashes() or normalize.soft_complete_allowed(
+        goal, root_goal=root_goal
+    )
+    return not demo_namespace or demo_recording_enabled()
+
+
 async def cache_set(
     key: str,
     kind: str,
@@ -860,10 +868,7 @@ async def cache_set(
     root_goal: Optional[str] = None,
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
-    demo_namespace = goal_hash in normalize.demo_cache_goal_hashes() or normalize.soft_complete_allowed(
-        goal, root_goal=root_goal
-    )
-    if demo_namespace and not demo_recording_enabled():
+    if not cache_write_allowed(goal_hash, goal=goal, root_goal=root_goal):
         # DEMO replay namespaces are frozen recordings (FAST_MODE_CACHE_RECORD_DEMO=1 re-records).
         logger.info("fast_cache.set_skipped_demo_namespace", key=key)
         return False

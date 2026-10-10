@@ -458,3 +458,38 @@ def test_web_fetch_file_download_write_only_stores_without_read(memwf, monkeypat
         assert len(memwf.blobs) == 1
 
     asyncio.run(body())
+
+
+def test_web_fetch_file_download_skips_frozen_demo_namespace(memwf, monkeypatch):
+    """A live DEMO-goal download returns its bytes without uploading a blob or row."""
+
+    async def body():
+        import domains.web_fetch.service as service
+        import providers.fast_cache.blob_store as blob_store
+        import providers.fast_cache.client as cclient
+
+        async def fake_download(urls):
+            return {url: b"LIVE-FILE-BYTES" for url in urls}
+
+        async def fake_upload_blob(path, body, content_type="application/octet-stream"):
+            memwf.blobs[path] = body
+            return True
+
+        monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+        monkeypatch.setattr(service, "download_files_batch", fake_download)
+        monkeypatch.setattr(cclient, "cache_get_record", memwf.get_record)
+        monkeypatch.setattr(cclient, "cache_set", memwf.set)
+        monkeypatch.setattr(blob_store, "upload_blob", fake_upload_blob)
+
+        out = await service._download_files_with_fast_cache(
+            ["https://x.com/report.pdf"],
+            fast_mode_cache_enabled=False,
+            fast_mode_goal=_soft_complete_bench_goal(),
+            fast_mode_cache_write_enabled=True,
+        )
+
+        assert out["https://x.com/report.pdf"] == b"LIVE-FILE-BYTES"
+        assert memwf.data == {}
+        assert memwf.blobs == {}
+
+    asyncio.run(body())
