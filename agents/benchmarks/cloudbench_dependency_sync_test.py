@@ -29916,7 +29916,7 @@ fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"
         assert (("link", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes())) == value
 
 
-@pytest.mark.parametrize("fault", ["none", "existing", "partial-existing", "foreign-existing", "nonprefix-existing", "foreign-guest", "generation"])
+@pytest.mark.parametrize("fault", ["none", "existing", "partial-existing", "foreign-existing", "nonprefix-existing", "foreign-guest", "generation", "replace-fails"])
 def test_boot_terminal_runtime_evidence_collects_complete_logs_recovery_driver(tmp_path: Path, fault: str) -> None:
     """The normal late-recovery transfer owns its original driver log too."""
     token, machine = "run-token", "fixture-machine"
@@ -29942,11 +29942,11 @@ def test_boot_terminal_runtime_evidence_collects_complete_logs_recovery_driver(t
         (output / name).write_text(json.dumps(owner))
     driver = destination / "cloudbench-driver.log"
     existing = b"RUNSTAMP-foreign\nretained original\n" if fault == "foreign-existing" else raw
-    if fault == "partial-existing":
+    if fault in ("partial-existing", "replace-fails"):
         existing = raw[:256]
     elif fault == "nonprefix-existing":
         existing = raw[:255] + b"X"
-    if fault in ("existing", "partial-existing", "foreign-existing", "nonprefix-existing"):
+    if fault in ("existing", "partial-existing", "foreign-existing", "nonprefix-existing", "replace-fails"):
         driver.write_bytes(existing)
         before = driver.stat()
     ready = tmp_path / "port"
@@ -29983,6 +29983,22 @@ raise SystemExit(module.main())
                                 fleet.index('            # Exact recovery may have stopped this guest'))
             end = fleet.index('        done\n    elif [ "$shutdown_status"', start)
             actual_transfer = fleet[start:end]
+            helper = ROOT / "scripts/cloudbench-collect-runtime-evidence.py"
+            if fault == "replace-fails":
+                # Fail the final publication after the private original link exists.
+                wrapper = tmp_path / "replace-fails.py"
+                wrapper.write_text(
+                    "import os, runpy, sys\n"
+                    "native = os.replace\n"
+                    "def failing(source, target, *args, **kwargs):\n"
+                    "    if str(target).endswith('cloudbench-driver.log'):\n"
+                    "        raise OSError('fixture publication failure')\n"
+                    "    return native(source, target, *args, **kwargs)\n"
+                    "os.replace = failing\n"
+                    f"sys.argv[0] = {str(helper)!r}\n"
+                    f"runpy.run_path({str(helper)!r}, run_name='__main__')\n"
+                )
+                helper = wrapper
             script = f"""set -euo pipefail
 output={shlex.quote(str(output))}
 recovery_index=0
@@ -29990,7 +30006,7 @@ recovery_proxy_ports=({int(ready.read_text())})
 recovery_guest_tokens=({token})
 recovery_machine_ids=({machine})
 recovery_benches=(fixture)
-RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-collect-runtime-evidence.py'))}
+RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(helper))}
 CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS=30
 shutdown_status=0
 {actual_transfer}
@@ -30006,14 +30022,17 @@ exit "$shutdown_status"
             else:
                 assert result.returncode != 0, "late recovery accepted a foreign or replaced driver log"
                 assert not (destination / "runtime-evidence").exists()
-                assert not driver.exists() or fault in ("foreign-existing", "nonprefix-existing")
+                assert not driver.exists() or fault in ("foreign-existing", "nonprefix-existing", "replace-fails")
                 leftovers = [path.name for path in destination.glob(".cloudbench-driver-*")
                              if not path.name.startswith(".cloudbench-driver-original-")]
                 assert not leftovers, f"failed collection left partial driver bytes: {leftovers}"
             assert json.loads((output / "runtime-evidence.pending").read_text()) == owner
             assert json.loads((output / "runtime-evidence.owner.json").read_text()) == owner
             preserved = list(destination.glob(".cloudbench-driver-original-*/cloudbench-driver.log"))
-            if fault == "partial-existing":
+            if fault == "replace-fails":
+                assert not preserved, "a failed publication must not keep the private original link"
+                assert driver.read_bytes() == existing, "a failed publication changed the original driver log"
+            elif fault == "partial-existing":
                 assert len(preserved) == 1, "the interrupted original prefix must remain private and byte-identical"
                 retained = preserved[0]
                 after = retained.stat()

@@ -84,7 +84,9 @@ class MemStore:
         self.get_calls += 1
         return self.data.get(key)
 
-    async def set(self, key: str, kind: str, goal_hash: str, value: Any) -> bool:
+    async def set(
+        self, key: str, kind: str, goal_hash: str, value: Any, *, goal: str | None = None, root_goal: str | None = None
+    ) -> bool:
         self.set_calls += 1
         self.data[key] = normalize.strip_secrets(value)
         return True
@@ -4374,6 +4376,14 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     assert asyncio.run(client.cache_set("demo-key", "llm", demo_hash, {"schema": {}})) is False
     child = context.FastCacheContext(enabled=True, goal="for_each child", root_goal=demo_goal, write_enabled=True)
     assert child.should_write is False
+    # Direct callers (browser-use, web search/fetch, files) pass their goal so an
+    # identity-bound OAi child goal is guarded even though its hash differs.
+    from utils.oai_demo import OAI_DEMO_CACHE_DISPLAY_NAME, OAI_DEMO_CHILD_GOAL_PREFIX
+
+    bound_child = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for {OAI_DEMO_CACHE_DISPLAY_NAME}"
+    child_hash = normalize.goal_hash(bound_child)
+    assert child_hash not in normalize.demo_cache_goal_hashes()
+    assert asyncio.run(client.cache_set("child-key", "web_search", child_hash, {}, goal=bound_child)) is False
     ordinary = normalize.goal_hash("an ordinary non-demo goal")
     assert asyncio.run(client.cache_set("ordinary-key", "llm", ordinary, {"schema": {}})) is True
     assert posts == ["ordinary-key"]

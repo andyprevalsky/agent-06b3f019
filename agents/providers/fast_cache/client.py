@@ -855,9 +855,15 @@ async def cache_set(
     goal_hash: str,
     value: Any,
     blob_path: Optional[str] = None,
+    *,
+    goal: Optional[str] = None,
+    root_goal: Optional[str] = None,
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
-    if goal_hash in normalize.demo_cache_goal_hashes() and not demo_recording_enabled():
+    demo_namespace = goal_hash in normalize.demo_cache_goal_hashes() or normalize.soft_complete_allowed(
+        goal, root_goal=root_goal
+    )
+    if demo_namespace and not demo_recording_enabled():
         # DEMO replay namespaces are frozen recordings (FAST_MODE_CACHE_RECORD_DEMO=1 re-records).
         logger.info("fast_cache.set_skipped_demo_namespace", key=key)
         return False

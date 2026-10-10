@@ -107,7 +107,9 @@ async def cached_browser_decision(
     result = await call_llm()
     if write_enabled:
         try:
-            await cache_client.cache_set(key, "browser_use", normalize.goal_hash(goal), result)
+            await cache_client.cache_set(
+                key, "browser_use", normalize.goal_hash(goal), result, goal=goal, root_goal=root_goal
+            )
             logger.info("fast_cache.browser_use_stored", key=key)
         except Exception as exc:
             logger.warning("fast_cache.browser_use_set_error", key=key, error=str(exc))

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import sys
 import tempfile
@@ -62,6 +63,7 @@ def collect_driver_log():
         with target.open("rb") as source:
             assert source.readline(len(stamp) + 1) == stamp, "driver log belongs to another run"
     descriptor, temporary = tempfile.mkstemp(prefix=".cloudbench-driver-", dir=parent)
+    history, published = None, False
     try:
         offset, size, generation, tail = 0, None, "", b""
         with os.fdopen(descriptor, "wb") as output:
@@ -126,6 +128,7 @@ def collect_driver_log():
                     os.close(descriptor)
             assert not target.is_symlink() and identity(target.stat()) == identity(original), "original driver log changed"
             os.replace(temporary, target)
+            published = True
         else:
             os.link(temporary, target)  # An absent target must remain absent until publication.
             os.unlink(temporary)
@@ -136,9 +139,12 @@ def collect_driver_log():
             os.close(descriptor)
     except BaseException:
         # A failed fetch or publication must not leave partial bytes behind for
-        # a later recovery that reuses this directory.
+        # a later recovery that reuses this directory. The private original link
+        # is kept only once publication replaced the original target.
         if os.path.lexists(temporary):
             os.unlink(temporary)
+        if history is not None and not published:
+            shutil.rmtree(history, ignore_errors=True)
         raise
 def exited_without_ack():
     # /shutdown-health is 409 until the controller sends POST /shutdown, even

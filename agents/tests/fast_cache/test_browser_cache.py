@@ -48,7 +48,9 @@ class MemStore:
         self.get_calls += 1
         return self.data.get(key)
 
-    async def set(self, key: str, kind: str, goal_hash: str, value: Any) -> bool:
+    async def set(
+        self, key: str, kind: str, goal_hash: str, value: Any, *, goal: str | None = None, root_goal: str | None = None
+    ) -> bool:
         self.set_calls += 1
         self.data[key] = normalize.strip_secrets(value)
         return True

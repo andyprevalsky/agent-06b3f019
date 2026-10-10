@@ -3602,6 +3602,7 @@ async def call_llm_structured_streaming(
                     "llm",
                     deferred_fast_cache_goal_hash,
                     deferred_fast_cache_acc,
+                    goal=deferred_fast_cache_goal_str,
                 )
                 # Diagnostic: the goal STRING behind the goal_hash. A trajectory whose
                 # terminal call caches under a run-unique goal (timestamp/uuid leaking
@@ -4148,6 +4149,8 @@ async def call_llm(
                             "codex_reasoning_items": rose_response.codex_reasoning_items,
                             "usage": usage,
                         },
+                        goal=ctx.goal,
+                        root_goal=ctx.root_goal,
                     )
                     if stored_ok:
                         logger.info(
@@ -4600,6 +4603,7 @@ async def _call_llm_verifier(
                 "llm",
                 deferred_fast_cache_goal_hash,
                 deferred_fast_cache_acc,
+                goal=deferred_fast_cache_goal_str,
             )
             goal_preview = (deferred_fast_cache_goal_str or "")[:160]
             if stored_ok:
@@ -6673,6 +6677,7 @@ async def set_response_schema_activity(
                         "llm",
                         _fc_norm.goal_hash(goal),
                         {"schema": schema, "title": title, "usage": usage},
+                        goal=goal,
                     )
             title = mass_agent_root_title(goal, include_title, title)
             generate_elapsed = time.perf_counter() - generate_start

@@ -65,6 +65,9 @@ class MemStore:
         goal_hash: str,
         value: Any,
         blob_path: str | None = None,
+        *,
+        goal: str | None = None,
+        root_goal: str | None = None,
     ) -> bool:
         self.data[key] = {
             "kind": kind,

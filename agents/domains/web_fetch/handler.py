@@ -478,7 +478,7 @@ async def web_fetch_activity(
 
     if cache_key is not None and write_cache:
         await fast_cache_client.cache_set(
-            cache_key, "web_fetch", fast_cache_normalize.goal_hash(fast_mode_goal), result
+            cache_key, "web_fetch", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
         logger.info("fast_cache.web_fetch_stored", key=cache_key, url=url)
     return result

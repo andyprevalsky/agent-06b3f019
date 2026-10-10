@@ -266,6 +266,7 @@ async def _download_files_with_fast_cache(
                     "url": fast_cache_normalize.normalize_url(url),
                     "download_failed": True,
                 },
+                goal=fast_mode_goal,
             )
             logger.info("fast_cache.file_stored", key=key, url=url, bytes=0, cached_failure=True)
             continue
@@ -283,6 +284,7 @@ async def _download_files_with_fast_cache(
                 "sha256": hashlib.sha256(body).hexdigest(),
             },
             blob_path=blob_path,
+            goal=fast_mode_goal,
         )
         logger.info("fast_cache.file_stored", key=key, url=url, bytes=len(body))
 

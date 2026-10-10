@@ -8093,7 +8093,7 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
     async def cache_get(key):
         return None
 
-    async def cache_set(key, kind, goal_hash, value):
+    async def cache_set(key, kind, goal_hash, value, *, goal=None, root_goal=None):
         nonlocal set_calls
         set_calls += 1
         store[key] = value

@@ -340,7 +340,7 @@ async def web_search_activity(
 
     if cache_key is not None and write_cache:
         await fast_cache_client.cache_set(
-            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result
+            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
         logger.info("fast_cache.web_search_stored", key=cache_key)
     return result
