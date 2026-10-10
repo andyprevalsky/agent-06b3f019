@@ -314,7 +314,13 @@ def seed_fixture(tmp_path, monkeypatch):
     calls = []
 
     class Storage(BaseHTTPRequestHandler):
+        # The seed client always addresses /<bucket>/<key>. Dev-box port
+        # forwarders probe each new local listener at `/` (e.g. a sprite-daemon
+        # `HEAD /`); those are host traffic, not storage calls under test.
         def do_GET(self):
+            if self.path == "/":
+                self.send_error(404)
+                return
             calls.append(("GET", self.path))
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -322,6 +328,9 @@ def seed_fixture(tmp_path, monkeypatch):
             self.wfile.write(body)
 
         def do_HEAD(self):
+            if self.path == "/":
+                self.send_error(404)
+                return
             calls.append(("HEAD", self.path))
             self.send_error(500)
 

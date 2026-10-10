@@ -69,6 +69,32 @@ class StructuralGateDocumentationTests(unittest.TestCase):
             }.issubset(_registry_commands())
         )
 
+    def test_pytest_gate_wrapper_signals_reach_pytest(self) -> None:
+        """Stopping the gate's PID must stop pytest, not orphan it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper = root / "scripts/tests/benchmark-live-results.test.py"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text((ROOT / "scripts/tests/benchmark-live-results.test.py").read_text())
+            pid_file = root / "pytest.pid"
+            fake_python = root / "agents/venv/bin/python"
+            fake_python.parent.mkdir(parents=True)
+            fake_python.write_text(f'#!/bin/sh\necho $$ > "{pid_file}"\nexec sleep 60\n')
+            fake_python.chmod(0o755)
+            process = subprocess.Popen([sys.executable, str(wrapper)], start_new_session=True)
+            try:
+                deadline = time.monotonic() + 60
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(pid_file.exists(), "fake pytest never started")
+                self.assertEqual(int(pid_file.read_text()), process.pid, "wrapper must exec pytest in place")
+                process.terminate()
+                self.assertEqual(process.wait(timeout=60), -signal.SIGTERM)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=60)
+
     def test_deploy_md_lists_every_registered_gate(self) -> None:
         deploy_md = DEPLOY_MD.read_text()
         missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)

@@ -1,43 +1,25 @@
 /**
- * Report Bug — launch a Cursor cloud agent to /rca a Rose agent failure.
+ * Report Bug — run the boxes.dev "Bug Report" automation to /rca a Rose agent failure.
  *
  * Flow:
  *   Agent Settings → Report Bug → description
  *     → POST /api/agents/:id/report-bug
- *     → GitHub issue + @cursor (source:scm)  ← preferred for mobile inbox
- *     → fallback: Cursor Cloud Agents API (source:api, hidden by default)
- *     → dashboard chat titled from the description (no forced prefix)
+ *     → boxes.dev thread-automation API trigger (configurable request)
+ *     → new devbox thread titled from the description, prompt `/rca … [id]\n<description>`
  *
  * No SMS and no auto-open: the FE keeps an explicit Open / Copy link after
  * launch. Texts and window.open were user-visible side effects of reporting.
- *
- * Why GitHub: Cursor staff document that source:api is hidden by default under
- * Filter → Source on web/Agents Window/mobile. GitHub mentions stamp source:scm
- * and show in the interactive inbox.
- * https://forum.cursor.com/t/cursor-cloud-agent-filtering-is-very-confusing/167363
- *
- * Platform limits on scm (not fixable from Rose):
- * - Cursor injects a "Using the context from GitHub…" wrapper around the prompt.
- * - Cursor auto-names the chat from the prompt; PATCH /v1/agents/:id → 404, so
- *   there is no post-create rename. Forced prefixes like "Bug |" are stripped.
- * We set the GitHub issue title from the description and keep the agent prompt
- * body to exactly `/rca … [id]\n<description>` (no Rose footer / title line).
  */
 
+import { createHash } from 'node:crypto';
 import { isAdminUser } from '../../utils/adminAccess';
 import * as benchmarkHubLookup from '../../providers/benchmarkHubLookup';
-import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
-import {
-  launchCursorCloudAgentViaGithub,
-  ScmDispatchUnknownError,
-} from '../../providers/cursorGithubLaunch';
+import { runBoxesThreadAutomation } from '../../providers/boxesThreadAutomations';
 import { createLogger } from '../../providers/logger';
 import {
-  getCursorApiBaseUrl,
-  getCursorApiKey,
-  getCursorBugReportGithubRepo,
-  getCursorCloudEnvName,
-  hasGithubIssueLaunchToken,
+  getBoxesBugReportAppUrl,
+  getBoxesBugReportRunUrl,
+  getBoxesBugReportSecret,
 } from './config';
 import * as repo from './repo';
 
@@ -69,7 +51,7 @@ export class ReportBugValidationError extends Error {
 
 export class ReportBugNotConfiguredError extends Error {
   constructor() {
-    super('Cursor / GitHub launch is not configured');
+    super('boxes.dev bug report automation is not configured');
     this.name = 'ReportBugNotConfiguredError';
   }
 }
@@ -78,21 +60,25 @@ export interface ReportBugResult {
   success: true;
   name: string;
   url: string;
-  cursor_agent_id: string;
-  launch_source: 'scm' | 'api';
+  run_id: string;
+}
+
+export interface ReportBugLaunchArgs {
+  name: string;
+  promptText: string;
+  idempotencyKey: string;
 }
 
 export interface ReportBugLaunch {
-  id: string;
+  run_id: string;
   name: string;
   url: string;
-  launch_source: 'scm' | 'api';
 }
 
 export interface ReportBugDeps {
   findAgentById?: typeof repo.findAgentById;
   findAgentAcrossRuns?: typeof benchmarkHubLookup.findAgentAcrossRuns;
-  launch?: (args: { name: string; promptText: string }) => Promise<ReportBugLaunch>;
+  launch?: (args: ReportBugLaunchArgs) => Promise<ReportBugLaunch>;
 }
 
 /** Collapse whitespace and truncate at a word boundary for the chat title. */
@@ -132,8 +118,17 @@ export async function agentExistsForBugReport(
 }
 
 export function buildBugReportChatName(description: string): string {
-  // No Bug | / P0 prefix — Cursor scm auto-naming strips those; plain title only.
+  // Plain title only — no Bug | / P0 prefix.
   return buildBugReportTitle(description);
+}
+
+/**
+ * Same agent + description → same key, so a double submit or a retry after an
+ * ambiguous timeout reuses the original boxes.dev run instead of a duplicate.
+ */
+export function buildBugReportIdempotencyKey(agentId: string, description: string): string {
+  const digest = createHash('sha256').update(`${agentId}\n${description.trim()}`).digest('hex');
+  return `rose-report-bug-${digest.slice(0, 48)}`;
 }
 
 function validateBugDescription(description: unknown): string {
@@ -150,51 +145,6 @@ function validateBugDescription(description: unknown): string {
     );
   }
   return trimmed;
-}
-
-async function launchViaApi(
-  apiKey: string,
-  name: string,
-  promptText: string
-): Promise<{ id: string; name: string; url: string; launch_source: 'api' }> {
-  const api = await launchCursorCloudAgent({
-    apiKey,
-    baseUrl: getCursorApiBaseUrl(),
-    name,
-    promptText,
-    envName: getCursorCloudEnvName(),
-  });
-  return { id: api.id, name: api.name, url: api.url, launch_source: 'api' };
-}
-
-async function launchViaScmOrApiFallback(
-  name: string,
-  promptText: string,
-  apiKey: string | undefined
-): Promise<{ id: string; name: string; url: string; launch_source: 'scm' | 'api' }> {
-  try {
-    const scm = await launchCursorCloudAgentViaGithub({
-      name,
-      promptText,
-      repo: getCursorBugReportGithubRepo(),
-    });
-    return { id: scm.id, name: scm.name, url: scm.url, launch_source: 'scm' };
-  } catch (error) {
-    // After GitHub accepted the @cursor comment, Cursor may still finish after
-    // our poll deadline. Falling back to the API would create a duplicate RCA.
-    if (error instanceof ScmDispatchUnknownError) {
-      log.warn('SCM @cursor dispatched but outcome unknown; not falling back to API', {
-        error: error.message,
-        github_issue_url: error.githubIssueUrl,
-      });
-      throw error;
-    }
-    log.warn('GitHub @cursor launch failed before dispatch; falling back to Cursor API', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    if (apiKey === undefined) throw error;
-    return launchViaApi(apiKey, name, promptText);
-  }
 }
 
 export async function reportAgentBug(
@@ -218,36 +168,36 @@ export async function reportAgentBug(
 
   const name = buildBugReportChatName(trimmed);
   const promptText = buildBugReportPrompt(agentId, trimmed);
+  const idempotencyKey = buildBugReportIdempotencyKey(agentId, trimmed);
   const launch = deps.launch ?? defaultLaunch;
 
-  // Prefer GitHub @cursor (source:scm) so the chat shows in the default mobile
-  // inbox. Cloud Agents API can set an exact name, but source:api is hidden
-  // under Filter → Source by default — including on phone.
   // Do not log chat_name / description — they carry customer incident text.
-  log.info('Submitting bug report to Cursor cloud agent', {
+  log.info('Submitting bug report to boxes.dev automation', {
     rose_agent_id: agentId,
     description_chars: trimmed.length,
   });
 
-  const launched = await launch({ name, promptText });
+  const launched = await launch({ name, promptText, idempotencyKey });
 
   return {
     success: true,
     name: launched.name,
     url: launched.url,
-    cursor_agent_id: launched.id,
-    launch_source: launched.launch_source,
+    run_id: launched.run_id,
   };
 }
 
-async function defaultLaunch(args: { name: string; promptText: string }): Promise<ReportBugLaunch> {
-  const canScm = hasGithubIssueLaunchToken();
-  const apiKey = getCursorApiKey();
-  if (canScm) {
-    return launchViaScmOrApiFallback(args.name, args.promptText, apiKey);
-  }
-  if (apiKey === undefined) {
+async function defaultLaunch(args: ReportBugLaunchArgs): Promise<ReportBugLaunch> {
+  const secret = getBoxesBugReportSecret();
+  if (secret === undefined) {
     throw new ReportBugNotConfiguredError();
   }
-  return launchViaApi(apiKey, args.name, args.promptText);
+  const run = await runBoxesThreadAutomation({
+    runUrl: getBoxesBugReportRunUrl(),
+    secret,
+    prompt: args.promptText,
+    threadTitle: args.name,
+    idempotencyKey: args.idempotencyKey,
+  });
+  return { run_id: run.runId, name: run.threadTitle, url: getBoxesBugReportAppUrl() };
 }

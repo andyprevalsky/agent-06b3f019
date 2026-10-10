@@ -1,4 +1,4 @@
-/** Admin-only: launch a Cursor cloud agent to RCA a Rose agent bug. */
+/** Admin-only: run the boxes.dev Bug Report automation to RCA a Rose agent bug. */
 
 import { Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';

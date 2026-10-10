@@ -2477,6 +2477,118 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
 
 
+async def test_post_pause_refreshes_retain_observed_harness_evidence():
+    """A post-pause transcript refresh must not erase what the poll loop observed.
+
+    Smoke agent 15ba14eb timed out after its subscription gate, paid Checkout and
+    payment approval had all been observed. The early-fail path paused it and
+    replaced ``data`` with raw agent reads, which carry no harness-only
+    ``_benchmark`` state, so evaluation appended a false "Expected subscription
+    gate before Checkout" to the genuine timeout.
+    """
+    import copy
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-new-user-journey")
+    browser_task_id = "browser-task-1"
+    claude_task_id = "claude-task-1"
+    open_messages = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "browser",
+                "toolStatus": "IN_PROGRESS",
+                "task_id": browser_task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "action_type": "claude_code_started",
+                "task_id": claude_task_id,
+            }
+        },
+    ]
+    terminal_messages = open_messages + [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "task_id": browser_task_id,
+                "recording_view_url": "https://kernel.example/replay.mp4",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+                "task_id": browser_task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "action_type": "task_complete",
+                "task_id": claude_task_id,
+            }
+        },
+    ]
+    observed = {
+        "approvals_triggered": 2,
+        "expected_gate_seen": True,
+        "expected_gate": dict(task.expected_gate),
+        "expected_gate_request_id": "gate-request-1",
+        "subscription_checkout": {
+            "status": "complete",
+            "payment_status": "paid",
+            "webhook_delivered": True,
+            "session_id": "cs_test_1",
+        },
+        "expected_attention_kinds_seen": list(task.expected_attention_kinds),
+    }
+    polled = {"agent": {"status": "ACTIVE"}, "messages": open_messages, "_benchmark": copy.deepcopy(observed)}
+    agent_reads = []
+
+    async def fake_get_agent(base_url, agent_id):
+        agent_reads.append((base_url, agent_id))
+        return {"agent": {"status": "PAUSED"}, "messages": copy.deepcopy(terminal_messages)}
+
+    with patch.object(bench, "get_agent", fake_get_agent):
+        refreshed = await bench._refresh_agent_after_pause_for_browser_terminal(
+            "https://api.example",
+            "root-agent-1",
+            polled,
+            timeout_seconds=5,
+            poll_interval_seconds=0,
+        )
+        assert refreshed["agent"]["status"] == "PAUSED"
+        assert bench._agent_messages_ready_for_browser_hub_archive(refreshed["messages"])
+        assert refreshed["_benchmark"] == observed
+
+        # The Claude Code chip wait re-reads the agent on its own; it must keep
+        # the same evidence. Start it from an unsettled chip transcript.
+        unsettled = {"agent": {"status": "PAUSED"}, "messages": open_messages, "_benchmark": copy.deepcopy(observed)}
+        settled = await bench._await_claude_code_chip_terminality(
+            "https://api.example",
+            "root-agent-1",
+            unsettled,
+            timeout_seconds=10,
+        )
+    assert len(agent_reads) == 2
+    assert claude_task_id in bench._claude_code_terminal_task_ids(settled["messages"])
+    assert settled["_benchmark"] == observed
+
+    passed, reason = bench.evaluate_task(task, settled, approvals_triggered=2)
+    assert passed is False
+    assert "subscription gate" not in str(reason)
+    assert "Stripe test Checkout" not in str(reason)
+    assert "Attention sequence mismatch" not in str(reason)
+
+
 async def test_payment_abandonment_seals_browser_before_hub_archive():
     """A successful abandonment snapshot must include browser terminal evidence.
 
@@ -22236,6 +22348,10 @@ async def run_all_tests():
     r.record(
         "timeout_early_fail_pauses_before_payment_cleanup",
         test_timeout_early_fail_pauses_agent_before_payment_cleanup,
+    )
+    await r.record_async(
+        "post_pause_refreshes_retain_observed_harness_evidence",
+        test_post_pause_refreshes_retain_observed_harness_evidence,
     )
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",
