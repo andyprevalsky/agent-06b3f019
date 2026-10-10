@@ -127,3 +127,58 @@ def test_explicit_session_cannot_bypass_initial_state(monkeypatch):
     monkeypatch.setattr(bench, "_api_headers", headers)
     with pytest.raises(ValueError, match="would bypass wmh_initial_state"):
         asyncio.run(bench.create_agent("http://localhost:55120", task))
+
+
+def test_context_insertion_adds_event_base_rates_without_changing_the_catalog(tmp_path):
+    import json
+
+    from benchmarks.wmh_context_insertion import (
+        CALIBRATION_TEXT,
+        EVENT_PROBABILITIES_KEY,
+        insert_event_probabilities,
+        main,
+    )
+
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    original = json.loads(json.dumps(task.wmh_initial_state))
+    events = [
+        {"event": "Investor replies to an outreach email", "probability": 0.9},
+        {"event": "Signed commitment wire settles in Brex", "probability": 1, "applies_when": "after a signed SAFE"},
+    ]
+    state = insert_event_probabilities(task.wmh_initial_state, events, item_id=task.name)
+    assert task.wmh_initial_state == original
+    assert bench.validate_wmh_initial_state(state, task.name) is state
+    assert state["structured"][EVENT_PROBABILITIES_KEY] == [
+        {"event": "Investor replies to an outreach email", "probability": 0.9},
+        {"event": "Signed commitment wire settles in Brex", "probability": 1.0, "applies_when": "after a signed SAFE"},
+    ]
+    assert {k: v for k, v in state["structured"].items() if k != EVENT_PROBABILITIES_KEY} == original["structured"]
+    assert state["scratchpad"] == original["scratchpad"] + "\n\n" + CALIBRATION_TEXT
+    with pytest.raises(ValueError, match="already inserted"):
+        insert_event_probabilities(state, events, item_id=task.name)
+
+    events_file = tmp_path / "events.json"
+    events_file.write_text(json.dumps(events))
+    out = tmp_path / "run-state.json"
+    assert main(["--task", task.name, "--events", str(events_file), "--out", str(out)]) == 0
+    assert json.loads(out.read_text()) == state
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [],
+        [{"event": "Reply", "probability": 1.5}],
+        [{"event": "Reply", "probability": float("nan")}],
+        [{"event": "Reply", "probability": True}],
+        [{"event": " ", "probability": 0.5}],
+        [{"event": "Reply", "probability": 0.5}, {"event": "reply", "probability": 0.4}],
+        [{"event": "Reply", "probability": 0.5, "weight": 2}],
+    ],
+)
+def test_context_insertion_rejects_invalid_event_tables(events):
+    from benchmarks.wmh_context_insertion import insert_event_probabilities
+
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    with pytest.raises(ValueError):
+        insert_event_probabilities(task.wmh_initial_state, events, item_id=task.name)

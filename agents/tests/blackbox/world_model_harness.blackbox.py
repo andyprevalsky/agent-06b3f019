@@ -5506,7 +5506,14 @@ def test_native_rose_provider_regressions():
 
     root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(root / "agents/benchmarks/wmh_rose_provider_test.py")],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(root / "agents/benchmarks/wmh_rose_provider_test.py"),
+            str(root / "agents/benchmarks/run_benchmark_wmh_initial_state_test.py"),
+        ],
         cwd=root,
         env={**os.environ, "PYTHONPATH": str(root / "agents")},
         capture_output=True,
