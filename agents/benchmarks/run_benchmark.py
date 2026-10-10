@@ -117,6 +117,12 @@ from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.spawn_contract import should_disable_saved_browser_auth
 from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.timeout_history import (
+    InsufficientHistoryError,
+)
+from benchmarks.timeout_history import (
+    get_timeout as _history_get_timeout,
+)
+from benchmarks.timeout_history import (
     summary as _history_summary,
 )
 from benchmarks.world_model_harness import (
@@ -1988,15 +1994,26 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
 def resolve_task_execution_timeout(task: BenchmarkTask, *, bootstrap: bool = False) -> tuple[int, str]:
     """Resolve one task's execution timeout and a short provenance note.
 
-    The benchmark definition owns the timeout. Recent pass history is reported
-    for diagnosis but never shortens or extends it; only an explicit operator
-    cap (--timeout / BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS) may stop a task early.
+    The benchmark definition (catalog timeout, smoke cap, floor) is the minimum.
+    Recent pass history may extend it within the smoke cap but never shortens
+    it; only an explicit operator cap (--timeout /
+    BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS) may stop a task earlier.
     """
     cap = get_smoke_cap(task.name)
     seconds = _default_timeout_for_task(task, cap)
     s = _history_summary(task.name, max_seconds=cap)
-    mode = "bootstrap; " if bootstrap else ""
-    return seconds, f"{mode}benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+    note = f"{'bootstrap; ' if bootstrap else ''}benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+    if bootstrap:
+        return seconds, note
+    try:
+        history_timeout = _history_get_timeout(task.name, max_seconds=cap)
+    except InsufficientHistoryError:
+        return seconds, note
+    floor = get_timeout_floor(task.name)
+    history_timeout = max(history_timeout, floor) if floor else history_timeout
+    if history_timeout > seconds:
+        return history_timeout, f"history extends the {seconds}s benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+    return seconds, note
 
 
 # ============================================================

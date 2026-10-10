@@ -10451,17 +10451,18 @@ def _assert_benchmark_timeout_is_not_implicitly_shortened(monkeypatch):
 
     task = get_task_by_name("job-applications")
     assert task.timeout_seconds == 900
+    monkeypatch.setattr(
+        bench, "_history_summary", lambda _name, max_seconds=None: {"count": 9, "recent_p95": 80, "recent_max": 90}
+    )
     # Fast recent passes once derived a 104 s implicit kill for this 900 s task.
-    for p95 in (80, 5000):
-        monkeypatch.setattr(
-            bench,
-            "_history_summary",
-            lambda _name, max_seconds=None, p95=p95: {"count": 9, "recent_p95": p95, "recent_max": p95},
-        )
-        seconds, note = bench.resolve_task_execution_timeout(task)
-        assert seconds == task.timeout_seconds, note
-        assert f"recent_p95={p95}s" in note
-        assert bench.resolve_task_execution_timeout(task, bootstrap=True)[0] == task.timeout_seconds
+    monkeypatch.setattr(bench, "_history_get_timeout", lambda _name, max_seconds=None: 104)
+    seconds, note = bench.resolve_task_execution_timeout(task)
+    assert seconds == task.timeout_seconds, note
+    assert "recent_p95=80s" in note
+    assert bench.resolve_task_execution_timeout(task, bootstrap=True)[0] == task.timeout_seconds
+    # History may only extend the definition (smoke caps bound it upstream).
+    monkeypatch.setattr(bench, "_history_get_timeout", lambda _name, max_seconds=None: 1500)
+    assert bench.resolve_task_execution_timeout(task)[0] == 1500
 
 
 def test_timeout_default_respects_explicit_floor():
