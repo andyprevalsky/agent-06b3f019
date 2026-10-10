@@ -18,8 +18,8 @@ Both planned user-input gates, and any unplanned human approval permitted by
 the composed commands, must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
-replace the shared Evidence, Detail, Before Behavior, After Behavior, and
-Downstream Implications sections.
+replace the shared Before Behavior, After Behavior, TL;DR, Evidence, Detail,
+and Downstream Implications sections or their code-block presentation.
 
 ## Hard rules
 
@@ -1035,90 +1035,89 @@ or multi-line explanations.
 
 ### Stop 1 content — fix approval
 
-After the lifecycle table, include one section for the top idle cluster with
-⏳ Fix approval. Lead with the one-glance core claim, then use
-the canonical approval narrative from `.claude/shared/approval-format.md`.
-The Evidence pack is the exemplar's. Put the verbatim `task.prompt` in
-Evidence, not above it. Never truncate, summarize, or paraphrase `task.prompt`,
-even when it is long or multiline. End Evidence with one Cluster line per
-member task; never replace the siblings with a count:
+After the lifecycle table, include one approval for the top idle cluster with
+⏳ Fix approval, using the canonical approval narrative from
+`.claude/shared/approval-format.md`: one code block (Before: and After: first)
+followed by its Links list. The core claim opens Detail. The Evidence pack is the exemplar's.
+Put the verbatim `task.prompt` in Evidence, not above it. Never truncate,
+summarize, or paraphrase `task.prompt`, even when it is long or multiline. End
+Evidence with one Cluster line per member task, and give each member its own
+FE link in the Links list; never replace the siblings with a count:
 
 ### <row ID> · <issue summary>
 
-#### TL;DR
+```text
+APPROVAL <row ID> — <issue summary>
 
-<exactly one sentence: what to approve and its most important consequence>
+Before:
+  <Trigger, ordering, measured wrong result, and user-visible failure before
+  the fix.>
 
-#### Evidence
+After:
+  <The same trigger and ordering after the fix, including the measured passing
+  result and what remains unchanged.>
 
-**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
+TL;DR:
+  <exactly one sentence: what to approve and its most important consequence>
 
-**FE link:** [Open agent](frontend-agent-url) — <verification status>
+Evidence:
+  What failed: When <the agent doing the task goal>, <it reached this step or
+    site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
+    measured result>.
+  FE link: <verification status> — see Links
+  LLM dump: last call `<call_site>` on `<agent_id>` — see Links
+  Local repro (<wall-clock>):
+    Tests: <one sentence naming the actual assertion>
+    1. <copy-paste command>
+    2. <next step>
+    Pre-fix: <measured wrong value>
+    Post-fix: <measured passing value>
+  Golden reference: <reference-repo>/<path>:<line> — <what the reference
+    harness does in this situation>; this change <converges on it | diverges
+    from it because <reason>>.
+  Environment:
+    Evaluators: `<id>` — <how checked>: <what is checked>. Catalog:
+      `<method>` / `<check.type or judge>`
+    Fixtures: base `<image>`; db `<db_fixtures or none>`; live overlay
+      `<live_fixtures or none>`
+    Task prompt:
+      <full exact task.prompt with every line and character preserved>
+  Cluster (<n> tasks):
+    <exemplar task> (exemplar) — <observed boundary evidence> ·
+      <passes>/<attempts> recorded passes · <runs> proof runs
+    <sibling task> — <its own observed boundary evidence> ·
+      <passes>/<attempts> recorded passes · <runs> proof runs
 
-**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
+Detail:
+  Core claim: <This task | These <n> tasks> failed because <issue class>.
+  <One or two plain sentences describing the exact mismatch or failure; expand
+  internal names such as write_lock into ordinary language.>
+  The issue is <root cause at the first-bad boundary>. I reproduced it with
+  <minimal local test and exact command>, where we measured <measurement> and
+  observed <wrong result> instead of <expected result>. The unchanged local
+  repro now <exact passing result>, and the regression is cemented in
+  <permanent test name>.
+  Snapshot: <approval snapshot ID>
+  Scope: <path:line> — <hunk summary>   (one line per affected hunk)
+  <exact diff of every prompt / LLM-visible hunk, as +/- lines>
 
-**Local repro (<wall-clock>):**
+Downstream:
+  <Affected tasks, users, agents, services, data/cost/security impact,
+  rollback, and 10k-agent behavior.>
 
-Tests: <one sentence naming the actual assertion>
+Approve: <row ID> approve
+Edit:    <row ID> edit: <instruction>
+Reject:  <row ID> reject
+```
 
-1. <copy-paste command>
-2. <next step>
+- **FE link:** [Open agent](frontend-agent-url) — <verification status>
+- **LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
+- **Cluster:** `<exemplar task>` [Open agent](frontend-agent-url) · `<sibling task>` [Open agent](frontend-agent-url)
+- **Scope:** one clickable `path:line` link per affected hunk
 
-- Pre-fix: <measured wrong value>
-- Post-fix: <measured passing value>
-
-**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
-
-**Environment**
-
-- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
-- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
-- **Task prompt:**
-
-> <full exact task.prompt with every line and character preserved>
-
-**Cluster (<n> tasks):**
-
-- `<exemplar task>` (exemplar) — [Open agent](frontend-agent-url) — <observed boundary evidence> · <passes>/<attempts> recorded passes · <runs> proof runs
-- `<sibling task>` — [Open agent](frontend-agent-url) — <its own observed boundary evidence> · <passes>/<attempts> recorded passes · <runs> proof runs
-
-#### Detail
-
-**Core claim:** <This task | These <n> tasks> failed because **<issue class>**. <One or two plain
-sentences describing the exact mismatch or failure; expand internal names such
-as write_lock into ordinary language.>
-
-The issue is **<root cause at the first-bad boundary>**. I reproduced it with
-**<minimal local test and exact command>**, where we measured **<measurement>**
-and observed **<wrong result>** instead of **<expected result>**.
-The unchanged local repro now **<exact passing result>**, and the regression is
-cemented in **<permanent test name>**. Include the approval snapshot and
-clickable links to every affected hunk. Do not restate the Evidence pack.
-
-#### Before Behavior
-
-<Trigger, ordering, measured wrong result, and user-visible failure before the
-fix.>
-
-#### After Behavior
-
-<The same trigger and ordering after the fix, including the measured passing
-result and what remains unchanged.>
-
-#### Downstream Implications
-
-<Affected tasks, users, agents, services, data/cost/security impact, rollback,
-and 10k-agent behavior.>
-
-**Is this fix approved?**
-
-- **Approve:** <row ID> approve
-- **Request an edit:** <row ID> edit: <instruction>
-- **Reject:** <row ID> reject
-
-Do not replace the reproduction measurement with vague language such as
-“the test failed.” State what was measured, the wrong observed value, and the
-expected value.
+Do not restate the Evidence pack in Detail. Do not replace the reproduction
+measurement with vague language such as “the test failed.” State what was
+measured, the wrong observed value, and the expected value.
 
 ### Stop 2 content — deploy approval
 
@@ -1128,61 +1127,59 @@ After the affected lifecycle rows, include:
 
 ### A-<id> · <row IDs>
 
-#### TL;DR
+```text
+APPROVAL A-<id> — <row IDs>
 
-<exactly one sentence: what to approve and its most important consequence>
+Before:
+  <The exact prompt or terminal behavior before this deploy.>
 
-#### Evidence
+After:
+  <The exact prompt or terminal behavior after this deploy.>
 
-**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
+TL;DR:
+  <exactly one sentence: what to approve and its most important consequence>
 
-**FE link:** [Open agent](frontend-agent-url) — <verification status>
+Evidence:
+  What failed: When <the agent doing the task goal>, <it reached this step or
+    site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
+    measured result>.
+  FE link: <verification status> — see Links
+  LLM dump: last call `<call_site>` on `<agent_id>` — see Links
+  Local repro (<wall-clock>):
+    Tests: <one sentence naming the actual assertion>
+    1. <copy-paste command>
+    Pre-fix: <measured wrong value>
+    Post-fix: <measured passing value>
+  Golden reference: <reference-repo>/<path>:<line> — <what the reference
+    harness does in this situation>; this change <converges on it | diverges
+    from it because <reason>>.
+  Environment:
+    Evaluators: `<id>` — <how checked>: <what is checked>. Catalog:
+      `<method>` / `<check.type or judge>`
+    Fixtures: base `<image>`; db `<db_fixtures or none>`; live overlay
+      `<live_fixtures or none>`
+    Task prompt:
+      <full exact task.prompt, or `Not applicable — not a catalog task`>
 
-**LLM dump:** [Open rendered dump](rendered-html-url) — last call `<call_site>` on `<agent_id>`
+Detail:
+  This deploy changes <one-line prompt or terminal-behavior effect>. Name the
+  exact unchanged test or reproduction that failed before and passes after
+  the change, and its concrete results. Do not restate the Evidence pack.
+  Snapshot: <approval snapshot ID>
+  Scope: <path:line> — <hunk summary>   (one line per affected hunk)
+  <exact diff of every prompt / LLM-visible hunk, as +/- lines>
 
-**Local repro (<wall-clock>):**
+Downstream:
+  <Affected tasks, users, agents, services, data/cost/security impact,
+  rollback, and 10k-agent behavior.>
 
-Tests: <one sentence naming the actual assertion>
+Approve: A-<id> approve
+Reject:  A-<id> reject: <reason>
+```
 
-1. <copy-paste command>
-
-- Pre-fix: <measured wrong value>
-- Post-fix: <measured passing value>
-
-**Golden reference:** `<reference-repo>/<path>:<line>` — <what the reference harness does in this situation>; this change <converges on it | diverges from it because <reason>>.
-
-**Environment**
-
-- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
-- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
-- **Task prompt:**
-
-> <full exact task.prompt, or `Not applicable — not a catalog task`>
-
-#### Detail
-
-This deploy changes **<one-line prompt or terminal-behavior effect>**. Name the
-exact unchanged test or reproduction that failed before and passes after the
-change, its concrete results, the approval snapshot ID, and clickable links to
-every affected hunk. Do not restate the Evidence pack.
-
-#### Before Behavior
-
-<The exact prompt or terminal behavior before this deploy.>
-
-#### After Behavior
-
-<The exact prompt or terminal behavior after this deploy.>
-
-#### Downstream Implications
-
-<Affected tasks, users, agents, services, data/cost/security impact, rollback,
-and 10k-agent behavior.>
-
-**Is this deploy change approved?**
-
-- **Approve:** A-<id> approve
-- **Reject:** A-<id> reject: <reason>
+- **FE link:** [Open agent](frontend-agent-url) — <verification status>
+- **LLM dump:** [Open rendered dump](rendered-html-url) — last call `<call_site>` on `<agent_id>`
+- **Scope:** one clickable `path:line` link per affected hunk
 
 For non-blocking progress, use 🟢 Descending and omit all approval questions.
 For either stop, use the corresponding approval-needed status. Never end a
