@@ -23,6 +23,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import Future
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional
@@ -897,9 +898,21 @@ class BrowserAgentRecorder:
         self.observations: List[Dict[str, Any]] = []
         self.cursor_events: List[Dict[str, int]] = []
         self._started_at = time.monotonic()
+        # Wall-clock start of this activity's recording. A pause/resume saves one
+        # recording per activity; the FE orders and places the parts by it.
+        self.started_at = datetime.now(timezone.utc).isoformat()
         self._frame_index = 0
         self._closed = False
         self._consecutive_failures = 0
+        # Capture-health summary for the manifest/close log: idle screenshot
+        # failures are otherwise silent, so a replay with a multi-minute hole
+        # could not be told apart from an idle browser.
+        self._capture_failure_count = 0
+        self._mark_capture_drop_count = 0
+        self._last_capture_error: Optional[str] = None
+        self._last_frame_ms = 0
+        self._longest_frame_gap_ms = 0
+        self._longest_frame_gap_start_ms = 0
         self._capture_lock = asyncio.Lock()
         self._loop_task: Optional[asyncio.Task] = None
         self._mark_tasks: set[asyncio.Task] = set()
@@ -1114,6 +1127,8 @@ class BrowserAgentRecorder:
             self.uses_kernel_replay = False
             self._kernel_replay_id = None
             self.recording_view_url = None
+            # Screenshot capture starts here; the Kernel video covers the rest.
+            self._last_frame_ms = self._elapsed_ms()
         elif self._closed:
             logger.warning(
                 "Ignoring browser recording transition after finalization",
@@ -1339,6 +1354,15 @@ class BrowserAgentRecorder:
                 continue
         return pages[-1]
 
+    def _elapsed_ms(self) -> int:
+        return int((time.monotonic() - self._started_at) * 1000)
+
+    def _note_frame_gap(self, ts_ms: int) -> None:
+        if ts_ms - self._last_frame_ms > self._longest_frame_gap_ms:
+            self._longest_frame_gap_ms = ts_ms - self._last_frame_ms
+            self._longest_frame_gap_start_ms = self._last_frame_ms
+        self._last_frame_ms = ts_ms
+
     async def _capture_loop(self) -> None:
         while not self._closed:
             # Back off when the renderer is frozen by a bot-challenge: each failed
@@ -1381,12 +1405,17 @@ class BrowserAgentRecorder:
 
     async def _bounded_mark_capture(self, label: str, action: str, metadata: Dict[str, Any], force: bool) -> None:
         # A slow diagnostic screenshot is dropped; the background loop and
-        # observations cover those gaps.
-        with contextlib.suppress(Exception):
+        # observations cover those gaps. Count the drops: on a slow provider
+        # every per-step frame lands here.
+        try:
             await asyncio.wait_for(
                 self.capture(label, action=action, metadata=metadata, force=force),
                 timeout=0.2,
             )
+        except asyncio.TimeoutError:
+            self._mark_capture_drop_count += 1
+        except Exception:
+            pass
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
         # Forced lifecycle frames get the full budget; best-effort idle frames use
@@ -1428,6 +1457,8 @@ class BrowserAgentRecorder:
                 self._consecutive_failures = 0
             except Exception as exc:
                 self._consecutive_failures += 1
+                self._capture_failure_count += 1
+                self._last_capture_error = str(exc)[:300]
                 if force:
                     logger.warning(
                         "Browser agent recording frame capture failed",
@@ -1445,6 +1476,8 @@ class BrowserAgentRecorder:
                 frame_path.write_bytes(image_bytes)
             except OSError as exc:
                 self._consecutive_failures += 1
+                self._capture_failure_count += 1
+                self._last_capture_error = str(exc)[:300]
                 logger.warning(
                     "Browser agent recording frame write failed",
                     agent_id=self.agent_id,
@@ -1453,10 +1486,12 @@ class BrowserAgentRecorder:
                     error=str(exc),
                 )
                 return
+            ts_ms = self._elapsed_ms()
+            self._note_frame_gap(ts_ms)
             self.frames.append(
                 {
                     "src": f"frames/{filename}",
-                    "ts_ms": int((time.monotonic() - self._started_at) * 1000),
+                    "ts_ms": ts_ms,
                     "label": label,
                     "action": action,
                     "cursor": self._cursor,
@@ -1535,6 +1570,8 @@ class BrowserAgentRecorder:
             final_label = self._last_label if self._last_label != "idle" else "recording stopped"
             await asyncio.wait_for(self.capture(final_label, action="stop", force=True), timeout=7)
         except asyncio.TimeoutError:
+            self._capture_failure_count += 1
+            self._last_capture_error = "final frame capture timed out after 7s"
             logger.warning(
                 "Browser agent recording final frame capture timed out",
                 agent_id=self.agent_id,
@@ -1542,6 +1579,10 @@ class BrowserAgentRecorder:
                 existing_frames=len(self.frames),
             )
         self._closed = True
+        if self.frames:
+            # The tail after the last frame is a capture hole too; measure it
+            # before the optional Steel media download.
+            self._note_frame_gap(self._elapsed_ms())
         steel_media = await self._download_steel_hls_recording() if include_steel_media else None
         if not self.frames and not steel_media and not self.replay_view_urls:
             return None
@@ -1567,6 +1608,11 @@ class BrowserAgentRecorder:
                     "observations": self.observations,
                     "frame_count": len(playback_frames),
                     "source_frame_count": source_frame_count,
+                    "capture_failure_count": self._capture_failure_count,
+                    "mark_capture_drop_count": self._mark_capture_drop_count,
+                    "last_capture_error": self._last_capture_error,
+                    "longest_frame_gap_ms": self._longest_frame_gap_ms,
+                    "longest_frame_gap_start_ms": self._longest_frame_gap_start_ms,
                     "render_fps": self.render_fps,
                     "frames": playback_frames,
                     "cursor_events": self.cursor_events,
@@ -1591,6 +1637,11 @@ class BrowserAgentRecorder:
             frame_count=len(playback_frames),
             source_frame_count=source_frame_count,
             recording_source=recording_source,
+            capture_failure_count=self._capture_failure_count,
+            mark_capture_drop_count=self._mark_capture_drop_count,
+            last_capture_error=self._last_capture_error,
+            longest_frame_gap_ms=self._longest_frame_gap_ms,
+            longest_frame_gap_start_ms=self._longest_frame_gap_start_ms,
         )
         if archive_artifacts:
             await self._archive_recording_artifacts()

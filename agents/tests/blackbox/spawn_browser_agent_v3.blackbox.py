@@ -1301,6 +1301,74 @@ async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
             ]
 
 
+async def test_browser_agent_recording_reports_capture_failures_and_frame_gaps():
+    """A replay hole is attributable from the recording's own artifacts.
+
+    Prod agent 8b4d4592's resumed Steel session captured no frame for 150s while
+    every idle screenshot timed out, and nothing recorded why.
+    """
+    import tempfile
+
+    from structlog.testing import capture_logs
+
+    from domains.spawn_browser_agent_v3 import recording
+
+    class FakePage:
+        url = "https://www.doordash.com/orders"
+
+        def __init__(self):
+            self.fail = True
+            self.slow = False
+
+        async def screenshot(self, **_kwargs):
+            if self.slow:
+                await asyncio.sleep(1)
+            if self.fail:
+                raise TimeoutError("Page.screenshot: Timeout 1200ms exceeded.")
+            return b"recording-frame"
+
+        async def content(self):
+            return "<html><body>Orders</body></html>"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(recording, "_recording_root", return_value=Path(tmp)):
+            page = FakePage()
+            recorder = recording.BrowserAgentRecorder(
+                page=page,
+                agent_id="agent-gap",
+                task_id="task-gap",
+                session_id="steel-session",
+                browser_url=page.url,
+                session_metadata={"provider": "steel"},
+            )
+            recorder.frames_dir.mkdir(parents=True)
+            recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
+            await recorder.capture("idle", action="idle")
+            await recorder.capture("idle", action="idle")
+            # Per-step frames ride a 200ms budget; a slow screenshot is dropped.
+            page.slow = True
+            await recorder.mark("Click Orders", action="click", metadata={"step": 52})
+            await recorder.flush_marks()
+            page.slow = False
+            assert recorder.frames == []
+            # 150s of failing captures pass before the session yields a frame.
+            recorder._started_at -= 150
+            page.fail = False
+            await recorder.capture("browser session changed", action="recovery", force=True)
+            with capture_logs() as logs:
+                html_path = await recorder.close(include_steel_media=False, archive_artifacts=False)
+            assert html_path is not None
+            manifest = json.loads((html_path.parent / "manifest.json").read_text())
+            saved = next(log for log in logs if log["event"] == "Browser agent recording saved")
+            for summary in (manifest, saved):
+                assert summary["capture_failure_count"] == 2
+                assert summary["mark_capture_drop_count"] == 1
+                assert "Timeout 1200ms exceeded" in summary["last_capture_error"]
+                assert summary["longest_frame_gap_ms"] >= 150_000
+                # The hole starts at the recorder start, before any frame.
+                assert summary["longest_frame_gap_start_ms"] == 0
+
+
 async def test_browser_agent_recording_writes_local_html_replay():
     import tempfile
 
@@ -1905,6 +1973,8 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                 )
                 assert recorder is not None
                 assert recorder.uses_kernel_replay is True
+                # Five Kernel-recorded minutes pass before the provider handoff.
+                recorder._started_at -= 300
 
                 await recorder.transition_browser(
                     page=SteelPage(),
@@ -1939,7 +2009,11 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                     check=False,
                 )
                 assert parsed.returncode == 0, parsed.stderr
-                await recorder.close(include_steel_media=False)
+                html_path = await recorder.close(include_steel_media=False)
+                manifest = json.loads((html_path.parent / "manifest.json").read_text())
+                # The Kernel video covers the pre-handoff minutes, so they are
+                # not a screenshot capture hole.
+                assert manifest["longest_frame_gap_ms"] < 300_000, manifest["longest_frame_gap_ms"]
                 stop_url = "https://kernel.example/browsers/kernel-before/replays/rep-kernel-before/stop"
                 assert calls.count(("POST", stop_url)) == 1
     finally:
@@ -2588,6 +2662,65 @@ async def test_browser_recording_finalizer_requires_backend_acknowledgement():
                         browser_recorder=recorder, agent_id="agent-1", task_id="task-1", user_id="user-1",
                         browser_url="https://debug.example", browser_session_metadata={"provider": "kernel" if kernel else "steel"},
                     )
+
+
+async def test_browser_recording_finalizer_stamps_each_part_start():
+    """Each saved recording names the activity part it covers.
+
+    Prod agent 8b4d4592 paused for auth assistance and saved one recording per
+    activity; the FE orders and places the parts by this start, since a
+    background finalizer can save the earlier part after a short resumed part.
+    """
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+
+    started_at = "2026-10-08T18:20:28.637000+00:00"
+    with tempfile.TemporaryDirectory() as directory:
+        recording_path = Path(directory) / "index.html"
+        recording_path.write_text("<html>recording</html>")
+        for kernel in (False, True):
+            recorder = SimpleNamespace(
+                uses_kernel_replay=kernel,
+                started_at=started_at,
+                stop_kernel_replay=AsyncMock(return_value="https://recording.example/view"),
+                replay_view_urls=[],
+                close=AsyncMock(return_value=recording_path),
+                export_inline_html_bytes=lambda: b"<html>recording</html>",
+            )
+            with (
+                patch(
+                    "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                    AsyncMock(return_value={"id": "recording-file"}),
+                ),
+                patch(
+                    "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                    AsyncMock(return_value=True),
+                ) as save_mock,
+            ):
+                await _finalize_browser_recording_for_fe(
+                    browser_recorder=recorder,
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    user_id="user-1",
+                    browser_url="https://debug.example",
+                    browser_session_metadata={"provider": "kernel" if kernel else "steel"},
+                )
+            metadata = save_mock.await_args.kwargs["extra_metadata"]
+            assert metadata["recording_started_at"] == started_at, (kernel, metadata)
+
+    # The real recorder stamps its own wall-clock start.
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    recorder = BrowserAgentRecorder(
+        page=SimpleNamespace(url="https://example.test"),
+        agent_id="agent-1",
+        task_id="task-1",
+        session_id="steel-session",
+        browser_url="https://debug.example",
+        session_metadata={"provider": "steel"},
+    )
+    assert datetime.fromisoformat(recorder.started_at).tzinfo is not None
 
 
 async def test_browser_recording_finalizer_persists_before_trace_archive():
@@ -25889,6 +26022,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_marks_do_not_block_on_slow_screenshots",
         test_browser_agent_recording_marks_do_not_block_on_slow_screenshots,
+    )
+    await r.record_async(
+        "browser_agent_recording_reports_capture_failures_and_frame_gaps",
+        test_browser_agent_recording_reports_capture_failures_and_frame_gaps,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_stamps_each_part_start",
+        test_browser_recording_finalizer_stamps_each_part_start,
     )
     await r.record_async(
         "browser_agent_recording_writes_html",

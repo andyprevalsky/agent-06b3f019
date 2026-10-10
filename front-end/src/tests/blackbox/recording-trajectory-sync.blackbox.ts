@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTrajectorySteps,
   findActiveStepIndex,
+  partPlayheadSec,
+  partSeekTarget,
   playheadFromSegments,
   resolveRecordingStartMs,
   seekTargetFromOffset,
@@ -87,5 +89,38 @@ describe('recordingTrajectorySync', () => {
     expect(seekTargetFromOffset(14, [10, 20])).toEqual({ segmentIndex: 1, timeInSegment: 4 });
     expect(seekTargetFromOffset(35, [10, 20])).toEqual({ segmentIndex: 1, timeInSegment: 25 });
     expect(seekTargetFromOffset(7, [])).toEqual({ segmentIndex: 0, timeInSegment: 7 });
+  });
+
+  it('places each recording part at its own start across a pause', () => {
+    const t0 = Date.parse('2026-10-08T18:00:00Z');
+    // Part 0 has two Kernel session segments; part 1 starts two hours later.
+    const segments = [
+      { partIndex: 0, partStartMs: t0 },
+      { partIndex: 0, partStartMs: t0 },
+      { partIndex: 1, partStartMs: t0 + 7_200_000 },
+    ];
+    const durations = [10, 20, 60];
+    expect(partPlayheadSec(segments, durations, 1, 5, t0)).toBe(15);
+    expect(partPlayheadSec(segments, durations, 2, 15, t0)).toBe(7215);
+    expect(partSeekTarget(segments, durations, 7215, t0)).toEqual({
+      segmentIndex: 2,
+      timeInSegment: 15,
+    });
+    expect(partSeekTarget(segments, durations, 14, t0)).toEqual({
+      segmentIndex: 1,
+      timeInSegment: 4,
+    });
+    // A step during the pause seeks to the end of the part before it.
+    expect(partSeekTarget(segments, durations, 3600, t0)).toEqual({
+      segmentIndex: 1,
+      timeInSegment: 3590,
+    });
+    // Without every part start, the segments stay one contiguous playlist.
+    const unplaced = segments.map((segment) => ({ ...segment, partStartMs: null }));
+    expect(partPlayheadSec(unplaced, durations, 2, 15, t0)).toBe(45);
+    expect(partSeekTarget(unplaced, durations, 45, t0)).toEqual({
+      segmentIndex: 2,
+      timeInSegment: 15,
+    });
   });
 });

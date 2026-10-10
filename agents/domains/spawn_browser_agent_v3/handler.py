@@ -3935,6 +3935,17 @@ async def _install_fast_mode_network_cache(
         context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
+def _recording_part_metadata(browser_recorder: Any) -> Dict[str, Any]:
+    """Identify which activity part a saved recording covers.
+
+    An approval/auth-assistance pause ends the activity and saves its recording;
+    the resumed activity saves another for the same task. The FE plays every part
+    and orders/places them by this start, since save order can differ.
+    """
+    started_at = getattr(browser_recorder, "started_at", None)
+    return {"recording_started_at": started_at} if isinstance(started_at, str) and started_at else {}
+
+
 async def _finalize_kernel_replay_for_fe(
     *,
     browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
@@ -3970,7 +3981,10 @@ async def _finalize_kernel_replay_for_fe(
 
     # Multiple rotation segments -> stitch into ONE continuous MP4 and upload it, so
     # the FE plays a single video player (not a playlist) of the IP changing.
-    extra_metadata: Dict[str, Any] = {"browser_session_metadata": browser_session_metadata}
+    extra_metadata: Dict[str, Any] = {
+        "browser_session_metadata": browser_session_metadata,
+        **_recording_part_metadata(browser_recorder),
+    }
     stitched_pointer = None
     if len(segment_urls) > 1 and user_id:
         try:
@@ -4108,6 +4122,7 @@ async def _finalize_browser_recording_for_fe(
                 "recording_path": str(recording_path),
                 "recording_file_pointer": recording_file_pointer,
                 "browser_session_metadata": browser_session_metadata,
+                **_recording_part_metadata(browser_recorder),
             },
         )
         if not accepted:
