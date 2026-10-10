@@ -493,3 +493,27 @@ def test_web_fetch_file_download_skips_frozen_demo_namespace(memwf, monkeypatch)
         assert memwf.blobs == {}
 
     asyncio.run(body())
+
+
+def test_web_search_write_only_child_under_demo_root_does_not_write(mem, monkeypatch):
+    """A child goal under an allowlisted DEMO root gains no entry from a live miss."""
+
+    async def body():
+        import providers.fast_cache.client as cclient
+
+        async def fake_search(query, max_tokens):
+            return {"answer": "live", "query": query}
+
+        async def tree_root_is_demo(agent_id, goal=None):
+            return agent_id == "demo-child"
+
+        monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+        monkeypatch.setattr(ws, "execute_search", fake_search)
+        monkeypatch.setattr(cclient, "soft_complete_allowed_for_agent", tree_root_is_demo)
+        kwargs = {"fast_mode_cache_write_enabled": True, "fast_mode_goal": "an ordinary child goal"}
+        await ws.web_search_activity("q", 100, agent_id="demo-child", **kwargs)
+        assert mem.data == {}
+        await ws.web_search_activity("q", 100, agent_id="ordinary-agent", **kwargs)
+        assert len(mem.data) == 1
+
+    asyncio.run(body())

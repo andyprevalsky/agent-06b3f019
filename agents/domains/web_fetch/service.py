@@ -147,6 +147,7 @@ async def download_and_attach(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    agent_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Download a curated list of file URLs and upload each to Supabase storage.
 
@@ -170,6 +171,7 @@ async def download_and_attach(
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         fast_mode_goal=fast_mode_goal,
         fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+        agent_id=agent_id,
     )
 
     seen_filenames: set[str] = set()
@@ -206,6 +208,7 @@ async def _download_files_with_fast_cache(
     fast_mode_cache_enabled: bool,
     fast_mode_goal: Optional[str],
     fast_mode_cache_write_enabled: bool = False,
+    agent_id: Optional[str] = None,
 ) -> Dict[str, Optional[bytes]]:
     """Download URL bytes with Fast Mode record/replay.
 
@@ -253,10 +256,8 @@ async def _download_files_with_fast_cache(
         return results
 
     live = await download_files_batch(misses)
-    # A frozen DEMO namespace must not gain blobs or rows from a live miss.
-    write_allowed = fast_cache_client.cache_write_allowed(
-        fast_cache_normalize.goal_hash(fast_mode_goal), goal=fast_mode_goal
-    )
+    # A frozen DEMO namespace (goal or tree root) must not gain blobs or rows from a live miss.
+    write_allowed = await fast_cache_client.cache_write_allowed_for_agent(agent_id, fast_mode_goal)
     for url in misses:
         body = live.get(url)
         results[url] = body

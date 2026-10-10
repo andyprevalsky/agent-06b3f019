@@ -16,7 +16,8 @@ import urllib.request
 
 destination, port, run_token, machine, deadline = sys.argv[1:6]
 options = sys.argv[6:]
-assert options in ([], ["--driver-log"])
+if options not in ([], ["--driver-log"]):
+    raise SystemExit(f"unsupported runtime evidence options: {options}")
 os.umask(0o077)
 assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
 assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0

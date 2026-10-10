@@ -338,7 +338,12 @@ async def web_search_activity(
         logger.error("Web search failed", query=query)
         raise
 
-    if cache_key is not None and write_cache:
+    # A frozen DEMO namespace (goal or tree root) gains no entries from a live miss.
+    if (
+        cache_key is not None
+        and write_cache
+        and await fast_cache_client.cache_write_allowed_for_agent(agent_id, fast_mode_goal)
+    ):
         await fast_cache_client.cache_set(
             cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )

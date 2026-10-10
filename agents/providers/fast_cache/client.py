@@ -857,6 +857,15 @@ def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal
     return not demo_namespace or demo_recording_enabled()
 
 
+async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[str]) -> bool:
+    """Write-only tool gate: the goal and the agent's resolved tree root must both be writable."""
+    if not cache_write_allowed(normalize.goal_hash(goal or ""), goal=goal):
+        return False
+    if demo_recording_enabled() or not agent_id:
+        return True
+    return not await soft_complete_allowed_for_agent(agent_id, goal)
+
+
 async def cache_set(
     key: str,
     kind: str,
