@@ -12311,6 +12311,7 @@ recover_exact_pool_claims() {{ printf 'pool-recovery\\n' >> "$CALLS"; }}
 capacity_release_stale_owner_reservations() {{ printf 'capacity-release\\n' >> "$CALLS"; }}
 fleet_audit_finalize_recovered_registry() {{ printf 'audit-finalize\\n' >> "$CALLS"; }}
 fleet_registry_remove_if_empty() {{ printf 'registry-finish\\n' >> "$CALLS"; }}
+fleet_publish_recovered_terminal_projection() {{ printf 'terminal-publication %s\\n' "$1" >> "$CALLS"; }}
 {functions}
 
 recover_exact_stale_fleet_owner {owner}
@@ -12336,13 +12337,14 @@ recover_exact_stale_fleet_owner {owner}
     assert all(
         call_lines.index(line) < transition_index for line in call_lines if line.startswith("shutdown-health http://")
     )
-    assert call_lines[transition_index : transition_index + 6] == [
+    assert call_lines[transition_index : transition_index + 7] == [
         "audit-recovery",
         f"provider-reap {registry} forced",
         "pool-recovery",
         "capacity-release",
         "audit-finalize",
         "registry-finish",
+        f"terminal-publication {audit_root / owner}",
     ]
     assert not (registry / "guest-cleanup-unconfirmed").exists()
     assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
@@ -30005,6 +30007,9 @@ exit "$shutdown_status"
                 assert result.returncode != 0, "late recovery accepted a foreign or replaced driver log"
                 assert not (destination / "runtime-evidence").exists()
                 assert not driver.exists() or fault in ("foreign-existing", "nonprefix-existing")
+                leftovers = [path.name for path in destination.glob(".cloudbench-driver-*")
+                             if not path.name.startswith(".cloudbench-driver-original-")]
+                assert not leftovers, f"failed collection left partial driver bytes: {leftovers}"
             assert json.loads((output / "runtime-evidence.pending").read_text()) == owner
             assert json.loads((output / "runtime-evidence.owner.json").read_text()) == owner
             preserved = list(destination.glob(".cloudbench-driver-original-*/cloudbench-driver.log"))

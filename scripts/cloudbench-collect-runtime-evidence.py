@@ -62,77 +62,84 @@ def collect_driver_log():
         with target.open("rb") as source:
             assert source.readline(len(stamp) + 1) == stamp, "driver log belongs to another run"
     descriptor, temporary = tempfile.mkstemp(prefix=".cloudbench-driver-", dir=parent)
-    offset, size, generation, tail = 0, None, "", b""
-    with os.fdopen(descriptor, "wb") as output:
-        while True:
-            query = urllib.parse.urlencode({"offset": offset, "limit": 262144})
-            log_headers = {**headers, "X-Cloudbench-Log-Anchor": hashlib.sha256(tail).hexdigest(),
-                           "X-Cloudbench-Log-Generation": generation}
-            with opener.open(urllib.request.Request(f"http://127.0.0.1:{port}/bench.log?{query}", headers=log_headers), timeout=6) as response:
-                current_generation = response.headers.get("X-Cloudbench-Log-Generation", "")
-                assert re.fullmatch(r"[0-9a-f]{32}", current_generation)
-                assert not generation or current_generation == generation, "driver log generation changed"
-                generation = current_generation
-                assert response.headers.get("X-Cloudbench-Log-Continuity") == "1"
-                if response.status == 204:
-                    assert offset > 0 and response.headers.get("X-Cloudbench-Log-Size") == str(offset) and size == offset
-                    assert not response.read(1)
-                    break
-                assert response.status == 206
-                span = re.fullmatch(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)", response.headers.get("Content-Range", ""))
-                assert span
-                begin, end, current_size = map(int, span.groups())
-                assert begin == offset and offset <= end < current_size <= maximum
-                assert size is None or current_size == size, "sealed driver log size changed"
-                size = current_size
-                remaining = end - begin + 1
-                assert remaining <= 262144 and response.headers.get("Content-Length") == str(remaining)
-                while remaining:
-                    chunk = response.read(min(65536, remaining))
-                    assert chunk, "driver log response ended early"
-                    if offset == 0:
-                        assert chunk.startswith(stamp), "driver log belongs to another run"
-                    output.write(chunk)
-                    tail = (tail + chunk)[-4096:]
-                    offset += len(chunk)
-                    remaining -= len(chunk)
-                assert not response.read(1)
-        output.flush()
-        os.fsync(output.fileno())
-    def identity(status):
-        return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
-    if original is not None:
-        with target.open("rb") as retained, open(temporary, "rb") as complete:
-            assert identity(os.fstat(retained.fileno())) == identity(original), "original driver log changed"
-            while chunk := retained.read(65536):
-                assert complete.read(len(chunk)) == chunk, "original driver log is not an exact prefix"
-            assert identity(os.fstat(retained.fileno())) == identity(original), "original driver log changed"
-            if original.st_size < offset:
-                os.fsync(retained.fileno())
-        assert not target.is_symlink() and identity(target.stat()) == identity(original), "original driver log changed"
-        if original.st_size == offset:
-            os.unlink(temporary)  # Leave an already complete original untouched.
-            return
-        # Keep the interrupted original inode inside a private directory before
-        # atomically publishing the complete, stable data-plane bytes.
-        history = Path(tempfile.mkdtemp(prefix=".cloudbench-driver-original-", dir=parent))
-        os.link(target, history / "cloudbench-driver.log")
-        for directory in (history, parent):
-            descriptor = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        assert not target.is_symlink() and identity(target.stat()) == identity(original), "original driver log changed"
-        os.replace(temporary, target)
-    else:
-        os.link(temporary, target)  # An absent target must remain absent until publication.
-        os.unlink(temporary)
-    descriptor = os.open(parent, os.O_RDONLY)
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        offset, size, generation, tail = 0, None, "", b""
+        with os.fdopen(descriptor, "wb") as output:
+            while True:
+                query = urllib.parse.urlencode({"offset": offset, "limit": 262144})
+                log_headers = {**headers, "X-Cloudbench-Log-Anchor": hashlib.sha256(tail).hexdigest(),
+                               "X-Cloudbench-Log-Generation": generation}
+                with opener.open(urllib.request.Request(f"http://127.0.0.1:{port}/bench.log?{query}", headers=log_headers), timeout=6) as response:
+                    current_generation = response.headers.get("X-Cloudbench-Log-Generation", "")
+                    assert re.fullmatch(r"[0-9a-f]{32}", current_generation)
+                    assert not generation or current_generation == generation, "driver log generation changed"
+                    generation = current_generation
+                    assert response.headers.get("X-Cloudbench-Log-Continuity") == "1"
+                    if response.status == 204:
+                        assert offset > 0 and response.headers.get("X-Cloudbench-Log-Size") == str(offset) and size == offset
+                        assert not response.read(1)
+                        break
+                    assert response.status == 206
+                    span = re.fullmatch(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)", response.headers.get("Content-Range", ""))
+                    assert span
+                    begin, end, current_size = map(int, span.groups())
+                    assert begin == offset and offset <= end < current_size <= maximum
+                    assert size is None or current_size == size, "sealed driver log size changed"
+                    size = current_size
+                    remaining = end - begin + 1
+                    assert remaining <= 262144 and response.headers.get("Content-Length") == str(remaining)
+                    while remaining:
+                        chunk = response.read(min(65536, remaining))
+                        assert chunk, "driver log response ended early"
+                        if offset == 0:
+                            assert chunk.startswith(stamp), "driver log belongs to another run"
+                        output.write(chunk)
+                        tail = (tail + chunk)[-4096:]
+                        offset += len(chunk)
+                        remaining -= len(chunk)
+                    assert not response.read(1)
+            output.flush()
+            os.fsync(output.fileno())
+        def identity(status):
+            return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
+        if original is not None:
+            with target.open("rb") as retained, open(temporary, "rb") as complete:
+                assert identity(os.fstat(retained.fileno())) == identity(original), "original driver log changed"
+                while chunk := retained.read(65536):
+                    assert complete.read(len(chunk)) == chunk, "original driver log is not an exact prefix"
+                assert identity(os.fstat(retained.fileno())) == identity(original), "original driver log changed"
+                if original.st_size < offset:
+                    os.fsync(retained.fileno())
+            assert not target.is_symlink() and identity(target.stat()) == identity(original), "original driver log changed"
+            if original.st_size == offset:
+                os.unlink(temporary)  # Leave an already complete original untouched.
+                return
+            # Keep the interrupted original inode inside a private directory before
+            # atomically publishing the complete, stable data-plane bytes.
+            history = Path(tempfile.mkdtemp(prefix=".cloudbench-driver-original-", dir=parent))
+            os.link(target, history / "cloudbench-driver.log")
+            for directory in (history, parent):
+                descriptor = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            assert not target.is_symlink() and identity(target.stat()) == identity(original), "original driver log changed"
+            os.replace(temporary, target)
+        else:
+            os.link(temporary, target)  # An absent target must remain absent until publication.
+            os.unlink(temporary)
+        descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        # A failed fetch or publication must not leave partial bytes behind for
+        # a later recovery that reuses this directory.
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+        raise
 def exited_without_ack():
     # /shutdown-health is 409 until the controller sends POST /shutdown, even
     # when a failed driver's boot supervisor has already sealed state=exited.

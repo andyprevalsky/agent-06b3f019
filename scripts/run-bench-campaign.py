@@ -1027,9 +1027,12 @@ def main() -> int:
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
     write_json_atomic(summary_path, state)
     publication_completed = False
-    if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
+    # A parent (for example the Hub poller) owns group publication when it
+    # supplies a group or parent run ID; only an attempted publication can fail.
+    publication_attempted = not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
         "BENCHMARK_HUB_PARENT_RUN_ID"
-    ):
+    )
+    if publication_attempted:
         # An existing cutoff/cancellation has already closed the controllers.
         # Publish that failed terminal group through the ordinary transport;
         # only a new stop during this handoff invokes its existing session drain.
@@ -1051,7 +1054,7 @@ def main() -> int:
     if stop_signal and not publication_completed:
         state["status"] = "cancelled"
         result = 128 + stop_signal
-    if args.retry_infra and not publication_completed:
+    if args.retry_infra and publication_attempted and not publication_completed:
         state["status"] = "failed" if not stop_signal else "cancelled"
         result = result or 1
     # Publication is part of the campaign lifetime, including cancellation

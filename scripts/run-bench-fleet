@@ -8292,7 +8292,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local recovery_index shutdown_status proxy_cleanup_status
     local prestart_inventory prestart_log prestart_status forensic_manifest forensic_schema
     local stopped_state stopped_attempt
-    local completed_native="" completed_status=1
+    local completed_native="" completed_native_tmp="" completed_status=1
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
@@ -8382,8 +8382,9 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                     # absence; leave all authorization/latches to normal recovery.
                     completed_native=""
                     if [ "$detail_status" -eq 0 ]; then
-                        completed_native="$(mktemp -d)" || return 1
-                        completed_native="$(cd "$completed_native" && pwd -P)" || return 1
+                        completed_native_tmp="$(mktemp -d)" || return 1
+                        completed_native="$(cd "$completed_native_tmp" && pwd -P)" \
+                            || { rm -rf "$completed_native_tmp"; return 1; }
                         if ! chmod 700 "$completed_native" \
                             || ! machine_config_exact_read "$machine_id" > "$completed_native/config.json" \
                             || ! fly_with_timeout 30 machines list -a "$APP" --json > "$completed_native/machines.json"; then

@@ -16,7 +16,7 @@ from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
-@pytest.mark.parametrize("failure", ("infra", "infra-strict", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing"))
+@pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing"))
 def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
     scripts = tmp_path / "scripts"
@@ -96,6 +96,9 @@ sys.exit(0 if status == 'PASSED' else 1)
            if not key.startswith("RUN_BENCH_CAMPAIGN_") and not key.startswith("BENCHMARK_HUB_")}
     env.update(FIXTURE_ROOT=str(tmp_path), FIXTURE_FAILURE=failure, CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
                FIXTURE_BARRIER=str(ROOT / 'scripts/cloudbench-campaign-barrier.py'))
+    if failure == "infra-parent-owned":
+        # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
+        env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     summaries = list((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json"))
     assert summaries, result.stdout + result.stderr
@@ -108,12 +111,15 @@ sys.exit(0 if status == 'PASSED' else 1)
         assert not started and result.returncode != 0
         assert summary['e2e_timeout_exceeded']
         assert (summaries[0].parent / 'hub-group-publication-ack.private.json').is_file(), 'cutoff skipped terminal group publication'
-    elif failure in {'infra', 'infra-strict', 'exhausted', 'retry-unverified', 'retry-handle-missing'}:
+    elif failure in {'infra', 'infra-strict', 'infra-parent-owned', 'exhausted', 'retry-unverified', 'retry-handle-missing'}:
         assert len([event for event in started if event['task'] == 'broken']) == 2
         assert len([event for event in started if event['task'] == 'healthy']) == 1
         assert len(broken['attempts']) == 2 and broken['attempts'][0]['task_status'] == 'INFRA_ERROR'
         assert len({attempt['log'] for attempt in broken['attempts']}) == 2
-        assert result.returncode == (0 if failure in {'infra', 'infra-strict'} else 1), result.stdout + result.stderr
+        assert result.returncode == (0 if failure in {'infra', 'infra-strict', 'infra-parent-owned'} else 1), result.stdout + result.stderr
+        if failure == 'infra-parent-owned':
+            assert summary['status'] == 'passed'
+            assert not (summaries[0].parent / 'hub-group-publication-ack.private.json').exists()
         if failure.startswith('retry-'):
             previous, current = broken['attempts']
             assert previous['attempt'] == 1 and current['attempt'] == 2
