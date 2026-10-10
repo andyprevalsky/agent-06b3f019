@@ -4435,7 +4435,8 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
     assert result["score"] == 1.0
     # Fast Mode soft-pass fires on the first parse failure so we never flip
     # the context to write-only live (verify8/10 cost bleed). One attempt only.
-    assert seen_contexts == [(True, True)]
+    # The DEMO replay namespace is read-only for writes (no re-recording here).
+    assert seen_contexts == [(True, False)]
     assert (result.get("usage") or {}).get("from_fast_cache") is True
 
 
