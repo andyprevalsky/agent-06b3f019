@@ -1203,6 +1203,14 @@ def test_native_service_owner_joins_child_on_shutdown(tmp_path):
                 else:
                     pytest.fail(log.read_text())
                 assert response.json()["engine"] == "experiential"
+                # An open session at shutdown (conformance never ends its own)
+                # must still retire through the provider bridge before it stops.
+                opened = http.post(
+                    f"http://127.0.0.1:{port}/world_models/rose-test/sessions",
+                    json={"task": "Shutdown retirement", "seed_state": {}},
+                )
+                assert opened.status_code == 200, opened.text
+                open_session = opened.json()["session_id"]
             children = psutil.Process(owner.pid).children()
             assert len(children) == 1
         finally:
@@ -1217,6 +1225,9 @@ def test_native_service_owner_joins_child_on_shutdown(tmp_path):
         assert not any(child.is_running() and child.status() != psutil.STATUS_ZOMBIE for child in children), (
             log.read_text()
         )
+        assert "Application shutdown failed" not in log.read_text(), log.read_text()
+        receipt = json.loads((tmp_path / "native" / "native-retirements" / f"{open_session}.json").read_text())
+        assert receipt["session_id"] == open_session and receipt["join_verified"] is True
 
 
 def test_message_conversion_omits_empty_system():

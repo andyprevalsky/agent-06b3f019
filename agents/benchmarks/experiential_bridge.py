@@ -20,6 +20,9 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
+# Bound for the native child to retire open sessions through the bridge on shutdown.
+_CHILD_RETIRE_SECONDS = 60
+
 
 def pool_sha256(pool):
     from providers.rose.pools import get_pool
@@ -161,8 +164,20 @@ def serve_native(name, root, pool, port):
         @contextmanager
         def capture_signals(self):
             # Uvicorn normally re-raises TERM before its caller's finally block.
-            # This owner must first terminate and join its exact native child.
-            previous = {sig: signal.signal(sig, self.handle_exit) for sig in (signal.SIGINT, signal.SIGTERM)}
+            # The native child retires its open sessions through this provider
+            # bridge, so stop the exact child first and keep serving until
+            # supervise() observes its exit (bounded by a fallback).
+            def stop_child_first(sig, frame):
+                self._captured_signals.append(sig)
+                if child.poll() is None and not self.should_exit:
+                    child.terminate()
+                    fallback = threading.Timer(_CHILD_RETIRE_SECONDS, setattr, (self, "should_exit", True))
+                    fallback.daemon = True
+                    fallback.start()
+                else:
+                    self.should_exit = True
+
+            previous = {sig: signal.signal(sig, stop_child_first) for sig in (signal.SIGINT, signal.SIGTERM)}
             try:
                 yield
             finally:
