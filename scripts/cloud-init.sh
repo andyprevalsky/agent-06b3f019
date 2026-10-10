@@ -249,6 +249,7 @@ esac
 # Everything our test suites + cloud benchmark runner need beyond the base image:
 #   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
 #   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
+#   lsof   — local stack/benchmark cleanup finds listener PIDs and process cwds
 #   time   — GNU /usr/bin/time for seed-memory RSS ratchet (bash builtin has no RSS)
 #   py3.11 — pinned interpreter for agents/venv (base python may be newer)
 #   flyctl — REQUIRED by scripts/run-bench (the cloud Fly benchmark fleet)
@@ -267,6 +268,7 @@ ensure_apt() {  # <binary-to-check> <apt-packages...>
 }
 ensure_apt ruby ruby
 ensure_apt rsync rsync
+ensure_apt lsof lsof
 # Prefer the real /usr/bin/time binary; `command -v time` hits the bash builtin.
 if [ ! -x /usr/bin/time ]; then
     ensure_apt /usr/bin/time time

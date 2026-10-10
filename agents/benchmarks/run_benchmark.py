@@ -5772,6 +5772,24 @@ def _agent_messages_ready_for_durable_browser_evidence(
     )
 
 
+def _retain_harness_benchmark_state(source: dict, refreshed: dict) -> dict:
+    """Carry harness-only ``_benchmark`` evidence onto a fresh agent read.
+
+    A live agent read knows nothing about evidence the poll loop observed (gates,
+    Checkout, attention order, receipts). Replacing the transcript must not erase
+    it, or evaluation reports contract failures the run never had.
+    """
+    if refreshed is source:
+        return refreshed
+    source_benchmark = source.get("_benchmark")
+    refreshed_benchmark = refreshed.get("_benchmark")
+    refreshed["_benchmark"] = {
+        **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
+        **(source_benchmark if isinstance(source_benchmark, dict) else {}),
+    }
+    return refreshed
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -5802,9 +5820,9 @@ async def _refresh_agent_after_pause_for_browser_terminal(
             continue
         if readiness_check(latest.get("messages")):
             print(f"    ✓ Browser terminal messages landed after pause ({len(latest.get('messages') or [])} messages)")
-            return latest
+            return _retain_harness_benchmark_state(data, latest)
     print("    ⚠ Timed out waiting for browser terminal messages after pause; archiving latest snapshot anyway")
-    return latest
+    return _retain_harness_benchmark_state(data, latest)
 
 
 async def _refresh_browser_archive_snapshot(
@@ -6276,15 +6294,9 @@ async def _seal_payment_abandonment_browser_for_archive(
     except Exception as pause_error:
         return data, f"Failed to seal payment-abandonment browser evidence: {pause_error}"
 
-    # The live agent read does not know about harness-only lifecycle/evaluator
-    # fields. Preserve them while replacing the transcript with the post-pause
-    # terminal snapshot.
-    source_benchmark = data.get("_benchmark")
-    refreshed_benchmark = refreshed.get("_benchmark")
-    refreshed["_benchmark"] = {
-        **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
-        **(source_benchmark if isinstance(source_benchmark, dict) else {}),
-    }
+    # Preserve harness-only lifecycle/evaluator fields while replacing the
+    # transcript with the post-pause terminal snapshot.
+    refreshed = _retain_harness_benchmark_state(data, refreshed)
     if not _agent_messages_ready_for_durable_browser_evidence(refreshed.get("messages")):
         return (
             refreshed,
@@ -12298,7 +12310,7 @@ async def _await_claude_code_chip_terminality(
             return latest
         await asyncio.sleep(1.5)
         try:
-            latest = await get_agent(base_url, agent_id)
+            latest = _retain_harness_benchmark_state(data, await get_agent(base_url, agent_id))
         except Exception as refresh_error:
             print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
 

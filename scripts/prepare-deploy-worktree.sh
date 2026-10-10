@@ -390,6 +390,17 @@ if $CHECK_ONLY; then
       echo "✅ Primary Conductor worktree does not require isolated deploy preparation."
       exit 0
     fi
+    # Cloud dev boxes have no Conductor-provided CONDUCTOR_WORKSPACE_PATH; their
+    # primary checkout is identified by the cloud-build.sh .cloud-env rooted at
+    # itself. A linked worktree is never primary, even with a copied .cloud-env.
+    cloud_root="$(sed -n 's/^export CONDUCTOR_ROOT_PATH=//p' "$WORKTREE/.cloud-env" 2>/dev/null | tail -n 1)"
+    if grep -qx '# rose-cloud-env' "$WORKTREE/.cloud-env" 2>/dev/null &&
+      [ -n "$cloud_root" ] && [ -d "$cloud_root" ] &&
+      [ "$(canonical_dir "$cloud_root")" = "$WORKTREE" ] &&
+      [ "$(git_common_dir "$WORKTREE")" = "$(canonical_dir "$(git -C "$WORKTREE" rev-parse --absolute-git-dir)")" ]; then
+      echo "✅ Primary cloud workspace does not require isolated deploy preparation."
+      exit 0
+    fi
     echo "❌ Isolated deploy worktree is missing .context/deploy-worktree.env." >&2
     echo "   Run /descend preparation before starting /deploy." >&2
     exit 1

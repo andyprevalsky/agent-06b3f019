@@ -1,12 +1,11 @@
 /**
  * Report Bug section in AgentSettingsDialog.
  *
- * Admin-only: expands into a description textarea that launches a Cursor
- * cloud agent titled from the description to /rca the Rose agent.
+ * Admin-only: expands into a description textarea that runs the boxes.dev
+ * Bug Report automation, titled from the description, to /rca the Rose agent.
  *
- * After launch, keep Open + Copy on screen. Preferred path is GitHub @cursor
- * (source:scm) for the Cursor mobile inbox; API fallback may be used when
- * SCM cannot dispatch. Submit never auto-opens Cursor and never sends SMS.
+ * After launch, keep Open + Copy on screen. Submit never auto-opens boxes.dev
+ * and never sends SMS.
  */
 
 import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
@@ -21,19 +20,16 @@ interface ReportBugSectionProps {
 
 export default function ReportBugSection({ flow }: ReportBugSectionProps) {
   if (flow.launched !== null) {
-    const isScm = flow.launched.launch_source === 'scm';
     return (
       <div className="space-y-3 pt-4 border-t border-border/60" data-testid="report-bug-launched">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm font-medium">
             <Check className="h-4 w-4 text-emerald-500" />
-            Cursor agent launched
+            boxes.dev agent launched
           </div>
           <p className="text-sm text-foreground/90 break-words">{flow.launched.name}</p>
           <p className="text-xs text-muted-foreground">
-            {isScm
-              ? 'Launched via GitHub so it should appear in the Cursor mobile inbox. Tap Open if you don\u2019t see it yet.'
-              : 'Launched via the Cursor API (not GitHub). Enable Filter \u2192 Source \u2192 API in Cursor if you don\u2019t see it in the inbox, or tap Open.'}
+            Started a new boxes.dev thread from the Bug Report automation. Tap Open to follow it.
           </p>
           <a
             href={flow.launched.url}
@@ -63,7 +59,7 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
             data-testid="report-bug-open-link"
           >
             <ExternalLink className="h-4 w-4 mr-2" />
-            Open in Cursor
+            Open in boxes.dev
           </Button>
         </div>
         <Button
@@ -107,7 +103,7 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               className="resize-y min-h-[100px]"
             />
             <p className="text-xs text-muted-foreground">
-              Launches a Cursor agent to investigate. After it launches you can copy or open the
+              Launches a boxes.dev agent to investigate. After it launches you can copy or open the
               link.
             </p>
           </div>

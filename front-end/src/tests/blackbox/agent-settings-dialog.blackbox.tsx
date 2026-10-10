@@ -328,9 +328,8 @@ describe('AgentSettingsDialog', () => {
           {
             success: true,
             name: 'Checkout never finished',
-            url: 'https://cursor.com/agents/bc-bug-1',
-            cursor_agent_id: 'bc-bug-1',
-            launch_source: 'scm',
+            url: 'https://boxes.dev/open/desktop?box=rose&automation=ta_bug',
+            run_id: 'run-bug-1',
           },
           { status: 201 },
         );
@@ -352,23 +351,24 @@ describe('AgentSettingsDialog', () => {
       ).toBe(true);
     });
     // Sticky launched panel with an explicit Open button. Submit must not
-    // auto-open Cursor — that is a user gesture, not a side effect of report.
+    // auto-open boxes.dev — that is a user gesture, not a side effect of report.
     expect(await screen.findByTestId('report-bug-launched')).toBeInTheDocument();
     expect(screen.getByTestId('report-bug-url')).toHaveAttribute(
       'href',
-      'https://cursor.com/agents/bc-bug-1',
+      'https://boxes.dev/open/desktop?box=rose&automation=ta_bug',
     );
     expect(screen.getByText('Checkout never finished')).toBeInTheDocument();
     expect(screen.queryByText(/Bug \|/)).toBeNull();
-    expect(screen.getByText(/Launched via GitHub/)).toBeInTheDocument();
-    expect(screen.queryByText(/Cursor API/)).toBeNull();
+    expect(screen.getByText('boxes.dev agent launched')).toBeInTheDocument();
+    expect(screen.getByTestId('report-bug-open-link')).toHaveTextContent('Open in boxes.dev');
+    expect(screen.queryByText(/Cursor/)).toBeNull();
     expect(screen.queryByText(/SMS/i)).toBeNull();
     expect(openSpy).not.toHaveBeenCalled();
 
     await u.click(screen.getByTestId('report-bug-open-link'));
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy).toHaveBeenCalledWith(
-      'https://cursor.com/agents/bc-bug-1',
+      'https://boxes.dev/open/desktop?box=rose&automation=ta_bug',
       '_blank',
       'noopener,noreferrer',
     );
@@ -376,21 +376,14 @@ describe('AgentSettingsDialog', () => {
     openSpy.mockRestore();
   });
 
-  it('shows API guidance when Report Bug falls back to Cursor API', async () => {
+  it('keeps the composer open with the error when the boxes.dev run is rejected', async () => {
     mockSession(ANDY_USER_ID);
     const u = userEvent.setup();
-    vi.spyOn(window, 'open').mockImplementation(() => null);
     server.use(
       http.post(`${API_BASE}/agents/:agentId/report-bug`, async () => {
         return HttpResponse.json(
-          {
-            success: true,
-            name: 'API fallback case',
-            url: 'https://cursor.com/agents/bc-bug-api',
-            cursor_agent_id: 'bc-bug-api',
-            launch_source: 'api',
-          },
-          { status: 201 },
+          { error: 'boxes.dev bug report automation is not configured' },
+          { status: 503 },
         );
       }),
     );
@@ -399,11 +392,19 @@ describe('AgentSettingsDialog', () => {
     await u.click(document.querySelector('button')!);
     await u.click(await screen.findByTestId('report-bug-open'));
     const textarea = await screen.findByTestId('report-bug-description');
-    await u.type(textarea, 'API fallback case');
+    await u.type(textarea, 'Unconfigured case');
     await u.click(screen.getByTestId('report-bug-submit'));
 
-    expect(await screen.findByTestId('report-bug-launched')).toBeInTheDocument();
-    expect(screen.getByText(/Launched via the Cursor API/)).toBeInTheDocument();
-    expect(screen.queryByText(/Launched via GitHub/)).toBeNull();
+    await waitFor(() => {
+      expect(
+        capturedRequests.some((r) => r.method === 'POST' && r.url.includes('/report-bug')),
+      ).toBe(true);
+    });
+    // Submit re-enables once the rejected request settles; nothing claims a launch.
+    await waitFor(() => {
+      expect(screen.getByTestId('report-bug-submit')).toBeEnabled();
+    });
+    expect(screen.queryByTestId('report-bug-launched')).toBeNull();
+    expect(screen.getByTestId('report-bug-description')).toHaveValue('Unconfigured case');
   });
 });
