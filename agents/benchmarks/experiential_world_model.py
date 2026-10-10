@@ -159,6 +159,12 @@ class NativeSession:
     receipts: dict = field(default_factory=dict)
     sampling_draws: dict = field(default_factory=dict)
     retirement: asyncio.Task | None = None
+    # Live invocations whose prediction was discarded, in conflict order. While
+    # any exist only the oldest may predict and commit, so a slow prediction
+    # cannot be rebased forever by a stream of faster commits.
+    contended: dict = field(default_factory=dict)
+    conflicts: int = 0
+    turn: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class RetiredWorldModelScope(ValueError):
@@ -269,7 +275,7 @@ class ParallelWorldModel:
                         if type(draw) not in (int, float) or not 0 <= draw < 1:
                             raise ValueError("Outcome draw must be a finite number in [0, 1)")
                         session.sampling_draws[key] = (identity, draw)
-                operation = asyncio.create_task(self._step(session, action, candidate, draw))
+                operation = asyncio.create_task(self._step(session, key, action, candidate, draw))
                 session.receipts[key] = (identity, operation)
 
                 def completed(task):
@@ -283,22 +289,47 @@ class ParallelWorldModel:
         # A lost HTTP response must not cancel an already admitted prediction.
         return deepcopy(await asyncio.shield(operation))
 
-    async def _step(self, session, action, candidate, draw):
-        async with asyncio.timeout(600):
-            return await self._step_with_rebase(session, action, candidate, draw)
+    async def _step(self, session, key, action, candidate, draw):
+        try:
+            async with asyncio.timeout(600):
+                return await self._step_with_rebase(session, key, action, candidate, draw)
+        finally:
+            # Synchronous on the session's loop, so a second cancellation cannot
+            # strand the turn on a finished operation.
+            if session.contended.pop(key, None) is not None:
+                self._advance_turn(session)
 
-    async def _step_with_rebase(self, session, action, candidate, draw):
+    @staticmethod
+    def _awaiting_turn(session, key):
+        """Under the session lock: the event to wait on while another conflicted operation owns the turn."""
+        if session.contended and min(session.contended, key=session.contended.__getitem__) != key:
+            return session.turn
+        return None
+
+    @staticmethod
+    def _advance_turn(session):
+        session.turn.set()
+        session.turn = asyncio.Event()
+
+    async def _step_with_rebase(self, session, key, action, candidate, draw):
         call = candidate.tool_calls[0]
         intervals = []
-        # The enclosing 600-second budget bounds rebases. A fixed attempt count
-        # would turn valid same-root fanout into failures after a few commits.
+        # Conflicts are resolved oldest first: a discarded operation predicts
+        # again only when it owns the turn, and no other operation commits
+        # meanwhile, so each operation rebases at most once. The enclosing
+        # 600-second budget bounds waiting for the turn.
         for attempt in count():
-            async with session.lock:
-                if session.closed:
-                    raise ValueError("Native world session ended before prediction")
-                base = session.state
-                messages = session.messages
-                revision = session.revision
+            while True:
+                async with session.lock:
+                    if session.closed:
+                        raise ValueError("Native world session ended before prediction")
+                    turn = self._awaiting_turn(session, key)
+                    if turn is None:
+                        base = session.state
+                        messages = session.messages
+                        revision = session.revision
+                        break
+                await turn.wait()
             task = TaskCase(
                 task_id=stable_id("rose-task", {"scope": session.scope or session.id}),
                 lineage_group_id=session.excluded_lineage,
@@ -502,35 +533,43 @@ class ParallelWorldModel:
             }
             if selection is not None:
                 audit["outcome_selection"] = deepcopy(selection)
-            async with session.lock:
-                if session.closed:
-                    raise ValueError("Native world session ended before commit")
-                # The predictor reads the whole state and history. Disjoint writes
-                # do not prove independence: both can depend on a shared balance.
-                if session.revision != revision:
-                    interval["discarded_due_to_revision"] = session.revision
-                    continue
-                if len(session.history) >= self.maximum_steps:
-                    raise ValueError("Native session step capacity reached")
-                observation["metadata"]["committed_revision"] = session.revision + 1
-                step = {
-                    "action": deepcopy(action),
-                    "observation": deepcopy(observation),
-                    "state_before": deepcopy(base),
-                    "task": session.task,
-                }
-                session.messages = (
-                    *session.messages,
-                    ModelMessage(role="assistant", assistant_action=candidate),
-                    *transition.visible_messages,
-                )
-                session.history = (*session.history, step)
-                session.state = deepcopy(transition.state)
-                session.revision += 1
-                self.retrieval_calls += 1
-                audit["committed_revision"] = session.revision
-                self.audit.append(audit)
-            return observation
+            while True:
+                async with session.lock:
+                    if session.closed:
+                        raise ValueError("Native world session ended before commit")
+                    # The predictor reads the whole state and history. Disjoint writes
+                    # do not prove independence: both can depend on a shared balance.
+                    if session.revision != revision:
+                        interval["discarded_due_to_revision"] = session.revision
+                        if key not in session.contended:
+                            session.conflicts += 1
+                            session.contended[key] = session.conflicts
+                        break
+                    # A prediction that started before a conflict yields to it.
+                    turn = self._awaiting_turn(session, key)
+                    if turn is None:
+                        if len(session.history) >= self.maximum_steps:
+                            raise ValueError("Native session step capacity reached")
+                        observation["metadata"]["committed_revision"] = session.revision + 1
+                        step = {
+                            "action": deepcopy(action),
+                            "observation": deepcopy(observation),
+                            "state_before": deepcopy(base),
+                            "task": session.task,
+                        }
+                        session.messages = (
+                            *session.messages,
+                            ModelMessage(role="assistant", assistant_action=candidate),
+                            *transition.visible_messages,
+                        )
+                        session.history = (*session.history, step)
+                        session.state = deepcopy(transition.state)
+                        session.revision += 1
+                        self.retrieval_calls += 1
+                        audit["committed_revision"] = session.revision
+                        self.audit.append(audit)
+                        return observation
+                await turn.wait()
         raise AssertionError("Unreachable state retry boundary")
 
     async def end_session(self, session_id):

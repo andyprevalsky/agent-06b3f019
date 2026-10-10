@@ -739,7 +739,56 @@ def test_eight_same_root_predictions_overlap_and_commit_every_effect():
         results = await asyncio.gather(*(model.step(s.id, action(n)) for n in range(8)))
         assert peak == 8 and s.state["count"] == 8 and len(s.history) == 8
         assert sorted(int(r["content"]) for r in results) == list(range(1, 9))
-        assert calls == 36 and sorted(r["metadata"]["committed_revision"] for r in results) == list(range(1, 9))
+        # Eight overlapped predictions; each of the seven conflicted operations then
+        # rebases exactly once in its turn (previously 8+7+...+1 = 36 predictions).
+        assert calls == 15 and sorted(r["metadata"]["committed_revision"] for r in results) == list(range(1, 9))
+        assert max(r["metadata"]["state_retries"] for r in results) == 1 and not s.contended
+
+    asyncio.run(run())
+
+
+def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations():
+    """A slow prediction (explore) must not be rebased forever by a stream of fast commits."""
+
+    async def run():
+        slow_entered = [asyncio.Event(), asyncio.Event()]
+        slow_release = [asyncio.Event(), asyncio.Event()]
+        slow_revisions, fast_revisions = [], []
+
+        async def complete(request):
+            e = json.loads(request.messages[1].content)
+            state = deepcopy(e["environment_state"])
+            call = e["candidate_response"]["tool_calls"][0]["call_id"]
+            if call == "call-0":
+                attempt = len(slow_revisions)
+                slow_revisions.append(state["count"])
+                assert attempt < 2, "slow operation was rebased again after its conflict"
+                slow_entered[attempt].set()
+                await slow_release[attempt].wait()
+            else:
+                fast_revisions.append((call, state["count"]))
+            state["count"] += 1
+            state.setdefault("order", []).append(call)
+            return reply(request, state, call)
+
+        model = ParallelWorldModel(complete, Retriever())
+        s = model.new_session("Explore while messaging", {"count": 0}, "root")
+        slow = asyncio.create_task(model.step(s.id, action(0), "explore"))
+        await asyncio.wait_for(slow_entered[0].wait(), 2)
+        assert (await asyncio.wait_for(model.step(s.id, action(1), "sms-1"), 2))["content"] == "call-1"
+        slow_release[0].set()
+        await asyncio.wait_for(slow_entered[1].wait(), 2)
+        # The conflicted slow operation now owns the next commit; a newer fast
+        # operation waits for it instead of predicting against a doomed revision.
+        fast = asyncio.create_task(model.step(s.id, action(2), "sms-2"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert fast_revisions == [("call-1", 0)] and not fast.done()
+        slow_release[1].set()
+        results = await asyncio.wait_for(asyncio.gather(slow, fast), 2)
+        assert slow_revisions == [0, 1] and fast_revisions == [("call-1", 0), ("call-2", 2)]
+        assert [r["metadata"]["committed_revision"] for r in results] == [2, 3]
+        assert s.state == {"count": 3, "order": ["call-1", "call-0", "call-2"]} and not s.contended
 
     asyncio.run(run())
 
