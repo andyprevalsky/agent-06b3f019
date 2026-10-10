@@ -13404,10 +13404,12 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert enabled.returncode == 0, enabled.stderr
     assert enabled.stdout.splitlines() == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
+        "stack:FAST_MODE_CACHE_USE_LOCAL=1",
+        "stack:FAST_MODE_CACHE_DATABASE_URL=",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
     ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
-    assert disabled.stdout == ""
+    assert disabled.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
@@ -13427,6 +13429,114 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     assert resolver_failure.returncode == 42
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
+
+
+def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
+    """Only fast_cache:on DEMO replays may hold production pooler slots.
+
+    Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
+    matching local isolated stacks; a broken resolver fails closed instead of
+    silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
+    still read the shared cache use a small Prisma pool instead of production's
+    75-client default.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    base_env = {
+        **os.environ,
+        "CLOUDBENCH_REPO_DIR": str(repo_root),
+        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+        "CLOUDBENCH_PRINT_TASK_ENV": "1",
+        "BENCH_TASKS_B64": "",
+    }
+    base_env.pop("CLOUDBENCH_INFRA_PROBE", None)
+
+    def print_env(tasks: str, **extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(script)],
+            env={**base_env, "BENCH_TASKS": tasks, **extra},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    live = print_env("chat-mode")
+    assert live.returncode == 0, live.stderr
+    assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+
+    shared = print_env("test-mass-agent-run-0")
+    assert shared.returncode == 0, shared.stderr
+    assert shared.stdout == "", "fast_cache:on replay must keep the frozen shared cache"
+
+    mixed = print_env("chat-mode,test-mass-agent-run-0")
+    assert mixed.returncode == 0, mixed.stderr
+    assert mixed.stdout == ""
+
+    probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+
+    with tempfile.TemporaryDirectory() as fake_bin_dir:
+        fake_python = Path(fake_bin_dir) / "python3"
+        fake_python.write_text(
+            '#!/bin/sh\ncase "$2" in requires-gate) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+        )
+        fake_python.chmod(0o755)
+        broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
+    assert broken.returncode == 31
+    assert "route-broken" in broken.stderr
+    assert "Fast Mode cache routing failed (exit 31)" in broken.stderr
+    assert "FAST_MODE_CACHE_USE_LOCAL" not in broken.stdout
+
+    unknown = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "cloudbench_catalog.py"),
+            "needs-shared-fast-cache",
+            str(repo_root / "agents" / "benchmarks" / "tasks.json"),
+            "no-such-benchmark-task",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unknown.returncode == 1
+    assert "no-such-benchmark-task" in unknown.stderr
+
+    lib = repo_root / "scripts" / "lib" / "fast-mode-cache-schema.sh"
+    pool_env = {key: value for key, value in os.environ.items() if key != "FAST_CACHE_DB_POOL"}
+
+    def pool_after(mode: str, explicit: str | None = None) -> str:
+        env = dict(pool_env)
+        if explicit is not None:
+            env["FAST_CACHE_DB_POOL"] = explicit
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; apply_benchmark_fast_cache_pool_default "$2" >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                "pool",
+                str(lib),
+                mode,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    assert pool_after("true") == "3"
+    assert pool_after("true", "9") == "9", "an explicit operator pool size wins"
+    assert pool_after("false") == "unset", "non-benchmark stacks keep the production default"
+
+    run_sh = (repo_root / "scripts" / "run.sh").read_text()
+    pool_call = run_sh.index('apply_benchmark_fast_cache_pool_default "$BENCHMARK_MODE"')
+    assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
+    assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
 
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
@@ -21393,6 +21503,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_source_connect_gate_benchmark_non_purchase_env",
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
+    r.record(
+        "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
+        test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler,
     )
     r.record(
         "cloudbench_task_gate_resolution_fails_closed",

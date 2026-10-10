@@ -50,3 +50,18 @@ ensure_fast_mode_cache_schema() {
     echo "❌ Fast Mode cache schema ensure failed after ${max_attempts} attempts (shared prod pooler saturated)" >&2
     return "$rc"
 }
+
+# Benchmark stacks sit outside production's pooler budget
+# (back-end/src/providers/database.ts). A stack's Fast Mode cache Prisma pool
+# otherwise inherits production's 75-client default, so 50 guests reading the
+# shared cache could claim 3,750 of the pooler's 1,000 client slots and starve
+# production. Benchmark stacks default to a small pool; an explicit
+# FAST_CACHE_DB_POOL still wins.
+BENCHMARK_FAST_CACHE_DB_POOL_DEFAULT=3
+apply_benchmark_fast_cache_pool_default() {
+    local benchmark_mode="$1"
+    if [ "$benchmark_mode" = true ] && [ -z "${FAST_CACHE_DB_POOL:-}" ]; then
+        export FAST_CACHE_DB_POOL="$BENCHMARK_FAST_CACHE_DB_POOL_DEFAULT"
+        echo "🧠 Benchmark stack: Fast Mode cache pool limited to ${FAST_CACHE_DB_POOL} connections"
+    fi
+}
