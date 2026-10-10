@@ -222,6 +222,23 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 self.assertEqual(module.main(), 0)
                 run.assert_called_once_with(module.GATES, max_workers=3)
 
+    def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
+        spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        stderr = io.StringIO()
+        with (
+            patch.object(module.shutil, "which", side_effect=lambda tool: None if tool == "lsof" else "/usr/bin/" + tool),
+            patch.object(module, "run_gates", return_value=0) as run,
+            patch.object(sys, "argv", [str(RUNNER)]),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(module.main(), 1)
+        run.assert_not_called()
+        self.assertIn("lsof", stderr.getvalue())
+        self.assertIn("apt-get install -y lsof", stderr.getvalue())
+
     def test_signal_does_not_wait_for_unlaunched_gates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deploy-runner-signal-") as temporary:
             temporary_path = Path(temporary)
