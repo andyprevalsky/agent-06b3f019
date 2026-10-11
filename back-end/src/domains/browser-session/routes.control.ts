@@ -9,6 +9,7 @@ import {
   SessionNotFoundError,
   setBrowserControlState,
 } from './service';
+import { getBrowserLiveView } from './service.control';
 import { browserControlSchema } from './types';
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -34,6 +35,23 @@ export function registerBrowserControlRoutes(router: Router): void {
       try {
         if (rejectMissingExternalUser(req, res)) return;
         res.json(await getBrowserControlState(req.params.taskId, externalUserId(req)));
+      } catch (error) {
+        if (error instanceof SessionNotFoundError) {
+          res.status(404).json({ error: 'Session not found' });
+          return;
+        }
+        throw error;
+      }
+    })
+  );
+
+  router.get(
+    '/task/:taskId/live-view',
+    auth,
+    asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
+      try {
+        if (rejectMissingExternalUser(req, res)) return;
+        res.json(await getBrowserLiveView(req.params.taskId, externalUserId(req)));
       } catch (error) {
         if (error instanceof SessionNotFoundError) {
           res.status(404).json({ error: 'Session not found' });

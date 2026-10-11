@@ -58,12 +58,12 @@ echo "PASS: failed dumps preserve a known-good archive and leave no partial"
 
 grep -q '_SEED_DUMP_CONTAINER="$DB_CONTAINER"' "$RUN_SH"
 SAVE_CALL="$(grep -A2 'bash scripts/save-seed-dump.sh' "$RUN_SH")"
-echo "$SAVE_CALL" | grep -q '"$LOCAL_DB_NAME"'
-echo "$SAVE_CALL" | grep -q '"$_SEED_DUMP_CONTAINER"'
+grep -q '"$LOCAL_DB_NAME"' <<<"$SAVE_CALL"
+grep -q '"$_SEED_DUMP_CONTAINER"' <<<"$SAVE_CALL"
 echo "PASS: run.sh passes the exact database and Docker container to the helper"
 
 RESTORE_FAILURE="$(grep -A7 'restore failed — falling back' "$RUN_SH")"
-echo "$RESTORE_FAILURE" | grep -q 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"'
+grep -q 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"' <<<"$RESTORE_FAILURE"
 echo "PASS: run.sh invalidates an archive already proven unrestorable"
 # ngrok reserved-domains list page size must stay <= 100 (ERR_NGROK_233).
 grep -qE -- '--limit 100\b' "$RUN_SH" || { echo "FAIL: run.sh must list reserved domains with --limit 100" >&2; exit 1; }
@@ -83,15 +83,15 @@ echo "PASS: run.sh compares reserved domains as exact JSON values"
 # Reserved-domain API calls must use the NGROK_API_KEY env (not --api-key argv)
 # and must fail closed on malformed listing JSON instead of creating a domain.
 ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
-echo "$ensure_fn" | grep -q 'export NGROK_API_KEY' \
+grep -q 'export NGROK_API_KEY' <<<"$ensure_fn" \
   || { echo "FAIL: ensure_ngrok_domain_reserved must export NGROK_API_KEY" >&2; exit 1; }
 if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -qE -- '--api-key[[:space:]]'; then
   echo "FAIL: ensure_ngrok_domain_reserved must not pass --api-key on argv" >&2
   exit 1
 fi
-echo "$ensure_fn" | grep -q 'malformed' \
+grep -q 'malformed' <<<"$ensure_fn" \
   || { echo "FAIL: ensure_ngrok_domain_reserved must fail on malformed listing JSON" >&2; exit 1; }
-echo "$ensure_fn" | grep -q 'raw.find("{")' \
+grep -q 'raw.find("{")' <<<"$ensure_fn" \
   || { echo "FAIL: ensure_ngrok_domain_reserved must tolerate ngrok CLI HTTP status prefixes before JSON" >&2; exit 1; }
 # Behavioral cement: a "200 OK\\n{...}" listing still resolves an existing domain.
 status_prefixed_listing='200 OK
@@ -164,7 +164,7 @@ echo "PASS: run.sh reserved-domain pagination cursor survives bash single-quotin
 # return — never bare-exit — or every stack on a full ngrok account dies before
 # the ephemeral/cloudflare fallback can run.
 ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
-echo "$ensure_fn" | grep -q 'tunnel start / fallback is authoritative' \
+grep -q 'tunnel start / fallback is authoritative' <<<"$ensure_fn" \
   || { echo "FAIL: ensure_ngrok_domain_reserved must continue after create rejection" >&2; exit 1; }
 # The create-failure branch must not exit 1 in the default (non-soft) path.
 create_fail_branch=$(echo "$ensure_fn" | awk '/Reserving ngrok domain/,/^}$/')
@@ -172,7 +172,7 @@ if echo "$create_fail_branch" | grep -vE 'failure_mode.*soft' | grep -qE '^\s*ex
   echo "FAIL: ensure_ngrok_domain_reserved still exits 1 on create rejection" >&2
   exit 1
 fi
-echo "$create_fail_branch" | grep -q 'return 0' \
+grep -q 'return 0' <<<"$create_fail_branch" \
   || { echo "FAIL: ensure_ngrok_domain_reserved default path must return 0 after create rejection" >&2; exit 1; }
 # Primary reserved-domain start must soft-reserve and fall back to ephemeral
 # when reservation fails (otherwise --domain binds a hostname that was never

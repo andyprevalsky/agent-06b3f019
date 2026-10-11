@@ -28,6 +28,7 @@ import {
 } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import { steelCdpConnectionUrl } from './urls';
+import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
@@ -283,6 +284,7 @@ export async function recreateSession(
       });
       if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
       committed = true;
+      await announceBrowserSessionBinding({ id: taskId });
 
       if (
         profile.persistProfile &&

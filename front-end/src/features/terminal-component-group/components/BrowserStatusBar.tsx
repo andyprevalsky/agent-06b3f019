@@ -42,6 +42,15 @@
  *
  * [DISCONNECTED] is derived separately from a session_paused browser message.
  *
+ * LIVE VIEW URL (useBrowserSessionBinding):
+ * [TRANSCRIPT_URL] --GET .../live-view on mount / transcript change / focus,
+ *                    BROWSER_SESSION broadcast on rebind / pause / close-->
+ * [BOUND_URL] BrowserSession.debugUrl (rebound + broadcast before the old
+ *   provider session is released). Auth handoff shows the interactive bound
+ *   URL once a binding is known; user control shows the interactive bound URL.
+ *   live=false (closed / provider ended) -> LiveViewLoading instead of iframe;
+ *   each new URL shows LiveViewLoading until its iframe loads.
+ *
  * TAKE CONTROL (same live session, no reinjection):
  * [AGENT] --Take control--> POST /control {mode:user} --> USER immediately
  *     |                        (same debugUrl / sessionId)
@@ -61,9 +70,12 @@ import { BrowserStatusBarFullscreen } from './browser-status-bar/BrowserStatusBa
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
 import { resolveBrowserControlState } from './browserControlState';
 import { useBrowserStatusBarState } from './browser-status-bar/useBrowserStatusBarState';
-import { useBrowserStatusBarUi } from './browser-status-bar/useBrowserStatusBarUi';
+import {
+  type BrowserStatusBarUi,
+  useBrowserStatusBarUi,
+} from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
-import type { BrowserStatusBarProps } from './browser-status-bar/types';
+import type { BrowserStatusBarProps, PendingAuthAssistance } from './browser-status-bar/types';
 
 function presentedControlState(
   isUserControlling: boolean,
@@ -75,6 +87,22 @@ function presentedControlState(
     : resolveBrowserControlState({ isDisconnected, isWaitingForAuthAssistance });
 }
 
+/** What the live view's primary control does in the current control state. */
+function controlActionFor(
+  ui: BrowserStatusBarUi,
+  pendingAuthAssistance: PendingAuthAssistance | null,
+  controlState: ReturnType<typeof presentedControlState>,
+  { isDisconnected }: { isDisconnected: boolean },
+): () => void {
+  if (ui.isUserControlling) return ui.onHandBackControl;
+  if (controlState === 'waiting') {
+    return () => {
+      if (pendingAuthAssistance) ui.onCompleteAuthAssistance(pendingAuthAssistance.requestId);
+    };
+  }
+  return () => ui.onTakeControl(isDisconnected);
+}
+
 function BrowserStatusBarImpl({
   taskId,
   browserUrl,
@@ -84,8 +112,8 @@ function BrowserStatusBarImpl({
   const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
   const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(vm.pendingAuthAssistance);
-  const sessionBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? browserUrl;
-  const ui = useBrowserStatusBarUi(taskId, forceMinimized, agentId, sessionBrowserUrl);
+  const handoffBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? null;
+  const ui = useBrowserStatusBarUi(taskId, forceMinimized, agentId, browserUrl, handoffBrowserUrl);
   const activeBrowserUrl = ui.browserUrl;
   const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
   const isDisconnected = vm.isDisconnected && !ui.hasReconnected;
@@ -94,15 +122,9 @@ function BrowserStatusBarImpl({
     isDisconnected,
     isWaitingForAuthAssistance,
   );
-  const handleControlAction = ui.isUserControlling
-    ? ui.onHandBackControl
-    : controlState === 'waiting'
-      ? () => {
-          if (vm.pendingAuthAssistance) {
-            void ui.onCompleteAuthAssistance(vm.pendingAuthAssistance.requestId);
-          }
-        }
-      : () => ui.onTakeControl(isDisconnected);
+  const handleControlAction = controlActionFor(ui, vm.pendingAuthAssistance, controlState, {
+    isDisconnected,
+  });
 
   if (ui.isFullscreen) {
     return (
@@ -110,6 +132,7 @@ function BrowserStatusBarImpl({
         agentId={agentId}
         taskId={taskId}
         browserUrl={activeBrowserUrl}
+        browserLive={ui.isLive}
         messages={messages}
         outputSchema={vm.outputSchema}
         browserSessionMetadata={vm.browserSessionMetadata}
@@ -130,6 +153,7 @@ function BrowserStatusBarImpl({
     return (
       <BrowserStatusBarMinimized
         browserUrl={activeBrowserUrl}
+        browserLive={ui.isLive}
         forceMinimized={forceMinimized}
         lastActionType={vm.lastActionType}
         lastActionTitle={vm.lastActionTitle}
@@ -147,6 +171,7 @@ function BrowserStatusBarImpl({
     <BrowserStatusBarExpanded
       taskId={taskId}
       browserUrl={activeBrowserUrl}
+      browserLive={ui.isLive}
       isDisconnected={isDisconnected}
       isWaitingForAuthAssistance={isWaitingForAuthAssistance}
       outputSchema={vm.outputSchema}

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 /**
- * Black-box HTTP gates for POST /api/agents/:id/report-bug.
+ * Black-box HTTP gates for POST /api/agents/:id/report-bug and its
+ * POST /api/agents/:id/report-bug/screenshots image upload.
  *
  * Happy-path boxes.dev launch is covered by unit tests with a mocked boxes.dev API.
  * This suite cements auth + validation surfaces against a live backend.
@@ -21,6 +22,17 @@ const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const FAKE_UUID = '00000000-0000-4000-8000-000000000099';
 
 const ErrorResponse = z.object({ error: z.string() });
+const ScreenshotResponse = z.object({
+  success: z.literal(true),
+  name: z.string(),
+  url: z.string().url(),
+  expires_in: z.literal(604_800),
+});
+/** 1x1 transparent PNG. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+  'base64'
+);
 
 interface TestResult {
   name: string;
@@ -169,6 +181,82 @@ async function testMissingAgent(): Promise<void> {
   assertSchema(ErrorResponse, res.data, 'missing-agent');
 }
 
+async function postScreenshot(
+  agentId: string,
+  headers: Record<string, string>,
+  file: { bytes: Buffer; name: string; type: string }
+): Promise<{ status: number; data: unknown }> {
+  const form = new FormData();
+  form.append('file', new Blob([file.bytes], { type: file.type }), file.name);
+  const response = await fetch(`${BASE_URL}/api/agents/${agentId}/report-bug/screenshots`, {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+  return { status: response.status, data: await response.json() };
+}
+
+async function testScreenshotNoAuth(): Promise<void> {
+  const res = await postScreenshot(
+    FAKE_UUID,
+    {},
+    { bytes: PNG_1X1, name: 'a.png', type: 'image/png' }
+  );
+  assertStatus(res.status, 401, res.data);
+  assertSchema(ErrorResponse, res.data, 'screenshot-no-auth');
+}
+
+async function testScreenshotNonAdminForbidden(): Promise<void> {
+  const userId = await createAnonymousUser();
+  const agentId = await createAgent(userId);
+  try {
+    const res = await postScreenshot(agentId, apiKeyHeaders(userId), {
+      bytes: PNG_1X1,
+      name: 'a.png',
+      type: 'image/png',
+    });
+    assertStatus(res.status, 403, res.data);
+    assertSchema(ErrorResponse, res.data, 'screenshot-non-admin');
+  } finally {
+    await deleteAgent(agentId, userId);
+  }
+}
+
+async function testScreenshotRejectsNonImage(): Promise<void> {
+  const agentId = await createAgent(ANDY_USER_ID);
+  try {
+    const res = await postScreenshot(agentId, apiKeyHeaders(ANDY_USER_ID), {
+      bytes: Buffer.from('<!doctype html><html></html>'),
+      name: 'not-really.png',
+      type: 'image/png',
+    });
+    assertStatus(res.status, 400, res.data);
+    assertSchema(ErrorResponse, res.data, 'screenshot-non-image');
+  } finally {
+    await deleteAgent(agentId, ANDY_USER_ID);
+  }
+}
+
+/** The signed URL must serve the uploaded bytes to whoever reads the description. */
+async function testScreenshotSignedUrlServesImage(): Promise<void> {
+  const agentId = await createAgent(ANDY_USER_ID);
+  try {
+    const res = await postScreenshot(agentId, apiKeyHeaders(ANDY_USER_ID), {
+      bytes: PNG_1X1,
+      name: 'live view.png',
+      type: 'image/png',
+    });
+    assertStatus(res.status, 201, res.data);
+    const body = assertSchema(ScreenshotResponse, res.data, 'screenshot-upload');
+    const image = await fetch(body.url);
+    if (image.status !== 200) throw new Error(`signed URL returned ${image.status}`);
+    const served = Buffer.from(await image.arrayBuffer());
+    if (!served.equals(PNG_1X1)) throw new Error('signed URL served different bytes');
+  } finally {
+    await deleteAgent(agentId, ANDY_USER_ID);
+  }
+}
+
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
@@ -200,6 +288,13 @@ async function main(): Promise<void> {
     runTest('POST /report-bug -- non-admin -> 403', testNonAdminForbidden),
     runTest('POST /report-bug -- empty description -> 400', testEmptyDescription),
     runTest('POST /report-bug -- missing agent -> 404', testMissingAgent),
+    runTest('POST /report-bug/screenshots -- no auth -> 401', testScreenshotNoAuth),
+    runTest('POST /report-bug/screenshots -- non-admin -> 403', testScreenshotNonAdminForbidden),
+    runTest('POST /report-bug/screenshots -- non-image -> 400', testScreenshotRejectsNonImage),
+    runTest(
+      'POST /report-bug/screenshots -- signed URL serves the image',
+      testScreenshotSignedUrlServesImage
+    ),
   ]);
 
   let failed = 0;

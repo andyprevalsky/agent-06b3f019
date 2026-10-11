@@ -8,6 +8,10 @@ import { http, HttpResponse } from 'msw';
 const API_BASE = 'http://localhost:3001/api';
 
 export const handlers = [
+  // No persisted binding by default: live views fall back to the transcript URL.
+  http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
+    HttpResponse.json({ error: 'Session not found' }, { status: 404 }),
+  ),
   http.get(`${API_BASE}/browser-session/task/:taskId/control`, () =>
     HttpResponse.json({ state: 'agent', agentPaused: false }),
   ),

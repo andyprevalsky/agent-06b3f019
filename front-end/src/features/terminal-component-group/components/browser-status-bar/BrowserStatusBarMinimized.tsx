@@ -15,6 +15,7 @@ import type { BrowserSessionMetadata, OutputSchemaRef } from './types';
 
 interface MinimizedProps {
   browserUrl: string;
+  browserLive?: boolean;
   forceMinimized: boolean;
   lastActionType: string | undefined;
   lastActionTitle: string;
@@ -48,6 +49,7 @@ function LastActionRow({
 
 export function BrowserStatusBarMinimized({
   browserUrl,
+  browserLive = true,
   forceMinimized,
   lastActionType,
   lastActionTitle,
@@ -67,6 +69,7 @@ export function BrowserStatusBarMinimized({
       <div className="relative flex items-center gap-3 p-2 pr-3 pl-3 sm:pl-36 rounded-xl border border-border bg-card/50 backdrop-blur-sm hover:bg-card/80 transition-colors">
         <BrowserThumbnail
           browserUrl={browserUrl}
+          live={browserLive}
           width={128}
           height={80}
           wrapperClassName={thumbnailWrapperClass}

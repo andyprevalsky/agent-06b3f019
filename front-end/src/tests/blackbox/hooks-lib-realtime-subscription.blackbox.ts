@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { server } from './msw/server';
 
@@ -22,6 +22,7 @@ import {
   DISCONNECTED_BACKFILL_POLL_MS,
 } from '@/features/agent-context/config';
 import * as RealtimeMod from '@/lib/realtime';
+import { getBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 /** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
 function agentDetailJson(messages: Array<Record<string, unknown>>) {
@@ -185,6 +186,9 @@ describe('useRealtimeSubscription', () => {
       stream_id: 's',
       tool_call_id: 'tc',
       message: 'm',
+      is_question: false,
+      done: false,
+      sequence: 0,
     });
     capturedHandlers.onToolStream?.({
       agentId: 'agent-1',
@@ -234,6 +238,38 @@ describe('useRealtimeSubscription', () => {
     });
 
     expect(isChatMode).toBe(false);
+    unmount();
+  });
+
+  it('publishes BROWSER_SESSION rebinds to the live-view binding store', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    const { unmount } = renderHook(() => useRealtimeSubscription(makeDeps()));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+
+    const promoted = {
+      agentId: 'agent-1',
+      taskId: 'task-promoted',
+      sessionId: 'kernel-winner',
+      debugUrl:
+        'https://prod-iad-hypeman-28.kernel.sh:8443/browser/live/pmHw1BNYtFaS?readOnly=true',
+      status: 'ACTIVE',
+      live: true,
+      asOf: 2,
+    };
+    act(() => capturedHandlers.onBrowserSession?.(promoted));
+
+    expect(getBrowserSessionBinding('task-promoted')).toEqual({
+      taskId: 'task-promoted',
+      sessionId: 'kernel-winner',
+      debugUrl: promoted.debugUrl,
+      status: 'ACTIVE',
+      live: true,
+      asOf: 2,
+    });
     unmount();
   });
 
