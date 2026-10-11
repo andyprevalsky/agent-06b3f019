@@ -18,8 +18,9 @@ export interface QuickLauncherPayload {
 
 /**
  * A consumer may return a promise for the work it started. The next submit is
- * claimed only after that work settles, so a submit that is still waiting its
- * turn stays with the desktop main process and survives a reload or a close.
+ * claimed only after that work settles (or QUICK_QUERY_MAX_TURN_WAIT_MS), so a
+ * submit that is still waiting its turn stays with the desktop main process
+ * and survives a reload or a close.
  */
 type QuickQueryConsumer = (payload: QuickLauncherPayload) => unknown;
 
@@ -42,6 +43,12 @@ interface HeldQuickQuery {
  */
 export const QUICK_QUERY_LAUNCH_WINDOW_MS = 60_000;
 
+/**
+ * The longest a submit waits for the launch ahead of it. It is well inside the
+ * launch window, so a submit made right behind a slow launch still launches.
+ */
+export const QUICK_QUERY_MAX_TURN_WAIT_MS = 30_000;
+
 /** How many submits wait here when nothing can take them; beyond it the oldest is let go. */
 export const QUICK_QUERY_MAX_HELD = 20;
 
@@ -58,15 +65,16 @@ let queue: Promise<void> = Promise.resolve();
 let pending = 0;
 /** Collects what the consumers of the submit being emitted returned. */
 let emitting: Promise<unknown>[] | null = null;
-/** When each submit last reached a consumer that could take it. */
-const readyAt = new WeakMap<QuickLauncherPayload, number>();
 
-/**
- * How long the submit waited for the app to be able to take it. Time spent
- * queued behind another launch does not count: the app was ready by then.
- */
-export function quickQueryWaitMs(payload: QuickLauncherPayload): number {
-  return (readyAt.get(payload) ?? Date.now()) - payload.submittedAt;
+/** Waits for the consumers' work, but a launch that stalls does not hold later submits back for good. */
+function settledWithinTurn(work: Promise<unknown>[]): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, QUICK_QUERY_MAX_TURN_WAIT_MS);
+    void Promise.allSettled(work).then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 function hold(held: HeldQuickQuery): void {
@@ -94,7 +102,7 @@ function emit(payload: QuickLauncherPayload): Promise<void> | null {
     emitting = null;
   }
   if (started.length === 0) return null;
-  return Promise.allSettled(started).then(() => undefined);
+  return settledWithinTurn(started);
 }
 
 /** Claims one submit and hands it over; it counts as pending until its consumer work settles. */
@@ -122,7 +130,6 @@ async function handOver({ payload, claim }: HeldQuickQuery): Promise<void> {
 }
 
 function deliver(held: HeldQuickQuery): void {
-  readyAt.set(held.payload, Date.now());
   if (held.claim === undefined && pending === 0) {
     const work = emit(held.payload);
     if (work === null) return;

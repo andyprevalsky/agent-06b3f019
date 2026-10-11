@@ -120,6 +120,12 @@ Also repaired because the mac-app structural suite was already red on main (5 vi
 
 Both tests are in `front-end/src/tests/blackbox/quick-query-attachments.blackbox.ts`.
 
+Two further independent reviews of those fixes changed them again before merge:
+
+- The hand-over re-holds a submit, still unclaimed, when its consumer has gone; it used to claim it with nobody to act on it.
+- A launch with no timeout of its own can stall, so the next submit waits at most 30 s (`QUICK_QUERY_MAX_TURN_WAIT_MS`) for the one ahead. The 60 s window is judged on the submit's age when its turn comes; an intermediate version tracked "time until a consumer was ready" and could launch a two-minute-old submit as fresh.
+- An expired draft stays in the input until the user sends or rewrites it; a later expired submit is added to it rather than replacing it after 5 s.
+
 ## Human feedback
 
 The user asked for the behavior directly: "make sure it opens the main app then launches it in that case". None recorded beyond that.

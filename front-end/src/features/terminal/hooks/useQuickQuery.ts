@@ -26,7 +26,6 @@ import {
   QUICK_QUERY_LAUNCH_WINDOW_MS,
   fileFromQuickLauncherAttachment,
   goalFromQuickLauncherPayload,
-  quickQueryWaitMs,
   subscribeQuickQuery,
   type QuickLauncherPayload,
 } from '@/lib/quickQuery';
@@ -80,7 +79,7 @@ export function useQuickQuery(deps: QuickQueryDeps) {
       const goal = goalFromQuickLauncherPayload(detail);
       const hasAttachments = (detail.attachments?.length ?? 0) > 0;
       if (!goal && !hasAttachments) return;
-      if (quickQueryWaitMs(detail) > QUICK_QUERY_LAUNCH_WINDOW_MS) {
+      if (Date.now() - detail.submittedAt > QUICK_QUERY_LAUNCH_WINDOW_MS) {
         showExpiredQuickQuery(depsRef.current, detail, expiredDraftsRef.current);
         return;
       }
