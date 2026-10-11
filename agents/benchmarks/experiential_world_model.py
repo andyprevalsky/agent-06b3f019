@@ -44,7 +44,13 @@ from benchmarks.wmh_execution_policy import (
 from benchmarks.wmh_execution_policy import (
     execution_policy as select_execution_policy,
 )
-from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, apply_state_patch, parse_distribution, select_outcome
+from benchmarks.wmh_outcomes import (
+    DISTRIBUTION_PROTOCOL,
+    _pointer,
+    apply_state_patch,
+    parse_distribution,
+    select_outcome,
+)
 from utils.world_model_observation import effective_world_model_content
 
 CANONICAL_INPUT_SCHEMA = {
@@ -143,11 +149,30 @@ class RoseNativeRetriever:
         return tuple(selected)
 
 
-def _appends_only(state_patch):
-    """True for a selected outcome patch that only appends to existing lists (empty included)."""
-    return state_patch is not None and all(
-        operation.get("op") == "add" and str(operation.get("path", "")).endswith("/-") for operation in state_patch
-    )
+def _adds_new_records(state_patch, state):
+    """True when every operation appends to a list or creates a key absent from ``state`` (empty included).
+
+    JSON Patch ``add`` on an existing key replaces it, so that is never a new record.
+    """
+    if state_patch is None:
+        return False
+    for operation in state_patch:
+        path = operation.get("path")
+        if operation.get("op") != "add" or not isinstance(path, str):
+            return False
+        if path.endswith("/-"):
+            continue
+        node = state
+        for part in _pointer(path):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            else:
+                break
+        else:
+            return False
+    return True
 
 
 @dataclass
@@ -172,8 +197,8 @@ class NativeSession:
     contended: dict = field(default_factory=dict)
     conflicts: int = 0
     turn: asyncio.Event = field(default_factory=asyncio.Event)
-    # Per committed revision: whether its state change only appended records.
-    append_only: list = field(default_factory=list)
+    # Per committed revision: whether its state change only added new records.
+    additive: list = field(default_factory=list)
 
 
 class RetiredWorldModelScope(ValueError):
@@ -319,9 +344,13 @@ class ParallelWorldModel:
         return None
 
     @staticmethod
-    def _append_merge(session, revision, state_patch):
-        """Under the session lock: the current state with this append-only patch, or None to rebase."""
-        if not _appends_only(state_patch) or not all(session.append_only[revision:]):
+    def _append_merge(session, revision, state_patch, base):
+        """Under the session lock: the current state with this record-adding patch, or None to rebase."""
+        if (
+            not all(session.additive[revision:])
+            or not _adds_new_records(state_patch, base)
+            or not _adds_new_records(state_patch, session.state)
+        ):
             return None
         try:
             return apply_state_patch(session.state, state_patch)
@@ -567,11 +596,11 @@ class ParallelWorldModel:
                     # The predictor reads the whole state and history. Disjoint writes
                     # do not prove independence: both can depend on a shared balance.
                     # The one exception (user-approved append-merge): a prediction
-                    # that only appends records commits over commits that also
-                    # only appended, without predicting again.
+                    # that only adds new records commits over commits that also
+                    # only added records, without predicting again.
                     merged = None
                     if session.revision != revision:
-                        merged = self._append_merge(session, revision, state_patch)
+                        merged = self._append_merge(session, revision, state_patch, base)
                         if merged is None:
                             interval["discarded_due_to_revision"] = session.revision
                             if key not in session.contended:
@@ -602,7 +631,7 @@ class ParallelWorldModel:
                         )
                         session.history = (*session.history, step)
                         session.state = deepcopy(state_after)
-                        session.append_only.append(_appends_only(state_patch))
+                        session.additive.append(_adds_new_records(state_patch, state_before))
                         session.revision += 1
                         self.retrieval_calls += 1
                         audit["committed_revision"] = session.revision

@@ -264,6 +264,43 @@ def test_distribution_append_prediction_rebases_after_an_intervening_replace():
     asyncio.run(run())
 
 
+def test_distribution_new_record_keys_merge_but_a_shared_new_key_rebases():
+    """Creating an absent key is a new record; two creations of the same key are not merged."""
+
+    async def run():
+        for shared in (False, True):
+            entered, release = asyncio.Event(), asyncio.Event()
+            requests = []
+
+            async def complete(request):
+                requests.append(request)
+                call = json.loads(request.messages[1].content)["candidate_response"]["tool_calls"][0]["call_id"]
+                payload = json.loads(distribution_reply(request))
+                key = "research_runs" if shared else f"{call}_runs"
+                payload["outcomes"][1]["state_patch"] = [{"op": "add", "path": f"/{key}", "value": [call]}]
+                if len(requests) == 2:
+                    entered.set()
+                await release.wait()
+                return json.dumps(payload)
+
+            model = distribution_model(complete, sample_uniform=lambda: 0.975)
+            session = model.new_session("Research two funds", {"receipts": []}, "root")
+            work = [asyncio.create_task(model.step(session.id, action(n), f"inv-{n}")) for n in (1, 2)]
+            await asyncio.wait_for(entered.wait(), 2)
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(*work), 2)
+            if shared:
+                # JSON Patch add on an existing key replaces it: never merge over it.
+                assert len(requests) == 3 and sorted(r["metadata"]["state_retries"] for r in results) == [0, 1]
+                assert not any("append_merged_from_revision" in r["metadata"] for r in results)
+            else:
+                assert len(requests) == 2 and session.state["call-1_runs"] == ["call-1"]
+                assert session.state["call-2_runs"] == ["call-2"]
+            assert session.revision == 2
+
+    asyncio.run(run())
+
+
 def test_distribution_invalid_unselected_branch_never_commits_and_retirement_fences_late_result():
     async def run():
         requests = []
