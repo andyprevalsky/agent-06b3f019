@@ -18,9 +18,8 @@ export interface QuickLauncherPayload {
 
 /**
  * A consumer may return a promise for the work it started. The next submit is
- * claimed only after that work settles (or QUICK_QUERY_MAX_TURN_WAIT_MS), so a
- * submit that is still waiting its turn stays with the desktop main process
- * and survives a reload or a close.
+ * claimed only after that work settles, so a submit that is still waiting its
+ * turn stays with the desktop main process and survives a reload or a close.
  */
 type QuickQueryConsumer = (payload: QuickLauncherPayload) => unknown;
 
@@ -43,12 +42,6 @@ interface HeldQuickQuery {
  */
 export const QUICK_QUERY_LAUNCH_WINDOW_MS = 60_000;
 
-/**
- * The longest a submit waits for the launch ahead of it. It is well inside the
- * launch window, so a submit made right behind a slow launch still launches.
- */
-export const QUICK_QUERY_MAX_TURN_WAIT_MS = 30_000;
-
 /** How many submits wait here when nothing can take them; beyond it the oldest is let go. */
 export const QUICK_QUERY_MAX_HELD = 20;
 
@@ -65,17 +58,6 @@ let queue: Promise<void> = Promise.resolve();
 let pending = 0;
 /** Collects what the consumers of the submit being emitted returned. */
 let emitting: Promise<unknown>[] | null = null;
-
-/** Waits for the consumers' work, but a launch that stalls does not hold later submits back for good. */
-function settledWithinTurn(work: Promise<unknown>[]): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, QUICK_QUERY_MAX_TURN_WAIT_MS);
-    void Promise.allSettled(work).then(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-}
 
 function hold(held: HeldQuickQuery): void {
   heldQueries.push(held);
@@ -102,7 +84,7 @@ function emit(payload: QuickLauncherPayload): Promise<void> | null {
     emitting = null;
   }
   if (started.length === 0) return null;
-  return settledWithinTurn(started);
+  return Promise.allSettled(started).then(() => undefined);
 }
 
 /** Claims one submit and hands it over; it counts as pending until its consumer work settles. */

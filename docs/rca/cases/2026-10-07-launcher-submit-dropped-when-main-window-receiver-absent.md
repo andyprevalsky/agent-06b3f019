@@ -120,11 +120,13 @@ Also repaired because the mac-app structural suite was already red on main (5 vi
 
 Both tests are in `front-end/src/tests/blackbox/quick-query-attachments.blackbox.ts`.
 
-Two further independent reviews of those fixes changed them again before merge:
+Three further independent reviews changed those fixes before merge:
 
 - The hand-over re-holds a submit, still unclaimed, when its consumer has gone; it used to claim it with nobody to act on it.
-- A launch with no timeout of its own can stall, so the next submit waits at most 30 s (`QUICK_QUERY_MAX_TURN_WAIT_MS`) for the one ahead. The 60 s window is judged on the submit's age when its turn comes; an intermediate version tracked "time until a consumer was ready" and could launch a two-minute-old submit as fresh.
 - An expired draft stays in the input until the user sends or rewrites it; a later expired submit is added to it rather than replacing it after 5 s.
+- Two additions were tried and removed because each produced its own defect: a "time until a consumer was ready" stamp (it could mark a two-minute-old submit fresh) and a 30 s cap on waiting for the launch ahead (it let launches overlap and clear each other's input). The 60 s window is the submit's age when its turn comes, so no agent launches more than 60 s after its submit; a submit whose turn comes later is kept as a draft.
+
+Known and unchanged: `createAgent` and `uploadAttachment` have no timeout, so a launch that never settles holds later submits back. They now stay unclaimed in the main process instead of claimed in the renderer, as they were in PR #1447.
 
 ## Human feedback
 

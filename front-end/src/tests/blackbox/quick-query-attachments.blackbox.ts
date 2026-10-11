@@ -15,7 +15,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useQuickQuery, type QuickQueryDeps } from '@/features/terminal/hooks/useQuickQuery';
 import {
   QUICK_QUERY_LAUNCH_WINDOW_MS,
-  QUICK_QUERY_MAX_TURN_WAIT_MS,
   QUICK_QUERY_MAX_HELD,
   dispatchQuickQueryEvent,
   goalFromQuickLauncherPayload,
@@ -395,6 +394,41 @@ describe('quick-query cold start', () => {
     unmount();
   });
 
+  // No agent is launched more than the launch window after its submit, even
+  // when the wait was for the launch ahead of it. Its text is kept instead.
+  it('keeps a submit as a draft when its turn comes after the launch window', async () => {
+    let finishFirst: (() => void) | null = null;
+    createAgent.mockImplementationOnce(
+      () =>
+        new Promise<{ agent_id: string }>((resolve) => {
+          finishFirst = () => resolve({ agent_id: 'agent-slow' });
+        }),
+    );
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    const submittedAt = Date.now();
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'slow first', submittedAt });
+      dispatchQuickQueryEvent({ query: 'right behind', submittedAt });
+    });
+    await waitFor(() => expect(createAgent).toHaveBeenCalledTimes(1));
+
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(submittedAt + QUICK_QUERY_LAUNCH_WINDOW_MS + 5_000);
+    await act(async () => {
+      finishFirst?.();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(vi.mocked(deps.setMessageInput).mock.lastCall?.[0]).toBe('right behind'),
+    );
+    clock.mockRestore();
+
+    expect(createAgent).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
   // Launching an agent costs money. A submit that sat held (signed out, a
   // window that never loaded) must not start one long after it was asked for.
   it('shows a submit that waited past the launch window instead of launching it', async () => {
@@ -551,34 +585,6 @@ describe('quick-query hold queue', () => {
     await waitFor(() => expect(received).toEqual(['slow launch', 'waits its turn']));
     expect(secondClaim).toHaveBeenCalledTimes(1);
     unsubscribe();
-  });
-
-  // A launch with no timeout of its own can stall. Later submits must not sit
-  // unclaimed behind it for good, and one made right behind it must still launch.
-  it('stops waiting for a stalled launch after the turn limit and hands over the next submit', async () => {
-    vi.useFakeTimers();
-    try {
-      const secondClaim = vi.fn(() => Promise.resolve(true));
-      const received: string[] = [];
-      const unsubscribe = subscribeQuickQuery((payload) => {
-        received.push(payload.query);
-        return payload.query === 'stalled launch' ? new Promise<void>(() => undefined) : undefined;
-      });
-      dispatchQuickQueryEvent({ query: 'stalled launch', submittedAt: 1 });
-      dispatchQuickQueryEvent({ query: 'right behind', submittedAt: 2 }, secondClaim);
-
-      await vi.advanceTimersByTimeAsync(QUICK_QUERY_MAX_TURN_WAIT_MS - 1);
-      expect(secondClaim).not.toHaveBeenCalled();
-      expect(received).toEqual(['stalled launch']);
-
-      await vi.advanceTimersByTimeAsync(1);
-      expect(secondClaim).toHaveBeenCalledTimes(1);
-      expect(received).toEqual(['stalled launch', 'right behind']);
-      expect(QUICK_QUERY_MAX_TURN_WAIT_MS).toBeLessThan(QUICK_QUERY_LAUNCH_WINDOW_MS);
-      unsubscribe();
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it('leaves a queued submit unclaimed when its consumer goes away mid-launch', async () => {
