@@ -12,7 +12,7 @@ import { act, cleanup, screen } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import ConnectivityIndicator from '../../ui/ConnectivityIndicator';
 import UpdateIndicator from '../../ui/UpdateIndicator';
-import { PORTAL_ID } from '../../ui/features/bottom-left-chips/config';
+import { PORTAL_ID } from '../../ui/shared/bottom-left-chips/config';
 import { clearIpcMock, installIpcMock } from './ipc-mock';
 import type { IPC, UpdateStatusPayload } from '../../shared/types/ipc';
 

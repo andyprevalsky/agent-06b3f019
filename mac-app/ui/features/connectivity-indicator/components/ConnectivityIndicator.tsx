@@ -9,7 +9,7 @@
  */
 
 import { createPortal } from 'react-dom';
-import { useBottomLeftChipPortal } from '../../bottom-left-chips/hooks';
+import { useBottomLeftChipPortal } from '../../../shared/bottom-left-chips/hooks';
 import { useConnectivityStatus } from '../hooks';
 import { WifiOffIcon } from './WifiOffIcon';
 
