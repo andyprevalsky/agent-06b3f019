@@ -863,7 +863,13 @@ async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[
         return False
     if demo_recording_enabled() or not agent_id:
         return True
-    return not await soft_complete_allowed_for_agent(agent_id, goal)
+    _enabled, resolved_goal, _write_enabled, _root_id, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
+    if not resolved_goal:
+        # An unresolved tree root may be a frozen DEMO recording; losing one
+        # write-through entry is safer than poisoning a replay namespace.
+        logger.info("fast_cache.write_skipped_unresolved_agent", agent_id=agent_id)
+        return False
+    return not normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
 
 
 async def cache_set(
