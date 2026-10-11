@@ -1899,7 +1899,8 @@ class RoseClient:
                             context_tools=context_tools,
                             tool_choice=gpt_api_key_tool_choice,
                             temperature=temperature,
-                            effort=effort,
+                            # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
+                            effort=pool_spec.waterfall_reasoning_effort or effort,
                             provider_fast_mode=provider_fast_mode,
                             request_id=rid,
                             route_key=foundry_route_key,

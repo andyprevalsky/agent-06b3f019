@@ -37,8 +37,9 @@ export interface PoolSpec {
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
   /**
-   * When set, the OpenRouter waterfall stamps this effort instead of the
-   * caller / xhigh default. claudeAuth and gptAuth are unchanged.
+   * When set, the OpenRouter waterfall and the Foundry fallback stamp this
+   * effort instead of the caller / xhigh default. claudeAuth and gptAuth are
+   * unchanged.
    */
   waterfallReasoningEffort?: string;
   /**

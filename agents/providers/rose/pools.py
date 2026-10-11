@@ -106,8 +106,8 @@ class PoolSpec:
     pool keeps its guarantee on Azure's gpt-oss). Defaults to ``gpt_auth_model``."""
 
     waterfall_reasoning_effort: str | None = None
-    """When set, the OpenRouter waterfall stamps this effort instead of the
-    caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
+    """When set, the OpenRouter waterfall and the Foundry fallback stamp this
+    effort instead of the caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
     the fast Gemini/GPT layers jumps from ~1s to 8–24s. claudeAuth and
     gptAuth keep the caller effort. Ultra leaves this unset."""
 

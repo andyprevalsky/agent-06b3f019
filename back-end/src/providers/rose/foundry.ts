@@ -192,7 +192,8 @@ export function foundryRequestFor(params: {
     tools: options.tools,
     toolChoice: options.tool_choice,
     temperature: options.temperature,
-    effort: options.effort,
+    // A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
+    effort: params.poolSpec.waterfallReasoningEffort ?? options.effort,
     providerFastMode: options.provider_fast_mode,
     requestId: params.requestId,
     routeKey:

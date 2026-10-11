@@ -49,6 +49,7 @@ async function main(): Promise<void> {
 
   const attempts: string[] = [];
   const foundryModels: string[] = [];
+  const foundryEfforts: string[] = [];
   let cerebrasStatus = 200;
   // 0 = the pool pipeline must never reach OpenRouter; otherwise its status.
   let openRouterStatus = 0;
@@ -63,7 +64,12 @@ async function main(): Promise<void> {
     }
     if (url === FOUNDRY_URL) {
       attempts.push('foundry');
-      foundryModels.push(String((JSON.parse(String(init?.body)) as { model: unknown }).model));
+      const body = JSON.parse(String(init?.body)) as {
+        model: unknown;
+        reasoning?: { effort?: unknown };
+      };
+      foundryModels.push(String(body.model));
+      foundryEfforts.push(String(body.reasoning?.effort));
       return new Response(foundrySse, { status: 200 });
     }
     if (url.includes('openrouter.ai')) {
@@ -119,6 +125,8 @@ async function main(): Promise<void> {
     assert.deepEqual(attempts, ['foundry']);
     assert.equal(chunks[0]?.actual_model, 'gpt-5.6-luna-foundry');
     assert.deepEqual(foundryModels, ['gpt-5.6-luna', 'gpt-5.6-luna', 'gpt-5.6-luna']);
+    // A fallback layer keeps the pool's fast effort; xhigh TTFT is slow on fast GPT layers.
+    assert.deepEqual(foundryEfforts, ['low', 'low', 'low']);
 
     // Chat-exclusive routes end at OpenRouter; with Cerebras and OpenRouter both
     // out of credit, funded Azure serves the turn as the last resort.

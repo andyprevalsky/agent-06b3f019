@@ -5835,6 +5835,7 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
     )
     attempted: list[str] = []
     foundry_models: list[str] = []
+    foundry_efforts: list[str] = []
     cerebras_status = {"code": 200}
 
     def handler(req):
@@ -5846,7 +5847,9 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
             return httpx.Response(cerebras_status["code"], json={"error": {"message": "quota exceeded"}})
         if host == "a-4989-resource.openai.azure.com":
             attempted.append("foundry")
-            foundry_models.append(json.loads(req.content)["model"])
+            foundry_body = json.loads(req.content)
+            foundry_models.append(foundry_body["model"])
+            foundry_efforts.append(foundry_body["reasoning"]["effort"])
             return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
         if host == "openrouter.ai":
             attempted.append("openrouter")
@@ -5900,6 +5903,8 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
         cerebras_route._reset_cerebras_cooldown_cache()
 
     assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-oss-120b"]
+    # A fallback layer keeps the pool's fast effort; xhigh TTFT is slow on fast GPT layers.
+    assert foundry_efforts[:3] == ["low", "low", "low"]
     assert get_pool("rose-1-ultra").foundry_enabled
 
 
