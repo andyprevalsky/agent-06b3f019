@@ -4,8 +4,9 @@
     wait(deadline) ──▶ resumes when shared time ≥ deadline
     shared time = min(running agents' times ∪ waiting agents' deadlines)
 
-A parent with live children waits on them and is excluded from shared time; it
-resumes at the latest child's finish. When every included agent waits, shared
+A parent idle on live children (it has not acted since spawning them) is
+excluded from shared time and resumes at the latest child's finish; a parent
+that keeps acting beside its children holds shared time like any agent. When every included agent waits, shared
 time is the earliest deadline, so the earliest waiter always wakes (no
 deadlock). Model thinking takes no world time. Updates are heap-backed:
 O(log n) per change, one clock per world, no state shared across worlds.
@@ -26,6 +27,7 @@ class _Agent:
     done: bool = False
     acted: bool = False
     live_children: set = field(default_factory=set)
+    acting: bool = True
     children_finish_ms: int = 0
     version: int = 0
     event: asyncio.Event | None = None
@@ -43,7 +45,7 @@ class WorldClock:
 
     @staticmethod
     def _key(agent: _Agent) -> int | None:
-        if agent.done or agent.live_children:
+        if agent.done or (agent.live_children and not agent.acting and agent.deadline_ms is None):
             return None
         return agent.deadline_ms if agent.deadline_ms is not None else agent.time_ms
 
@@ -95,6 +97,7 @@ class WorldClock:
                 existing.parent = parent
                 existing.time_ms = self._agents[parent].time_ms
                 self._agents[parent].live_children.add(agent_id)
+                self._agents[parent].acting = False
                 self._touch(parent)
                 self._touch(agent_id)
                 self._release()
@@ -107,6 +110,7 @@ class WorldClock:
         self._agents[agent_id] = _Agent(time_ms=start, parent=parent)
         if parent is not None:
             self._agents[parent].live_children.add(agent_id)
+            self._agents[parent].acting = False
             self._touch(parent)
         self._touch(agent_id)
         self._release()
@@ -117,12 +121,16 @@ class WorldClock:
         self.register(agent_id)
         agent = self._agents[agent_id]
         agent.acted = True
+        if not agent.acting:
+            agent.acting = True
+            self._touch(agent_id)
         return agent.time_ms
 
     def commit(self, agent_id: str, *, started_ms: int, elapsed_ms: int) -> int:
         self.register(agent_id)
         agent = self._agents[agent_id]
         agent.acted = True
+        agent.acting = True
         agent.time_ms = max(agent.time_ms, int(started_ms) + max(0, int(elapsed_ms)))
         self._touch(agent_id)
         self._release()
@@ -188,7 +196,7 @@ class WorldClock:
         def state(agent: _Agent) -> str:
             if agent.done:
                 return "done"
-            if agent.live_children:
+            if agent.live_children and not agent.acting and agent.deadline_ms is None:
                 return "waiting_on_children"
             return "waiting" if agent.deadline_ms is not None else "running"
 

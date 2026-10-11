@@ -102,6 +102,26 @@ def test_children_start_at_the_parent_time_and_the_parent_resumes_at_the_last_fi
     assert clock.time_of("root") == 5 * DAY and clock.shared_time() == 5 * DAY
 
 
+def test_a_parent_that_keeps_acting_beside_its_children_holds_shared_time():
+    """Run 4 (2026-10-11): roots act while a spawned child runs; they must not be overtaken."""
+    clock = WorldClock(start_ms=0)
+    clock.register("root")
+    clock.register("child", parent="root")
+    clock.commit("child", started_ms=0, elapsed_ms=10 * DAY)
+    # Spawned and idle: the parent waits on its child.
+    assert clock.shared_time() == 10 * DAY
+    started = clock.action_time("root")
+    clock.commit("root", started_ms=started, elapsed_ms=1 * DAY)
+    # Acting beside its child: the parent's own time holds shared time back.
+    assert clock.shared_time() == 1 * DAY
+    assert {a["agent_id"]: a["state"] for a in clock.snapshot()["agents"]}["root"] == "running"
+    clock.register("second", parent="root")
+    # Spawning again makes it idle on its children until it acts.
+    assert clock.shared_time() == 1 * DAY  # "second" starts at the parent's time
+    clock.commit("second", started_ms=1 * DAY, elapsed_ms=20 * DAY)
+    assert clock.shared_time() == 10 * DAY
+
+
 def test_parallel_actions_advance_an_agent_by_the_longest_not_the_sum():
     clock = WorldClock(start_ms=0)
     clock.register("root")
