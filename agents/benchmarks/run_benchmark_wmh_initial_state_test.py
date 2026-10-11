@@ -129,56 +129,76 @@ def test_explicit_session_cannot_bypass_initial_state(monkeypatch):
         asyncio.run(bench.create_agent("http://localhost:55120", task))
 
 
-def test_context_insertion_adds_event_base_rates_without_changing_the_catalog(tmp_path):
+def test_context_insertion_adds_researched_outcome_examples_without_changing_the_catalog(tmp_path):
     import json
 
-    from benchmarks.wmh_context_insertion import (
-        CALIBRATION_TEXT,
-        EVENT_PROBABILITIES_KEY,
-        insert_event_probabilities,
-        main,
-    )
+    from benchmarks.wmh_context_insertion import EXAMPLES_TEXT, OUTCOME_EXAMPLES_KEY, insert_outcome_examples, main
 
     task = get_task_by_name("raise-5m-rose-labs-brex")
     original = json.loads(json.dumps(task.wmh_initial_state))
-    events = [
-        {"event": "Investor replies to an outreach email", "probability": 0.9},
-        {"event": "Signed commitment wire settles in Brex", "probability": 1, "applies_when": "after a signed SAFE"},
+    examples = [
+        {
+            "action": "Cold pitch to an investor",
+            "applies_when": "no mutual introduction",
+            "typical_time": "1-14 days",
+            "outcomes": [{"outcome": "No reply", "probability": 0.95}, {"outcome": "Reply", "probability": 0.05}],
+            "sources": ["Gornall and Strebulaev 2018, https://www.gsb.stanford.edu/insights/do-vcs-really-favor-white-male-founders"],
+        },
+        {
+            "action": "Wire after a signed SAFE",
+            "outcomes": [{"outcome": "Received", "probability": 1}],
+            "sources": ["Hustle Fund closing guide"],
+        },
     ]
-    state = insert_event_probabilities(task.wmh_initial_state, events, item_id=task.name)
+    state = insert_outcome_examples(task.wmh_initial_state, examples, item_id=task.name)
     assert task.wmh_initial_state == original
     assert bench.validate_wmh_initial_state(state, task.name) is state
-    assert state["structured"][EVENT_PROBABILITIES_KEY] == [
-        {"event": "Investor replies to an outreach email", "probability": 0.9},
-        {"event": "Signed commitment wire settles in Brex", "probability": 1.0, "applies_when": "after a signed SAFE"},
-    ]
-    assert {k: v for k, v in state["structured"].items() if k != EVENT_PROBABILITIES_KEY} == original["structured"]
-    assert state["scratchpad"] == original["scratchpad"] + "\n\n" + CALIBRATION_TEXT
+    inserted = state["structured"][OUTCOME_EXAMPLES_KEY]
+    assert inserted[0] == examples[0] and inserted[1]["outcomes"] == [{"outcome": "Received", "probability": 1.0}]
+    assert {k: v for k, v in state["structured"].items() if k != OUTCOME_EXAMPLES_KEY} == original["structured"]
+    # The examples inform the world model's reasoning; nothing enforces them.
+    assert state["scratchpad"] == original["scratchpad"] + "\n\n" + EXAMPLES_TEXT
+    assert "not constraints" in EXAMPLES_TEXT
     with pytest.raises(ValueError, match="already inserted"):
-        insert_event_probabilities(state, events, item_id=task.name)
+        insert_outcome_examples(state, examples, item_id=task.name)
 
-    events_file = tmp_path / "events.json"
-    events_file.write_text(json.dumps(events))
+    examples_file = tmp_path / "examples.json"
+    examples_file.write_text(json.dumps(examples))
     out = tmp_path / "run-state.json"
-    assert main(["--task", task.name, "--events", str(events_file), "--out", str(out)]) == 0
+    assert main(["--task", task.name, "--examples", str(examples_file), "--out", str(out)]) == 0
     assert json.loads(out.read_text()) == state
 
 
+def _example(**changes):
+    example = {
+        "action": "Cold pitch",
+        "outcomes": [{"outcome": "No reply", "probability": 0.95}, {"outcome": "Reply", "probability": 0.05}],
+        "sources": ["Gornall and Strebulaev 2018"],
+    }
+    example.update(changes)
+    return example
+
+
 @pytest.mark.parametrize(
-    "events",
+    "examples",
     [
         [],
-        [{"event": "Reply", "probability": 1.5}],
-        [{"event": "Reply", "probability": float("nan")}],
-        [{"event": "Reply", "probability": True}],
-        [{"event": " ", "probability": 0.5}],
-        [{"event": "Reply", "probability": 0.5}, {"event": "reply", "probability": 0.4}],
-        [{"event": "Reply", "probability": 0.5, "weight": 2}],
+        [_example(sources=[])],
+        [_example(sources=[" "])],
+        [{k: v for k, v in _example().items() if k != "sources"}],
+        [_example(outcomes=[{"outcome": "No reply", "probability": 0.9}])],
+        [_example(outcomes=[{"outcome": "No reply", "probability": 1.5}, {"outcome": "Reply", "probability": -0.5}])],
+        [_example(outcomes=[{"outcome": "No reply", "probability": float("nan")}])],
+        [_example(outcomes=[{"outcome": "No reply", "probability": True}])],
+        [_example(outcomes=[{"outcome": "Reply", "probability": 0.5}, {"outcome": "reply", "probability": 0.5}])],
+        [_example(action=" ")],
+        [_example(), _example()],
+        [_example(weight=2)],
     ],
 )
-def test_context_insertion_rejects_invalid_event_tables(events):
-    from benchmarks.wmh_context_insertion import insert_event_probabilities
+def test_context_insertion_rejects_unsourced_or_invalid_outcome_examples(examples):
+    from benchmarks.wmh_context_insertion import insert_outcome_examples
 
     task = get_task_by_name("raise-5m-rose-labs-brex")
     with pytest.raises(ValueError):
-        insert_event_probabilities(task.wmh_initial_state, events, item_id=task.name)
+        insert_outcome_examples(task.wmh_initial_state, examples, item_id=task.name)

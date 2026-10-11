@@ -1,10 +1,12 @@
-"""Per-run WMH context insertion: operator-set event base rates for one simulated world.
+"""Per-run WMH context insertion: researched outcome distribution examples for one simulated world.
 
 The returned state is a normal ``--wmh-initial-state-file`` override. Native
-sessions copy their seed into ``initial_context``, so the rates sit in the stable
-task prefix of every world-model request. The execution policy is unchanged; the
-model still writes its own outcome distribution and is only told these world
-base rates. Nothing is inserted into any agent's trajectory.
+sessions copy their seed into ``initial_context``, so the examples sit in the
+session-constant task evidence of every world-model request (the cached system
+prefix on Azure). They are reference examples the model reasons from, never
+enforced: the execution policy is unchanged and the model still writes its own
+outcome distribution. Every example must cite the research it rests on. Nothing
+is inserted into any agent's trajectory.
 """
 
 from __future__ import annotations
@@ -18,55 +20,87 @@ from typing import Any
 
 from benchmarks.long_horizon import validate_wmh_initial_state
 
-EVENT_PROBABILITIES_KEY = "simulation_event_probabilities"
-CALIBRATION_TEXT = (
-    "Simulation calibration for this run (operator-set world base rates, listed in "
-    f"structured.{EVENT_PROBABILITIES_KEY}): when a possible result of an action is one of "
-    "these events, give that outcome the stated probability and distribute the remainder "
-    "across the other plausible results. These rates describe this simulated world only; "
-    "an event still requires its causal preconditions."
+OUTCOME_EXAMPLES_KEY = "outcome_distribution_examples"
+EXAMPLES_TEXT = (
+    "Outcome distribution examples for this run (researched base rates with their sources, listed in "
+    f"structured.{OUTCOME_EXAMPLES_KEY}): when a candidate action resembles an example, use its "
+    "distribution as a reference and reason from there about the current state and evidence. They are "
+    "examples, not constraints; every outcome still requires its causal preconditions."
 )
+_EXAMPLE_KEYS = {"action", "applies_when", "typical_time", "outcomes", "sources"}
 
 
-def insert_event_probabilities(state: dict[str, Any], events: list[dict[str, Any]], *, item_id: str) -> dict[str, Any]:
-    """Return a copy of ``state`` carrying the validated event base rates once."""
-    if not isinstance(events, list) or not events:
-        raise ValueError("Event probabilities must be a nonempty list")
-    rates = []
-    seen = set()
-    for entry in events:
-        if not isinstance(entry, dict) or set(entry) - {"event", "probability", "applies_when"}:
-            raise ValueError("Each entry needs event and probability, with optional applies_when")
-        event = entry.get("event")
-        probability = entry.get("probability")
-        if not isinstance(event, str) or not event.strip():
-            raise ValueError("Each event needs a nonempty description")
+def _text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a nonempty string")
+    return value.strip()
+
+
+def _example(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict) or set(entry) - _EXAMPLE_KEYS or not {"action", "outcomes", "sources"} <= set(entry):
+        raise ValueError("Each example needs action, outcomes and sources, with optional applies_when and typical_time")
+    action = _text(entry["action"], "Example action")
+    sources = entry["sources"]
+    if not isinstance(sources, list) or not sources:
+        raise ValueError(f"{action}: cite at least one research source")
+    outcomes, seen = [], set()
+    if not isinstance(entry["outcomes"], list) or not entry["outcomes"]:
+        raise ValueError(f"{action}: outcomes must be a nonempty list")
+    for outcome in entry["outcomes"]:
+        if not isinstance(outcome, dict) or set(outcome) != {"outcome", "probability"}:
+            raise ValueError(f"{action}: each outcome needs exactly outcome and probability")
+        name = _text(outcome["outcome"], f"{action}: outcome")
+        probability = outcome["probability"]
         if isinstance(probability, bool) or not isinstance(probability, (int, float)):
-            raise ValueError(f"{event}: probability must be a number")
+            raise ValueError(f"{action}: {name} probability must be a number")
         if not math.isfinite(probability) or not 0 <= probability <= 1:
-            raise ValueError(f"{event}: probability must be between 0 and 1")
-        key = event.strip().casefold()
-        if key in seen:
-            raise ValueError(f"{event}: duplicate event")
-        seen.add(key)
-        rate = {"event": event.strip(), "probability": float(probability)}
-        if entry.get("applies_when") is not None:
-            if not isinstance(entry["applies_when"], str) or not entry["applies_when"].strip():
-                raise ValueError(f"{event}: applies_when must be a nonempty string")
-            rate["applies_when"] = entry["applies_when"].strip()
-        rates.append(rate)
+            raise ValueError(f"{action}: {name} probability must be between 0 and 1")
+        if name.casefold() in seen:
+            raise ValueError(f"{action}: duplicate outcome {name}")
+        seen.add(name.casefold())
+        outcomes.append({"outcome": name, "probability": float(probability)})
+    if not math.isclose(math.fsum(o["probability"] for o in outcomes), 1.0, rel_tol=0, abs_tol=1e-6):
+        raise ValueError(f"{action}: outcome probabilities must sum to 1")
+    example = {"action": action}
+    for key in ("applies_when", "typical_time"):
+        if entry.get(key) is not None:
+            example[key] = _text(entry[key], f"{action}: {key}")
+    example["outcomes"] = outcomes
+    example["sources"] = [_text(source, f"{action}: source") for source in sources]
+    return example
+
+
+def validated_outcome_examples(examples: list[Any]) -> list[dict[str, Any]]:
+    """Normalize sourced outcome examples; each action once, each distribution summing to 1."""
+    if not isinstance(examples, list) or not examples:
+        raise ValueError("Outcome examples must be a nonempty list")
+    validated = [_example(entry) for entry in examples]
+    actions = [example["action"].casefold() for example in validated]
+    if len(set(actions)) != len(actions):
+        raise ValueError("Each action may have only one outcome example")
+    return validated
+
+
+def insert_outcome_examples(state: dict[str, Any], examples: list[Any], *, item_id: str) -> dict[str, Any]:
+    """Return a copy of ``state`` carrying the validated, sourced outcome examples once."""
+    validated = validated_outcome_examples(examples)
     result = deepcopy(validate_wmh_initial_state(state, item_id))
-    if EVENT_PROBABILITIES_KEY in result["structured"] or CALIBRATION_TEXT in result["scratchpad"]:
-        raise ValueError(f"{item_id}: event probabilities were already inserted")
-    result["structured"][EVENT_PROBABILITIES_KEY] = rates
-    result["scratchpad"] = (result["scratchpad"].rstrip() + "\n\n" + CALIBRATION_TEXT).strip()
+    if OUTCOME_EXAMPLES_KEY in result["structured"] or EXAMPLES_TEXT in result["scratchpad"]:
+        raise ValueError(f"{item_id}: outcome examples were already inserted")
+    result["structured"][OUTCOME_EXAMPLES_KEY] = validated
+    result["scratchpad"] = (result["scratchpad"].rstrip() + "\n\n" + EXAMPLES_TEXT).strip()
     return validate_wmh_initial_state(result, item_id)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", required=True, help="Catalog task whose wmh_initial_state is the base")
-    parser.add_argument("--events", required=True, type=Path, help="JSON list of {event, probability[, applies_when]}")
+    parser.add_argument(
+        "--examples",
+        required=True,
+        type=Path,
+        help="JSON list of {action, outcomes: [{outcome, probability}], sources[, applies_when, typical_time]}",
+    )
     parser.add_argument("--out", required=True, type=Path, help="Per-run --wmh-initial-state-file to write")
     args = parser.parse_args(argv)
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -74,8 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     task = get_task_by_name(args.task)
     if task is None or not task.wmh_initial_state:
         raise SystemExit(f"{args.task}: no catalog wmh_initial_state to extend")
-    state = insert_event_probabilities(
-        task.wmh_initial_state, json.loads(args.events.read_text(encoding="utf-8")), item_id=args.task
+    state = insert_outcome_examples(
+        task.wmh_initial_state, json.loads(args.examples.read_text(encoding="utf-8")), item_id=args.task
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
