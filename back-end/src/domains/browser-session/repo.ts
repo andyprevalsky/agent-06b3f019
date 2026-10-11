@@ -138,6 +138,20 @@ export async function findBrowserControlRecord(taskId: string) {
   });
 }
 
+/** Live-view binding: the provider session a task is bound to right now. */
+export async function findBrowserLiveViewRecord(taskId: string) {
+  return prisma.browserSession.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      sessionId: true,
+      status: true,
+      debugUrl: true,
+      context: { select: { userId: true } },
+    },
+  });
+}
+
 export async function findAgentStatus(agentId: string) {
   return prisma.agent.findUnique({ where: { id: agentId }, select: { status: true } });
 }

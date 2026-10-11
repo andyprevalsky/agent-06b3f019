@@ -7,6 +7,11 @@
  *     → boxes.dev thread-automation API trigger (configurable request)
  *     → new devbox thread titled from the description, prompt `/rca … [id]\n<description>`
  *
+ * Screenshots (the automation API accepts only prompt text):
+ *   drag / paste image → POST /api/agents/:id/report-bug/screenshots
+ *     → Supabase Storage under the admin's user id → 7-day signed URL
+ *     → FE inserts `![name](url)` into the description the admin submits
+ *
  * No SMS and no auto-open: the FE keeps an explicit Open / Copy link after
  * launch. Texts and window.open were user-visible side effects of reporting.
  */
@@ -16,6 +21,7 @@ import { isAdminUser } from '../../utils/adminAccess';
 import * as benchmarkHubLookup from '../../providers/benchmarkHubLookup';
 import { runBoxesThreadAutomation } from '../../providers/boxesThreadAutomations';
 import { createLogger } from '../../providers/logger';
+import { type FilePointer, getSignedUrl, processUploadedFile } from '../../providers/storage';
 import {
   getBoxesBugReportAppUrl,
   getBoxesBugReportRunUrl,
@@ -27,6 +33,8 @@ const log = createLogger('ReportBug');
 
 const MAX_DESCRIPTION_CHARS = 8_000;
 const MAX_TITLE_CHARS = 60;
+/** The investigating agent may first open a screenshot days later, on resume. */
+export const BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export class ReportBugForbiddenError extends Error {
   constructor() {
@@ -200,4 +208,101 @@ async function defaultLaunch(args: ReportBugLaunchArgs): Promise<ReportBugLaunch
     idempotencyKey: args.idempotencyKey,
   });
   return { run_id: run.runId, name: run.threadTitle, url: getBoxesBugReportAppUrl() };
+}
+
+/** Leading bytes for each accepted screenshot type. */
+const SCREENSHOT_SIGNATURES = new Map<string, (head: Buffer) => boolean>([
+  ['image/png', (head) => head.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))],
+  ['image/jpeg', (head) => head.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))],
+  ['image/gif', (head) => head.subarray(0, 4).toString('latin1') === 'GIF8'],
+  [
+    'image/webp',
+    (head) =>
+      head.subarray(0, 4).toString('latin1') === 'RIFF' &&
+      head.subarray(8, 12).toString('latin1') === 'WEBP',
+  ],
+]);
+
+export interface BugReportScreenshotFile {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+}
+
+export interface BugReportScreenshotResult {
+  success: true;
+  name: string;
+  url: string;
+  expires_in: number;
+}
+
+export interface BugReportScreenshotDeps {
+  findAgentById?: typeof repo.findAgentById;
+  findAgentAcrossRuns?: typeof benchmarkHubLookup.findAgentAcrossRuns;
+  store?: (
+    userId: string,
+    buffer: Buffer,
+    filename: string,
+    mimeType: string
+  ) => Promise<FilePointer>;
+  sign?: (storagePath: string, expiresIn: number) => Promise<string>;
+}
+
+/** Report Bug and its screenshot uploads are admin-only. */
+export function assertReportBugAdmin(userId: string | undefined): asserts userId is string {
+  if (userId === undefined || !isAdminUser(userId)) {
+    throw new ReportBugForbiddenError();
+  }
+}
+
+function validateScreenshot(file: BugReportScreenshotFile | undefined): BugReportScreenshotFile {
+  if (file === undefined) {
+    throw new ReportBugValidationError('Screenshot file is required');
+  }
+  const matchesSignature = SCREENSHOT_SIGNATURES.get(file.mimetype);
+  if (matchesSignature === undefined || !matchesSignature(file.buffer)) {
+    throw new ReportBugValidationError('Screenshot must be a PNG, JPEG, GIF or WebP image');
+  }
+  return file;
+}
+
+/**
+ * Store one Report Bug screenshot and return a signed URL the admin's
+ * description can embed. Same admin and agent gates as reportAgentBug.
+ */
+export async function uploadBugReportScreenshot(
+  userId: string | undefined,
+  agentId: string,
+  file: BugReportScreenshotFile | undefined,
+  deps: BugReportScreenshotDeps = {}
+): Promise<BugReportScreenshotResult> {
+  assertReportBugAdmin(userId);
+  const screenshot = validateScreenshot(file);
+  const exists = await agentExistsForBugReport(agentId, {
+    findAgentById: deps.findAgentById,
+    findAgentAcrossRuns: deps.findAgentAcrossRuns,
+  });
+  if (!exists) {
+    throw new ReportBugNotFoundError();
+  }
+
+  const store = deps.store ?? processUploadedFile;
+  const sign = deps.sign ?? getSignedUrl;
+  const pointer = await store(
+    userId,
+    screenshot.buffer,
+    screenshot.originalname,
+    screenshot.mimetype
+  );
+  const url = await sign(pointer.storage_path, BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS);
+  log.info('Stored bug report screenshot', {
+    rose_agent_id: agentId,
+    size_bytes: pointer.size_bytes,
+  });
+  return {
+    success: true,
+    name: pointer.original_filename,
+    url,
+    expires_in: BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS,
+  };
 }

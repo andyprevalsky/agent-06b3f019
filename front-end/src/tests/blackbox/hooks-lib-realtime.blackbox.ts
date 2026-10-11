@@ -68,7 +68,7 @@ describe('lib/realtime', () => {
     // Collect the (eventName → handler) map by intercepting channel.on
     const stub = setupChannelStub(['SUBSCRIBED']);
     const eventMap: Record<string, (w: unknown) => void> = {};
-    (stub.channel.on as never).mockImplementation(
+    stub.channel.on.mockImplementation(
       (_type: string, cfg: { event: string }, handler: (w: unknown) => void) => {
         eventMap[cfg.event] = handler;
         return stub.channel;
@@ -113,6 +113,34 @@ describe('lib/realtime', () => {
     expect(onInsert).not.toHaveBeenCalled();
   });
 
+  it('subscribeToAgent: delivers a valid BROWSER_SESSION binding and drops malformed ones', async () => {
+    const stub = setupChannelStub(['SUBSCRIBED']);
+    const eventMap: Record<string, (w: unknown) => void> = {};
+    stub.channel.on.mockImplementation(
+      (_type: string, cfg: { event: string }, handler: (w: unknown) => void) => {
+        eventMap[cfg.event] = handler;
+        return stub.channel;
+      },
+    );
+    const onBrowserSession = vi.fn();
+    await real.subscribeToAgent('a-browser', { onBrowserSession });
+    const record = {
+      agentId: 'a-browser',
+      taskId: 'e264ec23-538b-50bb-9874-30c9830a49d8',
+      sessionId: 'qzsodw10re6xto2hd8vcjxps',
+      debugUrl:
+        'https://prod-iad-hypeman-28.kernel.sh:8443/browser/live/pmHw1BNYtFaS?readOnly=true',
+      status: 'ACTIVE',
+      live: true,
+      asOf: 1791579416000,
+    };
+    // Backend sendBroadcastBatch wraps every payload as { record }.
+    eventMap['BROWSER_SESSION']?.({ payload: { record } });
+    eventMap['BROWSER_SESSION']?.({ payload: { record: { ...record, asOf: 'late' } } });
+    expect(onBrowserSession).toHaveBeenCalledTimes(1);
+    expect(onBrowserSession).toHaveBeenCalledWith(record);
+  });
+
   it('subscribeToAgent: rejects on CHANNEL_ERROR before resolve', async () => {
     setupChannelStub(['CHANNEL_ERROR']);
     await expect(real.subscribeToAgent('a-2', {})).rejects.toThrow(/error/i);
@@ -140,7 +168,7 @@ describe('lib/realtime', () => {
   it('subscribeToBus: attaches AGENT_STATE_CHANGED handler', async () => {
     const stub = setupChannelStub(['SUBSCRIBED']);
     const eventMap: Record<string, (w: unknown) => void> = {};
-    (stub.channel.on as never).mockImplementation(
+    stub.channel.on.mockImplementation(
       (_type: string, cfg: { event: string }, handler: (w: unknown) => void) => {
         eventMap[cfg.event] = handler;
         return stub.channel;

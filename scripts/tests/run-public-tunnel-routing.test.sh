@@ -288,11 +288,11 @@ held_line='lvl=crit msg="command failed" err="failed to start tunnel: The endpoi
 
 out="$(run_ngrok_mode 0 "$held_line" 1)" \
   || fail "case 9a: a reserved domain held by another session must not tear the stack down ($(cat "$TMP/ngrok_mode.err"))"
-printf '%s\n' "$out" | grep -qx 'url=https://stub.trycloudflare.com' \
+grep -qx 'url=https://stub.trycloudflare.com' <<<"$out" \
   || fail "case 9a: expected the account-less cloudflare origin, got: $out"
-printf '%s\n' "$out" | grep -q 'rose-held.ngrok.app' \
+grep -q 'rose-held.ngrok.app' <<<"$out" \
   && fail "case 9a: the held domain must not stay in PUBLIC_BASE_URL/ALLOWED_ORIGINS: $out"
-printf '%s\n' "$out" | grep -qx 'names=cloudflared' \
+grep -qx 'names=cloudflared' <<<"$out" \
   || fail "case 9a: the dead ngrok service must be de-registered, got: $out"
 [ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare " ] \
   || fail "case 9a: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
@@ -318,7 +318,7 @@ echo "PASS: other ngrok failures remain fatal in ngrok mode"
 
 out="$(run_ngrok_mode 1 'lvl=info msg="started tunnel"' 1)" \
   || fail "case 9d: a healthy ngrok tunnel must succeed ($(cat "$TMP/ngrok_mode.err"))"
-printf '%s\n' "$out" | grep -qx 'url=https://rose-held.ngrok.app' \
+grep -qx 'url=https://rose-held.ngrok.app' <<<"$out" \
   || fail "case 9d: a healthy reserved domain must stay the public origin, got: $out"
 [ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok " ] \
   || fail "case 9d: a healthy ngrok tunnel must not try fallbacks: $(tr '\n' ' ' < "$TMP/ctx/calls")"

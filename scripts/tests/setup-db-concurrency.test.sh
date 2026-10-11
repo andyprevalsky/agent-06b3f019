@@ -402,9 +402,9 @@ grace_loop="$({
   sed -n '/while \[ \$((SECONDS - grace_started)) -lt "\$grace" \]; do/,/^[[:space:]]*done$/p' \
     "$SETUP_DB"
 } 2>/dev/null)"
-printf '%s\n' "$grace_loop" | grep -q 'setup_db_child_records' || fail \
+grep -q 'setup_db_child_records' <<<"$grace_loop" || fail \
   "case 7: graceful cleanup does not rescan for late descendants"
-printf '%s\n' "$grace_loop" | grep -q 'setup_db_term_records' || fail \
+grep -q 'setup_db_term_records' <<<"$grace_loop" || fail \
   "case 7: descendants discovered during grace are remembered but never sent TERM"
 
 # ── Case 8: force cleanup must keep discovering late descendants ─────────────
@@ -415,20 +415,20 @@ force_loop="$({
   sed -n '/while \[ \$((SECONDS - force_started)) -lt 2 \]; do/,/^[[:space:]]*done$/p' \
     "$SETUP_DB"
 } 2>/dev/null)"
-printf '%s\n' "$force_loop" | grep -q 'setup_db_child_records' || fail \
+grep -q 'setup_db_child_records' <<<"$force_loop" || fail \
   "case 8: force-cleanup loop does not rescan descendants before releasing the DB lock"
-printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
+grep -q 'kill -KILL' <<<"$force_loop" || fail \
   "case 8: force-cleanup loop discovers descendants but does not stop late arrivals"
 
 # ── Case 8b: surviving descendants must be visible before lock release ───────
 post_force="$({
   sed -n '/for pid in \$reap_pids; do/,/release_workspace_db_lock/p' "$SETUP_DB"
 } 2>/dev/null)"
-printf '%s\n' "$post_force" | grep -q 'setup_db_child_records' || fail \
+grep -q 'setup_db_child_records' <<<"$post_force" || fail \
   "case 8b: teardown does not make a final descendant scan before releasing the DB lock"
-printf '%s\n' "$post_force" | grep -q 'setup_db_pid_matches_record' || fail \
+grep -q 'setup_db_pid_matches_record' <<<"$post_force" || fail \
   "case 8b: teardown warns about descendants without revalidating process identity"
-printf '%s\n' "$post_force" | grep -q 'survived SIGKILL.*PID\|PID .*survived SIGKILL' || fail \
+grep -q 'survived SIGKILL.*PID\|PID .*survived SIGKILL' <<<"$post_force" || fail \
   "case 8b: teardown silently releases the DB lock while a descendant survives SIGKILL"
 
 # ── Case 9: retained PIDs must be identity-checked before force cleanup ───────
@@ -436,7 +436,7 @@ printf '%s\n' "$post_force" | grep -q 'survived SIGKILL.*PID\|PID .*survived SIG
 # reused before a later force-loop iteration. PID plus start time distinguish the
 # owned process incarnation from the unrelated replacement process; parent/group
 # values are capture-time provenance because descendants may detach or reparent.
-printf '%s\n' "$force_loop" | grep -q 'setup_db_pid_matches_record' || fail \
+grep -q 'setup_db_pid_matches_record' <<<"$force_loop" || fail \
   "case 9: force cleanup can SIGKILL a recycled PID without revalidating identity"
 grep -q 'lstart=' "$SETUP_DB" || fail \
   "case 9: descendant identity does not include process start time"

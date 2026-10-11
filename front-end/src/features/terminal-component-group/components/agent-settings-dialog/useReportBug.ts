@@ -9,12 +9,16 @@
  *      |                                        +-- err --> [COMPOSING]
  *      +-- (agent change / dialog close) --> reset to IDLE
  *
+ * COMPOSING also accepts dragged or pasted screenshots (useBugReportScreenshots);
+ * submit waits until every pending screenshot upload has finished.
+ *
  * After launch we keep the boxes.dev link on-screen. Submit must not auto-open
  * it; Open / Copy stay as explicit user-gesture buttons.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { reportAgentBug, useToast, type AgentDetail } from '../../hooks';
+import { useBugReportScreenshots } from './useBugReportScreenshots';
 
 interface UseReportBugOptions {
   agent: AgentDetail | null;
@@ -33,6 +37,9 @@ export interface UseReportBugResult {
   description: string;
   setDescription: (v: string) => void;
   isSubmitting: boolean;
+  uploadingScreenshots: number;
+  /** Returns false when none of the files is an image. */
+  attachScreenshots: (files: File[], cursor: number | null) => boolean;
   start: () => void;
   cancel: () => void;
   submit: () => Promise<void>;
@@ -50,6 +57,11 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
   // Bumped on dialog close / agent switch so in-flight submits cannot apply
   // stale results to a different agent or a closed dialog.
   const submitGenerationRef = useRef(0);
+  const { uploadingCount, resetUploads, attachScreenshots } = useBugReportScreenshots({
+    agentId: agent?.agent_id ?? null,
+    setDescription,
+    generationRef: submitGenerationRef,
+  });
 
   useEffect(() => {
     if (!open) {
@@ -58,8 +70,9 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
       setLaunched(null);
       setDescription('');
       setIsSubmitting(false);
+      resetUploads();
     }
-  }, [open]);
+  }, [open, resetUploads]);
 
   useEffect(() => {
     submitGenerationRef.current += 1;
@@ -67,7 +80,8 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     setLaunched(null);
     setDescription('');
     setIsSubmitting(false);
-  }, [agent?.agent_id]);
+    resetUploads();
+  }, [agent?.agent_id, resetUploads]);
 
   const start = useCallback(() => {
     setLaunched(null);
@@ -149,6 +163,8 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     description,
     setDescription,
     isSubmitting,
+    uploadingScreenshots: uploadingCount,
+    attachScreenshots,
     start,
     cancel,
     submit,
