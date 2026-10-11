@@ -16,7 +16,12 @@ export interface QuickLauncherPayload {
   attachments?: QuickLauncherAttachment[];
 }
 
-type QuickQueryConsumer = (payload: QuickLauncherPayload) => void;
+/**
+ * A consumer may return a promise for the work it started. The next submit is
+ * claimed only after that work settles, so a submit that is still waiting its
+ * turn stays with the desktop main process and survives a reload or a close.
+ */
+type QuickQueryConsumer = (payload: QuickLauncherPayload) => unknown;
 
 /**
  * Resolves true once this submit is the caller's to act on. The desktop main
@@ -47,8 +52,12 @@ export const QUICK_QUERY_MAX_HELD = 20;
  */
 const heldQueries: HeldQuickQuery[] = [];
 const consumers = new Set<QuickQueryConsumer>();
-/** Claims settle one at a time, so claimed submits reach the consumer in submit order. */
-let claiming: Promise<void> = Promise.resolve();
+/** Submits are claimed and handed over one at a time, in submit order. */
+let queue: Promise<void> = Promise.resolve();
+/** Submits whose claim or consumer work has not settled yet. */
+let pending = 0;
+/** Collects what the consumers of the submit being emitted returned. */
+let emitting: Promise<unknown>[] | null = null;
 
 function hold(held: HeldQuickQuery): void {
   heldQueries.push(held);
@@ -58,29 +67,65 @@ function hold(held: HeldQuickQuery): void {
   }
 }
 
-function emit(payload: QuickLauncherPayload): void {
+/** Hands the submit to the consumers; resolves once the work they returned has settled. */
+function emit(payload: QuickLauncherPayload): Promise<void> | null {
   // The consumer can go away while a claim is in flight; the submit is ours by then.
   if (consumers.size === 0) {
     hold({ payload });
-    return;
+    return null;
   }
-  window.dispatchEvent(
-    new CustomEvent<QuickLauncherPayload>(QUICK_QUERY_EVENT, { detail: payload }),
-  );
+  const started: Promise<unknown>[] = [];
+  emitting = started;
+  try {
+    window.dispatchEvent(
+      new CustomEvent<QuickLauncherPayload>(QUICK_QUERY_EVENT, { detail: payload }),
+    );
+  } finally {
+    emitting = null;
+  }
+  if (started.length === 0) return null;
+  return Promise.allSettled(started).then(() => undefined);
 }
 
-function deliver({ payload, claim }: HeldQuickQuery): void {
-  if (claim === undefined) {
-    emit(payload);
+/** Claims one submit and hands it over; it counts as pending until its consumer work settles. */
+async function handOver({ payload, claim }: HeldQuickQuery): Promise<void> {
+  try {
+    // The consumer left while this submit waited its turn: leave it unclaimed.
+    if (consumers.size === 0) {
+      hold({ payload, claim });
+      return;
+    }
+    if (claim !== undefined) {
+      let claimed = false;
+      try {
+        claimed = await claim();
+      } catch {
+        claimed = false;
+      }
+      if (!claimed) return;
+    }
+    const work = emit(payload);
+    if (work !== null) await work;
+  } finally {
+    pending -= 1;
+  }
+}
+
+function deliver(held: HeldQuickQuery): void {
+  if (held.claim === undefined && pending === 0) {
+    const work = emit(held.payload);
+    if (work === null) return;
+    pending += 1;
+    queue = work.then(() => {
+      pending -= 1;
+    });
     return;
   }
-  claiming = claiming
-    .then(async () => {
-      const claimed = await claim().catch(() => false);
-      if (claimed) emit(payload);
-    })
+  pending += 1;
+  queue = queue
+    .then(() => handOver(held))
     .catch((error: unknown) => {
-      console.error('[QuickQuery] Failed to deliver a claimed submit', error);
+      console.error('[QuickQuery] Failed to deliver a submit', error);
     });
 }
 
@@ -89,7 +134,8 @@ export function dispatchQuickQueryEvent(payload: QuickLauncherPayload, claim?: Q
     return;
   }
 
-  if (consumers.size === 0) {
+  // While earlier submits are still in the queue, later ones follow them so order is kept.
+  if (consumers.size === 0 && pending === 0) {
     hold({ payload, claim });
     return;
   }
@@ -104,7 +150,9 @@ export function dispatchQuickQueryEvent(payload: QuickLauncherPayload, claim?: Q
 export function subscribeQuickQuery(consumer: QuickQueryConsumer): () => void {
   const listener = (event: Event) => {
     const detail = (event as CustomEvent<QuickLauncherPayload>).detail;
-    if (detail) consumer(detail);
+    if (!detail) return;
+    const work = consumer(detail);
+    if (work instanceof Promise && emitting !== null) emitting.push(work);
   };
   window.addEventListener(QUICK_QUERY_EVENT, listener);
   consumers.add(consumer);
