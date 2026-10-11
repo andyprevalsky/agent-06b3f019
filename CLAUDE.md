@@ -1884,6 +1884,7 @@ Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typic
 - **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Codex-cloud `rose` environment:** the cloud sandbox env that mirrors backend secrets. Every key set on Render must also be mirrored here (and vice-versa). Set via the Codex cloud environment settings UI. MANDATORY: User Approval Needed to Write Env Vars.
+- **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
 
 ## Autonomous Agent Testing
 
