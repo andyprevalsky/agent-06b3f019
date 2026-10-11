@@ -978,7 +978,7 @@ if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     echo "   Set it explicitly or keep the prod DATABASE_URL in back-end/.env so scripts/run.sh can derive it before local DB override."
     exit 1
 fi
-apply_benchmark_fast_cache_pool_default "$BENCHMARK_MODE"
+apply_fast_cache_pool_default
 echo "🧠 Ensuring Fast Mode cache schema..."
 # This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
 # default (see above). When a cloud fleet boots concurrently (plus any neighbor

@@ -13439,8 +13439,8 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
     matching local isolated stacks; a broken resolver fails closed instead of
     silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
-    still read the shared cache use a bounded Prisma pool (20, sized for the
-    50-child DEMO fan-out) instead of production's 75-client default.
+    still read the shared cache use bounded Prisma pools (20 per run.sh stack, 4 per
+    cloud DEMO guest) instead of production's 75-client default.
     """
     import subprocess
 
@@ -13470,11 +13470,16 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
 
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
-    assert shared.stdout == "", "fast_cache:on replay must keep the frozen shared cache"
+    # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
+    # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
+    assert shared.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=4"]
 
     mixed = print_env("chat-mode,test-mass-agent-run-0")
     assert mixed.returncode == 0, mixed.stderr
-    assert mixed.stdout == ""
+    assert mixed.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=4"]
+
+    tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
+    assert tuned.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=6"]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr
@@ -13518,7 +13523,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
             [
                 "bash",
                 "-c",
-                '. "$1"; apply_benchmark_fast_cache_pool_default "$2" >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                '. "$1"; apply_fast_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
                 "pool",
                 str(lib),
                 mode,
@@ -13531,12 +13536,12 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    assert pool_after("true") == "20"
-    assert pool_after("true", "9") == "9", "an explicit operator pool size wins"
-    assert pool_after("false") == "unset", "non-benchmark stacks keep the production default"
+    # Every run.sh stack (developer or benchmark) shares the pooler and gets 20.
+    assert pool_after("any") == "20"
+    assert pool_after("any", "9") == "9", "an explicit operator pool size wins"
 
     run_sh = (repo_root / "scripts" / "run.sh").read_text()
-    pool_call = run_sh.index('apply_benchmark_fast_cache_pool_default "$BENCHMARK_MODE"')
+    pool_call = run_sh.index("apply_fast_cache_pool_default\n")
     assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
     assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
 

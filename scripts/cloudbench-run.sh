@@ -465,6 +465,10 @@ resolve_fast_cache_route() {
     cache_status=$?
     case "$cache_status" in
         0)
+            # A shared-cache (DEMO) guest still reads the production pooler. A
+            # small pool keeps a 50-guest fleet at 200 of its 1,000 clients; Fly's
+            # ~12 ms round trip serves the replay's ~40 reads/s through 4.
+            STACK_CACHE_ENV+=("FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
             ;;
         10)
             STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
