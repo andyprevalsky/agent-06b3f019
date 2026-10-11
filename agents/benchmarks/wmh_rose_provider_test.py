@@ -310,8 +310,11 @@ def test_native_provider_cache_prefix_precedes_changing_candidate(change_world):
         for request in requests
     ]
     for original, messages in zip(requests, outgoing):
-        assert messages[0]["content"] == "unchanged system"
-        assert json.loads(_prompt_text(messages[1]["content"])) == original
+        # Azure reuses only exact instructions: the session-constant task rides
+        # in the system message and rejoins the evidence for every reader.
+        system, marker, carried = messages[0]["content"].partition(wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
+        assert system == "unchanged system" and marker and carried.startswith('{"task":')
+        assert json.loads(carried + _prompt_text(messages[1]["content"])) == original
         assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
         assert "cache_control" not in messages[1]["content"][-1]
         wire = build_openrouter_body(
@@ -320,6 +323,7 @@ def test_native_provider_cache_prefix_precedes_changing_candidate(change_world):
             max_tokens=16384, seed=None, cache_namespace="wmh:session:root",
         )
         assert wire["messages"][1]["content"] == messages[1]["content"]
+        assert wire["messages"][0]["content"] == messages[0]["content"]
         assert wmh_rose_provider._native_call_ids(messages) == (
             original["candidate_response"]["tool_calls"][0]["call_id"],
         )
@@ -331,9 +335,9 @@ def test_native_provider_cache_prefix_precedes_changing_candidate(change_world):
                 {"role": "user", "content": json.dumps(original)},
             ]})
         )
-    assert outgoing[0][1]["content"][0] == outgoing[1][1]["content"][0]
-    prefix = commonprefix([_prompt_text(messages[1]["content"]) for messages in outgoing])
-    assert '"instruction":"Raise funds"' in prefix
+    assert outgoing[0][0]["content"] == outgoing[1][0]["content"]
+    assert '"instruction":"Raise funds"' in outgoing[0][0]["content"]
+    prefix = commonprefix([messages[0]["content"] + _prompt_text(messages[1]["content"]) for messages in outgoing])
     if not change_world:
         assert '"environment_state"' in prefix
 
@@ -453,15 +457,16 @@ def _marked_native_prefixes(request):
     wire = build_openrouter_body(model="openai/gpt-6.1-sol", messages=messages, tools=None,
                                  tool_choice=None, response_format=None, temperature=None,
                                  max_tokens=16384, seed=None, effort="xhigh", cache_namespace="wmh:session:test")
-    assert json.loads(_prompt_text(wire["messages"][1]["content"])) == request
-    assert wire["messages"][0] == {"role": "system", "content": "fixed system"}
+    system, _, carried = wire["messages"][0]["content"].partition(wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
+    assert system == "fixed system"
+    assert json.loads(carried + _prompt_text(wire["messages"][1]["content"])) == request
     assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
         wmh_rose_provider._wmh_cache_key_material({"messages": [
             {"role": "system", "content": "fixed system"},
             {"role": "user", "content": json.dumps(request)},
         ]})
     )
-    text = ""
+    text = carried
     prefixes = []
     for block in wire["messages"][1]["content"]:
         text += block["text"]
@@ -771,6 +776,27 @@ def test_distribution_cache_keys_bind_exact_action_state_and_policy():
     assert key(request, site="wmh_world_model_v3") != original
     assert key(request, system="old single-transition contract") != original
     assert key(request, system=execution_policy("rose-outcome-distribution-v2").text) != original
+
+    # The wire layout carries the session task in the system message (Azure
+    # caches only exact instructions); the replay key and the policy identity
+    # still read the canonical layout.
+    from benchmarks import wmh_execution_policy as policies
+
+    native = deepcopy(request)
+    native["task"] = {"initial_context": {"seed": 1}, "instruction": "Inspect public contact", "task_id": "root"}
+    system = execution_policy("rose-outcome-distribution-v1").text
+    real, seen = policies.cache_policy_identity, []
+
+    def spy(messages):
+        seen.append(messages[0]["content"])
+        return real(messages)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(policies, "cache_policy_identity", spy)
+        wire = _to_rose_messages(system, [Message(role="user", content=json.dumps(native))])
+        assert wmh_rose_provider._SYSTEM_EVIDENCE_MARKER in wire[0]["content"]
+        assert cache.llm_key("wmh_world_model_distribution_v1", {"messages": wire}) == key(native)
+    assert seen == [system, system]
 
 
 def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():

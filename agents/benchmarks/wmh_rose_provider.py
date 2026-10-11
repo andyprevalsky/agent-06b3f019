@@ -105,6 +105,34 @@ _WMH_CALL_SITES = {
 }
 
 
+# Azure prompt caching reuses only an exactly repeated system prompt, so the
+# session-constant task evidence rides at the end of the system message (user
+# approved, 2026-10-11). Every reader folds it back into its user evidence.
+_SYSTEM_EVIDENCE_MARKER = (
+    "\n\nWORLD EVIDENCE JSON (identical for every step of this world session; it continues in the user message):\n"
+)
+
+
+def _fold_system_evidence(messages: list) -> list:
+    """Canonical layout: evidence carried by the system message rejoins its user message."""
+    if not messages or not isinstance(messages[0], dict) or messages[0].get("role") != "system":
+        return messages
+    content = messages[0].get("content")
+    if not isinstance(content, str) or _SYSTEM_EVIDENCE_MARKER not in content:
+        return messages
+    system, _, carried = content.partition(_SYSTEM_EVIDENCE_MARKER)
+    folded = [{**messages[0], "content": system}]
+    for message in messages[1:]:
+        if carried and isinstance(message, dict) and message.get("role") == "user":
+            try:
+                message = {**message, "content": carried + _prompt_text(message.get("content"))}
+                carried = ""
+            except TypeError:
+                pass
+        folded.append(message)
+    return folded
+
+
 def _prompt_text(content: object) -> str:
     """Read pure text provider blocks without dropping any native evidence."""
     if isinstance(content, str):
@@ -129,7 +157,7 @@ def _wmh_cache_key_material(request: object) -> object:
     if not isinstance(request, dict) or not isinstance(request.get("messages"), list):
         return request
     messages = []
-    for message in request["messages"]:
+    for message in _fold_system_evidence(request["messages"]):
         if (
             not isinstance(message, dict)
             or message.get("role") != "user"
@@ -212,7 +240,7 @@ class _WMHInvalidPrediction(ValueError):
 
 
 def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
-    for message in messages:
+    for message in _fold_system_evidence(messages):
         if message.get("role") != "user":
             continue
         try:
@@ -233,7 +261,7 @@ def _native_environment_state(messages: list[dict]) -> dict | None:
     """
     state = None
     found = False
-    for message in messages:
+    for message in _fold_system_evidence(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         try:
@@ -873,6 +901,9 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                 task = native["task"]
                 if all(key in task for key in ("initial_context", "instruction", "task_id")):
                     content = _native_prompt_blocks(native)
+                    if len(rose) == 1 and rose[0]["role"] == "system" and isinstance(rose[0]["content"], str):
+                        carried = content.pop(0)["text"]
+                        rose[0] = {"role": "system", "content": rose[0]["content"] + _SYSTEM_EVIDENCE_MARKER + carried}
                 elif next(iter(native)) != "task":
                     ordered = {key: native[key] for key in order if key in native}
                     ordered.update({
