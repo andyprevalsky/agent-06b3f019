@@ -13439,8 +13439,8 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
     matching local isolated stacks; a broken resolver fails closed instead of
     silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
-    still read the shared cache use a small Prisma pool instead of production's
-    75-client default.
+    still read the shared cache use a bounded Prisma pool (20, sized for the
+    50-child DEMO fan-out) instead of production's 75-client default.
     """
     import subprocess
 
@@ -13531,7 +13531,7 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    assert pool_after("true") == "3"
+    assert pool_after("true") == "20"
     assert pool_after("true", "9") == "9", "an explicit operator pool size wins"
     assert pool_after("false") == "unset", "non-benchmark stacks keep the production default"
 
