@@ -124,7 +124,13 @@ export interface IPC {
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => void;
   onQuickQueryToggle: (callback: (state: QuickQueryToggleState) => void) => void;
-  onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => void;
+  /**
+   * `claim` resolves true once the main process has given this submit up to the
+   * caller; act on the submit only then. Until claimed it stays held there.
+   */
+  onQuickQuerySubmit: (
+    callback: (payload: QuickQueryPayload, claim: () => Promise<boolean>) => void
+  ) => () => void;
   onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => void;
   onUpdateProgress: (callback: (percent: number) => void) => void;
   onFocusInput: (callback: () => void) => void;
@@ -375,6 +381,12 @@ export interface QuickQueryPayload {
   submittedAt: number;
   /** Optional local files; main window uploads these before createAgent. */
   attachments?: QuickQueryAttachment[];
+}
+
+/** A launcher submit the main process holds until the main window's consumer claims it. */
+export interface QuickQueryHeldSubmit {
+  id: string;
+  payload: QuickQueryPayload;
 }
 
 export interface QuickQueryResizePayload {

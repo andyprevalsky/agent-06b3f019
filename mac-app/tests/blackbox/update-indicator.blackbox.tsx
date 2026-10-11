@@ -41,7 +41,7 @@ import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import { clearIpcMock, installIpcMock } from './ipc-mock';
 import UpdateIndicator from '../../ui/UpdateIndicator';
-import { PORTAL_ID } from '../../ui/features/bottom-left-chips/config';
+import { PORTAL_ID } from '../../ui/shared/bottom-left-chips/config';
 import type { IPC, UpdateStatusPayload } from '../../shared/types/ipc';
 
 // ---------------------------------------------------------------------------

@@ -5,11 +5,15 @@
  * path hid immediately on blur, so the drop landed on apps behind the (now
  * gone) always-on-top pill. File-drag IPC must cancel deferred blur-hide and
  * re-show the window if hide already raced ahead.
+ *
+ * Also covers submit delivery: the main window may be closed or not listening
+ * yet when the launcher submits, and the query must still reach its renderer.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { makeBrowserWindowStub, stubElectron } from './electron-stubs';
 import { QUICK_QUERY_BLUR_HIDE_DELAY_MS, QuickQueryController } from '../../main/app/quickQuery';
+import { QUICK_QUERY_MAX_PENDING_SUBMITS } from '../../main/app/quickQueryHeldSubmits';
 
 stubElectron();
 
@@ -33,6 +37,20 @@ type WinStub = ReturnType<typeof makeBrowserWindowStub> & {
   isVisible: ReturnType<typeof vi.fn>;
   webContents: { on: ReturnType<typeof vi.fn> };
 };
+
+type MainStub = WinStub & {
+  show: ReturnType<typeof vi.fn>;
+  focus: ReturnType<typeof vi.fn>;
+  isDestroyed: ReturnType<typeof vi.fn>;
+  webContents: { send: ReturnType<typeof vi.fn> };
+};
+
+type HeldSubmit = { id: string; payload: { query: string; submittedAt: number } };
+
+/** The submits the main process is still holding for this window, without their ids. */
+function heldPayloads(result: unknown): Array<{ query: string; submittedAt: number }> {
+  return (result as HeldSubmit[]).map((held) => held.payload);
+}
 
 function windowEventHandler(win: WinStub, event: string): (() => void) | undefined {
   const match = win.on.mock.calls.find((call) => call[0] === event);
@@ -79,6 +97,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -125,6 +144,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -151,6 +171,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -180,6 +201,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -199,6 +221,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -221,19 +244,17 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     expect(win.showInactive).not.toHaveBeenCalled();
   });
 
-  it('submit with query content focuses the main window; hide IPC focuses main', async () => {
+  it('submit opens the main window and hands it the query; hide IPC focuses main', async () => {
     const electron = await import('electron');
     vi.mocked(electron.BrowserWindow).mockImplementation(
       () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
     );
-    const main = makeBrowserWindowStub() as unknown as WinStub & {
-      show: ReturnType<typeof vi.fn>;
-      focus: ReturnType<typeof vi.fn>;
-      webContents: { send: ReturnType<typeof vi.fn> };
-    };
+    const main = makeBrowserWindowStub() as unknown as MainStub;
+    const openMainWindow = vi.fn();
 
     const controller = new QuickQueryController({
       getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -246,13 +267,18 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     await vi.advanceTimersByTimeAsync(1100);
 
     const submit = await ipcHandler('quick-query:submit');
-    submit?.(null, { query: 'ship it', submittedAt: Date.now() });
-    expect(main.show).toHaveBeenCalled();
-    expect(main.focus).toHaveBeenCalled();
-    expect(main.webContents.send).toHaveBeenCalledWith(
-      'quick-query:submit',
-      expect.objectContaining({ query: 'ship it' })
-    );
+    expect(submit?.(null, { query: 'ship it', submittedAt: 1 })).toEqual({ success: true });
+    expect(win.hide).toHaveBeenCalledTimes(1);
+    expect(openMainWindow).toHaveBeenCalledTimes(1);
+    // The renderer is told a submit is waiting and takes it; nothing is pushed.
+    expect(main.webContents.send.mock.calls).toEqual([['quick-query:pending']]);
+
+    const take = await ipcHandler('quick-query:take');
+    const claim = await ipcHandler('quick-query:claim');
+    const held = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(held)).toEqual([{ query: 'ship it', submittedAt: 1 }]);
+    expect(claim?.({ sender: main.webContents }, held[0]?.id)).toEqual({ claimed: true });
+    expect(take?.({ sender: main.webContents })).toEqual([]);
 
     // Re-open after the 2s re-show guard so hide IPC can run.
     await vi.advanceTimersByTimeAsync(2100);
@@ -264,6 +290,225 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     const hide = await ipcHandler('quick-query:hide');
     hide?.(null);
     expect(main.show).toHaveBeenCalled();
+    expect(main.focus).toHaveBeenCalled();
+  });
+
+  // Closing the main window leaves Rose running, so the launcher still opens.
+  // Its submit used to be discarded because there was no window to send to.
+  it('submit with the main window closed opens it and holds the query until that window takes it', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    let main: MainStub | null = null;
+    const openMainWindow = vi.fn(() => {
+      main = makeBrowserWindowStub() as unknown as MainStub;
+    });
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow | null,
+      openMainWindow,
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    expect(submit?.(null, { query: 'ship it', submittedAt: 3 })).toEqual({ success: true });
+    expect(openMainWindow).toHaveBeenCalledTimes(1);
+
+    // The reopened window's renderer takes the query whenever it starts
+    // listening; delivery never depends on how far its page has loaded.
+    const reopened = main as unknown as MainStub;
+    const take = await ipcHandler('quick-query:take');
+    expect(heldPayloads(take?.({ sender: reopened.webContents }))).toEqual([
+      { query: 'ship it', submittedAt: 3 },
+    ]);
+  });
+
+  // Listing a submit must not give it up: a renderer that reloads or closes
+  // before its consumer acts would otherwise lose the query for good.
+  it('keeps a listed submit until it is claimed, and offers it to a re-created window', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    let main = makeBrowserWindowStub() as unknown as MainStub;
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => undefined,
+      getOnboardingComplete: () => true,
+    });
+    const launcher = controller.createWindow() as unknown as MainStub;
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    submit?.(null, { query: 'survives a reload', submittedAt: 11 });
+    const take = await ipcHandler('quick-query:take');
+    const claim = await ipcHandler('quick-query:claim');
+
+    const first = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(first)).toEqual([{ query: 'survives a reload', submittedAt: 11 }]);
+    // Listed twice, still held: nothing has claimed it.
+    expect(take?.({ sender: main.webContents })).toEqual(first);
+
+    // The window is replaced before its consumer claims anything.
+    const closed = main;
+    main = makeBrowserWindowStub() as unknown as MainStub;
+    expect(claim?.({ sender: closed.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(claim?.({ sender: launcher.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(take?.({ sender: main.webContents })).toEqual(first);
+
+    expect(claim?.({ sender: main.webContents }, first[0]?.id)).toEqual({ claimed: true });
+    // One claim only: a second consumer cannot launch the same query again.
+    expect(claim?.({ sender: main.webContents }, first[0]?.id)).toEqual({ claimed: false });
+    expect(claim?.({ sender: main.webContents }, 'not-a-held-id')).toEqual({ claimed: false });
+    expect(take?.({ sender: main.webContents })).toEqual([]);
+  });
+
+  it('keeps a submit held when no main window opened, for the next one to take', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    let main: MainStub | null = null;
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow | null,
+      openMainWindow: () => undefined,
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    expect(submit?.(null, { query: 'nowhere to go yet', submittedAt: 5 })).toEqual({
+      success: true,
+    });
+
+    const take = await ipcHandler('quick-query:take');
+    const closing = makeBrowserWindowStub() as unknown as MainStub;
+    closing.isDestroyed.mockReturnValue(true);
+    main = closing;
+    expect(take?.({ sender: closing.webContents })).toEqual([]);
+
+    const later = makeBrowserWindowStub() as unknown as MainStub;
+    main = later;
+    expect(heldPayloads(take?.({ sender: later.webContents }))).toEqual([
+      { query: 'nowhere to go yet', submittedAt: 5 },
+    ]);
+  });
+
+  // A rejected submit re-enables the launcher input; a retry would then queue
+  // the same query twice and start two agents.
+  it('accepts and keeps a submit even when opening the main window throws', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as MainStub;
+    const failure = new Error('window could not be created');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => {
+        throw failure;
+      },
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    expect(submit?.(null, { query: 'held despite the failure', submittedAt: 9 })).toEqual({
+      success: true,
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[QuickQuery] Could not open the main window; submit stays held',
+      failure
+    );
+    errorSpy.mockRestore();
+
+    const take = await ipcHandler('quick-query:take');
+    expect(heldPayloads(take?.({ sender: main.webContents }))).toEqual([
+      { query: 'held despite the failure', submittedAt: 9 },
+    ]);
+  });
+
+  it('hands held submits over in order, exactly once, and only to the main window', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as MainStub;
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => undefined,
+      getOnboardingComplete: () => true,
+    });
+    const launcher = controller.createWindow() as unknown as MainStub;
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    submit?.(null, { query: 'first', submittedAt: 1 });
+    submit?.(null, { query: 'second', submittedAt: 2 });
+    expect(main.webContents.send.mock.calls).toEqual([
+      ['quick-query:pending'],
+      ['quick-query:pending'],
+    ]);
+
+    const take = await ipcHandler('quick-query:take');
+    const claim = await ipcHandler('quick-query:claim');
+    expect(take?.({ sender: launcher.webContents })).toEqual([]);
+    const held = take?.({ sender: main.webContents }) as HeldSubmit[];
+    expect(heldPayloads(held)).toEqual([
+      { query: 'first', submittedAt: 1 },
+      { query: 'second', submittedAt: 2 },
+    ]);
+    expect(new Set(held.map((entry) => entry.id)).size).toBe(2);
+
+    expect(claim?.({ sender: main.webContents }, held[0]?.id)).toEqual({ claimed: true });
+    expect(heldPayloads(take?.({ sender: main.webContents }))).toEqual([
+      { query: 'second', submittedAt: 2 },
+    ]);
+    expect(claim?.({ sender: main.webContents }, held[1]?.id)).toEqual({ claimed: true });
+    expect(take?.({ sender: main.webContents })).toEqual([]);
+  });
+
+  it('bounds held submits when the main window never takes them', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as MainStub;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => undefined,
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerIpc();
+
+    const submit = await ipcHandler('quick-query:submit');
+    for (let n = 0; n <= QUICK_QUERY_MAX_PENDING_SUBMITS; n += 1) {
+      submit?.(null, { query: `query ${n}`, submittedAt: n });
+    }
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[QuickQuery] Oldest held submit dropped - main window never took it'
+    );
+    errorSpy.mockRestore();
+
+    const take = await ipcHandler('quick-query:take');
+    const taken = heldPayloads(take?.({ sender: main.webContents }));
+    expect(taken).toHaveLength(QUICK_QUERY_MAX_PENDING_SUBMITS);
+    expect(taken[0]?.query).toBe('query 1');
+    expect(taken[taken.length - 1]?.query).toBe(`query ${QUICK_QUERY_MAX_PENDING_SUBMITS}`);
   });
 
   it('resize IPC clamps height; empty submit does not forward to main', async () => {
@@ -271,12 +516,11 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     vi.mocked(electron.BrowserWindow).mockImplementation(
       () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
     );
-    const main = makeBrowserWindowStub() as unknown as WinStub & {
-      webContents: { send: ReturnType<typeof vi.fn> };
-    };
+    const main = makeBrowserWindowStub() as unknown as MainStub;
 
     const controller = new QuickQueryController({
       getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub & {
@@ -292,6 +536,8 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     const submit = await ipcHandler('quick-query:submit');
     submit?.(null, { query: '   ', submittedAt: 1 });
     expect(main.webContents.send).not.toHaveBeenCalled();
+    const take = await ipcHandler('quick-query:take');
+    expect(take?.({ sender: main.webContents })).toEqual([]);
   });
 
   it('blocks show/toggle when onboarding is incomplete', async () => {
@@ -302,6 +548,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => false,
     });
     const win = controller.createWindow() as unknown as WinStub;
@@ -320,6 +567,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     controller.createWindow();
@@ -339,6 +587,7 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const controller = new QuickQueryController({
       getMainWindow: () => null,
+      openMainWindow: () => undefined,
       getOnboardingComplete: () => true,
     });
     const win = controller.createWindow() as unknown as WinStub & {

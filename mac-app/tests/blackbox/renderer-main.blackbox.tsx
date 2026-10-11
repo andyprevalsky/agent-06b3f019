@@ -124,7 +124,7 @@ import {
   IntegrationHandlersProvider,
   useIntegrationHandlers,
 } from '@/features/integration-handlers-context';
-import { QUICK_QUERY_EVENT, dispatchQuickQueryEvent } from '@/lib/quickQuery';
+import { QUICK_QUERY_EVENT, dispatchQuickQueryEvent, subscribeQuickQuery } from '@/lib/quickQuery';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -511,32 +511,34 @@ describe('renderer-main blackbox', () => {
   // -------------------------------------------------------------------------
 
   describe('QuickQuery bridge (main.tsx → window event)', () => {
-    it('dispatchQuickQueryEvent emits a rose:quick-query CustomEvent with payload', () => {
+    it('dispatchQuickQueryEvent emits a rose:quick-query CustomEvent to a subscribed consumer', () => {
       const received: QuickQueryPayload[] = [];
+      const windowEvents: QuickQueryPayload[] = [];
       const listener = (e: Event) => {
-        received.push((e as CustomEvent<QuickQueryPayload>).detail);
+        windowEvents.push((e as CustomEvent<QuickQueryPayload>).detail);
       };
       window.addEventListener(QUICK_QUERY_EVENT, listener);
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
 
       dispatchQuickQueryEvent({ query: 'hello', submittedAt: 42 });
 
+      unsubscribe();
       window.removeEventListener(QUICK_QUERY_EVENT, listener);
       expect(received).toEqual([{ query: 'hello', submittedAt: 42 }]);
+      expect(windowEvents).toEqual([{ query: 'hello', submittedAt: 42 }]);
     });
 
-    it('main.tsx-style wiring forwards window.api.onQuickQuerySubmit payloads to the window event', () => {
+    it('main.tsx-style wiring forwards window.api.onQuickQuerySubmit payloads to the consumer', () => {
       let ipcSubmitCb: ((p: QuickQueryPayload) => void) | null = null;
       installIpcMock({
         onQuickQuerySubmit: (cb) => {
           ipcSubmitCb = cb;
+          return () => {};
         },
       } as Partial<IPC>);
 
       const received: QuickQueryPayload[] = [];
-      const listener = (e: Event) => {
-        received.push((e as CustomEvent<QuickQueryPayload>).detail);
-      };
-      window.addEventListener(QUICK_QUERY_EVENT, listener);
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
 
       renderWithProviders(<QuickQueryListener />);
 
@@ -545,8 +547,115 @@ describe('renderer-main blackbox', () => {
         ipcSubmitCb?.({ query: 'from-ipc', submittedAt: 99 });
       });
 
-      window.removeEventListener(QUICK_QUERY_EVENT, listener);
+      unsubscribe();
       expect(received).toEqual([{ query: 'from-ipc', submittedAt: 99 }]);
+    });
+
+    // A launcher submit can re-create the main window: the IPC payload then
+    // lands while the shell still shows its loading screen, before Terminal
+    // (the consumer) has mounted.
+    it('holds a submit that arrives before any consumer and delivers it once on subscribe', () => {
+      let ipcSubmitCb: ((p: QuickQueryPayload) => void) | null = null;
+      installIpcMock({
+        onQuickQuerySubmit: (cb) => {
+          ipcSubmitCb = cb;
+          return () => {};
+        },
+      } as Partial<IPC>);
+      renderWithProviders(<QuickQueryListener />);
+
+      act(() => {
+        ipcSubmitCb?.({ query: 'sent while loading', submittedAt: 100 });
+      });
+
+      const received: QuickQueryPayload[] = [];
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
+      expect(received).toEqual([{ query: 'sent while loading', submittedAt: 100 }]);
+      unsubscribe();
+
+      const replayed: QuickQueryPayload[] = [];
+      subscribeQuickQuery((payload) => replayed.push(payload))();
+      expect(replayed).toEqual([]);
+    });
+
+    // Terminal links to /about, /privacy and /terms, where no consumer exists.
+    it('brings Terminal back when a submit arrives on another route', () => {
+      let ipcSubmitCb: ((p: QuickQueryPayload) => void) | null = null;
+      installIpcMock({
+        onQuickQuerySubmit: (cb) => {
+          ipcSubmitCb = cb;
+          return () => {};
+        },
+      } as Partial<IPC>);
+      const startUrl = window.location.href;
+      window.history.replaceState({}, '', '#/privacy');
+      const routeChanges: string[] = [];
+      const onPopState = () => routeChanges.push(window.location.hash);
+      window.addEventListener('popstate', onPopState);
+      const received: QuickQueryPayload[] = [];
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
+      renderWithProviders(<QuickQueryListener />);
+
+      act(() => {
+        ipcSubmitCb?.({ query: 'sent from a legal page', submittedAt: 101 });
+      });
+      expect(window.location.hash).toBe('#/');
+      expect(routeChanges).toEqual(['#/']);
+
+      // Already on Terminal: the route is left alone.
+      act(() => {
+        ipcSubmitCb?.({ query: 'sent from terminal', submittedAt: 102 });
+      });
+      expect(routeChanges).toEqual(['#/']);
+      expect(received.map((payload) => payload.query)).toEqual([
+        'sent from a legal page',
+        'sent from terminal',
+      ]);
+
+      unsubscribe();
+      window.removeEventListener('popstate', onPopState);
+      window.history.replaceState({}, '', startUrl);
+    });
+
+    // The main process keeps a submit until the consumer claims it, so the
+    // bridge must pass the claim along and act only once it is granted.
+    it('passes the claim through: a granted submit is delivered, a refused one is not', async () => {
+      let ipcSubmitCb: ((p: QuickQueryPayload, claim: () => Promise<boolean>) => void) | null =
+        null;
+      installIpcMock({
+        onQuickQuerySubmit: (cb) => {
+          ipcSubmitCb = cb;
+          return () => {};
+        },
+      } as Partial<IPC>);
+      const received: QuickQueryPayload[] = [];
+      const unsubscribe = subscribeQuickQuery((payload) => received.push(payload));
+      renderWithProviders(<QuickQueryListener />);
+
+      const granted = vi.fn(() => Promise.resolve(true));
+      const refused = vi.fn(() => Promise.resolve(false));
+      await act(async () => {
+        ipcSubmitCb?.({ query: 'granted', submittedAt: 201 }, granted);
+        ipcSubmitCb?.({ query: 'already taken elsewhere', submittedAt: 202 }, refused);
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(received).toEqual([{ query: 'granted', submittedAt: 201 }]));
+      expect(granted).toHaveBeenCalledTimes(1);
+      expect(refused).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
+    it('releases its preload subscription on unmount', () => {
+      const unsubscribeIpc = vi.fn();
+      installIpcMock({
+        onQuickQuerySubmit: () => unsubscribeIpc,
+      } as Partial<IPC>);
+
+      const { unmount } = renderWithProviders(<QuickQueryListener />);
+      expect(unsubscribeIpc).not.toHaveBeenCalled();
+      unmount();
+      expect(unsubscribeIpc).toHaveBeenCalledTimes(1);
     });
 
     it('does not crash when quick-query preload bridge is unavailable', () => {

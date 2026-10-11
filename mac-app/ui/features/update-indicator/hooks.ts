@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useBottomLeftChipPortal } from '../bottom-left-chips/hooks';
+import { useBottomLeftChipPortal } from '../../shared/bottom-left-chips/hooks';
 import {
   checkForUpdates,
   downloadUpdate,

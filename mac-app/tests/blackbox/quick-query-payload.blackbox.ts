@@ -37,6 +37,17 @@ describe('normalizeQuickQueryPayload', () => {
     expect(result.submittedAt).toBe(1234);
   });
 
+  it('replaces a non-finite submittedAt, which would otherwise never expire', () => {
+    // The consumer expires a submit by its age; `Date.now() - NaN` is never
+    // greater than the limit, so a NaN timestamp would launch at any age.
+    const before = Date.now();
+    for (const submittedAt of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const result = normalizeQuickQueryPayload({ query: 'hi', submittedAt });
+      expect(Number.isFinite(result.submittedAt)).toBe(true);
+      expect(result.submittedAt).toBeGreaterThanOrEqual(before);
+    }
+  });
+
   it('omits the attachments key entirely when none survive normalization', () => {
     // Not `attachments: []` — a present-but-empty array reads downstream as
     // "the user attached something that failed to load".
