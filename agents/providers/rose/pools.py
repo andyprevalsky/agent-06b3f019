@@ -51,7 +51,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-oss:  (open-weights only)
         direct_auth_enabled = False
-        foundry    = gpt-oss-120b (when configured)
+        foundry    = DeepSeek-V3.2 (when configured)
         waterfall  = moonshotai/kimi-k3
 
 Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b.
@@ -103,7 +103,8 @@ class PoolSpec:
 
     foundry_model: str | None = None
     """Foundry model when it must differ from ``gpt_auth_model`` (the open-weights
-    pool keeps its guarantee on Azure's gpt-oss). Defaults to ``gpt_auth_model``."""
+    pool keeps its guarantee on an open-weights Azure model). Defaults to
+    ``gpt_auth_model``."""
 
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall and the Foundry fallback stamp this
@@ -205,9 +206,11 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-luna",
         waterfall=("moonshotai/kimi-k3",),
         direct_auth_enabled=False,
-        # Funded Azure fallback stays open-weights: gpt-oss-120b.
+        # Funded Azure fallback stays open-weights: DeepSeek-V3.2 (MIT). On the
+        # pinned biometrics task's spawn_agent schema it produced valid calls
+        # 4/4 where gpt-oss-120b produced 0/4.
         foundry_enabled=True,
-        foundry_model="gpt-oss-120b",
+        foundry_model="DeepSeek-V3.2",
     ),
 }
 

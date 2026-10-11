@@ -272,28 +272,21 @@ def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
     assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
     # The open-weights pool's Foundry fallback stays open-weights.
     oss = get_pool("rose-1-oss")
-    assert oss.foundry_enabled and foundry_model(oss) == "gpt-oss-120b"
-    assert foundry._deployments(foundry_model(oss)) == ["gpt-oss-120b"]
+    assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
+    assert foundry._deployments(foundry_model(oss)) == ["DeepSeek-V3.2"]
 
 
 @pytest.mark.asyncio
-async def test_open_weights_foundry_caps_xhigh_effort(monkeypatch):
-    """Azure gpt-oss rejects efforts outside low/medium/high (HTTP 400); its fallback clamps them."""
-    efforts = []
+async def test_open_weights_foundry_omits_reasoning_params(monkeypatch):
+    """Azure DeepSeek rejects reasoning params (HTTP 400); GPT pools keep their effort."""
+    bodies = []
 
     def handler(request):
-        efforts.append(json.loads(request.content)["reasoning"]["effort"])
+        bodies.append(json.loads(request.content))
         return httpx.Response(200, text=_sse({"type": "response.output_text.delta", "delta": "ok"}))
 
     _install_http(monkeypatch, handler)
-    for pool, effort in (
-        ("rose-1-oss", None),
-        ("rose-1-oss", "max"),
-        ("rose-1-oss", "medium"),
-        ("rose-1-oss", "none"),
-        ("rose-1-ultra", None),
-        ("rose-1-ultra", "none"),
-    ):
+    for pool in ("rose-1-oss", "rose-1-ultra"):
         async for _chunk in foundry.foundry_complete(
             pool_spec=get_pool(pool),
             messages=[{"role": "user", "content": "hi"}],
@@ -302,9 +295,9 @@ async def test_open_weights_foundry_caps_xhigh_effort(monkeypatch):
             context_tools=None,
             tool_choice=None,
             temperature=None,
-            effort=effort,
+            effort=None,
             provider_fast_mode=False,
-            request_id=f"effort-{pool}-{effort}",
+            request_id=f"reasoning-{pool}",
             route_key="agent-1",
             agent_id="agent-1",
             call_site="test",
@@ -313,4 +306,7 @@ async def test_open_weights_foundry_caps_xhigh_effort(monkeypatch):
             idle_timeout_s=2,
         ):
             pass
-    assert efforts == ["high", "high", "medium", "low", "xhigh", "none"]
+    oss, ultra = bodies
+    assert oss["model"] == "DeepSeek-V3.2"
+    assert "reasoning" not in oss and "include" not in oss
+    assert ultra["model"] == "gpt-6-sol" and ultra["reasoning"]["effort"] == "xhigh"

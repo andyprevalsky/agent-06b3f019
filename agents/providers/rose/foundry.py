@@ -16,7 +16,7 @@ import httpx
 import structlog
 
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
-from providers.rose.gpt_auth import _normalize_reasoning_effort, build_codex_responses_body
+from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.pools import PoolSpec, foundry_model
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.types import StreamChunk
@@ -35,20 +35,9 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
     )
 
 
-# Azure rejects an effort a model does not support with HTTP 400. Open-weights
-# gpt-oss accepts low / medium / high only, so other efforts (the xhigh default,
-# none) clamp to the nearest supported end of that range.
-_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-_SUPPORTED_EFFORTS: dict[str, tuple[str, ...]] = {"gpt-oss-120b": ("low", "medium", "high")}
-
-
-def _effort_for(model: str, effort: Optional[str]) -> str:
-    normalized = _normalize_reasoning_effort(effort)
-    supported = _SUPPORTED_EFFORTS.get(model)
-    if not supported or normalized in supported:
-        return normalized
-    rank = _EFFORT_ORDER.index(normalized) if normalized in _EFFORT_ORDER else len(_EFFORT_ORDER)
-    return supported[0] if rank < _EFFORT_ORDER.index(supported[0]) else supported[-1]
+# Non-reasoning Foundry models (the open-weights pool's DeepSeek) reject
+# reasoning.effort and reasoning includes with HTTP 400; omit both for them.
+_NO_REASONING_MODELS = frozenset({"DeepSeek-V3.2"})
 
 
 def _deployments(model: str) -> list[str]:
@@ -127,11 +116,14 @@ async def foundry_complete(
                 context_tools=context_tools,
                 tool_choice=tool_choice,
                 temperature=temperature,
-                effort=_effort_for(foundry_model(pool_spec), effort),
+                effort=effort,
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,
             )
+            if foundry_model(pool_spec) in _NO_REASONING_MODELS:
+                body.pop("reasoning", None)
+                body.pop("include", None)
             yielded_visible = False
             try:
                 async with client.stream("POST", url, headers={"api-key": key}, json=body) as response:

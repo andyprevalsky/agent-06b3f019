@@ -152,7 +152,7 @@ def test_oss_pool_is_open_weights_only():
     # Its funded Azure fallback is open-weights too, never the inert gpt_auth_model.
     from providers.rose.pools import foundry_model
 
-    assert oss.foundry_enabled and foundry_model(oss) == "gpt-oss-120b"
+    assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
     assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
     auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
@@ -5810,7 +5810,7 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
 
 
 async def test_client_foundry_luna_backs_mini_and_speed_pools():
-    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter; oss to gpt-oss-120b.
+    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter; oss to DeepSeek-V3.2.
 
     Speed pools keep the direct Cerebras hop first; Foundry serves only after it
     fails before content. The shared Sol deployment list never receives Luna.
@@ -5849,7 +5849,7 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
             attempted.append("foundry")
             foundry_body = json.loads(req.content)
             foundry_models.append(foundry_body["model"])
-            foundry_efforts.append(foundry_body["reasoning"]["effort"])
+            foundry_efforts.append((foundry_body.get("reasoning") or {}).get("effort"))
             return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
         if host == "openrouter.ai":
             attempted.append("openrouter")
@@ -5895,16 +5895,16 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
         assert attempted == ["foundry"], attempted
         assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
 
-        # The open-weights pool keeps its guarantee on Azure: gpt-oss-120b.
+        # The open-weights pool keeps its guarantee on Azure: DeepSeek-V3.2.
         attempted.clear()
         chunks = await run("rose-1-oss")
         assert attempted == ["foundry"], attempted
-        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-oss-120b-foundry"
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "DeepSeek-V3.2-foundry"
         cerebras_route._reset_cerebras_cooldown_cache()
 
-    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-oss-120b"]
+    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna", "DeepSeek-V3.2"]
     # A fallback layer keeps the pool's fast effort; xhigh TTFT is slow on fast GPT layers.
-    assert foundry_efforts[:3] == ["low", "low", "low"]
+    assert foundry_efforts == ["low", "low", "low", None], "DeepSeek gets no reasoning params"
     assert get_pool("rose-1-ultra").foundry_enabled
 
 
