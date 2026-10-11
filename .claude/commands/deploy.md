@@ -37,6 +37,25 @@ echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 
 If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 14a rename.
 
+## Step 0g: Start the deploy goal
+
+Start the built-in `/goal` with this condition (fill in the branch). If you
+cannot start it yourself, print `/goal <condition>` on its own line for the
+user and continue.
+
+The goal ends when its condition is met. At a defined stop it lets the turn
+end and stays active for the user's reply. Only the user ends it early, with
+`/goal clear`; never clear or pause it yourself.
+
+    /deploy of <branch> is finished: the PR is merged, every applicable
+    production lane is verified, and the scorecard ending in READY TO CLOSE
+    is posted. Stopping earlier is allowed only when the last message is one
+    of /deploy's defined stops: a prompt, agent-behavior or
+    trajectory-injection approval request (Steps 0p/0b/0c); a credential or
+    billing escalation; a request for an explicit gate override; an approval
+    for a destructive or irreversible action; or a deploy failure that cannot
+    be fixed without the user.
+
 ---
 
 # Phase 1: Test Loop
@@ -204,7 +223,9 @@ CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review)_test|run_benchmark|wall_clock_backstop_test)\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
-CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
+# Append-only benchmark history ledgers (agents/benchmarks/history/*.jsonl) are
+# data, not payment lifecycle code; a main sync carries other deploys' rows.
+CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/history/' | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
 # Keep the aggregate coverage worker pool within this 14-core deploy host.
 # Backend blackboxes and unit files overlap, so both pools count. An uncapped
@@ -2502,10 +2523,13 @@ After the new branch is created, the final message is only this scorecard in a
 `text` block, with no prose before or after it. Fill every value from recorded
 evidence:
 
-- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: use the wall
-  time of the final passing attempt. Production lane times come from
-  `.context/factory-events.jsonl`. Parallel lanes overlap.
-- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event.
+- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: sum every
+  attempt of the lane (passed, failed, interrupted) and show the run count and
+  failure causes. Production lane times come from `.context/factory-events.jsonl`
+  and also cover every attempt. Parallel lanes overlap.
+- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event,
+  broken down so it adds up: active gate/review/prod time (union of intervals) +
+  each blocked window + other time (investigation, fixes, waiting on the user).
 - `💸` is the summed benchmark `cost_cents` of this deploy's runs.
 
 Lane marks:
@@ -2528,12 +2552,17 @@ superseded attempts, review cycles that produced no review, retries, and detours
 around it. Use `0s` when it cost nothing, add a total row, or write `▲ none`.
 
 NOT SHIPPED has one `✖` row per piece of this workspace's work that is absent
-from `origin/main` after the merge:
+from `origin/main` after the merge, each with a concise explanation of what the
+change is and why it was not included:
 
 - Non-ignored uncommitted or untracked changes.
 - Reverted or unmerged commits on branches this workspace created or pushed.
 
 Ignore other workspaces' branches. Write `✖ none` if there is nothing.
+
+End with a `READY TO CLOSE` line: `✅` when nothing is left open; `⚠️` plus the
+open items when work remains outside the merge (unsettled prod state, unshipped
+rows, follow-ups); `❌` when the deploy is not complete.
 
 ```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2552,7 +2581,8 @@ Ignore other workspaces' branches. Write `✖ none` if there is nothing.
             ✅  semantic 6/6 · AgentCard $1 → refunded       11m14s
  TEMPORAL   ✅  no cutover needed · gen 7d9946f524be live
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⏱ 1h54m45s   💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
+ ⏱ <total> = <active> active + <blocked> blocked + <other> other
+ 💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
  🔗 github.com/Rose-Ai-Labs/rose/pull/1456
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  ▲ SHIPPED WITH                                          ⌛ wasted
@@ -2563,8 +2593,12 @@ Ignore other workspaces' branches. Write `✖ none` if there is nothing.
                                                     total     6m44s
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  ✖ NOT SHIPPED · this workspace
- ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans (reverted)
- ✖ worktree   prod AgentCard history rows (uncommitted)
+ ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans · reverted
+   because GitHub flagged a ledger merge conflict
+ ✖ worktree   prod AgentCard history rows · uncommitted; landing them
+   would have changed HEAD after review
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ READY TO CLOSE  ✅  nothing left open
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 

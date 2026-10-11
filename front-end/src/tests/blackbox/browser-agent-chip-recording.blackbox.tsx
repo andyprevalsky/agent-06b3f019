@@ -6,13 +6,8 @@
  *  - recording_file_pointer (Supabase):  fetched -> text/html Blob -> iframed.
  * A recording_view_url, when present, is preferred over the FilePointer.
  */
-import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { TooltipProvider } from '@/components/ui/tooltip';
-import { AgentContext } from '@/features/agent-context';
-import type { AgentContextValue } from '@/features/agent-context';
-import BrowserAgentChip from '@/features/terminal-component-group/components/BrowserAgentChip';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import type { Message } from '@/lib/api';
 
 // The stitched-MP4 path resolves a Supabase attachment URL, so stub the resolver.
@@ -22,90 +17,15 @@ vi.mock('@/lib/api/messages', async (importActual) => ({
 }));
 
 import { getAttachmentUrl } from '@/lib/api/messages';
-
-const TASK = 'browser-task-1';
-const CALL = 'browser-call-1';
-const KERNEL_VIEW_URL =
-  'https://proxy.example.onkernel.com:8443/browser/replays?jwt=header.payload.sig&replay_id=rep-1';
-
-function makeCtx(messages: Message[]): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
-  return {
-    agent: null,
-    applyAgentDetail: () => true,
-    selectedAgentId: 'agent-1',
-    setSelectedAgentId: () => {},
-    messages,
-    streamingBubbles: new Map(),
-    streamingPlan: null,
-    streamingAttention: null,
-    streamingTools: new Map(),
-    streamedTextsRef,
-    registerMessageHandler: () => () => {},
-    sendMessage: async () => {},
-    isLoadingAgent: false,
-    forceResubscribe: () => {},
-    isChatMode: false,
-  } as AgentContextValue;
-}
-
-function renderChip(messages: Message[], anchor: Message) {
-  return render(
-    <AgentContext.Provider value={makeCtx(messages)}>
-      <TooltipProvider>
-        <BrowserAgentChip message={anchor} />
-      </TooltipProvider>
-    </AgentContext.Provider>,
-  );
-}
-
-const anchorMsg: Message = {
-  message_id: 'complete-1',
-  timestamp: '2026-07-16T00:00:02Z',
-  role: 'TOOL',
-  text: '**Status**: ✅ SUCCESS',
-  metadata: {
-    task_id: TASK,
-    toolCallId: CALL,
-    toolName: 'spawn_browser_agent',
-    action_type: 'task_complete',
-  },
-};
-
-function recordingMsg(extra: Record<string, unknown>): Message {
-  return {
-    message_id: 'rec-1',
-    timestamp: '2026-07-16T00:00:01Z',
-    role: 'TOOL',
-    text: 'Browser session replay recorded (Kernel).',
-    metadata: {
-      task_id: TASK,
-      subAgentId: TASK,
-      toolName: 'spawn_browser_agent',
-      action_type: 'recording',
-      toolStatus: 'FINISHED',
-      ...extra,
-    },
-  };
-}
-
-function recordingMsgWithId(
-  messageId: string,
-  timestamp: string,
-  extra: Record<string, unknown>,
-): Message {
-  return {
-    ...recordingMsg(extra),
-    message_id: messageId,
-    timestamp,
-  };
-}
-
-async function openRecordingTab() {
-  fireEvent.click(screen.getByTestId('browser-agent-chip-header'));
-  await waitFor(() => expect(screen.getByText(/^Recording/)).toBeInTheDocument());
-  fireEvent.click(screen.getByText(/^Recording/));
-}
+import {
+  anchorMsg,
+  KERNEL_VIEW_URL,
+  openRecordingTab,
+  recordingMsg,
+  recordingMsgWithId,
+  renderChip,
+  TASK,
+} from './browser-agent-chip.fixtures';
 
 describe('BrowserAgentChip recording', () => {
   it('streams the Kernel recording_view_url in a <video> directly (no fetch)', async () => {
@@ -210,7 +130,7 @@ describe('BrowserAgentChip recording', () => {
     expect(video.tagName).toBe('VIDEO');
     expect(video.src).toBe(seg0);
 
-    // A non-interactive status strip shows the playhead (baseline first).
+    // The segment strip shows the playhead (baseline first).
     expect(screen.getByTestId('recording-segments')).toBeInTheDocument();
     expect(screen.getByText('baseline IP')).toBeInTheDocument();
 
@@ -313,7 +233,7 @@ describe('BrowserAgentChip recording', () => {
 
   it('shows a live trajectory side panel beside the recording', async () => {
     const t0 = '2026-07-16T00:00:00.000Z';
-    const messages = [
+    const messages: Message[] = [
       {
         ...anchorMsg,
         message_id: 'complete-live',
@@ -369,7 +289,7 @@ describe('BrowserAgentChip recording', () => {
       message_id: 'complete-scrub',
       timestamp: '2026-07-16T00:02:00.000Z',
     };
-    const messages = [
+    const messages: Message[] = [
       anchor,
       { ...recordingMsg({ recording_view_url: KERNEL_VIEW_URL }), timestamp: t0 },
       {
@@ -434,7 +354,7 @@ describe('BrowserAgentChip recording', () => {
     const longTitle =
       'Browser challenge recovery failed: No stable browser configuration cleared the challenge (Steel fixed-IP proxies unavailable)';
     const t0 = '2026-07-16T00:00:00.000Z';
-    const messages = [
+    const messages: Message[] = [
       { ...recordingMsg({ recording_view_url: KERNEL_VIEW_URL }), timestamp: t0 },
       {
         message_id: 'step-wait',

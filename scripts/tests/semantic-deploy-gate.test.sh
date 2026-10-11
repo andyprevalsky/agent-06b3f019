@@ -391,6 +391,7 @@ if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
   fail "/deploy semantic stack must not retain replay config used only by the removed duplicate backend blackbox run"
 fi
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
+require_text "$DEPLOY_COMMAND" "CHANGED_AGENTCARD_PAYMENT=\$(echo \"\$CHANGED\" | grep -v '^agents/benchmarks/history/'" "/deploy must not start the AgentCard lane for benchmark history-ledger rows"
 # Assert on the fenced command that actually runs, not deploy.md prose, which
 # mentions env vars the lane deliberately does not set.
 AGENTCARD_DEPLOY_BLOCK="$(awk '

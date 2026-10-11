@@ -635,6 +635,43 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert failures == [], failures
 
+# A pause/resume saves one recording per activity and the chip plays every
+# part, so a broken pre-pause part fails even when the resumed part plays.
+def paused_task(first_pointer: dict) -> list[dict]:
+    return [
+        msg(task_id="t3", toolName="spawn_browser_agent",
+            action_type="task_complete", toolStatus="FINISHED"),
+        msg(task_id="t3", toolName="spawn_browser_agent", action_type="recording",
+            toolStatus="FINISHED", recording_file_pointer=first_pointer),
+        msg(task_id="t3", toolName="spawn_browser_agent", action_type="recording",
+            toolStatus="FINISHED",
+            recording_file_pointer={"id": "fp-ok", "storage_path": "u/part-2.html"}),
+    ]
+
+
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent, paused_task({"id": "fp-broken", "storage_path": "u/part-1.html"})
+)
+assert any("no correctly attached recording" in f for f in failures), failures
+assert mod.validate_browser_agents_terminated_with_recording(
+    agent, paused_task({"id": "fp-ok", "storage_path": "u/part-1.html"})
+) == []
+# A pre-pause part whose upload failed saved no source: that part is missing.
+failures = mod.validate_browser_agents_terminated_with_recording(agent, paused_task(None))
+assert any("no correctly attached recording" in f for f in failures), failures
+# Every Kernel per-session segment the chip plays must be reachable too.
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent,
+    [
+        msg(task_id="t4", toolName="spawn_browser_agent",
+            action_type="task_complete", toolStatus="FINISHED"),
+        msg(task_id="t4", toolName="spawn_browser_agent", action_type="recording",
+            toolStatus="FINISHED", recording_view_url="https://ok/seg-0.mp4",
+            recording_view_urls=["https://ok/seg-0.mp4", "https://gone/seg-1.mp4"]),
+    ],
+)
+assert any("no correctly attached recording" in f for f in failures), failures
+
 # A Claude Code task shares task_started/task_complete action types but never
 # records a browser, so it must not be held to the browser recording rule.
 failures = mod.validate_browser_agents_terminated_with_recording(
