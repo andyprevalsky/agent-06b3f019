@@ -6,6 +6,7 @@ import type {
 import type {
   AgentModeStartedPayload,
   AssistantStreamPayload,
+  BrowserSessionBindingPayload,
   AttentionStreamPayload,
   PlanStreamPayload,
   ToolStreamPayload,
@@ -29,6 +30,7 @@ export interface AgentChannelHandlers {
   onToolStream?: (payload: ToolStreamPayload) => void;
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
   onAgentModeStarted?: (payload: AgentModeStartedPayload) => void;
+  onBrowserSession?: (payload: BrowserSessionBindingPayload) => void;
 }
 
 /**

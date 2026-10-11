@@ -13,7 +13,9 @@ import {
   takeBrowserControl,
 } from '@/lib/api';
 import { getQueryParams } from '@/lib/url';
-import { completeAuthAssistanceRequest, resumeBrowserSession } from '../../hooks';
+import { resumeBrowserSession } from '../../hooks';
+import { useCompleteAuthAssistance } from './useCompleteAuthAssistance';
+import { useBrowserSessionBinding } from './useBrowserSessionBinding';
 
 export interface BrowserStatusBarUi {
   isExpanded: boolean;
@@ -22,6 +24,8 @@ export interface BrowserStatusBarUi {
   isUserControlling: boolean;
   hasReconnected: boolean;
   browserUrl: string;
+  /** False when the bound provider session is closed or ended: show loading. */
+  isLive: boolean;
   onExpand: () => void;
   onCollapse: () => void;
   onThumbnailClick: (e: MouseEvent) => void;
@@ -32,9 +36,9 @@ export interface BrowserStatusBarUi {
   onCompleteAuthAssistance: (requestId: string) => void;
 }
 
+/** Per-task control flags. URLs always derive from the session binding. */
 interface SessionOverride {
   taskId: string;
-  browserUrl: string;
   resumedFromDisconnected?: boolean;
 }
 
@@ -42,6 +46,7 @@ interface BrowserControlTransitions {
   setBusy: (busy: boolean) => void;
   setResumedSession: (session: SessionOverride) => void;
   setUserControl: (session: SessionOverride | null) => void;
+  refreshBinding: () => Promise<void>;
 }
 
 function currentSession(session: SessionOverride | null, taskId: string): SessionOverride | null {
@@ -63,26 +68,20 @@ export function interactiveBrowserUrl(browserUrl: string): string {
 
 async function requestUserControl(
   taskId: string,
-  browserUrl: string,
   isDisconnected: boolean,
   transitions: BrowserControlTransitions,
 ): Promise<void> {
   transitions.setBusy(true);
   try {
-    let liveBrowserUrl = browserUrl;
     if (isDisconnected) {
-      const resumed = await resumeBrowserSession(taskId);
-      liveBrowserUrl = resumed.debug_url || browserUrl;
-      transitions.setResumedSession({
-        taskId,
-        browserUrl: liveBrowserUrl,
-        resumedFromDisconnected: true,
-      });
+      // Resume rebinds the task's row; read that binding instead of pinning a URL.
+      await resumeBrowserSession(taskId);
+      await transitions.refreshBinding();
+      transitions.setResumedSession({ taskId, resumedFromDisconnected: true });
     }
     const snapshot = await takeBrowserControl(taskId);
     transitions.setUserControl({
       taskId,
-      browserUrl: interactiveBrowserUrl(snapshot.debugUrl || liveBrowserUrl),
       resumedFromDisconnected: isDisconnected || snapshot.agentPaused,
     });
   } catch (error) {
@@ -126,21 +125,11 @@ function useBrowserControlRecovery(
         let snapshot = await readBrowserControlState(taskId);
         if (snapshot.state === 'requested') snapshot = await takeBrowserControl(taskId);
         if (!cancelled && snapshot.state === 'user') {
-          const liveBrowserUrl = snapshot.debugUrl;
-          if (liveBrowserUrl === null || liveBrowserUrl === '') return;
-          const recoveredControl = {
-            taskId,
-            browserUrl: interactiveBrowserUrl(liveBrowserUrl),
-            resumedFromDisconnected: snapshot.agentPaused,
-          };
+          if (snapshot.debugUrl === null || snapshot.debugUrl === '') return;
           if (snapshot.agentPaused) {
-            setResumedSession({
-              taskId,
-              browserUrl: liveBrowserUrl,
-              resumedFromDisconnected: true,
-            });
+            setResumedSession({ taskId, resumedFromDisconnected: true });
           }
-          setUserControl(recoveredControl);
+          setUserControl({ taskId, resumedFromDisconnected: snapshot.agentPaused });
         }
       } catch (error) {
         console.error('Failed to reconcile browser control ownership:', error);
@@ -164,16 +153,35 @@ function useBrowserControlRecovery(
   }, [activeUserControl, setUserControl, taskId]);
 }
 
+/**
+ * Live-view URL precedence: the user's interactive view of the bound session;
+ * the bound session after a resume; during auth assistance, the interactive
+ * bound session (every handoff is `same_steel_session_live_view`), falling back
+ * to the handoff URL only until a binding is known; otherwise the bound session.
+ */
+function presentedBrowserUrl(
+  binding: { browserUrl: string; isBound: boolean },
+  handoffUrl: string | null,
+  isUserControlling: boolean,
+  hasReconnected: boolean,
+): string {
+  if (isUserControlling) return interactiveBrowserUrl(binding.browserUrl);
+  if (hasReconnected || handoffUrl === null) return binding.browserUrl;
+  return binding.isBound ? interactiveBrowserUrl(binding.browserUrl) : handoffUrl;
+}
+
 function useBrowserSessionControl(
   taskId: string,
   agentId: string | null,
-  browserUrl: string,
+  transcriptBrowserUrl: string,
+  handoffBrowserUrl: string | null,
 ): Pick<
   BrowserStatusBarUi,
   | 'isResuming'
   | 'isUserControlling'
   | 'hasReconnected'
   | 'browserUrl'
+  | 'isLive'
   | 'onTakeControl'
   | 'onHandBackControl'
   | 'onCompleteAuthAssistance'
@@ -182,20 +190,21 @@ function useBrowserSessionControl(
   const [resumedSession, setResumedSession] = useState<SessionOverride | null>(null);
   const [userControl, setUserControl] = useState<SessionOverride | null>(null);
 
+  const binding = useBrowserSessionBinding(taskId, transcriptBrowserUrl);
+  const refreshBinding = binding.refresh;
   const activeResumedSession = currentSession(resumedSession, taskId);
   const activeUserControl = currentSession(userControl, taskId);
   useBrowserControlRecovery(taskId, activeUserControl, setResumedSession, setUserControl);
   const hasReconnected = activeResumedSession !== null;
-  const controlledBrowserUrl =
-    activeUserControl?.browserUrl ?? activeResumedSession?.browserUrl ?? browserUrl;
   const handleTakeControl = useCallback(
     (isDisconnected: boolean) =>
-      requestUserControl(taskId, browserUrl, isDisconnected, {
+      requestUserControl(taskId, isDisconnected, {
         setBusy: setIsResuming,
         setResumedSession,
         setUserControl,
+        refreshBinding,
       }),
-    [browserUrl, taskId],
+    [refreshBinding, taskId],
   );
 
   const onTakeControl = useCallback(
@@ -209,35 +218,27 @@ function useBrowserSessionControl(
       setBusy: setIsResuming,
       setResumedSession,
       setUserControl,
+      refreshBinding,
     });
-  }, [activeUserControl, agentId, taskId]);
+  }, [activeUserControl, agentId, refreshBinding, taskId]);
   const onHandBackControl = useCallback(
     () => void handleHandBackControl(),
     [handleHandBackControl],
   );
 
-  const handleCompleteAuthAssistance = useCallback(async (requestId: string) => {
-    setIsResuming(true);
-    try {
-      await completeAuthAssistanceRequest(requestId);
-    } catch (error) {
-      console.error('Failed to complete authentication assistance:', error);
-    } finally {
-      setIsResuming(false);
-    }
-  }, []);
-  const onCompleteAuthAssistance = useCallback(
-    (requestId: string) => {
-      void handleCompleteAuthAssistance(requestId);
-    },
-    [handleCompleteAuthAssistance],
-  );
+  const onCompleteAuthAssistance = useCompleteAuthAssistance(setIsResuming);
 
   return {
     isResuming,
     isUserControlling: activeUserControl !== null,
     hasReconnected,
-    browserUrl: controlledBrowserUrl,
+    browserUrl: presentedBrowserUrl(
+      binding,
+      handoffBrowserUrl,
+      activeUserControl !== null,
+      hasReconnected,
+    ),
+    isLive: binding.isLive,
     onTakeControl,
     onHandBackControl,
     onCompleteAuthAssistance,
@@ -304,14 +305,24 @@ function useBrowserPanelVisibility(
   };
 }
 
+/**
+ * @param transcriptBrowserUrl latest transcript browser_url for the task
+ * @param handoffBrowserUrl pending auth-assistance live view, if any
+ */
 export function useBrowserStatusBarUi(
   taskId: string,
   forceMinimized: boolean,
   agentId: string | null,
-  browserUrl: string,
+  transcriptBrowserUrl: string,
+  handoffBrowserUrl: string | null = null,
 ): BrowserStatusBarUi {
   const visibility = useBrowserPanelVisibility(taskId, forceMinimized);
-  const control = useBrowserSessionControl(taskId, agentId, browserUrl);
+  const control = useBrowserSessionControl(
+    taskId,
+    agentId,
+    transcriptBrowserUrl,
+    handoffBrowserUrl,
+  );
   return {
     ...visibility,
     ...control,

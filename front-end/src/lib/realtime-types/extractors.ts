@@ -8,6 +8,7 @@ import type {
 import type {
   AgentModeStartedPayload,
   AssistantStreamPayload,
+  BrowserSessionBindingPayload,
   AttentionStreamPayload,
   PlanStreamPayload,
   ToolStreamPayload,
@@ -18,6 +19,7 @@ import {
   validateAgentStateChangedPayload,
   validateAssistantStreamPayload,
   validateAttentionStreamPayload,
+  validateBrowserSessionBindingPayload,
   validateInsertMessagePayload,
   validatePlanStreamPayload,
   validateToolStreamPayload,
@@ -157,6 +159,19 @@ export function extractAgentModeStartedPayload(wrapper: unknown): AgentModeStart
     wrapper,
     'AGENT_MODE_STARTED',
     validateAgentModeStartedPayload,
+  );
+}
+
+/**
+ * Extract and validate BROWSER_SESSION payload.
+ */
+export function extractBrowserSessionBindingPayload(
+  wrapper: unknown,
+): BrowserSessionBindingPayload | null {
+  return extractAndValidate<BrowserSessionBindingPayload>(
+    wrapper,
+    'BROWSER_SESSION',
+    validateBrowserSessionBindingPayload,
   );
 }
 

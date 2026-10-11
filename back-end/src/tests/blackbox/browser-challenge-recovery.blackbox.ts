@@ -186,6 +186,8 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
   });
   const created: string[] = [];
   const released: string[] = [];
+  // Live view must learn the promoted binding before the original session dies.
+  const bindingEvents: string[] = [];
   let sequence = 0;
   const candidate = (provider: 'kernel' | 'steel', proxySource: string) => {
     sequence += 1;
@@ -207,9 +209,15 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
     createSteel: async (input) => candidate('steel', input.proxyMode),
     releaseKernel: async (sessionId) => {
       released.push(sessionId);
+      bindingEvents.push(`release:${sessionId}`);
     },
     releaseSteel: async (sessionId) => {
       released.push(sessionId);
+      bindingEvents.push(`release:${sessionId}`);
+    },
+    announceBinding: async (where) => {
+      const row = await prisma.browserSession.findUniqueOrThrow({ where });
+      bindingEvents.push(`announce:${row.sessionId}`);
     },
     probe: async (candidateSession) => ({
       // Lane search promotes the first fully-stable config. Residential city is
@@ -247,6 +255,16 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
     assert(
       released.length === 6,
       `expected five partial-clear losers plus original release, saw ${released.length}`
+    );
+    const announced = bindingEvents.findIndex((event) => event.startsWith('announce:'));
+    assert(announced >= 0, `promote never announced the winner: ${JSON.stringify(bindingEvents)}`);
+    assert(
+      bindingEvents[announced] !== `announce:${session.sessionId}`,
+      `promote announced the old binding: ${JSON.stringify(bindingEvents)}`
+    );
+    assert(
+      announced < bindingEvents.indexOf(`release:${session.sessionId}`),
+      `original session released before the live view learned the winner: ${JSON.stringify(bindingEvents)}`
     );
 
     const persisted = await prisma.browserContext.findUniqueOrThrow({ where: { id: context.id } });

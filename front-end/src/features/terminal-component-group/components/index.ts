@@ -34,8 +34,6 @@ export * from './BrowserStatusBar';
 export { default as BrowserStatusBar } from './BrowserStatusBar';
 export * from './BrowserStatusBarCarousel';
 export { default as BrowserStatusBarCarousel } from './BrowserStatusBarCarousel';
-export * from './BrowserViewPanel';
-export { default as BrowserViewPanel } from './BrowserViewPanel';
 export * from './ClaudeCodeChip';
 export { default as ClaudeCodeChip } from './ClaudeCodeChip';
 export * from './FilePointerDisplay';
