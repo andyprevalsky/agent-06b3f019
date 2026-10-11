@@ -485,7 +485,9 @@ case "$1" in
   waiting)
     trap 'exit 0' TERM
     touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
-    while :; do sleep 0.1; done
+    # The campaign signals the whole group. If TERM reaches this sleep before
+    # the shell, errexit must not end the shell ahead of its own TERM trap.
+    while :; do sleep 0.1 || true; done
     ;;
   passed|queued) exit 0 ;;
   *) exit 99 ;;
