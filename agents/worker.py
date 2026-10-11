@@ -143,11 +143,12 @@ from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.workflow_sandbox import production_workflow_runner
 from helpers.world_model_runtime import (
+    world_clock_activity,
     world_model_specialized_agent_activity,
     world_model_step_activity,
 )
-from helpers.workflow_sandbox import production_workflow_runner
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -1280,6 +1281,7 @@ async def main():
         query_parent_state_activity,
         world_model_step_activity,
         world_model_specialized_agent_activity,
+        world_clock_activity,
         report_failure_activity,
     ]
 

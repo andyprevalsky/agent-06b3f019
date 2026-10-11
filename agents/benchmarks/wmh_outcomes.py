@@ -20,6 +20,13 @@ from utils.world_model_observation import effective_world_model_content
 
 DISTRIBUTION_PROTOCOL = "rose-outcome-distribution-v1"
 DISTRIBUTION_SCHEMA = "rose.wmh_outcome_distribution.v1"
+# Timed worlds: each outcome states its elapsed world time; later results are
+# scheduled events revealed only to actions at or after their time.
+TIMED_DISTRIBUTION_PROTOCOL = "rose-timed-outcome-distribution-v1"
+TIMED_DISTRIBUTION_SCHEMA = "rose.wmh_timed_outcome_distribution.v1"
+DISTRIBUTION_PROTOCOLS = frozenset({DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL})
+SCHEDULED_EVENTS_KEY = "scheduled_events"
+MAXIMUM_ELAPSED_MS = 366 * 86_400_000
 DISTRIBUTION_TEXT = """For this execution mode, replace the single-transition JSON output contract above with an outcome distribution. Infer 1 to 6 plausible, mutually exclusive possible results of this exact candidate action, conditional on the full task, delegated goal, initial context, current environment state, and visible history. Generate the possibilities yourself; do not use fixed event labels or force success or failure. When the result is genuinely certain, one outcome with probability 1 is sufficient. Retrieved demonstrations illustrate tool response format and behavior in other worlds; they do not determine this world's outcome frequencies.
 
 Return only JSON with this exact shape:
@@ -29,6 +36,10 @@ Each probability must be a finite number between 0 and 1, and the probabilities 
 
 state_patch is an ordered JSON Patch array against the supplied environment_state. Use only {"op":"add","path":"/key","value":...}, {"op":"replace","path":"/existing/key","value":...}, or {"op":"remove","path":"/existing/key"}. Paths are JSON pointers: escape ~ as ~0 and / as ~1; array indices are zero-based, and /array/- appends only for add. Parent paths must already exist, replace/remove targets must exist, and the empty root path is forbidden. An empty patch retains the state unchanged. Preserve all unrelated state and prior facts, including existing lists; append new entries rather than replacing their history. Each patch belongs solely to its own outcome and must contain only effects of that possible result. Availability alone creates no submission receipt; inquiry submission alone creates no investor interest, financing commitment or settled funds. Do not invent unknown private company facts or pre-existing private records to fill a branch."""
 
+
+TIMING_TEXT = """World time for this execution mode: the candidate action's timestamp_ms is the current world time in milliseconds (UTC). Use the envelope schema "rose.wmh_timed_outcome_distribution.v1" and give every outcome an integer "elapsed_ms": the simulated time from that timestamp until this observation is complete (seconds for a sent message, minutes for a browser or research session, the waited interval for a wait). All other output rules above still apply.
+
+A result that only happens later, such as a reply, an introduction, a meeting, a signature or a wire, is not part of this observation. Append it to /structured/scheduled_events as an object with an integer "available_at_ms" (the world time it happens), a "description" and its concrete details. The runner reveals each scheduled event only to actions at or after that time. Report a later result in an observation only once it appears in environment_state."""
 
 def _digest(value):
     material = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -106,7 +117,9 @@ def apply_state_patch(base_state: dict, patch: list) -> dict:
     return state
 
 
-def parse_distribution(content: str, *, base_state: dict, expected_call_ids: tuple[str, ...]) -> dict:
+def parse_distribution(
+    content: str, *, base_state: dict, expected_call_ids: tuple[str, ...], timed: bool = False
+) -> dict:
     if not isinstance(content, str) or not isinstance(base_state, dict) or not expected_call_ids:
         raise ValueError("Outcome distribution requires native state and candidate call identities")
     raw = content.strip()
@@ -117,21 +130,20 @@ def parse_distribution(content: str, *, base_state: dict, expected_call_ids: tup
     if (
         not isinstance(distribution, dict)
         or set(distribution) != {"schema", "outcomes"}
-        or distribution["schema"] != DISTRIBUTION_SCHEMA
+        or distribution["schema"] != (TIMED_DISTRIBUTION_SCHEMA if timed else DISTRIBUTION_SCHEMA)
         or not isinstance(distribution["outcomes"], list)
         or not 1 <= len(distribution["outcomes"]) <= 6
     ):
         raise ValueError("Invalid outcome distribution envelope")
     outcomes, seen = [], set()
     for outcome in distribution["outcomes"]:
-        if not isinstance(outcome, dict) or set(outcome) != {
-            "id",
-            "probability",
-            "description",
-            "tool_results",
-            "state_patch",
-        }:
+        keys = {"id", "probability", "description", "tool_results", "state_patch"} | ({"elapsed_ms"} if timed else set())
+        if not isinstance(outcome, dict) or set(outcome) != keys:
             raise ValueError("Invalid outcome keys")
+        if timed and (
+            type(outcome["elapsed_ms"]) is not int or not 0 <= outcome["elapsed_ms"] <= MAXIMUM_ELAPSED_MS
+        ):
+            raise ValueError("Each timed outcome needs an integer elapsed_ms within one year")
         identity, probability = outcome["id"], outcome["probability"]
         if not isinstance(identity, str) or not identity.strip() or identity in seen:
             raise ValueError("Outcome IDs must be nonempty and unique")
@@ -183,7 +195,7 @@ def select_outcome(distribution: dict, draw: float) -> tuple[dict, dict]:
             break
     if selected is None:
         raise ValueError("Outcome distribution has no positive probability")
-    return selected["transition"], {
+    selection = {
         "schema": "rose.wmh_outcome_selection.v1",
         "draw": draw,
         "selected_outcome_id": selected["id"],
@@ -195,3 +207,33 @@ def select_outcome(distribution: dict, draw: float) -> tuple[dict, dict]:
             {key: outcome[key] for key in ("id", "probability", "description")} for outcome in distribution["outcomes"]
         ],
     }
+    if "elapsed_ms" in selected:
+        selection["elapsed_ms"] = selected["elapsed_ms"]
+    return selected["transition"], selection
+
+
+def visible_world_state(state: dict, *, at_ms: int) -> tuple[dict, list]:
+    """The state an action at ``at_ms`` may observe, and the future events withheld from it."""
+    view = deepcopy(state)
+    structured = view.get("structured")
+    if not isinstance(structured, dict):
+        return view, []
+    events = structured.get(SCHEDULED_EVENTS_KEY)
+    if not isinstance(events, list):
+        structured[SCHEDULED_EVENTS_KEY] = []
+        return view, []
+    visible, hidden = [], []
+    for event in events:
+        at = event.get("available_at_ms") if isinstance(event, dict) else None
+        (hidden if type(at) is int and at > at_ms else visible).append(event)
+    structured[SCHEDULED_EVENTS_KEY] = visible
+    return view, hidden
+
+
+def restore_hidden_events(state: dict, hidden: list) -> dict:
+    """Return a predicted state with the withheld future events put back."""
+    if not hidden:
+        return state
+    restored = deepcopy(state)
+    restored["structured"].setdefault(SCHEDULED_EVENTS_KEY, []).extend(deepcopy(hidden))
+    return restored

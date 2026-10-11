@@ -77,11 +77,13 @@ extra=()
     export ROSE_USE_SYSTEM_PG=true CONDUCTOR_WORKSPACE_NAME="$(basename "$repo")" CONDUCTOR_ROOT_PATH="$repo"
     unset CONDUCTOR_PORT TEMPORAL_TASK_QUEUE
     export WMH_ENGINE="${WMH_ENGINE:-experiential}" WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}" \
-        WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v2}"
+        WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v3}"
     export WMH_BUILD_DIR="$wmh_root" WMH_MODEL_NAME=rose-archive BENCHMARK_SKIP_WMH_DELTA=1 \
         WMH_EXTERNAL_BASE_URL="http://127.0.0.1:$wmh_port" TRACE_ARCHIVE_ENABLED=1
     # A fresh DEMO cache per run; keep SEED_REMOTE_DATABASE_URL if the caller pinned a fixture source.
     export FAST_MODE_CACHE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/victoria_bench_${safe_run_id}"
+    # Keep any Fast Mode pool small: the shared production pooler has a hard client cap.
+    export FAST_CACHE_DB_POOL="${FAST_CACHE_DB_POOL:-5}"
     exec scripts/run-bench --local "$task" --simulate --timeout-seconds "$timeout" "${extra[@]}" \
         --run-id "$run_id" --base-port "$base_port" --no-clean --no-dashboard
 ) > "$out/launcher.log" 2>&1

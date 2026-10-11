@@ -76,6 +76,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+    from helpers.world_model_runtime import world_clock_activity
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -96,10 +97,10 @@ with workflow.unsafe.imports_passed_through():
         mint_subscription_checkout_activity,
         raise_gate_direct,
     )
+    from tools.google_oauth_demo import google_oauth_demo
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
-    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -873,6 +874,7 @@ class AgentWorkflow:
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
         self._deployment_resume: bool = False
+        self._world_clock_events: set[str] = set()
         self._resume_prior_status: str = "ACTIVE"
         self._resume_status_message: Optional[str] = None
         self._resume_progress: float = 0.0
@@ -1727,6 +1729,7 @@ class AgentWorkflow:
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
         if not self._deployment_resume:
+            await self._world_clock_event("register")
             await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
@@ -5094,6 +5097,24 @@ class AgentWorkflow:
             "steps_taken": steps_taken,
         }
 
+    async def _world_clock_event(self, operation: str) -> None:
+        """Simulate mode: register or finish this agent on its world's shared clock.
+
+        Children start at their parent's world time; a finished child lets its
+        parent resume at the children's latest finish, so finish precedes the
+        parent signal. Best effort: an unavailable clock leaves the run intact.
+        """
+        if self.world_model_mode != "simulate" or operation in self._world_clock_events:
+            return
+        self._world_clock_events.add(operation)
+        with contextlib.suppress(Exception):
+            await workflow.execute_activity(
+                world_clock_activity,
+                args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
     async def _mark_failed(
         self,
         context: List[Dict],
@@ -5117,6 +5138,7 @@ class AgentWorkflow:
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
@@ -5321,6 +5343,7 @@ class AgentWorkflow:
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        await self._world_clock_event("finish")
         await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s

@@ -122,6 +122,15 @@ one example per action. Keep the file and the run-state with the run's evidence.
   devbox OOM watcher spares it; keep `MemAvailable` above ~1.1 GB. Serve the WMH
   externally: `run.sh`'s 600 s readiness bound is shorter than the load.
   Stop it by TERM to the exact owner PID only.
+- **World clock** (policy `rose-outcome-distribution-v3`, the scripts' default):
+  one clock per world starting at the seed's `as_of_utc`. Each action runs at
+  its agent's world time and every outcome states `elapsed_ms`; later results
+  go into `structured.scheduled_events` with `available_at_ms` and stay hidden
+  from earlier actions. `wait_for` in simulate mode waits on the shared clock
+  (`agents/benchmarks/wmh_world_clock.py`): an agent resumes once every other
+  agent has passed its deadline, and the clock jumps when all agents wait.
+  Agents register at start and finish before signalling their parent.
+  Inspect it at `GET /world_models/<name>/scopes/<root agent>/clock`.
 - **Native concurrency** (already in code): conflicted predictions take the
   commit turn oldest-first; predictions that only add new records merge
   without re-predicting; there is no per-operation deadline (a Temporal retry

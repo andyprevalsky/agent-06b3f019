@@ -159,6 +159,62 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
                 "revision": session.revision,
             }
 
+    # The world clock is addressed by root scope: agents know their root agent
+    # id, and a scope maps to exactly one live world session.
+    def scoped_session(model_name, scope):
+        session_id = model.scopes.get(scope) if model_name == name else None
+        if session_id is None or session_id not in model.sessions:
+            raise HTTPException(404, "Unknown world scope")
+        return session_id
+
+    def clock_call(model_name, scope, operation):
+        session_id = scoped_session(model_name, scope)
+        try:
+            return operation(session_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/world_models/{model_name}/scopes/{scope}/clock")
+    def world_clock(model_name: str, scope: str):
+        return clock_call(model_name, scope, model.clock_snapshot)
+
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/register")
+    def clock_register(model_name: str, scope: str, agent_id: str, payload: dict):
+        parent = payload.get("parent")
+        if parent is not None and (not isinstance(parent, str) or not parent):
+            raise HTTPException(422, "parent must be an agent id")
+        return clock_call(model_name, scope, lambda session_id: model.clock_register(session_id, agent_id, parent))
+
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/finish")
+    def clock_finish(model_name: str, scope: str, agent_id: str, payload: dict):
+        return clock_call(model_name, scope, lambda session_id: model.clock_finish(session_id, agent_id))
+
+    @app.post("/world_models/{model_name}/scopes/{scope}/clock/agents/{agent_id}/wait")
+    async def clock_wait(model_name: str, scope: str, agent_id: str, payload: dict):
+        # Long-poll: returns resumed=false after the poll so callers re-poll
+        # instead of holding one HTTP request across a long real-time wait.
+        wait_id = payload.get("wait_id")
+        bounds = [payload.get(key) for key in ("until_ms", "duration_ms")]
+        if (
+            not isinstance(wait_id, str)
+            or not wait_id
+            or sum(value is not None for value in bounds) != 1
+            or any(value is not None and (type(value) is not int or value < 0) for value in bounds)
+        ):
+            raise HTTPException(422, "A wait needs a wait_id and exactly one non-negative until_ms or duration_ms")
+        session_id = scoped_session(model_name, scope)
+        try:
+            return await model.clock_wait(
+                session_id,
+                agent_id,
+                wait_id,
+                until_ms=bounds[0],
+                duration_ms=bounds[1],
+                poll_seconds=min(float(payload.get("poll_seconds", 50)), 50),
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.get("/world_models/{model_name}/sessions/{session_id}/activity")
     def session_activity(model_name: str, session_id: str):
         # Cheap liveness for benchmark stall detection; never the world state.

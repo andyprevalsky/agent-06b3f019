@@ -38,7 +38,12 @@ from typing import TYPE_CHECKING, List, Optional
 
 import structlog
 
-from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, parse_distribution
+from benchmarks.wmh_outcomes import (
+    DISTRIBUTION_PROTOCOL,
+    DISTRIBUTION_PROTOCOLS,
+    TIMED_DISTRIBUTION_PROTOCOL,
+    parse_distribution,
+)
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
@@ -97,11 +102,12 @@ _HISTORY_MARKER = "\n\nINTERACTION HISTORY:\n"
 _ROOT_OBJECTIVE_MARKER = "ROOT OBJECTIVE:\n"
 _DELEGATION_MARKER = "\n\nCURRENT DELEGATION:\n"
 _ACTION_TIMESTAMP_RE = re.compile(r'("timestamp_ms"\s*:\s*)\d+')
-_NATIVE_WMH_PROTOCOLS = {"text-world-model-v3", DISTRIBUTION_PROTOCOL}
+_NATIVE_WMH_PROTOCOLS = {"text-world-model-v3", *DISTRIBUTION_PROTOCOLS}
 _WMH_CALL_SITES = {
     "legacy": "wmh_world_model",
     "text-world-model-v3": "wmh_world_model_v3",
     DISTRIBUTION_PROTOCOL: "wmh_world_model_distribution_v1",
+    TIMED_DISTRIBUTION_PROTOCOL: "wmh_world_model_timed_distribution_v1",
 }
 
 
@@ -211,7 +217,7 @@ class _WMHFastCacheContext(FastCacheContext):
         if call_site in _WMH_CALL_SITES.values():
             messages = _wmh_cache_key_material(messages)
         if (
-            call_site in {"wmh_world_model_v3", "wmh_world_model_distribution_v1"}
+            call_site in {"wmh_world_model_v3", "wmh_world_model_distribution_v1", "wmh_world_model_timed_distribution_v1"}
             and isinstance(messages, dict)
             and isinstance(messages.get("messages"), list)
         ):
@@ -287,7 +293,7 @@ def _native_environment_state(messages: list[dict]) -> dict | None:
 def _prediction_call_ids(messages: list[dict], protocol: str) -> tuple[str, ...] | None:
     if protocol == "text-world-model-v3":
         return _native_call_ids(messages)
-    if protocol != DISTRIBUTION_PROTOCOL:
+    if protocol not in DISTRIBUTION_PROTOCOLS:
         return None
     try:
         call_ids = _native_call_ids(messages)
@@ -310,7 +316,7 @@ def _require_wmh_prediction(
     from helpers.world_model_runtime import parse_world_model_prediction
 
     reason = "empty visible content" if not content.strip() else None
-    if reason is None and protocol == DISTRIBUTION_PROTOCOL:
+    if reason is None and protocol in DISTRIBUTION_PROTOCOLS:
         try:
             if base_state is None:
                 raise ValueError("Missing or malformed native environment state")
@@ -318,7 +324,12 @@ def _require_wmh_prediction(
                 raise ValueError("Missing native candidate call IDs")
             # Validate every possible result, including branches that will not
             # be sampled. No invalid branch may enter the shared response cache.
-            parse_distribution(content, base_state=base_state, expected_call_ids=expected_call_ids)
+            parse_distribution(
+                content,
+                base_state=base_state,
+                expected_call_ids=expected_call_ids,
+                timed=protocol == TIMED_DISTRIBUTION_PROTOCOL,
+            )
         except (ValueError, TypeError, KeyError) as exc:
             reason = str(exc)
     elif reason is None and protocol == "text-world-model-v3":
@@ -394,7 +405,7 @@ class _WMHCacheSafeRoseClient(RoseClient):
                         protocol=protocol,
                         expected_call_ids=_prediction_call_ids(kwargs.get("messages", []), protocol),
                         base_state=_native_environment_state(kwargs.get("messages", []))
-                        if protocol == DISTRIBUTION_PROTOCOL
+                        if protocol in DISTRIBUTION_PROTOCOLS
                         else None,
                     )
             if is_wmh and chunk.kind == "usage":
@@ -799,7 +810,7 @@ class RoseWMHProvider:
             response.actual_model or "",
             protocol=self._protocol,
             expected_call_ids=_prediction_call_ids(rose_messages, self._protocol),
-            base_state=_native_environment_state(rose_messages) if self._protocol == DISTRIBUTION_PROTOCOL else None,
+            base_state=_native_environment_state(rose_messages) if self._protocol in DISTRIBUTION_PROTOCOLS else None,
         )
 
         completion_type = _NativeCompletion if self._protocol in _NATIVE_WMH_PROTOCOLS else Completion

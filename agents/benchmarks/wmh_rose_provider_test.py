@@ -741,6 +741,30 @@ def test_distribution_is_validated_before_cache_write_and_on_cached_response(mon
     assert usage.snapshot().calls == 1
 
 
+def test_timed_policy_validates_elapsed_time_at_the_provider_boundary():
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+
+    assert wmh_rose_provider._WMH_CALL_SITES[TIMED_DISTRIBUTION_PROTOCOL] == "wmh_world_model_timed_distribution_v1"
+    request = outcome_request()
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": json.dumps(request)}]
+    timed = {
+        "schema": "rose.wmh_timed_outcome_distribution.v1",
+        "outcomes": [{
+            "id": "sent", "probability": 1.0, "description": "sent", "elapsed_ms": 60_000,
+            "tool_results": [{"call_id": "call-1", "content": "sent", "is_error": False}], "state_patch": [],
+        }],
+    }
+    check = dict(
+        protocol=TIMED_DISTRIBUTION_PROTOCOL,
+        expected_call_ids=wmh_rose_provider._prediction_call_ids(messages, TIMED_DISTRIBUTION_PROTOCOL),
+        base_state=wmh_rose_provider._native_environment_state(messages),
+    )
+    wmh_rose_provider._require_wmh_prediction(json.dumps(timed), {}, "m", **check)
+    del timed["outcomes"][0]["elapsed_ms"]
+    with pytest.raises(wmh_rose_provider._WMHInvalidPrediction, match="keys"):
+        wmh_rose_provider._require_wmh_prediction(json.dumps(timed), {}, "m", **check)
+
+
 def test_distribution_cache_keys_bind_exact_action_state_and_policy():
     from copy import deepcopy
 

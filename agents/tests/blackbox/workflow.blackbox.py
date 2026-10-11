@@ -4544,6 +4544,56 @@ async def test_workflow_mark_failed_signals_parent_with_context():
         _restore_workflow(original)
 
 
+async def test_simulated_agent_finishes_on_the_world_clock_before_signalling_its_parent():
+    """A parent resumes at its children's finish times, so the finish lands first (V8, V10)."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.parent_agent_id = "root-1"
+    wf.user_id = "u-1"
+    wf.goal = "fail goal"
+    wf.parent_workflow_id = "parent-wf"
+    wf.world_model_mode = "simulate"
+    fake = _FakeWorkflowModule()
+    order = []
+    original_execute = fake.execute_activity
+
+    async def execute_activity(fn, args=None, **kwargs):
+        order.append(("activity", getattr(fn, "__name__", "?"), list(args or [])))
+        return await original_execute(fn, args=args, **kwargs)
+
+    fake.execute_activity = execute_activity
+    original_handle = fake.get_external_workflow_handle
+
+    def handle(wf_id):
+        order.append(("signal", wf_id))
+        return original_handle(wf_id)
+
+    fake.get_external_workflow_handle = handle
+    original = _patch_workflow(fake)
+    try:
+        await wf._world_clock_event("register")
+        await wf._world_clock_event("register")
+        await wf._mark_failed(context=[], reason="error", message="Something broke")
+    finally:
+        _restore_workflow(original)
+    clock = [entry for entry in order if entry[0] == "activity" and entry[1] == "world_clock_activity"]
+    assert [entry[2] for entry in clock] == [["register", "child-1", "root-1"], ["finish", "child-1", None]]
+    finish_at = order.index(clock[-1])
+    signal_at = next(index for index, entry in enumerate(order) if entry[0] == "signal")
+    assert finish_at < signal_at
+
+    real = _bare_workflow_instance()
+    real.agent_id = "root-2"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await real._world_clock_event("register")
+        await real._mark_failed(context=[], reason="error", message="Something broke")
+    finally:
+        _restore_workflow(original)
+    assert "world_clock_activity" not in [call[0] for call in fake.activity_calls]
+
+
 async def test_workflow_mark_failed_no_parent_no_signal():
     wf = _bare_workflow_instance()
     wf.agent_id = "root-1"
@@ -9398,6 +9448,10 @@ async def run_all_tests():
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)
     await r.record_async("wf_mark_failed_signals_parent", test_workflow_mark_failed_signals_parent_with_context)
     await r.record_async("wf_mark_failed_no_parent", test_workflow_mark_failed_no_parent_no_signal)
+    await r.record_async(
+        "wf_simulated_agent_finishes_on_world_clock_before_parent_signal",
+        test_simulated_agent_finishes_on_the_world_clock_before_signalling_its_parent,
+    )
     await r.record_async(
         "wf_paused_continuation_preserves_state",
         test_workflow_paused_continue_as_new_preserves_deployment_state,

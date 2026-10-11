@@ -14,7 +14,8 @@ import re
 import sys
 from pathlib import Path
 
-CALL_SITE = "wmh_world_model_distribution_v1"
+# Untimed (policies v1/v2) and timed world-clock (policy v3) distribution calls.
+CALL_SITES = ("wmh_world_model_distribution_v1", "wmh_world_model_timed_distribution_v1")
 FIELD = re.compile(r"(\w+)=('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)")
 EVENT = re.compile(r"\[\s*\w+\s*\]\s+(\S+)\s+(.*)$")
 
@@ -51,7 +52,7 @@ def measure(paths: list[Path]) -> dict:
             if not parsed:
                 continue
             event, fields = parsed
-            if fields.get("call_site") != CALL_SITE:
+            if fields.get("call_site") not in CALL_SITES:
                 continue
             if event == "llm.cache":
                 identity = (path.name, line)
@@ -73,7 +74,7 @@ def measure(paths: list[Path]) -> dict:
     output = sum(int(r.get("completion_tokens", 0) or 0) for r in metered)
     lookups = demo["replay"] + demo["miss"]
     return {
-        "call_site": CALL_SITE,
+        "call_sites": list(CALL_SITES),
         "provider_metered_requests": len(metered),
         "provider_requests_with_cached_input": sum(1 for r in metered if int(r.get("cache_read", 0) or 0) > 0),
         "provider_cached_input_tokens": read,

@@ -1460,6 +1460,97 @@ async def test_handler_timestamp_simulate_mode_skips_wall_clock_and_advances_sim
     assert fake.sleep_records == []
 
 
+class _ClockFakeWFModule(_FakeWFModule):
+    """Records shared world-clock waits and answers them at the requested time."""
+
+    def __init__(self, *args, world_start, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.world_time_ms = world_start
+        self.clock_calls = []
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") != "world_clock_activity":
+            return await super().execute_activity(fn, args=args, **kwargs)
+        operation, agent_id, _parent, wait = args
+        self.clock_calls.append((operation, agent_id, dict(wait)))
+        self.world_time_ms = wait["until_ms"] if wait.get("until_ms") is not None else self.world_time_ms + wait["duration_ms"]
+        return {"resumed": True, "time_ms": self.world_time_ms, "deadline_ms": self.world_time_ms}
+
+
+async def test_handler_timestamp_simulate_mode_waits_on_the_shared_world_clock():
+    """The world clock decides when a simulated wait ends; this agent's view follows it."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    now = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+    fake = _ClockFakeWFModule(current_time=now, world_start=int(now.timestamp() * 1000))
+    restore = _patch_handler_workflow(fake)
+    wf = _WFInstance(goal="Raise me 5m dollars for my company Rose Labs")
+    wf.world_model_mode = "simulate"
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"until_timestamp": "2026-09-09T12:00:00+00:00"},
+                tool_call_id="tc-clock-1",
+            )
+        )
+    finally:
+        restore()
+
+    target = int(datetime(2026, 9, 9, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    assert fake.clock_calls == [("wait", "agent-1", {"wait_id": "agent-1:tc-clock-1", "until_ms": target})]
+    finished = [e for e in events if e.status == MessageStatus.FINISHED][-1]
+    assert finished.metadata["worldClock"] is True and finished.metadata["worldTimeMs"] == target
+    assert wf.simulated_clock_offset_seconds == 86_400 and fake.sleep_records == []
+
+
+async def test_handler_condition_simulate_mode_checks_at_shared_world_clock_intervals():  # V9
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    async def fake_spawn_explore(self, wf, tool_call, explore_tool_call_id, *, task_id=None, display_goal=None,
+                                 capture_tool_results=None):
+        yield ToolEvent(type=EventType.POST_MESSAGE, title="Explore done", message="evidence",
+                        status=MessageStatus.FINISHED, metadata={"agentType": "explore", "taskId": task_id},
+                        data={"usage": {"llm": [], "service": []}})
+
+    evals = {"n": 0}
+
+    def _eval():
+        evals["n"] += 1
+        return {"satisfied": evals["n"] >= 3, "reasoning": "checked"}
+
+    now = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+    fake = _ClockFakeWFModule(
+        activity_results={"evaluate_condition_activity": _eval}, current_time=now, world_start=0
+    )
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    wf = _WFInstance(goal="Raise me 5m dollars for my company Rose Labs")
+    wf.world_model_mode = "simulate"
+    try:
+        await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"description": "reply", "condition": "an investor replied", "check_interval_seconds": 900,
+                           "max_checks": 5},
+                tool_call_id="tc-clock-cond",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert fake.clock_calls == [
+        ("wait", "agent-1", {"wait_id": "agent-1:tc-clock-cond:check-2", "duration_ms": 900_000}),
+        ("wait", "agent-1", {"wait_id": "agent-1:tc-clock-cond:check-3", "duration_ms": 900_000}),
+    ]
+    assert fake.sleep_records == []
+
+
 async def test_handler_timestamp_simulate_mode_past_target_on_sim_clock_still_errors():
     """A target already behind the ADVANCED simulated clock is still "in the past"."""
     from domains.wait_for.handler import WaitForManager
@@ -1698,6 +1789,14 @@ async def run_all_tests():
     await r.record_async(
         "handler_cond_simulate_skips_interval",
         test_handler_condition_simulate_mode_skips_inter_check_sleep_and_advances_sim_clock,
+    )
+    await r.record_async(
+        "handler_ts_simulate_waits_on_shared_world_clock",
+        test_handler_timestamp_simulate_mode_waits_on_the_shared_world_clock,
+    )
+    await r.record_async(
+        "handler_cond_simulate_checks_at_world_clock_intervals",
+        test_handler_condition_simulate_mode_checks_at_shared_world_clock_intervals,
     )
     teardown_mock()
     return r.all_passed

@@ -17,6 +17,7 @@ import uuid
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import count
 from typing import Awaitable, Callable
 
@@ -45,12 +46,17 @@ from benchmarks.wmh_execution_policy import (
     execution_policy as select_execution_policy,
 )
 from benchmarks.wmh_outcomes import (
-    DISTRIBUTION_PROTOCOL,
+    DISTRIBUTION_PROTOCOLS,
+    SCHEDULED_EVENTS_KEY,
+    TIMED_DISTRIBUTION_PROTOCOL,
     _pointer,
     apply_state_patch,
     parse_distribution,
+    restore_hidden_events,
     select_outcome,
+    visible_world_state,
 )
+from benchmarks.wmh_world_clock import WorldClock
 from utils.world_model_observation import effective_world_model_content
 
 CANONICAL_INPUT_SCHEMA = {
@@ -149,6 +155,20 @@ class RoseNativeRetriever:
         return tuple(selected)
 
 
+def _world_start_ms(seed_state):
+    """A world starts at its seed's as_of_utc; otherwise at creation time."""
+    structured = seed_state.get("structured") if isinstance(seed_state, dict) else None
+    as_of = structured.get("as_of_utc") if isinstance(structured, dict) else None
+    if isinstance(as_of, str):
+        try:
+            parsed = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            return int(parsed.timestamp() * 1000)
+    return time.time_ns() // 1_000_000
+
+
 def _adds_new_records(state_patch, state):
     """True when every operation appends to a list or creates a key absent from ``state`` (empty included).
 
@@ -199,6 +219,8 @@ class NativeSession:
     turn: asyncio.Event = field(default_factory=asyncio.Event)
     # Per committed revision: whether its state change only added new records.
     additive: list = field(default_factory=list)
+    # One world clock per root; actions run at their agent's world time.
+    clock: WorldClock = field(default_factory=lambda: WorldClock(0))
 
 
 class RetiredWorldModelScope(ValueError):
@@ -234,6 +256,7 @@ class ParallelWorldModel:
         self.capabilities = capabilities or ModelCapabilities(supports_tools=False, maximum_output_tokens=16384)
         self.token_counter = Utf8UpperBoundTokenCounter()
         self.execution_policy = select_execution_policy(execution_policy)
+        self._timed = self.execution_policy.response_protocol == TIMED_DISTRIBUTION_PROTOCOL
         self.sample_uniform = sample_uniform or secrets.SystemRandom().random
         if execution_policy != DEFAULT_EXECUTION_POLICY and execution_identity is None:
             raise ValueError("Activated WMH policy requires a verified artifact-bound execution identity")
@@ -268,6 +291,9 @@ class ParallelWorldModel:
         if len(self.sessions) + len(self.retired) >= self.maximum_sessions:
             raise ValueError("Native session capacity reached")
         session = NativeSession(uuid.uuid4().hex, task, deepcopy(seed_state), deepcopy(seed_state), scope)
+        session.clock = WorldClock(_world_start_ms(seed_state))
+        if self._timed and isinstance(session.state.get("structured"), dict):
+            session.state["structured"].setdefault(SCHEDULED_EVENTS_KEY, [])
         structured = seed_state.get("structured") if isinstance(seed_state.get("structured"), dict) else seed_state
         source_root = structured.get("root_agent_id")
         session.excluded_lineage = lineage_id(scope or source_root or session.id)
@@ -296,7 +322,7 @@ class ParallelWorldModel:
                 if len(session.receipts) >= self.maximum_steps:
                     raise ValueError("Native session step capacity reached")
                 draw = None
-                if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                if self.execution_policy.response_protocol in DISTRIBUTION_PROTOCOLS:
                     prior = session.sampling_draws.get(key)
                     if prior is not None:
                         if prior[0] != identity:
@@ -365,6 +391,16 @@ class ParallelWorldModel:
     async def _step_with_rebase(self, session, key, action, candidate, draw):
         call = candidate.tool_calls[0]
         intervals = []
+        actor = world_started = None
+        if self._timed:
+            # The action happens at its agent's world time, whatever the
+            # caller's wall clock said; retries keep their first start.
+            actor = str(call.arguments.get("agent_id") or session.scope or session.id)
+            world_started = session.clock.action_time(actor)
+            action = deepcopy(action)
+            action["arguments"]["timestamp_ms"] = world_started
+            candidate = action_from_canonical(action)
+            call = candidate.tool_calls[0]
         # Conflicts are resolved oldest first: a discarded operation predicts
         # again only when it owns the turn, and no other operation commits
         # meanwhile, so each operation rebases at most once.
@@ -380,6 +416,7 @@ class ParallelWorldModel:
                         revision = session.revision
                         break
                 await turn.wait()
+            view, hidden = visible_world_state(base, at_ms=world_started) if self._timed else (base, [])
             task = TaskCase(
                 task_id=stable_id("rose-task", {"scope": session.scope or session.id}),
                 lineage_group_id=session.excluded_lineage,
@@ -404,7 +441,7 @@ class ParallelWorldModel:
                 candidate_response=candidate,
                 grounded_examples=demos,
                 maximum_output_tokens=16384,
-                state=base,
+                state=view,
             )
             # The public packer preserves this system message and counts it.
             request = self.execution_policy.apply(request)
@@ -468,10 +505,13 @@ class ParallelWorldModel:
                         if self.record_prediction:
                             await asyncio.to_thread(self.record_prediction, record)
                     raw = response["content"] if isinstance(response, dict) else response
-                    if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                    if self.execution_policy.response_protocol in DISTRIBUTION_PROTOCOLS:
                         try:
                             distribution = parse_distribution(
-                                raw, base_state=base, expected_call_ids=tuple(c.call_id for c in candidate.tool_calls)
+                                raw,
+                                base_state=view,
+                                expected_call_ids=tuple(c.call_id for c in candidate.tool_calls),
+                                timed=self._timed,
                             )
                         except (ValueError, TypeError, KeyError) as exc:
                             raise TextWorldModelProtocolError(str(exc)) from exc
@@ -525,7 +565,7 @@ class ParallelWorldModel:
                 except TextWorldModelProtocolError as exc:
                     if repair:
                         raise
-                    if self.execution_policy.response_protocol == DISTRIBUTION_PROTOCOL:
+                    if self.execution_policy.response_protocol in DISTRIBUTION_PROTOCOLS:
                         correction = ModelMessage(
                             role="user",
                             content=(
@@ -557,8 +597,14 @@ class ParallelWorldModel:
             }
             if isinstance(response, dict):
                 observation["metadata"]["actual_model"] = response.get("actual_model")
+            elapsed = 0
+            if self._timed:
+                elapsed = selection.get("elapsed_ms", 0) if selection else 0
+                observation["metadata"].update(
+                    world_time_ms=world_started, elapsed_ms=elapsed, world_time_after_ms=world_started + elapsed
+                )
             if selection is not None:
-                observation["metadata"]["prediction_protocol"] = DISTRIBUTION_PROTOCOL
+                observation["metadata"]["prediction_protocol"] = self.execution_policy.response_protocol
                 observation["metadata"]["outcome_selection"] = deepcopy(interval["outcome_selection"])
 
             def preview(text):
@@ -612,7 +658,7 @@ class ParallelWorldModel:
                     if turn is None:
                         if len(session.history) >= self.maximum_steps:
                             raise ValueError("Native session step capacity reached")
-                        state_before, state_after = base, transition.state
+                        state_before, state_after = base, restore_hidden_events(transition.state, hidden)
                         if merged is not None:
                             state_before, state_after = session.state, merged
                             observation["metadata"]["append_merged_from_revision"] = revision
@@ -632,6 +678,8 @@ class ParallelWorldModel:
                         session.history = (*session.history, step)
                         session.state = deepcopy(state_after)
                         session.additive.append(_adds_new_records(state_patch, state_before))
+                        if self._timed:
+                            session.clock.commit(actor, started_ms=world_started, elapsed_ms=elapsed)
                         session.revision += 1
                         self.retrieval_calls += 1
                         audit["committed_revision"] = session.revision
@@ -639,6 +687,30 @@ class ParallelWorldModel:
                         return observation
                 await turn.wait()
         raise AssertionError("Unreachable state retry boundary")
+
+    def _clock_session(self, session_id):
+        session = self.sessions[session_id]
+        if session.closed:
+            raise ValueError("Native world session is closed")
+        return session
+
+    def clock_register(self, session_id, agent_id, parent=None):
+        session = self._clock_session(session_id)
+        return {"agent_id": agent_id, "time_ms": session.clock.register(agent_id, parent)}
+
+    def clock_finish(self, session_id, agent_id):
+        session = self._clock_session(session_id)
+        session.clock.finish(agent_id)
+        return {"agent_id": agent_id, "time_ms": session.clock.time_of(agent_id)}
+
+    async def clock_wait(self, session_id, agent_id, wait_id, *, until_ms=None, duration_ms=None, poll_seconds=50):
+        session = self._clock_session(session_id)
+        return await session.clock.wait(
+            agent_id, wait_id, until_ms=until_ms, duration_ms=duration_ms, poll_seconds=poll_seconds
+        )
+
+    def clock_snapshot(self, session_id):
+        return self.sessions[session_id].clock.snapshot()
 
     async def end_session(self, session_id):
         if session_id in self.retired:
@@ -687,6 +759,8 @@ class ParallelWorldModel:
         }
         if self.execution_identity is not None:
             receipt["execution_identity"] = deepcopy(self.execution_identity)
+        if self._timed:
+            receipt["world_clock"] = session.clock.snapshot()
         stored = await asyncio.to_thread(self.record_retirement, receipt) if self.record_retirement else receipt
         # Publication is synchronous on this loop after all owned work has joined.
         self.retired[session.id] = (stored, sha256_json(receipt))

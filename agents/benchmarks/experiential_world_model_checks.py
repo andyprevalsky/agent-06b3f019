@@ -301,6 +301,150 @@ def test_distribution_new_record_keys_merge_but_a_shared_new_key_rebases():
     asyncio.run(run())
 
 
+def _timed(payload, elapsed=(60_000, 60_000)):
+    payload = json.loads(payload) if isinstance(payload, str) else payload
+    payload["schema"] = "rose.wmh_timed_outcome_distribution.v1"
+    for outcome, value in zip(payload["outcomes"], elapsed):
+        outcome["elapsed_ms"] = value
+    return payload
+
+
+@pytest.mark.parametrize(
+    "elapsed,valid",
+    [((60_000, 3_600_000), True), ((0, 0), True), ((None, 1), False), ((-1, 1), False), ((True, 1), False),
+     ((1.5, 1), False), ((400 * 86_400_000, 1), False)],
+)
+def test_timed_distribution_requires_a_plausible_elapsed_time_per_outcome(elapsed, valid):  # V1
+    from benchmarks.wmh_outcomes import parse_distribution
+
+    request = type("R", (), {})()
+    evidence = {"candidate_response": {"tool_calls": [{"call_id": "call-1"}]}}
+    request.messages = (None, type("M", (), {"content": json.dumps(evidence)})())
+    payload = _timed(distribution_reply(request), elapsed)
+    if elapsed[0] is None:
+        del payload["outcomes"][0]["elapsed_ms"]
+    content = json.dumps(payload)
+    if valid:
+        parsed = parse_distribution(content, base_state={"receipts": []}, expected_call_ids=("call-1",), timed=True)
+        assert [o["elapsed_ms"] for o in parsed["outcomes"]] == list(elapsed)
+    else:
+        with pytest.raises(ValueError):
+            parse_distribution(content, base_state={"receipts": []}, expected_call_ids=("call-1",), timed=True)
+    # The untimed protocol keeps its exact contract.
+    with pytest.raises(ValueError):
+        parse_distribution(json.dumps(_timed(distribution_reply(request))), base_state={"receipts": []},
+                           expected_call_ids=("call-1",))
+
+
+def test_scheduled_events_stay_hidden_until_their_world_time():  # V6
+    from benchmarks.wmh_outcomes import restore_hidden_events, visible_world_state
+
+    state = {"structured": {"scheduled_events": [
+        {"available_at_ms": 2, "description": "sent"}, {"available_at_ms": 9, "description": "reply"},
+        {"description": "no time: visible"},
+    ], "other": 1}, "scratchpad": "x"}
+    view, hidden = visible_world_state(state, at_ms=7)
+    assert [e["description"] for e in view["structured"]["scheduled_events"]] == ["sent", "no time: visible"]
+    assert [e["description"] for e in hidden] == ["reply"]
+    assert visible_world_state(state, at_ms=11)[1] == []
+    # A prediction made on the view keeps the hidden future when it commits.
+    view["structured"]["scheduled_events"].append({"available_at_ms": 20, "description": "meeting"})
+    merged = restore_hidden_events(view, hidden)
+    assert [e["description"] for e in merged["structured"]["scheduled_events"]] == [
+        "sent", "no time: visible", "meeting", "reply"]
+    assert visible_world_state({"structured": {}, "scratchpad": ""}, at_ms=0)[0]["structured"]["scheduled_events"] == []
+
+
+def _timed_action(n, agent="root"):
+    stamped = action(n)
+    stamped["arguments"]["agent_id"] = agent
+    stamped["arguments"]["timestamp_ms"] = 999  # wall clock from the caller; the world clock wins
+    return stamped
+
+
+def test_timed_actions_run_at_world_time_and_advance_their_agent_once():  # V2, V3
+    async def run():
+        requests = []
+
+        async def complete(request):
+            requests.append(request)
+            return json.dumps(_timed(distribution_reply(request), (7_200_000, 7_200_000)))
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v3", sample_uniform=lambda: 0.975)
+        seed = {"structured": {"schema": "test", "as_of_utc": "2026-10-11T00:00:00Z"}, "scratchpad": "", "receipts": []}
+        session = model.new_session("Raise", seed, "root")
+        start = 1_791_676_800_000
+        first = await model.step(session.id, _timed_action(1), "inv-1")
+        evidence = json.loads(requests[0].messages[1].content)
+        assert evidence["candidate_response"]["tool_calls"][0]["arguments"]["timestamp_ms"] == start
+        assert first["metadata"]["world_time_ms"] == start and first["metadata"]["elapsed_ms"] == 7_200_000
+        assert session.clock.time_of("root") == start + 7_200_000
+        again = await model.step(session.id, _timed_action(1), "inv-1")
+        assert again == first and len(requests) == 1 and session.clock.time_of("root") == start + 7_200_000
+        second = await model.step(session.id, _timed_action(2), "inv-2")
+        assert second["metadata"]["world_time_ms"] == start + 7_200_000
+
+    asyncio.run(run())
+
+
+def test_a_scheduled_reply_is_invisible_before_its_time_and_visible_after():  # V6
+    async def run():
+        seen = []
+
+        async def complete(request):
+            evidence = json.loads(request.messages[1].content)
+            seen.append([e["description"] for e in evidence["environment_state"]["structured"]["scheduled_events"]])
+            payload = _timed(distribution_reply(request), (2 * 86_400_000, 2 * 86_400_000))
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v3", sample_uniform=lambda: 0.975)
+        day = 86_400_000
+        seed = {
+            "structured": {
+                "schema": "test",
+                "as_of_utc": "1970-01-08T00:00:00Z",
+                "scheduled_events": [{"available_at_ms": 9 * day, "description": "investor reply"}],
+            },
+            "scratchpad": "",
+            "receipts": [],
+        }
+        session = model.new_session("Check inbox", seed, "root")
+        await model.step(session.id, _timed_action(1), "check-day-7")  # starts at day 7
+        await model.step(session.id, _timed_action(2), "check-day-9")  # starts at day 9
+        assert seen == [[], ["investor reply"]]
+        # The committed world kept the hidden reply throughout.
+        assert [e["description"] for e in session.state["structured"]["scheduled_events"]] == ["investor reply"]
+
+    asyncio.run(run())
+
+
+def test_served_world_clock_registers_waits_and_finishes_agents():
+    import httpx
+
+    from benchmarks.serve_experiential_world_model import create_app
+
+    async def run():
+        async def complete(request):
+            return json.dumps(_timed(distribution_reply(request)))
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v3", sample_uniform=lambda: 0.975)
+        session = model.new_session("Raise", {"structured": {"schema": "t", "as_of_utc": "1970-01-01T00:00:00Z"}, "scratchpad": ""}, "root")
+        base = "/world_models/rose/scopes/root/clock"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app("rose", model)), base_url="http://wmh") as http:
+            assert (await http.post(f"{base}/agents/root/register", json={})).status_code == 200
+            assert (await http.post(f"{base}/agents/child/register", json={"parent": "root"})).json()["time_ms"] == 0
+            waited = (await http.post(f"{base}/agents/child/wait", json={"wait_id": "w", "duration_ms": 3_600_000})).json()
+            assert waited == {"resumed": True, "time_ms": 3_600_000, "deadline_ms": 3_600_000}
+            assert (await http.post(f"{base}/agents/child/finish", json={})).status_code == 200
+            snapshot = (await http.get(base)).json()
+            assert {a["agent_id"]: a["state"] for a in snapshot["agents"]} == {"root": "running", "child": "done"}
+            assert next(a for a in snapshot["agents"] if a["agent_id"] == "root")["time_ms"] == 3_600_000
+            assert (await http.post(f"{base}/agents/x/wait", json={"wait_id": "w"})).status_code == 422
+            assert (await http.get("/world_models/rose/scopes/missing/clock")).status_code == 404
+
+    asyncio.run(run())
+
+
 def test_distribution_invalid_unselected_branch_never_commits_and_retirement_fences_late_result():
     async def run():
         requests = []

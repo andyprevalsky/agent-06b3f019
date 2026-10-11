@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, DISTRIBUTION_TEXT
+from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, DISTRIBUTION_TEXT, TIMED_DISTRIBUTION_PROTOCOL, TIMING_TEXT
 
 BASE_PROTOCOL_VERSION = "text-world-model-v3"
 BASE_PROTOCOL_SHA256 = "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122"
@@ -60,6 +60,13 @@ OUTCOME_DISTRIBUTION_V2_TEXT = (
     + "\nExplain probabilities against goal-implied alternatives; justify omitting plausible ones."
     + "\nSimulate newly discovered public evidence; lack of input verification does not exclude an outcome."
 )
+
+# Timed world clock: elapsed time per outcome and scheduled later events.
+OUTCOME_DISTRIBUTION_V3_POLICY = "rose-outcome-distribution-v3"
+OUTCOME_DISTRIBUTION_V3_VERSION = "3"
+OUTCOME_DISTRIBUTION_V3_SHA256 = "3ace77b6b1a3a33ca94e69541cd1e671a4c3a7694d3612b9ddc68f1ccdf6da8a"
+OUTCOME_DISTRIBUTION_V3_EFFECTIVE_SYSTEM_SHA256 = "d772e38450ffae45f44598e215b9cf50237062f86ad867d4a1d4fa7c9c198041"
+OUTCOME_DISTRIBUTION_V3_TEXT = OUTCOME_DISTRIBUTION_V2_TEXT + "\n\n" + TIMING_TEXT
 
 
 def text_sha256(text: str) -> str:
@@ -133,6 +140,13 @@ _POLICIES = {
         OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256,
         DISTRIBUTION_PROTOCOL,
     ),
+    OUTCOME_DISTRIBUTION_V3_POLICY: ExecutionPolicy(
+        OUTCOME_DISTRIBUTION_V3_POLICY,
+        OUTCOME_DISTRIBUTION_V3_VERSION,
+        OUTCOME_DISTRIBUTION_V3_TEXT,
+        OUTCOME_DISTRIBUTION_V3_EFFECTIVE_SYSTEM_SHA256,
+        TIMED_DISTRIBUTION_PROTOCOL,
+    ),
 }
 _IMMUTABLE_IDENTITIES = {
     DEFAULT_EXECUTION_POLICY: ("1", text_sha256(""), BASE_SYSTEM_SHA256),
@@ -156,6 +170,11 @@ _IMMUTABLE_IDENTITIES = {
         OUTCOME_DISTRIBUTION_V2_SHA256,
         OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256,
     ),
+    OUTCOME_DISTRIBUTION_V3_POLICY: (
+        OUTCOME_DISTRIBUTION_V3_VERSION,
+        OUTCOME_DISTRIBUTION_V3_SHA256,
+        OUTCOME_DISTRIBUTION_V3_EFFECTIVE_SYSTEM_SHA256,
+    ),
 }
 
 
@@ -177,11 +196,11 @@ def execution_policy(name: str = DEFAULT_EXECUTION_POLICY) -> ExecutionPolicy:
         )
         != _IMMUTABLE_IDENTITIES[name]
         or policy.response_protocol
-        != (
-            DISTRIBUTION_PROTOCOL
-            if name in {OUTCOME_DISTRIBUTION_POLICY, OUTCOME_DISTRIBUTION_V2_POLICY}
-            else BASE_PROTOCOL_VERSION
-        )
+        != {
+            OUTCOME_DISTRIBUTION_POLICY: DISTRIBUTION_PROTOCOL,
+            OUTCOME_DISTRIBUTION_V2_POLICY: DISTRIBUTION_PROTOCOL,
+            OUTCOME_DISTRIBUTION_V3_POLICY: TIMED_DISTRIBUTION_PROTOCOL,
+        }.get(name, BASE_PROTOCOL_VERSION)
     ):
         raise ValueError("WMH execution policy changed without a new version")
     return policy

@@ -16,6 +16,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
 
+from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
@@ -4510,6 +4512,31 @@ def test_world_model_policy_cache_identities_match_the_immutable_registry():
         policy = policies.execution_policy(name)
         registered[name] = (policy.version, policy.metadata()["policy_sha256"][:16])
     assert normalize.WMH_POLICY_CACHE_IDENTITIES == registered
+
+
+def test_backend_policy_cache_identities_mirror_the_immutable_registry():
+    """The backend's simulate-mode cache scope throws for an unlisted policy, so
+    its TypeScript mirror must carry every registered policy exactly."""
+    import re
+
+    from benchmarks import wmh_execution_policy as policies
+
+    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/fastCacheNormalizeConstants.ts").read_text()
+    constants = dict(re.findall(r"const (WMH_[A-Z0-9_]+) =\s*'([^']+)'", source))
+    table = source[source.index("const WMH_EXECUTION_POLICIES") : source.index("]);", source.index("const WMH_EXECUTION_POLICIES"))]
+    mirrored = {}
+    for name, version, sha in re.findall(
+        r"\[\s*('[^']+'|WMH_[A-Z0-9_]+),\s*\{\s*version:\s*('[^']+'|WMH_[A-Z0-9_]+),\s*sha256:\s*('[^']+'|WMH_[A-Z0-9_]+)",
+        table,
+    ):
+        value = lambda token: token.strip("'") if token.startswith("'") else constants[token]  # noqa: E731
+        mirrored[value(name)] = (value(version), value(sha))
+    registered = {
+        name: (policies.execution_policy(name).version, policies.execution_policy(name).metadata()["policy_sha256"])
+        for name in policies.registered_execution_policies()
+        if name != policies.DEFAULT_EXECUTION_POLICY
+    }
+    assert mirrored == registered
 
 
 @pytest.mark.parametrize("base_step", [None, 7], ids=["content", "position"])

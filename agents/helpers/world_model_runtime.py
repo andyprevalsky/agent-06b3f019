@@ -234,6 +234,22 @@ class WMHHttpClient:
         return observation
 
 
+class _NoWorldSession(LookupError):
+    """The root has no live WMH world yet, so there is no shared clock to use."""
+
+
+async def _clock_request(base_url: str, path: str, payload: JsonObject, timeout: float) -> JsonObject:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(f"{base_url.rstrip('/')}{path}", json=payload)
+    if response.status_code == 404:
+        raise _NoWorldSession(path)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("WMH world clock returned a non-object response")
+    return data
+
+
 def canonical_category_for_tool(tool_name: str) -> str:
     if tool_name in _EXPLORE_ORCHESTRATION_TOOLS:
         return "explore"
@@ -651,6 +667,49 @@ async def world_model_step_activity(
     if not resolved_base_url:
         raise RuntimeError("WMH step requires WMH_BASE_URL or WORLD_MODEL_HARNESS_URL")
     return await WMHHttpClient(resolved_base_url).step(world_model_name, session_id, action)
+
+
+@activity.defn
+async def world_clock_activity(
+    operation: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
+    wait: JsonObject | None = None,
+    session_scope_id: str | None = None,
+) -> JsonObject:
+    """Register, finish or wait for one agent on its world's shared clock.
+
+    Waits long-poll the WMH (resumed=false after each poll) and heartbeat, so a
+    retried activity rejoins the same wait_id. A root without a live world, or
+    a run without a WMH, reports ``skipped`` and the caller keeps its private clock.
+    """
+
+    base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
+    model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
+    if not base_url or not model:
+        return {"skipped": "no_world_model"}
+    scope = session_scope_id
+    if not scope:
+        from providers.fast_cache.client import resolve_agent_fast_mode
+
+        scope = (await resolve_agent_fast_mode(agent_id))[3] or agent_id
+    path = f"/world_models/{model}/scopes/{scope}/clock/agents/{agent_id}/{operation}"
+    try:
+        if operation == "register":
+            return await _clock_request(base_url, path, {"parent": parent_agent_id}, 30)
+        if operation == "finish":
+            return await _clock_request(base_url, path, {}, 30)
+        if operation != "wait" or not isinstance(wait, dict):
+            raise ValueError("World clock operation must be register, finish or wait")
+        payload = {key: wait[key] for key in ("wait_id", "until_ms", "duration_ms") if wait.get(key) is not None}
+        payload["poll_seconds"] = 50
+        while True:
+            result = await _clock_request(base_url, path, payload, 90)
+            if result.get("resumed"):
+                return result
+            activity.heartbeat(result)
+    except _NoWorldSession:
+        return {"skipped": "no_world_session"}
 
 
 @activity.defn

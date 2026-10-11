@@ -3027,6 +3027,51 @@ async def test_runtime_wmh_retirement_uses_exact_session_and_preserves_join_rece
         teardown_mock()
 
 
+async def test_runtime_world_clock_long_polls_waits_and_skips_without_a_world():
+    from unittest.mock import AsyncMock
+
+    import helpers.world_model_runtime as runtime
+
+    day = 86_400_000
+    polls = [
+        {"resumed": False, "time_ms": 0, "deadline_ms": day},
+        {"resumed": True, "time_ms": day, "deadline_ms": day},
+    ]
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, json.loads(request.content or b"{}")))
+        if "/scopes/root-1/clock/agents/child-1/" not in request.url.path:
+            return httpx.Response(404, json={"detail": "Unknown world scope"})
+        if request.url.path.endswith("/wait"):
+            return httpx.Response(200, json=polls.pop(0))
+        return httpx.Response(200, json={"agent_id": "child-1", "time_ms": 0})
+
+    setup_mock_fn(handler)
+    heartbeats = []
+    resolve = AsyncMock(return_value=(False, None, False, "root-1", None, False))
+    try:
+        with (
+            patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+            patch.object(runtime.activity, "heartbeat", lambda *args: heartbeats.append(args)),
+            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+        ):
+            assert (await runtime.world_clock_activity("register", "child-1", "root-1"))["time_ms"] == 0
+            waited = await runtime.world_clock_activity("wait", "child-1", None, {"wait_id": "w1", "duration_ms": day})
+            assert waited == {"resumed": True, "time_ms": day, "deadline_ms": day} and len(heartbeats) == 1
+            assert (await runtime.world_clock_activity("finish", "child-1"))["agent_id"] == "child-1"
+            assert requests[0] == ("/world_models/rose-archive/scopes/root-1/clock/agents/child-1/register", {"parent": "root-1"})
+            assert requests[1][1] == {"wait_id": "w1", "duration_ms": day, "poll_seconds": 50}
+            resolve.return_value = (False, None, False, "root-without-world", None, False)
+            assert await runtime.world_clock_activity("wait", "child-1", None, {"wait_id": "w2", "duration_ms": day}) == {
+                "skipped": "no_world_session"
+            }
+        with patch.dict(os.environ, {"WMH_BASE_URL": "", "WORLD_MODEL_HARNESS_URL": ""}):
+            assert await runtime.world_clock_activity("finish", "child-1") == {"skipped": "no_world_model"}
+    finally:
+        teardown_mock()
+
+
 def test_wmh_http_clients_allow_slow_grounded_transitions():
     from benchmarks.world_model_harness import WMHHttpClient as BenchmarkClient
     from helpers.world_model_runtime import WMHHttpClient as RuntimeClient
@@ -5513,6 +5558,7 @@ def test_native_rose_provider_regressions():
             "-q",
             str(root / "agents/benchmarks/wmh_rose_provider_test.py"),
             str(root / "agents/benchmarks/run_benchmark_wmh_initial_state_test.py"),
+            str(root / "agents/benchmarks/wmh_world_clock_test.py"),
         ],
         cwd=root,
         env={**os.environ, "PYTHONPATH": str(root / "agents")},
@@ -5752,6 +5798,10 @@ async def run_all_tests():
     await r.record_async(
         "runtime_wmh_retirement_uses_exact_session_and_preserves_join_receipt",
         test_runtime_wmh_retirement_uses_exact_session_and_preserves_join_receipt,
+    )
+    await r.record_async(
+        "runtime_world_clock_long_polls_waits_and_skips_without_a_world",
+        test_runtime_world_clock_long_polls_waits_and_skips_without_a_world,
     )
     await r.record_async(
         "evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result",
