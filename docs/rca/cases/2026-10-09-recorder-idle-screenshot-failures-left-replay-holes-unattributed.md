@@ -74,7 +74,8 @@ records, in `manifest.json` and the `Browser agent recording saved` log:
 - `last_capture_error` (300 chars).
 - `longest_frame_gap_ms` and `longest_frame_gap_start_ms`, measured from
   screenshot-capture start (or the Kernel→screenshot handoff) through close.
-  The tail is measured before the optional Steel media download.
+  The tail is measured before the optional Steel media download, and is
+  skipped once the frame cap (`frame_cap_reached`) stopped capture by design.
 
 Regressions:
 - `test_browser_agent_recording_reports_capture_failures_and_frame_gaps` drives

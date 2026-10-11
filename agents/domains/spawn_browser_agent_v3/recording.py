@@ -1579,9 +1579,11 @@ class BrowserAgentRecorder:
                 existing_frames=len(self.frames),
             )
         self._closed = True
-        if self.frames:
+        frame_cap_reached = len(self.frames) >= self.max_frames
+        if self.frames and not frame_cap_reached:
             # The tail after the last frame is a capture hole too; measure it
-            # before the optional Steel media download.
+            # before the optional Steel media download. After the frame cap,
+            # capture stops by design, so that tail is not a hole.
             self._note_frame_gap(self._elapsed_ms())
         steel_media = await self._download_steel_hls_recording() if include_steel_media else None
         if not self.frames and not steel_media and not self.replay_view_urls:
@@ -1610,6 +1612,7 @@ class BrowserAgentRecorder:
                     "source_frame_count": source_frame_count,
                     "capture_failure_count": self._capture_failure_count,
                     "mark_capture_drop_count": self._mark_capture_drop_count,
+                    "frame_cap_reached": frame_cap_reached,
                     "last_capture_error": self._last_capture_error,
                     "longest_frame_gap_ms": self._longest_frame_gap_ms,
                     "longest_frame_gap_start_ms": self._longest_frame_gap_start_ms,
@@ -1639,6 +1642,7 @@ class BrowserAgentRecorder:
             recording_source=recording_source,
             capture_failure_count=self._capture_failure_count,
             mark_capture_drop_count=self._mark_capture_drop_count,
+            frame_cap_reached=frame_cap_reached,
             last_capture_error=self._last_capture_error,
             longest_frame_gap_ms=self._longest_frame_gap_ms,
             longest_frame_gap_start_ms=self._longest_frame_gap_start_ms,

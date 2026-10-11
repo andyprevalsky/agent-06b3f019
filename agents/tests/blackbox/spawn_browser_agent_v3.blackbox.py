@@ -2664,6 +2664,46 @@ async def test_browser_recording_finalizer_requires_backend_acknowledgement():
                     )
 
 
+async def test_browser_agent_recording_frame_cap_is_not_reported_as_a_capture_hole():
+    """Capture stops by design at the frame cap; the time after it is no hole."""
+    import tempfile
+
+    from domains.spawn_browser_agent_v3 import recording
+
+    class FakePage:
+        url = "https://www.doordash.com/orders"
+
+        async def screenshot(self, **_kwargs):
+            return b"recording-frame"
+
+        async def content(self):
+            return "<html><body>Orders</body></html>"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(recording, "_recording_root", return_value=Path(tmp)):
+            page = FakePage()
+            recorder = recording.BrowserAgentRecorder(
+                page=page,
+                agent_id="agent-cap",
+                task_id="task-cap",
+                session_id="steel-session",
+                browser_url=page.url,
+                session_metadata={"provider": "steel"},
+            )
+            recorder.max_frames = 1
+            recorder.frames_dir.mkdir(parents=True)
+            recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
+            await recorder.capture("Open orders", action="idle")
+            # A long task keeps running after the cap.
+            recorder._started_at -= 100
+            html_path = await recorder.close(include_steel_media=False, archive_artifacts=False)
+            assert html_path is not None
+            manifest = json.loads((html_path.parent / "manifest.json").read_text())
+            assert manifest["frame_cap_reached"] is True
+            assert manifest["capture_failure_count"] == 0
+            assert manifest["longest_frame_gap_ms"] < 100_000, manifest["longest_frame_gap_ms"]
+
+
 async def test_browser_recording_finalizer_stamps_each_part_start():
     """Each saved recording names the activity part it covers.
 
@@ -26030,6 +26070,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_stamps_each_part_start",
         test_browser_recording_finalizer_stamps_each_part_start,
+    )
+    await r.record_async(
+        "browser_agent_recording_frame_cap_is_not_reported_as_a_capture_hole",
+        test_browser_agent_recording_frame_cap_is_not_reported_as_a_capture_hole,
     )
     await r.record_async(
         "browser_agent_recording_writes_html",

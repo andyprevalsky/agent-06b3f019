@@ -34,6 +34,11 @@ export function useRecordingSegmentLoads(
   const setSegmentIndex = (index: number) => setSelectedKey(segments[index]?.key ?? null);
   // Stable identity of the segment list (keys are URLs / storage paths).
   const recordingKey = segments.map((segment) => segment.key).join('\n');
+  // Pin the default selection once the viewer opens the recording, so a part
+  // that arrives later and sorts in front of it cannot take over playback.
+  useEffect(() => {
+    if (opened && selectedIndex < 0 && currentSegment) setSelectedKey(currentSegment.key);
+  }, [opened, selectedIndex, currentSegment]);
   const liveKeysRef = useRef<Set<string>>(new Set());
   const blobUrlsRef = useRef<Map<string, string>>(new Map());
   const inFlightKeysRef = useRef<Set<string>>(new Set());

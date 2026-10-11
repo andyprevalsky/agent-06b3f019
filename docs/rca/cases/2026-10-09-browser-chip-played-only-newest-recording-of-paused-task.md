@@ -100,8 +100,9 @@ screenshot finalizers).
   one deduplicated segment list from every task message.
   - Each message contributes its best source: stitched `video/*` pointer, then
     `recording_view_urls`, then `recording_view_url`, then the HTML pointer.
-  - Parts are ordered and placed by `recording_started_at`. Older rows use the
-    latest unclaimed "Browser recording started" message.
+  - Parts are ordered and placed by `recording_started_at`. Older rows pair
+    with the latest still-unclaimed "Browser recording started" message (a
+    stack), which stays right when the earlier part is saved last.
 - The chip plays the earliest segment first and auto-advances `<video>`
   segments. Numbered part buttons and "Next part" reach every segment,
   including HTML players, which can't signal their own end.
@@ -109,7 +110,9 @@ screenshot finalizers).
   live trajectory stays aligned across a pause. A click on a step in another
   part sets a pending seek that the part's video applies on `loadedmetadata`,
   after downloading first if it has to.
-- `useRecordingSegmentLoads` selects the playing segment by key and loads
+- `useRecordingSegmentLoads` pins the playing segment by key as soon as the
+  recording is opened, so a part that arrives late and sorts in front cannot
+  take over playback. It loads
   pointer parts lazily. It keeps loaded parts when a later part arrives,
   dedupes in-flight loads, and revokes Blob URLs on removal or unmount,
   including a load that lands after unmount.
@@ -117,7 +120,8 @@ screenshot finalizers).
   case.
 
 **Evidence publisher.** `scripts/publish_evidence_links.py` requires every
-attached part, and every Kernel segment URL, to be reachable, not just one.
+attached part, and every Kernel segment URL, to be reachable, not just one. A
+saved part with no source (its upload failed) counts as missing.
 
 **Regressions.** `browser-agent-chip-recording-parts.blackbox.tsx` covers:
 - incident replay;

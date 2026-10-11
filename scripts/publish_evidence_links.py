@@ -524,12 +524,10 @@ def validate_browser_agents_terminated_with_recording(
             )
         # A pause/resume splits one task into several saved recordings and the
         # chip plays every part, so every attached part must be playable.
-        sources = [
-            source
-            for meta in recording_candidates.get(task_id, [])
-            for source in _recording_sources(meta)
-        ]
-        recording_ok = bool(sources) and all(
+        # A saved part without a source (its upload failed) is a missing part.
+        parts = [_recording_sources(meta) for meta in recording_candidates.get(task_id, [])]
+        sources = [source for part in parts for source in part]
+        recording_ok = bool(parts) and all(parts) and all(
             _probe_recording_view_url(value)
             if kind == "view"
             else _probe_recording_file_pointer(agent_id, value)

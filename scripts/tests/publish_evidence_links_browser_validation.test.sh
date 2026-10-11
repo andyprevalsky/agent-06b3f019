@@ -656,6 +656,9 @@ assert any("no correctly attached recording" in f for f in failures), failures
 assert mod.validate_browser_agents_terminated_with_recording(
     agent, paused_task({"id": "fp-ok", "storage_path": "u/part-1.html"})
 ) == []
+# A pre-pause part whose upload failed saved no source: that part is missing.
+failures = mod.validate_browser_agents_terminated_with_recording(agent, paused_task(None))
+assert any("no correctly attached recording" in f for f in failures), failures
 # Every Kernel per-session segment the chip plays must be reachable too.
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,

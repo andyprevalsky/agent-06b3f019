@@ -13,7 +13,7 @@
  *     recording_view_url  → [view]
  *     other pointer       → [html]            (self-contained screenshot player)
  *   and its part start: metadata.recording_started_at, else (older rows) the
- *   latest unclaimed "recording started" message before it
+ *   latest still-unclaimed "recording started" message before it
  *        │
  *        ▼
  *   segments = parts ordered by start (save order can differ: a background
@@ -63,14 +63,28 @@ function messageSources(metadata: Record<string, unknown> | null | undefined): S
   return [];
 }
 
+/** Remove and return the unclaimed start nearest to `ms` (an explicit part start). */
+function claimNearestStart(starts: number[], ms: number): void {
+  let best = -1;
+  starts.forEach((start, index) => {
+    if (best < 0 || Math.abs(start - ms) < Math.abs(starts[best] - ms)) best = index;
+  });
+  if (best >= 0) starts.splice(best, 1);
+}
+
 export function buildRecordingSegments(messages: RecordingMessage[]): RecordingSegment[] {
   const seen = new Set<string>();
   const parts: { sources: SegmentSource[]; startMs: number | null; sortMs: number }[] = [];
-  let unclaimedStartMs: number | null = null;
+  // "Browser recording started" times not yet matched to a saved part. Each
+  // activity saves its recording after it starts, so an older row without
+  // recording_started_at pairs with the latest unclaimed start (a stack keeps
+  // that right even when the earlier part is saved last).
+  const unclaimedStarts: number[] = [];
   messages.forEach((message, order) => {
     const metadata = message.metadata;
     if (metadata?.action_type === 'recording' && metadata?.toolStatus === 'IN_PROGRESS') {
-      unclaimedStartMs = parseMs(message.timestamp);
+      const startedMs = parseMs(message.timestamp);
+      if (startedMs !== null) unclaimedStarts.push(startedMs);
     }
     const sources = messageSources(metadata).filter((source) => {
       if (seen.has(source.key)) return false;
@@ -78,8 +92,9 @@ export function buildRecordingSegments(messages: RecordingMessage[]): RecordingS
       return true;
     });
     if (!sources.length) return;
-    const startMs = parseMs(metadata?.recording_started_at) ?? unclaimedStartMs;
-    unclaimedStartMs = null;
+    const explicitStartMs = parseMs(metadata?.recording_started_at);
+    if (explicitStartMs !== null) claimNearestStart(unclaimedStarts, explicitStartMs);
+    const startMs = explicitStartMs ?? unclaimedStarts.pop() ?? null;
     parts.push({ sources, startMs, sortMs: startMs ?? parseMs(message.timestamp) ?? order });
   });
   parts.sort((a, b) => a.sortMs - b.sortMs);

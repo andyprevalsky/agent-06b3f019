@@ -15,6 +15,7 @@ vi.mock('@/lib/api/messages', async (importActual) => ({
 }));
 
 import { getAttachmentUrl } from '@/lib/api/messages';
+import { buildRecordingSegments } from '@/features/terminal-component-group/components/browser-agent-chip/recordingSegments';
 import {
   anchorMsg,
   CALL,
@@ -259,6 +260,29 @@ describe('BrowserAgentChip multi-part recording', () => {
     downloads.restore();
   });
 
+  it('pairs older rows without a stamped start with their own activity start', () => {
+    // Rows saved before recording_started_at existed: the pre-pause part is
+    // saved after the resumed part started and saved.
+    const started = (id: string, timestamp: string) =>
+      recordingMsgWithId(id, timestamp, { toolStatus: 'IN_PROGRESS' });
+    const saved = (id: string, timestamp: string) =>
+      recordingMsgWithId(id, timestamp, { recording_file_pointer: htmlPointer(id) });
+    const segments = buildRecordingSegments([
+      started('start-1', '2026-10-08T18:20:00Z'),
+      started('start-2', '2026-10-09T20:34:00Z'),
+      saved('saved-2', '2026-10-09T20:40:00Z'),
+      saved('saved-1', '2026-10-09T20:41:00Z'),
+    ]);
+    expect(segments.map((segment) => segment.key)).toEqual([
+      'user/saved-1.html',
+      'user/saved-2.html',
+    ]);
+    expect(segments.map((segment) => segment.partStartMs)).toEqual([
+      Date.parse('2026-10-08T18:20:00Z'),
+      Date.parse('2026-10-09T20:34:00Z'),
+    ]);
+  });
+
   it('keeps the step list aligned across a pause between parts', async () => {
     const t0 = '2026-10-08T18:00:00.000Z';
     const resumed = '2026-10-08T20:00:00.000Z';
@@ -336,6 +360,41 @@ describe('BrowserAgentChip multi-part recording', () => {
     const currentTime = controlVideo(second, 90);
     fireEvent.loadedMetadata(second);
     expect(currentTime()).toBe(20);
+    downloads.restore();
+  });
+
+  it('keeps playing the opened part when an earlier-starting part arrives late', async () => {
+    // A background finalizer can save the pre-pause part after the resumed part:
+    // the viewer is already watching the resumed part when it appears.
+    const downloads = stubDownloads();
+    const resumedPart = [
+      anchorMsg,
+      recordingMsgWithId('rec-resumed', '2026-10-09T20:40:00Z', {
+        recording_started_at: '2026-10-09T20:34:00Z',
+        recording_file_pointer: htmlPointer('resumed'),
+      }),
+    ];
+    const { rerender } = renderChip(resumedPart, anchorMsg);
+    await openRecordingTab();
+    await waitFor(() => expect(playingSrc()).toBe('blob:resumed'));
+
+    rerender(
+      chipElement(
+        [
+          ...resumedPart,
+          recordingMsgWithId('rec-first', '2026-10-09T20:41:00Z', {
+            recording_started_at: '2026-10-08T18:20:00Z',
+            recording_file_pointer: htmlPointer('first'),
+          }),
+        ],
+        anchorMsg,
+      ),
+    );
+    await waitFor(() => expect(screen.getByTestId('recording-segments')).toBeInTheDocument());
+    // The new part sorts first, but playback stays on the part being watched.
+    expect(screen.getByText('part 2')).toBeInTheDocument();
+    expect(playingSrc()).toBe('blob:resumed');
+    expect(downloads.fetchSpy).toHaveBeenCalledTimes(1);
     downloads.restore();
   });
 
