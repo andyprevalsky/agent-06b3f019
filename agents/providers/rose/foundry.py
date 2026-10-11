@@ -35,15 +35,20 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
     )
 
 
-# Azure rejects efforts above a model's ceiling with HTTP 400. Open-weights
-# gpt-oss accepts low / medium / high only, so the xhigh default is capped.
-_EFFORT_CEILINGS: dict[str, str] = {"gpt-oss-120b": "high"}
+# Azure rejects an effort a model does not support with HTTP 400. Open-weights
+# gpt-oss accepts low / medium / high only, so other efforts (the xhigh default,
+# none) clamp to the nearest supported end of that range.
+_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_SUPPORTED_EFFORTS: dict[str, tuple[str, ...]] = {"gpt-oss-120b": ("low", "medium", "high")}
 
 
 def _effort_for(model: str, effort: Optional[str]) -> str:
     normalized = _normalize_reasoning_effort(effort)
-    ceiling = _EFFORT_CEILINGS.get(model)
-    return ceiling if ceiling and normalized == "xhigh" else normalized
+    supported = _SUPPORTED_EFFORTS.get(model)
+    if not supported or normalized in supported:
+        return normalized
+    rank = _EFFORT_ORDER.index(normalized) if normalized in _EFFORT_ORDER else len(_EFFORT_ORDER)
+    return supported[0] if rank < _EFFORT_ORDER.index(supported[0]) else supported[-1]
 
 
 def _deployments(model: str) -> list[str]:
