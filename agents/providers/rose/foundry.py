@@ -35,12 +35,15 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
     )
 
 
-def _deployments(model: str) -> list[str]:
-    return [item.strip() for item in os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", model).split(",") if item.strip()]
+def _deployments(pool_spec: PoolSpec) -> list[str]:
+    if pool_spec.foundry_deployments:
+        return list(pool_spec.foundry_deployments)
+    configured = os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", pool_spec.gpt_auth_model)
+    return [item.strip() for item in configured.split(",") if item.strip()]
 
 
-def _ordered_deployments(model: str, route_key: str) -> list[str]:
-    deployments = _deployments(model)
+def _ordered_deployments(pool_spec: PoolSpec, route_key: str) -> list[str]:
+    deployments = _deployments(pool_spec)
     if not deployments:
         return []
     start = int(hashlib.sha256(route_key.encode()).hexdigest()[:8], 16) % len(deployments)
@@ -91,7 +94,7 @@ async def foundry_complete(
     route_key = route_key or agent_id or request_id
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for deployment in _ordered_deployments(pool_spec.gpt_auth_model, route_key):
+        for deployment in _ordered_deployments(pool_spec, route_key):
             if time.monotonic() < _cooldown_until.get(deployment, 0):
                 continue
             body = build_codex_responses_body(

@@ -6061,6 +6061,60 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
+    """Azure credit serves the world model ahead of OpenRouter, on the WMH model.
+
+    The production deployment list (``AZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol``) names
+    Ultra's GPT-6 deployments; it must not route a GPT-6.1 world-model request to
+    a different model. OpenRouter credit ran out mid-run on 2026-10-10 (HTTP 402).
+    """
+    import providers.rose.foundry as foundry
+
+    sse = (
+        b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+        b'data: {"type":"response.completed","response":{"usage":'
+        b'{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    seen = []
+
+    def handler(req):
+        if "a-4989-resource.openai.azure.com" in str(req.url):
+            body = json.loads(req.content)
+            seen.append((body["model"], body["reasoning"]["effort"]))
+            return httpx.Response(200, content=sse, headers={"Content-Type": "text/event-stream"})
+        seen.append(str(req.url.host))
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    with (
+        patch.object(foundry, "_auth_cooldown_until", 0.0),
+        patch.object(foundry, "_cooldown_until", {}),
+        patch.dict(
+            os.environ,
+            {
+                "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+                "AZURE_FOUNDRY_API_KEY": "test-key",
+                "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+                "GPT_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
+            },
+        ),
+    ):
+        for pool in ("rose-wmh-gpt61", "rose-1-ultra"):
+            chunks = await _drain(
+                RoseClient(openrouter_key="ork-x").complete(
+                    pool=pool,
+                    messages=[{"role": "user", "content": "simulate"}],
+                    _exclude_anthropic_family=True,
+                    call_site="test-foundry-wmh-deployment",
+                )
+            )
+            assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks), (pool, chunks)
+
+    assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
+
+
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
 
@@ -8412,6 +8466,10 @@ async def run_all_tests():
     )
     r.record("cut_off_recovery_limits_keys_cache", test_cut_off_recovery_limits_model_keys_and_cache_restart)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "wmh_pool_uses_azure_gpt_6_1_deployment_before_openrouter",
+        test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter,
+    )
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,

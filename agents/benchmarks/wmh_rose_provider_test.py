@@ -789,7 +789,9 @@ def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():
     pool = get_pool("rose-wmh-gpt61")
     assert pool.waterfall == ("openai/gpt-6.1-sol",)
     assert pool.waterfall_reasoning_effort == "xhigh"
-    assert not pool.direct_auth_enabled and not pool.foundry_enabled and pool.cerebras_model is None
+    assert not pool.direct_auth_enabled and pool.cerebras_model is None
+    # Azure credit serves the same GPT-6.1 deployment ahead of OpenRouter (user-directed 2026-10-11).
+    assert pool.foundry_enabled and pool.foundry_deployments == ("gpt-6.1-sol",)
     assert _cost_usd_for_call("openai/gpt-6.1-sol", 1000, 1000) == pytest.approx(0.012)
     assert get_pool("rose-1-ultra").waterfall[0] == "openai/gpt-6-sol"
     with pytest.MonkeyPatch.context() as patcher:
@@ -1135,6 +1137,37 @@ def test_native_provider_bridge_returns_typed_protocol_feedback():
             },
         )
         assert response.status_code == 422 and response.json()["detail"]["kind"] == "invalid_prediction"
+
+
+def test_wmh_pool_identity_excludes_billing_routes_for_the_same_model():
+    """Azure Foundry serves the built artifact's model; enabling it must not orphan the artifact.
+
+    grounded-world-model-785e30597233ee43e354 binds this pool identity. Model,
+    waterfall and effort changes still change it; billing routes do not.
+    """
+    from dataclasses import replace
+
+    from benchmarks import experiential_bridge
+    from providers.rose import pools
+
+    spec = pools.get_pool("rose-wmh-gpt61")
+    assert spec.foundry_enabled is True and spec.foundry_deployments == ("gpt-6.1-sol",)
+    assert experiential_bridge.pool_sha256("rose-wmh-gpt61") == (
+        "31497e147da1d8aa72f949a59120fb4dac636621dbe7e239039701e52b3e1f47"
+    )
+    original = pools.get_pool
+    for changed in (
+        replace(spec, waterfall=("openai/gpt-6-sol",)),
+        replace(spec, gpt_auth_model="gpt-6-sol"),
+        replace(spec, waterfall_reasoning_effort="high"),
+    ):
+        try:
+            pools.get_pool = lambda name, changed=changed: changed
+            assert experiential_bridge.pool_sha256("rose-wmh-gpt61") != (
+                "31497e147da1d8aa72f949a59120fb4dac636621dbe7e239039701e52b3e1f47"
+            )
+        finally:
+            pools.get_pool = original
 
 
 def test_native_child_drops_idle_bridge_connections_before_the_bridge_closes_them():

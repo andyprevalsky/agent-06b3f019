@@ -202,6 +202,68 @@ def test_distribution_rebases_concurrent_predictions_without_rerolling_or_losing
     asyncio.run(run())
 
 
+def test_distribution_append_only_predictions_merge_without_repredicting():
+    """A wide fan-out of record-appending steps commits as each finishes (user-approved append-merge)."""
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+
+        async def complete(request):
+            requests.append(request)
+            if len(requests) == 3:
+                entered.set()
+            await release.wait()
+            return distribution_reply(request)
+
+        model = distribution_model(complete, sample_uniform=lambda: 0.975)
+        session = model.new_session("Contact three funds", {"receipts": []}, "root")
+        work = [asyncio.create_task(model.step(session.id, action(n), f"inv-{n}")) for n in (1, 2, 3)]
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*work), 2)
+        assert len(requests) == 3 and session.revision == 3
+        assert sorted(session.state["receipts"]) == ["call-1", "call-2", "call-3"]
+        merged = sorted(r["metadata"].get("append_merged_from_revision", -1) for r in results)
+        assert merged == [-1, 0, 0] and all(r["metadata"]["state_retries"] == 0 for r in results)
+        # History records the state each commit actually applied to.
+        assert [len(step["state_before"]["receipts"]) for step in session.history] == [0, 1, 2]
+
+    asyncio.run(run())
+
+
+def test_distribution_append_prediction_rebases_after_an_intervening_replace():
+    """A record append is not merged over a commit that changed existing state."""
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+
+        async def complete(request):
+            requests.append(request)
+            evidence = json.loads(request.messages[1].content)
+            payload = json.loads(distribution_reply(request))
+            if evidence["candidate_response"]["tool_calls"][0]["call_id"] == "call-1":
+                payload["outcomes"][1]["state_patch"] = [{"op": "replace", "path": "/funds_cents", "value": 500}]
+                return json.dumps(payload)
+            entered.set()
+            await release.wait()
+            return json.dumps(payload)
+
+        model = distribution_model(complete, sample_uniform=lambda: 0.975)
+        session = model.new_session("Fund then record", {"receipts": [], "funds_cents": 0}, "root")
+        slow = asyncio.create_task(model.step(session.id, action(2), "inv-2"))
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(model.step(session.id, action(1), "inv-1"), 2)
+        release.set()
+        result = await asyncio.wait_for(slow, 2)
+        assert len(requests) == 3 and result["metadata"]["state_retries"] == 1
+        assert "append_merged_from_revision" not in result["metadata"]
+        assert session.state == {"receipts": ["call-2"], "funds_cents": 500}
+
+    asyncio.run(run())
+
+
 def test_distribution_invalid_unselected_branch_never_commits_and_retirement_fences_late_result():
     async def run():
         requests = []

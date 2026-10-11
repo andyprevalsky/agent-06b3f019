@@ -91,6 +91,10 @@ class PoolSpec:
     foundry_enabled: bool = False
     """Try a matching Microsoft Foundry deployment after direct credentials."""
 
+    foundry_deployments: Tuple[str, ...] = ()
+    """Foundry deployments serving this pool's GPT model. Empty uses
+    ``AZURE_FOUNDRY_DEPLOYMENTS`` (Ultra's GPT-6 deployments in production)."""
+
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall stamps this effort instead of the
     caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
@@ -117,6 +121,9 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-wmh-gpt61",
         claude_auth_model="claude-opus-5-5",
         gpt_auth_model="gpt-6.1-sol",
+        # Azure credit first; the same model on OpenRouter is the fallback.
+        foundry_enabled=True,
+        foundry_deployments=("gpt-6.1-sol",),
         waterfall=("openai/gpt-6.1-sol",),
         waterfall_reasoning_effort="xhigh",
         direct_auth_enabled=False,

@@ -44,7 +44,7 @@ from benchmarks.wmh_execution_policy import (
 from benchmarks.wmh_execution_policy import (
     execution_policy as select_execution_policy,
 )
-from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, parse_distribution, select_outcome
+from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, apply_state_patch, parse_distribution, select_outcome
 from utils.world_model_observation import effective_world_model_content
 
 CANONICAL_INPUT_SCHEMA = {
@@ -143,6 +143,13 @@ class RoseNativeRetriever:
         return tuple(selected)
 
 
+def _appends_only(state_patch):
+    """True for a selected outcome patch that only appends to existing lists (empty included)."""
+    return state_patch is not None and all(
+        operation.get("op") == "add" and str(operation.get("path", "")).endswith("/-") for operation in state_patch
+    )
+
+
 @dataclass
 class NativeSession:
     id: str
@@ -165,6 +172,8 @@ class NativeSession:
     contended: dict = field(default_factory=dict)
     conflicts: int = 0
     turn: asyncio.Event = field(default_factory=asyncio.Event)
+    # Per committed revision: whether its state change only appended records.
+    append_only: list = field(default_factory=list)
 
 
 class RetiredWorldModelScope(ValueError):
@@ -310,6 +319,16 @@ class ParallelWorldModel:
         return None
 
     @staticmethod
+    def _append_merge(session, revision, state_patch):
+        """Under the session lock: the current state with this append-only patch, or None to rebase."""
+        if not _appends_only(state_patch) or not all(session.append_only[revision:]):
+            return None
+        try:
+            return apply_state_patch(session.state, state_patch)
+        except ValueError:
+            return None
+
+    @staticmethod
     def _advance_turn(session):
         session.turn.set()
         session.turn = asyncio.Event()
@@ -368,6 +387,7 @@ class ParallelWorldModel:
             # Only malformed protocol is repaired here; semantic outcomes are not graded.
             original = request
             selection = None
+            state_patch = None
             for repair in range(2):
                 try:
                     context = self.capabilities.context_window_tokens
@@ -434,6 +454,11 @@ class ParallelWorldModel:
                             )
                             validate_transition_action(proposed, candidate)
                         selected, selection = select_outcome(distribution, draw)
+                        state_patch = next(
+                            outcome["state_patch"]
+                            for outcome in distribution["outcomes"]
+                            if outcome["id"] == selection["selected_outcome_id"]
+                        )
                         raw = json.dumps(selected, allow_nan=False)
                         selection.update(
                             prediction_id=prediction_id,
@@ -541,22 +566,33 @@ class ParallelWorldModel:
                         raise ValueError("Native world session ended before commit")
                     # The predictor reads the whole state and history. Disjoint writes
                     # do not prove independence: both can depend on a shared balance.
+                    # The one exception (user-approved append-merge): a prediction
+                    # that only appends records commits over commits that also
+                    # only appended, without predicting again.
+                    merged = None
                     if session.revision != revision:
-                        interval["discarded_due_to_revision"] = session.revision
-                        if key not in session.contended:
-                            session.conflicts += 1
-                            session.contended[key] = session.conflicts
-                        break
+                        merged = self._append_merge(session, revision, state_patch)
+                        if merged is None:
+                            interval["discarded_due_to_revision"] = session.revision
+                            if key not in session.contended:
+                                session.conflicts += 1
+                                session.contended[key] = session.conflicts
+                            break
                     # A prediction that started before a conflict yields to it.
                     turn = self._awaiting_turn(session, key)
                     if turn is None:
                         if len(session.history) >= self.maximum_steps:
                             raise ValueError("Native session step capacity reached")
+                        state_before, state_after = base, transition.state
+                        if merged is not None:
+                            state_before, state_after = session.state, merged
+                            observation["metadata"]["append_merged_from_revision"] = revision
+                            audit["append_merged_from_revision"] = revision
                         observation["metadata"]["committed_revision"] = session.revision + 1
                         step = {
                             "action": deepcopy(action),
                             "observation": deepcopy(observation),
-                            "state_before": deepcopy(base),
+                            "state_before": deepcopy(state_before),
                             "task": session.task,
                         }
                         session.messages = (
@@ -565,7 +601,8 @@ class ParallelWorldModel:
                             *transition.visible_messages,
                         )
                         session.history = (*session.history, step)
-                        session.state = deepcopy(transition.state)
+                        session.state = deepcopy(state_after)
+                        session.append_only.append(_appends_only(state_patch))
                         session.revision += 1
                         self.retrieval_calls += 1
                         audit["committed_revision"] = session.revision

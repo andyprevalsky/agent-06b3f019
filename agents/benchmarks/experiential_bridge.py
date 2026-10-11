@@ -30,11 +30,17 @@ PROVIDER_SERVER_KEEPALIVE_SECONDS = 30
 
 
 def pool_sha256(pool):
-    from providers.rose.pools import get_pool
+    """Model identity a native artifact binds: models, waterfall and effort.
 
-    return hashlib.sha256(
-        json.dumps(asdict(get_pool(pool)), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    Azure Foundry is a billing route for the pool's own GPT model, so it is
+    normalized out; otherwise enabling Azure credit would orphan every artifact.
+    """
+    from providers.rose import pools
+
+    identity = asdict(pools.get_pool(pool))
+    identity.pop("foundry_deployments")
+    identity["foundry_enabled"] = False
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def native_python():
