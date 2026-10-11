@@ -24,6 +24,15 @@ type LedgerLine =
  * so later runs from any worktree on this machine check them, including after a merged worktree
  * is deleted.
  */
+/**
+ * TREASURY_RAILS_SKIP_OVERDUE_RECLAIM=1 reports an earlier mint that is still unreclaimed past the
+ * deadline as a loud SKIP instead of failing the run. Use it only while the AgentCard sandbox itself
+ * is not reclaiming (an external outage); other provider failures still fail.
+ */
+export function overdueReclaimSkipped(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.TREASURY_RAILS_SKIP_OVERDUE_RECLAIM === '1';
+}
+
 export function pendingMintLedgerPath(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.TREASURY_RAILS_PENDING_MINT_LEDGER?.trim();
   if (override) return override;
