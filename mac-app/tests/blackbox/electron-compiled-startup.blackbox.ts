@@ -80,6 +80,7 @@ function makeWebContents() {
     on() {},
     once() {},
     isLoading() { return false; },
+    isLoadingMainFrame() { return false; },
     setWindowOpenHandler() {},
     openDevTools() {},
     focus() {},

@@ -1,10 +1,11 @@
 /**
  * Blackbox tests for AgentSettingsDialog.
  * Covers open/close, no-agent state, metrics rendering, price-limit edit/save/cancel,
- * response-schema rendering, the 1.8s delete-confirmation timer, and admin Report Bug.
+ * response-schema rendering, the 1.8s delete-confirmation timer, and admin Report Bug
+ * (including dragged / pasted screenshots).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -406,5 +407,116 @@ describe('AgentSettingsDialog', () => {
     });
     expect(screen.queryByTestId('report-bug-launched')).toBeNull();
     expect(screen.getByTestId('report-bug-description')).toHaveValue('Unconfigured case');
+  });
+
+  it('uploads a dropped screenshot and submits it as an image link in the description', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    const signedUrl =
+      'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/sign/attachments/u/1_live-view.png?token=t';
+    // jsdom Files reach MSW through undici as Blobs named "blob", so assert the
+    // type here and let the mock answer with the backend's original filename.
+    const uploads: Array<{ agentId: string; type: string }> = [];
+    let releaseUpload: (() => void) | null = null;
+    let submitted: string | undefined;
+    server.use(
+      http.post(
+        `${API_BASE}/agents/:agentId/report-bug/screenshots`,
+        async ({ request, params }) => {
+          const form = await request.formData();
+          const file = form.get('file') as File;
+          uploads.push({ agentId: String(params.agentId), type: file.type });
+          await new Promise<void>((resolve) => {
+            releaseUpload = resolve;
+          });
+          return HttpResponse.json(
+            { success: true, name: 'live-view.png', url: signedUrl, expires_in: 604_800 },
+            { status: 201 },
+          );
+        },
+      ),
+      http.post(`${API_BASE}/agents/:agentId/report-bug`, async ({ request }) => {
+        submitted = ((await request.json()) as { description?: string }).description;
+        return HttpResponse.json(
+          { success: true, name: 'Live view', url: 'https://boxes.dev/x', run_id: 'run-shot' },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+    await u.click(await screen.findByTestId('report-bug-open'));
+    const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
+    expect(screen.getByTestId('report-bug-screenshot-hint')).toHaveTextContent(
+      'Drag, drop or paste screenshots',
+    );
+    await u.type(textarea, 'Live view shows a closed session');
+
+    const screenshot = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'live-view.png', {
+      type: 'image/png',
+    });
+    fireEvent.drop(textarea, { dataTransfer: { files: [screenshot], types: ['Files'] } });
+
+    await waitFor(() => expect(uploads).toHaveLength(1));
+    expect(uploads[0]).toEqual({ agentId: 'agent-xyz', type: 'image/png' });
+    expect(textarea.value).toBe(
+      'Live view shows a closed session\n![Uploading live-view.png #1…]()\n',
+    );
+    expect(screen.getByTestId('report-bug-screenshot-hint')).toHaveTextContent(
+      'Uploading 1 screenshot…',
+    );
+    expect(screen.getByTestId('report-bug-submit')).toBeDisabled();
+
+    releaseUpload!();
+    await waitFor(() =>
+      expect(textarea.value).toBe(
+        `Live view shows a closed session\n![live-view.png](${signedUrl})\n`,
+      ),
+    );
+    expect(screen.getByTestId('report-bug-submit')).toBeEnabled();
+
+    await u.click(screen.getByTestId('report-bug-submit'));
+    await waitFor(() =>
+      expect(submitted).toBe(`Live view shows a closed session\n![live-view.png](${signedUrl})`),
+    );
+  });
+
+  it('attaches a pasted screenshot and ignores dropped non-image files', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    const uploads: string[] = [];
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/report-bug/screenshots`, async ({ request }) => {
+        const file = (await request.formData()).get('file') as File;
+        uploads.push(file.type);
+        return HttpResponse.json(
+          {
+            success: true,
+            name: 'clipboard.jpg',
+            url: 'https://img.example/clipboard.jpg',
+            expires_in: 1,
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+    await u.click(await screen.findByTestId('report-bug-open'));
+    const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
+
+    const notes = new File(['notes'], 'notes.txt', { type: 'text/plain' });
+    fireEvent.drop(textarea, { dataTransfer: { files: [notes], types: ['Files'] } });
+    const pasted = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'clipboard.jpg', {
+      type: 'image/jpeg',
+    });
+    fireEvent.paste(textarea, { clipboardData: { files: [pasted], types: ['Files'] } });
+
+    await waitFor(() =>
+      expect(textarea.value).toBe('![clipboard.jpg](https://img.example/clipboard.jpg)\n'),
+    );
+    expect(uploads).toEqual(['image/jpeg']);
   });
 });

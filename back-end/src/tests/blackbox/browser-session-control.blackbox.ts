@@ -159,12 +159,71 @@ async function testOwnershipHandshake(accessToken: string, userId: string): Prom
   }
 }
 
+/** The live view's binding read: owner-only, closed rows report live=false. */
+async function testLiveViewBinding(accessToken: string, userId: string): Promise<void> {
+  const context = await prisma.browserContext.upsert({
+    where: { userId },
+    create: { userId, contextId: `live-view-profile-${randomUUID()}` },
+    update: {},
+  });
+  const session = await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId: `live-view-session-${randomUUID()}`,
+      debugUrl: 'https://connect.steel.dev/v1/sessions/released/player?interactive=false',
+      status: 'CLOSED',
+    },
+  });
+  const foreignContext = await prisma.browserContext.create({
+    data: { userId: `foreign-live-view-${randomUUID()}`, contextId: `profile-${randomUUID()}` },
+  });
+  const foreign = await prisma.browserSession.create({
+    data: {
+      contextId: foreignContext.id,
+      agentId: randomUUID(),
+      sessionId: `foreign-live-view-${randomUUID()}`,
+      status: 'ACTIVE',
+    },
+  });
+  const liveView = (taskId: string) => `${BASE_URL}/api/browser-session/task/${taskId}/live-view`;
+  const userHeaders = { Authorization: `Bearer ${accessToken}` };
+  try {
+    expectStatus(await request(liveView(session.id)), 401);
+    expectStatus(await request(liveView(foreign.id), { headers: userHeaders }), 404);
+    const before = Date.now();
+    const owned = await request(liveView(session.id), { headers: userHeaders });
+    expectStatus(owned, 200);
+    const view = owned.data as Record<string, unknown>;
+    if (
+      view.taskId !== session.id ||
+      view.sessionId !== session.sessionId ||
+      view.debugUrl !== session.debugUrl ||
+      view.status !== 'CLOSED' ||
+      view.live !== false ||
+      typeof view.asOf !== 'number' ||
+      view.asOf < before - 60_000
+    ) {
+      throw new Error(`Unexpected live-view binding: ${JSON.stringify(view)}`);
+    }
+    const leaseRow = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: session.id },
+      select: { controlState: true },
+    });
+    if (leaseRow.controlState !== 'AGENT') throw new Error('live-view read mutated control state');
+  } finally {
+    await prisma.browserSession.delete({ where: { id: session.id } });
+    await prisma.browserContext.delete({ where: { id: foreignContext.id } });
+  }
+}
+
 async function runAll(): Promise<void> {
   const { accessToken, userId } = await anonymousSession();
   await testCrossUserResume(accessToken);
   await testOwnershipHandshake(accessToken, userId);
+  await testLiveViewBinding(accessToken, userId);
   await prisma.$disconnect();
-  console.log('PASS browser-session-control (2 cases)');
+  console.log('PASS browser-session-control (3 cases)');
 }
 
 runAll().catch(async (error) => {

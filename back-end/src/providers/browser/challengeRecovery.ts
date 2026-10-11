@@ -65,6 +65,7 @@ import {
   type LaneConfigSearchOptions,
 } from './challengeRecoveryLaneSearch';
 import { closeValidationBrowser } from './challengeRecoverySupport';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 
 export {
   buildPreferredBrowserConfig,
@@ -139,6 +140,8 @@ export interface BrowserConfigSearchRuntimeDependencies {
   releaseSteel: typeof releaseSteelRemoteSession;
   releaseBrowserUse: typeof releaseBrowserUseRemoteSession;
   probe: typeof probeCandidateBrowser;
+  /** Tell the live view about the promoted binding before the old session is released. */
+  announceBinding?: typeof announceBrowserSessionBinding;
 }
 
 export interface RecoveryStorageLane {
@@ -437,6 +440,7 @@ export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeD
   releaseSteel: releaseSteelRemoteSession,
   releaseBrowserUse: releaseBrowserUseRemoteSession,
   probe: probeCandidateBrowser,
+  announceBinding: announceBrowserSessionBinding,
 };
 
 /**

@@ -136,3 +136,27 @@ export interface AttentionStreamPayload {
 export interface AgentModeStartedPayload {
   agentId: string;
 }
+
+// -----------------------------------------------------------------------------
+// BROWSER_SESSION Event - a browser task's provider-session binding changed
+// -----------------------------------------------------------------------------
+
+/**
+ * BROWSER_SESSION payload - the provider session a browser task is bound to.
+ *
+ * Sent when the backend rebinds a task's BrowserSession row (challenge
+ * recovery, resume, rotation, reclaim) before releasing the old session, and
+ * when the row is paused or closed. The live-view GET returns the same shape;
+ * consumers keep the newest `asOf` per task.
+ */
+export interface BrowserSessionBindingPayload {
+  agentId?: string;
+  taskId: string;
+  sessionId: string;
+  debugUrl: string | null;
+  status: string;
+  /** false: closed or ended by the provider; null: provider health unknown. */
+  live: boolean | null;
+  /** Server time in ms. */
+  asOf: number;
+}
