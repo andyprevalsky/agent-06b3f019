@@ -9,6 +9,8 @@
  *   step.offsetSec = (step.tsMs - recordingStartMs) / 1000
  *        │
  *   playheadSec = sum(priorSegmentDurations) + video.currentTime
+ *     (multi-part: partStart - recordingStartMs + sum(prior durations in the
+ *      same part) + video.currentTime, so a pause between parts stays aligned)
  *        │
  *        ▼
  *   activeIndex = last i where offsetSec[i] <= playheadSec
@@ -150,4 +152,82 @@ export function seekTargetFromOffset(
     return { segmentIndex: i, timeInSegment: remaining };
   }
   return { segmentIndex: 0, timeInSegment: t };
+}
+
+/** A playlist segment placed in wall-clock time by its recording part. */
+export type PartTimedSegment = { partIndex: number; partStartMs: number | null };
+
+function partStartsKnown(
+  segments: PartTimedSegment[],
+  recordingStartMs: number | null,
+): recordingStartMs is number {
+  return (
+    recordingStartMs !== null &&
+    segments.length > 0 &&
+    segments.every((segment) => segment.partStartMs !== null)
+  );
+}
+
+/**
+ * Playhead for a multi-part recording. Each part (one saved recording per
+ * browser activity) starts at its own wall-clock start, so a pause between
+ * parts — hours for an auth-assistance handoff — keeps later steps aligned.
+ * Segments inside one part (Kernel per-session replays) follow each other.
+ * Without every part start, falls back to one contiguous playlist.
+ */
+export function partPlayheadSec(
+  segments: PartTimedSegment[],
+  segmentDurationsSec: number[],
+  segmentIndex: number,
+  currentTimeSec: number,
+  recordingStartMs: number | null,
+): number {
+  if (!partStartsKnown(segments, recordingStartMs) || !segments[segmentIndex]) {
+    return playheadFromSegments(segmentDurationsSec, segmentIndex, currentTimeSec);
+  }
+  const segment = segments[segmentIndex];
+  const partIndices = segments
+    .map((other, index) => (other.partIndex === segment.partIndex ? index : -1))
+    .filter((index) => index >= 0);
+  const position = partIndices.indexOf(segmentIndex);
+  const partStartSec = ((segment.partStartMs as number) - recordingStartMs) / 1000;
+  return (
+    partStartSec +
+    playheadFromSegments(
+      partIndices.map((index) => segmentDurationsSec[index] ?? 0),
+      position,
+      currentTimeSec,
+    )
+  );
+}
+
+/** Inverse of {@link partPlayheadSec}: the segment and in-segment time for a step offset. */
+export function partSeekTarget(
+  segments: PartTimedSegment[],
+  segmentDurationsSec: number[],
+  offsetSec: number,
+  recordingStartMs: number | null,
+): { segmentIndex: number; timeInSegment: number } {
+  if (!partStartsKnown(segments, recordingStartMs)) {
+    return seekTargetFromOffset(offsetSec, segmentDurationsSec);
+  }
+  // Segments are ordered by part start: take the last part starting at or
+  // before the offset (or the first part when the offset precedes them all).
+  let partIndex = segments[0].partIndex;
+  let partStartSec = ((segments[0].partStartMs as number) - recordingStartMs) / 1000;
+  for (const segment of segments) {
+    const startSec = ((segment.partStartMs as number) - recordingStartMs) / 1000;
+    if (startSec <= offsetSec + 1e-6) {
+      partIndex = segment.partIndex;
+      partStartSec = startSec;
+    }
+  }
+  const partIndices = segments
+    .map((segment, index) => (segment.partIndex === partIndex ? index : -1))
+    .filter((index) => index >= 0);
+  const local = seekTargetFromOffset(
+    offsetSec - partStartSec,
+    partIndices.map((index) => segmentDurationsSec[index] ?? 0),
+  );
+  return { segmentIndex: partIndices[local.segmentIndex], timeInSegment: local.timeInSegment };
 }
