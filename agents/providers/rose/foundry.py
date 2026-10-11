@@ -16,7 +16,7 @@ import httpx
 import structlog
 
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
-from providers.rose.gpt_auth import build_codex_responses_body
+from providers.rose.gpt_auth import _normalize_reasoning_effort, build_codex_responses_body
 from providers.rose.pools import PoolSpec, foundry_model
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.types import StreamChunk
@@ -33,6 +33,17 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
         and os.getenv("AZURE_FOUNDRY_ENDPOINT", "").strip()
         and os.getenv("AZURE_FOUNDRY_API_KEY", "").strip()
     )
+
+
+# Azure rejects efforts above a model's ceiling with HTTP 400. Open-weights
+# gpt-oss accepts low / medium / high only, so the xhigh default is capped.
+_EFFORT_CEILINGS: dict[str, str] = {"gpt-oss-120b": "high"}
+
+
+def _effort_for(model: str, effort: Optional[str]) -> str:
+    normalized = _normalize_reasoning_effort(effort)
+    ceiling = _EFFORT_CEILINGS.get(model)
+    return ceiling if ceiling and normalized == "xhigh" else normalized
 
 
 def _deployments(model: str) -> list[str]:
@@ -111,7 +122,7 @@ async def foundry_complete(
                 context_tools=context_tools,
                 tool_choice=tool_choice,
                 temperature=temperature,
-                effort=effort,
+                effort=_effort_for(foundry_model(pool_spec), effort),
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,

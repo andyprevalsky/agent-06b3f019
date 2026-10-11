@@ -274,3 +274,36 @@ def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
     oss = get_pool("rose-1-oss")
     assert oss.foundry_enabled and foundry_model(oss) == "gpt-oss-120b"
     assert foundry._deployments(foundry_model(oss)) == ["gpt-oss-120b"]
+
+
+@pytest.mark.asyncio
+async def test_open_weights_foundry_caps_xhigh_effort(monkeypatch):
+    """Azure gpt-oss rejects xhigh (HTTP 400); its fallback caps effort at high."""
+    efforts = []
+
+    def handler(request):
+        efforts.append(json.loads(request.content)["reasoning"]["effort"])
+        return httpx.Response(200, text=_sse({"type": "response.output_text.delta", "delta": "ok"}))
+
+    _install_http(monkeypatch, handler)
+    for pool, effort in (("rose-1-oss", None), ("rose-1-oss", "max"), ("rose-1-oss", "medium"), ("rose-1-ultra", None)):
+        async for _chunk in foundry.foundry_complete(
+            pool_spec=get_pool(pool),
+            messages=[{"role": "user", "content": "hi"}],
+            response_format=None,
+            tools=None,
+            context_tools=None,
+            tool_choice=None,
+            temperature=None,
+            effort=effort,
+            provider_fast_mode=False,
+            request_id=f"effort-{pool}-{effort}",
+            route_key="agent-1",
+            agent_id="agent-1",
+            call_site="test",
+            cache_namespace=None,
+            ttft_timeout_s=2,
+            idle_timeout_s=2,
+        ):
+            pass
+    assert efforts == ["high", "high", "medium", "xhigh"]
