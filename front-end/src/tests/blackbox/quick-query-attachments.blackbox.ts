@@ -42,6 +42,7 @@ function makeDeps(overrides: Partial<QuickQueryDeps> = {}): QuickQueryDeps {
     selectedModel: 'rose-1-flash',
     canSubmitGoals: true,
     authReady: true,
+    messageInput: '',
     clientSource: 'MAC_APP',
     pendingPriceLimitCents: 500,
     setCurrentView: vi.fn(),
@@ -319,6 +320,54 @@ describe('quick-query cold start', () => {
     unmount();
   });
 
+  // An expired draft is text the user has not sent. A fresh submit drained in
+  // the same pass used to prefill and then clear the input over it.
+  it('keeps an expired submit in the input when a fresh one launches in the same drain', async () => {
+    const stale = Date.now() - QUICK_QUERY_LAUNCH_WINDOW_MS - 1;
+    act(() => {
+      dispatchQuickQueryEvent({ query: 'expired draft', submittedAt: stale });
+      dispatchQuickQueryEvent({ query: 'fresh launch', submittedAt: Date.now() });
+    });
+
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await waitFor(() => expect(deps.setSelectedAgentIdContext).toHaveBeenCalled());
+
+    expect(createAgent).toHaveBeenCalledTimes(1);
+    expect(createAgent.mock.calls[0]?.[0]).toMatchObject({ goal: 'fresh launch' });
+    expect(vi.mocked(deps.setMessageInput).mock.calls).toEqual([['expired draft']]);
+    unmount();
+  });
+
+  it('lets a launch use the input again once the user has sent the expired draft', async () => {
+    const stale = Date.now() - QUICK_QUERY_LAUNCH_WINDOW_MS - 1;
+    act(() => {
+      dispatchQuickQueryEvent({ query: 'expired draft', submittedAt: stale });
+    });
+
+    const deps = makeDeps();
+    const { rerender, unmount } = renderHook((props: QuickQueryDeps) => useQuickQuery(props), {
+      initialProps: deps,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender({ ...deps, messageInput: 'expired draft' });
+    rerender({ ...deps, messageInput: '' });
+
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'later launch', submittedAt: Date.now() });
+    });
+    await waitFor(() => expect(deps.setSelectedAgentIdContext).toHaveBeenCalled());
+
+    expect(vi.mocked(deps.setMessageInput).mock.calls).toEqual([
+      ['expired draft'],
+      ['later launch'],
+      [''],
+    ]);
+    unmount();
+  });
+
   // Launching an agent costs money. A submit that sat held (signed out, a
   // window that never loaded) must not start one long after it was asked for.
   it('shows a submit that waited past the launch window instead of launching it', async () => {
@@ -447,6 +496,33 @@ describe('quick-query hold queue', () => {
     expect(received).toEqual(['granted']);
     expect(granted).toHaveBeenCalledTimes(1);
     expect(refused).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  // A submit waiting behind a slow launch must stay with the main process: once
+  // claimed it exists only in this renderer, and a reload or close would lose it.
+  it('claims the next submit only after the previous consumer work settles', async () => {
+    let finishFirst: (() => void) | null = null;
+    const firstClaim = vi.fn(() => Promise.resolve(true));
+    const secondClaim = vi.fn(() => Promise.resolve(true));
+    const received: string[] = [];
+    const unsubscribe = subscribeQuickQuery((payload) => {
+      received.push(payload.query);
+      if (payload.query !== 'slow launch') return undefined;
+      return new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+    });
+    dispatchQuickQueryEvent({ query: 'slow launch', submittedAt: 1 }, firstClaim);
+    dispatchQuickQueryEvent({ query: 'waits its turn', submittedAt: 2 }, secondClaim);
+
+    await waitFor(() => expect(received).toEqual(['slow launch']));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(secondClaim).not.toHaveBeenCalled();
+
+    finishFirst?.();
+    await waitFor(() => expect(received).toEqual(['slow launch', 'waits its turn']));
+    expect(secondClaim).toHaveBeenCalledTimes(1);
     unsubscribe();
   });
 

@@ -9,8 +9,9 @@
  *   [auth_resolving] --authReady--> [idle] (held submits replay as quick-query)
  *   [idle] --quick-query(text|files)--> [freshness_gate]
  *     [freshness_gate] --held past launch window--> [prefill_input + toast] --> [idle]
- *     [freshness_gate] --fresh--> [queued] (one launch at a time, in submit order)
- *     [queued] --previous launch settled--> [auth_gate]
+ *     [freshness_gate] --fresh--> [auth_gate]
+ *   lib/quickQuery hands over (and claims) the next submit only after this
+ *   one's launch settles, so launches run one at a time in submit order.
  *     [auth_gate] --!canSubmit--> [login_modal] --> stop
  *     [auth_gate] --ok--> [uploading_attachments?] --> [creating_agent]
  *       [creating_agent] --ok--> [agent_selected]
@@ -39,6 +40,8 @@ export interface QuickQueryDeps {
   canSubmitGoals: boolean;
   /** False while auth is still resolving, when canSubmitGoals is not yet meaningful. */
   authReady: boolean;
+  /** What the message input shows as of the last render. */
+  messageInput: string;
   clientSource: string;
   pendingPriceLimitCents: number;
   setCurrentView: (v: TerminalView) => void;
@@ -57,16 +60,20 @@ const EXPIRED_DRAFT_BATCH_MS = 5_000;
 interface ExpiredDrafts {
   startedAt: number;
   queries: string[];
+  /** The input's value when drafts were put there; it still reads as this until it re-renders. */
+  replaced: string | null;
 }
 
 export function useQuickQuery(deps: QuickQueryDeps) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
   const { authReady } = deps;
-  // One launch at a time: a second submit must not reset the input or the
-  // sending state while the first is still uploading or creating its agent.
-  const launchQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const expiredDraftsRef = useRef<ExpiredDrafts>({ startedAt: 0, queries: [] });
+  const expiredDraftsRef = useRef<ExpiredDrafts>({ startedAt: 0, queries: [], replaced: null });
+
+  useEffect(() => {
+    // The input has re-rendered: from here it shows the drafts or the user's own edit.
+    expiredDraftsRef.current.replaced = null;
+  }, [deps.messageInput]);
 
   useEffect(() => {
     // A launcher submit can open the main window itself. Until auth resolves,
@@ -80,11 +87,12 @@ export function useQuickQuery(deps: QuickQueryDeps) {
         showExpiredQuickQuery(depsRef.current, detail, expiredDraftsRef.current);
         return;
       }
-      launchQueueRef.current = launchQueueRef.current
-        .then(() => handleQuickQuery(depsRef.current, detail, goal))
-        .catch((error: unknown) => {
+      // Returning the launch keeps the next submit unclaimed until this one settles.
+      return handleQuickQuery(depsRef.current, detail, goal, expiredDraftsRef.current).catch(
+        (error: unknown) => {
           console.error('[QuickQuery] Launch failed', error);
-        });
+        },
+      );
     });
   }, [authReady]);
 
@@ -95,6 +103,16 @@ export function useQuickQuery(deps: QuickQueryDeps) {
       window.removeEventListener(OPEN_AGENT_EVENT, handleOpenAgent);
     };
   }, []);
+}
+
+/** True while expired drafts are what the input shows, or is about to show. */
+function draftsOccupyInput(d: QuickQueryDeps, drafts: ExpiredDrafts): boolean {
+  if (drafts.queries.length === 0) return false;
+  if (d.messageInput === drafts.queries.join('\n\n')) return true;
+  if (drafts.replaced !== null && d.messageInput === drafts.replaced) return true;
+  // The user sent or rewrote them; the input is theirs again.
+  drafts.queries = [];
+  return false;
 }
 
 /** Too old to launch unasked: keep the user's text and let them send it. */
@@ -120,14 +138,22 @@ function showExpiredQuickQuery(
       drafts.queries = [];
     }
     drafts.queries.push(query);
+    drafts.replaced = d.messageInput;
     d.setMessageInput(drafts.queries.join('\n\n'));
   }
   d.toast({ title: 'Quick launch was not sent', description });
 }
 
-async function handleQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload, goal: string) {
+async function handleQuickQuery(
+  d: QuickQueryDeps,
+  payload: QuickLauncherPayload,
+  goal: string,
+  drafts: ExpiredDrafts,
+) {
+  // Expired drafts are text the user has not sent yet; a launch must not replace or clear them.
+  const keepInput = draftsOccupyInput(d, drafts);
   d.setCurrentView('agents');
-  d.setMessageInput(goal);
+  if (!keepInput) d.setMessageInput(goal);
   analytics.track('goal_submitted', {
     goal_length: goal.length,
     model: d.selectedModel,
@@ -158,7 +184,7 @@ async function handleQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload
     await d.loadAgents();
     d.setCurrentView('agents');
     d.setSelectedAgentIdContext(newAgent.agent_id);
-    d.setMessageInput('');
+    if (!keepInput) d.setMessageInput('');
     d.toast({
       title: 'Agent created',
       description: 'Your new agent has been created and is starting',
