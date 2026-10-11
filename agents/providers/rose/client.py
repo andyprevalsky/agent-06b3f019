@@ -63,7 +63,7 @@ from providers.rose.foundry import foundry_complete, foundry_configured
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
-from providers.rose.pools import PoolName, get_pool
+from providers.rose.pools import PoolName, foundry_model, get_pool
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
@@ -1886,7 +1886,7 @@ class RoseClient:
             # visible response remains an error.
             # A model that was cut off at its output limit is excluded from every
             # route that serves it, funded ones included (see truncation.py).
-            if foundry_configured(pool_spec) and model_key(pool_spec.gpt_auth_model) not in _skip_models:
+            if foundry_configured(pool_spec) and model_key(foundry_model(pool_spec)) not in _skip_models:
                 active_route = "foundry"
                 foundry_yielded_any = False
                 try:

@@ -49,6 +49,11 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
+    rose-1-oss:  (open-weights only)
+        direct_auth_enabled = False
+        foundry    = gpt-oss-120b (when configured)
+        waterfall  = moonshotai/kimi-k3
+
 Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b.
 Groq's newer qwen3.8-27b is not on OpenRouter's Groq route. TypeSafe Jev
 is Decisions-API only. Yutori n1.5 is a separate computer-use tool schema.
@@ -91,10 +96,14 @@ class PoolSpec:
     which the transport layer maps to the right endpoint."""
 
     foundry_enabled: bool = False
-    """Try the pool's ``gpt_auth_model`` on Microsoft Foundry (funded Azure).
+    """Try the pool's Foundry model on Microsoft Foundry (funded Azure).
 
     It follows direct credentials and the direct Cerebras hop, and precedes the
     OpenRouter waterfall. ``direct_auth_enabled`` does not gate it."""
+
+    foundry_model: str | None = None
+    """Foundry model when it must differ from ``gpt_auth_model`` (the open-weights
+    pool keeps its guarantee on Azure's gpt-oss). Defaults to ``gpt_auth_model``."""
 
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall stamps this effort instead of the
@@ -196,8 +205,16 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-luna",
         waterfall=("moonshotai/kimi-k3",),
         direct_auth_enabled=False,
+        # Funded Azure fallback stays open-weights: gpt-oss-120b.
+        foundry_enabled=True,
+        foundry_model="gpt-oss-120b",
     ),
 }
+
+
+def foundry_model(pool_spec: PoolSpec) -> str:
+    """The model a pool requests from Microsoft Foundry."""
+    return pool_spec.foundry_model or pool_spec.gpt_auth_model
 
 
 def get_pool(name: str) -> PoolSpec:

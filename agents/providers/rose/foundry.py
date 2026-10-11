@@ -17,7 +17,7 @@ import structlog
 
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import build_codex_responses_body
-from providers.rose.pools import PoolSpec
+from providers.rose.pools import PoolSpec, foundry_model
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.types import StreamChunk
 
@@ -99,7 +99,7 @@ async def foundry_complete(
     route_key = route_key or agent_id or request_id
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for deployment in _ordered_deployments(pool_spec.gpt_auth_model, route_key):
+        for deployment in _ordered_deployments(foundry_model(pool_spec), route_key):
             if time.monotonic() < _cooldown_until.get(deployment, 0):
                 continue
             body = build_codex_responses_body(
@@ -147,7 +147,7 @@ async def foundry_complete(
                     try:
                         async for chunk in parse_responses_sse(
                             response,
-                            actual_model=f"{pool_spec.gpt_auth_model}-foundry",
+                            actual_model=f"{foundry_model(pool_spec)}-foundry",
                             pool_name="foundry",
                             request_id=request_id,
                             idle_timeout_s=idle_timeout_s,

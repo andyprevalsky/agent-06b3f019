@@ -8,7 +8,7 @@ import pytest
 from providers.rose import foundry
 from providers.rose.errors import RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import _openai_credit_error, build_codex_responses_body
-from providers.rose.pools import get_pool
+from providers.rose.pools import foundry_model, get_pool
 from providers.rose.pricing import get_model_pricing
 
 
@@ -270,4 +270,7 @@ def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
     assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
     monkeypatch.delenv("AZURE_FOUNDRY_DEPLOYMENTS")
     assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
-    assert not get_pool("rose-1-oss").foundry_enabled
+    # The open-weights pool's Foundry fallback stays open-weights.
+    oss = get_pool("rose-1-oss")
+    assert oss.foundry_enabled and foundry_model(oss) == "gpt-oss-120b"
+    assert foundry._deployments(foundry_model(oss)) == ["gpt-oss-120b"]

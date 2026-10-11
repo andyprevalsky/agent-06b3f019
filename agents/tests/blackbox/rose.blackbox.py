@@ -149,6 +149,11 @@ def test_oss_pool_is_open_weights_only():
     assert oss.direct_auth_enabled is False
     assert oss.waterfall == ("moonshotai/kimi-k3",)
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
+    # Its funded Azure fallback is open-weights too, never the inert gpt_auth_model.
+    from providers.rose.pools import foundry_model
+
+    assert oss.foundry_enabled and foundry_model(oss) == "gpt-oss-120b"
+    assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
     auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
     for name, spec in POOL_REGISTRY.items():
@@ -5805,7 +5810,7 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
 
 
 async def test_client_foundry_luna_backs_mini_and_speed_pools():
-    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter.
+    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter; oss to gpt-oss-120b.
 
     Speed pools keep the direct Cerebras hop first; Foundry serves only after it
     fails before content. The shared Sol deployment list never receives Luna.
@@ -5886,10 +5891,16 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
         chunks = await run("rose-1-mini")
         assert attempted == ["foundry"], attempted
         assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
+
+        # The open-weights pool keeps its guarantee on Azure: gpt-oss-120b.
+        attempted.clear()
+        chunks = await run("rose-1-oss")
+        assert attempted == ["foundry"], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-oss-120b-foundry"
         cerebras_route._reset_cerebras_cooldown_cache()
 
-    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna"]
-    assert get_pool("rose-1-ultra").foundry_enabled and not get_pool("rose-1-oss").foundry_enabled
+    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-oss-120b"]
+    assert get_pool("rose-1-ultra").foundry_enabled
 
 
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
