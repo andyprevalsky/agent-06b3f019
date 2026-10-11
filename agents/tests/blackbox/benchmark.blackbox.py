@@ -19,7 +19,7 @@ import tempfile
 from unittest.mock import AsyncMock, patch
 import time
 
-from _test_utils import BlackboxResult
+from _test_utils import BlackboxResult, live_funded_azure
 
 # A command family verifies many native cases. Use the owning coverage domain's
 # generous guard, including in standalone runs, rather than sub-suite race caps.
@@ -7546,7 +7546,8 @@ async def _assert_blue_bottle_tree_proof_semantics_passes():
     static_passed, static_reason = _run_declared_static_check(task, static, data)
     assert static_passed is True, static_reason
 
-    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    with live_funded_azure():
+        single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
     assert single_score >= 1.0, (
         f"Expected tree-aware single-turn judge to pass; got score={single_score}: {single_turn.get('reasoning')}"
@@ -7569,7 +7570,8 @@ async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
     static_passed, static_reason = _run_declared_static_check(task, static, data)
     assert static_passed is True, static_reason
 
-    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    with live_funded_azure():
+        single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
     assert single_score >= 1.0, (
         f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: {single_turn.get('reasoning')}"

@@ -25,12 +25,14 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
         gptAuth    = gpt-5.6-luna
+        foundry    = gpt-5.6-luna (when configured)
         waterfall  = anthropic/claude-haiku-4.5 -> z-ai/glm-5.3-flash
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
+        foundry    = gpt-5.6-luna (when configured; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
@@ -43,6 +45,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-browser-use:  (same rose-fast hop as flash)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
+        foundry    = gpt-5.6-luna (when configured; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
@@ -88,7 +91,10 @@ class PoolSpec:
     which the transport layer maps to the right endpoint."""
 
     foundry_enabled: bool = False
-    """Try a matching Microsoft Foundry deployment after direct credentials."""
+    """Try the pool's ``gpt_auth_model`` on Microsoft Foundry (funded Azure).
+
+    It follows direct credentials and the direct Cerebras hop, and precedes the
+    OpenRouter waterfall. ``direct_auth_enabled`` does not gate it."""
 
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall stamps this effort instead of the
@@ -99,7 +105,8 @@ class PoolSpec:
     direct_auth_enabled: bool = True
     """When False, OAuth and funded API-key routes (claudeAuth / gptAuth /
     ANTHROPIC_API_KEY / GPT_API_KEY) are skipped. The pool then starts at
-    `cerebras_model` (if set) and falls through to `waterfall`."""
+    `cerebras_model` (if set), then Foundry (if `foundry_enabled`), and falls
+    through to `waterfall`."""
 
     cerebras_model: str | None = None
     """Bare Cerebras inventory id, posted to api.cerebras.ai (not OpenRouter)."""
@@ -119,6 +126,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-mini",
         claude_auth_model="claude-haiku-4-5",
         gpt_auth_model="gpt-5.6-luna",
+        foundry_enabled=True,
         waterfall=(
             "anthropic/claude-haiku-4.5",
             "z-ai/glm-5.3-flash",
@@ -137,6 +145,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
+        foundry_enabled=True,
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
@@ -170,6 +179,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
+        foundry_enabled=True,
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
     # open-source model -- currently the behavioral-biometrics benchmark, whose

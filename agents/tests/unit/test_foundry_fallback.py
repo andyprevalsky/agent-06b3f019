@@ -255,3 +255,19 @@ async def test_postcontent_protocol_error_never_retries(monkeypatch):
             chunks.append(chunk)
     assert len(calls) == 1
     assert chunks[1].data["text"] == "Partial"
+
+
+def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
+    """Prod's AZURE_FOUNDRY_DEPLOYMENTS names Sol; Luna pools must not inherit it."""
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol, gpt-6-sol-b")
+    assert foundry._deployments(get_pool("rose-1-ultra").gpt_auth_model) == ["gpt-6-sol", "gpt-6-sol-b"]
+    for pool in ("rose-1-mini", "rose-1-flash", "rose-1-browser-use"):
+        spec = get_pool(pool)
+        assert spec.foundry_enabled, pool
+        assert foundry._deployments(spec.gpt_auth_model) == ["gpt-5.6-luna"], pool
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-5.6-luna-east")
+    assert foundry._deployments("gpt-5.6-luna") == ["gpt-5.6-luna-east"]
+    assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
+    monkeypatch.delenv("AZURE_FOUNDRY_DEPLOYMENTS")
+    assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
+    assert not get_pool("rose-1-oss").foundry_enabled

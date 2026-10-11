@@ -36,7 +36,15 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
 
 
 def _deployments(model: str) -> list[str]:
-    return [item.strip() for item in os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", model).split(",") if item.strip()]
+    """Deployments serving ``model``: configured names equal to it or prefixed ``<model>-``.
+
+    AZURE_FOUNDRY_DEPLOYMENTS is shared by every Foundry pool, so one pool's
+    deployments must never receive another pool's model. Without a matching
+    configured name, Foundry's deploymentless inference serves the model id.
+    """
+    configured = [item.strip() for item in os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", "").split(",") if item.strip()]
+    matching = [name for name in configured if name == model or name.startswith(f"{model}-")]
+    return matching or [model]
 
 
 def _ordered_deployments(model: str, route_key: str) -> list[str]:

@@ -5804,6 +5804,94 @@ async def test_client_foundry_server_error_falls_through_to_openrouter():
     assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
 
 
+async def test_client_foundry_luna_backs_mini_and_speed_pools():
+    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter.
+
+    Speed pools keep the direct Cerebras hop first; Foundry serves only after it
+    fails before content. The shared Sol deployment list never receives Luna.
+    """
+    from providers.rose import cerebras as cerebras_route
+
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"luna ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    cerebras_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "from-cerebras"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    foundry_models: list[str] = []
+    cerebras_status = {"code": 200}
+
+    def handler(req):
+        host = req.url.host
+        if host == "api.cerebras.ai":
+            attempted.append("cerebras")
+            if cerebras_status["code"] == 200:
+                return httpx.Response(200, text=cerebras_ok, headers={"Content-Type": "text/event-stream"})
+            return httpx.Response(cerebras_status["code"], json={"error": {"message": "quota exceeded"}})
+        if host == "a-4989-resource.openai.azure.com":
+            attempted.append("foundry")
+            foundry_models.append(json.loads(req.content)["model"])
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if host == "openrouter.ai":
+            attempted.append("openrouter")
+            return httpx.Response(500, text="OpenRouter must not be reached")
+        return httpx.Response(200, json={"ok": True})
+
+    async def run(pool: str) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool=pool,
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
+                call_site=f"test-foundry-luna-{pool}",
+            )
+        )
+
+    set_mock_handler(handler)
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "CEREBRAS_API_KEY": "csk-test",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    with patch.dict(os.environ, env):
+        cerebras_route._reset_cerebras_cooldown_cache()
+        chunks = await run("rose-1-flash")
+        assert attempted == ["cerebras"], "a healthy Cerebras hop stays primary"
+        assert any(c.kind == "content" and c.data.get("text") == "from-cerebras" for c in chunks)
+
+        for pool in ("rose-1-flash", "rose-1-browser-use"):
+            attempted.clear()
+            cerebras_route._reset_cerebras_cooldown_cache()
+            cerebras_status["code"] = 402
+            chunks = await run(pool)
+            assert attempted == ["cerebras", "foundry"], (pool, attempted)
+            assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
+            assert any(c.kind == "content" and c.data.get("text") == "luna ok" for c in chunks)
+
+        attempted.clear()
+        chunks = await run("rose-1-mini")
+        assert attempted == ["foundry"], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
+        cerebras_route._reset_cerebras_cooldown_cache()
+
+    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna"]
+    assert get_pool("rose-1-ultra").foundry_enabled and not get_pool("rose-1-oss").foundry_enabled
+
+
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
 
@@ -8141,6 +8229,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_luna_backs_mini_and_speed_pools",
+        test_client_foundry_luna_backs_mini_and_speed_pools,
     )
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",
