@@ -1,5 +1,7 @@
 WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF THE USER WANTS MORE, OTHERWISE DO NOT OVERCOMMUNICATE. STRICTLY FOLLOWING USER COMMUNICATION PROTOCOL
 
+For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
+
 # Rose Labs
 
 AI agent platform.
