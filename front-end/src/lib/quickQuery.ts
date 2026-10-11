@@ -58,6 +58,16 @@ let queue: Promise<void> = Promise.resolve();
 let pending = 0;
 /** Collects what the consumers of the submit being emitted returned. */
 let emitting: Promise<unknown>[] | null = null;
+/** When each submit last reached a consumer that could take it. */
+const readyAt = new WeakMap<QuickLauncherPayload, number>();
+
+/**
+ * How long the submit waited for the app to be able to take it. Time spent
+ * queued behind another launch does not count: the app was ready by then.
+ */
+export function quickQueryWaitMs(payload: QuickLauncherPayload): number {
+  return (readyAt.get(payload) ?? Date.now()) - payload.submittedAt;
+}
 
 function hold(held: HeldQuickQuery): void {
   heldQueries.push(held);
@@ -90,6 +100,11 @@ function emit(payload: QuickLauncherPayload): Promise<void> | null {
 /** Claims one submit and hands it over; it counts as pending until its consumer work settles. */
 async function handOver({ payload, claim }: HeldQuickQuery): Promise<void> {
   try {
+    // The consumer left while this submit waited its turn: leave it unclaimed.
+    if (consumers.size === 0) {
+      hold({ payload, claim });
+      return;
+    }
     if (claim !== undefined) {
       let claimed = false;
       try {
@@ -107,6 +122,7 @@ async function handOver({ payload, claim }: HeldQuickQuery): Promise<void> {
 }
 
 function deliver(held: HeldQuickQuery): void {
+  readyAt.set(held.payload, Date.now());
   if (held.claim === undefined && pending === 0) {
     const work = emit(held.payload);
     if (work === null) return;
@@ -129,7 +145,8 @@ export function dispatchQuickQueryEvent(payload: QuickLauncherPayload, claim?: Q
     return;
   }
 
-  if (consumers.size === 0) {
+  // While earlier submits are still in the queue, later ones follow them so order is kept.
+  if (consumers.size === 0 && pending === 0) {
     hold({ payload, claim });
     return;
   }

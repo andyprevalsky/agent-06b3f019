@@ -368,6 +368,65 @@ describe('quick-query cold start', () => {
     unmount();
   });
 
+  it('adds a later expired submit to drafts that are still unsent in the input', async () => {
+    const stale = Date.now() - QUICK_QUERY_LAUNCH_WINDOW_MS - 1;
+    act(() => {
+      dispatchQuickQueryEvent({ query: 'first expired', submittedAt: stale });
+    });
+    const deps = makeDeps();
+    const { rerender, unmount } = renderHook((props: QuickQueryDeps) => useQuickQuery(props), {
+      initialProps: deps,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender({ ...deps, messageInput: 'first expired' });
+
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_000);
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'later expired', submittedAt: stale });
+    });
+    clock.mockRestore();
+
+    expect(vi.mocked(deps.setMessageInput).mock.lastCall?.[0]).toBe(
+      'first expired\n\nlater expired',
+    );
+    unmount();
+  });
+
+  // The launch window is about the app not being ready. A submit made while it
+  // was ready must not expire because the launch ahead of it was slow.
+  it('launches a submit made while the app was ready, however slow the launch ahead of it', async () => {
+    let finishFirst: (() => void) | null = null;
+    createAgent.mockImplementationOnce(
+      () =>
+        new Promise<{ agent_id: string }>((resolve) => {
+          finishFirst = () => resolve({ agent_id: 'agent-slow' });
+        }),
+    );
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    const submittedAt = Date.now();
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'slow first', submittedAt });
+      dispatchQuickQueryEvent({ query: 'right behind', submittedAt });
+    });
+    await waitFor(() => expect(createAgent).toHaveBeenCalledTimes(1));
+
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(submittedAt + QUICK_QUERY_LAUNCH_WINDOW_MS + 5_000);
+    await act(async () => {
+      finishFirst?.();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(createAgent).toHaveBeenCalledTimes(2));
+    clock.mockRestore();
+
+    expect(createAgent.mock.calls[1]?.[0]).toMatchObject({ goal: 'right behind' });
+    unmount();
+  });
+
   // Launching an agent costs money. A submit that sat held (signed out, a
   // window that never loaded) must not start one long after it was asked for.
   it('shows a submit that waited past the launch window instead of launching it', async () => {
@@ -524,6 +583,35 @@ describe('quick-query hold queue', () => {
     await waitFor(() => expect(received).toEqual(['slow launch', 'waits its turn']));
     expect(secondClaim).toHaveBeenCalledTimes(1);
     unsubscribe();
+  });
+
+  it('leaves a queued submit unclaimed when its consumer goes away mid-launch', async () => {
+    let finishFirst: (() => void) | null = null;
+    const firstClaim = vi.fn(() => Promise.resolve(true));
+    const secondClaim = vi.fn(() => Promise.resolve(true));
+    const early: string[] = [];
+    const unsubscribeEarly = subscribeQuickQuery((payload) => {
+      early.push(payload.query);
+      return new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+    });
+    dispatchQuickQueryEvent({ query: 'in flight', submittedAt: 1 }, firstClaim);
+    dispatchQuickQueryEvent({ query: 'queued behind', submittedAt: 2 }, secondClaim);
+    await waitFor(() => expect(early).toEqual(['in flight']));
+
+    unsubscribeEarly();
+    finishFirst?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(secondClaim).not.toHaveBeenCalled();
+
+    const late: string[] = [];
+    const unsubscribeLate = subscribeQuickQuery((payload) => {
+      late.push(payload.query);
+    });
+    await waitFor(() => expect(late).toEqual(['queued behind']));
+    expect(secondClaim).toHaveBeenCalledTimes(1);
+    unsubscribeLate();
   });
 
   it('keeps a submit that was claimed just as its consumer went away', async () => {

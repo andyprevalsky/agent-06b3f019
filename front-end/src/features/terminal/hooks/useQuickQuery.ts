@@ -26,6 +26,7 @@ import {
   QUICK_QUERY_LAUNCH_WINDOW_MS,
   fileFromQuickLauncherAttachment,
   goalFromQuickLauncherPayload,
+  quickQueryWaitMs,
   subscribeQuickQuery,
   type QuickLauncherPayload,
 } from '@/lib/quickQuery';
@@ -54,11 +55,7 @@ export interface QuickQueryDeps {
   toast: ReturnType<typeof useToast>['toast'];
 }
 
-/** Expired submits that surface this close together came from one cold start. */
-const EXPIRED_DRAFT_BATCH_MS = 5_000;
-
 interface ExpiredDrafts {
-  startedAt: number;
   queries: string[];
   /** The input's value when drafts were put there; it still reads as this until it re-renders. */
   replaced: string | null;
@@ -68,7 +65,7 @@ export function useQuickQuery(deps: QuickQueryDeps) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
   const { authReady } = deps;
-  const expiredDraftsRef = useRef<ExpiredDrafts>({ startedAt: 0, queries: [], replaced: null });
+  const expiredDraftsRef = useRef<ExpiredDrafts>({ queries: [], replaced: null });
 
   useEffect(() => {
     // The input has re-rendered: from here it shows the drafts or the user's own edit.
@@ -83,7 +80,7 @@ export function useQuickQuery(deps: QuickQueryDeps) {
       const goal = goalFromQuickLauncherPayload(detail);
       const hasAttachments = (detail.attachments?.length ?? 0) > 0;
       if (!goal && !hasAttachments) return;
-      if (Date.now() - detail.submittedAt > QUICK_QUERY_LAUNCH_WINDOW_MS) {
+      if (quickQueryWaitMs(detail) > QUICK_QUERY_LAUNCH_WINDOW_MS) {
         showExpiredQuickQuery(depsRef.current, detail, expiredDraftsRef.current);
         return;
       }
@@ -131,12 +128,8 @@ function showExpiredQuickQuery(
   }
   d.setCurrentView('agents');
   if (query) {
-    // Several submits can expire in one cold start; keep each one's text.
-    const now = Date.now();
-    if (now - drafts.startedAt > EXPIRED_DRAFT_BATCH_MS) {
-      drafts.startedAt = now;
-      drafts.queries = [];
-    }
+    // Keep every expired submit's text for as long as the drafts are still unsent.
+    if (!draftsOccupyInput(d, drafts)) drafts.queries = [];
     drafts.queries.push(query);
     drafts.replaced = d.messageInput;
     d.setMessageInput(drafts.queries.join('\n\n'));
