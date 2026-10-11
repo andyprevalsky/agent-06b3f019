@@ -28,6 +28,9 @@ sources:
   - agent 8b054756-bf09-43b9-ab3a-8a6c782e15e8
   - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
   - agent d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc
+  - PR #1459
+  - agent 5b7dd06e-81d9-4bc0-88f7-e65355f75b7c
+  - task agent-payment-production-abandonment
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -266,6 +269,29 @@ task passed earlier the same day in this deploy's Phase 1 6a run.
   `490787fb-fea5-4f08-9700-8ac6835ef966`) passed in 213s after
   `Abandoned issued payment card and reconciled funding`.
 
+### Recurrence on 2026-10-11 (live production org)
+
+`/deploy` Step 13c for PR #1459 (deploy run `20261009-214158-1894878`, merge
+`75be7489d`) failed `agent-payment-production-abandonment` (agent
+`5b7dd06e-81d9-4bc0-88f7-e65355f75b7c`) the same way after 562s. This is the
+first occurrence on the live production AgentCard org rather than the shared
+sandbox cardholder.
+
+- The agent completed at 21:07:05Z. Transfer `owt_…6234e` (card
+  `card_…b131`, $1.00 mint, 100 transferred, `livemode: true`) stayed
+  `consumed` with `releasedCents: 0` while the card read `CLOSED`, balance 0.
+  The purchase stayed `HELD` and funding `RECLAIMING`. The Stripe charge was
+  captured (100 received) with no refund yet.
+- Prod logs show the stale-lease retry requesting the release again every three
+  to four minutes (`Recording AgentCard company-wallet funding release
+  request`, then `Failed to retry purchase funding reclaim`). The transfer was
+  still `consumed` / 0 released at 22:18:25Z, 71 minutes after close.
+- The unchanged rerun (agent `15ed2603-3eb1-4572-a860-f9229e735ac3`) passed:
+  its transfer read `reclaimed` with 100 released inside the 420s wait, and
+  the purchase reached `VOIDED` with the refund. A second attempt in between
+  died before allocating anything, on a benchmark Hub registration read
+  timeout.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
@@ -274,7 +300,10 @@ Still open:
   `card_0d8d820f72e50b35fd394b93`; `owt_…a52e`, card
   `card_aec0bd2ceaea33cfb4e17c36`; `owt_…d6d22`, card
   `card_d7608e33491511fdeec32b5d`; `owt_f46e484168f57370a4cda9c6`, card
-  `card_5b1c41fe5dee8907e092e155`) to AgentCard with the ledger reads.
+  `card_5b1c41fe5dee8907e092e155`; live-org `owt_…6234e`, card
+  `card_…b131`) to AgentCard with the ledger reads.
+- Confirm the live-org $1 purchase from 2026-10-11 (agent `5b7dd06e`) reaches
+  `VOIDED` with its Stripe refund once AgentCard records the release.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
