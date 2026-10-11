@@ -429,6 +429,40 @@ describe('quick-query cold start', () => {
     unmount();
   });
 
+  // A launch that does not happen leaves its goal for the user to send. The
+  // next queued submit used to prefill over it, losing the earlier submit.
+  it('keeps both goals in the input when two submits hit the sign-in gate', async () => {
+    const deps = makeDeps({ canSubmitGoals: false });
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'first goal', submittedAt: Date.now() });
+      dispatchQuickQueryEvent({ query: 'second goal', submittedAt: Date.now() });
+    });
+    await waitFor(() => expect(deps.setLoginModalOpen).toHaveBeenCalledTimes(2));
+
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.setMessageInput).mock.calls).toEqual([
+      ['first goal'],
+      ['first goal\n\nsecond goal'],
+    ]);
+    unmount();
+  });
+
+  it('keeps a failed launch goal in the input while the next submit launches', async () => {
+    createAgent.mockRejectedValueOnce(new Error('request failed'));
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useQuickQuery(deps));
+    await act(async () => {
+      dispatchQuickQueryEvent({ query: 'fails to launch', submittedAt: Date.now() });
+      dispatchQuickQueryEvent({ query: 'launches fine', submittedAt: Date.now() });
+    });
+    await waitFor(() => expect(deps.setSelectedAgentIdContext).toHaveBeenCalled());
+
+    expect(createAgent).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(deps.setMessageInput).mock.calls).toEqual([['fails to launch']]);
+    unmount();
+  });
+
   // Launching an agent costs money. A submit that sat held (signed out, a
   // window that never loaded) must not start one long after it was asked for.
   it('shows a submit that waited past the launch window instead of launching it', async () => {

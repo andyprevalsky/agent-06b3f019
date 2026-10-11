@@ -126,6 +126,8 @@ Three further independent reviews changed those fixes before merge:
 - An expired draft stays in the input until the user sends or rewrites it; a later expired submit is added to it rather than replacing it after 5 s.
 - Two additions were tried and removed because each produced its own defect: a "time until a consumer was ready" stamp (it could mark a two-minute-old submit fresh) and a 30 s cap on waiting for the launch ahead (it let launches overlap and clear each other's input). The 60 s window is the submit's age when its turn comes, so no agent launches more than 60 s after its submit; a submit whose turn comes later is kept as a draft.
 
+- A launch that does not happen (sign-in gate, failed upload or request) leaves its goal as unsent text; the next queued submit adds to it instead of prefilling over it. This loss path predated PR #1447.
+
 Known and unchanged: `createAgent` and `uploadAttachment` have no timeout, so a launch that never settles holds later submits back. They now stay unclaimed in the main process instead of claimed in the renderer, as they were in PR #1447.
 
 ## Human feedback

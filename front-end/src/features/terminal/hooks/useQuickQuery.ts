@@ -16,6 +16,8 @@
  *     [auth_gate] --ok--> [uploading_attachments?] --> [creating_agent]
  *       [creating_agent] --ok--> [agent_selected]
  *       [creating_agent] --err--> [toast_error] --> [idle]
+ *   A submit that expires, is gated or fails leaves its text in the input as
+ *   unsent text; later submits add to it and never replace or clear it.
  */
 
 import { useEffect, useRef } from 'react';
@@ -84,7 +86,7 @@ export function useQuickQuery(deps: QuickQueryDeps) {
         return;
       }
       // Returning the launch keeps the next submit unclaimed until this one settles.
-      return handleQuickQuery(depsRef.current, detail, goal, expiredDraftsRef.current).catch(
+      return handleQuickQuery(() => depsRef.current, detail, goal, expiredDraftsRef.current).catch(
         (error: unknown) => {
           console.error('[QuickQuery] Launch failed', error);
         },
@@ -136,14 +138,45 @@ function showExpiredQuickQuery(
   d.toast({ title: 'Quick launch was not sent', description });
 }
 
+/**
+ * A launch that did not happen (sign-in gate, failed upload or request) leaves
+ * its goal for the user to send. Record it as unsent text, so the next submit
+ * adds to it instead of replacing it.
+ */
+function keepUnsentGoal(
+  live: QuickQueryDeps,
+  drafts: ExpiredDrafts,
+  goal: string,
+  launch: { keepInput: boolean; inputBefore: string },
+) {
+  if (launch.keepInput) {
+    // Earlier unsent text is showing: add this goal after it, unless the user took the input back.
+    if (!draftsOccupyInput(live, drafts)) return;
+    drafts.queries.push(goal);
+    drafts.replaced = live.messageInput;
+    live.setMessageInput(drafts.queries.join('\n\n'));
+    return;
+  }
+  // This launch put its goal in the input; it shows it now, or will once it re-renders.
+  if (live.messageInput === goal) {
+    drafts.queries = [goal];
+    drafts.replaced = null;
+  } else if (live.messageInput === launch.inputBefore) {
+    drafts.queries = [goal];
+    drafts.replaced = launch.inputBefore;
+  }
+}
+
 async function handleQuickQuery(
-  d: QuickQueryDeps,
+  live: () => QuickQueryDeps,
   payload: QuickLauncherPayload,
   goal: string,
   drafts: ExpiredDrafts,
 ) {
-  // Expired drafts are text the user has not sent yet; a launch must not replace or clear them.
-  const keepInput = draftsOccupyInput(d, drafts);
+  const d = live();
+  // Unsent text (expired or failed submits) stays the user's; a launch must not replace or clear it.
+  const launch = { keepInput: draftsOccupyInput(d, drafts), inputBefore: d.messageInput };
+  const { keepInput } = launch;
   d.setCurrentView('agents');
   if (!keepInput) d.setMessageInput(goal);
   analytics.track('goal_submitted', {
@@ -154,11 +187,13 @@ async function handleQuickQuery(
   });
 
   if (!d.canSubmitGoals) {
+    keepUnsentGoal(live(), drafts, goal, launch);
     d.setLoginModalOpen(true);
     d.toast({ title: 'Authentication required', description: 'Please log in to continue' });
     return;
   }
 
+  let launched = false;
   try {
     d.setIsSendingMessage(true);
     d.setIsLoadingNetwork(true);
@@ -173,6 +208,7 @@ async function handleQuickQuery(
       price_limit_cents: d.pendingPriceLimitCents,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
+    launched = true;
     await d.loadAgents();
     d.setCurrentView('agents');
     d.setSelectedAgentIdContext(newAgent.agent_id);
@@ -188,6 +224,7 @@ async function handleQuickQuery(
       variant: 'destructive',
     });
   } finally {
+    if (!launched) keepUnsentGoal(live(), drafts, goal, launch);
     d.setIsSendingMessage(false);
     d.setIsLoadingNetwork(false);
   }
