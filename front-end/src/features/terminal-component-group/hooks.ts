@@ -69,6 +69,7 @@ export {
   fetchTestPaymentPublicUrl,
   submitFeedback,
   reportAgentBug,
+  uploadBugReportScreenshot,
   downloadAttachmentAsBlob,
   downloadAttachmentAsText,
   fetchPhoneCallRecording,

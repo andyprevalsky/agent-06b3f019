@@ -21,6 +21,25 @@ export async function readBrowserControlState(taskId: string): Promise<BrowserCo
   return (await response.json()) as BrowserControlSnapshot;
 }
 
+/** GET .../live-view — the task's current provider session plus provider liveness. */
+export interface BrowserLiveView {
+  taskId: string;
+  sessionId: string;
+  debugUrl: string | null;
+  status: string;
+  live: boolean | null;
+  asOf: number;
+}
+
+export async function readBrowserLiveView(taskId: string): Promise<BrowserLiveView> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/browser-session/task/${encodeURIComponent(taskId)}/live-view`,
+    { headers: getAuthHeaders() },
+  );
+  if (!response.ok) throw new Error(`Failed to read browser live view (${response.status})`);
+  return (await response.json()) as BrowserLiveView;
+}
+
 async function setBrowserControlMode(
   taskId: string,
   mode: 'user' | 'agent',

@@ -228,3 +228,25 @@ export function validateAgentModeStartedPayload(payload: unknown): string | null
     return `Missing or invalid 'agentId' (got ${typeof p.agentId})`;
   return null;
 }
+
+/**
+ * Validate BrowserSessionBindingPayload structure.
+ * Returns error message if invalid, null if valid.
+ */
+export function validateBrowserSessionBindingPayload(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return 'Payload is not an object';
+  }
+  const p = payload as Record<string, unknown>;
+  if (typeof p.taskId !== 'string') return `Missing or invalid 'taskId' (got ${typeof p.taskId})`;
+  if (typeof p.sessionId !== 'string')
+    return `Missing or invalid 'sessionId' (got ${typeof p.sessionId})`;
+  if (p.debugUrl !== null && typeof p.debugUrl !== 'string')
+    return `Invalid 'debugUrl' (got ${typeof p.debugUrl})`;
+  if (typeof p.status !== 'string') return `Missing or invalid 'status' (got ${typeof p.status})`;
+  if (p.live !== null && typeof p.live !== 'boolean')
+    return `Invalid 'live' (got ${typeof p.live})`;
+  if (typeof p.asOf !== 'number' || !Number.isFinite(p.asOf))
+    return `Missing or invalid 'asOf' (got ${typeof p.asOf})`;
+  return null;
+}

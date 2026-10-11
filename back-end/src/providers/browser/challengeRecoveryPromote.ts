@@ -21,6 +21,7 @@ import {
   shouldPreferSteelForChallengeTarget,
 } from './challengeRecoveryCandidates';
 import type { FingerprintInjectionData } from './fingerprintInjection';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 import {
   browserConfigSearchRuntimeDependencies,
   ChallengeConfigSearchExhaustedError,
@@ -240,6 +241,7 @@ export async function searchAndPromoteBrowserConfig(
         return true;
       });
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
+      await (dependencies.announceBinding ?? announceBrowserSessionBinding)({ id: current.id });
       if (current.provider === 'kernel') {
         await dependencies.releaseKernel(current.sessionId).catch(() => {});
       } else if (current.provider === 'browser-use') {

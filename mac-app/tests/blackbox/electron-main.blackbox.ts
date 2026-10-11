@@ -118,6 +118,18 @@ async function ipcHandleChannels(): Promise<string[]> {
   return mockHandle.mock.calls.map((c) => c[0] as string);
 }
 
+/** Pull one registered quick-query ipcMain handler. */
+async function quickQueryHandler(
+  channel: 'quick-query:submit' | 'quick-query:take' | 'quick-query:claim'
+): Promise<(event: unknown, payload?: unknown) => unknown> {
+  const electron = await import('electron');
+  const handler = vi
+    .mocked(electron.ipcMain.handle)
+    .mock.calls.find(([registered]) => registered === channel)?.[1];
+  expect(handler).toBeDefined();
+  return handler as unknown as (event: unknown, payload?: unknown) => unknown;
+}
+
 let currentWhenReadyResolver: (() => void) | null = null;
 
 /**
@@ -351,6 +363,8 @@ describe('blackbox: electron-main (main-wiring)', () => {
     const channels = await ipcHandleChannels();
     for (const ch of [
       'quick-query:submit',
+      'quick-query:take',
+      'quick-query:claim',
       'quick-query:hide',
       'quick-query:resize',
       'quick-query:file-drag',
@@ -597,6 +611,99 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
     didFinishLoad?.();
     expect(reopenedMain.webContents.send).toHaveBeenCalledWith('open-agent', 'agent-after-close');
+  });
+
+  // Closing the main window leaves Rose running on macOS, so the global
+  // shortcut still opens the launcher. Its submit used to be discarded.
+  it('quick-query: submit recreates a closed main window, whose renderer then takes the query', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const originalMain = BrowserWindow.mock.results[0]?.value as {
+      on: ReturnType<typeof vi.fn>;
+      webContents: unknown;
+    };
+    const closedListener = originalMain.on.mock.calls.find(([event]) => event === 'closed')?.[1] as
+      (() => void) | undefined;
+    expect(closedListener).toBeDefined();
+    closedListener?.();
+
+    const submit = await quickQueryHandler('quick-query:submit');
+    expect(submit({}, { query: 'book a table for two', submittedAt: 7 })).toEqual({
+      success: true,
+    });
+
+    expect(BrowserWindow).toHaveBeenCalledTimes(3);
+    const reopenedMain = BrowserWindow.mock.results[2]?.value as {
+      show: ReturnType<typeof vi.fn>;
+      moveTop: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+      webContents: unknown;
+    };
+    expect(reopenedMain.show).toHaveBeenCalled();
+    expect(reopenedMain.moveTop).toHaveBeenCalled();
+    expect(reopenedMain.focus).toHaveBeenCalled();
+
+    const take = await quickQueryHandler('quick-query:take');
+    const claim = await quickQueryHandler('quick-query:claim');
+    expect(take({ sender: originalMain.webContents })).toEqual([]);
+    const held = take({ sender: reopenedMain.webContents }) as Array<{
+      id: string;
+      payload: unknown;
+    }>;
+    expect(held.map((entry) => entry.payload)).toEqual([
+      { query: 'book a table for two', submittedAt: 7 },
+    ]);
+    expect(claim({ sender: reopenedMain.webContents }, held[0]?.id)).toEqual({ claimed: true });
+    expect(take({ sender: reopenedMain.webContents })).toEqual([]);
+  });
+
+  it('quick-query: submit restores a minimized main window and tells it a query is waiting', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const electron = await import('electron');
+    const main = vi.mocked(electron.BrowserWindow).mock.results[0]?.value as {
+      isMinimized: ReturnType<typeof vi.fn>;
+      restore: ReturnType<typeof vi.fn>;
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+    main.isMinimized.mockReturnValue(true);
+    main.restore.mockClear();
+    main.webContents.send.mockClear();
+
+    const submit = await quickQueryHandler('quick-query:submit');
+    submit({}, { query: 'find my flight', submittedAt: 8 });
+
+    expect(main.restore).toHaveBeenCalled();
+    expect(main.webContents.send.mock.calls).toEqual([['quick-query:pending']]);
+    const take = await quickQueryHandler('quick-query:take');
+    const held = take({ sender: main.webContents }) as Array<{ payload: unknown }>;
+    expect(held.map((entry) => entry.payload)).toEqual([
+      { query: 'find my flight', submittedAt: 8 },
+    ]);
+  });
+
+  it('deep-link: open selects the agent immediately when only an embedded frame is loading', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const openUrlListeners = await appListenersFor('open-url');
+    const electron = await import('electron');
+    const main = vi.mocked(electron.BrowserWindow).mock.results[0]?.value as {
+      webContents: {
+        isLoading: ReturnType<typeof vi.fn>;
+        send: ReturnType<typeof vi.fn>;
+      };
+    };
+    main.webContents.isLoading.mockReturnValue(true);
+
+    const fakeEvent = { preventDefault: vi.fn() } as unknown as Electron.Event;
+    openUrlListeners[0].listener(fakeEvent, 'roselabs://open?agent-id=agent-live-view');
+
+    expect(main.webContents.send).toHaveBeenCalledWith('open-agent', 'agent-live-view');
   });
 
   it('deep-link: malformed URL is swallowed (no throw, no send)', async () => {

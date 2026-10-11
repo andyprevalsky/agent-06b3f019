@@ -9,6 +9,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS,
+  ReportBugForbiddenError,
+  ReportBugValidationError,
+  uploadBugReportScreenshot,
   buildBugReportChatName,
   buildBugReportIdempotencyKey,
   buildBugReportPrompt,
@@ -270,6 +274,94 @@ async function testAgentExistsForBugReportArchivedFallback(): Promise<void> {
   );
 }
 
+const ADMIN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const PNG_BYTES = Buffer.concat([
+  Buffer.from('89504e470d0a1a0a', 'hex'),
+  Buffer.from('0000000d49484452', 'hex'),
+]);
+
+function screenshotDeps(calls: { stored: unknown[]; signed: unknown[] }) {
+  return {
+    findAgentById: async () => ({ agent_id: 'agent-xyz' }) as never,
+    store: async (userId: string, buffer: Buffer, filename: string, mimeType: string) => {
+      calls.stored.push({ userId, size: buffer.length, filename, mimeType });
+      return {
+        id: 'file-1',
+        storage_path: `${userId}/file-1_${filename}`,
+        original_filename: filename,
+        mime_type: mimeType,
+        size_bytes: buffer.length,
+        created_at: '2026-10-09T00:00:00.000Z',
+      };
+    },
+    sign: async (storagePath: string, expiresIn: number) => {
+      calls.signed.push({ storagePath, expiresIn });
+      return `https://storage.example/sign/attachments/${storagePath}?token=t`;
+    },
+  };
+}
+
+async function testScreenshotStoresAndSignsForSevenDays(): Promise<void> {
+  const calls = { stored: [] as unknown[], signed: [] as unknown[] };
+  const result = await uploadBugReportScreenshot(
+    ADMIN_USER_ID,
+    'agent-xyz',
+    { buffer: PNG_BYTES, originalname: 'live-view.png', mimetype: 'image/png' },
+    screenshotDeps(calls)
+  );
+  assert.equal(BUG_REPORT_SCREENSHOT_URL_TTL_SECONDS, 604_800);
+  assert.deepEqual(calls.stored, [
+    {
+      userId: ADMIN_USER_ID,
+      size: PNG_BYTES.length,
+      filename: 'live-view.png',
+      mimeType: 'image/png',
+    },
+  ]);
+  assert.deepEqual(calls.signed, [
+    { storagePath: `${ADMIN_USER_ID}/file-1_live-view.png`, expiresIn: 604_800 },
+  ]);
+  assert.deepEqual(result, {
+    success: true,
+    name: 'live-view.png',
+    url: `https://storage.example/sign/attachments/${ADMIN_USER_ID}/file-1_live-view.png?token=t`,
+    expires_in: 604_800,
+  });
+}
+
+async function testScreenshotRequiresAdminBeforeStoring(): Promise<void> {
+  const calls = { stored: [] as unknown[], signed: [] as unknown[] };
+  await assert.rejects(
+    uploadBugReportScreenshot(
+      'not-an-admin',
+      'agent-xyz',
+      { buffer: PNG_BYTES, originalname: 'x.png', mimetype: 'image/png' },
+      screenshotDeps(calls)
+    ),
+    ReportBugForbiddenError
+  );
+  assert.deepEqual(calls.stored, []);
+}
+
+async function testScreenshotRejectsNonImages(): Promise<void> {
+  const calls = { stored: [] as unknown[], signed: [] as unknown[] };
+  const deps = screenshotDeps(calls);
+  for (const file of [
+    { buffer: Buffer.from('plain text'), originalname: 'notes.txt', mimetype: 'text/plain' },
+    // Declared PNG whose bytes are an HTML error page (proxy/dev-server interception).
+    { buffer: Buffer.from('<!doctype html><html>'), originalname: 'x.png', mimetype: 'image/png' },
+    // Not an image type at all, even though the key exists on Object.prototype.
+    { buffer: PNG_BYTES, originalname: 'x.png', mimetype: 'constructor' },
+    undefined,
+  ]) {
+    await assert.rejects(
+      uploadBugReportScreenshot(ADMIN_USER_ID, 'agent-xyz', file, deps),
+      ReportBugValidationError
+    );
+  }
+  assert.deepEqual(calls.stored, []);
+}
+
 async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
@@ -284,6 +376,9 @@ async function main(): Promise<void> {
     ['boxes.dev rejection surfaces error code', testBoxesRunRejectionSurfacesErrorCode],
     ['boxes.dev 202 without run id fails loudly', testBoxesRunWithoutRunIdFailsLoudly],
     ['archived hub agent counts as reportable', testAgentExistsForBugReportArchivedFallback],
+    ['screenshot is stored and signed for seven days', testScreenshotStoresAndSignsForSevenDays],
+    ['screenshot upload requires admin before storing', testScreenshotRequiresAdminBeforeStoring],
+    ['screenshot upload rejects non-images', testScreenshotRejectsNonImages],
   ];
 
   let failed = 0;

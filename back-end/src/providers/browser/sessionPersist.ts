@@ -9,6 +9,7 @@
 import { Prisma as PrismaRuntime, type BrowserSession } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 
 const log = createLogger('BrowserSessionPersist');
 
@@ -137,10 +138,12 @@ export async function persistBrowserSessionRow(
     if (previous.status === 'ACTIVE' && previous.closedAt === null) {
       return previous;
     }
-    return prisma.browserSession.update({
+    const reactivated = await prisma.browserSession.update({
       where: { id: taskId },
       data: { ...shared, closedAt: null },
     });
+    await announceBrowserSessionBinding({ id: taskId });
+    return reactivated;
   }
 
   const previousSessionId = previous.sessionId;
@@ -173,6 +176,7 @@ export async function persistBrowserSessionRow(
     throw new BrowserSessionReclaimConflictError(taskId, input.sessionId, current.sessionId);
   }
 
+  await announceBrowserSessionBinding({ id: taskId });
   await releaseRemote(release, previousSessionId, 'idempotent session reclaim');
   return prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
 }

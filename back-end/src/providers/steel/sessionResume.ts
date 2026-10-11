@@ -34,6 +34,7 @@ import {
   unregisterInFlightSteelSession,
 } from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
+import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
@@ -297,6 +298,7 @@ export async function recreateSession(
       if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
       committed = true;
       unregisterInFlightSteelSession(session.id);
+      await announceBrowserSessionBinding({ id: taskId });
 
       if (
         profile.persistProfile &&

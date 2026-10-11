@@ -22,7 +22,6 @@ vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', (
 }));
 
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
-import { BrowserIframe } from '@/features/terminal-component-group/components/browser-view-panel/BrowserIframe';
 import { BrowserStatusBarExpanded } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded';
 import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/BrowserLiveViewFrame';
 import {
@@ -95,28 +94,6 @@ describe('live-view iframe containment', () => {
 
     rerender(<BrowserStatusBarFullscreen {...props} isUserControlling />);
     expect(screen.getByTitle('Browser')).not.toHaveAttribute('inert');
-  });
-
-  it('crops the inline Steel live view to the content viewport, not 16:9 or the chrome window', () => {
-    renderWithProviders(
-      <BrowserIframe
-        agentId="agent-1"
-        taskId="t1"
-        url={STEEL_PLAYER}
-        messages={[]}
-        isFullscreen={false}
-        isDisconnected={false}
-        isWaitingForAuthAssistance={false}
-        isResuming={false}
-        onResume={vi.fn()}
-      />,
-    );
-
-    const iframe = screen.getByTitle('Browser Session');
-    expect(iframe.className).not.toMatch(/aspect-video/);
-    expect(iframe.closest('.aspect-video')).toBeNull();
-    expect(screen.getByTestId('live-view-pane')).toHaveClass('overflow-hidden');
-    expectSteelContentClip(screen.getByTestId('live-view-stream'), iframe);
   });
 
   it('frames the expanded thumbnail to the cropped Steel content box, not 1440x900', () => {

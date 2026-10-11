@@ -36,6 +36,7 @@ export function makeBrowserWindowStub(): Record<string, unknown> {
       on: vi.fn(),
       once: vi.fn(),
       isLoading: vi.fn(() => false),
+      isLoadingMainFrame: vi.fn(() => false),
       setWindowOpenHandler: vi.fn(),
       openDevTools: vi.fn(),
       focus: vi.fn(),

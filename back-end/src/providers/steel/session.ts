@@ -25,6 +25,7 @@ import {
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import {
   newOwnedSteelSessionId,
   registerInFlightSteelSession,
@@ -463,6 +464,7 @@ export async function closeSession(
       currentUrl: currentUrl || undefined,
     },
   });
+  await announceBrowserSessionBinding({ sessionId });
 
   if (releaseError !== null) throw releaseError;
 

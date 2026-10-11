@@ -266,6 +266,7 @@ export {
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
   reportAgentBug,
+  uploadBugReportScreenshot,
 } from '@/lib/api';
 
 export type {

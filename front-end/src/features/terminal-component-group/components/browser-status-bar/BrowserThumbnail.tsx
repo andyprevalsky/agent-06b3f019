@@ -4,6 +4,7 @@
  *
  * Frames the content viewport (1280x800). Steel streams are the 1288x891
  * computer window, so the iframe is translated to hide toolbar/borders.
+ * A compact LiveViewLoading covers the iframe until its URL loads.
  */
 
 import { useLayoutEffect, useRef, type MouseEvent } from 'react';
@@ -15,9 +16,13 @@ import {
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
 } from './liveViewDisplay';
+import { LiveViewLoading } from './LiveViewLoading';
+import { useLiveViewLoaded } from './useLiveViewLoaded';
 
 export interface BrowserThumbnailProps {
   browserUrl: string;
+  /** False when the bound session is closed or ended: loading, no iframe. */
+  live?: boolean;
   /** Outer wrapper dimensions in px. */
   width: number;
   height: number;
@@ -29,6 +34,7 @@ export interface BrowserThumbnailProps {
 
 export function BrowserThumbnail({
   browserUrl,
+  live = true,
   width,
   height,
   wrapperClassName,
@@ -36,9 +42,10 @@ export function BrowserThumbnail({
   disabled = false,
 }: BrowserThumbnailProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const { isLoaded, onLoad } = useLiveViewLoaded(browserUrl);
   useLayoutEffect(() => {
     iframeRef.current?.setAttribute('inert', '');
-  }, []);
+  }, [live, browserUrl]);
   const display = resolveLiveViewDisplaySize(browserUrl);
   const windowSize = resolveLiveViewWindowSize(browserUrl);
   const crop = resolveLiveViewChromeCrop(browserUrl);
@@ -58,19 +65,23 @@ export function BrowserThumbnail({
       className={wrapperClassName}
       style={{ width: `${width}px`, height: `${height}px`, marginBottom: '8px' }}
     >
-      <iframe
-        ref={iframeRef}
-        src={browserUrl}
-        className="border-0 pointer-events-none"
-        tabIndex={-1}
-        style={{
-          width: `${iframe.width}px`,
-          height: `${iframe.height}px`,
-          transform: `translate(${iframe.x}px, ${iframe.y}px) scale(${iframe.scale})`,
-          transformOrigin: 'top left',
-        }}
-        title="Preview"
-      />
+      {live && (
+        <iframe
+          ref={iframeRef}
+          src={browserUrl}
+          className="border-0 pointer-events-none"
+          tabIndex={-1}
+          style={{
+            width: `${iframe.width}px`,
+            height: `${iframe.height}px`,
+            transform: `translate(${iframe.x}px, ${iframe.y}px) scale(${iframe.scale})`,
+            transformOrigin: 'top left',
+          }}
+          title="Preview"
+          onLoad={onLoad}
+        />
+      )}
+      {(!live || !isLoaded) && <LiveViewLoading compact />}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-black/10 to-black/30 opacity-0 group-hover:opacity-100 transition-opacity" />
       <div className="pointer-events-none absolute bottom-1 right-1 flex items-center gap-1 rounded-md bg-black/70 text-white px-2 py-1 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
         <Maximize2 className="h-3.5 w-3.5" />

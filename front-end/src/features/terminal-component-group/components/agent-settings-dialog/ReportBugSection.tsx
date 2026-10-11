@@ -4,21 +4,66 @@
  * Admin-only: expands into a description textarea that runs the boxes.dev
  * Bug Report automation, titled from the description, to /rca the Rose agent.
  *
+ * Screenshots dragged onto or pasted into the textarea upload immediately and
+ * appear in the description as `![name](url)` image links.
+ *
+ * COMPOSER DROP STATE: [IDLE] --dragover with files--> [DRAG_OVER]
+ *   --drop--> attachScreenshots (UPLOADING count > 0 disables Submit)
+ *   --dragleave--> [IDLE]
+ *
  * After launch, keep Open + Copy on screen. Submit never auto-opens boxes.dev
  * and never sends SMS.
  */
 
+import { useState, type ClipboardEvent, type DragEvent } from 'react';
 import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 import type { UseReportBugResult } from './useReportBug';
+import { isScreenshotFile } from './useBugReportScreenshots';
 
 interface ReportBugSectionProps {
   flow: UseReportBugResult;
 }
 
+function draggingFiles(event: DragEvent<HTMLTextAreaElement>): boolean {
+  return Array.from(event.dataTransfer.types).includes('Files');
+}
+
+function useScreenshotDropTarget(flow: UseReportBugResult) {
+  const [isDragOver, setIsDragOver] = useState(false);
+  return {
+    isDragOver,
+    onDragOver: (event: DragEvent<HTMLTextAreaElement>) => {
+      if (!draggingFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      setIsDragOver(true);
+    },
+    onDragLeave: () => setIsDragOver(false),
+    onDrop: (event: DragEvent<HTMLTextAreaElement>) => {
+      if (!draggingFiles(event)) return;
+      event.preventDefault();
+      setIsDragOver(false);
+      flow.attachScreenshots(
+        Array.from(event.dataTransfer.files),
+        event.currentTarget.selectionStart,
+      );
+    },
+    onPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const images = Array.from(event.clipboardData.files).filter(isScreenshotFile);
+      if (images.length === 0) return;
+      event.preventDefault();
+      flow.attachScreenshots(images, event.currentTarget.selectionStart);
+    },
+  };
+}
+
 export default function ReportBugSection({ flow }: ReportBugSectionProps) {
+  const { isDragOver, ...dropHandlers } = useScreenshotDropTarget(flow);
+  const isUploading = flow.uploadingScreenshots > 0;
   if (flow.launched !== null) {
     return (
       <div className="space-y-3 pt-4 border-t border-border/60" data-testid="report-bug-launched">
@@ -100,8 +145,17 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               placeholder="What went wrong? Include expected vs actual behavior."
               rows={5}
               disabled={flow.isSubmitting}
-              className="resize-y min-h-[100px]"
+              className={cn(
+                'resize-y min-h-[100px]',
+                isDragOver && 'border-primary ring-2 ring-primary/40',
+              )}
+              {...dropHandlers}
             />
+            <p className="text-xs text-muted-foreground" data-testid="report-bug-screenshot-hint">
+              {isUploading
+                ? `Uploading ${flow.uploadingScreenshots} screenshot${flow.uploadingScreenshots === 1 ? '' : 's'}…`
+                : 'Drag, drop or paste screenshots into the description.'}
+            </p>
             <p className="text-xs text-muted-foreground">
               Launches a boxes.dev agent to investigate. After it launches you can copy or open the
               link.
@@ -122,7 +176,7 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               type="button"
               onClick={() => void flow.submit()}
               className="flex-1"
-              disabled={flow.isSubmitting || flow.description.trim() === ''}
+              disabled={flow.isSubmitting || isUploading || flow.description.trim() === ''}
               data-testid="report-bug-submit"
             >
               {flow.isSubmitting ? (

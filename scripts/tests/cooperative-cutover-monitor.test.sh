@@ -74,7 +74,7 @@ got="$(extract_open_with_status $'0' 0)"
 # and the only `machines stop` left is old-gen retirement after drain.
 same_surface_block="$(awk '/CURRENT_HASH" = "\$SURFACE_HASH"/{p=1} p{print} p&&/^fi$/{exit}' "$CUTOVER")"
 [ -n "$same_surface_block" ] || fail "could not locate the same-surface rolling deploy block"
-if printf '%s\n' "$same_surface_block" | grep -q 'machines stop'; then
+if grep -q 'machines stop' <<<"$same_surface_block"; then
   fail "same-surface rolling deploy must not stop live-generation machines (autoscaler owns idle-only scale-down)"
 fi
 stop_calls="$(grep -c 'flyctl machines stop' "$CUTOVER" || true)"
