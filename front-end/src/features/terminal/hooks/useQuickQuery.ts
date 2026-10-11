@@ -5,7 +5,12 @@
  * OPEN_AGENT_EVENT from desktop deep links, routing both into the chat view.
  *
  * STATE MACHINE:
- *   [idle] --quick-query(text|files)--> [auth_gate]
+ *   [unmounted | auth_resolving] --quick-query--> held in lib/quickQuery
+ *   [auth_resolving] --authReady--> [idle] (held submits replay as quick-query)
+ *   [idle] --quick-query(text|files)--> [freshness_gate]
+ *     [freshness_gate] --held past launch window--> [prefill_input + toast] --> [idle]
+ *     [freshness_gate] --fresh--> [queued] (one launch at a time, in submit order)
+ *     [queued] --previous launch settled--> [auth_gate]
  *     [auth_gate] --!canSubmit--> [login_modal] --> stop
  *     [auth_gate] --ok--> [uploading_attachments?] --> [creating_agent]
  *       [creating_agent] --ok--> [agent_selected]
@@ -17,9 +22,10 @@ import { useEffect, useRef } from 'react';
 import * as analytics from '@/lib/analytics';
 import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
 import {
-  QUICK_QUERY_EVENT,
+  QUICK_QUERY_LAUNCH_WINDOW_MS,
   fileFromQuickLauncherAttachment,
   goalFromQuickLauncherPayload,
+  subscribeQuickQuery,
   type QuickLauncherPayload,
 } from '@/lib/quickQuery';
 import type { useToast } from '@/hooks/use-toast';
@@ -31,6 +37,8 @@ import type { TerminalView } from '../types';
 export interface QuickQueryDeps {
   selectedModel: string;
   canSubmitGoals: boolean;
+  /** False while auth is still resolving, when canSubmitGoals is not yet meaningful. */
+  authReady: boolean;
   clientSource: string;
   pendingPriceLimitCents: number;
   setCurrentView: (v: TerminalView) => void;
@@ -43,27 +51,78 @@ export interface QuickQueryDeps {
   toast: ReturnType<typeof useToast>['toast'];
 }
 
+/** Expired submits that surface this close together came from one cold start. */
+const EXPIRED_DRAFT_BATCH_MS = 5_000;
+
+interface ExpiredDrafts {
+  startedAt: number;
+  queries: string[];
+}
+
 export function useQuickQuery(deps: QuickQueryDeps) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
+  const { authReady } = deps;
+  // One launch at a time: a second submit must not reset the input or the
+  // sending state while the first is still uploading or creating its agent.
+  const launchQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const expiredDraftsRef = useRef<ExpiredDrafts>({ startedAt: 0, queries: [] });
 
   useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<QuickLauncherPayload>).detail;
-      if (!detail) return;
+    // A launcher submit can open the main window itself. Until auth resolves,
+    // a signed-in user still reads as signed out, so leave the submit held.
+    if (!authReady) return;
+    return subscribeQuickQuery((detail) => {
       const goal = goalFromQuickLauncherPayload(detail);
       const hasAttachments = (detail.attachments?.length ?? 0) > 0;
       if (!goal && !hasAttachments) return;
-      void handleQuickQuery(depsRef.current, detail, goal);
-    };
+      if (Date.now() - detail.submittedAt > QUICK_QUERY_LAUNCH_WINDOW_MS) {
+        showExpiredQuickQuery(depsRef.current, detail, expiredDraftsRef.current);
+        return;
+      }
+      launchQueueRef.current = launchQueueRef.current
+        .then(() => handleQuickQuery(depsRef.current, detail, goal))
+        .catch((error: unknown) => {
+          console.error('[QuickQuery] Launch failed', error);
+        });
+    });
+  }, [authReady]);
+
+  useEffect(() => {
     const handleOpenAgent = () => depsRef.current.setCurrentView('agents');
-    window.addEventListener(QUICK_QUERY_EVENT, handler as EventListener);
     window.addEventListener(OPEN_AGENT_EVENT, handleOpenAgent);
     return () => {
-      window.removeEventListener(QUICK_QUERY_EVENT, handler as EventListener);
       window.removeEventListener(OPEN_AGENT_EVENT, handleOpenAgent);
     };
   }, []);
+}
+
+/** Too old to launch unasked: keep the user's text and let them send it. */
+function showExpiredQuickQuery(
+  d: QuickQueryDeps,
+  payload: QuickLauncherPayload,
+  drafts: ExpiredDrafts,
+) {
+  const query = payload.query.trim();
+  const hasAttachments = (payload.attachments?.length ?? 0) > 0;
+  let description = 'Rose took too long to open. Attach your files again to send them.';
+  if (query) {
+    description = hasAttachments
+      ? 'Rose took too long to open. Your message is in the input; attach your files again before sending.'
+      : 'Rose took too long to open. Your message is in the input.';
+  }
+  d.setCurrentView('agents');
+  if (query) {
+    // Several submits can expire in one cold start; keep each one's text.
+    const now = Date.now();
+    if (now - drafts.startedAt > EXPIRED_DRAFT_BATCH_MS) {
+      drafts.startedAt = now;
+      drafts.queries = [];
+    }
+    drafts.queries.push(query);
+    d.setMessageInput(drafts.queries.join('\n\n'));
+  }
+  d.toast({ title: 'Quick launch was not sent', description });
 }
 
 async function handleQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload, goal: string) {
