@@ -141,7 +141,7 @@ it (see Human feedback), and the measurements below support it.
   spent-budget stage, which enforces it.
 - `maxItems` on `queries` broke Cerebras constrained decoding (the model looped
   inside its last allowed string until truncation), so the schema has no cap
-  and the round runs at most 4 searches at once.
+  and every unique query runs, at most 4 at once (observed decisions use 2-4).
 - Hits (two cities, BTC vs ETH, World Cup, the deploy semantic prompt, news):
   2-3 parallel queries, then a direct answer.
 - All 31 real prod chat web_search turns in 45 days through the loop: 20/21
@@ -186,9 +186,12 @@ approved as RCA-572-B on 2026-10-12:
   route asks whether the results contain what was asked: answer, search again,
   or escalate; a "not found" report or a clarifying question is not an answer.
   The spent stage can only answer or escalate.
-- `chatWebSearchRound.ts`: one round runs every query in parallel (at most 4 at
-  once, via the shared `providers/concurrency.ts`) and persists one tool result
-  per query in query order.
+- `chatWebSearchRound.ts`: one round runs every unique query in parallel (at
+  most 4 at once, via the shared `providers/concurrency.ts`) and persists one
+  tool result per query in query order. Fast Mode context loads before any
+  chip is persisted, and a search that throws reports the standard `Unable to
+  search at this time` result while the others keep theirs (code review on PR
+  #1472; `chat-web-search-round.test.ts`).
 - `chatHandler.ts`: Router → round → Router … until it answers or escalates; the
   Generator overlaps each after-search route and is committed only on
   direct_answer. `resolveGeneratorMessages` became dead and was removed.
@@ -219,6 +222,37 @@ Router could only answer or escalate): "after websearch it should be able to
 websearch again, ALSO, it should be able to emit multiple web searches (make
 sure the chat mode system prompt makes that clear)". The user approved the
 resulting search-loop design (RCA-572-B) the same day.
+
+Code review on PR #1472 asked for a per-round query cap. The user rejected it
+("we should be able to run 50 if we wanted to") and asked for one UI row per
+turn reading "Searching N web searches", like the ChatGPT and Gemini apps. The
+front-end now groups a turn's root web_search rows at render time
+(`webSearchTurnGroups.ts`, `WebSearchGroupItem.tsx`,
+`web-search-turn-group.blackbox.tsx`). The persisted rows, and therefore the
+model's context, are unchanged.
+
+The user then asked to reuse the SMS supervisor's wording from PR #1473 ("If
+grep and web_search can't find information you need, escalate with
+start_new_agent instead of asking the user for it"). Replays at temperature 0
+on Qwen 3.8 via direct Cerebras compared the wordings.
+
+- **Exact turn-2 spent-stage request, 5 runs per wording:**
+  - The approved variant ("…instead of asking the user for it or replying that
+    it wasn't found") hit `max_tokens: 1_024` with `finish_reason=length`. The
+    JSON was cut off, so all 5 runs ended in the failure notice.
+  - The SMS line alone escalated 5/5, using 978 of the 1,024 tokens.
+  - The RCA-572-B wording escalated 5/5 using 596 tokens.
+- **Multi-run harness:** the SMS line alone replied "nothing found" in 2 of 8
+  turn-2 runs.
+
+The user kept the RCA-572-B wording.
+
+Still open: the router's Cerebras `max_tokens: 1_024` (`routerLlm.ts`, already
+on main) covers both Qwen's reasoning and the decision JSON. A route that
+deliberates long enough truncates `goal`, partial recovery cannot rebuild a
+start_superintelligence decision, and the turn ends in the failure notice. Any
+future router prompt edit should replay the turn-2 spent-stage request and
+check its completion tokens against the cap.
 
 ## Reusable lesson
 
