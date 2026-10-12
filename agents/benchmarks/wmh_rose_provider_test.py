@@ -310,34 +310,23 @@ def test_native_provider_cache_prefix_precedes_changing_candidate(change_world):
         for request in requests
     ]
     for original, messages in zip(requests, outgoing):
-        # Azure reuses only exact instructions: the session-constant task rides
-        # in the system message and rejoins the evidence for every reader.
-        system, marker, carried = messages[0]["content"].partition(wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
-        assert system == "unchanged system" and marker and carried.startswith('{"task":')
-        assert json.loads(carried + _prompt_text(messages[1]["content"])) == original
-        assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
-        assert "cache_control" not in messages[1]["content"][-1]
+        # The session-constant task rides in the system message; the evidence
+        # rejoins exactly for every reader.
+        _native_wire_checked(original, messages, "unchanged system")
         wire = build_openrouter_body(
             model="openai/gpt-6.1-sol", messages=messages, tools=None,
             tool_choice=None, response_format=None, temperature=None,
             max_tokens=16384, seed=None, cache_namespace="wmh:session:root",
         )
-        assert wire["messages"][1]["content"] == messages[1]["content"]
-        assert wire["messages"][0]["content"] == messages[0]["content"]
-        assert wmh_rose_provider._native_call_ids(messages) == (
-            original["candidate_response"]["tool_calls"][0]["call_id"],
-        )
-        assert wmh_rose_provider._native_environment_state(messages) == original["environment_state"]
-        # Changing wire layout must not alter whole-response replay identity.
-        assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
-            wmh_rose_provider._wmh_cache_key_material({"messages": [
-                {"role": "system", "content": "unchanged system"},
-                {"role": "user", "content": json.dumps(original)},
-            ]})
+        assert [_prompt_text(message["content"]) for message in wire["messages"]] == (
+            [_prompt_text(message["content"]) for message in messages]
         )
     assert outgoing[0][0]["content"] == outgoing[1][0]["content"]
     assert '"instruction":"Raise funds"' in outgoing[0][0]["content"]
-    prefix = commonprefix([messages[0]["content"] + _prompt_text(messages[1]["content"]) for messages in outgoing])
+    prefix = commonprefix([
+        messages[0]["content"] + "".join(_prompt_text(message["content"]) for message in messages[1:])
+        for messages in outgoing
+    ])
     if not change_world:
         assert '"environment_state"' in prefix
 
@@ -449,64 +438,97 @@ def _native_history_batch(*call_ids):
     ]}}, *[{"role": "tool", "tool_call_id": call_id, "content": "result " + call_id} for call_id in call_ids]]
 
 
-def _marked_native_prefixes(request):
+_PER_CALL_EVIDENCE = ("grounding_contexts", "grounded_examples", "environment_state", "candidate_response")
+
+
+def _native_wire_checked(request, messages, system):
+    """Checks one native wire layout and returns its provider-visible text per message."""
     from benchmarks.wmh_rose_provider import _prompt_text
-    from providers.rose.waterfall import build_openrouter_body
+
+    head, marker, carried = messages[0]["content"].partition(wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
+    assert head == system and marker
+    stable = {key: request["task"][key] for key in ("initial_context", "instruction", "task_id")}
+    assert json.loads(carried) == {"task": stable}
+    assert [message["role"] for message in messages[1:]] == ["user"] * (len(messages) - 1)
+    texts = [carried, *(_prompt_text(message["content"]) for message in messages[1:])]
+    folded = wmh_rose_provider._fold_system_evidence(messages)
+    assert [message["role"] for message in folded] == ["system", "user"] and folded[0]["content"] == system
+    assert json.loads(folded[1]["content"]) == request
+    # Per-call evidence (including the candidate's tools) changes on every step,
+    # so only the final message carries it.
+    for key in (*_PER_CALL_EVIDENCE, "tools"):
+        assert f'"{key}":' not in "".join(texts[:-1])
+    markers = [block for message in messages[1:] if isinstance(message["content"], list)
+               for block in message["content"] if "cache_control" in block]
+    assert len(markers) <= 4
+    canonical = [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(request)}]
+    assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
+        wmh_rose_provider._wmh_cache_key_material({"messages": canonical})
+    )
+    assert wmh_rose_provider._native_call_ids(messages) == tuple(
+        call["call_id"] for call in request["candidate_response"]["tool_calls"]
+    )
+    assert wmh_rose_provider._native_environment_state(messages) == request["environment_state"]
+    return texts
+
+
+def _native_history_messages(request):
+    """The native layout split at completed history batches (text per message)."""
+    messages = _to_rose_messages("fixed system", [Message(role="user", content=json.dumps(request))])
+    return _native_wire_checked(request, messages, "fixed system")
+
+
+def _azure_input(request):
+    """The exact Azure Responses instructions and input items for one native request."""
+    from providers.rose.gpt_auth import _build_instructions, _build_responses_input
 
     messages = _to_rose_messages("fixed system", [Message(role="user", content=json.dumps(request))])
-    wire = build_openrouter_body(model="openai/gpt-6.1-sol", messages=messages, tools=None,
-                                 tool_choice=None, response_format=None, temperature=None,
-                                 max_tokens=16384, seed=None, effort="xhigh", cache_namespace="wmh:session:test")
-    system, _, carried = wire["messages"][0]["content"].partition(wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
-    assert system == "fixed system"
-    assert json.loads(carried + _prompt_text(wire["messages"][1]["content"])) == request
-    assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
-        wmh_rose_provider._wmh_cache_key_material({"messages": [
-            {"role": "system", "content": "fixed system"},
-            {"role": "user", "content": json.dumps(request)},
-        ]})
-    )
-    text = carried
-    prefixes = []
-    for block in wire["messages"][1]["content"]:
-        text += block["text"]
-        if "cache_control" in block:
-            prefixes.append(text)
-            assert '"environment_state":' not in text
-            assert '"candidate_response":' not in text
-    assert 1 <= len(prefixes) <= 4
-    return prefixes
+    return _build_instructions(messages), _build_responses_input(messages)
 
 
-def test_native_cache_reuses_completed_batch_when_history_grows():
-    history = _native_history_batch("a", "b") + _native_history_batch("c")
-    first = _native_history_cache_request(history)
-    second = _native_history_cache_request(history + _native_history_batch("d", "e"))
-    second["environment_state"]["structured"]["clock"] = 11
-    second["candidate_response"]["tool_calls"][0]["call_id"] = "different-next"
-    old = _marked_native_prefixes(first)
-    new = _marked_native_prefixes(second)
-    assert old[-1] in new
-    assert old[-1].endswith('"content":"result c"}')
-    assert new[-1].endswith('"content":"result e"}')
-    assert old[-1] != new[-1]
+def test_native_history_grows_as_an_exact_message_prefix():
+    """An agent's next request repeats every earlier message exactly: prefix-caching
+    routes (OpenAI) and stored-response chains reuse them. Azure gpt-6.1-sol caches only
+    the exactly repeated system block otherwise (measured 2026-10-12), so the system
+    stays identical for the whole session even when the candidate's tools change."""
+    steps = [
+        [{"role": "user", "content": "Raise the round"}],
+        [{"role": "user", "content": "Raise the round"}, *_native_history_batch("a", "b")],
+        [{"role": "user", "content": "Raise the round"}, *_native_history_batch("a", "b"),
+         *_native_history_batch("c")],
+    ]
+    requests = []
+    for index, history in enumerate(steps):
+        request = _native_history_cache_request(history)
+        request["task"]["tools"] = [{"name": ("browser", "explore", "email")[index]}]
+        request["environment_state"]["structured"]["clock"] = index
+        request["candidate_response"]["tool_calls"][0]["call_id"] = f"next-{index}"
+        requests.append(request)
+    wires = [_azure_input(request) for request in requests]
+    assert len({instructions for instructions, _ in wires}) == 1
+    for (_, earlier), (_, later) in zip(wires, wires[1:]):
+        assert later[: len(earlier) - 1] == earlier[:-1]
+        assert len(later) == len(earlier) + 1
+        assert later[len(earlier) - 1]["role"] == earlier[-1]["role"] == "user"
+    assert [len(items) for _, items in wires] == [1, 2, 3]
+    assert _native_history_messages(requests[2])[2].endswith('"content":"result c"}')
 
 
-def test_native_cache_does_not_mark_incomplete_parallel_result_batch():
+def test_native_cache_does_not_split_incomplete_parallel_result_batch():
     complete = _native_history_batch("a", "b")
-    incomplete = _marked_native_prefixes(_native_history_cache_request(complete[:-1]))
-    finished = _marked_native_prefixes(_native_history_cache_request(complete))
-    assert not any('"content":"result a"' in prefix for prefix in incomplete)
-    assert finished[-1].endswith('"content":"result b"}')
+    incomplete = _native_history_messages(_native_history_cache_request(complete[:-1]))
+    finished = _native_history_messages(_native_history_cache_request(complete))
+    assert len(incomplete) == 2 and '"content":"result a"' in incomplete[-1]
+    assert len(finished) == 3 and finished[1].endswith('"content":"result b"}')
 
 
 @pytest.mark.parametrize("history", [None, "unrecognized future representation", [{"role": "user", "content": "new"}]])
 def test_native_cache_preserves_unrecognized_history_and_future_fields(history):
-    _marked_native_prefixes(_native_history_cache_request(history))
+    assert len(_native_history_messages(_native_history_cache_request(history))) == 2
 
 
 @pytest.mark.parametrize("problem", ["opaque_declaration", "duplicate_declaration", "unexpected_result", "duplicate_result", "opaque_result"])
-def test_native_cache_opaque_or_malformed_batches_are_preserved_unmarked(problem):
+def test_native_cache_opaque_or_malformed_batches_are_preserved_unsplit(problem):
     batch = _native_history_batch("a", "b")
     if problem == "opaque_declaration":
         batch[0]["assistant_action"]["tool_calls"].append(None)
@@ -518,15 +540,34 @@ def test_native_cache_opaque_or_malformed_batches_are_preserved_unmarked(problem
         batch.append(batch[-1])
     else:
         batch[1]["tool_call_id"] = ["a"]
-    prefixes = _marked_native_prefixes(_native_history_cache_request(batch))
-    assert not any('"role":"tool"' in prefix for prefix in prefixes)
+    assert len(_native_history_messages(_native_history_cache_request(batch))) == 2
 
 
 def test_native_cache_complete_parallel_results_can_arrive_out_of_order():
     batch = _native_history_batch("a", "b")
     batch[1:] = reversed(batch[1:])
-    prefixes = _marked_native_prefixes(_native_history_cache_request(batch))
-    assert prefixes[-1].endswith('"content":"result a"}')
+    texts = _native_history_messages(_native_history_cache_request(batch))
+    assert len(texts) == 3 and texts[1].endswith('"content":"result a"}')
+
+
+def test_native_cache_marks_at_most_the_two_latest_history_messages():
+    history = [entry for call in "abcdef" for entry in _native_history_batch(call)]
+    messages = _to_rose_messages("fixed system", [
+        Message(role="user", content=json.dumps(_native_history_cache_request(history)))
+    ])
+    marked = [index for index, message in enumerate(messages)
+              if isinstance(message["content"], list) and "cache_control" in message["content"][-1]]
+    assert len(messages) == 8 and marked == [5, 6]
+
+
+def test_native_evidence_fold_stops_at_the_first_non_user_turn():
+    request = _native_history_cache_request(_native_history_batch("a"))
+    messages = _to_rose_messages("fixed system", [
+        Message(role="user", content=json.dumps(request)), Message(role="assistant", content="later turn"),
+    ])
+    folded = wmh_rose_provider._fold_system_evidence(messages)
+    assert [message["role"] for message in folded] == ["system", "user", "assistant"]
+    assert json.loads(folded[1]["content"]) == request and folded[2]["content"] == "later turn"
 
 
 def test_native_protocol_uses_same_rose_transport_and_retains_actual_model(monkeypatch):

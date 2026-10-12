@@ -111,12 +111,21 @@ one example per action. Keep the file and the run-state with the run's evidence.
   check OpenRouter credit (`GET https://openrouter.ai/api/v1/credits`); on
   2026-10-10 it ran out mid-run (HTTP 402 on every step). Local
   `agents/.env`/`back-end/.env` need the Render `AZURE_FOUNDRY_*` values.
-- **Prompt caching.** Azure reuses cached tokens only for an exactly repeated
-  system prompt; OpenAI via OpenRouter reuses partial prefixes. WMH therefore
-  carries the session-constant task evidence (seed state, examples, network) at
-  the end of the system message. Rates are `llm.cache` rows for
-  `wmh_world_model_distribution_v1`, denominator `cache_total_input`
-  (`scripts/measure.py`). DEMO response cache is fresh per run (expect 0 hits).
+- **Prompt caching** (measured on Azure `gpt-6.1-sol`, 2026-10-12). Azure reuses
+  only an exactly repeated leading instructions/developer block, or an
+  identical whole request. User-role content is never prefix-cached, and a
+  block that grew since the last request caches nothing, not even its
+  unchanged start. A request that chains a stored response
+  (`previous_response_id`, `store: true`) reuses the whole chain, user content
+  included. OpenAI via OpenRouter reuses ordinary prefixes. WMH therefore
+  carries the session-constant task fields (seed state, examples, network) at
+  the end of the system message. Each completed history batch follows as its
+  own user message, and one final message holds everything that changes per
+  call (the candidate's tools, retrieval, world state, candidate). Replays of
+  run 5 measured 7.8% on Azure (the system block) against about 37% reusable
+  under a prefix cache. Rates are `llm.cache` rows for the WMH call site,
+  denominator `cache_total_input` (`scripts/measure.py`). The DEMO response
+  cache is fresh per run (expect 0 hits).
 - **Devbox memory.** A cold native load peaks near 40 GB and takes 13–25 min.
   Run it in its own systemd scope (`MemoryHigh` ≤ 11G, swap ≥ 40 GB) so the
   devbox OOM watcher spares it; keep `MemAvailable` above ~1.1 GB. Serve the WMH

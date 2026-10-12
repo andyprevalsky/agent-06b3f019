@@ -111,16 +111,24 @@ _WMH_CALL_SITES = {
 }
 
 
-# Azure prompt caching reuses only an exactly repeated system prompt, so the
-# session-constant task evidence rides at the end of the system message (user
-# approved, 2026-10-11). Every reader folds it back into its user evidence.
+# Azure gpt-6.1-sol prompt caching (measured 2026-10-12) reuses only an exactly
+# repeated leading instructions/developer block, never user-role content, unless
+# the request chains a stored response. The session-constant task fields therefore
+# ride as a JSON object at the end of the system message. The rest of the evidence
+# follows as one JSON object split across user messages: one per completed history
+# batch, then a final message with everything that changes per call. An agent's
+# next request repeats every earlier message exactly, which prefix-caching routes
+# (OpenAI) and response chains can reuse. Every reader folds the layout back into
+# one user evidence message.
 _SYSTEM_EVIDENCE_MARKER = (
-    "\n\nWORLD EVIDENCE JSON (identical for every step of this world session; it continues in the user message):\n"
+    "\n\nWORLD EVIDENCE JSON, task part (identical for every step of this world session; the rest of "
+    "the evidence follows as one JSON object across the user messages, and its task fields extend this task):\n"
 )
 
 
 def _fold_system_evidence(messages: list) -> list:
-    """Canonical layout: evidence carried by the system message rejoins its user message."""
+    """Canonical layout: the system task part and its consecutive user fragments
+    rejoin as one user evidence message."""
     if not messages or not isinstance(messages[0], dict) or messages[0].get("role") != "system":
         return messages
     content = messages[0].get("content")
@@ -128,15 +136,34 @@ def _fold_system_evidence(messages: list) -> list:
         return messages
     system, _, carried = content.partition(_SYSTEM_EVIDENCE_MARKER)
     folded = [{**messages[0], "content": system}]
-    for message in messages[1:]:
-        if carried and isinstance(message, dict) and message.get("role") == "user":
-            try:
-                message = {**message, "content": carried + _prompt_text(message.get("content"))}
-                carried = ""
-            except TypeError:
-                pass
-        folded.append(message)
-    return folded
+    rest = list(messages[1:])
+    first = None
+    text = ""
+    while rest and isinstance(rest[0], dict) and rest[0].get("role") == "user":
+        try:
+            text += _prompt_text(rest[0].get("content"))
+        except TypeError:
+            break
+        first = first or rest[0]
+        rest.pop(0)
+    if first is None:
+        return folded + rest
+    try:
+        task_part, evidence = json.loads(carried), json.loads(text)
+    except ValueError:
+        task_part = evidence = None
+    if (
+        isinstance(task_part, dict) and list(task_part) == ["task"] and isinstance(task_part["task"], dict)
+        and isinstance(evidence, dict) and isinstance(evidence.get("task", {}), dict)
+        and not set(task_part["task"]) & set(evidence.get("task", {}))
+    ):
+        evidence = {"task": {**task_part["task"], **evidence.get("task", {})},
+                    **{key: value for key, value in evidence.items() if key != "task"}}
+        text = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+    else:
+        # Not this layout's parts: keep every byte for the readers to reject.
+        text = carried + text
+    return folded + [{**first, "content": text}] + rest
 
 
 def _prompt_text(content: object) -> str:
@@ -911,10 +938,20 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                 )
                 task = native["task"]
                 if all(key in task for key in ("initial_context", "instruction", "task_id")):
-                    content = _native_prompt_blocks(native)
+                    fragments = _native_prompt_fragments(native)
                     if len(rose) == 1 and rose[0]["role"] == "system" and isinstance(rose[0]["content"], str):
-                        carried = content.pop(0)["text"]
-                        rose[0] = {"role": "system", "content": rose[0]["content"] + _SYSTEM_EVIDENCE_MARKER + carried}
+                        rose[0] = {
+                            "role": "system",
+                            "content": rose[0]["content"] + _SYSTEM_EVIDENCE_MARKER + fragments[0],
+                        }
+                        history = fragments[1:-1]
+                        for index, text in enumerate(history):
+                            block = {"type": "text", "text": text}
+                            # Anthropic-style routes cache through the two latest batches.
+                            if index >= len(history) - 2:
+                                block["cache_control"] = {"type": "ephemeral"}
+                            rose.append({"role": "user", "content": [block]})
+                        content = fragments[-1]
                 elif next(iter(native)) != "task":
                     ordered = {key: native[key] for key in order if key in native}
                     ordered.update({
@@ -927,77 +964,72 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
     return rose
 
 
-def _native_prompt_blocks(native: dict) -> List[dict]:
-    """Mark exact shared context and completed history without dropping values."""
+def _completed_batch_ends(history: list) -> set[int]:
+    """Indices that end a complete assistant tool-call batch (every declared result present)."""
+    ends = set()
+    pending = None
+    for index, entry in enumerate(history):
+        if entry.get("role") == "assistant":
+            action = entry.get("assistant_action")
+            calls = action.get("tool_calls") if isinstance(action, dict) else None
+            ids = [call.get("call_id") for call in calls] if isinstance(calls, list) and all(isinstance(call, dict) for call in calls) else []
+            valid = ids and all(isinstance(value, str) and value for value in ids)
+            pending = set(ids) if valid and len(set(ids)) == len(ids) else None
+        elif entry.get("role") == "tool" and pending is not None:
+            result_id = entry.get("tool_call_id")
+            if not isinstance(result_id, str) or result_id not in pending:
+                pending = None
+            else:
+                pending.remove(result_id)
+                if not pending and (index + 1 == len(history) or history[index + 1].get("role") != "tool"):
+                    ends.add(index)
+                    pending = None
+        else:
+            pending = None
+    return ends
+
+
+def _native_prompt_fragments(native: dict) -> List[str]:
+    """The system task part, then the remaining evidence split at completed history batches.
+
+    The first fragment is the session-constant task fields as a JSON object. The
+    others join into one JSON object holding every other value unchanged: the
+    agent's append-only history first, then everything that changes per call
+    (the candidate's tools, retrieval, world state and candidate). An agent's
+    next request repeats each completed batch exactly and appends new ones.
+    """
     def encode(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     task = native["task"]
     stable_keys = ("initial_context", "instruction", "task_id")
-    stable = {key: task[key] for key in stable_keys}
-    remainder = {key: value for key, value in task.items() if key not in stable}
-    text = '{"task":' + encode(stable)[:-1]
-    cuts = [len(text)]
-    text += "," + encode(remainder)[1:] if remainder else "}"
-    # Retrieval replaces the full-task marker to keep at most four.
-    emitted = {"task"}
+    remainder = {key: value for key, value in task.items() if key not in stable_keys}
+    fragments = [encode({"task": {key: task[key] for key in stable_keys}})]
+    text = "{"
+    emitted = {"task", "candidate_response"}
 
-    def field(key: str) -> None:
+    def field(key: str, value: object) -> None:
         nonlocal text
-        if key in native:
-            text += "," + encode(key) + ":" + encode(native[key])
-            emitted.add(key)
+        text += ("" if text.endswith("{") else ",") + encode(key) + ":" + encode(value)
+        emitted.add(key)
 
-    field("grounding_schema_version")
-    field("grounding_contexts")
-    field("grounded_examples")
-    cuts.append(len(text))
     history = native.get("visible_conversation")
     if isinstance(history, list) and all(isinstance(entry, dict) for entry in history):
-        # A boundary after each of the last two complete result batches retains
-        # the previous exact prefix when a new assistant/tool batch is appended.
-        boundaries = []
-        pending = None
-        for index, entry in enumerate(history):
-            if entry.get("role") == "assistant":
-                action = entry.get("assistant_action")
-                calls = action.get("tool_calls") if isinstance(action, dict) else None
-                ids = [call.get("call_id") for call in calls] if isinstance(calls, list) and all(isinstance(call, dict) for call in calls) else []
-                valid = ids and all(isinstance(value, str) and value for value in ids)
-                pending = set(ids) if valid and len(set(ids)) == len(ids) else None
-            elif entry.get("role") == "tool" and pending is not None:
-                result_id = entry.get("tool_call_id")
-                if not isinstance(result_id, str) or result_id not in pending:
-                    pending = None
-                else:
-                    pending.remove(result_id)
-                    if not pending and (index + 1 == len(history) or history[index + 1].get("role") != "tool"):
-                        boundaries.append(index)
-                        pending = None
-            else:
-                pending = None
-        selected = set(boundaries[-2:])
-        text += ',"visible_conversation":['
+        ends = _completed_batch_ends(history)
+        text += '"visible_conversation":['
         emitted.add("visible_conversation")
         for index, entry in enumerate(history):
             text += ("," if index else "") + encode(entry)
-            if index in selected:
-                cuts.append(len(text))
-        # Keep the closing array bracket out of the cached history prefix.
+            if index in ends:
+                fragments.append(text)
+                text = ""
         text += "]"
-    else:
-        field("visible_conversation")
-    field("environment_state")
-    # Retrieval already precedes history.
-    for key in native:
-        if key not in emitted and key != "candidate_response":
-            field(key)
-    field("candidate_response")
-    text += "}"
-    blocks = []
-    start = 0
-    for end in cuts:
-        blocks.append({"type": "text", "text": text[start:end], "cache_control": {"type": "ephemeral"}})
-        start = end
-    blocks.append({"type": "text", "text": text[start:]})
-    return blocks
+    if remainder:
+        field("task", remainder)
+    for key in ("visible_conversation", "grounding_schema_version", "grounding_contexts", "grounded_examples",
+                "environment_state", *native):
+        if key in native and key not in emitted:
+            field(key, native[key])
+    if "candidate_response" in native:
+        field("candidate_response", native["candidate_response"])
+    return fragments + [text + "}"]
