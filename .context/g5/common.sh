@@ -1,0 +1,2 @@
+export DEPLOY_MERGED_SHA=32bbe410a575bf3d121e87ae8ad0c4a0d45dca2e
+cd /home/boxes/rose
