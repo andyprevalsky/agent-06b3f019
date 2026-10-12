@@ -124,9 +124,23 @@ The test uses the real trigger, `clearWorkflowForTerminalAgent`,
 generation` failed with `terminations = [<agent>:<agent>:run-2-…]` (the live run
 was terminated, `interrupted_count=1`). `follow-up run survives cleanup of an
 exact-run completed generation` failed with
-`temporalWorkflowId = <agent>:deployment-sealed:…`. Post-fix: 13/13 pass,
-including the guard `still-terminal agent with an unknown run is still sealed
-and terminated`.
+`temporalWorkflowId = <agent>:deployment-sealed:…`. Post-fix the suite passes
+(18/18 after the review hardening below), including the guard `still-terminal
+agent with an unknown run is still sealed and terminated`.
+
+An adversarial review then found five more holes in the same identity class.
+Each now has a case in the same file that fails on the first fix (`8f87649da`)
+and passes after:
+
+- `a live agent still on the exact terminal chain is sealed and terminated`
+  covers a start that adopted the finishing chain.
+- `a reopened agent between runs keeps its next run and chips` covers the
+  chat-mode window with `wf=null`.
+- `a later terminal generation retargets the pending obligation` covers the
+  trigger's `ON CONFLICT` keeping the oldest run.
+- `a reopen committed during the seal is never overwritten` covers the seal
+  TOCTOU against the lock-free reopen.
+- `a newer generation landing during the lease is requeued, not deleted`.
 
 Golden reference: OpenClaw never acts on a reusable session key alone.
 `openclaw/src/config/sessions/provider-review-store.ts:107` requires
@@ -155,7 +169,24 @@ query and task loops showed no analog.
   create `startDirectWorkflow`, SMS `start_new_agent` and the two checkpoint
   scripts now start with `startAgentWorkflowExecution` and record the exact run.
   `startAgentMode` returns 409 and terminates its unaccepted start if another
-  generation or a deletion won, matching chat escalation.
+  generation or a deletion won, matching chat escalation. The batch root start
+  and the SMS ambiguous-start adoption record the run too. `reconcileWorkflowStart`
+  now returns the chain's first run ID, not only the current run ID.
+- Review hardening in `workflowTerminalCleanup.ts`:
+  - The seal is a compare-and-set on the exact row state it read. A concurrent
+    reopen yields `raced`, and the obligation is retained with backoff.
+  - A live agent between runs, whose next run may reuse the agent ID, is
+    treated like a follow-up.
+  - The exact terminal chain still installed on a live agent keeps the
+    original seal.
+  - `finishCleanup` requeues, rather than deletes, an obligation that a newer
+    generation retargeted during the lease.
+- Migration `20261012040000_temporal_cleanup_newest_generation`: on conflict,
+  the newest known run wins and the later grace is kept. The local SQL hooks
+  apply it after the original trigger.
+- `force-clear-generation-queue.ts` / `generationQueueCutover.ts`: the orphan
+  terminate is scoped to the exact run listed on the superseded queue, never
+  the latest run of a Workflow ID that a follow-up may reuse.
 
 Siblings prevented:
 
@@ -166,9 +197,17 @@ Siblings prevented:
 - Unknown-run obligations from every lossy start path (API create, SMS, manual
   escalation).
 
-Regression coverage: `workflow-terminal-cleanup.test.ts` (+3) and
-`workflow-generation-locks.test.ts` (+1) run via `scripts/run-unit-tests.ts`
-inside `run-coverage.sh` (the `/deploy` backend coverage gate).
+Regression coverage: `workflow-terminal-cleanup.test.ts` (+8),
+`workflow-generation-locks.test.ts` (+1), `generation-queue-cutover.test.ts`
+(the run-scoped orphan) and `coverage-script.test.ts` (hook order) all run via
+`scripts/run-unit-tests.ts` inside `run-coverage.sh`, the `/deploy` backend
+coverage gate.
+
+Still open, and pre-existing: a chat escalation whose start hits
+`WorkflowExecutionAlreadyStartedError` adopts the still-finishing chain, so
+that follow-up is never processed. Separately, `routeUserMessage` re-reads a
+just-sealed row and signals the tombstone when its reopen compare-and-set loses
+to a seal. Neither was observed in this incident.
 
 10k-agent behavior: no new queries on any hot path. Cleanup does the same
 single-row read it already did under the existing per-agent advisory lock. One

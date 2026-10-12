@@ -181,14 +181,17 @@ async function claimCleanupBatch(
 }
 
 type SealOutcome =
-  | { kind: 'sealed' | 'not-installed' }
-  | { kind: 'live-follow-up'; installedFirstExecutionRunId: string | null };
+  | { kind: 'sealed' | 'not-installed' | 'raced' }
+  | { kind: 'follow-up-owned'; installedFirstExecutionRunId: string | null };
 
 /**
  * A root agent reuses Workflow ID = agent ID for every follow-up run, so the
- * Workflow ID alone never names the generation that went terminal. Once the
- * agent is live again on that Workflow ID, the installed run and every tool
- * chip stamped with that generation string belong to the follow-up run.
+ * Workflow ID alone never names the generation that went terminal. While the
+ * agent is live and its installed run (or, between runs, its next run) can
+ * reuse this Workflow ID, that run and every tool chip stamped with the same
+ * generation string belong to the follow-up. Only the exact terminal chain
+ * still installed on a live agent (a start that adopted the finishing chain)
+ * keeps the original seal.
  */
 async function sealCleanup(obligation: CleanupObligation): Promise<SealOutcome> {
   return runTransactionWithRetry(async (tx) => {
@@ -203,25 +206,40 @@ async function sealCleanup(obligation: CleanupObligation): Promise<SealOutcome> 
       },
     });
     if (current === null) return { kind: 'not-installed' };
-    if (current.temporalWorkflowId !== obligation.workflowId) return { kind: 'not-installed' };
-    if (
+    const live =
       current.deletedAt === null &&
-      !(TERMINAL_AGENT_STATUSES as readonly string[]).includes(current.status)
-    ) {
+      !(TERMINAL_AGENT_STATUSES as readonly string[]).includes(current.status);
+    const terminalChainInstalled =
+      obligation.firstExecutionRunId !== null &&
+      current.temporalWorkflowId === obligation.workflowId &&
+      current.temporalFirstExecutionRunId === obligation.firstExecutionRunId;
+    const nextRunMayReuse =
+      current.temporalWorkflowId === obligation.workflowId ||
+      (current.temporalWorkflowId === null && obligation.workflowId === obligation.agentId);
+    if (live && !terminalChainInstalled && nextRunMayReuse) {
       return {
-        kind: 'live-follow-up',
+        kind: 'follow-up-owned',
         installedFirstExecutionRunId: current.temporalFirstExecutionRunId,
       };
     }
-    await tx.agent.update({
-      where: { id: obligation.agentId },
+    if (current.temporalWorkflowId !== obligation.workflowId) return { kind: 'not-installed' };
+    // A follow-up reopening the agent does not take this lock; seal only the
+    // exact row state that was read.
+    const sealedRows = await tx.agent.updateMany({
+      where: {
+        id: obligation.agentId,
+        temporalWorkflowId: obligation.workflowId,
+        temporalFirstExecutionRunId: current.temporalFirstExecutionRunId,
+        status: current.status,
+        deletedAt: current.deletedAt,
+      },
       data: {
         temporalWorkflowId: `${obligation.agentId}:deployment-sealed:${randomUUID()}`,
         temporalFirstExecutionRunId: null,
         toolsInUse: [],
       },
     });
-    return { kind: 'sealed' };
+    return { kind: sealedRows.count === 1 ? 'sealed' : 'raced' };
   });
 }
 
@@ -233,10 +251,23 @@ async function finishCleanup(snapshot: CleanupSnapshot): Promise<void> {
         agentId: snapshot.agentId,
         workflowId: snapshot.workflowId,
         leaseToken: snapshot.leaseToken,
+        firstExecutionRunId: snapshot.firstExecutionRunId,
       },
     });
     if (deleted.count !== 1) {
-      throw new Error(`Cleanup lease was lost for ${snapshot.agentId}/${snapshot.workflowId}`);
+      // A newer generation under this Workflow ID went terminal while this
+      // lease was held; keep its obligation for the next sweep.
+      const requeued = await tx.temporalWorkflowCleanup.updateMany({
+        where: {
+          agentId: snapshot.agentId,
+          workflowId: snapshot.workflowId,
+          leaseToken: snapshot.leaseToken,
+        },
+        data: { leaseToken: null, leaseUntil: null },
+      });
+      if (requeued.count !== 1) {
+        throw new Error(`Cleanup lease was lost for ${snapshot.agentId}/${snapshot.workflowId}`);
+      }
     }
     const remaining = await tx.temporalWorkflowCleanup.count({
       where: { agentId: snapshot.agentId },
@@ -276,15 +307,18 @@ async function cleanupOne(
     obligation.workflowId
   );
   const sealOutcome = await sealCleanup(obligation);
-  if (sealOutcome.kind === 'live-follow-up') {
-    // Only the terminal generation's exact chain may be closed, and only when
-    // it is provably not the installed run. Temporal scopes the terminate to
-    // that chain, so the follow-up keeps running.
+  if (sealOutcome.kind === 'raced') {
+    throw new Error(
+      `Agent ${obligation.agentId} workflow generation changed during terminal cleanup; retrying`
+    );
+  }
+  if (sealOutcome.kind === 'follow-up-owned') {
+    // Close only the terminal generation's exact, known chain. Temporal scopes
+    // the terminate to that chain, so a follow-up run under the same Workflow
+    // ID keeps running; an unknown chain is never resolved here.
     const completedRunId = obligation.firstExecutionRunId;
     const terminateCompleted =
-      completedRunId !== null &&
-      sealOutcome.installedFirstExecutionRunId !== null &&
-      completedRunId !== sealOutcome.installedFirstExecutionRunId;
+      completedRunId !== null && completedRunId !== sealOutcome.installedFirstExecutionRunId;
     if (terminateCompleted) {
       assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} termination`);
       await dependencies.terminate(

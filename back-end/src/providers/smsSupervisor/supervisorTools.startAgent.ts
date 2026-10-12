@@ -207,6 +207,8 @@ export async function commitStartNewAgent(
       memoryEnabled: resolvedMemory,
     });
 
+    // A superseded record means the row was deleted or another start won; the
+    // row's own terminal/deletion cleanup obligation owns the started run.
     if (!(await recordAgentWorkflowExecution(startedAgent.id, execution))) {
       log.warn('Started workflow was superseded before its run identity was recorded', {
         phase: 'start',
@@ -244,10 +246,17 @@ export async function commitStartNewAgent(
         workflowStatus: reconciled.status,
         error: errorMsg,
       });
-      await prisma.agent.update({
-        where: { id: startedAgent.id },
-        data: { temporalWorkflowId: startedAgent.id },
-      });
+      if (reconciled.firstExecutionRunId === null) {
+        await prisma.agent.update({
+          where: { id: startedAgent.id },
+          data: { temporalWorkflowId: startedAgent.id },
+        });
+      } else {
+        await recordAgentWorkflowExecution(startedAgent.id, {
+          workflowId: startedAgent.id,
+          firstExecutionRunId: reconciled.firstExecutionRunId,
+        });
+      }
       return {
         tool: 'start_new_agent',
         success: true,

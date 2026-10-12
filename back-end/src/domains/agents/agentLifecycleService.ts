@@ -98,7 +98,9 @@ async function startDirectWorkflow(
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
   // startSubAgentWorkflow above); bind the run so cleanup can tell this
-  // generation from a later follow-up that reuses the same Workflow ID.
+  // generation from a later follow-up that reuses the same Workflow ID. A
+  // superseded record means the row was deleted or another start won; the
+  // row's own terminal/deletion cleanup obligation owns the started run.
   if (!(await recordAgentWorkflowExecution(agentDbId, execution))) {
     log.warn('Started workflow was superseded before its run identity was recorded', {
       agent_id: agentDbId,
