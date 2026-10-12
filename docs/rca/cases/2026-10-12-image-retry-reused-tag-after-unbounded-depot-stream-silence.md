@@ -24,7 +24,7 @@ tags:
 sources:
   - benchmark run daily-live50 20261012-191951-t1
   - benchmark run daily-live50 20261012-215230-t2
-  - commit a040520d5
+  - commit 989ffdbdd
 repro: agents/benchmarks/cloudbench_image_cli_test.py::test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag
 status: open
 ---
