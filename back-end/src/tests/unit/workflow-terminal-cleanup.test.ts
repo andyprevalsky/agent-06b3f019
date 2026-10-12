@@ -118,6 +118,12 @@ async function main(): Promise<void> {
   await test('already-closed workflow clears exact obligation without terminate', async () => {
     const runId = `workflow-terminal-closed-${randomUUID()}`;
     const agentId = await createAgent(runId, 'FAILED');
+    // Direct starts record only the workflow id, so neither the agent row nor
+    // its obligation knows the chain and cleanup must describe it.
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { temporalFirstExecutionRunId: null },
+    });
     await prisma.temporalWorkflowCleanup.update({
       where: {
         agentId_workflowId: { agentId, workflowId: `workflow-${agentId}` },
@@ -136,6 +142,29 @@ async function main(): Promise<void> {
         },
       });
       assert.strictEqual(terminated, false);
+      await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
+    } finally {
+      await deleteRun(runId);
+    }
+  });
+
+  await test('an obligation without a chain adopts the ended row chain exactly', async () => {
+    // A descendant can be deleted before its start records the run id, so its
+    // obligation is queued without one and the row learns the chain later.
+    const runId = `workflow-terminal-rebind-${randomUUID()}`;
+    const agentId = await createAgent(runId, 'FAILED');
+    await prisma.temporalWorkflowCleanup.update({
+      where: {
+        agentId_workflowId: { agentId, workflowId: `workflow-${agentId}` },
+      },
+      data: { firstExecutionRunId: null },
+    });
+    const terminations: string[] = [];
+    try {
+      const result = await forceCleanup([agentId], successfulDependencies(terminations));
+      assert.deepStrictEqual(terminations, [`${agentId}:workflow-${agentId}:first-${agentId}`]);
+      assert.strictEqual(result.superseded, 1);
+      assert.strictEqual(result.sealed, 1);
       await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
     } finally {
       await deleteRun(runId);
