@@ -21,11 +21,11 @@ WINDOW="$(
   grep -n 'not E2B-reachable' "$RUN_SH" | head -1 | cut -d: -f1 \
     | xargs -I{} awk -v n={} 'NR>=n-6 && NR<=n {print}' "$RUN_SH"
 )"
-printf '%s\n' "$WINDOW" | grep -Fq 'FAST_MODE_ANTHROPIC_PROXY_URL=""' \
+grep -Fq 'FAST_MODE_ANTHROPIC_PROXY_URL=""' <<<"$WINDOW" \
   || fail "E2B-unreachable branch must clear FAST_MODE_ANTHROPIC_PROXY_URL"
-printf '%s\n' "$WINDOW" | grep -Fq 'FAST_MODE_CODEX_PROXY_URL=""' \
+grep -Fq 'FAST_MODE_CODEX_PROXY_URL=""' <<<"$WINDOW" \
   || fail "E2B-unreachable branch must clear FAST_MODE_CODEX_PROXY_URL"
-printf '%s\n' "$WINDOW" | grep -Fq 'http://localhost:*' \
+grep -Fq 'http://localhost:*' <<<"$WINDOW" \
   || fail "E2B-unreachable branch must match localhost PUBLIC_BASE_URL"
 
 ENV_TS="$ROOT_DIR/back-end/src/providers/codeAgentFastModeEnv.ts"

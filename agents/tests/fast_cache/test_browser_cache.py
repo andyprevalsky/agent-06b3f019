@@ -48,7 +48,9 @@ class MemStore:
         self.get_calls += 1
         return self.data.get(key)
 
-    async def set(self, key: str, kind: str, goal_hash: str, value: Any) -> bool:
+    async def set(
+        self, key: str, kind: str, goal_hash: str, value: Any, *, goal: str | None = None, root_goal: str | None = None
+    ) -> bool:
         self.set_calls += 1
         self.data[key] = normalize.strip_secrets(value)
         return True
@@ -276,6 +278,40 @@ def test_browser_use_write_only_records_without_read(mem):
         assert mem.get_calls == 0
         assert mem.set_calls == 1
         assert len(mem.data) == 1
+
+    asyncio.run(body())
+
+
+def test_browser_use_write_skips_child_under_demo_tree_root(mem, monkeypatch):
+    """A non-DEMO child goal under a DEMO root never writes the frozen replay namespace."""
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+    roots = {"child-under-demo": _soft_complete_bench_goal(), "child-under-ordinary": "ordinary root goal"}
+
+    async def resolve(agent_id):
+        return False, "child browser goal", True, f"root-of-{agent_id}", roots[agent_id], True
+
+    monkeypatch.setattr(browser_use_cache.cache_client, "resolve_agent_fast_mode", resolve)
+
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": 2}
+
+        for agent_id in ("child-under-demo", "child-under-ordinary"):
+            out = await browser_use_cache.cached_browser_decision(
+                enabled=False,
+                write_enabled=True,
+                goal="child browser goal",
+                request={"url": f"https://x.com/{agent_id}"},
+                call_llm=live,
+                agent_id=agent_id,
+            )
+            assert out == {"action": "click", "index": 2}
+        assert calls["n"] == 2
+        # Only the ordinary-rooted child records its live decision.
+        assert mem.set_calls == 1
 
     asyncio.run(body())
 

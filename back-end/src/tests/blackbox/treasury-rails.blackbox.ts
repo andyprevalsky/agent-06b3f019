@@ -46,6 +46,7 @@ import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
 import { selectTreasuryRailCardholder } from './treasury-rails-cardholder';
 import {
   checkPendingUnusedMints,
+  overdueReclaimSkipped,
   pendingMintLedgerPath,
   recordPendingMint,
 } from './treasury-rails-pending-mints';
@@ -225,12 +226,17 @@ async function checkEarlierUnusedMints(
       case 'unobservable':
         console.warn(`  UNVERIFIED ${label}: ${verdict.reason}`);
         break;
-      case 'overdue':
-        lost.push(
+      case 'overdue': {
+        const overdue =
           `${label} still ${verdict.status} past the ${RECLAIM_DEADLINE} reclaim deadline; ` +
-            `provider row: ${JSON.stringify(verdict.row ?? null)}`
-        );
+          `provider row: ${JSON.stringify(verdict.row ?? null)}`;
+        if (overdueReclaimSkipped()) {
+          console.warn(`  SKIP ${overdue} (TREASURY_RAILS_SKIP_OVERDUE_RECLAIM=1)`);
+          break;
+        }
+        lost.push(overdue);
         break;
+      }
       case 'failed':
         lost.push(
           `${label}: ${verdict.reason}; provider row: ${JSON.stringify(verdict.row ?? null)}`

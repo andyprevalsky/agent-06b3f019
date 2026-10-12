@@ -2,9 +2,11 @@
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,175 @@ import pytest
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
+
+
+@pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing", "lifecycle-failed"))
+def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
+    """Exercise the real scheduler with owned child processes and terminal artifacts."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    cli = scripts / "run-bench"
+    cli.write_text(f"#!/bin/bash\nexec {shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / 'child.py'))} \"$@\"\n")
+    child = r'''
+import json, os, subprocess, sys, time
+from pathlib import Path
+root = Path(os.environ['FIXTURE_ROOT'])
+task = sys.argv[1]
+attempt = int(os.environ.get('RUN_BENCH_CAMPAIGN_ATTEMPT', '1'))
+mode = os.environ['FIXTURE_FAILURE']
+run_id = f'{task}-{attempt}'
+fleet = root / '.context/fleet/runs' / run_id
+(fleet / '_batch').mkdir(parents=True)
+owner = run_id
+audit = root / '.git/cloudbench-fleet-audits' / owner
+audit.mkdir(parents=True)
+status = 'INFRA_ERROR' if task == 'broken' and (attempt == 1 or mode == 'exhausted') else 'PASSED'
+if task == 'broken' and mode == 'task':
+    status = 'FAILED'
+if task == 'broken' and mode == 'lifecycle-failed':
+    status = 'PASSED'
+row = {'name': task, 'status': status, 'passed': status == 'PASSED', 'lifecycle_stage': 'released'}
+if mode == 'contradictory' and task == 'broken':
+    row['passed'] = True
+if mode == 'retained' and task == 'broken':
+    row['lifecycle_stage'] = 'teardown'
+    (root / '.git/cloudbench-fleet-ownership' / owner).mkdir(parents=True)
+(fleet / '_batch/run.json').write_text(json.dumps({'run_id': run_id, 'tasks': [row]}))
+# The fleet verifies a genuinely evaluated FAILED task; a released attempt whose
+# mandatory autoscaler failed (controller exit 2) keeps a failed lifecycle.
+lifecycle_failed = status == 'INFRA_ERROR' or (mode == 'lifecycle-failed' and task == 'broken')
+(fleet / '_batch/lifecycle.json').write_text(json.dumps({
+    'run_id': run_id, 'fleet_owner_token': owner, 'workspace_root': str(root),
+    'status': 'failed' if lifecycle_failed else 'verified', 'hub_publication_failed': False}))
+meta = f'run_id={run_id}\nfleet_owner_token={owner}\nworkspace_root={root}\nstatus=provider-teardown-verified\n'
+(audit / 'meta').write_text(meta)
+(audit / 'provider-teardown-verified.epoch').write_text(str(time.time()))
+(fleet / 'teardown-ownership.path').write_text(str(audit))
+(fleet / 'teardown-ownership').mkdir()
+(fleet / 'teardown-ownership/meta').write_text(meta)
+(fleet / 'teardown-ownership/provider-teardown-verified.epoch').write_bytes((audit / 'provider-teardown-verified.epoch').read_bytes())
+fd = os.open(root / 'events.jsonl', os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+os.write(fd, (json.dumps({'task': task, 'attempt': attempt, 'event': 'started'}) + '\n').encode())
+os.close(fd)
+if not (mode == 'retry-handle-missing' and task == 'broken' and attempt == 2):
+    print(f'    {root}/scripts/run-bench monitor {fleet}', flush=True)
+if mode == 'retry-unverified' and task == 'broken' and attempt == 2:
+    (audit / 'provider-teardown-verified.epoch').unlink()
+if os.environ.get('RUN_BENCH_CAMPAIGN_BARRIER_DIR') and status != 'INFRA_ERROR':
+    subprocess.run([sys.executable, os.environ['FIXTURE_BARRIER'], '--deadline', str(time.time()+60),
+                    '--controller-pid', str(os.getpid())], check=True)
+if task == 'healthy' and mode.startswith('infra'):
+    while not (root / 'retry-started').exists():
+        time.sleep(0.05)
+if task == 'broken' and attempt == 2:
+    (root / 'retry-started').touch()
+fd = os.open(root / 'events.jsonl', os.O_WRONLY | os.O_APPEND)
+os.write(fd, (json.dumps({'task': task, 'attempt': attempt, 'event': 'finished'}) + '\n').encode())
+os.close(fd)
+sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status == 'PASSED' else 1)
+'''
+    (tmp_path / "child.py").write_text(child)
+    uploader = tmp_path / "agents/benchmarks/hub_upload.py"
+    uploader.parent.mkdir(parents=True)
+    uploader.write_text(
+        "import argparse, hashlib, json, os, sys\n"
+        "args=sys.argv[1:]; record=json.load(open(args[1])); ack=args[args.index('--publication-ack')+1]\n"
+        "json.dump({'pid':os.getpid(),'token':args[args.index('--publication-token')+1],"
+        "'record_sha256':hashlib.sha256(json.dumps(record,sort_keys=True).encode()).hexdigest()},open(ack,'w'))\n"
+    )
+    command = [sys.executable, str(ROOT / "scripts/run-bench-campaign.py"), "--root", str(tmp_path),
+               "--runs", "1", "--concurrency", "2", "--task", "broken", "--task", "healthy",
+               "--retry-infra", "0" if failure == "cutoff-no-retry" else "1", "--e2e-timeout", "5400"]
+    if failure.startswith("cutoff"):
+        command += ["--e2e-started-at", str(time.time() - 5401)]
+    elif failure == "infra-strict":
+        command += ["--forward-arg=--strict-barrier"]
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("RUN_BENCH_CAMPAIGN_") and not key.startswith("BENCHMARK_HUB_")}
+    env.update(FIXTURE_ROOT=str(tmp_path), FIXTURE_FAILURE=failure, CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY="0",
+               FIXTURE_BARRIER=str(ROOT / 'scripts/cloudbench-campaign-barrier.py'))
+    if failure == "infra-parent-owned":
+        # A Hub-dispatched campaign (run-bench-hub-poller) leaves group publication to its parent.
+        env["BENCHMARK_HUB_PARENT_RUN_ID"] = "fixture-parent"
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    summaries = list((tmp_path / ".context/benchmarks/campaigns").glob("*/summary.json"))
+    assert summaries, result.stdout + result.stderr
+    summary = json.loads(summaries[0].read_text())
+    events = [json.loads(line) for line in (tmp_path / 'events.jsonl').read_text().splitlines()] if (tmp_path / 'events.jsonl').exists() else []
+    broken = next(job for job in summary['jobs'] if job['task'] == 'broken')
+    started = [event for event in events if event['event'] == 'started']
+    assert len(summary['jobs']) == summary['total_jobs'] == 2
+    if failure.startswith('cutoff'):
+        assert not started and result.returncode != 0
+        assert summary['e2e_timeout_exceeded']
+        assert (summaries[0].parent / 'hub-group-publication-ack.private.json').is_file(), 'cutoff skipped terminal group publication'
+    elif failure in {'infra', 'infra-strict', 'infra-parent-owned', 'exhausted', 'retry-unverified', 'retry-handle-missing'}:
+        assert len([event for event in started if event['task'] == 'broken']) == 2
+        assert len([event for event in started if event['task'] == 'healthy']) == 1
+        assert len(broken['attempts']) == 2 and broken['attempts'][0]['task_status'] == 'INFRA_ERROR'
+        assert len({attempt['log'] for attempt in broken['attempts']}) == 2
+        assert result.returncode == (0 if failure in {'infra', 'infra-strict', 'infra-parent-owned'} else 1), result.stdout + result.stderr
+        if failure == 'infra-parent-owned':
+            assert summary['status'] == 'passed'
+            assert not (summaries[0].parent / 'hub-group-publication-ack.private.json').exists()
+        if failure.startswith('retry-'):
+            previous, current = broken['attempts']
+            assert previous['attempt'] == 1 and current['attempt'] == 2
+            assert previous['run_id'] == previous['fleet_owner_token'] == 'broken-1'
+            assert previous['resources_released'] is True and previous['infra_failure'] is True
+            assert previous['released_at_epoch'] > 0 and previous['retry_blocked'] is None
+            assert current['controller_exit_code'] == 0 and current['resources_released'] is False
+            assert current['retry_blocked'] == (
+                'physical run handle unavailable' if failure == 'retry-handle-missing'
+                else 'terminal result or release remains unverified'
+            )
+            for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'task_status',
+                        'infra_failure', 'terminal_task', 'released_at_epoch'):
+                assert current[key] is None, f'current attempt inherited prior {key}'
+                assert broken.get(key) is None, f'current job inherited prior {key}'
+        if failure.startswith('infra'):
+            retry = next(index for index, event in enumerate(events) if event['task'] == 'broken' and event['attempt'] == 2 and event['event'] == 'started')
+            peer_end = next(index for index, event in enumerate(events) if event['task'] == 'healthy' and event['event'] == 'finished')
+            assert retry < peer_end, 'retry unnecessarily waited for the healthy peer'
+        if failure == 'infra-strict':
+            cohort = summary['startup_cohorts'][0]
+            assert cohort['expected_count'] == 2 and cohort['released_count'] == cohort['failed_count'] == 1
+    else:
+        assert len([event for event in started if event['task'] == 'broken']) == 1
+        assert result.returncode == (0 if failure == 'task' else 1 if failure != 'lifecycle-failed' else 2), (
+            result.stdout + result.stderr)
+        if failure == 'lifecycle-failed':
+            # Released resources and a PASSED row alone are not a healthy attempt.
+            assert broken['status'] != 'passed' and summary['status'] != 'passed'
+            assert broken['attempts'][0]['resources_released'] is True
+            assert broken['attempts'][0]['lifecycle_verified'] is False
+
+
+@pytest.mark.parametrize('explicit_concurrency', (False, True))
+def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry(tmp_path, explicit_concurrency):
+    scripts = tmp_path / 'scripts'
+    scripts.mkdir()
+    (tmp_path / 'agents').mkdir()
+    shutil.copyfile(ROOT / 'scripts/run-bench', scripts / 'run-bench')
+    shutil.copyfile(ROOT / 'scripts/cloudbench_catalog.py', scripts / 'cloudbench_catalog.py')
+    receipt = tmp_path / 'dispatch.json'
+    (scripts / 'run-bench-campaign.py').write_text(
+        'import json, os, sys\n'
+        "json.dump(sys.argv[1:], open(os.environ['FIXTURE_DISPATCH'], 'w'))\n")
+    arguments = ['demo-fleet-alpha', 'demo-fleet-beta', '--retry-infra', '1', '--e2e-timeout', '5400',
+                 '--e2e-started-at', '1791410000', '--timeout', '1200']
+    if explicit_concurrency:
+        arguments += ['--concurrency', '1']
+    result = subprocess.run(['bash', str(scripts / 'run-bench'), *arguments], capture_output=True, text=True,
+                            env={**os.environ, 'FIXTURE_DISPATCH': str(receipt),
+                                 'RUN_BENCH_CATALOG_UNDER_TEST': str(ROOT / 'agents/benchmarks/tasks.json')},
+                            timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = json.loads(receipt.read_text())
+    assert '--retry-infra=1' in actual and '--e2e-timeout=5400' in actual and '--e2e-started-at=1791410000' in actual
+    assert f'--concurrency={1 if explicit_concurrency else 2}' in actual
+    assert '--task=demo-fleet-alpha' in actual and '--task=demo-fleet-beta' in actual
+    assert actual[-2:] == ['--forward-arg=--timeout', '--forward-arg=1200']
 
 
 @pytest.mark.parametrize("runner_mode", ("installed", "node", "npx", "missing"))
@@ -1006,7 +1177,8 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
         'phase="starting" if "--register-starting" in sys.argv else "final"\n'
         'if phase != os.environ["FIXTURE_PHASE"]: sys.exit(0)\n'
         'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(120)"])\n'
-        'Path(os.environ["FIXTURE_MARKER"]).write_text(json.dumps({"pid":os.getpid(),"child_pid":child.pid}))\n'
+        'marker=Path(os.environ["FIXTURE_MARKER"]); temporary=marker.with_suffix(".tmp")\n'
+        'temporary.write_text(json.dumps({"pid":os.getpid(),"child_pid":child.pid})); temporary.replace(marker)\n'
         'while not Path(os.environ["FIXTURE_RELEASE"]).exists(): time.sleep(0.1)\n'
         "child.terminate(); child.wait()\n"
     )
@@ -1043,7 +1215,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
             owner = json.loads(marker.read_text())
             process.send_signal(signal.SIGTERM)
             try:
-                result = process.wait(timeout=15)
+                result = process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
             except subprocess.TimeoutExpired:
                 raise AssertionError(f"campaign cancellation remained blocked in {phase} publication") from None
             assert result == 143

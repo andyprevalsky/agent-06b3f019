@@ -997,7 +997,9 @@ async def cached_complete(
             can_rekey = (call_site or "").strip() != "dag_param_populator"
             if hit_key and hit_key != key and ctx.should_write and can_rekey:
                 try:
-                    await cache_client.cache_set(key, "llm", ctx.goal_hash, stored)
+                    await cache_client.cache_set(
+                        key, "llm", ctx.goal_hash, stored, goal=ctx.goal, root_goal=ctx.root_goal
+                    )
                 except Exception as exc:
                     logger.warning("fast_cache.set_error", key=key, error=str(exc))
             logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
@@ -1163,7 +1165,9 @@ async def cached_complete(
         _accumulate(acc, chunk)
         if chunk.kind == "done" and ctx.should_write and not structured_response_model:
             try:
-                await cache_client.cache_set(key, "llm", ctx.goal_hash, acc)
+                await cache_client.cache_set(
+                    key, "llm", ctx.goal_hash, acc, goal=ctx.goal, root_goal=ctx.root_goal
+                )
                 logger.info("llm.cache.stored", call_site=call_site, key=key)
             except Exception as exc:
                 logger.warning("fast_cache.set_error", key=key, error=str(exc))

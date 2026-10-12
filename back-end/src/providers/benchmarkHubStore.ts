@@ -16,6 +16,7 @@
  * and completed runs through one index.
  */
 
+import { validateGroupAttempt } from './benchmarkHubGroupAttempts';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
   deleteHubAncestorSkeletonsFromBundle,
@@ -250,9 +251,9 @@ let indexAdmissionHeld = false;
  * when an R2 operation throws.
  *
  * Live snapshots are superseded by the run's next snapshot, while a final
- * bundle, delete or index read is one-shot. Queued foreground work is admitted
- * ahead of queued snapshots, so a fleet's snapshot stream saturating this
- * single writer cannot starve the final upload behind every pending snapshot.
+ * bundle, delete or index read is one-shot. Each process admits its queued
+ * foreground work ahead of its snapshots. The shared SQL lock still orders
+ * other processes' already-admitted writes; it does not preempt those writes.
  */
 async function withIndexLock<T>(
   operation: () => Promise<T>,
@@ -311,6 +312,10 @@ async function storeRun(
     ...(bundle.run_group !== undefined ? { run_group: runGroupSchedule(bundle) } : {}),
   };
   const agentIds = agentIdsFromHubBundle(bundle);
+  // This one-shot registration must be visible before the caller can create
+  // any agent; it cannot be replaced by an already-running progress stream.
+  const startingRegistration =
+    tasks.length > 0 && tasks.every((task) => task.status === 'starting') && agentIds.length === 0;
 
   let storedSummary = summary;
   let storedAgentIndexRevision: number | null = null;
@@ -324,7 +329,9 @@ async function storeRun(
         }
         if (
           existing?.run_group &&
-          JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members)
+          (JSON.stringify(existing.run_group.members) !==
+            JSON.stringify(summary.run_group!.members) ||
+            existing.timestamp !== summary.timestamp)
         ) {
           throw new Error('Benchmark Hub group schedule changed');
         }
@@ -351,7 +358,11 @@ async function storeRun(
       }
       if (existing?.group_run_id) {
         for (const field of HUB_GROUP_FIELDS) {
-          if (summary[field] !== undefined && summary[field] !== existing[field]) {
+          if (
+            summary[field] !== undefined &&
+            summary[field] !==
+              (field === 'group_attempt' ? (existing[field] ?? 1) : existing[field])
+          ) {
             throw new Error('Benchmark Hub group membership changed');
           }
         }
@@ -361,16 +372,7 @@ async function storeRun(
         const owner = index.find((run) => run.run_id === summary.group_run_id);
         if (owner && !owner.run_group)
           throw new Error('Benchmark Hub group ID collides with a physical run');
-        if (
-          index.some(
-            (run) =>
-              run.run_id !== runId &&
-              run.group_run_id === summary.group_run_id &&
-              run.group_member_id === summary.group_member_id
-          )
-        ) {
-          throw new Error('Benchmark Hub group member already belongs to another run');
-        }
+        validateGroupAttempt(summary, index, existing);
         if (owner?.run_group) {
           const member = owner.run_group.members.find(
             (item) => item.member_id === summary.group_member_id
@@ -423,6 +425,23 @@ async function storeRun(
         return;
       }
       const persisted = await readAgentRunIndexForMutation(index);
+      // An unknown-ACK registration retry can arrive after another process
+      // has committed progress. Preserve that durable handoff; distinct
+      // pre-agent starting packets may still update until ownership advances.
+      if (
+        existing !== undefined &&
+        summary.live &&
+        startingRegistration &&
+        (existing.tasks.some(
+          (task) =>
+            (typeof task.status === 'string' && task.status !== 'starting') ||
+            (typeof task.agent_id === 'string' && task.agent_id.length > 0)
+        ) ||
+          Array.from(persisted?.agents.values() ?? []).includes(runId))
+      ) {
+        storedSummary = existing;
+        return;
+      }
       const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
       await putObject(
         `runs/${runId}.json`,
@@ -435,7 +454,7 @@ async function storeRun(
       await putObject(`visibility/${runId}.json`, 'true');
       storedAgentIndexRevision = agentIndex.revision;
     },
-    summary.live ? 'snapshot' : 'foreground'
+    summary.live && !startingRegistration ? 'snapshot' : 'foreground'
   );
   log.info('Stored benchmark run bundle', {
     runId,

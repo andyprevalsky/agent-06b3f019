@@ -84,7 +84,9 @@ class MemStore:
         self.get_calls += 1
         return self.data.get(key)
 
-    async def set(self, key: str, kind: str, goal_hash: str, value: Any) -> bool:
+    async def set(
+        self, key: str, kind: str, goal_hash: str, value: Any, *, goal: str | None = None, root_goal: str | None = None
+    ) -> bool:
         self.set_calls += 1
         self.data[key] = normalize.strip_secrets(value)
         return True
@@ -4337,3 +4339,57 @@ def test_demo_cache_probe_preserves_existing_recorded_replay_hits(mem, monkeypat
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
     replay_control(mem, monkeypatch)
     assert mem.set_calls == 0
+
+
+def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
+    """A live miss must not add entries to a frozen DEMO recording.
+
+    On 2026-10-09 a team write-through run stored a fresh response_schema under
+    the DEMO mass-agent goal; later replays mixed it with the July outputs.
+    """
+    import asyncio
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from providers.fast_cache import client, context, normalize
+
+    demo_goal = get_task_by_name("test-mass-agent-run-0").prompt
+    posts = []
+
+    class _Response:
+        status_code = 200
+
+    class _Recorder:
+        async def post(self, url, **kwargs):
+            posts.append(kwargs["json"]["key"])
+            return _Response()
+
+    async def _no_archive(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(client, "_shared_client", lambda: _Recorder())
+    monkeypatch.setattr(client, "_backend", lambda: ("http://backend.invalid", "key"))
+    monkeypatch.setattr(client, "_archive_cache_write", _no_archive)
+    monkeypatch.delenv("FAST_MODE_CACHE_RECORD_DEMO", raising=False)
+    monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
+
+    demo_hash = normalize.goal_hash(demo_goal)
+    assert asyncio.run(client.cache_set("demo-key", "llm", demo_hash, {"schema": {}})) is False
+    child = context.FastCacheContext(enabled=True, goal="for_each child", root_goal=demo_goal, write_enabled=True)
+    assert child.should_write is False
+    # Direct callers (browser-use, web search/fetch, files) pass their goal so an
+    # identity-bound OAi child goal is guarded even though its hash differs.
+    from utils.oai_demo import OAI_DEMO_CACHE_DISPLAY_NAME, OAI_DEMO_CHILD_GOAL_PREFIX
+
+    bound_child = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for {OAI_DEMO_CACHE_DISPLAY_NAME}"
+    child_hash = normalize.goal_hash(bound_child)
+    assert child_hash not in normalize.demo_cache_goal_hashes()
+    assert asyncio.run(client.cache_set("child-key", "web_search", child_hash, {}, goal=bound_child)) is False
+    ordinary = normalize.goal_hash("an ordinary non-demo goal")
+    assert asyncio.run(client.cache_set("ordinary-key", "llm", ordinary, {"schema": {}})) is True
+    assert posts == ["ordinary-key"]
+
+    # A deliberate re-recording may still write the DEMO namespace.
+    monkeypatch.setenv("FAST_MODE_CACHE_RECORD_DEMO", "1")
+    assert child.should_write is True
+    assert asyncio.run(client.cache_set("demo-key", "llm", demo_hash, {"schema": {}})) is True
+    assert posts == ["ordinary-key", "demo-key"]

@@ -150,7 +150,7 @@ else:
   echo "FAIL: paginated listing should report next cursor, got: $page_parse" >&2
   exit 1
 }
-echo "$ensure_fn" | grep -Fq 'print("next:" + reserved_domains[-1]["id"])' \
+grep -Fq 'print("next:" + reserved_domains[-1]["id"])' <<<"$ensure_fn" \
   || { echo "FAIL: ensure_ngrok_domain_reserved must use bash-safe next-cursor print" >&2; exit 1; }
 if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -Fq "['id']"; then
   echo "FAIL: ensure_ngrok_domain_reserved still embeds bash-breaking ['id'] inside single quotes" >&2

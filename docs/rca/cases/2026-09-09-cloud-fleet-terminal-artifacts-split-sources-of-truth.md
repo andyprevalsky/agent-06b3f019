@@ -104,6 +104,47 @@ archives and one ordered report-card projection: O(tasks) local work, one file
 read per task, three atomic batch writes, no external request, polling loop,
 shared lock, or per-agent fan-in.
 
+## October 8 review recurrence: markerless terminal refresh
+
+The exact composition review found another projection loss at the same owning
+boundary. A cleanup refresh with `--preserve-terminal-outcomes` kept the sealed
+task verdict but replaced its known `lifecycle_stage` with `null` when the local
+marker files were unavailable. That lost stage then reached both the report card
+and the normal Hub upload bundle. Archive searches for `preserve terminal
+lifecycle stage aggregate` identified this terminal projection case as the
+existing owner; the defect was reproduced independently of the earlier case.
+
+The critical path was the original aggregate CLI output, followed by preserved
+terminal refresh, report-card projection, and normal upload serialization. The
+first bad boundary was `_preserved_terminal_projection`: it assigned an optional
+marker observation unconditionally. The known stage disappeared because absence
+of current marker evidence was treated as an authoritative replacement for the
+sealed stage. The general cause was a refresh contract that could erase already
+published terminal evidence.
+
+The registered reproduction is:
+
+`python3 -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py -k fleet_publishes_evaluation_before_teardown_preserves_markerless_stage`
+
+With the unchanged seven-case test and the original production assignment, four
+cases failed the lifecycle-stage assertion and three controls passed in 5.44
+seconds. The normal aggregate CLI creates the original canonical run first; the
+test then changes the mutable child verdict and cost before invoking the real
+preservation CLI. It verifies every original task and outer metadata field,
+report-card stages, and normal required Hub serialization. A markerless unknown
+stage remains unknown; current teardown and released markers still take
+precedence over older evidence. Known evaluated, teardown, and released stages
+survive a markerless refresh for passing and failing evaluated outcomes.
+
+The fix retains the sealed stage only when the current marker observation is
+absent. It changes no task verdict, retry classification, timeout, evaluator, or
+resource-release authority. The broader owning projection and exact-recovery
+command passed 20 tests in 10.50 seconds, and the identical seven-case
+reproduction passed in 0.81 seconds. These are deterministic source checks;
+the prior normal registry failure, pending deployment gates, and zero accepted
+LIVE50 trials remain separate results. The change adds constant work per task
+to the existing linear aggregate pass, with no external calls or shared state.
+
 ## Human feedback
 
 The user independently reproduced the exact production-aggregator failure and

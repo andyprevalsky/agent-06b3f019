@@ -22,6 +22,7 @@ from helpers.trace_archive import archive_json_deferred
 from helpers.tracing import backend_api_headers, current_root_agent_id, current_span_id, span
 
 from . import normalize
+from .context import demo_recording_enabled
 
 logger = structlog.get_logger(__name__)
 
@@ -848,14 +849,44 @@ async def resolve_provider_fast_mode(agent_id: Optional[str]) -> bool:
         return True
 
 
+def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal: Optional[str] = None) -> bool:
+    """False for a DEMO replay namespace unless a deliberate re-recording is enabled."""
+    demo_namespace = goal_hash in normalize.demo_cache_goal_hashes() or normalize.soft_complete_allowed(
+        goal, root_goal=root_goal
+    )
+    return not demo_namespace or demo_recording_enabled()
+
+
+async def cache_write_allowed_for_agent(agent_id: Optional[str], goal: Optional[str]) -> bool:
+    """Write-only tool gate: the goal and the agent's resolved tree root must both be writable."""
+    if not cache_write_allowed(normalize.goal_hash(goal or ""), goal=goal):
+        return False
+    if demo_recording_enabled() or not agent_id:
+        return True
+    _enabled, resolved_goal, _write_enabled, _root_id, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
+    if not resolved_goal:
+        # An unresolved tree root may be a frozen DEMO recording; losing one
+        # write-through entry is safer than poisoning a replay namespace.
+        logger.info("fast_cache.write_skipped_unresolved_agent", agent_id=agent_id)
+        return False
+    return not normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
+
+
 async def cache_set(
     key: str,
     kind: str,
     goal_hash: str,
     value: Any,
     blob_path: Optional[str] = None,
+    *,
+    goal: Optional[str] = None,
+    root_goal: Optional[str] = None,
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
+    if not cache_write_allowed(goal_hash, goal=goal, root_goal=root_goal):
+        # DEMO replay namespaces are frozen recordings (FAST_MODE_CACHE_RECORD_DEMO=1 re-records).
+        logger.info("fast_cache.set_skipped_demo_namespace", key=key)
+        return False
     sanitized_value = normalize.strip_secrets(value)
     await _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
     try:

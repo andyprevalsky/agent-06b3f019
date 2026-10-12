@@ -349,3 +349,32 @@ stack remains available to the existing reconciler. The normal terminal wallet
 state and exact native resource release are still pending. There is no new
 causal reproduction or completed fix here; this is updated runtime evidence in
 the existing open case, independent of the five-run DAILY50 acceptance streak.
+
+### Recurrence on 2026-10-11 (PR #1450 deploy, sandbox)
+
+The local AgentCard lifecycle lane for PR #1450 (HEAD `9d9a65e56`, stack
+`1791759656-942305-17040`) failed `agent-payment-abandonment` (agent
+`80ed40fe-fd84-428c-ade3-8abdd010c820`) the same way. The other three tasks
+passed.
+
+- Transfer `owt_db04af54fa18afa2ef9df8aa` (card `card_3d520c1c49a3f8dfc71e8f4c`,
+  $43.96 mint, 4396 transferred) was created at 23:15:43. `close_card`
+  succeeded at 23:15:51. `recover_funds` ran after each of the first five
+  release reads and recovered nothing. All 27 release reads returned
+  `consumed`, `released_cents=0`.
+- Two earlier lane runs of this deploy failed identically: transfers
+  `owt_cf95ac0648d93fa0688885a2` (created 06:12:29) and
+  `owt_ddb33aaa7b5a900245228f2c` (created 07:47:28). A read-only
+  `list_transfers` at about 23:45 still showed all three as `consumed` with
+  `released_cents: 0`, 17.5 hours after the first one.
+- Across the nine local abandonment runs on this box from 2026-10-09 to
+  2026-10-11, six passed. In those runs AgentCard reported `reclaimed` about 2
+  minutes 15 seconds to 2 minutes 50 seconds after the close, when a stale-lease
+  retry's `recover_funds` pulled 4396. Create-to-close timing was about 6s in
+  every passing and failing run, so close timing does not distinguish them.
+- The failed run's retained stack kept re-reading the transfer, which spends
+  the org-wide MCP request budget, and could not make progress. It was
+  stopped with the owner-verified `local.stop_services` path. The sandbox
+  Stripe hold remains in test mode.
+
+The lane reruns unchanged on the post-main-sync HEAD.

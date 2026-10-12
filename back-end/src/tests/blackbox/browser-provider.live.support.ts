@@ -154,8 +154,13 @@ export async function runLiveProviderParity(): Promise<void> {
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
-      await navigateKernelPage(page, 'https://example.com');
-      assert((await page.title()) === 'Example Domain', 'Kernel CDP navigation failed');
+      const status = await navigateKernelPage(page, 'https://example.com');
+      const title = await page.title();
+      // Record what the residential exit actually served so a miss is diagnosable.
+      assert(
+        title === 'Example Domain',
+        `Kernel CDP navigation failed: status=${status} title=${JSON.stringify(title)} url=${page.url()}`
+      );
     } finally {
       await browser.close();
     }

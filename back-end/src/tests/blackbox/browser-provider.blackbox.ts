@@ -18,6 +18,7 @@ import {
   assertKernelCityInventoryFallback,
   assertStoredProviderFallback,
   assertKernelTimeoutFallback,
+  isRetryableKernelGatewayStatus,
   isRetryableKernelNavigationError,
   withProvider,
 } from './browser-provider.helpers';
@@ -393,6 +394,14 @@ const tests: Array<[string, () => void | Promise<void>]> = [
       assert(
         !isRetryableKernelNavigationError(new Error('Kernel CDP navigation failed')),
         'semantic navigation failures must fail closed'
+      );
+      assert(
+        [502, 503, 504].every(isRetryableKernelGatewayStatus),
+        'expected proxy gateway error pages to be retryable'
+      );
+      assert(
+        [null, 200, 403, 404, 500].every((status) => !isRetryableKernelGatewayStatus(status)),
+        'non-gateway statuses must fail closed'
       );
     },
   ],

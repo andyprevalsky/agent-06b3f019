@@ -115,6 +115,11 @@ class WebSearchManager(ToolManager):
             ]
             if world_model_mode != "real":
                 activity_args.extend([agent_id, world_model_mode])
+            else:
+                activity_args.extend([None, None])
+            # The cache write gate resolves this agent's tree root (a child under
+            # a frozen DEMO root never writes) without changing world-model routing.
+            activity_args.append(agent_id)
             result = await execute_activity(
                 web_search_activity,
                 args=activity_args,
@@ -261,6 +266,7 @@ async def web_search_activity(
     fast_mode_cache_write_enabled: bool = False,
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
+    fast_cache_agent_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
@@ -338,9 +344,14 @@ async def web_search_activity(
         logger.error("Web search failed", query=query)
         raise
 
-    if cache_key is not None and write_cache:
+    # A frozen DEMO namespace (goal or tree root) gains no entries from a live miss.
+    if (
+        cache_key is not None
+        and write_cache
+        and await fast_cache_client.cache_write_allowed_for_agent(fast_cache_agent_id or agent_id, fast_mode_goal)
+    ):
         await fast_cache_client.cache_set(
-            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result
+            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result, goal=fast_mode_goal
         )
         logger.info("fast_cache.web_search_stored", key=cache_key)
     return result

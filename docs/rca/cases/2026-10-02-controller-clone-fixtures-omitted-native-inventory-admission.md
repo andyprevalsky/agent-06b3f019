@@ -11,6 +11,8 @@ symptoms:
   - "inventory_machine_field: command not found"
   - "production clone command builder failed in the capacity replay"
   - "test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete returned 21"
+  - "test_demo_cache_probe_repeated_copies_keep_guard_and_existing_topology failed before either fake fleet launched"
+  - "shared inventory snapshot did not initialize"
 tags:
   - cloudbench
   - fixture
@@ -19,6 +21,7 @@ tags:
 sources:
   - PR #1299
   - commit e5586839726b96306ebbf9b45a619774bb5db630 (native Linux Step 4cb batch)
+  - PR #1450, exact 9712327589e7ac51c5b8abb2cf1459e9e374ed8f command registry
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete
 status: fixed
 ---
@@ -72,6 +75,47 @@ verification found all six recorded identities absent, no owned process-group
 or fixture-path member, and the temporary multi-workstream fixture removed.
 Production code and all deadlines are unchanged. The final normal deploy gates
 and the separate hundred-benchmark acceptance campaign remain pending.
+
+### 2026-10-08: a repeated-demo fixture omitted parent campaign dependencies
+
+The exact `97123275` normal command registry passed 44 of 45 owners. Its
+benchmark compact owner passed 520 controls, skipped four existing platform
+cases, and failed the repeated-demo control's original zero-exit assertion.
+The retained campaign had `shared_inventory_failed: true`, peak concurrency
+zero, and two cancelled members with no child exit codes. The native publisher
+reported `shared inventory snapshot did not initialize`; no fake fleet ran.
+Initial Hub publication also remained pending. These are fixture evidence,
+not a failure or latency measurement of a LIVE benchmark.
+
+Literal-error and behavioral archive searches found this admission-fixture
+case plus the campaign-wide inventory and Hub membership owners. The prior
+clone correction held, but did not cover another isolated caller: the demo
+test replaced fleet children while leaving the real parent dependent on host
+Fly inventory and Hub configuration. Its intended cache-policy assertions
+therefore depended on unrelated external availability.
+
+The existing repeated-copy command, with an offline transport refusing
+unprovided native reads and a loopback Hub, failed at the same zero-exit
+assertion in 1.951 seconds. From `agents/` with `source venv/bin/activate`,
+the command is `python -m pytest -q benchmarks/cloudbench_demo_cache_test.py -k
+repeated_copies_keep_guard_and_existing_topology` on both revisions.
+Supply the parent's external collaborators in
+`launch_probe`: a read-only fake Fly client accepts only Machines/Volumes list
+and returns valid empty inventory, and the existing Hub transport fixture
+receives real parent publication. Keep the real inventory producer, ownership,
+admission, scheduler and cleanup active. Override only this test child's
+transport credentials and URL; no host credentials or production service are
+needed. Close the loopback server in `finally`.
+
+The same focused command then passed in 3.508 seconds. All original assertions
+and host guards remain; the repeated-copy control additionally checks that
+inventory initialized and its owner retired. The entire existing nineteen-case
+demo-cache family passed in 10.741 seconds. It remains selected by
+`scripts/tests/benchmark-live-results.test.py` in normal deploy, without a new
+test stage, provider/model calls, or production/runtime changes. Production
+release, final composed gates and the five width-fifty LIVE streak remain
+separate required evidence. At ten thousand agents this fixture-only repair
+adds no runtime work.
 
 ## Human feedback
 

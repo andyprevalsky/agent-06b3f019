@@ -158,6 +158,30 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
         )
 
 
+class StructuralGatePipefailGrepTests(unittest.TestCase):
+    """Source checks must not fail when a matching grep exits first.
+
+    Under `set -o pipefail`, `printf '%s\\n' "$text" | grep -q pattern` fails
+    with the writer's SIGPIPE (141) whenever grep matches and exits before the
+    writer finishes. Concurrent gate load widens that window: the seed-cache
+    preflight check failed this way 2/6 times in the deploy runner, and 110 of
+    6,000 loaded iterations ended with PIPESTATUS=141 0. Feed the text with a
+    here-string instead, which has no separate writer.
+    """
+
+    def test_pipefail_shell_tests_do_not_pipe_variables_into_grep_q(self) -> None:
+        pattern = re.compile(r"""(?:printf '%s\\n'|echo) "\$\w+" \|\s*grep\s+-\w*q""")
+        offenders = []
+        for script in sorted((ROOT / "scripts" / "tests").glob("*.sh")):
+            text = script.read_text()
+            if "pipefail" not in text:
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{script.name}:{number}: {line.strip()}")
+        self.assertEqual(offenders, [], "use grep ... <<<\"$text\" under pipefail:\n" + "\n".join(offenders))
+
+
 class StructuralGateInterpreterTests(unittest.TestCase):
     """The agents venv is preferred only when it is the pinned Python 3.11+.
 
