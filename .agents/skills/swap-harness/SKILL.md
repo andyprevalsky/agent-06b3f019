@@ -7,7 +7,9 @@ description: Migrate boxes.dev tasks stopped by Claude or Codex subscription lim
 
 Resume every affected task on a **new devbox and thread**: Claude exhausted →
 Codex; Codex exhausted → Claude. Save each task's changes and context in its PR
-before archival. An invocation authorizes these checkpoints, draft PRs,
+before branching the continuation or archival. **All task files and source
+changes must be preserved in the PR; a previously pushed branch alone is not
+completion.** An invocation authorizes these checkpoints, draft PRs,
 replacement threads and preservation-conditioned archival. It does not
 authorize merging/deploying, changing subscriptions, paid API fallbacks, or
 overriding task-specific user constraints. Preserve Freedom and protected
@@ -73,8 +75,10 @@ keep the checkpoint and old box; do not recursively swap back and forth.
 
 When the user asks to continue without supplying IDs and no supported route
 reaches the old filesystem, preserve the latest **pushed** task branch and
-thread context in its PR, then start one fresh opposite-harness continuation
-from that checkpoint. Check for a newer pushed branch named in the transcript;
+thread context in its PR as preparation. Do not start source-changing or paid
+continuation from an incomplete checkpoint. A fresh box may investigate safe
+read-only recovery, but it cannot substitute for an old-filesystem worker.
+Check for a newer pushed branch named in the transcript;
 an older open PR may lag it. Fast-forward an existing PR only with proven
 ancestry; otherwise create a new draft PR for the latest pushed task branch.
 Use an isolated worktree when writing its handoff from the coordinator.
@@ -87,6 +91,16 @@ preserve the old machine. Verify checkout, handoff reading and meaningful
 continuation as usual. Report that archival and complete local preservation
 remain unfinished; never convert a partial recovery into a completed migration
 or delete the old box on the strength of a GitHub checkpoint alone.
+
+If installed tooling has no thread-ID-to-box resolver and no working peer on
+the old box, the user can start a thread with the credited harness on that
+existing devbox through the app's **New thread** action, without supplying any
+ID. Provide the concrete prompt in
+[references/old-box-bootstrap.md](references/old-box-bootstrap.md), filled with
+the actual source thread/PR and published skill revision. This is a required
+access step, not approval to discard work. Once that local worker can run,
+follow the full single-box workflow. Keep the task explicitly unfinished until
+every affected box has a verified complete checkpoint and archive result.
 
 ## Install and iterate
 
