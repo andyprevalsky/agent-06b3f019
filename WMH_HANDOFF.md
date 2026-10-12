@@ -166,6 +166,7 @@ OpenRouter credit ran out on 2026-10-10 ($11,003.17 used of $11,000); local
 | `a52069aa` root `a211dcc4` | Azure | 3,620 s | 60-min cap; turn fix (up to 8 concurrent predictions, 5 rebases of 48); root delegated to one general-purpose worker; 37 commits, ~11 pitches, 1 process reply, 3 blocked by required deck/fields | 139,893 / 2,198,535 (6.36%), output 411,484 | 0/48 | ~18% |
 | `59b3582b` root `fffd8127` | Azure | 615 s | 10-min cache validation (stream + breakpoints); 5 calls, 4 commits, root still researching | 69,279 / 101,176 (68.5%), written 31,882, cost 0.43× of no cache (run 7: 1.19×); per call 0→36→72→85→87% | 0/6 | n/a |
 | `99d2b05c` root `bc11292d` | Azure | 20-min cap | fan-out cache validation; root + 2 children, 6 commits (research, warm-roster check, private packet saved) | 124,739 / 242,514 (51.4%), written 117,751, cost 0.63× of no cache; root 0→38→43→86→89%; each child's first call read the shared 3,729-token static prefix (policy + task + researched examples) | 0/9 | n/a |
+| `e58632bd` root `c4f96d9d` | Azure | 20-min cap | world stream + Rose auto-marking; 17-agent fan-out, 25 commits (23 explores) | 1,458,680 / 1,573,788 (92.7%), written 115,033, cost 0.138× of no cache; new agents' first calls read 94% (min 78%, n=10) | 0/41 | n/a |
 
 Run 3 had no world-model errors (65/66 predictions; one cancelled at
 teardown): research, a $0 Brex check, then a for-each outreach to ~20 funds
@@ -241,6 +242,7 @@ Run 7 also re-serialized its fan-out: one replacing commit queued every other
 operation behind one re-prediction at a time. Since `ac788e8f5`, only a
 conflicted operation waits for its turn before predicting; the others predict
 at once and yield only at commit.
+FE (run 11): https://www.roselabs.ai/?agent-id=c4f96d9d-6a2e-43f9-8ed3-f967248fe562#benchmark-share=e58632bd-f899-48cd-9b34-d656adb26e94.1794434272.400086d89a23ad40339b621460d8403e0523d0e35f4f117585190e5229174433
 FE (run 10): https://www.roselabs.ai/?agent-id=bc11292d-b28d-4a74-bb07-0ff4bd2e95ab#benchmark-share=99d2b05c-0cbb-4949-bf65-520f71a07057.1794430892.95f3f1aa2e750a185fafaf25c3ef82dacfd9aa72a7be122b094dc1435129f39d
 FE (run 9): https://www.roselabs.ai/?agent-id=fffd8127-60ef-4e0e-bdc5-9bc3d1e4c52e#benchmark-share=59b3582b-1565-4e5e-a015-5f4884b5dc10.1794427590.b86667c5939d384c748811612333236d1db02c07470fba2ffc9516e33db90361
 FE (run 8): https://www.roselabs.ai/?agent-id=a211dcc4-7fb1-46e6-b434-4313fc77e15f#benchmark-share=a52069aa-bcba-4f63-9e60-0d2ab007a2df.1794382926.1f8ec69f50d0fbaf2750b583da32dd99980a5376730e9b27377f32e591642dae
