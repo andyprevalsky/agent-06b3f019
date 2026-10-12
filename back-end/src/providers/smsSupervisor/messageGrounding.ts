@@ -9,7 +9,7 @@
  */
 
 export function normalizeSmsClaimText(text: string): string {
-  return text.replace(/[‘’‛]/g, "'").replace(/[“”]/g, '"');
+  return text.replace(/[\u2018\u2019\u201B]/g, "'").replace(/[\u201C\u201D]/g, '"');
 }
 
 export function sameSmsBody(left: string, right: string): boolean {
