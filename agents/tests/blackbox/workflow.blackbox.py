@@ -1999,6 +1999,8 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
     wf.fast_cache_goal = "stable persisted goal"
+    # A simulated agent's clock reads world time (two weeks before today here).
+    wf.simulated_clock_offset_seconds = -1_209_600
     context = [{"role": "USER", "text": "durable context"}]
 
     args = wf._continuation_args(context)
@@ -2032,6 +2034,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.start_time == wf.start_time
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
+    assert restored.simulated_clock_offset_seconds == -1_209_600
     assert restored._continuation_resume_state(context) == state
     # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
     wf.provider_fast_mode = True
@@ -4557,8 +4560,12 @@ async def test_simulated_agent_finishes_on_the_world_clock_before_signalling_its
     order = []
     original_execute = fake.execute_activity
 
+    world_start = int(datetime(2026, 9, 28, tzinfo=timezone.utc).timestamp() * 1000)
+
     async def execute_activity(fn, args=None, **kwargs):
         order.append(("activity", getattr(fn, "__name__", "?"), list(args or [])))
+        if getattr(fn, "__name__", "") == "world_clock_activity":
+            return {"agent_id": "child-1", "time_ms": world_start}
         return await original_execute(fn, args=args, **kwargs)
 
     fake.execute_activity = execute_activity
@@ -4572,6 +4579,8 @@ async def test_simulated_agent_finishes_on_the_world_clock_before_signalling_its
     original = _patch_workflow(fake)
     try:
         await wf._world_clock_event("register")
+        # The agent's own clock now reads world time (the pinned scenario date).
+        assert wf.simulated_clock_offset_seconds == world_start // 1000 - int(fake.now().timestamp())
         await wf._world_clock_event("register")
         await wf._mark_failed(context=[], reason="error", message="Something broke")
     finally:

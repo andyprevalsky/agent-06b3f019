@@ -933,6 +933,8 @@ class AgentWorkflow:
         prior_status_message = state.get("prior_status_message")
         self._resume_status_message = prior_status_message if isinstance(prior_status_message, str) else None
         self._resume_progress = float(_number("progress"))
+        # A simulated agent keeps reading world time after continue-as-new.
+        self.simulated_clock_offset_seconds = int(_number("simulated_clock_offset_seconds"))
         self.token_count = int(_number("token_count"))
         self.tokens_in = int(_number("tokens_in"))
         self.tokens_out = int(_number("tokens_out"))
@@ -1187,6 +1189,7 @@ class AgentWorkflow:
             "prior_status": prior_status,
             "prior_status_message": self._resume_status_message,
             "progress": self._resume_progress,
+            "simulated_clock_offset_seconds": self.simulated_clock_offset_seconds,
             "token_count": self.token_count,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -5107,13 +5110,18 @@ class AgentWorkflow:
         if self.world_model_mode != "simulate" or operation in self._world_clock_events:
             return
         self._world_clock_events.add(operation)
+        result = None
         with contextlib.suppress(Exception):
-            await workflow.execute_activity(
+            result = await workflow.execute_activity(
                 world_clock_activity,
                 args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+        if operation == "register" and isinstance(result, dict) and type(result.get("time_ms")) is int:
+            # This agent's own clock reads world time from its first step: the
+            # world starts at its pinned scenario date, not today's date.
+            self.simulated_clock_offset_seconds = result["time_ms"] // 1000 - int(workflow.now().timestamp())
 
     async def _mark_failed(
         self,

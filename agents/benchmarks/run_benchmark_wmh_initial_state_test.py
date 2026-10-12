@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import replace
 
@@ -127,6 +128,20 @@ def test_explicit_session_cannot_bypass_initial_state(monkeypatch):
     monkeypatch.setattr(bench, "_api_headers", headers)
     with pytest.raises(ValueError, match="would bypass wmh_initial_state"):
         asyncio.run(bench.create_agent("http://localhost:55120", task))
+
+
+@pytest.mark.parametrize("as_of", [None, "", "yesterday", "2026-09-28T00:00:00", 20260928])
+def test_seeded_worlds_must_pin_an_iso_utc_start_date(as_of):
+    """The world clock starts at structured.as_of_utc; every seeded world pins it."""
+    task = get_task_by_name("raise-5m-rose-labs-brex")
+    assert task.wmh_initial_state["structured"]["as_of_utc"] == "2026-09-28T00:00:00Z"
+    state = json.loads(json.dumps(task.wmh_initial_state))
+    if as_of is None:
+        del state["structured"]["as_of_utc"]
+    else:
+        state["structured"]["as_of_utc"] = as_of
+    with pytest.raises(ValueError, match="as_of_utc"):
+        bench.validate_wmh_initial_state(state, task.name)
 
 
 def test_context_insertion_adds_researched_outcome_examples_without_changing_the_catalog(tmp_path):

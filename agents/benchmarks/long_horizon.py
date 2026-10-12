@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -282,6 +283,14 @@ def validate_wmh_initial_state(value: Any, item_id: str) -> dict[str, Any]:
         raise ValueError(f"{item_id}: wmh_initial_state must have a schema and omit runtime root fields")
     if not isinstance(value["scratchpad"], str):
         raise ValueError(f"{item_id}: wmh_initial_state.scratchpad must be a string")
+    # The world clock starts here, so every seeded world pins an ISO UTC date.
+    as_of = structured.get("as_of_utc")
+    try:
+        pinned = datetime.fromisoformat(as_of.replace("Z", "+00:00")) if isinstance(as_of, str) else None
+    except ValueError:
+        pinned = None
+    if pinned is None or pinned.utcoffset() is None:
+        raise ValueError(f"{item_id}: wmh_initial_state.structured.as_of_utc must pin an ISO UTC start date")
     try:
         json.dumps(value, allow_nan=False)
     except (TypeError, ValueError) as exc:

@@ -7290,8 +7290,14 @@ async def call_planner_llm_activity(
     prompt_start = time.perf_counter()
     system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
     # Seeded or imported communications can be months old. Give the planner an
-    # explicit clock so "current" goals cannot inherit a message timestamp.
-    system_prompt += f"\n\nCurrent UTC date: {datetime.now(timezone.utc).date().isoformat()}."
+    # explicit clock so "current" goals cannot inherit a message timestamp. A
+    # simulated agent lives on its world's clock, which starts at the pinned
+    # scenario date; outside a WMH world this is the real date.
+    from helpers.world_model_runtime import world_time_ms
+
+    world_ms = await world_time_ms(agent_id)
+    current = datetime.fromtimestamp(world_ms / 1000, timezone.utc) if world_ms is not None else datetime.now(timezone.utc)
+    system_prompt += f"\n\nCurrent UTC date: {current.date().isoformat()}."
     prompt_elapsed = time.perf_counter() - prompt_start
     logger.info(f"[TIMING] Planner system prompt build: {prompt_elapsed * 1000:.1f}ms")
 

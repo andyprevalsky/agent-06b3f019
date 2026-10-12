@@ -3072,6 +3072,40 @@ async def test_runtime_world_clock_long_polls_waits_and_skips_without_a_world():
         teardown_mock()
 
 
+async def test_runtime_world_time_reads_the_agent_clock_or_reports_no_world():
+    from unittest.mock import AsyncMock
+
+    import helpers.world_model_runtime as runtime
+
+    snapshot = {
+        "start_ms": 1_000,
+        "shared_time_ms": 5_000,
+        "agents": [{"agent_id": "child-1", "time_ms": 7_000, "parent": "root-1", "state": "running"}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/world_models/rose-archive/scopes/root-1/clock":
+            return httpx.Response(200, json=snapshot)
+        return httpx.Response(404, json={"detail": "Unknown world scope"})
+
+    setup_mock_fn(handler)
+    resolve = AsyncMock(return_value=(False, None, False, "root-1", None, False))
+    try:
+        with (
+            patch.dict(os.environ, {"WMH_BASE_URL": "https://wmh.example.test", "WMH_MODEL_NAME": "rose-archive"}),
+            patch("providers.fast_cache.client.resolve_agent_fast_mode", resolve),
+        ):
+            assert await runtime.world_time_ms("child-1") == 7_000
+            # An agent the clock has not seen yet starts at shared time.
+            assert await runtime.world_time_ms("new-agent") == 5_000
+            resolve.return_value = (False, None, False, "no-world", None, False)
+            assert await runtime.world_time_ms("child-1") is None
+        with patch.dict(os.environ, {"WMH_BASE_URL": "", "WORLD_MODEL_HARNESS_URL": ""}):
+            assert await runtime.world_time_ms("child-1") is None
+    finally:
+        teardown_mock()
+
+
 def test_wmh_http_clients_allow_slow_grounded_transitions():
     from benchmarks.world_model_harness import WMHHttpClient as BenchmarkClient
     from helpers.world_model_runtime import WMHHttpClient as RuntimeClient
@@ -5802,6 +5836,10 @@ async def run_all_tests():
     await r.record_async(
         "runtime_world_clock_long_polls_waits_and_skips_without_a_world",
         test_runtime_world_clock_long_polls_waits_and_skips_without_a_world,
+    )
+    await r.record_async(
+        "runtime_world_time_reads_the_agent_clock_or_reports_no_world",
+        test_runtime_world_time_reads_the_agent_clock_or_reports_no_world,
     )
     await r.record_async(
         "evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result",

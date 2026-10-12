@@ -669,6 +669,30 @@ async def world_model_step_activity(
     return await WMHHttpClient(resolved_base_url).step(world_model_name, session_id, action)
 
 
+async def world_time_ms(agent_id: str | None) -> int | None:
+    """This agent's time on its world's shared clock, or None outside a simulated world."""
+    base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
+    model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
+    if not base_url or not model or not agent_id:
+        return None
+    from providers.fast_cache.client import resolve_agent_fast_mode
+
+    scope = (await resolve_agent_fast_mode(agent_id))[3] or agent_id
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/world_models/{model}/scopes/{scope}/clock")
+        if response.status_code != 200:
+            return None
+        snapshot = response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    for agent in snapshot.get("agents") or []:
+        if isinstance(agent, dict) and agent.get("agent_id") == agent_id and type(agent.get("time_ms")) is int:
+            return agent["time_ms"]
+    fallback = snapshot.get("shared_time_ms") or snapshot.get("start_ms")
+    return fallback if type(fallback) is int else None
+
+
 @activity.defn
 async def world_clock_activity(
     operation: str,
