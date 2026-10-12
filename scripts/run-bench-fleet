@@ -7660,19 +7660,167 @@ cleanup_stale_owner_recovery_proxies() {
     return "$status"
 }
 
+# A guest whose authenticated /shutdown cannot be delivered keeps executing its
+# benchmark, and holding its shared production connections, until its own
+# execution backstop. Stop (never destroy) only an exact Machine this controller
+# owns and verify its native state. The original volume, the durable owner and
+# its unconfirmed-cleanup quarantine stay retained: exact-owner recovery already
+# treats a stopped guest as requiring its original-volume runtime archive.
+fleet_native_stop_guest() {  # <child-index>
+    local j="$1" out id bench kind="" clone_name="" record="" volume_id="" details
+    local observed_state="" observed_name="" mounted_volume="" requested=0 attempt
+    local requested_epoch="" verified_epoch=""
+    out="${CHILD_OUT[$j]:-}"
+    id="${CHILD_MACHINE[$j]:-}"
+    bench="${CHILD_BENCH[$j]:-unknown}"
+    case "$id" in
+        ''|*[!0-9a-f]*)
+            echo "❌ [$bench] undelivered guest has no exact Machine identity; retaining ownership without a native stop" >&2
+            return 1
+            ;;
+    esac
+    [ -n "$out" ] && [ -d "$out" ] && [ ! -L "$out" ] || return 1
+    # Ownership comes only from this controller's own immutable audit.
+    if [ -f "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" ] \
+        && grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null \
+        && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" disposition)" = claimed ]; then
+        kind=pool
+        volume_id="$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" volume_id)"
+    else
+        clone_name="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/by-machine-id/$id" 2>/dev/null || true)"
+        case "$clone_name" in cloudbench-[a-zA-Z0-9._-]*) record="$FLEET_TEARDOWN_OWNERSHIP_DIR/fresh/$clone_name" ;; esac
+        if [ -n "$record" ] && [ -f "$record" ] \
+            && [ "$(registry_meta_value "$record" machine_id)" = "$id" ] \
+            && [ "$(registry_meta_value "$record" disposition)" = owned ]; then
+            kind=fresh
+            volume_id="$(registry_meta_value "$record" volume_id)"
+        fi
+    fi
+    if [ -z "$kind" ] || [ -z "$volume_id" ]; then
+        echo "❌ [$bench] Machine $id is not exactly owned by this controller; no native stop" >&2
+        return 1
+    fi
+    # The live Machine must still be that exact owned guest and its volume.
+    if ! details="$(registry_machine_details "$id")"; then
+        echo "❌ [$bench] exact owned Machine $id could not be read before its native stop" >&2
+        return 1
+    fi
+    read -r observed_state observed_name _ <<< "$details"
+    mounted_volume="$(machine_volume_id "$id" 2>/dev/null || true)"
+    if [ "$mounted_volume" != "$volume_id" ] \
+        || { [ "$kind" = fresh ] && [ "$observed_name" != "$clone_name" ]; } \
+        || { [ "$kind" = pool ] && [[ "$observed_name" != cloudbench-* ]]; }; then
+        echo "❌ [$bench] Machine $id no longer matches its exact owned identity; no native stop" >&2
+        return 1
+    fi
+    requested_epoch="$(date +%s)"
+    case "$observed_state" in
+        stopped|suspended|created) ;;
+        *)
+            requested=1
+            fly_with_timeout "${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-20}" \
+                machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+            ;;
+    esac
+    for attempt in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+        if details="$(registry_machine_details "$id")"; then
+            observed_state="${details%% *}"
+        else
+            observed_state=""
+        fi
+        case "$observed_state" in stopped|suspended|created) break ;; esac
+        sleep 1
+    done
+    verified_epoch="$(date +%s)"
+    python3 - "$out/guest-native-stop.json" "$RUN_ID" "$FLEET_OWNER_TOKEN" "$bench" \
+        "$id" "$volume_id" "$kind" "$requested" "$observed_state" \
+        "$requested_epoch" "$verified_epoch" <<'PY' || return 1
+import json
+import os
+import sys
+
+path, run_id, owner, bench, machine, volume, kind, requested, state, asked, seen = sys.argv[1:]
+receipt = {
+    "version": 1,
+    "kind": "guest-native-stop",
+    "reason": "authenticated guest shutdown was not delivered",
+    "run_id": run_id,
+    "fleet_owner_token": owner,
+    "bench": bench,
+    "machine_id": machine,
+    "volume_id": volume,
+    "ownership": kind,
+    "stop_requested": requested == "1",
+    "verified_state": state or "unknown",
+    "requested_epoch": int(asked),
+    "verified_epoch": int(seen),
+    "destroyed": False,
+}
+temporary = f"{path}.tmp.{os.getpid()}"
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w") as handle:
+    json.dump(receipt, handle, sort_keys=True)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, path)
+directory = os.open(os.path.dirname(path), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+    case "$observed_state" in
+        stopped|suspended|created)
+            echo "🛑 [$bench] guest shutdown was not delivered; exact Machine $id is natively $observed_state (volume $volume_id and ownership retained for exact-owner recovery)" >&2
+            return 0
+            ;;
+    esac
+    echo "❌ [$bench] exact Machine $id did not verify stopped after its native stop (state=${observed_state:-unknown}); retaining ownership" >&2
+    return 1
+}
+
+fleet_native_stop_undelivered_guests() {  # <child-index...>
+    local j pid failed=0 limit="${CLOUDBENCH_GUEST_NATIVE_STOP_CONCURRENCY:-16}"
+    local -a stop_pids=()
+    case "$limit" in ''|*[!0-9]*|0) limit=16 ;; esac
+    # Each stop is an independent bounded provider call. Concurrency keeps a
+    # wide fleet's backstop inside one stop budget instead of one per guest.
+    for j in "$@"; do
+        fleet_native_stop_guest "$j" &
+        stop_pids+=("$!")
+        if [ "${#stop_pids[@]}" -ge "$limit" ]; then
+            for pid in "${stop_pids[@]}"; do wait "$pid" || failed=1; done
+            stop_pids=()
+        fi
+    done
+    for pid in "${stop_pids[@]:-}"; do
+        [ -z "$pid" ] || wait "$pid" || failed=1
+    done
+    return "$failed"
+}
+
 # Shared by the early exact-owner recovery entrypoint and the normal controller
 # EXIT cleanup. Keep the one definition before either caller can execute.
-cloudbench_confirm_guest_shutdowns() {
-    local deadline j out port status_code failed=0
-    local -a pending_indices next_pending_indices
+cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
+    local deadline j out port status_code failed=0 native_stop=0 responses pid
+    local -a pending_indices next_pending_indices request_indices request_pids
+    local -a undelivered_indices
     pending_indices=()
     next_pending_indices=()
+    request_indices=()
+    request_pids=()
+    undelivered_indices=()
+    [ "${1:-}" != "--native-stop-undelivered" ] || native_stop=1
     [ "${#CHILD_OUT[@]}" -gt 0 ] || return 0
     deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
+    responses="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guest-shutdown.XXXXXX")" || return 1
 
     # Request every guest first so cancellation/archive/provider cleanup runs in
     # parallel across the fleet. The local status proxies are still alive here;
     # terminating CHILD_PIDS first destroys the only machine-pinned data plane.
+    # Requests are concurrent: a fleet-wide cancellation costs one bounded
+    # request, not one timeout per guest.
     for j in "${!CHILD_OUT[@]}"; do
         out="${CHILD_OUT[$j]}"
         if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
@@ -7696,12 +7844,27 @@ cloudbench_confirm_guest_shutdowns() {
                 fi
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] no status proxy for guest cleanup acknowledgement" >&2
                 failed=1
+                undelivered_indices+=("$j")
                 continue
                 ;;
         esac
-        status_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
             -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
-            "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+            "http://127.0.0.1:$port/shutdown" > "$responses/$j" 2>/dev/null &
+        request_pids+=("$!")
+        request_indices+=("$j")
+        if [ "${#request_pids[@]}" -ge 32 ]; then
+            for pid in "${request_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+            request_pids=()
+        fi
+    done
+    for pid in "${request_pids[@]:-}"; do
+        [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+    done
+    for j in "${request_indices[@]:-}"; do
+        [ -n "$j" ] || continue
+        out="${CHILD_OUT[$j]}"
+        status_code="$(cat "$responses/$j" 2>/dev/null || true)"
         case "$status_code" in
             # A configured guest persists its shutdown request before the
             # driver-PID ownership fence can return 409. Preserve that possible
@@ -7709,20 +7872,60 @@ cloudbench_confirm_guest_shutdowns() {
             # cleanup verdict.
             202|204|409) pending_indices+=("$j") ;;
             *)
+                # The runner may have completed the same exact acknowledgement
+                # and retired its proxy just before this request.
+                if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
+                    && [ -f "$out/guest-shutdown.confirmed" ] \
+                    && [ ! -L "$out/guest-shutdown.confirmed" ] \
+                    && [ "$(cat "$out/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
+                    continue
+                fi
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
                 failed=1
+                undelivered_indices+=("$j")
                 ;;
         esac
     done
+    # Undelivered guests are still executing. Stop them now, before waiting
+    # for any sibling's acknowledgement, so the stop fits a caller's bounded
+    # cancellation window. Recovery callers retain their existing contract.
+    if [ "$native_stop" = "1" ] && [ "${#undelivered_indices[@]}" -gt 0 ] \
+        && ! fleet_native_stop_undelivered_guests "${undelivered_indices[@]}"; then
+        failed=1
+    fi
 
     while [ "${#pending_indices[@]}" -gt 0 ] && [ "$SECONDS" -le "$deadline" ]; do
         next_pending_indices=()
+        request_indices=()
+        request_pids=()
         for j in "${pending_indices[@]}"; do
             out="${CHILD_OUT[$j]}"
+            # Its runner observed the same exact 204 and may then retire the
+            # proxy this loop would otherwise keep polling.
+            if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
+                && [ -f "$out/guest-shutdown.confirmed" ] \
+                && [ ! -L "$out/guest-shutdown.confirmed" ] \
+                && [ "$(cat "$out/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
+                continue
+            fi
             port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
-            status_code="$(curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+            curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
                 -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
-                "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
+                "http://127.0.0.1:$port/shutdown-health" > "$responses/$j" 2>/dev/null &
+            request_pids+=("$!")
+            request_indices+=("$j")
+            if [ "${#request_pids[@]}" -ge 32 ]; then
+                for pid in "${request_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+                request_pids=()
+            fi
+        done
+        for pid in "${request_pids[@]:-}"; do
+            [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+        done
+        for j in "${request_indices[@]:-}"; do
+            [ -n "$j" ] || continue
+            out="${CHILD_OUT[$j]}"
+            status_code="$(cat "$responses/$j" 2>/dev/null || true)"
             if [ "$status_code" = "204" ]; then
                 if ! cloudbench_publish_guest_shutdown_confirmation "$out" "$RUN_ID"; then
                     echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
@@ -7742,6 +7945,7 @@ cloudbench_confirm_guest_shutdowns() {
         fi
         [ "${#pending_indices[@]}" -eq 0 ] || sleep 0.25
     done
+    rm -rf "$responses"
     if [ "${#pending_indices[@]}" -gt 0 ]; then
         echo "❌ ${#pending_indices[@]} guest(s) did not acknowledge browser/session cleanup; retaining provider ownership" >&2
         failed=1
@@ -11516,7 +11720,7 @@ cleanup() {
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
-    if ! cloudbench_confirm_guest_shutdowns; then
+    if ! cloudbench_confirm_guest_shutdowns --native-stop-undelivered; then
         guest_shutdown_failed=1
     elif ! fleet_registry_confirm_guest_teardown; then
         echo "❌ could not persist confirmed guest-cleanup ownership transition" >&2
@@ -12918,21 +13122,39 @@ wait_for_autoscaler_finalization() {
 }
 
 terminate_fleet_runner_group() {  # <runner-pgid> <HUP|INT|TERM>
-    local runner_pid="$1" signal_name="$2" grace deadline kill_deadline
+    local runner_pid="$1" signal_name="$2" grace deadline residual_deadline
+    local kill_deadline leader_state
     grace="${CLOUDBENCH_RUNNER_TERM_SECONDS:-15}"
     case "$grace" in ''|*[!0-9]*) grace=15 ;; esac
     # Stay strictly inside cleanup's 30s supervisor ceiling, leaving time for
-    # SIGKILL propagation, reaping, and marker publication.
+    # the residual-group grace, SIGKILL propagation, reaping, and marker
+    # publication (at most 20 + 3 + 3 seconds).
     [ "$grace" -le 20 ] || grace=20
-
-    kill -s "$signal_name" -- "-$runner_pid" 2>/dev/null \
-        || kill -s "$signal_name" "$runner_pid" 2>/dev/null \
-        || true
     deadline=$((SECONDS + grace))
-    while kill -0 -- "-$runner_pid" 2>/dev/null; do
-        [ "$SECONDS" -lt "$deadline" ] || break
+
+    # Signal the runner itself before its process group. The runner's EXIT
+    # cleanup and this controller's guest-shutdown confirmation both deliver
+    # the authenticated guest /shutdown through data-plane proxies that live
+    # in this same group. A group-wide signal killed those proxies at the same
+    # instant, so a campaign's os.killpg, a terminal Ctrl-C or a detached
+    # waiter's group TERM left both requests with HTTP 000 and the guest kept
+    # executing until its own backstop. Residual members (proxies, sleeps) are
+    # signalled only after the runner has exited or its grace has expired.
+    kill -s "$signal_name" "$runner_pid" 2>/dev/null || true
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        leader_state="$(ps -o stat= -p "$runner_pid" 2>/dev/null)" || break
+        case "$leader_state" in ''|Z*) break ;; esac
         sleep 0.1
     done
+    if kill -0 -- "-$runner_pid" 2>/dev/null; then
+        kill -s "$signal_name" -- "-$runner_pid" 2>/dev/null || true
+        residual_deadline=$((SECONDS + 3))
+        [ "$deadline" -le "$residual_deadline" ] || residual_deadline="$deadline"
+        while kill -0 -- "-$runner_pid" 2>/dev/null; do
+            [ "$SECONDS" -lt "$residual_deadline" ] || break
+            sleep 0.1
+        done
+    fi
     if kill -0 -- "-$runner_pid" 2>/dev/null; then
         kill -KILL -- "-$runner_pid" 2>/dev/null \
             || kill -KILL "$runner_pid" 2>/dev/null \

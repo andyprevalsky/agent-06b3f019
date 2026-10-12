@@ -3713,6 +3713,7 @@ stop_on_exit() {
     local ec=$?
     local retirement_deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} - 2))
     local remaining shutdown_confirmed=0
+    [ -z "${POLL_SLEEP_PID:-}" ] || kill "$POLL_SLEEP_PID" 2>/dev/null || true
     release_boot_config_update_slot
     if [ -n "${GUEST_SHUTDOWN_RESULT:-}" ]; then
         if [ "$GUEST_SHUTDOWN_RESULT" = "0" ]; then shutdown_confirmed=1; else ec=125; fi
@@ -5530,7 +5531,13 @@ while :; do
         # of death. The per-box barrier/run timeout remains the bounded detector.
         last_change="$now"
     fi
-    sleep "$(( ${CLOUDBENCH_POLL_INTERVAL:-15} + (RANDOM % 6) ))"
+    # Bash defers a trap until a foreground child exits. Wait on the poll
+    # sleep instead, so a cancellation reaches the EXIT trap at once and its
+    # authenticated guest shutdown leaves while the status proxy is alive.
+    sleep "$(( ${CLOUDBENCH_POLL_INTERVAL:-15} + (RANDOM % 6) ))" &
+    POLL_SLEEP_PID=$!
+    wait "$POLL_SLEEP_PID" 2>/dev/null || true
+    POLL_SLEEP_PID=""
 done
 
 # Preserve the complete remote driver and service logs before the EXIT trap

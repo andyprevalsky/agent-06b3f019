@@ -182,6 +182,15 @@ its exact resource reaper and final native provider audit. Archive readiness is
 not release; follow CLAUDE.md's recovery guidance instead of calling the archive
 verifier directly. Other forensic receipt modes keep their existing contracts.
 
+Cancelling a fleet, including a campaign's process-group TERM or a terminal
+Ctrl-C, keeps each runner's data-plane proxies alive until the authenticated
+guest `/shutdown` has been sent: the per-bench supervisor signals the runner
+before its process group. A guest whose stop still cannot be delivered is
+natively stopped (never destroyed) on its exact owned Machine, with a
+`guest-native-stop.json` receipt in its bench output. Its owner, volume and
+unconfirmed-cleanup quarantine stay retained; recover it with the
+original-volume archive and `--recover-stale-owner`, as for any stopped guest.
+
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 
 ```bash

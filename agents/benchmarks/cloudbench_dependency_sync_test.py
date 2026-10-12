@@ -2835,7 +2835,13 @@ cloudbench_env_value() { return 0; }
         assert "state=clean" in cleanup_status
         assert (data_dir / f"cloudbench-driver-clean-{run_token}.ack").read_text() == f"{run_token}\n"
         assert (data_dir / "cloudbench-driver.state").read_text() == "exited\n"
-        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index(
+        # The driver logs its exact target immediately before `kill -INT` and the
+        # dispatch status immediately after it. The interrupted runner can log
+        # its verified cleanup before that second line, so only the pre-signal
+        # record orders causally against the runner's cleanup.
+        assert "benchmark cancellation signal dispatched: pid=" in log_text
+        assert "signal=INT status=0" in log_text
+        assert log_text.index("benchmark signal target evidence") < log_text.index(
             "Verified cloud root provider cleanup"
         )
         assert log_text.index("Verified cloud root provider cleanup") < log_text.index(
@@ -6405,6 +6411,9 @@ def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
     The tracked background PID is a Bash function/subshell, not the runner it
     starts.  A controller TERM therefore has to be forwarded explicitly and
     the runner must be reaped before the durable child-finished marker appears.
+    The runner's EXIT cleanup delivers the guest shutdown through a data-plane
+    proxy in its own process group, so that proxy must still be alive while the
+    runner handles the forwarded signal; residual members are reaped after it.
     """
     supervisor = _extract_fleet_function(fleet_source_text(), "run_fleet_child_supervised() {")
     terminator = _extract_fleet_function(fleet_source_text(), "terminate_fleet_runner_group() {")
@@ -6418,8 +6427,18 @@ def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
     ready = tmp_path / "child.ready"
     cleaned = tmp_path / "child.cleaned"
     child_pid = tmp_path / "child.pid"
+    proxy_pid = tmp_path / "proxy.pid"
+    proxy_terminated = tmp_path / "proxy.terminated"
+    proxy = (
+        f"trap 'printf terminated > {shlex.quote(str(proxy_terminated))}; exit 143' TERM; "
+        "while :; do sleep 0.1; done"
+    )
     child = (
-        f"trap 'printf cleaned > {shlex.quote(str(cleaned))}; exit 143' TERM; "
+        f"bash -c {shlex.quote(proxy)} & "
+        f"printf '%s\\n' \"$!\" > {shlex.quote(str(proxy_pid))}; "
+        f"trap 'sleep 0.5; if [ -e {shlex.quote(str(proxy_terminated))} ]; then "
+        f"printf proxy-killed-before-runner-cleanup > {shlex.quote(str(cleaned))}; "
+        f"else printf cleaned > {shlex.quote(str(cleaned))}; fi; exit 143' TERM; "
         f"printf '%s\\n' \"$$\" > {shlex.quote(str(child_pid))}; "
         f": > {shlex.quote(str(ready))}; "
         "while :; do sleep 1; done"
@@ -6437,10 +6456,14 @@ wait "$supervisor_pid"
 supervisor_rc=$?
 [ "$supervisor_rc" -eq 143 ] || exit 92
 [ -e {shlex.quote(str(cleaned))} ] || exit 93
+[ "$(cat {shlex.quote(str(cleaned))})" = cleaned ] || exit 97
 [ -e {shlex.quote(str(marker))} ] || exit 94
 [ "$(cat {shlex.quote(str(marker))})" = 143 ] || exit 95
 runner_pid="$(cat {shlex.quote(str(child_pid))})"
 ! kill -0 "$runner_pid" 2>/dev/null || exit 96
+proxy="$(cat {shlex.quote(str(proxy_pid))})"
+! kill -0 "$proxy" 2>/dev/null || exit 98
+[ -e {shlex.quote(str(proxy_terminated))} ] || exit 99
 """
 
     result = subprocess.run(

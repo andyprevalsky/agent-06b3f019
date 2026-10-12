@@ -614,6 +614,8 @@ cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
   {"name":"bench-detached-wait"},
   {"name":"bench-invalid-recovery"},
   {"name":"bench-detached-cancel"},
+  {"name":"bench-group-term"},
+  {"name":"bench-group-term-undeliverable"},
   {"name":"private-ip-proxy"},
   {"name":"autoscaler-must-start"},
   {"name":"autoscaler-waits-for-boot-release"},
@@ -982,6 +984,40 @@ def run_fake_driver(mdir):
             log(f"synchronized start barrier released: {barrier}")
     benchmark_started = exit_code == 0
     result_stamped = False
+    if exit_code == 0 and bench.startswith("bench-group-term"):
+        # A long admitted benchmark keeps executing on its isolated guest, and
+        # holding its shared production connections, until the guest receives
+        # the authenticated /shutdown or its exact Machine is stopped natively.
+        # The bounded deadline stands in for the 7,200 s execution backstop.
+        machine_id = os.path.basename(mdir)
+        executing_since = time.time()
+        Path(MARKERS, "benchmark-executing-" + machine_id).write_text(
+            json.dumps({"pid": os.getpid(), "run_token": token, "bench": bench}))
+        stop_reason = "execution-backstop"
+        while time.time() - executing_since < 240:
+            if os.path.exists(os.path.join(mdir, "guest-cleanup.ack")):
+                stop_reason = "guest-shutdown"
+                break
+            try:
+                with open(STATE) as fh:
+                    native = find_machine(json.load(fh), machine_id)
+            except (OSError, ValueError):
+                native = {"state": "started"}
+            if native is None or native.get("state") != "started":
+                stop_reason = "native-stop" if native is not None else "machine-removed"
+                break
+            time.sleep(0.2)
+        Path(mdir, "benchmark.stopped").write_text(json.dumps({
+            "reason": stop_reason, "pid": os.getpid(),
+            "executing_seconds": round(time.time() - executing_since, 3),
+            "stopped_epoch": time.time(),
+        }))
+        if stop_reason != "guest-shutdown":
+            # A natively stopped Machine powers off: no DONE line, no seal.
+            return
+        # Graceful cancellation drains the benchmark before any terminal result.
+        exit_code = 143
+        benchmark_started = False
     def current_task_output():
         # Shared workstream ledgers retain earlier runs. Bind every barrier to
         # this staged driver's exact token, never a previous task's marker.
@@ -1914,6 +1950,13 @@ elif args[:1] == ["proxy"]:
 
         def do_POST(self):
             if self.path == "/shutdown":
+                staged_bench = base64.b64decode(
+                    rb_export(rb_text, "BENCH_TASKS_B64") or ""
+                ).decode().split(",")[0].strip()
+                if staged_bench == "bench-group-term-undeliverable":
+                    # A guest whose authenticated stop cannot be delivered.
+                    self.send_error(503, "guest shutdown endpoint unavailable")
+                    return
                 # Model the guest's durable completion boundary. Fleet teardown
                 # may not reap this fake Machine until this exact ack is visible.
                 open(os.path.join(mdir, "guest-cleanup.ack"), "w").close()
@@ -2101,7 +2144,7 @@ journal_must_be_read_only() {  # journal_must_be_read_only <phase>
 
 run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-args...>
     local ws="$1" port="$2" log="$3"
-    local launch_args=()
+    local launch_args=() session_leader=()
     shift 3
     launch_args=("$@")
     # Most scenarios need direct exit-status control. The default-detach
@@ -2109,6 +2152,12 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     # disappear while the fleet continues in its own session.
     [ "${CLOUDBENCH_TEST_DEFAULT_DETACH:-0}" = "1" ] ||
         launch_args+=(--foreground)
+    # run-bench-campaign.py starts each foreground fleet as its own session
+    # leader (start_new_session=True) and cancels it with os.killpg. Reproduce
+    # that exact process-group boundary when a scenario signals the group.
+    if [ "${CLOUDBENCH_TEST_NEW_SESSION:-0}" = "1" ]; then
+        session_leader=(python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')
+    fi
     # Cloud/agent hosts often inject CLOUDBENCH_SNAPSHOT_ID for live fleets.
     # That pin must not leak into this hermetic fixture: the fake inventory only
     # has snap_0001, and a foreign pin marks warm-deps stale → --refresh-deps
@@ -2145,7 +2194,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
-        bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
+        "${session_leader[@]}" bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
@@ -2376,7 +2425,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ]; then
+    && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -3407,7 +3457,8 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
     exit 0
 fi
 
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ]; then
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
 hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
     "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
     || fail "workstream A test Hub failed its pending-owner launch handshake"
@@ -3941,10 +3992,176 @@ assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
 fi
 
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ]; then
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ] \
+    || [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
     hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
         "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
         || fail "focused exact-recovery test Hub failed its pending-owner launch handshake"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 2-group-term — cancelling a fleet's whole process group must stop
+# its executing guest
+# ═════════════════════════════════════════════════════════════════════════════
+# run-bench-campaign.py cancels each fleet with os.killpg(SIGTERM). A terminal
+# Ctrl-C and the detached --wait forwarder signal the whole controller group
+# the same way, so every per-bench supervisor receives the signal alongside
+# the controller. Each guest below is mid-benchmark and stops only after its
+# authenticated /shutdown arrives over a live data-plane proxy, or after its
+# exact Machine is stopped natively when that stop cannot be delivered. The
+# owner, the original volume and the evidence latches must be retained, and
+# nothing may be destroyed on the unconfirmed path.
+group_term_cancellation_contract() {  # <bench> <expected-stop-reason>
+    local bench="$1" expected_reason="$2" log launcher_pid registry="" candidate
+    local machine="" volume="" marker="" deadline fleet_pid fleet_pid_start fleet_pgid
+    local term_epoch stop_file driver_pid launcher_status=0 output pid machine_state
+    local budget=$(( ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} + 15 ))
+    local -a remaining_pids=()
+    log="$TMP_ROOT/controller-$bench.log"
+    reset_fake_state
+    rm -f "$POOL_A" "$POOL_B"
+    rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+    mkdir -p "$FAKE_DIR/markers"
+    : > "$FAKE_DIR/journal.log"
+    CLOUDBENCH_TEST_NEW_SESSION=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$log" "$bench" --timeout 240 &
+    launcher_pid=$!
+    PIDS+=("$launcher_pid")
+    deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        marker="$(find "$FAKE_DIR/markers" -maxdepth 1 -name 'benchmark-executing-*' \
+            -type f -print -quit 2>/dev/null)"
+        [ -z "$marker" ] || break
+        kill -0 "$launcher_pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$marker" ] || fail "$bench: the guest never started executing its benchmark"
+    machine="${marker##*/benchmark-executing-}"
+    driver_pid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$marker")"
+    for candidate in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+        [ -f "$candidate/meta" ] || continue
+        if grep -rqx "id=$machine" "$candidate/clones" 2>/dev/null; then
+            registry="$candidate"
+            volume="$(grep -rh '^volume_id=' "$candidate/clones" | head -1)"
+            volume="${volume#volume_id=}"
+        fi
+    done
+    [ -n "$registry" ] && [ -n "$volume" ] ||
+        fail "$bench: the executing guest has no exact durable owner record"
+    fleet_pid="$(sed -n 's/^pid=//p' "$registry/meta" | head -1)"
+    fleet_pid_start="$(sed -n 's/^pid_start=//p' "$registry/meta" | head -1)"
+    fleet_pgid="$(ps -o pgid= -p "$fleet_pid" 2>/dev/null | tr -d ' ')"
+    cloudbench_pid_matches_start "$fleet_pid" "$fleet_pid_start" \
+        && [ "$fleet_pgid" = "$fleet_pid" ] ||
+        fail "$bench: the exact controller is not the leader of its own session"
+    # Exactly run-bench-campaign.py terminate_owned_children: os.killpg(SIGTERM).
+    term_epoch="$(date +%s)"
+    kill -TERM -- "-$fleet_pgid"
+    stop_file="$FAKE_DIR/machines/$machine/benchmark.stopped"
+    deadline=$((term_epoch + budget))
+    while [ ! -s "$stop_file" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 0.5
+    done
+    if [ ! -s "$stop_file" ]; then
+        # Stop only the test-owned fake benchmark before reporting the defect.
+        kill "$driver_pid" 2>/dev/null || true
+        grep -E 'guest cleanup|controller received|retaining|status proxy' "$log" >&2 || true
+        fail "$bench: the guest kept executing its benchmark ${budget}s after the controller group received TERM"
+    fi
+    deadline=$((SECONDS + 300))
+    while kill -0 "$launcher_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 1
+    done
+    ! kill -0 "$launcher_pid" 2>/dev/null ||
+        fail "$bench: the cancelled controller did not finish its bounded cleanup"
+    wait "$launcher_pid" || launcher_status=$?
+    for pid in "${PIDS[@]}"; do
+        [ "$pid" = "$launcher_pid" ] || remaining_pids+=("$pid")
+    done
+    PIDS=("${remaining_pids[@]}")
+    [ "$launcher_status" -ne 0 ] ||
+        fail "$bench: a cancelled controller reported success"
+    grep -qF "controller received TERM" "$log" ||
+        fail "$bench: the controller did not observe the group TERM"
+    python3 - "$stop_file" "$expected_reason" "$term_epoch" "$budget" <<'PY' ||
+import json
+import sys
+
+stop = json.load(open(sys.argv[1]))
+expected, term_epoch, budget = sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+assert stop["reason"] == expected, (stop["reason"], expected)
+assert stop["stopped_epoch"] - term_epoch <= budget, stop
+PY
+        fail "$bench: the guest did not stop through $expected_reason within ${budget}s ($(cat "$stop_file"))"
+    deadline=$((SECONDS + 10))
+    while kill -0 "$driver_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 0.2
+    done
+    ! kill -0 "$driver_pid" 2>/dev/null ||
+        fail "$bench: the guest benchmark process survived its stop"
+    [ -f "$registry/meta" ] && [ -e "$registry/runtime-evidence-unconfirmed" ] ||
+        fail "$bench: cancellation released the exact owner before its evidence was preserved"
+    fake_machine_exists "$machine" ||
+        fail "$bench: cancellation destroyed the unconfirmed guest Machine"
+    FAKE_STATE="$FAKE_DIR/state.json" VOLUME="$volume" python3 - <<'PY' ||
+import json
+import os
+
+volumes = json.load(open(os.environ["FAKE_STATE"]))["volumes"]
+raise SystemExit(0 if any(item.get("id") == os.environ["VOLUME"] for item in volumes) else 1)
+PY
+        fail "$bench: cancellation destroyed the original evidence volume"
+    if grep -qE "^machine destroy |^volumes destroy " "$FAKE_DIR/journal.log"; then
+        fail "$bench: provider deletion ran on an unconfirmed cancellation path"
+    fi
+    machine_state="$(FAKE_STATE="$FAKE_DIR/state.json" MACHINE="$machine" python3 -c '
+import json, os
+machines = json.load(open(os.environ["FAKE_STATE"]))["machines"]
+print(next(m["state"] for m in machines if m["id"] == os.environ["MACHINE"]))
+')"
+    output="$(sed -n 's/^runs_root=//p' "$registry/meta" | head -1)/$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)/$bench"
+    [ -d "$output" ] || fail "$bench: the retained owner does not name its run output"
+    if [ "$expected_reason" = native-stop ]; then
+        JOURNAL="$FAKE_DIR/journal.log" MACHINE="$machine" python3 - <<'PY' ||
+import os
+import shlex
+
+stops = [shlex.split(line)[2] for line in open(os.environ["JOURNAL"]) if line.startswith("machine stop ")]
+assert stops and set(stops) == {os.environ["MACHINE"]}, stops
+PY
+            fail "$bench: native stop did not target exactly the owned guest Machine"
+        [ "$machine_state" = stopped ] ||
+            fail "$bench: the undeliverable guest was not left natively stopped (state=$machine_state)"
+        python3 - "$output/guest-native-stop.json" "$machine" <<'PY' ||
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1]))
+assert receipt["machine_id"] == sys.argv[2], receipt
+assert receipt["verified_state"] == "stopped", receipt
+assert receipt["destroyed"] is False, receipt
+PY
+            fail "$bench: the native guest stop has no exact durable receipt"
+        [ -e "$registry/guest-cleanup-unconfirmed" ] ||
+            fail "$bench: a natively stopped guest must keep its unconfirmed-cleanup quarantine"
+    else
+        [ -s "$output/guest-shutdown.confirmed" ] ||
+            fail "$bench: the delivered guest shutdown was not acknowledged"
+        if grep -qE "^machine stop " "$FAKE_DIR/journal.log"; then
+            fail "$bench: a guest that acknowledged its delivered shutdown was also stopped natively"
+        fi
+    fi
+    grep -E "guest cleanup|guest shutdown|natively" "$log" || true
+    assert_and_reset_retained_fake_owner "$registry" ||
+        fail "$bench: retained group-TERM owner could not be safely reset"
+    echo "PASS: scenario 2-group-term ($bench) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group TERM (budget ${budget}s); exact owner, volume and evidence retained"
+}
+group_term_cancellation_contract bench-group-term guest-shutdown
+group_term_cancellation_contract bench-group-term-undeliverable native-stop
+assert_no_controller_script_snapshots "process-group TERM cancellation"
+if [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
+    echo "All process-group TERM cancellation checks passed."
+    exit 0
 fi
 
 # Cooperative predeploy cancellation walks only the poller/waiter descendant
