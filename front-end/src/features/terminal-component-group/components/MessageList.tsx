@@ -138,6 +138,7 @@ export function MessageList({
       agent={ctx.agent}
       selectedAgentId={ctx.selectedAgentId}
       filteredMessages={filteredMessages}
+      webSearchGrouping={state.webSearchGrouping}
       exploreStepMap={filtered.exploreStepMap}
       waitForCheckMap={filtered.waitForCheckMap}
       streaming={streaming}
