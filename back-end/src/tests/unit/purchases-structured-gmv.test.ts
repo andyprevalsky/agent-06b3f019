@@ -101,6 +101,22 @@ async function main(): Promise<void> {
       status: 'skipped',
       reason: 'agentcard_purchase_exists',
     });
+
+    // The browser agent reported the item price, not the charged total: the
+    // same card purchase still covers it, so no second purchase row appears.
+    const itemPriceOnly = await recordStructuredGmv({
+      userId,
+      agentId,
+      structured: {
+        selected_product_url: 'https://blick.example/products/pencil',
+        selected_product_price_usd: 10.0,
+        order_confirmation_id: 'BLICK-CONF-99',
+      },
+    });
+    assert.deepEqual(itemPriceOnly, {
+      status: 'skipped',
+      reason: 'agentcard_purchase_exists',
+    });
   });
 
   await withUser(async (userId) => {
@@ -160,6 +176,25 @@ async function main(): Promise<void> {
       status: 'skipped',
       reason: 'agentcard_purchase_exists',
     });
+
+    // A card purchase AFTER the historical event cannot be its cover: the
+    // backfill is bounded by the event's own time, so this one records GMV.
+    const earlierEvent = new Date(occurredAt.getTime() - 60 * 60 * 1000);
+    const recorded = await recordStructuredGmv({
+      userId,
+      agentId,
+      structured: {
+        merchant: 'Historical Merchant',
+        total_cents: 3400,
+        order_id: 'HIST-CONF-00',
+      },
+      occurredAt: earlierEvent,
+    });
+    assert.equal(
+      recorded.status,
+      'recorded',
+      `a later AgentCard charge must not cover an earlier event: ${JSON.stringify(recorded)}`
+    );
   });
 
   await withUser(async (userId) => {

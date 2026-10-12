@@ -16,9 +16,12 @@ import {
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
   kernelRecreateProxySelection,
+  managedKernelProxyFromSource,
+  recordedKernelProxyLocation,
   resolveKernelProxyMode,
   type KernelProxyType,
 } from './kernelProxy';
+import { rotationGeolocation } from './rotationGeolocation';
 import {
   BrowserProviderRateLimitError,
   type BrowserProviderResumeSession,
@@ -510,7 +513,7 @@ async function recreateKernelSession(
     where: { id: oldSession.agentId },
     select: { proxyCountry: true, proxyState: true, proxyCity: true },
   });
-  const proxyLocation: ProxyGeoLocation = agent?.proxyCountry
+  const agentLocation: ProxyGeoLocation = agent?.proxyCountry
     ? {
         country: agent.proxyCountry,
         ...(agent.proxyState ? { state: agent.proxyState } : {}),
@@ -519,6 +522,30 @@ async function recreateKernelSession(
     : DEFAULT_GEOLOCATION;
 
   const previousSessionId = oldSession.sessionId;
+  // A rotation must land on a different egress IP: the cached city-pinned Kernel
+  // proxy kept answering with the same exit node, so a forced managed rotation
+  // requests another US state without a city (see rotationGeolocation; the
+  // caller already reserved this rotation, so the row's count is its step).
+  // A resume keeps the proxy the session actually used: after a rotation that
+  // is another state than the agent's own, and recomputing from the agent's
+  // location would silently move the session back.
+  const recordedLocation =
+    opts.forceManagedProxyType === undefined &&
+    managedKernelProxyFromSource(oldSession.kernelProxySource) !== undefined
+      ? await recordedKernelProxyLocation(kernelClient(), previousSessionId)
+      : undefined;
+  const proxyLocation =
+    opts.forceManagedProxyType !== undefined
+      ? rotationGeolocation(agentLocation, taskId, oldSession.proxyRotationCount)
+      : (recordedLocation ?? agentLocation);
+  if (opts.forceManagedProxyType !== undefined) {
+    log.info('Kernel rotation requests a different proxy location', {
+      taskId,
+      proxyType: opts.forceManagedProxyType,
+      from: agentLocation,
+      to: proxyLocation,
+    });
+  }
 
   const remote = await createRemoteSession(
     oldSession.contextId,

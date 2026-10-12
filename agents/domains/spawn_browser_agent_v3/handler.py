@@ -55,6 +55,7 @@ from helpers.wait_condition_or_handoff import (
     sleep_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
+from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
@@ -63,6 +64,7 @@ from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
+from utils.attention_requests import REJECTION_SENTINEL
 from utils.error_utils import extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
@@ -145,6 +147,7 @@ from .repo import (
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
+    save_minted_account_password,
     upload_file_to_session,
 )
 from .resume_store import hydrate_resume_context, persist_resume_context
@@ -178,6 +181,7 @@ from .service_actions import (
     wait_for_navigation_ready,
 )
 from .service_crypto import (
+    MINTED_NEW_PASSWORD_REF,
     PAYMENT_CARD_ENTRY_RULE,
     PAYMENT_CARD_SECRET_REFS,
     ExtractedOTP,
@@ -191,6 +195,7 @@ from .service_crypto import (
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
+    mask_secret_values,
 )
 from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
@@ -198,6 +203,9 @@ from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+
+# Resume marker for a sign-in-help request the user declined.
+AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -1167,19 +1175,43 @@ async def _propagate_browser_credentials_with_progress(
             success=success,
             message=message,
         )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
+        # Propagation is bookkeeping about the credentials the finished run used.
+        # The run's own outcome stands: a backend 500 here (a Prisma transaction
+        # expiring under load, 2026-10-06) must not turn a completed browser task
+        # into a failure that the planner then retries from scratch.
         error_message = extract_error_message(e)
-        await save_browser_action_message(
+        logger.warning(
+            "Credential propagation failed; keeping the browser run's outcome",
             agent_id=agent_id,
-            title="Credential state update failed",
             task_id=task_id,
-            message=error_message,
-            status=MessageStatus.ERROR,
-            browser_url=browser_url,
-            action_type="credential_propagation",
-            tool_call_id=tool_call_id,
+            status=status,
+            error=error_message,
         )
-        raise
+        # The diagnostic write is best-effort: the backend that just failed the
+        # propagation may refuse this message too, and that must not turn the
+        # fallback into a raise either.
+        try:
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title="Credential state update failed",
+                task_id=task_id,
+                message=error_message,
+                status=MessageStatus.ERROR,
+                browser_url=browser_url,
+                action_type="credential_propagation",
+                tool_call_id=tool_call_id,
+            )
+        except Exception as save_error:
+            logger.warning(
+                "Credential propagation diagnostic message was not saved",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=extract_error_message(save_error),
+            )
+        return {"outcome": "unknown", "refs": 0, "applied": 0, "error": error_message}
 
     outcome = result.get("outcome", "unknown")
     refs = result.get("refs", 0)
@@ -2247,6 +2279,10 @@ def _clear_browser_activity_memory_buffers(
     gc.collect()
 
 
+# Clock slack between the mail server's receipt time and this worker's clock.
+OTP_TASK_START_SLACK_SECONDS = 30
+
+
 async def _append_new_otp_user_messages(
     *,
     otps: List[ExtractedOTP],
@@ -2255,8 +2291,14 @@ async def _append_new_otp_user_messages(
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
     agent_id: str,
     task_id: Optional[str],
+    task_elapsed_seconds: Optional[float] = None,
 ) -> int:
-    """Append unseen OTPs as USER messages and log credential refs."""
+    """Append unseen OTPs as USER messages and log credential refs.
+
+    A code that arrived before this task started was sent for something else
+    (an earlier task of the same user); handing it over as "recently received"
+    sends the agent to the site with a code the site never issued it.
+    """
     new_count = 0
     for otp in otps:
         if not is_usable_email_otp(otp):
@@ -2266,6 +2308,23 @@ async def _append_new_otp_user_messages(
                 source_message_id=otp.source_message_id,
                 ttl_seconds=otp.ttl_seconds,
             )
+            continue
+        if (
+            task_elapsed_seconds is not None
+            and otp.age_seconds > task_elapsed_seconds + OTP_TASK_START_SLACK_SECONDS
+        ):
+            # Remember the stale MESSAGE, not its code: a site may reissue the
+            # same code for this sign-in, and that fresh mail must still arrive.
+            stale_marker = f"stale-message:{otp.source_message_id or otp.code}"
+            if stale_marker not in seen_otp_codes:
+                seen_otp_codes.add(stale_marker)
+                logger.info(
+                    "Skipping OTP that predates this browser task",
+                    agent_id=agent_id,
+                    source_message_id=otp.source_message_id,
+                    age_seconds=otp.age_seconds,
+                    task_elapsed_seconds=int(task_elapsed_seconds),
+                )
             continue
 
         if otp.code in seen_otp_codes:
@@ -2313,6 +2372,7 @@ async def _fetch_and_append_recent_otp_user_messages(
     credential_refs_by_secret_ref: Dict[str, Dict[str, str]],
     agent_id: str,
     task_id: Optional[str],
+    task_elapsed_seconds: Optional[float] = None,
 ) -> int:
     otps = await fetch_recent_otps(user_id, api_url, api_key)
     return await _append_new_otp_user_messages(
@@ -2322,6 +2382,7 @@ async def _fetch_and_append_recent_otp_user_messages(
         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
         agent_id=agent_id,
         task_id=task_id,
+        task_elapsed_seconds=task_elapsed_seconds,
     )
 
 
@@ -6337,6 +6398,7 @@ async def _spawn_browser_agent_activity_v3_real(
     # because a realm transition rebinds that dict while a poll is in flight.
     otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
+    otp_task_started_monotonic = time.monotonic()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
     # Every decrypted passkey we have ever seeded on the virtual authenticator,
@@ -6426,6 +6488,39 @@ async def _spawn_browser_agent_activity_v3_real(
     state_prefetch = BrowserStatePrefetch()
 
     try:
+        if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
+            # The user said no, so nothing is left to try. Release the browser
+            # that was kept alive for them and end the task; ``finally`` posts
+            # the terminal event that closes the FE chip.
+            declined_session_id = (write_lock_resume_state or {}).get("session_id") or session_id
+            # The handoff may have replaced the provider session while the task
+            # was paused; close the task's current session, not just the saved id.
+            try:
+                current = await fetch_session_info(config, task_id)
+                declined_session_id = str(current.get("session_id") or declined_session_id or "")
+            except Exception as lookup_error:
+                logger.warning(
+                    "Could not look up the declined task's current session; closing the saved one",
+                    task_id=task_id,
+                    error=str(lookup_error),
+                )
+            if declined_session_id:
+                await close_browser_session(config, declined_session_id, pause=False)
+            logger.info("User declined auth assistance; ending browser task", task_id=task_id)
+            return {
+                "status": "completed",
+                "success": False,
+                "user_declined_auth": True,
+                "message": f"User declined to sign in to {auth_realm or 'the site'}.",
+                "browser_url": browser_url,
+                "task_id": task_id,
+                "usage_items": [],
+                "execution_time_ms": 0,
+                "session_id": declined_session_id,
+                "structured_response": None,
+                "output_files": [],
+            }
+
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
         timing_events: list[tuple[str, float, float]] = []
@@ -7735,6 +7830,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         credential_refs_by_secret_ref=otp_credential_refs,
                         agent_id=agent_id,
                         task_id=task_id,
+                        task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
                     )
                 )
             step_timer.mark("otp_poll")
@@ -9752,6 +9848,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            # Nothing a tool read back from the page may carry a secret the tool typed.
+            result = mask_secret_values(result, secret_refs)
             state_prefetch.arm(
                 action_name,
                 success=isinstance(result, dict) and bool(result.get("success", True)),
@@ -9760,6 +9858,22 @@ Based on this feedback, I need to continue working on the task and address the i
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
                     visited_urls.append(current_url)
+            if (
+                action_name == "input_text"
+                and result.get("success")
+                and str(unified_action.get("params", {}).get("text", "")) == MINTED_NEW_PASSWORD_REF
+                and current_url
+            ):
+                # The account now exists (or is being created) under this password; keep it.
+                try:
+                    await save_minted_account_password(config, user_id, current_url)
+                except Exception as save_error:
+                    logger.warning(
+                        "Failed to save minted account password",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=extract_error_message(save_error),
+                    )
             if (
                 not result.get("credential_ref")
                 and action_name == "input_text"
@@ -11773,8 +11887,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "Browser paused while awaiting authentication assistance.",
                         )
                         return
+                    user_declined = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
-                        workflow_instance._signal_responses.pop(request_id, None)
+                        signal_response = workflow_instance._signal_responses.pop(request_id, None)
+                        # A decline used to be read as "the user signed in": the
+                        # task resumed on a signed-out page and asked again.
+                        user_declined = (
+                            isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
+                        )
                         workflow_instance.is_paused = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
@@ -11783,7 +11903,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
-                        "approval_type": "auth_assistance",
+                        "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
@@ -11803,7 +11923,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="User Assistance Received",
+                        title="User Declined To Sign In" if user_declined else "User Assistance Received",
                         message="",
                         status=MessageStatus.FINISHED,
                         metadata={
@@ -11834,7 +11954,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             output_files = result.get("output_files", [])
             verified_completion = result.get("status") == "completed" and result.get("success") is True
-            final_status = MessageStatus.FINISHED if verified_completion else MessageStatus.ERROR
+            # A user declining sign-in help is a clean end, not a tool error: the
+            # parent reports it instead of respawning the browser.
+            user_declined_auth = bool(result.get("user_declined_auth"))
+            final_status = (
+                MessageStatus.FINISHED if verified_completion or user_declined_auth else MessageStatus.ERROR
+            )
             # Declare terminality explicitly. The front-end must never have to
             # infer "this browser task is over" from a missing action_type — a
             # workflow-scope progress event would look identical.
@@ -11843,6 +11968,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 "action_type": "task_complete",
                 "success": verified_completion,
             }
+            if user_declined_auth:
+                final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
                 "world_model_simulated",

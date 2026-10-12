@@ -110,12 +110,27 @@ COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
 DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
+# Tasks whose user starts with no subscription and pays through Stripe test Checkout.
+NEW_USER_PAYMENT_TASK_NAMES = {
+    NEW_USER_PAYMENT_JOURNEY_TASK_NAME,
+    "browser-auth-signup-purchase-no-subscription",
+}
+# Hosted Rose Shop purchases settle through the same sandbox AgentCard fixture
+# as the test-payment portal, as the same seeded user.
+ROSE_SHOP_PAYMENT_TASK_NAMES = {
+    "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
+    "browser-auth-member-discount-signup-fails-purchase",
+    "browser-auth-paid-membership-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-session-expires-at-checkout",
+}
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     NEW_USER_PAYMENT_JOURNEY_TASK_NAME,
@@ -1205,7 +1220,7 @@ def validate_agentcard_org_credentials(
     env: Mapping[str, str] | None = None,
     env_path: Path | None = None,
 ) -> None:
-    if not ((AGENT_PAYMENT_TASK_NAMES | {NEW_USER_PAYMENT_JOURNEY_TASK_NAME}) & set(tasks)):
+    if not ((AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & set(tasks)):
         return
     configured = _dotenv_values(env_path or REPO_ROOT / "back-end" / ".env")
     configured.update(os.environ if env is None else env)
@@ -1259,7 +1274,7 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
     selected = set(tasks)
     if needs_non_purchase_gates(tasks):
         os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
-    if (AGENT_PAYMENT_TASK_NAMES | {NEW_USER_PAYMENT_JOURNEY_TASK_NAME}) & selected:
+    if (AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,
         # must execute uncached, and need the allowlisted hosted callback even

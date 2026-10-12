@@ -6,7 +6,7 @@ import { Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
-import { getAuthOptions, markSteelSessionAuthFailed } from './service';
+import { getAuthOptions, markSteelSessionAuthFailed, saveMintedAccountPassword } from './service';
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -82,6 +82,32 @@ router.post(
         error: error instanceof Error ? error.message : String(error),
       });
       res.status(500).json({ error: 'Failed to mark Steel session auth failed' });
+    }
+  })
+);
+
+/** The browser agent typed the minted account's new password on `origin`; keep it. */
+router.post(
+  '/minted-password',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    const userId = req.userId;
+    const origin = (req.body as Record<string, unknown>).origin;
+    if (typeof userId !== 'string' || userId === '') {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    if (typeof origin !== 'string' || !/^https?:\/\//.test(origin.trim())) {
+      res.status(400).json({ error: 'origin must be an absolute http(s) URL' });
+      return;
+    }
+    try {
+      res.json(await saveMintedAccountPassword(userId, origin.trim()));
+    } catch (error) {
+      log.error('Failed to save minted account password', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: 'Failed to save minted account password' });
     }
   })
 );

@@ -17,6 +17,7 @@ import {
   BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES,
   BROWSER_DEFAULT_MAX_ITERATIONS,
   BROWSER_SESSION_MIN_REMAINING_MS,
+  BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT,
   STEEL_PLAN_MAX_SESSION_MS,
   browserActivityBudgetMinutes,
   steelSessionTimeoutMs,
@@ -54,6 +55,10 @@ test('backend budget constants match the Python browser activity config', () => 
   assert.strictEqual(
     BROWSER_DEFAULT_MAX_ITERATIONS,
     pythonIntConstant(source, 'DEFAULT_MAX_ITERATIONS')
+  );
+  assert.strictEqual(
+    BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT,
+    pythonIntConstant(source, 'STEPS_COVERED_BY_BASE_TIMEOUT')
   );
   assert.ok(
     source.includes('return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)'),

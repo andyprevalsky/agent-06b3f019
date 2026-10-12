@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../providers/agentPhone';
 import {
   buildMockAgentPhoneSendResult,
+  isLocalBenchmarkAgentPhoneMockEnabled,
   shouldMockMessagingSend,
 } from '../../providers/smsTransportMock';
 import {
@@ -208,6 +209,23 @@ export async function fetchAgentPhoneMessagesSince(
   const phoneNumber = identity?.phone?.trim() ?? '';
   if (identity?.phoneProvider !== 'agentphone' || (numberId === '' && phoneNumber === '')) {
     return [];
+  }
+
+  // A benchmark stack's number is a mock no carrier can reach, so the provider
+  // has no conversations for it. Its inbox is the local table the stack's own
+  // test site delivers texts into.
+  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
+    const stored = await repo.findStoredInboundMessages({ userId, to: phoneNumber, since, limit });
+    return stored.map((message) => ({
+      id: message.externalId,
+      from: message.from,
+      to: message.to,
+      body: message.body,
+      channel: message.channel,
+      receivedAt: message.receivedAt,
+      credentialId: phoneNumber,
+      credentialPhone: phoneNumber,
+    }));
   }
 
   const messages = await listInboundMessagesForNumber(

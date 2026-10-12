@@ -3,19 +3,30 @@ import { prisma } from '../../providers/database';
 
 const STRUCTURED_GMV_PROVIDERS = ['order_confirmation', 'merchant_saved'] as const;
 
+/** Tax, shipping and fees on top of a subtotal: 35% plus $20 covers the cases seen. */
+export function coveringPurchaseCeilingCents(totalCents: number): number {
+  return Math.round(totalCents * 1.35) + 2000;
+}
+
 export async function findAgentcardCoveringPurchase(input: {
   agentId: string;
   totalCents: number;
   statuses: PurchaseSpendStatus[];
   since: Date;
+  /** Backfills bound the match by the event's own time; a later charge is not its cover. */
+  until?: Date;
 }): Promise<{ id: string } | null> {
   return prisma.purchaseSpend.findFirst({
     where: {
       agentId: input.agentId,
       provider: { notIn: [...STRUCTURED_GMV_PROVIDERS] },
       status: { in: input.statuses },
-      totalCents: input.totalCents,
-      createdAt: { gte: input.since },
+      // The structured output may carry an item price or subtotal rather than
+      // the charged total (selected_product_price_usd: 15.00 against a $21.23
+      // card purchase); the card row then still covers it. The bound keeps an
+      // unrelated larger charge from swallowing a small structured sale.
+      totalCents: { gte: input.totalCents, lte: coveringPurchaseCeilingCents(input.totalCents) },
+      createdAt: { gte: input.since, ...(input.until !== undefined ? { lte: input.until } : {}) },
     },
     select: { id: true },
   });

@@ -18,6 +18,7 @@ import {
 } from './session';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { newOwnedSteelSessionId, registerInFlightSteelSession } from './sessionIdentity';
 import { log } from './types';
 import { steelCdpUrl, steelDebugUrl } from './urls';
 
@@ -34,6 +35,7 @@ export function buildSteelRecoveryBrowserOptions(input: {
   userAgent?: string;
 }) {
   return {
+    sessionId: newOwnedSteelSessionId(),
     persistProfile: false,
     userAgent: input.userAgent,
     useProxy: input.proxy,
@@ -91,6 +93,7 @@ export async function createSteelRecoverySession(
           userAgent: input.userAgent,
         })
       )) as SteelSessionResult;
+      registerInFlightSteelSession(session.id);
       const wsUrl = steelCdpUrl(session.id);
       const validation = await validateBrowserConnection(wsUrl, {
         connect: deps?.connect,

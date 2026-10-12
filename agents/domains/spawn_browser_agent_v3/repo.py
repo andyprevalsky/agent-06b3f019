@@ -870,6 +870,22 @@ async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
     raise RuntimeError(f"Failed to acknowledge browser control: HTTP {response.status_code}")
 
 
+async def save_minted_account_password(config: Any, user_id: str, origin: str) -> bool:
+    """Keep the password the agent just created a minted account with on ``origin``.
+
+    Idempotent on the backend, so a retried activity saves the same login once.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/auth-options/minted-password",
+            headers={"x-api-key": config.backend.api_key or "", "x-user-id": user_id},
+            json={"origin": origin},
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to save minted account password: HTTP {response.status_code}")
+    return bool(response.json().get("saved"))
+
+
 async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:
     """Close or pause a browser session."""
     payload: Dict[str, Any] = {"session_id": session_id, "pause": pause}

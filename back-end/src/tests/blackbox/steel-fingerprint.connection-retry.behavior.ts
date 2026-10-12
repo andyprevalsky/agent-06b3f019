@@ -42,6 +42,10 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
   const previousProxyServer = process.env.STEEL_PROXY_SERVER;
   const previousProxyEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
   let savedUrl: string | null = 'https://example.com/connection-retry';
+  // rotateBrowserProxy reserves the rotation before the provider recreates the
+  // session, so the row a rotation reads already carries its own position.
+  let replacedSessionId = 'steel-connection-old';
+  let proxyRotationCount = 1;
 
   try {
     delete process.env.STEEL_PROXY_SERVER;
@@ -50,7 +54,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
     ).findUnique = (async () => ({
       id: 'replacement-connection-retry-task',
-      sessionId: 'steel-connection-old',
+      sessionId: replacedSessionId,
+      proxyRotationCount,
       provider: 'kernel',
       providerProfileId: 'kernel-profile',
       providerProfileSource: 'kernel_session',
@@ -68,7 +73,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       (async () => ({
         proxyCountry: 'US',
         proxyState: 'CA',
-        proxyCity: 'RCA TEST CITY',
+        // A distinct city: the rejected-city test memoizes 'RCA TEST CITY' for the process.
+        proxyCity: 'RCA RESUME CITY',
       })) as typeof prisma.agent.findUnique;
     (
       prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
@@ -109,6 +115,80 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
     assert(
       connectionInputs.length === 3,
       `expected three Steel create attempts after Connection error, got ${connectionInputs.length}`
+    );
+    // A rotation must land on a different egress IP: Steel's pool kept handing
+    // the same exit node back for the same state, so a rotation requests another
+    // US state and no city. Resumes keep the user's own location.
+    const rotationGeo = (
+      connectionInputs[0].useProxy as { geolocation?: Record<string, unknown> } | undefined
+    )?.geolocation;
+    assert(
+      rotationGeo !== undefined &&
+        rotationGeo.country === 'US' &&
+        typeof rotationGeo.state === 'string' &&
+        rotationGeo.state !== 'CA' &&
+        rotationGeo.city === undefined,
+      `rotation must request a different state without a city, got ${JSON.stringify(rotationGeo)}`
+    );
+    // Every rotation of a task moves again. Live parity (2026-10-07) replaced
+    // Kernel session ociyyt6sx5uvqc1j22yq7g94 and then Steel session
+    // eaac6de5-290b-4bf9-bc9d-d7effdd6b147: both rotations asked Steel for FL
+    // and the second session read the first one's exit IP.
+    const consecutiveStates: unknown[] = [];
+    for (const [position, sessionId] of [
+      [3, 'ociyyt6sx5uvqc1j22yq7g94'],
+      [4, 'eaac6de5-290b-4bf9-bc9d-d7effdd6b147'],
+    ] as const) {
+      proxyRotationCount = position;
+      replacedSessionId = sessionId;
+      await recreateSession(
+        'replacement-connection-retry-task',
+        { forceManagedRotation: true },
+        {
+          createSession: async (input) => {
+            const geo = (input as { useProxy?: { geolocation?: Record<string, unknown> } }).useProxy
+              ?.geolocation;
+            consecutiveStates.push(geo?.state);
+            return {
+              id: `steel-rotation-${position}`,
+              debugUrl: 'https://steel.example/debug',
+              profileId: null,
+              proxySource: 'steel',
+            };
+          },
+          validateConnection: async () => null,
+        }
+      );
+    }
+    assert(
+      consecutiveStates.length === 2 &&
+        consecutiveStates.every((state) => typeof state === 'string' && state !== 'CA') &&
+        consecutiveStates[0] !== consecutiveStates[1],
+      `consecutive rotations must request different states, got ${JSON.stringify(consecutiveStates)}`
+    );
+    const resumeInputs: Array<Record<string, unknown>> = [];
+    await recreateSession(
+      'replacement-connection-retry-task',
+      { forceManagedRotation: false },
+      {
+        createSession: async (input) => {
+          resumeInputs.push(input as unknown as Record<string, unknown>);
+          return {
+            id: 'steel-after-resume',
+            debugUrl: 'https://steel.example/debug',
+            profileId: null,
+            proxySource: 'steel',
+          };
+        },
+        validateConnection: async () => null,
+      }
+    );
+    const resumeGeo = (
+      resumeInputs[0]?.useProxy as { geolocation?: Record<string, unknown> } | undefined
+    )?.geolocation;
+    assert(
+      resumeGeo !== undefined && resumeGeo.city === 'RCA RESUME CITY',
+      `resume must keep the user's city, got ${JSON.stringify(resumeGeo)}`
     );
 
     // A created session whose CDP validation times out must retain the

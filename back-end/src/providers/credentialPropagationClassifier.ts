@@ -143,6 +143,8 @@ function normalizeKind(kind: string): CredentialKind | null {
     return 'email_otp';
   }
   if (normalized === 'passkey' || normalized === 'webauthn') return 'passkey';
+  // The browser agent records the minted identity as `minted_account`.
+  if (normalized === 'minted_account') return 'minted';
   return CREDENTIAL_KINDS.has(normalized as CredentialKind) ? (normalized as CredentialKind) : null;
 }
 
@@ -477,6 +479,14 @@ function parseClassifierResponse(
   return { reason: parsed.reason, decisions: [...decisionsByKey.values()] };
 }
 
+/**
+ * Output budget for the judge. The flash pool's model thinks before it answers
+ * and its thinking counts against this cap: at 200 every call ended with no
+ * answer (a real two-login run thought for 1,543 tokens), so no rejected
+ * credential was ever classified.
+ */
+const CLASSIFIER_MAX_OUTPUT_TOKENS = 8192;
+
 /* c8 ignore start -- live classifier auth path requires real compute credentials */
 async function directAuthForClassifier(agent: AgentForPropagation) {
   if (agent.userId === undefined || agent.userId === '') return {};
@@ -517,13 +527,30 @@ export async function classifyCredentialOutcomesBestEffort(
   credentialRefs: CredentialRef[] = []
 ): Promise<CredentialClassificationResult> {
   const fallback = heuristicDecision(agent, messages, credentialRefs.length > 0);
+  // A run-level verdict names the run, not a credential. With several
+  // credentials in play and no judge, copying it onto each of them would
+  // disable the one that worked (failure) or re-enable the one the site
+  // rejected (success); those credentials stay unknown.
+  const perCredentialFallback: PropagationDecision =
+    credentialRefs.length > 1 && fallback.outcome !== 'unknown'
+      ? {
+          ...fallback,
+          outcome: 'unknown',
+          failureReason: null,
+          reason: `${fallback.reason}; per-credential verdict unavailable`,
+        }
+      : fallback;
   const fallbackDecisions = credentialRefs.map((credentialRef) =>
-    decisionForCredential(credentialRef, fallback)
+    decisionForCredential(credentialRef, perCredentialFallback)
   );
   if (credentialRefs.length === 0) {
     return { reason: 'no_credentials_used', rawError: fallback.rawError, decisions: [] };
   }
-  if (agent.status === 'COMPLETED' || process.env.CREDENTIAL_PROPAGATION_DISABLE_LLM === '1') {
+  // A completed run that used one credential needs no judge: that credential
+  // worked. One that tried several does: the run's success says nothing about
+  // which of them the site rejected on the way.
+  const oneCredentialWorked = agent.status === 'COMPLETED' && credentialRefs.length === 1;
+  if (oneCredentialWorked || process.env.CREDENTIAL_PROPAGATION_DISABLE_LLM === '1') {
     return { reason: fallback.reason, rawError: fallback.rawError, decisions: fallbackDecisions };
   }
 
@@ -537,6 +564,10 @@ export async function classifyCredentialOutcomesBestEffort(
       agent_id: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (agent.status === 'COMPLETED') {
+      // No judge, no per-credential verdict: keep what a completed run always meant.
+      return { reason: fallback.reason, rawError: fallback.rawError, decisions: fallbackDecisions };
+    }
     const unavailable = classifierUnavailableDecision(agent, messages);
     return {
       reason: unavailable.reason,
@@ -562,7 +593,7 @@ async function classifierContent(
   const stream = await createStreamingCompletion({
     model: 'rose-labs/rose-1-flash',
     temperature: 0,
-    max_tokens: 200,
+    max_tokens: CLASSIFIER_MAX_OUTPUT_TOKENS,
     ...directAuth,
     messages: [
       { role: 'system' as const, content: buildCredentialClassifierSystemPrompt() },

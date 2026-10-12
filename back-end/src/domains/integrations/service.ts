@@ -39,7 +39,7 @@ import {
 } from '../../providers/gptCredentials';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
-import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
+import { fetchPrimitiveMessagesSince, primitiveDomain } from '../../providers/primitive';
 import { archiveJson } from '../../providers/traceArchive';
 import {
   clearConnectionNeedsReconnectFromIntegrationRecovery,
@@ -245,16 +245,27 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
         c.accessToken !== undefined &&
         c.accessToken !== ''
     );
-  const mintedInboxEmails = await repo.findMintedAccountEmails(userId);
+  // A connected inbox on our own mail domain is read through the mail provider
+  // that hosts it, not through Gmail: it has no Google token to read with.
+  const ownDomain = `@${primitiveDomain().toLowerCase()}`;
+  const ownDomainInboxes = allCredentials
+    .map((credential) => credential.email?.toLowerCase() ?? '')
+    .filter((email) => email.endsWith(ownDomain));
+  const gmailCredentials = allCredentials.filter(
+    (credential) => !(credential.email?.toLowerCase() ?? '').endsWith(ownDomain)
+  );
+  const mintedInboxEmails = [
+    ...new Set([...(await repo.findMintedAccountEmails(userId)), ...ownDomainInboxes]),
+  ];
   if (allCredentials.length === 0 && mintedInboxEmails.length === 0) {
     if (integrations.length === 0) throw new GmailNotConnectedError();
     throw new GmailCredentialsNotFoundError();
   }
 
-  const sourceCount = allCredentials.length + mintedInboxEmails.length;
+  const sourceCount = gmailCredentials.length + mintedInboxEmails.length;
   const perAccountLimit = Math.max(1, Math.ceil(limit / sourceCount));
   const emailArrays = await Promise.all(
-    allCredentials.map(async (credential) => {
+    gmailCredentials.map(async (credential) => {
       try {
         const accessToken = await getValidAccessToken(credential);
         if (accessToken === null || accessToken === undefined || accessToken === '') {
@@ -290,7 +301,7 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
     .slice(0, limit);
   log.info('Fetched emails', {
     count: emails.length,
-    accounts: allCredentials.length,
+    accounts: gmailCredentials.length,
     mintedInboxes: mintedInboxEmails.length,
     since: since.toISOString(),
     userId,

@@ -304,11 +304,24 @@ def test_get_max_iterations_reads_positive_env(monkeypatch):
     monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "12")
     assert get_max_iterations() == 12
     monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "0")
-    assert get_max_iterations() == 60
+    assert get_max_iterations() == 250
     monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "nope")
-    assert get_max_iterations() == 60
+    assert get_max_iterations() == 250
     monkeypatch.delenv("BROWSER_MAX_ITERATIONS", raising=False)
-    assert get_max_iterations() == 60
+    assert get_max_iterations() == 250
+
+
+def test_browser_activity_timeout_grows_only_for_an_explicit_step_override(monkeypatch):
+    """The 250-step default keeps the 30-minute window a browser session can outlive."""
+    monkeypatch.delenv("BROWSER_MAX_ITERATIONS", raising=False)
+    assert get_max_iterations() == 250
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 30
+    monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "60")
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 30
+    monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "250")
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 102
+    monkeypatch.setenv("BROWSER_MAX_ITERATIONS", "500")
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal="Buy socks") == 190
 
 
 def test_resolve_explore_depth_promotes_on_demo_prompt_not_button():

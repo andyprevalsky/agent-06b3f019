@@ -2,9 +2,9 @@
 /* eslint-disable no-console */
 
 import 'dotenv/config';
-import { constants, createCipheriv, publicEncrypt, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
-import { RSA_PUBLIC_KEY_PEM } from '../src/providers/encryptionKeys';
+import { encryptPasswordForStorage } from '../src/providers/credentialEnvelope';
 
 type CredentialKind = 'cookie_bundle' | 'password' | 'steel_session' | 'email_otp' | 'minted';
 
@@ -93,31 +93,6 @@ function classifierMessage(metadata: unknown) {
   };
 }
 
-function encryptPasswordForStorage(password: string): string {
-  const aesKey = randomBytes(32);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
-  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
-  const ciphertext = Buffer.concat([encrypted, cipher.getAuthTag()]);
-  const encryptedAesKey = publicEncrypt(
-    {
-      key: RSA_PUBLIC_KEY_PEM,
-      padding: constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256',
-    },
-    aesKey
-  );
-
-  return Buffer.from(
-    JSON.stringify({
-      version: 1,
-      encrypted_aes_key: encryptedAesKey.toString('base64'),
-      iv: iv.toString('base64'),
-      ciphertext: ciphertext.toString('base64'),
-    })
-  ).toString('base64');
-}
-
 async function ensureUser(userId: string) {
   await prisma.user.upsert({
     where: { userId },
@@ -154,7 +129,9 @@ async function setupFixture(caseName: string, userId: string) {
       userId,
       origin: PRACTICE_LOGIN_URL,
       username: 'student',
-      encryptedPassword: encryptPasswordForStorage(isSuccess ? SUCCESS_PASSWORD : AUTH_FAILURE_PASSWORD),
+      encryptedPassword: encryptPasswordForStorage(
+        isSuccess ? SUCCESS_PASSWORD : AUTH_FAILURE_PASSWORD
+      ),
       browserSource: E2E_BROWSER_SOURCE,
       browserProfile: `run-${runId}`,
       dateLastUsed: BigInt(Date.now() * 1000),
@@ -305,7 +282,7 @@ async function loadAgent(agentId: string | null) {
 }
 
 async function main() {
-  const command = process.argv[2]?.startsWith('--') ? 'state' : process.argv[2] ?? 'state';
+  const command = process.argv[2]?.startsWith('--') ? 'state' : (process.argv[2] ?? 'state');
   if (command === 'setup') {
     const caseName = argValue('--case');
     const userId = argValue('--user-id');
@@ -336,10 +313,7 @@ async function main() {
   }
 
   const agentId = argValue('--agent-id');
-  const [credential, agent] = await Promise.all([
-    loadCredential(kind, id),
-    loadAgent(agentId),
-  ]);
+  const [credential, agent] = await Promise.all([loadCredential(kind, id), loadAgent(agentId)]);
 
   console.log(JSON.stringify({ credential, agent }));
 }

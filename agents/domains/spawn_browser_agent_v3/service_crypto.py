@@ -10,7 +10,7 @@ import base64
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -310,6 +310,8 @@ class ExtractedOTP:
     subject: str = ""
     credential_kind: str = "email_otp"
     channel: str = "email"
+    # Set instead of a code when the mail carries sign-in / verification links.
+    links: List[str] = field(default_factory=list)
 
 
 # Keyword groups shared across OTP patterns. Kept broad so we catch the common
@@ -398,8 +400,38 @@ def _format_duration(seconds: int) -> str:
     return f"{int(seconds / 60)}m"
 
 
+# The ref the minted identity's new-account password is typed by (see back-end
+# providers/mintedAccountPassword.ts).
+MINTED_NEW_PASSWORD_REF = "pwd:new"
+MAX_EMAIL_LINKS = 5
+MINTED_INBOX_LABEL = "primitive"
+
+
+def extract_email_links(email: Dict) -> List[str]:
+    """Distinct http(s) links of a mail, in reading order (anchors first, then plain text)."""
+    body_html = str(email.get("bodyHtml") or "")
+    body_text = str(email.get("bodyText") or "")
+    # Attribute spelling and spacing vary across mailers (`HREF = "..."`).
+    found = [
+        html.unescape(url)
+        for url in re.findall(r"href\s*=\s*[\"'](https?://[^\"']+)[\"']", body_html, flags=re.IGNORECASE)
+    ]
+    found += [url.rstrip(".,;)") for url in re.findall(r"https?://[^\s<>\"']+", body_text)]
+    return list(dict.fromkeys(found))[:MAX_EMAIL_LINKS]
+
+
 def format_otp_user_message(otp: ExtractedOTP) -> str:
     """Format one OTP as a USER-role message for the browser-use conversation."""
+    if otp.links:
+        links = "\n".join(f"  - {link}" for link in otp.links)
+        return (
+            "Recently received email with no code:\n"
+            f"- From: {otp.sender}\n"
+            f"- Subject: {otp.subject}\n"
+            f"- Received: {_format_duration(max(0, otp.age_seconds))} ago\n"
+            f"- Links:\n{links}\n\n"
+            "Open a link only if the current site said it emailed you one."
+        )
     channel_label = "SMS" if otp.channel == "sms" else "email"
     preference = (
         "Use this code only if the current site requested an SMS or phone OTP."
@@ -450,10 +482,17 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
         seen_codes: set[str] = set()
         for email in emails:
             body_text = _email_otp_search_text(email)
-            if not body_text:
+            code = extract_otp_from_text(body_text) if body_text else None
+            # A mail to the agent's own inbox that carries no code may carry the
+            # sign-in link a site sent instead (an HTML-only mail has no
+            # searchable text at all); it is keyed by its message id.
+            links: List[str] = []
+            if not code and MINTED_INBOX_LABEL in (email.get("labels") or []):
+                links = extract_email_links(email)
+                if links:
+                    code = f"link:{email.get('id') or email.get('messageId') or links[0]}"
+            if not body_text and not code:
                 continue
-
-            code = extract_otp_from_text(body_text)
             if code:
                 if code in seen_codes:
                     continue
@@ -493,6 +532,7 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
                             or email.get("threadId")
                         ),
                         subject=email.get("subject", ""),
+                        links=links,
                     )
                 )
 
@@ -545,9 +585,69 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
     return []
 
 
+def _is_masked_secret_ref(ref: str) -> bool:
+    """Saved passwords and the card number; short or public refs (cvv, name) are left alone."""
+    return ref.startswith("pwd:") or ref == "card_number"
+
+
+def mask_secret_values(value: Any, secret_refs: Optional[Dict[str, str]]) -> Any:
+    """Return ``value`` with any secret plaintext replaced by the ref that names it.
+
+    Secrets are typed into the page by the browser tool, never by the model. A
+    tool result that reads the page back (``evaluate`` on a form, a network
+    capture of the sign-in request) would otherwise hand the model the
+    plaintext, which then lands in its reasoning and the saved transcript.
+    """
+    secrets = sorted(
+        (
+            (plaintext, ref)
+            for ref, plaintext in (secret_refs or {}).items()
+            if _is_masked_secret_ref(ref) and isinstance(plaintext, str) and plaintext
+        ),
+        key=lambda pair: -len(pair[0]),
+    )
+    if not secrets:
+        return value
+
+    def mask(item: Any) -> Any:
+        if isinstance(item, str):
+            for plaintext, ref in secrets:
+                if plaintext in item:
+                    item = item.replace(plaintext, ref)
+            return item
+        if isinstance(item, dict):
+            # Keys can carry a secret too ({"entered-<password>": true}).
+            return {mask(key): mask(entry) for key, entry in item.items()}
+        if isinstance(item, list):
+            return [mask(entry) for entry in item]
+        return item
+
+    if isinstance(value, dict):
+        # The result's own field names (`success`, `status`) are the tool's
+        # protocol and are read after masking, so they are never rewritten: a
+        # password that happens to be the word `success` must not rename the
+        # field. What the page supplied sits beneath them and is masked whole.
+        return {key: mask(entry) for key, entry in value.items()}
+    return mask(value)
+
+
 # ========================================
 # AUTH OPTIONS PROMPT BUILDING
 # ========================================
+
+# Dev tunnel hosts fronting a local stack; only these (plus localhost) may
+# override their realm with ?authRealm=. Keep in sync with the backend's
+# canonicalAuthRealm (back-end/src/providers/authRealm.ts).
+# Hosted benchmark fixture realms (back-end/src/domains/auth-test-site).
+FIXTURE_REALM_PATTERN = re.compile(r"^rose-shop-[0-9a-z]+$")
+
+AUTH_REALM_OVERRIDE_HOST_SUFFIXES = (
+    ".ngrok-free.dev",
+    ".ngrok-free.app",
+    ".ngrok.app",
+    ".ngrok.io",
+    ".trycloudflare.com",
+)
 
 
 def auth_realm_from_url(url: str) -> str:
@@ -566,15 +666,15 @@ def auth_realm_from_url(url: str) -> str:
     host = (parsed.hostname or parsed.path.split("/")[0]).lower()
     if host.startswith("www."):
         host = host[4:]
-    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(
-        (".ngrok-free.dev", ".ngrok.app", ".ngrok.io")
-    )
-    if allow_query_override:
+    local_host = host in {"localhost", "127.0.0.1"}
+    if local_host or host.endswith(AUTH_REALM_OVERRIDE_HOST_SUFFIXES):
         query = parse_qs(parsed.query)
         override = (query.get("authRealm") or query.get("auth_realm") or [""])[0]
         if override:
             override_host = auth_realm_from_url(override)
-            if override_host:
+            # Anyone can open a tunnel on these domains, so a tunnel may only
+            # claim a hosted-fixture realm, never a real site's credentials.
+            if override_host and (local_host or FIXTURE_REALM_PATTERN.match(override_host)):
                 return override_host
     if host == "aws.amazon.com" or host.endswith(".aws.amazon.com"):
         return "aws.amazon.com"
@@ -816,7 +916,7 @@ def build_auth_options_prompt_section(
         match_text = f"; likely match: {match}" if match else ""
         lines.append(f"- Email OTP: available ({connected_text}{match_text})")
     else:
-        lines.append("- Email OTP: unavailable")
+        lines.append("- Email OTP (user's inboxes): unavailable, none connected")
 
     if minted:
         minted_id = minted.get("id") or minted.get("accountLabel") or minted.get("account_label") or minted.get("email")
@@ -830,7 +930,24 @@ def build_auth_options_prompt_section(
         minted_phone = minted.get("phone") or minted.get("agentPhone") or minted.get("agent_phone")
         if minted_email:
             phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
-            lines.append(f"- Minted account: Email -> {minted_email}{phone_clause} | {_disabled_label(minted)}")
+            # The password to create the account with. Typing the ref saves it, so
+            # the account can be signed into again on a later run.
+            new_password = minted.get("newPassword") or minted.get("new_password") or {}
+            new_password_ref = str(new_password.get("ref") or "")
+            new_password_encrypted = str(new_password.get("encryptedPassword") or "")
+            password_clause = ""
+            if new_password_ref and new_password_encrypted:
+                ref_to_encrypted[new_password_ref] = new_password_encrypted
+                credential_refs_by_secret_ref[new_password_ref] = {
+                    "kind": "minted_account",
+                    "id": str(minted_id or minted_email),
+                }
+                # "Sign-up": a first run typed the ref into sign-in forms when it read "New password".
+                password_clause = f" | Sign-up password ref (new accounts only): {new_password_ref}"
+            lines.append(
+                f"- Minted account: Email -> {minted_email} (codes mailed here reach you automatically)"
+                f"{phone_clause}{password_clause} | {_disabled_label(minted)}"
+            )
             credential_refs_by_secret_ref[str(minted_email)] = {
                 "kind": "minted_account",
                 "id": str(minted_id or minted_email),
