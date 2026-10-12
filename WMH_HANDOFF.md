@@ -163,6 +163,7 @@ OpenRouter credit ran out on 2026-10-10 ($11,003.17 used of $11,000); local
 | `cecb966b` root `6c7b7005` | Azure | 60-min cap | world clock, policy v3 | 150,234 / 1,681,496 (8.93%) | 0/45 | ~15% |
 | `11a85869` root `59f70a24` | Azure | 60-min cap | pinned world date; 28-fund fan-out serialized by `as_of_utc` writes (fixed) | 217,953 / 3,688,480 (5.91%) | 0/73 | ~12% |
 | `8abbd152` root `d3a9812a` | Azure (1 OpenRouter fallback, $0.08) | 3,602 s | 60-min cap; 63 commits, ~14 pitches delivered, 1 later-interest signal, no replies | 240,128 / 4,637,772 (5.18%), output 600,653 | 0/78 | ~20% |
+| `a52069aa` root `a211dcc4` | Azure | 3,620 s | 60-min cap; turn fix (up to 8 concurrent predictions, 5 rebases of 48); root delegated to one general-purpose worker; 37 commits, ~11 pitches, 1 process reply, 3 blocked by required deck/fields | 139,893 / 2,198,535 (6.36%), output 411,484 | 0/48 | ~18% |
 
 Run 3 had no world-model errors (65/66 predictions; one cancelled at
 teardown): research, a $0 Brex check, then a for-each outreach to ~20 funds
@@ -194,6 +195,7 @@ Run 7 also re-serialized its fan-out: one replacing commit queued every other
 operation behind one re-prediction at a time. Since `ac788e8f5`, only a
 conflicted operation waits for its turn before predicting; the others predict
 at once and yield only at commit.
+FE (run 8): https://www.roselabs.ai/?agent-id=a211dcc4-7fb1-46e6-b434-4313fc77e15f#benchmark-share=a52069aa-bcba-4f63-9e60-0d2ab007a2df.1794382926.1f8ec69f50d0fbaf2750b583da32dd99980a5376730e9b27377f32e591642dae
 FE (run 7): https://www.roselabs.ai/?agent-id=d3a9812a-c539-4432-b855-de18d69b7bac#benchmark-share=8abbd152-6cf6-42bd-90b6-8216b1216346.1794373952.df3d9fb0a98c643ee1ae3e96a4924ff3a7228f3c0fd9ee1bc619273402f84cea
 
 ### Still open
