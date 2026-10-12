@@ -116,8 +116,9 @@ one example per action. Keep the file and the run-state with the run's evidence.
   the only one is the end of the latest message, so a growing history never
   matches and almost the whole prompt is billed as a cache write (1.25×; reads
   are 0.05×). Run 7 wrote 4.40M of 4.64M input tokens: 1.19× the cost of no
-  caching. The WMH pool therefore sends explicit breakpoints
-  (`PoolSpec.explicit_cache_breakpoints`, explicit mode) and each agent's
+  caching. Rose now maps ordinary `cache_control` markers to GPT-5.6+
+  `prompt_cache_breakpoint`s on Foundry and the OpenAI API key route (implicit mode
+  stays on, so prompts and chat-style callers are unchanged), and each agent's
   evidence goes out as an **append-only stream** (`benchmarks/wmh_wire_stream.py`):
   task, world baseline, completed history batches, world changes as JSON Patch
   since the agent's last call, and reference examples sent once by id, each a
