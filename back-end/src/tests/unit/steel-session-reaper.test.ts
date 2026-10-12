@@ -123,6 +123,8 @@ async function main(): Promise<void> {
     const neighbour = '31920031-9d66-40b6-8e70-047c1d28f0d6';
     const released: string[] = [];
     const summary = await reconcileOrphanedSteelSessions({
+      // Pin the identity the marker was built from; ambient env must not decide.
+      identity: () => 'render:srv-1',
       listLiveSessions: async () => [
         { id: orphan, createdAt: old },
         { id: heldByTask, createdAt: old },
@@ -160,6 +162,8 @@ async function main(): Promise<void> {
     const inFlight = new Set([committing]);
     const released: string[] = [];
     const summary = await reconcileOrphanedSteelSessions({
+      // Pin the identity the marker was built from; ambient env must not decide.
+      identity: () => 'render:srv-1',
       listLiveSessions: async () => [{ id: committing, createdAt: old }],
       heldSessionIds: async () => {
         // The row commits and the id is unregistered while this query runs; the
@@ -186,6 +190,8 @@ async function main(): Promise<void> {
     const b = newOwnedSteelSessionId(marker);
     const released: string[] = [];
     const summary = await reconcileOrphanedSteelSessions({
+      // Pin the identity the marker was built from; ambient env must not decide.
+      identity: () => 'render:srv-1',
       listLiveSessions: async () => [
         { id: a, createdAt: old },
         { id: b, createdAt: old },

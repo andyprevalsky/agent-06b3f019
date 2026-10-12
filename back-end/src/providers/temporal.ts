@@ -497,11 +497,6 @@ export async function startAgentWorkflowExecution(
   return startAgentWorkflowExecutionWithClient(await getTemporalClient(), params, deadlineAtMs);
 }
 
-/** Backwards-compatible helper for callers that only expose Workflow ID. */
-export async function startAgentWorkflow(params: StartAgentWorkflowParams): Promise<string> {
-  return (await startAgentWorkflowExecution(params)).workflowId;
-}
-
 /* c8 ignore start -- getWorkflowStatus requires live Temporal server */
 /**
  * Get workflow status
@@ -537,7 +532,7 @@ export async function getWorkflowStatus(
  * "absent".
  */
 export type WorkflowReconciliation =
-  | { kind: 'live'; status: string; runId: string }
+  | { kind: 'live'; status: string; runId: string; firstExecutionRunId: string | null }
   | { kind: 'terminal'; status: string }
   | { kind: 'absent' }
   | { kind: 'lookup_failed'; error: string };
@@ -556,8 +551,15 @@ export async function reconcileWorkflowStart(workflowId: string): Promise<Workfl
       client.workflow.getHandle(workflowId).describe()
     );
     const status = description.status.name;
+    const firstRunId = description.raw.workflowExecutionInfo?.firstRunId;
     return LIVE_WORKFLOW_STATUSES.has(status)
-      ? { kind: 'live', status, runId: description.runId }
+      ? {
+          kind: 'live',
+          status,
+          runId: description.runId,
+          firstExecutionRunId:
+            typeof firstRunId === 'string' && firstRunId.length > 0 ? firstRunId : null,
+        }
       : { kind: 'terminal', status };
   } catch (error) {
     if (error instanceof WorkflowNotFoundError) return { kind: 'absent' };

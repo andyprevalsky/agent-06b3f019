@@ -17,8 +17,9 @@ RUN apt-get update && apt-get install -y \
 # Needed by helpers/e2b_log_collector.py for retained sandbox stdout/stderr logs.
 RUN npm install -g @e2b/cli@2.13.0 && npm cache clean --force
 
-# Copy requirements first for better caching
+# Copy requirements first for better caching; vendored wheels resolve beside them.
 COPY requirements.txt .
+COPY vendor/ ./vendor/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt

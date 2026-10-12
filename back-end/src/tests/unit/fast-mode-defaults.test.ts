@@ -126,8 +126,10 @@ test('SMS start_new_agent persists Fast Mode on and passes resolved flag into Te
     'SMS P2002 recovery must adopt the persisted Fast Mode flag'
   );
   assert.ok(
-    /startAgentWorkflow\(\{[\s\S]*fastModeCacheEnabled:\s*resolvedFastMode/.test(startAgent),
-    'SMS startAgentWorkflow must pass the resolved Fast Mode flag'
+    /startAgentWorkflowExecution\(\{[\s\S]*fastModeCacheEnabled:\s*resolvedFastMode/.test(
+      startAgent
+    ),
+    'SMS startAgentWorkflowExecution must pass the resolved Fast Mode flag'
   );
 });
 

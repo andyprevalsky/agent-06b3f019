@@ -1,8 +1,10 @@
 import type { Message, Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from './database';
+import { createLogger } from './logger';
 import type { TemporalWorkflowExecutionRef } from './temporal';
 
 const WORKFLOW_GENERATION_LOCK_SEED = 6_901_733;
+const log = createLogger('WorkflowGeneration');
 
 export const DEPLOY_INTERRUPTED_TOOL_MESSAGE = 'new code version deployed, retry this tool';
 
@@ -59,13 +61,17 @@ export async function lockAgentWorkflowGenerationShared(
 }
 
 /**
- * Commit a chat escalation only while the agent still belongs to chat mode.
- * A deployment replacement or another workflow start that wins first remains
- * authoritative; delayed fire-and-forget chat work may never overwrite it.
+ * Commit a started execution's full chain identity to its agent. A root agent
+ * reuses Workflow ID = agent ID for every run, so the first-execution run ID
+ * is what distinguishes one generation from the next; recording only the
+ * Workflow ID lets terminal cleanup mistake a follow-up run for the finished
+ * one. A deployment replacement or another start that wins first remains
+ * authoritative.
  */
-export async function acceptChatWorkflowExecution(
+export async function recordAgentWorkflowExecution(
   agentId: string,
-  execution: TemporalWorkflowExecutionRef
+  execution: TemporalWorkflowExecutionRef,
+  options: { requireActive?: boolean; requireInstalledWorkflowId?: boolean } = {}
 ): Promise<boolean> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
@@ -81,7 +87,9 @@ export async function acceptChatWorkflowExecution(
     if (
       agent === null ||
       agent.deletedAt !== null ||
-      agent.status !== 'ACTIVE' ||
+      (options.requireActive === true && agent.status !== 'ACTIVE') ||
+      (options.requireInstalledWorkflowId === true &&
+        agent.temporalWorkflowId !== execution.workflowId) ||
       (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== execution.workflowId) ||
       (agent.temporalFirstExecutionRunId !== null &&
         agent.temporalFirstExecutionRunId !== execution.firstExecutionRunId)
@@ -97,4 +105,46 @@ export async function acceptChatWorkflowExecution(
     });
     return true;
   });
+}
+
+/**
+ * Bind an already-running execution to an agent row created with its Workflow
+ * ID. The row must still carry that ID: a run that finished and was reopened
+ * before the bind must not be written back onto the chat-mode row. The run is
+ * live, so a failed bind is logged, never surfaced as a failed start.
+ */
+export async function bindStartedRunIdentity(
+  agentId: string,
+  execution: TemporalWorkflowExecutionRef
+): Promise<void> {
+  try {
+    if (
+      !(await recordAgentWorkflowExecution(agentId, execution, {
+        requireInstalledWorkflowId: true,
+      }))
+    ) {
+      log.warn('Started workflow was superseded before its run identity was recorded', {
+        agent_id: agentId,
+        workflow_id: execution.workflowId,
+        first_execution_run_id: execution.firstExecutionRunId,
+      });
+    }
+  } catch (error) {
+    log.error('Failed to record started workflow run identity', {
+      agent_id: agentId,
+      workflow_id: execution.workflowId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Commit a chat escalation only while the agent still belongs to chat mode;
+ * delayed fire-and-forget chat work may never overwrite a winning start.
+ */
+export async function acceptChatWorkflowExecution(
+  agentId: string,
+  execution: TemporalWorkflowExecutionRef
+): Promise<boolean> {
+  return recordAgentWorkflowExecution(agentId, execution, { requireActive: true });
 }
