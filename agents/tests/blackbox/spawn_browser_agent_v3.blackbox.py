@@ -554,6 +554,42 @@ async def test_browser_activity_preserves_requested_start_url():
     assert real_browser.await_args.kwargs["goal"] == "Open the selected cafe"
 
 
+async def test_browser_activity_runs_on_spawning_agents_pool():
+    """Browser steps, real or simulated, run on the spawning agent's Rose pool."""
+    from domains.spawn_browser_agent_v3.config import browser_pool_for_agent_model
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    assert browser_pool_for_agent_model("rose-labs/rose-1-ultra") == "rose-1-ultra"
+    assert browser_pool_for_agent_model("rose-labs/rose-1-flash") == "rose-1-flash"
+    assert browser_pool_for_agent_model("rose-labs/rose-1-oss") == "rose-1-oss"
+    # Non-Rose models and activities scheduled without a model keep the browser pool.
+    assert browser_pool_for_agent_model("anthropic/claude-sonnet-4.6") == "rose-1-browser-use"
+    assert browser_pool_for_agent_model(None) == "rose-1-browser-use"
+
+    for simulate, path in (
+        (False, "_spawn_browser_agent_activity_v3_real"),
+        (True, "_spawn_browser_agent_activity_v3_simulated"),
+    ):
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.WorldModelToolExecutionAdapter.from_env",
+                return_value=SimpleNamespace(should_simulate=lambda _action, simulate=simulate: simulate),
+            ),
+            patch(f"domains.spawn_browser_agent_v3.handler.{path}", new_callable=AsyncMock) as browser,
+        ):
+            browser.return_value = {"status": "completed"}
+            await spawn_browser_agent_activity_v3(
+                user_id="user", agent_id="agent", goal="Buy socks", tool_call_id="tool",
+                agent_model="rose-labs/rose-1-ultra",
+            )
+        assert browser.await_args.kwargs["browser_pool"] == "rose-1-ultra", path
+
+    # Unattributed tokens price at the pool the steps ran on.
+    items = build_usage_items(10, 20, {}, 1.0, pricing_pool="rose-1-ultra")
+    assert next(item for item in items if item["type"] == "llm")["model"] == "rose-1-ultra"
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -9253,9 +9289,11 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
         gpt_token_pool_id="pool-gpt",
         browser_use_mode="gpt",
         extra_user_messages=[{"role": "user", "content": "resume from current live state"}],
+        pool="rose-1-ultra",
     )
 
     assert result == {"actions": [{"type": "wait"}]}
+    assert client.calls[0]["pool"] == "rose-1-ultra"
     assert client.calls[0]["claude_auth"] is None
     assert client.calls[0]["gpt_auth"].token == "gpt-token"
     assert client.calls[0]["gpt_auth"].account_id == "acct-1"
@@ -21905,6 +21943,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
         write_lock_enabled=True,
         system_name="Rose",
         fast_mode_cache_enabled=True,
+        model="rose-labs/rose-1-ultra",
     )
     manager = SpawnBrowserAgentManagerV3()
     start_calls = []
@@ -21928,8 +21967,16 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
             events.append(event)
 
     assert events[-1].status.name == "FINISHED"
-    activity_args = start_calls[0][1]["args"]
-    assert activity_args[-1] is True
+    # Positional args must bind to the activity's own parameters.
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    bound = inspect.signature(spawn_browser_agent_activity_v3).bind(*start_calls[0][1]["args"]).arguments
+    assert bound["fast_mode_cache_enabled"] is True
+    assert bound["world_model_mode"] is None
+    # The browser agent inherits its spawning agent's model pool.
+    assert bound["agent_model"] == "rose-labs/rose-1-ultra"
     # Live Fast Mode (Buy socks) keeps the 30m Kernel checkout budget.
     from datetime import timedelta
 
@@ -25074,6 +25121,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_activity_preserves_requested_start_url",
         test_browser_activity_preserves_requested_start_url,
+    )
+    await r.record_async(
+        "browser_activity_runs_on_spawning_agents_pool",
+        test_browser_activity_runs_on_spawning_agents_pool,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
