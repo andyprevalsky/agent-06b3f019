@@ -7701,10 +7701,13 @@ fleet_native_stop_call_budget() {  # <deadline-SECONDS>; seconds for one bounded
     printf '%s\n' "$per_call"
 }
 
-fleet_native_stop_send() {  # <machine-id> <deadline-SECONDS>; one bounded stop request
-    local budget
-    budget="$(fleet_native_stop_call_budget "$2")" || return 1
-    fly_with_timeout "$budget" machine stop "$1" -a "$APP" >/dev/null 2>&1
+fleet_native_stop_send() {  # <machine-id> <deadline-SECONDS>; one bounded stop request; 2 = not sent
+    local budget status=0
+    budget="$(fleet_native_stop_call_budget "$2")" || return 2
+    fly_with_timeout "$budget" machine stop "$1" -a "$APP" >/dev/null 2>&1 || status=$?
+    # Status 2 is reserved for "no request was sent".
+    [ "$status" -ne 2 ] || status=1
+    return "$status"
 }
 
 fleet_native_stop_publish_receipt() {  # <out> <bench> <id> <volume> <kind> <requests> <state> <requested-epoch> <delivery>
@@ -7755,7 +7758,7 @@ PY
 fleet_native_stop_request_guest() {  # <child-index> <state-dir> <deadline-SECONDS>
     local j="$1" state_dir="$2" deadline="$3" out id bench kind="" clone_name="" record=""
     local volume_id="" details budget observed_state="" observed_name="" mounted_volume=""
-    local requests=0 requested_epoch
+    local requests=0 requested_epoch send_status
     out="${CHILD_OUT[$j]:-}"
     id="${CHILD_MACHINE[$j]:-}"
     bench="${CHILD_BENCH[$j]:-unknown}"
@@ -7806,13 +7809,22 @@ fleet_native_stop_request_guest() {  # <child-index> <state-dir> <deadline-SECON
         echo "❌ [$bench] Machine $id no longer matches its exact owned identity (volume ${mounted_volume:-unreadable}); no native stop, retaining ownership for exact-owner recovery" >&2
         return 1
     fi
+    # The runner may have published its exact delivery receipt after this
+    # controller's own request failed (its POST was still in flight). That
+    # guest is delivered and draining: never stop it natively.
+    if [ "$(fleet_guest_shutdown_delivery_state "$j" 2>/dev/null)" = delivered ]; then
+        echo "⏳ [$bench] an exact delivery receipt for Machine $id appeared after the controller's request failed; no native stop, retaining ownership for exact-owner recovery" >&2
+        return 1
+    fi
     requested_epoch="$(date +%s)"
     case "$observed_state" in
         stopped|stopping) ;;
         *)
-            # A rejected request is retried by the verification phase.
-            fleet_native_stop_send "$id" "$deadline" || true
-            requests=1
+            # A rejected request is retried by the verification phase; a
+            # request that was never sent is not counted.
+            send_status=0
+            fleet_native_stop_send "$id" "$deadline" || send_status=$?
+            [ "$send_status" -eq 2 ] || requests=1
             ;;
     esac
     printf 'kind=%s\nvolume_id=%s\nrequests=%s\nlast_request=%s\nrequested_epoch=%s\n' \
@@ -7823,7 +7835,7 @@ fleet_native_stop_request_guest() {  # <child-index> <state-dir> <deadline-SECON
 # Phase 2: verify against the shared deadline, re-issuing a bounded stop.
 fleet_native_stop_verify_guest() {  # <child-index> <state-dir> <deadline-SECONDS>
     local j="$1" state_dir="$2" deadline="$3" id bench out request kind volume_id requests
-    local last_request requested_epoch max_requests next_request details budget state=""
+    local last_request requested_epoch max_requests next_request details budget state="" send_status
     out="${CHILD_OUT[$j]}"
     id="${CHILD_MACHINE[$j]}"
     bench="${CHILD_BENCH[$j]:-unknown}"
@@ -7848,9 +7860,12 @@ fleet_native_stop_verify_guest() {  # <child-index> <state-dir> <deadline-SECOND
             ''|stopping) ;;
             *)
                 if [ "$requests" -lt "$max_requests" ] && [ "$SECONDS" -ge "$next_request" ]; then
-                    fleet_native_stop_send "$id" "$deadline" || true
-                    requests=$((requests + 1))
-                    next_request=$((SECONDS + (1 << (requests - 1))))
+                    send_status=0
+                    fleet_native_stop_send "$id" "$deadline" || send_status=$?
+                    if [ "$send_status" -ne 2 ]; then
+                        requests=$((requests + 1))
+                        next_request=$((SECONDS + (1 << (requests - 1))))
+                    fi
                 fi
                 ;;
         esac
@@ -7967,7 +7982,9 @@ elif receipt.get("machine_id") != machine:
     print("invalid:foreign-machine")
 elif receipt.get("bench") != bench:
     print("invalid:foreign-bench")
-elif receipt.get("http_status") not in (202, 204, 409):
+elif receipt.get("http_status") not in (202, 204):
+    # 409 is never delivery: the guest recorded nothing or could not signal
+    # its executing benchmark.
     print("invalid:not-accepted")
 else:
     print("delivered")
@@ -7979,6 +7996,7 @@ fleet_guest_shutdown_delivered_by_runner() {  # <child-index> <controller-observ
     state="$(fleet_guest_shutdown_delivery_state "$j" 2>/dev/null)" || state=""
     case "$state" in
         delivered)
+            FLEET_GUEST_DELIVERY_STATE[$j]=delivered
             echo "⏳ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed ($observation) after its runner delivered the authenticated shutdown; tracking the draining guest for acknowledgement without a native stop" >&2
             return 0
             ;;
@@ -7997,7 +8015,7 @@ fleet_guest_shutdown_delivered_by_runner() {  # <child-index> <controller-observ
 # EXIT cleanup. Keep the one definition before either caller can execute.
 cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
     local deadline j out port status_code failed=0 native_stop=0 responses pid
-    local native_stop_pid="" native_stop_seconds
+    local native_stop_pid="" native_stop_seconds accepted curl_status run_token
     local -a pending_indices next_pending_indices request_indices request_pids
     local -a undelivered_indices
     pending_indices=()
@@ -8065,12 +8083,18 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
         [ -n "$j" ] || continue
         out="${CHILD_OUT[$j]}"
         status_code="$(cat "$responses/$j" 2>/dev/null || true)"
+        accepted=0
         case "$status_code" in
+            202|204) accepted=1 ;;
             # A configured guest persists its shutdown request before the
-            # driver-PID ownership fence can return 409. Preserve that possible
-            # in-progress state and let /shutdown-health provide the only
-            # cleanup verdict.
-            202|204|409) pending_indices+=("$j") ;;
+            # driver-PID ownership fence can return 409, so recovery keeps that
+            # possible in-progress state on /shutdown-health. Controller
+            # cleanup does not: the guest answers 409 when it recorded nothing
+            # or could not signal its executing benchmark, which keeps running.
+            409) [ "$native_stop" = "1" ] || accepted=1 ;;
+        esac
+        case "$accepted" in
+            1) pending_indices+=("$j") ;;
             *)
                 # The runner may have completed the same exact acknowledgement
                 # and retired its proxy just before this request.
@@ -8124,9 +8148,33 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
                 continue
             fi
             port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
-            curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
-                -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
-                "http://127.0.0.1:$port/shutdown-health" > "$responses/$j" 2>/dev/null &
+            case "$port" in
+                ''|*[!0-9]*)
+                    if [ "${FLEET_GUEST_DELIVERY_STATE[$j]:-}" = delivered ]; then
+                        echo "❌ [${CHILD_BENCH[$j]:-unknown}] the delivered guest's status proxy is retired; it is still draining, so provider ownership is retained without a native stop" >&2
+                        failed=1
+                        continue
+                    fi
+                    ;;
+            esac
+            # Name the exact guest: siblings share the barrier credential, so a
+            # reused local port must never credit another guest's 204.
+            run_token="${CHILD_RUN_TOKEN[$j]:-}"
+            {
+                if [[ "$run_token" =~ ^[A-Za-z0-9._-]+$ ]] \
+                    && [[ "${CHILD_MACHINE[$j]:-}" =~ ^[0-9a-f]{14}$ ]]; then
+                    curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+                        -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+                        -H "X-Cloudbench-Run-Token: $run_token" \
+                        -H "X-Cloudbench-Machine-Id: ${CHILD_MACHINE[$j]}" \
+                        "http://127.0.0.1:$port/shutdown-health" 2>/dev/null
+                else
+                    curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+                        -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+                        "http://127.0.0.1:$port/shutdown-health" 2>/dev/null
+                fi
+                printf ' %s\n' "$?"
+            } > "$responses/$j" &
             request_pids+=("$!")
             request_indices+=("$j")
             if [ "${#request_pids[@]}" -ge 32 ]; then
@@ -8140,7 +8188,16 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
         for j in "${request_indices[@]:-}"; do
             [ -n "$j" ] || continue
             out="${CHILD_OUT[$j]}"
-            status_code="$(cat "$responses/$j" 2>/dev/null || true)"
+            status_code="" curl_status=""
+            read -r status_code curl_status < "$responses/$j" 2>/dev/null || true
+            # The runner retires its proxy only after its own acknowledgement
+            # window: a refused loopback connection means no listener remains,
+            # so nothing can acknowledge this delivered guest any more.
+            if [ "${FLEET_GUEST_DELIVERY_STATE[$j]:-}" = delivered ] && [ "$curl_status" = 7 ]; then
+                echo "❌ [${CHILD_BENCH[$j]:-unknown}] the delivered guest's status proxy is retired; it is still draining, so provider ownership is retained without a native stop" >&2
+                failed=1
+                continue
+            fi
             if [ "$status_code" = "204" ]; then
                 if ! cloudbench_publish_guest_shutdown_confirmation "$out" "$RUN_ID"; then
                     echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
@@ -11898,6 +11955,7 @@ CHILD_BENCH=()
 CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
+CHILD_RUN_TOKEN=()
 
 
 cleanup() {
@@ -15026,6 +15084,7 @@ for bench in "${BENCHES[@]}"; do
     CHILD_MODE+=("$mode_label")
     CHILD_PORT+=("$port")
     CHILD_MACHINE+=("$cid")
+    CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
     # into that parallel bring-up at four launches/second, so all 30 are submitted
