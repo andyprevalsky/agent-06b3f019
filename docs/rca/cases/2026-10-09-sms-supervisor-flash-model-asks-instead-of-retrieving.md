@@ -152,9 +152,13 @@ Testing GPT-6 Sol (rose-1-ultra, served by Azure Foundry) on the matched benchma
 5. **Grep returned only the first match window.** Qwen read the Travel docs note with pattern `.` and got back only the synthetic `source: documents` header line. It replied "no numbers in it" and asked for them.
    - Fix: `formatSnippet` now follows ripgrep content mode, as Claude Code's Grep does: every match with `-A/-B/-C` context, merged windows separated by `--`, and at most 250 lines per record with an explicit omission note.
    - Repro: `testDocumentReturnsEveryMatchingLine` in the data-grep blackbox domain. It returned the header line only before the fix.
-6. **The grounding guard read a plain question as a confirmation claim.** The confirmation-code regex `confirmation\s*[#:]?\s*[a-z0-9-]{4,}` matched "…email for the confirmation⏎⏎Send…", because `\s` crosses line breaks and any four-letter word counted as a code. Eight questions were rejected, and the run ended in the fallback apology.
-   - Fix: the code must sit on the same line and contain a digit.
-   - Repro: `testConfirmationWordWithoutCodeAllowed` in `sms-message-grounding.test.ts`.
+6. **A regex guard rejected honest questions as claims.** The guard's confirmation-code alternative `confirmation\s*[#:]?\s*[a-z0-9-]{4,}` matched "…email for the confirmation⏎⏎Send…", because `\s` crosses line breaks and any four-letter word counted as a code. Eight questions were rejected, and the run ended in the fallback apology. The same loop recurred on the closed-restaurant benchmark (A/B run 2).
+   - Fix (user direction, CLAUDE.md rule 25b): remove the harness classifiers in `messageGrounding.ts` (order-progress, agent-start and agent-kill claims) and the purchase-intent completion block. One SMS overlay line now states the rule: "Only say something happened … when a tool result in this run or the current state block shows it."
+   - The exact-duplicate send check stays, since it is equality, not classification.
+   - Replaced tests:
+     - `sms-message-grounding.test.ts` and the two guard-only Blue Bottle fixture cases are gone.
+     - `sms-prompt-layering` pins the overlay line and that sends are not rejected for their wording.
+   - Qwen started an agent for the closed restaurant in 0/2 runs with the guard and 0/2 with main's schema text, so that failure predates this change.
 
 Matched benchmark `sms-supervisor-fill-form-searches-then-delegates` (local), across the fix stages:
 

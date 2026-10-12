@@ -30,13 +30,7 @@ import { isProductionEnvironment } from '../productionEnvironment';
 import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
-import {
-  absorbPendingOpKind,
-  emptySmsRunSideEffectEvidence,
-  purchaseIntentCompletionError,
-  resolveSendUserMessage,
-  sameSmsBody,
-} from './messageGrounding';
+import { resolveSendUserMessage, sameSmsBody } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
 
 export type { SupervisorResponse } from './supervisorLlm';
@@ -254,7 +248,6 @@ export async function handleSmsSupervisorMessage(config: {
   const toolTrace: SupervisorToolTraceEntry[] = [];
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
-  let sideEffectEvidence = emptySmsRunSideEffectEvidence();
   let completionAccepted = false;
   let consecutiveEmptyRounds = 0;
   let inboundStoredForRun = inboundAlreadyPersisted;
@@ -515,22 +508,11 @@ export async function handleSmsSupervisorMessage(config: {
       });
     }
 
-    // Track write tools queued this round so send_user_message grounding can
-    // see start_new_agent / kill_agent even before the commit flush below.
-    for (const op of pendingWrites) {
-      sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, op.kind);
-    }
-
     const dispatchFailures = toolResults.filter((result) => !result.success);
     if (sendCalls.length > 0 && dispatchFailures.length === 0) {
       const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       toolResults.push(...commitResults);
-      for (const committed of commitResults) {
-        if (committed.success) {
-          sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, committed.tool);
-        }
-      }
       if (commitFailures.length > 0) {
         const delivery = await deliverUserMessage(
           buildToolFailureMessage(commitFailures, 'commit')
@@ -539,14 +521,10 @@ export async function handleSmsSupervisorMessage(config: {
         terminalFailureReported = delivery.success;
       } else {
         for (const toolCall of sendCalls) {
-          const resolved = resolveSendUserMessage(toolCall.arguments?.message, sideEffectEvidence);
+          const resolved = resolveSendUserMessage(toolCall.arguments?.message);
           let sendResult: ToolResult;
           if (!resolved.ok) {
-            log.warn('[SmsSupervisor] Blocked ungrounded send_user_message', {
-              round,
-              error: resolved.error,
-              sideEffectEvidence,
-            });
+            log.warn('[SmsSupervisor] Invalid send_user_message', { round, error: resolved.error });
             sendResult = {
               tool: 'send_user_message',
               success: false,
@@ -603,20 +581,15 @@ export async function handleSmsSupervisorMessage(config: {
         );
         break;
       }
-      const purchaseCompletionError = purchaseIntentCompletionError(
-        inboundText,
-        sideEffectEvidence
-      );
-      if (sentMessages.length === 0 || blockingFailures.length > 0 || purchaseCompletionError) {
+      if (sentMessages.length === 0 || blockingFailures.length > 0) {
         const completionFailure: ToolResult = {
           tool: 'attempt_completion',
           success: false,
           result: '',
           error:
-            purchaseCompletionError ??
-            (sentMessages.length === 0
+            sentMessages.length === 0
               ? 'Rejected: this run has not successfully called send_user_message'
-              : 'Rejected: at least one tool failed'),
+              : 'Rejected: at least one tool failed',
         };
         recordResult(completionCall, completionFailure);
         recordToolTrace(round, completionCall, completionFailure, 'completion');

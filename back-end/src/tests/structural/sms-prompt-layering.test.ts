@@ -26,6 +26,7 @@ import { join } from 'node:path';
 
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../../providers/rose';
 import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
+import { resolveSendUserMessage } from '../../providers/smsSupervisor/messageGrounding';
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
@@ -322,6 +323,26 @@ for (const tool of TOOL_SCHEMAS) {
     `${tool.name} is undocumented or still wrapped in arguments`
   );
 }
+
+// Grounding of user-visible claims is a prompt rule, not a harness regex. The
+// regex guard rejected honest questions ("…email for the confirmation") eight
+// times in a row and ended the run in the fallback apology.
+runCheck(
+  'block 3 owns the grounded-claims rule',
+  SMS_SURFACE_OVERLAY.includes(
+    'Only say something happened (an agent started, an order was placed, a form was submitted, a booking was confirmed) when a tool result in this run or the current state block shows it.'
+  ),
+  'SMS overlay is missing the grounded-claims rule'
+);
+runCheck(
+  'send_user_message text is not classified by the harness',
+  [
+    'Placing your usual order now.',
+    'Order submitted, confirmation #4421.',
+    'Your email for the confirmation\n\nSend those.',
+  ].every((message) => resolveSendUserMessage(message).ok) && !resolveSendUserMessage('   ').ok,
+  'the harness still rejects send_user_message by its wording'
+);
 
 out(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 if (failed > 0) {
