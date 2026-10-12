@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import benchmarks.run_benchmark as rb
+from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 
 TARGET = "postgresql://postgres:fixture@localhost:55005/victoria"
 SOURCE = "postgresql://fixture@source.invalid/victoria"
@@ -382,7 +383,7 @@ raise SystemExit(1 if os.environ['MODE']=='partial' else 0)
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     except BaseException:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
@@ -708,7 +709,7 @@ def test_explicit_codex_driver_wait_owns_spawn_signal_boundary(tmp_path, handoff
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     except BaseException:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
@@ -796,7 +797,7 @@ stage_explicit_codex_auth /cloudbench-codex-auth.py
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
@@ -934,7 +935,7 @@ def test_explicit_codex_pending_shutdown_survives_successful_child(tmp_path, lab
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
     except BaseException:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
