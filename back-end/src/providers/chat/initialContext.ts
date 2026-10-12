@@ -6,15 +6,16 @@
  *   startInitialChatContext ──> ordered messages ──> project checkpoints
  *                            ──> auto-compact if over budget ──> Router ──┬─ direct_answer
  *                                                            │    └─ same array ─> Generator
- *                                                            └─ other action
- *                                                                 └─ refresh ───> Generator
+ *                                                            └─ web_search round
+ *                                                                 └─ reload ────> Router again
+ *                                                                                └─> Generator
  *
  * State:
  *   STARTED -> MESSAGES_PENDING
  *     messages rejected  -> router blocked / chat failed
  *     messages fulfilled -> Router and speculative Generator may run
  *     direct_answer       -> reuse exact initial message snapshot
- *     other action        -> refresh ordered messages after branch side effects
+ *     web_search round    -> reload ordered messages after its tool rows persist
  *     escalation branch   -> exit without any credential lookup
  */
 
@@ -53,12 +54,6 @@ export interface InitialChatContext {
 interface StartInitialChatContextConfig {
   agentId: string;
   requestedModel: string;
-}
-
-interface ResolveGeneratorMessagesOptions {
-  action: string;
-  initialMessages: ChatMessage[];
-  refreshMessages: () => Promise<ChatMessage[]>;
 }
 
 const defaultDependencies: InitialChatContextDependencies = {
@@ -108,13 +103,6 @@ export function mapChatDatabaseMessages(dbMessages: ChatDatabaseMessage[]): Chat
     filePointer: message.filePointer as Record<string, unknown> | undefined,
     metadata: message.metadata as Record<string, unknown> | undefined,
   }));
-}
-
-export async function resolveGeneratorMessages(
-  options: ResolveGeneratorMessagesOptions
-): Promise<ChatMessage[]> {
-  if (options.action === 'direct_answer') return options.initialMessages;
-  return options.refreshMessages();
 }
 
 function invoke<T>(operation: () => Promise<T>): Promise<T> {
