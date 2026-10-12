@@ -212,10 +212,9 @@ export async function handleSmsSupervisorMessage(config: {
   const smsContext = await environment.prepareSmsEnvironment(
     userId,
     mySeq,
-    inboundAlreadyPersisted,
-    inboundText
+    inboundAlreadyPersisted
   );
-  const { systemPrompt, contextUserMessage, sessionHistory, invocationContext } = smsContext;
+  const { systemPrompt, contextUserMessage, sessionHistory } = smsContext;
 
   log.info('[SmsSupervisor] Context built', {
     userId,
@@ -492,7 +491,7 @@ export async function handleSmsSupervisorMessage(config: {
                 inboundAlreadyPersisted ? mySeq : undefined
               ),
             }
-          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext)
+          : await dispatchToolCall(toolCall, userId, pendingWrites)
       );
       recordResult(toolCall, result);
       allToolsExecuted.push(toolCall.tool);

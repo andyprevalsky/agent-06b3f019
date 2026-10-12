@@ -36,17 +36,10 @@ async function testReplyToAgentQueuedThisRun(prisma: PrismaClient): Promise<void
       throw new Error(`start_new_agent did not advertise a prefix: ${JSON.stringify(started)}`);
     }
 
-    // The inbound SMS does not name the task; the agent was started for it.
-    const invocationContext = {
-      currentUserMessage: 'Filled it for me',
-      visibleSessionHistory: [],
-      pendingAttentionRequestIds: [],
-    };
     const replied = await dispatchToolCall(
       { tool: 'reply_to_agent', arguments: { agent_id_or_prefix: prefix, message: NOTE } },
       userId,
-      pendingWrites,
-      invocationContext
+      pendingWrites
     );
     if (!replied.success) {
       throw new Error(`reply to the queued agent was rejected: ${replied.error ?? ''}`);

@@ -20,58 +20,6 @@ export function unknownSupervisorToolError(tool: string): string {
   return `Unknown tool: ${tool}`;
 }
 
-const REPLY_INTENT_STOP_WORDS = new Set([
-  'agent',
-  'task',
-  'call',
-  'ask',
-  'tell',
-  'reply',
-  'message',
-  'please',
-  'about',
-  'with',
-  'that',
-  'this',
-  'from',
-  'have',
-  'what',
-  'when',
-  'where',
-]);
-
-function intentKeywords(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, ' ')
-      .split(' ')
-      .filter((word) => word.length >= 3 && !REPLY_INTENT_STOP_WORDS.has(word))
-  );
-}
-
-function referencesGoal(message: string, goal: string): boolean {
-  const messageWords = intentKeywords(message);
-  return [...intentKeywords(goal)].some((word) => messageWords.has(word));
-}
-
-/** Require the current SMS—not ambient agent state—to justify an agent reply. */
-export function smsIntendsAgentReply(params: {
-  currentUserMessage: string;
-  visibleSessionHistory: string[];
-  agentGoal: string;
-}): boolean {
-  if (referencesGoal(params.currentUserMessage, params.agentGoal)) return true;
-  const isShortConfirmation =
-    /^(yes|yep|yeah|ok|okay|sure|approved?|go ahead|do it|proceed|sounds good)[.!\s]*$/i.test(
-      params.currentUserMessage.trim()
-    );
-  if (!isShortConfirmation) return false;
-  return params.visibleSessionHistory
-    .slice(-4)
-    .some((message) => referencesGoal(message, params.agentGoal));
-}
-
 /**
  * Resolve a 6-char prefix or full UUID to the user's agent row, scoped to the
  * given userId so SMS never reaches across tenants. Returns null when nothing
@@ -136,7 +84,7 @@ export async function resolveAgentTarget(
   prefixOrId: string,
   userId: string,
   pendingWrites: readonly PendingOp[]
-): Promise<{ id: string; goal: string; queuedThisRun: boolean } | null> {
+): Promise<{ id: string } | null> {
   const input = prefixOrId.trim();
   const queued =
     input.length > 0
@@ -145,7 +93,7 @@ export async function resolveAgentTarget(
             op.kind === 'start_new_agent' && op.provisionalId.startsWith(input)
         )
       : undefined;
-  if (queued) return { id: queued.provisionalId, goal: queued.args.goal, queuedThisRun: true };
+  if (queued) return { id: queued.provisionalId };
   const agent = await resolveAgentPrefix(input, userId);
-  return agent ? { id: agent.id, goal: agent.goal, queuedThisRun: false } : null;
+  return agent ? { id: agent.id } : null;
 }

@@ -24,11 +24,7 @@ import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
 import { deliverUserMessageToWorkflow } from '../agentResume';
-import {
-  resolveAgentTarget,
-  smsIntendsAgentReply,
-  unknownSupervisorToolError,
-} from './supervisorTools.helpers';
+import { resolveAgentTarget, unknownSupervisorToolError } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 import { commitStartNewAgent, type StartNewAgentArgs } from './supervisorTools.startAgent';
 import type { SupervisorChannel } from './channelDelivery';
@@ -77,12 +73,6 @@ export interface ToolResult {
   success: boolean;
   result: string;
   error?: string;
-}
-
-export interface ToolInvocationContext {
-  currentUserMessage: string;
-  visibleSessionHistory: string[];
-  pendingAttentionRequestIds: string[];
 }
 
 // Per-tool argument types (validated upstream via JSON schema)
@@ -144,8 +134,7 @@ export type PendingOp =
 export async function dispatchToolCall(
   toolCall: ToolCall,
   userId: string,
-  pendingWrites: PendingOp[],
-  invocationContext?: ToolInvocationContext
+  pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
@@ -160,8 +149,7 @@ export async function dispatchToolCall(
         result = await validateReplyToAgent(
           args as unknown as ReplyToAgentArgs,
           userId,
-          pendingWrites,
-          invocationContext
+          pendingWrites
         );
         break;
       case 'kill_agent':
@@ -286,8 +274,7 @@ export async function commitPendingWrites(
 async function validateReplyToAgent(
   args: ReplyToAgentArgs,
   userId: string,
-  pendingWrites: PendingOp[],
-  invocationContext?: ToolInvocationContext
+  pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
   const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
@@ -296,26 +283,6 @@ async function validateReplyToAgent(
       success: false,
       result: '',
       error: `No agent found matching "${args.agent_id_or_prefix}"`,
-    };
-  }
-  const attentionMatches =
-    args.attention_request_id !== undefined &&
-    invocationContext?.pendingAttentionRequestIds.includes(args.attention_request_id) === true;
-  // An agent this run started was started for the current SMS.
-  const currentSmsMatches =
-    agent.queuedThisRun ||
-    (invocationContext !== undefined &&
-      smsIntendsAgentReply({
-        currentUserMessage: invocationContext.currentUserMessage,
-        visibleSessionHistory: invocationContext.visibleSessionHistory,
-        agentGoal: agent.goal,
-      }));
-  if (!attentionMatches && !currentSmsMatches) {
-    return {
-      tool: 'reply_to_agent',
-      success: false,
-      result: '',
-      error: 'Current SMS does not identify this agent task or a matching pending request',
     };
   }
   // A rejection is only expressible as a resolved attention request: without an

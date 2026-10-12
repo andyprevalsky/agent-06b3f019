@@ -124,7 +124,6 @@ export interface SmsContext {
    */
   contextUserMessage: string;
   sessionHistory: CompletionMessage[];
-  pendingAttentionRequestIds: string[];
 }
 
 /**
@@ -261,7 +260,6 @@ export async function buildSmsContext(
     systemPrompt,
     contextUserMessage,
     sessionHistory: sessionMessages,
-    pendingAttentionRequestIds: attentionRequests.map((request) => request.id),
   };
 }
 

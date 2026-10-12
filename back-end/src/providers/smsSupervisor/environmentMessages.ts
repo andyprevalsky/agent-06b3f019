@@ -1,6 +1,6 @@
 import type { CompletionMessage } from '../rose';
 import { buildSmsContext } from './contextBuilder';
-import type { ToolCall, ToolInvocationContext, ToolResult } from './supervisorTools';
+import type { ToolCall, ToolResult } from './supervisorTools';
 
 export const MAX_TOOL_ROUNDS = 10;
 
@@ -138,36 +138,10 @@ export async function refreshEnvironmentSnapshot(
   return context.contextUserMessage;
 }
 
-export function buildToolInvocationContext(params: {
-  inboundText: string;
-  sessionHistory: CompletionMessage[];
-  pendingAttentionRequestIds: string[];
-}): ToolInvocationContext {
-  return {
-    currentUserMessage: params.inboundText || 'The user sent an attachment without text.',
-    visibleSessionHistory: params.sessionHistory.flatMap((message) =>
-      typeof message.content === 'string' ? [message.content] : []
-    ),
-    pendingAttentionRequestIds: params.pendingAttentionRequestIds,
-  };
-}
-
 export async function prepareSmsEnvironment(
   userId: string,
   sequence: number,
-  inboundAlreadyPersisted: boolean,
-  inboundText: string
+  inboundAlreadyPersisted: boolean
 ) {
-  const context = await buildSmsContext(
-    userId,
-    inboundAlreadyPersisted ? { excludeInboundSeq: sequence } : {}
-  );
-  return {
-    ...context,
-    invocationContext: buildToolInvocationContext({
-      inboundText,
-      sessionHistory: context.sessionHistory,
-      pendingAttentionRequestIds: context.pendingAttentionRequestIds,
-    }),
-  };
+  return buildSmsContext(userId, inboundAlreadyPersisted ? { excludeInboundSeq: sequence } : {});
 }
