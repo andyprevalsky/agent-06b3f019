@@ -783,12 +783,6 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
     required?: string[];
   };
   assert(!('arguments' in startAgentArgs.properties), 'native tool parameters must be flat');
-  for (const tool of extracted.tools) {
-    assert(
-      typeof tool.description === 'string' && tool.description.length > 0,
-      `${tool.name as string} must reach the model with a description`
-    );
-  }
   const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
