@@ -182,14 +182,22 @@ its exact resource reaper and final native provider audit. Archive readiness is
 not release; follow CLAUDE.md's recovery guidance instead of calling the archive
 verifier directly. Other forensic receipt modes keep their existing contracts.
 
-Cancelling a fleet, including a campaign's process-group TERM or a terminal
-Ctrl-C, keeps each runner's data-plane proxies alive until the authenticated
+Cancelling a fleet (a campaign's process-group TERM, a terminal Ctrl-C or a
+hangup) keeps each runner's data-plane proxies alive until the authenticated
 guest `/shutdown` has been sent: the per-bench supervisor signals the runner
-before its process group. A guest whose stop still cannot be delivered is
-natively stopped (never destroyed) on its exact owned Machine, with a
-`guest-native-stop.json` receipt in its bench output. Its owner, volume and
-unconfirmed-cleanup quarantine stay retained; recover it with the
-original-volume archive and `--recover-stale-owner`, as for any stopped guest.
+before its process group, always as TERM because the runner inherits SIGINT
+ignored. When the guest accepts the request, the runner publishes an exact
+run-scoped `guest-shutdown.requested` receipt before waiting for its cleanup
+acknowledgement. Controller cleanup natively stops (never destroys) only an
+exactly owned guest that no party delivered a stop to: its own request was
+rejected and no matching receipt exists. A delivered guest that is still
+draining is left running and stays on the normal acknowledgement and retention
+path. The native stop has one deadline inside the cleanup ceiling, bounded
+Machines API calls and a bounded stop retry, and only a verified `stopped`
+state counts; `created` or `suspended` remains unresolved. Its result is
+recorded in `guest-native-stop.json`. In every unacknowledged case the owner,
+volume and unconfirmed-cleanup quarantine stay retained; recover with
+`--recover-stale-owner` (a stopped guest needs the original-volume archive).
 
 For an explicit cold-image measurement, activate the exact image from its build receipt before the fleet:
 

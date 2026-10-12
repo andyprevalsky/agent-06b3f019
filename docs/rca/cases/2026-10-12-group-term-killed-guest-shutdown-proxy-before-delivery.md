@@ -10,9 +10,9 @@ first_bad_boundary: scripts/run-bench-fleet terminate_fleet_runner_group signall
 symptoms:
   - "controller received TERM ... guest cleanup request failed (HTTP 000)"
   - "runtime evidence is incomplete; retaining original fleet volumes"
-  - "retaining durable capacity reservation with the recoverable guest machines"
   - cancelled campaign guests kept executing until their 7,200 s backstop
   - prod Supabase pooler EMAXCONN after a cancelled cloud benchmark campaign
+  - "guest shutdown was not delivered; exact Machine ... is natively stopped"
 tags:
   - cloudbench
   - fleet-cancellation
@@ -23,6 +23,9 @@ tags:
   - emaxconn
   - supavisor
   - fly-io
+  - native-stop
+  - delivery-receipt
+  - sigint-ignored
 sources:
   - commit 7f9adaafa
   - commit a07d44ab5
@@ -142,6 +145,13 @@ proving the group signal is the first-bad boundary. The supervisor unit test
 
 ## Solution
 
+The fix landed in two rounds. An independent adversarial review of the first
+round (APPROVE-WITH-CHANGES) found that its native-stop trigger mistook the
+controller's own failed request for "never delivered", that INT never reached
+the runner, and that the stop phase was unbounded. The final design is below.
+
+### Deliver the stop while its transport is alive
+
 - `terminate_fleet_runner_group` (scripts/run-bench-fleet) signals the runner
   process itself first and waits, within the unchanged grace, for its EXIT
   cleanup. Only then does it signal residual group members and escalate to
@@ -153,51 +163,206 @@ proving the group signal is the first-bad boundary. The supervisor unit test
   (`claude-code-src/src/services/mcp/client.ts:1428-1525`); Codex terminates the
   exact app-server PID and reserves group signals for its updater
   (`codex-rs/app-server-daemon/src/backend/pid.rs:431-446`, `514-560`).
+- Every forwarded cancellation reaches the runner and the residual group as
+  **TERM**: a campaign's TERM, a terminal Ctrl-C's INT and a HUP alike. The
+  runner is started from an asynchronous subshell of a non-interactive shell,
+  so it and its proxies inherit SIGINT ignored and its `trap 'exit 130' INT`
+  could never run; with the first round, a forwarded INT left the runner
+  running for the full grace and then SIGKILLed it without its EXIT cleanup.
+  The supervisor still reports the original signal's exit status. The leader
+  wait uses a builtin `kill -0` every 0.1 s and a once-per-second `ps` zombie
+  check instead of a `ps` fork every tick; a failed `ps` read no longer ends
+  the grace early.
 - `run-bench-cloud`'s poll sleep is interruptible (`sleep & wait`), so the
   runner's EXIT trap starts at once instead of after a deferred 15–20 s
   foreground sleep; `stop_on_exit` reaps that sleep.
+- `stop_on_exit` records a second HUP/INT/TERM instead of running the `exit`
+  trap inside itself. Previously the supervisor's residual group TERM, or the
+  controller's process-tree teardown, aborted the EXIT cleanup midway and
+  skipped proxy retirement, port-lease release, viewer teardown and the exit
+  status line. Child commands keep default dispositions, and every caller still
+  bounds the cleanup with SIGKILL.
+
+### Natively stop only a guest that no party delivered a stop to
+
+- When the guest accepts the runner's `/shutdown` (HTTP 202, 204 or 409), the
+  runner publishes `guest-shutdown.requested` in its bench output before it
+  waits for the cleanup acknowledgement, on both the EXIT-trap path and the
+  execution-window (`TIMED_OUT`) path. The receipt binds the fleet run ID, the
+  runner token (`<owner>-<index>`), the Machine ID, the bench and the HTTP
+  status. It is written to an `O_EXCL` temporary file with mode 0600,
+  fsynced and hard-linked into place, so it never replaces an existing
+  receipt; the directory is fsynced.
 - `cloudbench_confirm_guest_shutdowns --native-stop-undelivered` (controller
-  EXIT cleanup only) natively stops every guest whose authenticated `/shutdown`
-  was not delivered (no proxy, transport failure or a non-accepting status),
-  immediately after the request phase and before waiting for siblings. It stops
-  only an exact Machine proven by this controller's immutable audit (fresh
-  `by-machine-id` + `fresh/<name>` owned, or a claimed pool record) whose live
-  name and mounted volume still match, never destroys, verifies the native
-  state and writes `guest-native-stop.json`. Ownership, the volume, the
-  `guest-cleanup-unconfirmed` quarantine and the runtime-evidence latch remain
-  for the existing exact-owner recovery. A child-published exact
-  `guest-shutdown.confirmed` marker is accepted while polling, so a runner that
-  retires its proxy after its own 204 cannot trigger a false native stop.
-  Recovery callers keep their previous contract.
-- Requests and health polls are issued concurrently (batches of 32) and native
-  stops run 16 at a time, so a fleet-wide cancellation costs one bounded request
-  rather than one timeout per guest.
+  EXIT cleanup only) classifies a failed controller request (no status proxy,
+  transport failure or a non-accepting status) with that receipt:
+  - **exact match** (regular file, bounded size, same run, owner token prefix,
+    Machine, bench, and an accepted status): the stop was delivered and the
+    guest may still be draining. It stays on the existing `/shutdown-health`
+    poll and, unacknowledged, on the existing retention path
+    (`KEEP_CLONES`, `guest-cleanup-unconfirmed`, retained-started guest). It is
+    never stopped natively. This is the old, recoverable behaviour for a
+    delivered guest.
+  - **absent**: nothing was delivered (the original incident). The guest is
+    natively stopped.
+  - **foreign, symlinked, oversized, malformed or non-accepted**: logged as
+    unusable and treated as undelivered, so the guest is natively stopped. The
+    fail-safe direction is to stop a guest that may be executing; its volume
+    and owner remain for the forensic original-volume archive.
+  Recovery callers do not pass the flag and keep their previous contract.
+- The native stop runs concurrently with the acknowledgement polling, under one
+  deadline of `min(CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS (20), remaining
+  cleanup deadline)`, so neither phase starves the other. Every Machines API
+  call goes through `fly_with_timeout` with a per-call budget
+  (`CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT`, 8 s, clamped to the remaining
+  deadline); `machine_status_exact_read`, `machine_config_exact_read`,
+  `registry_machine_details` and `machine_volume_id` gained an optional timeout
+  argument for this.
+  - Phase 1 proves exact ownership from this controller's immutable audit (as
+    before) and the live name and single mounted volume, then sends the first
+    stop request. It runs through a sliding window of
+    `CLOUDBENCH_GUEST_NATIVE_STOP_CONCURRENCY` (16), so every stop request is
+    sent before any verification polling and no batch waits for its slowest
+    member.
+  - Phase 2 polls each requested Machine once per second against the shared
+    deadline. While it reads anything but `stopped` or `stopping` (including a
+    429/5xx-rejected request that left it `started`), the stop is re-issued
+    with 1 s and 2 s backoff, at most `CLOUDBENCH_GUEST_NATIVE_STOP_REQUEST_ATTEMPTS`
+    (3) requests in total.
+  - Only `stopped` verifies. `created`, `suspended` or any other state is
+    unresolved, matching recovery's started-or-stopped contract: the receipt
+    records `verified: false`, the call fails and the log names the exact
+    Machine for exact-owner recovery.
+  - `guest-native-stop.json` records the run, owner token, bench, Machine,
+    volume, ownership kind, `stop_requests`, `verified_state`, `verified`,
+    `delivery_receipt` (`absent` or the unusable reason) and `destroyed: false`.
+    Nothing is ever destroyed, and the owner, volume and quarantine are
+    retained.
+- Bash reports the status from before an EXIT trap for a bare `return` inside
+  the trap. Controller cleanup is such a trap, so the bounded config read
+  returns its status explicitly; the unit regression runs the native stop from
+  an `exit 143` EXIT trap to keep that boundary covered.
 
-Regression coverage (deploy Step 4cb and `scripts/test.sh` cloudbench lane):
-scenario 2-group-term in `scripts/tests/cloudbench-multi-workstream.test.sh`
-asserts, for a deliverable guest, `/shutdown` delivery (guest stopped 1.0 s after
-the group TERM, no native stop) and, for an undeliverable guest, an exact native
-stop (0.5 s) with a receipt. Both require the benchmark process to exit, a
-nonzero controller exit, the retained registry and evidence latch, the Machine
-and volume present, and no provider deletion. The supervisor unit test asserts
-the proxy outlives the runner's trap.
+### Scaling
 
-Scaling: each fleet controller stops only its own guests; the campaign signals
+Each fleet controller stops only its own guests, and the campaign signals
 fleets independently, so cancelling N fleets is N concurrent bounded cleanups,
-not a serial walk. Inside a fleet, delivery and polling are O(1) wall-clock per
-batch of 32 guests and provider calls are exact per-guest reads/stops
-(O(1) payload, not an app-wide inventory list), issued only for undelivered
-guests (normally none). At 10k undelivered guests the burst is roughly four
-Machines API calls per guest and would be throttled by Fly's organization rate
-limit; a throttled stop fails closed with the owner retained and is logged.
+not a serial walk. Inside a fleet, delivery and polling cost O(1) wall-clock
+per batch of 32 guests. Provider calls are exact per-guest reads and stops
+(O(1) payload, never an app-wide inventory list), issued only for undelivered
+guests (normally none), at most 16 guests at a time. Per undelivered guest the
+bound is 2 identity reads, at most 3 stop requests and at most one bounded
+status read per second until it verifies or the 20 s deadline: at most about
+25 Machines API calls, typically 4–5. The first round had no deadline, a
+single stop attempt and up to 30 polls, about 33 calls per guest. At 10k
+undelivered guests, Fly's organization rate limit would throttle some stops;
+each is retried within the deadline and otherwise fails closed with its owner
+retained and the Machine named.
+
+### Residual risk
+
+- **Runtime evidence after a cancellation (review finding 5).** The runner now
+  completes its own EXIT bookkeeping, but its runtime-evidence capture still
+  needs its data-plane proxy. The controller's `CHILD_PIDS` process-tree
+  teardown runs right after its own acknowledgement confirmation and kills
+  those proxies, and the supervisor's 15 s (at most 20 s) grace bounds the
+  capture anyway. A cancelled fleet therefore still ends with
+  `runtime-evidence-unconfirmed` and a retained owner that needs
+  `--recover-stale-owner`, as the group-TERM regression asserts. Joining the
+  runners' capture before the tree teardown would compete with the campaign's
+  30 s SIGKILL ceiling for the controller's own cleanup, so it was not made
+  part of this fix.
+- **Receipt window.** A runner killed with SIGKILL after the guest's 202 but
+  before it publishes the receipt leaves no receipt, and controller cleanup
+  then stops that draining guest natively; it needs the forensic archive.
+- **Delivered guest that never drains.** It is no longer stopped natively; it
+  is bounded by the guest's own drain controls and stays retained and owned.
+- **Not implemented.** Reconnecting a fresh exact-Machine status proxy and
+  retrying `/shutdown` before the native stop (the review's optional
+  suggestion) is not done; the native stop remains the first response to an
+  undelivered guest.
+- **Controller cleanup ceiling.** The acknowledgement poll keeps its existing
+  30 s deadline, so a never-acknowledging delivered guest can still push
+  controller cleanup past the campaign's 30 s SIGKILL; the native stop is
+  started before that poll and fits inside it.
+
+### Regression coverage
+
+All of it runs in deploy Step 4cb and the `scripts/test.sh` cloudbench lane;
+the unit tests also run in the registered `benchmark-live-results` gate.
+
+- Scenario 2-group-term in `scripts/tests/cloudbench-multi-workstream.test.sh`
+  (`CLOUDBENCH_TEST_GROUP_TERM_ONLY=1`; `CLOUDBENCH_TEST_GROUP_TERM_CASES`
+  selects `term`, `int`, `undeliverable` or `slowdrain`) runs the real
+  controller and runner against the fake provider:
+  - a deliverable guest under process-group TERM and under INT: the runner
+    itself delivers the stop and writes its receipt; there is no native stop;
+  - an undeliverable guest (its runner sees the guest's own HTTP 503, the
+    controller then sees HTTP 000, so neither delivered) whose first stop
+    request is throttled with a 429: exactly two stop requests, verified
+    stopped, receipt `stop_requests: 2`;
+  - a slow drain: the execution window expires, the runner delivers (202) and
+    retires its proxy, and the controller group is cancelled while the guest
+    drains for 90 s. There must be no native stop, the drain must complete,
+    and the owner and quarantine must be retained.
+  Every case requires the Machine and volume to be present and no provider
+  deletion.
+- `agents/benchmarks/cloudbench_dependency_sync_test.py`, in the
+  `guest_shutdown_child_confirmation` family:
+  - the supervisor forwards TERM, INT and HUP as TERM, the proxy outlives the
+    runner's trap, and the original status is reported;
+  - bounded escalation;
+  - the runner's exact receipt (and none after a rejection or over a foreign
+    receipt);
+  - controller classification across absent, delivered and unusable
+    receipts;
+  - the native stop across `started`, a throttled first request,
+    always-failing stops, `created`, `suspended`, a mismatched volume, a
+    foreign name and a hung status read, all from an EXIT trap;
+  - the runner's EXIT cleanup completing despite a second TERM.
+
+Fail-before evidence on `a7a35124f`:
+
+- **Slow drain:** `guest cleanup request failed (HTTP 000)` followed by `🛑 …
+  guest shutdown was not delivered; exact Machine … is natively stopped`, so
+  the test fails with "a guest whose stop was delivered and still draining was
+  stopped natively".
+- **Throttled undeliverable guest:** "did not verify stopped … (state=started)",
+  so the test fails with "the guest kept executing its benchmark 45s after the
+  controller group received TERM".
+- **INT supervisor case:** exit 93, because the runner ignored INT and never
+  ran its cleanup.
+- **HUP supervisor case:** exit 97, because the runner received HUP instead of
+  TERM.
+- **Second TERM during the runner's EXIT cleanup:** the trap aborted before
+  delivering the stop or retiring the proxy.
+- **`created` and `suspended`:** reported as "natively created" or "natively
+  suspended" with exit 0.
+- **Hung status read:** the native stop is not bounded.
+
+With the receipt fix but the INT forwarding reverted, the INT scenario fails
+with "the runner did not deliver the guest stop itself after the group INT".
 
 ## Human feedback
 
-None recorded. The request required keeping exact ownership, evidence
-retention and fail-closed release unchanged; never destroying on an
-unconfirmed path; never touching foreign Machines; and signalling only owned
-processes.
+None recorded from a human directly. The original request required keeping
+exact ownership, evidence retention and fail-closed release unchanged; never
+destroying on an unconfirmed path; never touching foreign Machines; and
+signalling only owned processes.
+
+The follow-up request that relayed the independent review required:
+
+- native-stopping only a guest with no exact run-scoped delivery receipt;
+- handling an absent or unreadable receipt fail-safe, so the original
+  undelivered guest is still stopped;
+- leaving a delivered, draining guest on the existing confirmation and
+  retention paths;
+- forwarding INT and HUP to the runner as TERM;
+- bounding the native-stop phase, with a bounded, fail-closed retry for
+  throttled stops;
+- never reporting `created` or `suspended` as stopped;
+- proving fail-before and pass-after for each.
 
 ## Reusable lesson
 
-Deliver a cancellation's stop through its transport before tearing that transport down, and natively stop any exactly owned remote worker whose stop could not be delivered.
+Deliver a cancellation's stop through its transport before tearing that transport down, record that delivery durably, and natively stop only an exactly owned remote worker that no party delivered a stop to.
