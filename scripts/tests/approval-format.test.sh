@@ -32,16 +32,56 @@ import sys
 
 text = Path(sys.argv[1]).read_text()
 headings = [
+    "## Presentation",
+    "## Before Behavior",
+    "## After Behavior",
     "## TL;DR",
     "## Evidence",
     "## Detail",
-    "## Before Behavior",
-    "## After Behavior",
     "## Downstream Implications",
 ]
 positions = [text.index(heading) for heading in headings]
 if positions != sorted(positions):
     raise SystemExit("FAIL: canonical approval headings are out of order")
+PY
+
+# Every approval template (shared skeleton and both /descend stops) is one
+# fenced text block whose items lead with Before:/After:, followed by the
+# clickable Links list that the block itself cannot render.
+python3 - "$FORMAT" "$DESCEND" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+labels = ["Before:", "After:", "TL;DR:", "Evidence:", "Detail:", "Downstream:", "Approve:"]
+
+
+def check(path, expected_blocks):
+    text = Path(path).read_text()
+    blocks = re.findall(r"^```text\nAPPROVAL .*?\n```$", text, flags=re.M | re.S)
+    if len(blocks) != expected_blocks:
+        raise SystemExit(
+            f"FAIL: {path} must hold {expected_blocks} approval code block(s), found {len(blocks)}"
+        )
+    for block in blocks:
+        items = [
+            line.split(" ", 1)[0]
+            for line in block.splitlines()[2:]
+            if line and not line.startswith((" ", "`", "Reject:", "Edit:"))
+        ]
+        if items != labels:
+            raise SystemExit(f"FAIL: {path} approval block items {items} must be {labels}")
+        if re.search(r"\]\(|\*\*|^#", block, flags=re.M):
+            raise SystemExit(
+                f"FAIL: {path} approval block must not contain Markdown links, bold or headings"
+            )
+        after = text[text.index(block) + len(block):].lstrip("\n")
+        if not after.startswith("- **FE link:** [Open agent]("):
+            raise SystemExit(f"FAIL: {path} approval block must be followed by its Links list")
+
+
+check(sys.argv[1], 1)
+check(sys.argv[2], 2)
 PY
 
 require_text "$FORMAT" "name the exact unchanged test or" \
@@ -130,7 +170,7 @@ require_text "$FORMAT" "Never cite a" \
   "golden references must be opened, not recalled"
 require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
-require_text "$DESCEND" '**Golden reference:** `<reference-repo>/<path>:<line>`' \
+require_text "$DESCEND" 'Golden reference: <reference-repo>/<path>:<line>' \
   "descend approval narrative must carry the golden reference field"
 require_text "$RCA" 'The golden-reference check (Step 6b in `docs/root-cause-analysis.md`)' \
   "RCA completion must record the golden-reference check"
@@ -152,18 +192,20 @@ require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
   "/deploy must cement the shared approval format in its no-skip structural gate"
 require_text "$DESCEND" "the canonical approval narrative" \
   "/descend approval stops must use the canonical approval narrative"
-require_text "$DESCEND" "**What failed:** When <the agent doing the task goal>" \
+require_text "$DESCEND" "What failed: When <the agent doing the task goal>" \
   "/descend Stop 1 must frame the failure inside the agent's task"
 require_text "$DESCEND" "the LLM called \`<tool>\` to <attempt>" \
   "/descend What failed must name the exact tool"
-require_text "$DESCEND" "**Local repro (<wall-clock>):**" \
+require_text "$DESCEND" "Local repro (<wall-clock>):" \
   "/descend Stop 1 must include local repro wall-clock"
 require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call \`<call_site>\` on \`<agent_id>\`" \
   "/descend Stop 1 must include the last-call rendered LLM dump link"
 require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
   "/descend Stop 1 must describe what the local repro tests"
-require_text "$DESCEND" "**<how checked>**" \
+require_text "$DESCEND" "Evaluators: \`<id>\` — <how checked>:" \
   "/descend Stop 1 must name how each evaluator is checked"
+require_text "$DESCEND" "give each member its own" \
+  "/descend Stop 1 must keep one clickable FE link per cluster member"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
 require_text "$RCA" "## Autonomous fix-and-deploy default" \
@@ -183,6 +225,10 @@ fi
 
 if grep -Fq "the canonical four-part approval narrative" "$DESCEND"; then
   fail "/descend must not retain the superseded four-part approval narrative"
+fi
+
+if grep -Eq '^#### (TL;DR|Before Behavior)$' "$DESCEND"; then
+  fail "/descend must use the code-block approval layout, not superseded #### sections"
 fi
 
 if grep -Fq "primary link is the failing call site" "$FORMAT"; then

@@ -74,6 +74,7 @@ def needs_result(*, tools: Any, tool_choice: Any, response_model: Any, result_re
 USAGE_COUNTERS = (
     "prompt_tokens",
     "completion_tokens",
+    "total_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
@@ -156,6 +157,9 @@ async def recover_truncated(
                 yield chunk
             return
 
+        # Every model that cut off so far is excluded once we move on, not just
+        # the last one: a larger-limit retry can be served by a different model.
+        skipped = skipped | {model_key(actual_model)}
         abandoned.append(
             {
                 "model": actual_model,
@@ -173,7 +177,6 @@ async def recover_truncated(
                 return
         stage = remaining.pop(0)
         if stage == "next_model":
-            skipped = skipped | {model_key(actual_model)}
             # The direct-token routes serve one model; leaving it means the pool's waterfall.
             current = {**current, "claude_auth": None, "gpt_auth": None, "_skip_models": skipped}
         if larger:

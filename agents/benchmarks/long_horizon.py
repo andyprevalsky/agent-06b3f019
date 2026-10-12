@@ -31,6 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from benchmarks.auth_test_site import (
+    AUTH_TEST_SITE_OUTCOME_CHECK,
+    AUTH_TEST_SITE_URL_PLACEHOLDER,
+    declared_scenario as declared_auth_test_site_scenario,
+    validate_outcome_check as validate_auth_test_site_outcome_check,
+)
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 
 CATALOG_VERSION = "0.1"
@@ -59,6 +65,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "plan_shape",
     "principal_user_andy",
     "agent_task_title",
+    AUTH_TEST_SITE_OUTCOME_CHECK,
     "root_deliverable_markers",
     "tree_agent_status",
     "expected_gate",
@@ -194,6 +201,16 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
     # not sufficient — stale bundles still inject and the agent then correctly
     # escalates to auth_assistance, which must be reported as an INFRA/fixture
     # gap rather than an agent capability miss.
+    if "auth_test_site" in env:
+        try:
+            declared_auth_test_site_scenario(env)
+        except ValueError as exc:
+            raise ValueError(f"{item_id}: {exc}") from exc
+        if mode != "synthetic" or env.get("live_fixtures"):
+            raise ValueError(
+                f"{item_id}: environment.auth_test_site is a fully seeded synthetic world; "
+                "declare mode=synthetic without live_fixtures"
+            )
     needs_auth = env.get("needs_auth")
     if needs_auth is not None and not isinstance(needs_auth, bool):
         raise ValueError(f"{item_id}: environment.needs_auth must be a boolean")
@@ -296,6 +313,30 @@ def validate_wmh_initial_state(value: Any, item_id: str) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{item_id}: wmh_initial_state must contain finite JSON values") from exc
     return value
+
+
+def _validate_auth_test_site_contract(raw: dict[str, Any], item_id: str) -> None:
+    """A hosted-site task must send the agent to its site and judge the site's own record."""
+    scenario = declared_auth_test_site_scenario(raw.get("environment"))
+    outcome_checks = [
+        check
+        for evaluator in raw.get("evaluators") or []
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks") or []
+        if check.get("type") == AUTH_TEST_SITE_OUTCOME_CHECK
+    ]
+    for check in outcome_checks:
+        validate_auth_test_site_outcome_check(check, scenario, item_id)
+    if scenario is None:
+        return
+    if AUTH_TEST_SITE_URL_PLACEHOLDER not in str(raw.get("prompt") or ""):
+        raise ValueError(
+            f"{item_id}: environment.auth_test_site requires {AUTH_TEST_SITE_URL_PLACEHOLDER} in the prompt"
+        )
+    if not outcome_checks or raw.get("enforce_declared_evaluators") is not True:
+        raise ValueError(
+            f"{item_id}: environment.auth_test_site requires an enforced {AUTH_TEST_SITE_OUTCOME_CHECK} check"
+        )
 
 
 def validate_task_contract(raw: dict[str, Any]) -> None:
@@ -404,6 +445,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     evaluators = raw.get("evaluators")
     if evaluators:
         _validate_evaluators(evaluators, item_id)
+    _validate_auth_test_site_contract(raw, item_id)
     enforce_declared_evaluators = raw.get("enforce_declared_evaluators", False)
     if not isinstance(enforce_declared_evaluators, bool):
         raise ValueError(f"{item_id}: enforce_declared_evaluators must be a boolean")

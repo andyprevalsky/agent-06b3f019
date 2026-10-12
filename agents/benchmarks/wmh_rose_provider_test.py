@@ -959,7 +959,7 @@ def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():
     from dataclasses import replace
 
     from benchmarks import wmh_execution_policy as policies
-    from providers.rose.pools import get_pool
+    from providers.rose.pools import foundry_model, get_pool
 
     policy = policies.execution_policy("rose-outcome-distribution-v2")
     assert policies.text_sha256(policy.text) == "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0"
@@ -973,7 +973,7 @@ def test_reviewed_distribution_policy_has_exact_identity_and_pinned_runner():
     assert pool.waterfall_reasoning_effort == "xhigh"
     assert not pool.direct_auth_enabled and pool.cerebras_model is None
     # Azure credit serves the same GPT-6.1 deployment ahead of OpenRouter (user-directed 2026-10-11).
-    assert pool.foundry_enabled and pool.foundry_deployments == ("gpt-6.1-sol",)
+    assert pool.foundry_enabled and foundry_model(pool) == "gpt-6.1-sol"
     assert _cost_usd_for_call("openai/gpt-6.1-sol", 1000, 1000) == pytest.approx(0.012)
     assert get_pool("rose-1-ultra").waterfall[0] == "openai/gpt-6-sol"
     with pytest.MonkeyPatch.context() as patcher:
@@ -1333,7 +1333,7 @@ def test_wmh_pool_identity_excludes_billing_routes_for_the_same_model():
     from providers.rose import pools
 
     spec = pools.get_pool("rose-wmh-gpt61")
-    assert spec.foundry_enabled is True and spec.foundry_deployments == ("gpt-6.1-sol",)
+    assert spec.foundry_enabled is True and pools.foundry_model(spec) == "gpt-6.1-sol"
     assert experiential_bridge.pool_sha256("rose-wmh-gpt61") == (
         "31497e147da1d8aa72f949a59120fb4dac636621dbe7e239039701e52b3e1f47"
     )

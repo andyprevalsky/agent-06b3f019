@@ -23,6 +23,7 @@ import type { BrowserSessionMetadata, OutputSchemaRef, StepProgress } from './ty
 interface ExpandedProps {
   taskId: string;
   browserUrl: string;
+  browserLive?: boolean;
   isDisconnected: boolean;
   isWaitingForAuthAssistance: boolean;
   outputSchema: OutputSchemaRef | undefined;
@@ -35,6 +36,7 @@ interface ExpandedProps {
 
 function ExpandedHeader({
   browserUrl,
+  browserLive,
   controlState,
   outputSchema,
   browserSessionMetadata,
@@ -43,6 +45,7 @@ function ExpandedHeader({
   onCollapse,
 }: {
   browserUrl: string;
+  browserLive: boolean;
   controlState: BrowserControlState;
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
@@ -61,6 +64,7 @@ function ExpandedHeader({
     <div className="relative flex items-center gap-3 p-3 pl-3 sm:pl-40 border-b border-border">
       <BrowserThumbnail
         browserUrl={browserUrl}
+        live={browserLive}
         width={144}
         height={90}
         wrapperClassName="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40 hidden sm:block"
@@ -103,6 +107,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
   const {
     taskId,
     browserUrl,
+    browserLive = true,
     isDisconnected,
     isWaitingForAuthAssistance,
     outputSchema,
@@ -122,6 +127,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
       <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm overflow-visible">
         <ExpandedHeader
           browserUrl={browserUrl}
+          browserLive={browserLive}
           controlState={controlState}
           outputSchema={outputSchema}
           browserSessionMetadata={browserSessionMetadata}

@@ -231,6 +231,12 @@ function getConnectionUrl(): string {
   return `${url}${separator}${params.join('&')}`;
 }
 
+/** Connections this process's Prisma pool may open: the `connection_limit` in effect. */
+export function databasePoolLimit(): number {
+  const match = /[?&]connection_limit=(\d+)/.exec(getConnectionUrl());
+  return match ? Number(match[1]) : LOCAL_POOL_SIZE;
+}
+
 export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({

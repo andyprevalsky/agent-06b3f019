@@ -18,23 +18,36 @@ STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 # whatever budget the pre-approval half left behind. 50 was not enough to reach
 # checkout and then enter a card (prod agent
 # 7f354640-ffab-4098-b7ae-041ddf246c6f died at "Max iterations reached: 50"
-# mid card entry after resuming at step 32).
-DEFAULT_MAX_ITERATIONS = 60
+# mid card entry after resuming at step 32). 60 was still short of a sign-in
+# ladder where every option fails: the agent spent its budget on the refused
+# options and never reached "ask the user". 250 matches the sub-agent budget of
+# the reference harnesses (Hermes delegate 250, Claude Code fork 200).
+DEFAULT_MAX_ITERATIONS = 250
 
 
-def get_max_iterations() -> int:
-    """Resolve the browser-agent step budget for this worker process."""
+def _max_iterations_override() -> int | None:
+    """The BROWSER_MAX_ITERATIONS override, or None when unset or invalid."""
     raw = os.environ.get("BROWSER_MAX_ITERATIONS", "").strip()
     if raw.isdigit():
         value = int(raw)
         if value > 0:
             return value
-    return DEFAULT_MAX_ITERATIONS
+    return None
+
+
+def get_max_iterations() -> int:
+    """Resolve the browser-agent step budget for this worker process."""
+    return _max_iterations_override() or DEFAULT_MAX_ITERATIONS
 
 
 MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
+# One attempt, 30 minutes: a browser session cannot be relied on for longer (Steel
+# releases it at its 60-minute plan maximum), so the default budget ends at 250
+# steps or 30 minutes, whichever comes first. Only an explicit
+# BROWSER_MAX_ITERATIONS above this threshold (benchmarks) opts into a longer window.
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
+STEPS_COVERED_BY_BASE_TIMEOUT = 60
 # test-mass-agent-run-0 Fast Mode only. Live Fast Mode checkouts (Blue Bottle)
 # keep the 30m budget. Soft-complete + cache hits on the demo finish in
 # seconds; 3m is a hard ceiling so Huberman YouTube hangs cannot burn 30m.
@@ -57,8 +70,8 @@ def browser_start_to_close_timeout_minutes(
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
     if fast_mode and demo:
         return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
-    steps = get_max_iterations()
-    if steps > DEFAULT_MAX_ITERATIONS:
+    steps = _max_iterations_override()
+    if steps is not None and steps > STEPS_COVERED_BY_BASE_TIMEOUT:
         # 100 steps ≈ 30 minutes upstream; keep a small buffer above that ratio.
         return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)
     return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES

@@ -51,7 +51,8 @@ class OwnedBackendCleanup(unittest.TestCase):
             leaf.write_text("""import json,os,pathlib,signal,socket,sys,time
 p=pathlib.Path(sys.argv[1]);signal.signal(signal.SIGTERM,signal.SIG_IGN)
 s=socket.socket();s.bind(('127.0.0.1',0));s.listen()
-(p/'ready.json').write_text(json.dumps({'pid':os.getpid(),'port':s.getsockname()[1]}))
+(p/'ready.tmp').write_text(json.dumps({'pid':os.getpid(),'port':s.getsockname()[1]}))
+os.replace(p/'ready.tmp',p/'ready.json')
 while True:
  with (p/'heartbeat').open('a') as f:f.write('x')
  time.sleep(.02)
@@ -114,6 +115,8 @@ child.wait()
                     (p / "ready.json").exists()
                     and (np / "ready.json").exists()
                     and (p / "root.pid").exists()
+                    # printf creates the file before it writes the pid.
+                    and (p / "root.pid").read_text().strip()
                 ):
                     assert controller.poll() is None, (
                         "controller failed before fixture admission"

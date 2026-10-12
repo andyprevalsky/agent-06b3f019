@@ -884,6 +884,9 @@ async def test_handler_execute_tool_happy_path():
         True,
         "root goal",
         False,
+        None,
+        None,
+        "a-1",
     ]
 
     # Result wires the file_pointer through
@@ -905,7 +908,12 @@ async def test_handler_execute_tool_happy_path():
 
 
 async def test_handler_simulator_appends_mode_only_to_boundary_activities():
-    """Simulated agents carry mode/identity while real agents retain legacy activity histories."""
+    """Simulated agents carry mode/identity; real agents keep world-model args empty.
+
+    Both shapes carry the trailing cache-write agent id so the Fast Mode write
+    gate can resolve the agent's tree root (a child under a frozen DEMO root
+    never writes) without changing world-model routing.
+    """
     from domains.web_fetch.handler import WebFetchManager
 
     calls = []
@@ -936,9 +944,22 @@ async def test_handler_simulator_appends_mode_only_to_boundary_activities():
     )
 
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
-    assert scrape_call["args"][-2:] == ["a-sim", "simulate"]
+    assert scrape_call["args"][-3:] == ["a-sim", "simulate", "a-sim"]
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
-    assert download_call["args"][-2:] == ["a-sim", "simulate"]
+    assert download_call["args"][-3:] == ["a-sim", "simulate", "a-sim"]
+
+    calls.clear()
+    await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://example.com/a", "objective": "download"},
+        tool_call_id="tc-real",
+        agent_id="a-real",
+        user_id="u-1",
+    )
+    scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
+    assert scrape_call["args"][-3:] == [None, None, "a-real"]
+    download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
+    assert download_call["args"][-3:] == [None, None, "a-real"]
 
 
 async def test_handler_reports_parallel_provider_when_fallback_succeeds():

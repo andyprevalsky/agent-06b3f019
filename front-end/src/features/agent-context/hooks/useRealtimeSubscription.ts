@@ -11,6 +11,7 @@ import {
   type ToolStreamPayload,
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
+import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { MAX_RECONNECT_DELAY_MS } from '../config';
@@ -25,6 +26,7 @@ import {
   cleanupSubscription,
 } from './realtimeHandlers';
 import { useDisconnectedAgentBackfill } from './useDisconnectedAgentBackfill';
+import { endsCloudAgentMode, startsCloudAgentMode } from './cloudAgentMode';
 import {
   isAgentScopeActive,
   isAgentScopeCurrent,
@@ -62,27 +64,6 @@ function isScopeActive(deps: RealtimeSubscriptionDeps, scope: AgentScope): boole
   return isAgentScopeActive(deps.selectedAgentIdRef, scope, 'realtime-subscription');
 }
 
-function startsCloudAgentMode(data: InsertMessagePayload, agentId: string): boolean {
-  const metadata = data.metadata;
-  return (
-    data.agentId === agentId &&
-    metadata?.toolName === 'cloud_agent' &&
-    metadata.toolStatus === 'IN_PROGRESS' &&
-    (metadata.startPhase === 'plan' || metadata.startPhase === 'execute')
-  );
-}
-
-function endsCloudAgentMode(data: InsertMessagePayload, agentId: string): boolean {
-  const metadata = data.metadata;
-  return (
-    data.agentId === agentId &&
-    metadata?.toolName === 'completion_summary' &&
-    metadata.toolStatus === 'FINISHED' &&
-    metadata.isFinalSummary === true &&
-    (metadata.subAgentId === undefined || metadata.subAgentId === null)
-  );
-}
-
 function createRealtimeHandlers(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
@@ -109,8 +90,6 @@ function createRealtimeHandlers(
         setStreamingAttention,
         setStreamingTools,
         setMessages,
-        setAgent,
-        setIsChatMode,
         dispatchMessage: (message) => {
           if (active()) deps.dispatchMessage(message);
         },
@@ -142,6 +121,10 @@ function createRealtimeHandlers(
     },
     onAgentModeStarted: (data) => {
       if (active() && data.agentId === scope.agentId) setIsChatMode(false);
+    },
+    // Live views follow the backend binding, not the lagging transcript URL.
+    onBrowserSession: (binding) => {
+      if (active()) publishBrowserSessionBinding(binding);
     },
     onDisconnect: () => {
       if (!active()) return;

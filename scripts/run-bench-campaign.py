@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import secrets
 import shlex
@@ -201,7 +202,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--task", action="append", default=[])
     parser.add_argument("--forward-arg", action="append", default=[])
+    parser.add_argument("--retry-infra", type=int, default=0)
+    parser.add_argument("--e2e-timeout", type=float)
+    parser.add_argument("--e2e-started-at", type=float)
     return parser.parse_args()
+
+
+def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
+    """Read the existing physical result and full-release seal, without regrading."""
+    try:
+        fleet = None
+        with Path(str(job["log"])).open(errors="replace") as stream:
+            for line in stream:
+                if "/scripts/run-bench monitor " not in line:
+                    continue
+                fields = shlex.split(line.strip())
+                if len(fields) >= 3 and fields[0] == str(root / "scripts/run-bench") and fields[1] == "monitor":
+                    fleet = Path(fields[2]).resolve()
+                    break
+        if fleet is None or not fleet.is_relative_to(root / ".context"):
+            return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
+        record = json.loads((fleet / "_batch/run.json").read_text())
+        lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
+        tasks = record.get("tasks") or []
+        if len(tasks) != 1 or tasks[0].get("name") != job["task"]:
+            raise ValueError("terminal task binding changed")
+        task = tasks[0]
+        status = str(task.get("benchmark_status") or task.get("status") or "").upper()
+        run_id = fleet.name
+        owner = lifecycle["fleet_owner_token"]
+        audit = Path((fleet / "teardown-ownership.path").read_text().strip()).resolve()
+        meta_bytes = (audit / "meta").read_bytes()
+        meta = dict(line.split("=", 1) for line in meta_bytes.decode().splitlines())
+        epoch_bytes = (audit / "provider-teardown-verified.epoch").read_bytes()
+        registry = audit.parent.parent / "cloudbench-fleet-ownership" / owner
+        closed = (
+            lifecycle.get("run_id") == record.get("run_id") == meta.get("run_id") == run_id
+            and lifecycle.get("workspace_root") == meta.get("workspace_root") == str(root)
+            and meta.get("fleet_owner_token") == owner == audit.name
+            and audit.parent.name == "cloudbench-fleet-audits"
+            and meta.get("status") == "provider-teardown-verified"
+            and (fleet / "teardown-ownership/meta").read_bytes() == meta_bytes
+            and (fleet / "teardown-ownership/provider-teardown-verified.epoch").read_bytes() == epoch_bytes
+            and math.isfinite(float(epoch_bytes)) and float(epoch_bytes) > 0
+            and not registry.exists() and not registry.is_symlink()
+            and lifecycle.get("hub_publication_failed") is False
+            and task.get("lifecycle_stage") == "released"
+        )
+        # The fleet's lifecycle verdict also covers execution completion, the
+        # mandatory autoscaler and the controller exit; release alone does not.
+        return {"run_id": run_id, "fleet_dir": str(fleet), "fleet_owner_token": owner,
+                "task_status": status, "resources_released": closed,
+                "lifecycle_verified": closed and lifecycle.get("status") == "verified",
+                "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
+                "terminal_task": isinstance(task.get("passed"), bool) and status in {
+                    "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"},
+                "released_at_epoch": float(epoch_bytes) if closed else None}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
 
 
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
@@ -312,6 +370,19 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
         raise SystemExit("runs, concurrency, and at least one task are required")
+    if args.retry_infra < 0:
+        raise SystemExit("--retry-infra must be a nonnegative integer")
+    if args.e2e_timeout is not None and (not math.isfinite(args.e2e_timeout) or args.e2e_timeout <= 0):
+        raise SystemExit("--e2e-timeout must be positive finite seconds")
+    if args.e2e_started_at is not None and (not math.isfinite(args.e2e_started_at) or args.e2e_started_at > time.time()):
+        raise SystemExit("--e2e-started-at must be the original past epoch")
+    if args.e2e_started_at is not None and args.e2e_timeout is None:
+        raise SystemExit("--e2e-started-at requires --e2e-timeout")
+    e2e_started_at = args.e2e_started_at if args.e2e_started_at is not None else time.time()
+    e2e_deadline = time.monotonic() + args.e2e_timeout - (time.time() - e2e_started_at) if args.e2e_timeout is not None else None
+
+    def deadline_expired() -> bool:
+        return e2e_deadline is not None and time.monotonic() >= e2e_deadline
 
     root = args.root.resolve()
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
@@ -358,6 +429,8 @@ def main() -> int:
                         f"cloudbench-controller-campaign-{lock_prefix}-{index}.lock"
                     ),
                     "log": str(campaign_dir / f"{job_id}.log"),
+                    "attempt": 1,
+                    "attempts": [],
                 }
             )
 
@@ -372,6 +445,10 @@ def main() -> int:
         "total_jobs": len(jobs),
         "peak_concurrency": 0,
         "jobs": jobs,
+        "retry_infra": args.retry_infra,
+        "e2e_started_at_epoch": e2e_started_at,
+        "e2e_timeout_seconds": args.e2e_timeout,
+        "e2e_timeout_exceeded": False,
     }
     strict_start = (
         "--strict-barrier" in args.forward_arg
@@ -446,6 +523,11 @@ def main() -> int:
     print(
         "   controller status/exit is separate from monitor.task_outcomes; retain genuine task FAIL."
     )
+    if args.retry_infra:
+        print(f"   INFRA-only retry: at most {args.retry_infra} fresh attempt(s) per task, after original full release and terminal publication; healthy peers continue.")
+        print("   attempts keep separate logs/evidence within the original Hub group; genuine task FAIL is not retried and the E2E clock never resets.")
+    if args.e2e_timeout is not None:
+        print(f"   whole-experiment limit: {args.e2e_timeout:g}s from epoch {e2e_started_at:g}, including image handoff, retries, evidence and full release.")
     print(
         "   keep the original owner on stale cards or retryable startup/publication warnings; reconcile native birth/log growth read-only."
     )
@@ -471,11 +553,13 @@ def main() -> int:
     pending = deque(jobs)
     active: dict[int, dict[str, object]] = {}
     stop_signal = 0
+    stop_requests = 0
     termination_requested = False
 
     def request_stop(signum: int, _frame: object) -> None:
-        nonlocal stop_signal
+        nonlocal stop_signal, stop_requests
         stop_signal = signum
+        stop_requests += 1
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
@@ -589,10 +673,11 @@ def main() -> int:
                 campaign_dir,
                 state,
                 live=True,
-                stop_requested=lambda: bool(stop_signal),
+                stop_requested=lambda: bool(stop_signal) or deadline_expired(),
             )
         if (
             not stop_signal
+            and not deadline_expired()
             and args.concurrency > 1
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
@@ -617,6 +702,10 @@ def main() -> int:
                 )
             write_json_atomic(summary_path, state)
         while pending or active:
+            if deadline_expired() and not state["e2e_timeout_exceeded"]:
+                state["e2e_timeout_exceeded"] = True
+                request_stop(signal.SIGTERM, None)
+                print("Whole-experiment limit reached; no new attempt admitted, exact controllers continue through owned cleanup.")
             if inventory_process is not None and inventory_process.poll() is not None:
                 barrier_failure = True
                 first_failure = first_failure or 1
@@ -635,7 +724,7 @@ def main() -> int:
                             process.terminate()
                             job["_aborted_by_campaign"] = True
                     inventory_failure_signalled = True
-            if strict_start and not active and not barrier_failure:
+            if strict_start and not active and not barrier_failure and not (pending and pending[0].get("_independent_retry")):
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
                     current_cohort["status"] = "waiting"
@@ -673,6 +762,7 @@ def main() -> int:
                                     while result.poll() is None:
                                         if not interrupted and (
                                             stop_signal
+                                            or deadline_expired()
                                             or inventory_process.poll() is not None
                                         ):
                                             result.terminate()
@@ -706,7 +796,8 @@ def main() -> int:
                 and len(active) < args.concurrency
                 and not stop_signal
                 and not barrier_failure
-                and (not strict_start or pending[0]["_cohort"] is current_cohort)
+                and not deadline_expired()
+                and (not strict_start or pending[0].get("_independent_retry") or pending[0]["_cohort"] is current_cohort)
             ):
                 job = pending.popleft()
                 environment = os.environ.copy()
@@ -728,6 +819,10 @@ def main() -> int:
                         "CLOUDBENCH_CONTROLLER_LOCK_NAME": str(job["controller_lock"]),
                     }
                 )
+                if args.retry_infra:
+                    environment["RUN_BENCH_CAMPAIGN_ATTEMPT"] = str(job["attempt"])
+                else:
+                    environment.pop("RUN_BENCH_CAMPAIGN_ATTEMPT", None)
                 if inventory_directory is not None:
                     environment["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"] = str(
                         inventory_directory
@@ -735,7 +830,7 @@ def main() -> int:
                 else:
                     environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
-                if strict_start:
+                if strict_start and not job.get("_independent_retry"):
                     if current_cohort.get("_seed_proof"):
                         environment["CLOUDBENCH_CAMPAIGN_SEED_PROOF"] = str(
                             current_cohort["_seed_proof"]
@@ -772,12 +867,13 @@ def main() -> int:
                     start_new_session=True,
                 )
                 job["_process"] = process
+                job["controller_pid"] = process.pid
                 job["_log_handle"] = log_handle
                 job["_started_monotonic"] = time.monotonic()
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
-                if strict_start:
+                if strict_start and not job.get("_independent_retry"):
                     current_cohort["_manifest"]["jobs"][str(job["job_id"])] = (
                         process.pid
                     )
@@ -797,7 +893,16 @@ def main() -> int:
                 termination_requested = True
                 if current_cohort:
                     abort_startup_cohort(current_cohort, "user cancelled campaign")
-                terminate_owned_children(active)
+                if state["e2e_timeout_exceeded"]:
+                    # The explicit outer cutoff stops only the known controller
+                    # leader. Its EXIT ownership path retains generous cleanup;
+                    # no short internal KILL deadline is added.
+                    for job in active.values():
+                        if job["_process"].poll() is None:
+                            job["_process"].terminate()
+                            job["_terminated_by_campaign"] = True
+                else:
+                    terminate_owned_children(active)
 
             for process_id, job in list(active.items()):
                 process = job["_process"]
@@ -810,11 +915,12 @@ def main() -> int:
                 handle = job.pop("_log_handle")
                 handle.close()
                 job.pop("_process")
-                exited_before_release = strict_start and job["_cohort"][
+                exited_before_release = strict_start and not job.get("_independent_retry") and job["_cohort"][
                     "status"
                 ] not in {"released", "aborted"}
                 if exited_before_release:
-                    first_failure = first_failure or exit_code or 1
+                    if not args.retry_infra:
+                        first_failure = first_failure or exit_code or 1
                     # Keep the failed member and its original custody manifest.
                     # Only release eligibility changes; healthy peers and later
                     # cohorts can still complete, while the campaign stays failed.
@@ -835,7 +941,32 @@ def main() -> int:
                     time.monotonic() - float(job.pop("_started_monotonic")), 3
                 )
                 active.pop(process_id)
-                if exit_code and not first_failure:
+                if args.retry_infra:
+                    disposition = released_attempt(root, job)
+                    for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                                "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
+                                "released_at_epoch", "retry_blocked"):
+                        job.pop(key, None)
+                    job.update(disposition)
+                    job["attempts"].append({key: job.get(key) for key in (
+                        "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
+                        "controller_exit_code", "status", "run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                        "resources_released", "lifecycle_verified", "infra_failure", "terminal_task", "released_at_epoch",
+                        "retry_blocked")})
+                    if (disposition.get("lifecycle_verified") and disposition.get("terminal_task")
+                            and job["status"] != "cancelled"):
+                        job["status"] = "passed"  # infrastructure health; task verdict is retained separately
+                    elif (disposition.get("resources_released") and disposition.get("infra_failure")
+                          and job["attempt"] <= args.retry_infra and not stop_signal and not barrier_failure and not deadline_expired()):
+                        job["attempt"] += 1
+                        job["status"] = "queued"
+                        job["log"] = str(campaign_dir / f"{job['job_id']}.attempt-{job['attempt']}.log")
+                        job["_independent_retry"] = True
+                        pending.appendleft(job)
+                        print(f"↻ {job['job_id']} INFRA attempt released; admitting fresh attempt {job['attempt']} without restarting peers")
+                    else:
+                        first_failure = first_failure or exit_code or 1
+                elif exit_code and not first_failure:
                     first_failure = exit_code
                 print(
                     f"{'✅' if exit_code == 0 else '❌'} {job['job_id']} "
@@ -901,23 +1032,45 @@ def main() -> int:
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
     write_json_atomic(summary_path, state)
     publication_completed = False
-    if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
+    # A parent (for example the Hub poller) owns group publication when it
+    # supplies a group or parent run ID; only an attempted publication can fail.
+    publication_attempted = not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
         "BENCHMARK_HUB_PARENT_RUN_ID"
-    ):
+    )
+    if publication_attempted:
+        # An existing cutoff/cancellation has already closed the controllers.
+        # Publish that failed terminal group through the ordinary transport;
+        # only a new stop during this handoff invokes its existing session drain.
+        # Cleanup can exceed the outer cap, but the run still gets zero credit.
+        stops_before_publication = stop_requests
+        deadline_before_publication = deadline_expired()
         publication_completed = publish_campaign_group(
             root,
             campaign_dir,
             state,
             live=False,
-            stop_requested=lambda: bool(stop_signal),
+            stop_requested=lambda: (
+                stop_requests > stops_before_publication
+                or (not deadline_before_publication and deadline_expired())
+            )
+            if args.retry_infra or args.e2e_timeout is not None
+            else bool(stop_signal),
         )
     if stop_signal and not publication_completed:
         state["status"] = "cancelled"
         result = 128 + stop_signal
+    if args.retry_infra and publication_attempted and not publication_completed:
+        state["status"] = "failed" if not stop_signal else "cancelled"
+        result = result or 1
     # Publication is part of the campaign lifetime, including cancellation
     # during its final handoff. Preserve the original child outcomes.
     state["finished_at"] = utc_now()
     state["wall_clock_seconds"] = round(time.monotonic() - started, 3)
+    state["e2e_wall_clock_seconds"] = round(time.time() - e2e_started_at, 3)
+    if deadline_expired():
+        state["e2e_timeout_exceeded"] = True
+        state["status"] = "failed"
+        result = result or 1
     write_json_atomic(summary_path, state)
     print(
         f"{'✅' if result == 0 else '❌'} campaign {state['status']} "

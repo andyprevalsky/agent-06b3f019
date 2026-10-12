@@ -55,6 +55,7 @@ if (enforceSingleInstance && !hasSingleInstanceLock) {
 let mainWindow: BrowserWindow | null = null;
 const quickQuery = new QuickQueryController({
   getMainWindow: () => mainWindow,
+  openMainWindow: handleActivate,
   getOnboardingComplete,
 });
 
@@ -179,7 +180,9 @@ function openAppFromDeepLink(agentId: string | null): void {
   const selectAgent = () => {
     if (!window.isDestroyed()) window.webContents.send('open-agent', agentId);
   };
-  if (mustWaitForRenderer || window.webContents.isLoading()) {
+  // Main frame only: did-finish-load never fires again for an embedded
+  // live-view frame that happens to be loading in an already-open window.
+  if (mustWaitForRenderer || window.webContents.isLoadingMainFrame()) {
     window.webContents.once('did-finish-load', selectAgent);
   } else {
     selectAgent();

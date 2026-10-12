@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+# run-cloudbench-controller-gate — run the /deploy Step 4cb cloud-benchmark
+# controller suites on a throwaway Linux machine in the benchmark Fly app.
+#
+# Three of those suites read /proc and use native Linux process semantics; on
+# macOS they fail identically on main and on every branch, which stalled a
+# deploy on 2026-10-05 for hours. The fleet's warm image already has the deps
+# baked in, so one machine from it, the pushed HEAD fetched inside, is the
+# gate's natural home. The machine is created with --rm and destroyed when the
+# command exits, on timeout, or when this script is interrupted.
+#
+#   HEAD (pushed) ──► fly machine run <warm image> --rm --file-local gate.sh
+#                        │ clone HEAD, link /app deps, run each suite
+#                        ▼
+#                     logs: GATE_STEP <name> exit=N … GATE_RESULT exit=N
+#                        │
+#   this script polls ◄──┘ and exits with GATE_RESULT's code
+#
+# Usage:
+#   bash scripts/run-cloudbench-controller-gate            # the Step 4cb suites
+#   bash scripts/run-cloudbench-controller-gate -- bash scripts/tests/cloudbench-env.test.sh
+#   CLOUDBENCH_GATE_REF=<sha> bash scripts/run-cloudbench-controller-gate
+# Env: CLOUDBENCH_GATE_TIMEOUT_S (default 5400), WARM_IMAGE_REF (default: newest
+# cloudbench-warm image on the fleet), CLOUDBENCH_GATE_VM_SIZE / _VM_MEMORY.
+set -euo pipefail
+ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+cd "$ROOT_DIR"
+# Bash reads a script incrementally. A fix landing in this file while a gate is
+# running (2026-10-06) made the running controller resume at a shifted offset
+# and die with a syntax error after GATE_RESULT, before it could fetch the
+# failed suites' logs. Run from a private copy so the worktree can change.
+if [ -z "${CLOUDBENCH_GATE_SELF_COPY:-}" ]; then
+  CLOUDBENCH_GATE_SELF_COPY="$(mktemp -t cloudbench-gate-self.XXXXXX)"
+  cat "${BASH_SOURCE[0]}" > "$CLOUDBENCH_GATE_SELF_COPY"
+  export CLOUDBENCH_GATE_SELF_COPY CLOUDBENCH_GATE_ROOT_DIR="$ROOT_DIR"
+  exec bash "$CLOUDBENCH_GATE_SELF_COPY" "$@"
+fi
+
+APP="${CLOUDBENCH_APP:-navi-whisper-lux-bench}"
+REGION="${CLOUDBENCH_REGION:-iad}"
+VM_SIZE="${CLOUDBENCH_GATE_VM_SIZE:-shared-cpu-4x}"
+VM_MEMORY="${CLOUDBENCH_GATE_VM_MEMORY:-8192}"
+# The multi-workstream suite alone took 30–42 min on shared-cpu-4x (2026-10-06),
+# so the ten suites need more than the former 40 min; 2400s timed out mid-suite.
+TIMEOUT_S="${CLOUDBENCH_GATE_TIMEOUT_S:-5400}"
+REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
+
+# shellcheck disable=SC2016  # the pytest -k expression is quoted for the remote shell
+DEFAULT_SUITES=(
+  "bash scripts/tests/cloudbench-env.test.sh"
+  "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh"
+  "bash scripts/tests/fleet-infra-canary.test.sh"
+  "bash scripts/tests/fleet-infra-stability-proof.test.sh"
+  "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py"
+  "bash scripts/tests/cloudbench-multi-workstream.test.sh"
+  "bash scripts/tests/cloudbench-github-token.test.sh"
+  "bash scripts/tests/seed-dump-toolchain.test.sh"
+  "agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py"
+)
+
+# The status-service control exercises a root-only permission primitive against
+# the offline controller image's pinned toolchain, so its home is that image:
+# it runs here through its own dispatcher (native on Linux, the container on a
+# Mac), exactly as Step 4cb documents, and its result joins the machine's.
+CONTROLLER_IMAGE_SUITES=(
+  "python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown"
+)
+
+SUITES=()
+if [ "${1:-}" = "--" ]; then
+  shift
+  [ "$#" -gt 0 ] || { echo "usage: scripts/run-cloudbench-controller-gate -- <command to run in the repo on the machine>" >&2; exit 2; }
+  # One remote command; each argument stays a separate word on the machine.
+  SUITES=("$(printf '%q ' "$@")")
+elif [ "$#" -gt 0 ]; then
+  echo "usage: scripts/run-cloudbench-controller-gate [-- <command to run in the repo on the machine>]" >&2
+  exit 2
+else
+  SUITES=("${DEFAULT_SUITES[@]}")
+  RUN_CONTROLLER_IMAGE_SUITES=1
+fi
+
+if [ -z "${FLY_API_TOKEN:-}" ]; then
+  FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+[ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ FLY_API_TOKEN is not set and not in agents/.env" >&2; exit 1; }
+export FLY_API_TOKEN
+
+GATE_REF="${CLOUDBENCH_GATE_REF:-$(git rev-parse HEAD)}"
+# The machine fetches GATE_REF from REPO_URL. For the default repository that is
+# origin, so check containment here (after refreshing stale tracking refs) and
+# fail early; a fork URL is checked by the machine's own fetch (exit 90).
+if [ "$REPO_URL" = "https://github.com/Rose-Ai-Labs/rose.git" ]; then
+  git fetch -q origin 2>/dev/null || true
+  if [ -z "$(git branch -r --contains "$GATE_REF" 2>/dev/null)" ]; then
+    echo "❌ $GATE_REF is not on any origin branch; push it first (the machine fetches from GitHub)." >&2
+    exit 1
+  fi
+fi
+
+GITHUB_TOKEN_VALUE="${GITHUB_TOKEN:-}"
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  GITHUB_TOKEN_VALUE="$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token --hostname github.com 2>/dev/null || true)"
+fi
+if [ -z "$GITHUB_TOKEN_VALUE" ]; then
+  GITHUB_TOKEN_VALUE="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "❌ No GitHub token (gh auth, GITHUB_TOKEN, back-end/.env)" >&2; exit 1; }
+
+IMAGE_REF="${WARM_IMAGE_REF:-}"
+if [ -z "$IMAGE_REF" ]; then
+  IMAGE_REF="$(flyctl machines list -a "$APP" --json 2>/dev/null | python3 -c '
+import json, sys, re
+images = {m["config"]["image"] for m in json.load(sys.stdin) if "cloudbench-warm" in m["config"].get("image", "")}
+# Tags are cloudbench-warm[-local]-YYYYMMDD-HHMMSS; the newest date wins.
+def stamp(image):
+    m = re.search(r"cloudbench-warm(?:-local)?-(\d{8}-\d{4,6})", image)
+    return m.group(1) if m else ""
+print(max(images, key=stamp) if images else "")
+')"
+fi
+[ -n "$IMAGE_REF" ] || { echo "❌ No cloudbench-warm image found on $APP; set WARM_IMAGE_REF" >&2; exit 1; }
+
+# Node for the gate machine: the newest release of the current LTS line, so the
+# controller's strip-types TypeScript helpers run there as they do on this host.
+GATE_NODE_VERSION="${CLOUDBENCH_GATE_NODE_VERSION:-$(curl -fsSL --max-time 15 https://nodejs.org/dist/index.json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    print(next(r["version"] for r in rows if r["version"].startswith("v24.") and "linux-x64" in r.get("files", [])))
+except Exception:
+    print("")
+' 2>/dev/null)}"
+GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
+
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
+MACHINE_NAME="cloudbench-gate-${GATE_REF:0:8}-${STAMP}"
+# Repeated log pulls overlap; drop repeats but keep arrival order so each
+# suite's GATE_FAIL_TAIL section stays readable (sort -u interleaved them).
+dedupe_machine_log() {
+  awk '!seen[$0]++' "$MACHINE_LOG" > "$MACHINE_LOG.dedupe" && mv "$MACHINE_LOG.dedupe" "$MACHINE_LOG"
+}
+
+GATE_SCRIPT="$(mktemp -t cloudbench-gate.XXXXXX)"
+MACHINE_ID=""
+cleanup() {
+  rm -f "$GATE_SCRIPT" "${GATE_TOKEN_FILE:-}" "${CLOUDBENCH_GATE_SELF_COPY:-}"
+  if [ -n "$MACHINE_ID" ]; then
+    # A destroy of a machine still pulling its image can hang; bound it so an
+    # interrupted gate exits promptly (the machine is --rm and times out anyway).
+    flyctl machine destroy "$MACHINE_ID" -a "$APP" --force >/dev/null 2>&1 &
+    local destroy_pid=$!
+    for _ in $(seq 1 45); do kill -0 "$destroy_pid" 2>/dev/null || break; sleep 1; done
+    kill "$destroy_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+# A signal must end the run (EXIT then cleans up), not return into the launch.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -uo pipefail'
+  echo 'echo "GATE_START $(date -u +%FT%TZ) $(uname -srm)"'
+  echo 'token="$(cat /tmp/gate-github-token)"; rm -f /tmp/gate-github-token'
+  echo 'mkdir -p /tmp/gate && cd /tmp/gate'
+  echo 'git init -q repo && cd repo'
+  echo 'git -c http.extraheader="AUTHORIZATION: basic $(printf "x-access-token:%s" "$token" | base64 -w0)" fetch -q --depth 1 "$GATE_REPO_URL" "$GATE_REF" || { echo "GATE_RESULT exit=90 fetch_failed"; exit 90; }'
+  echo 'git checkout -q FETCH_HEAD'
+  echo '# Dependencies are baked into the warm image; the suites only need the paths.'
+  echo 'ln -s /app/node_modules node_modules; ln -s /app/back-end/node_modules back-end/node_modules'
+  echo 'ln -s /app/agents/venv agents/venv; [ -d /app/front-end/node_modules ] && ln -s /app/front-end/node_modules front-end/node_modules'
+  echo '# The controller runs TypeScript helpers with `node --experimental-strip-types`,'
+  echo '# which the image'"'"'s Node 20 rejects; the controller host runs a current Node.'
+  echo 'if ! node --experimental-strip-types -e "export {}" >/dev/null 2>&1; then'
+  echo '  mkdir -p /tmp/gate/node && curl -fsSL "https://nodejs.org/dist/$GATE_NODE_VERSION/node-$GATE_NODE_VERSION-linux-x64.tar.gz" | tar -xz --strip-components=1 -C /tmp/gate/node || { echo "GATE_RESULT exit=91 node_install_failed version=$GATE_NODE_VERSION"; exit 91; }'
+  echo '  echo "GATE_NODE $(/tmp/gate/node/bin/node --version) installed (image had $(node --version))"'
+  echo 'fi'
+  echo '# The bench app injects the shared .env files as base64 secrets (what the'
+  echo '# fleet entrypoint decodes for guests); the controller suites read R2 and'
+  echo '# provider settings from those files exactly as they do on a developer host.'
+  echo '[ -z "${BACKEND_ENV_B64:-}" ] || printf "%s" "$BACKEND_ENV_B64" | base64 -d > back-end/.env'
+  echo '[ -z "${AGENTS_ENV_B64:-}" ] || printf "%s" "$AGENTS_ENV_B64" | base64 -d > agents/.env'
+  echo 'echo "GATE_ENV backend_env=$([ -s back-end/.env ] && echo yes || echo no) agents_env=$([ -s agents/.env ] && echo yes || echo no)"'
+  echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
+  echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  echo 'overall=0'
+  echo 'failed_steps=""'
+  echo 'n=0'
+  for suite in "${SUITES[@]}"; do
+    printf 'n=$((n+1)); echo "GATE_STEP_START #$n %s"\n' "$suite"
+    # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
+    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+    printf 'echo "GATE_STEP %s exit=$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
+  done
+  echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
+  echo 'echo "GATE_RESULT exit=$overall"'
+  echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
+  echo '# stream. Stay alive until the controller has copied the full step logs out'
+  echo '# (it touches /tmp/gate/fetched); --rm destroys the machine on exit.'
+  echo 'if [ "$overall" -ne 0 ]; then for _ in $(seq 1 900); do [ -e /tmp/gate/fetched ] && break; sleep 1; done; fi'
+  echo 'exit $overall'
+} > "$GATE_SCRIPT"
+
+echo "🖥️  Gate machine: $MACHINE_NAME  image: ${IMAGE_REF##*/}  ref: $GATE_REF"
+# The token rides to the machine as a file: a process argument (even base64)
+# is readable by every local user through the command line.
+GATE_TOKEN_FILE="$(mktemp -t cloudbench-gate-token.XXXXXX)"
+chmod 600 "$GATE_TOKEN_FILE"
+printf '%s' "$GITHUB_TOKEN_VALUE" > "$GATE_TOKEN_FILE"
+RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
+# flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
+# non-zero even though the machine comes up; the machine id in its output is
+# what matters, and the loop below is the real wait.
+set +e
+flyctl machine run "$IMAGE_REF" \
+  -a "$APP" --region "$REGION" --name "$MACHINE_NAME" \
+  --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" \
+  --restart no --rm --detach \
+  --entrypoint "/bin/bash" \
+  --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
+  --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
+  -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
+  "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
+set -e
+MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+rm -f "$RUN_LOG" "$GATE_TOKEN_FILE"
+[ -n "$MACHINE_ID" ] || { echo "❌ Could not read the gate machine id" >&2; exit 1; }
+echo "✅ machine $MACHINE_ID started; waiting up to ${TIMEOUT_S}s"
+
+deadline=$((SECONDS + TIMEOUT_S))
+result=""
+seen=0
+MACHINE_LOG="${CLOUDBENCH_GATE_LOG:-$ROOT_DIR/.context/cloudbench-gate-$MACHINE_ID.log}"
+mkdir -p "$(dirname "$MACHINE_LOG")"
+: > "$MACHINE_LOG"
+echo "📄 full machine log: $MACHINE_LOG"
+while [ $SECONDS -lt $deadline ]; do
+  sleep 20
+  # Fly returns about the last 100 lines per call; merge every poll into one file.
+  flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+  dedupe_machine_log
+  logs="$(cat "$MACHINE_LOG")"
+  steps="$(printf '%s\n' "$logs" | grep -oE 'GATE_(START|STEP|STEP_START|RESULT)[^"]*' | sed 's/\\n$//' || true)"
+  count="$(printf '%s\n' "$steps" | grep -c . || true)"
+  if [ "$count" -gt "$seen" ]; then
+    printf '%s\n' "$steps" | tail -n +"$((seen + 1))" | sed 's/^/   /'
+    seen="$count"
+  fi
+  result="$(printf '%s\n' "$steps" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
+  [ -n "$result" ] && break
+  state="$(flyctl machines list -a "$APP" --json 2>/dev/null | MID="$MACHINE_ID" python3 -c '
+import json, os, sys
+machines = json.load(sys.stdin)
+print(next((m.get("state", "") for m in machines if m.get("id") == os.environ["MID"]), "destroyed"))
+' 2>/dev/null || true)"
+  # An empty state is a transient status-API miss, not an ended machine.
+  if [ "$state" = "destroyed" ] || [ "$state" = "stopped" ]; then
+    # The command exited before its result line reached the log stream; read once more.
+    sleep 10
+    flyctl logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null >> "$MACHINE_LOG" || true
+    dedupe_machine_log
+    logs="$(cat "$MACHINE_LOG")"
+    result="$(printf '%s\n' "$logs" | grep -oE 'GATE_RESULT exit=[0-9]+' | tail -1 || true)"
+    [ -n "$result" ] || { echo "❌ gate machine ended ($state) without a GATE_RESULT line" >&2; exit 1; }
+    break
+  fi
+done
+# Number of the suite that was running where a machine log ends. The remote
+# runner numbers each start marker, so the latest one is the answer even when
+# earlier markers fell outside the ~100-line windows the log was read in; no
+# numbered marker is suite 0.
+gate_running_step() {
+  local log="$1" step
+  step="$(grep -oE 'GATE_STEP_START #[0-9]+' "$log" | tail -1 | tr -dc '0-9' || true)"
+  printf '%s\n' "${step:-0}"
+}
+
+if [ -z "$result" ]; then
+  # Keep the evidence: the suite still running when the budget ran out is the
+  # one to diagnose, and --rm destroys the machine the moment this script exits.
+  running_step="$(gate_running_step "$MACHINE_LOG")"
+  if [ "$running_step" -gt 0 ]; then
+    step_log="${MACHINE_LOG%.log}-step-$running_step.partial.log"
+    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$running_step.log" "$step_log" >/dev/null 2>&1 \
+      && [ -s "$step_log" ]; then
+      echo "   suite #$running_step was still running; its partial output: $step_log ($(wc -l < "$step_log") lines)" >&2
+    fi
+  fi
+  echo "❌ gate timed out after ${TIMEOUT_S}s; destroying $MACHINE_ID" >&2
+  exit 1
+fi
+code="${result##*=}"
+controller_image_code=0
+if [ -n "${RUN_CONTROLLER_IMAGE_SUITES:-}" ]; then
+  for suite in "${CONTROLLER_IMAGE_SUITES[@]}"; do
+    suite_log="${MACHINE_LOG%.log}-controller-image.log"
+    echo "   GATE_STEP_START $suite"
+    rc=0
+    bash -c "$suite" > "$suite_log" 2>&1 || rc=$?
+    echo "   GATE_STEP $suite exit=$rc"
+    if [ "$rc" -ne 0 ]; then
+      controller_image_code=1
+      echo "   full output: $suite_log" >&2
+      tail -n 40 "$suite_log" | sed 's/^/     /' >&2
+    fi
+  done
+fi
+# Step numbers of the failed suites in a machine log: the summary line when the
+# log read caught it, else the per-step markers. A log with neither (a read that
+# missed both) is an empty answer, not a reason to exit before the machine is
+# told its logs were fetched.
+gate_failed_steps() {
+  local log="$1" steps
+  steps="$(grep -oE 'GATE_FAILED_STEPS( [0-9]+)*' "$log" | tail -1 | sed 's/GATE_FAILED_STEPS//' || true)"
+  [ -n "$steps" ] || steps="$(grep -oE 'GATE_STEP_FAILED [0-9]+' "$log" | awk '{print $2}' || true)"
+  printf '%s\n' "$steps"
+}
+
+if [ "$code" = "0" ] && [ "$controller_image_code" = "0" ]; then
+  echo "✅ cloud-bench controller gate passed on Linux ($MACHINE_ID)"
+elif [ "$code" = "0" ]; then
+  echo "❌ cloud-bench controller gate failed in the controller image (machine $MACHINE_ID passed)" >&2
+  exit 1
+else
+  echo "❌ cloud-bench controller gate failed on Linux ($MACHINE_ID): $result" >&2
+  # The machine waits for /tmp/gate/fetched before exiting, so the complete
+  # output of every failed suite can be copied out here.
+  # The summary line is printed right before GATE_RESULT, so it is always in the
+  # final log read; per-step markers can scroll out when several suites fail.
+  failed_steps="$(gate_failed_steps "$MACHINE_LOG")"
+  for n in $(printf '%s\n' $failed_steps | sort -un); do
+    step_log="${MACHINE_LOG%.log}-step-$n.log"
+    rm -f "$step_log"
+    if flyctl ssh sftp get -a "$APP" --machine "$MACHINE_ID" "/tmp/gate/step-$n.log" "$step_log" >/dev/null 2>&1 \
+      && [ -s "$step_log" ]; then
+      echo "   failed suite #$n full output: $step_log ($(wc -l < "$step_log") lines)" >&2
+    else
+      echo "   failed suite #$n: could not copy /tmp/gate/step-$n.log; its last 60 lines are in $MACHINE_LOG between GATE_FAIL_TAIL_START/END $n" >&2
+    fi
+  done
+  flyctl ssh console -a "$APP" --machine "$MACHINE_ID" -C "touch /tmp/gate/fetched" >/dev/null 2>&1 || true
+fi
+exit "$code"

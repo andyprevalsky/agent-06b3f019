@@ -103,6 +103,7 @@ COPY --chown=rose:rose back-end/package.json back-end/package-lock.json /app/bac
 COPY --chown=rose:rose front-end/package.json front-end/package-lock.json /app/front-end/
 COPY --chown=rose:rose back-end/prisma /app/back-end/prisma
 COPY --chown=rose:rose agents/requirements.txt /app/agents/requirements.txt
+COPY --chown=rose:rose agents/vendor /app/agents/vendor
 COPY --chown=rose:rose scripts/cloudbench-install-image-deps.sh /tmp/rose-cloudbench-install-image-deps.sh
 RUN bash /tmp/rose-cloudbench-install-image-deps.sh
 

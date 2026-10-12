@@ -1265,9 +1265,9 @@ async function sync() {
   console.log(`   Local:  ${process.env.DATABASE_URL?.replace(/:[^:@]+@/, ':***@') ?? 'default'}`);
   console.log(`   User:   ${SEED_USER_ID}\n`);
 
-  // Verify remote connectivity
-  await remote.$queryRaw`SELECT 1`;
-  await ensureSeedUserExists();
+  // The first real read verifies connectivity and hydrates the selected user.
+  // Keep initial pooler admission failures inside the existing retry owner.
+  await syncRequiredCredentialTable('Seed identity', ensureSeedUserExists);
 
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();

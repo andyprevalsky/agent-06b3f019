@@ -59,7 +59,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import cloud_batch_cleanup
+from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -375,13 +375,25 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
+# Same journey on the hosted Rose Shop: a fresh account per lane, no subscription.
+ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME = "browser-auth-signup-purchase-no-subscription"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
+# Hosted Rose Shop purchases settle through the same sandbox AgentCard fixture,
+# as the same seeded user. Must equal local.ROSE_SHOP_PAYMENT_TASK_NAMES.
+ROSE_SHOP_PAYMENT_TASK_NAMES = {
+    "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
+    "browser-auth-member-discount-signup-fails-purchase",
+    "browser-auth-paid-membership-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-session-expires-at-checkout",
+}
 AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
@@ -423,7 +435,7 @@ AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     "agent-payment-setup-resume",
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
-}
+} | ROSE_SHOP_PAYMENT_TASK_NAMES
 # Production counterpart of the four sandbox tasks above, and the same hard requirement.
 # `agent-payment-production-abandonment` is /deploy Step 13c and asserts stripeHold succeeded plus
 # stripePaymentIntentCount 1; running it as the default (admin) benchmark user routes the mint to
@@ -2069,6 +2081,31 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
     return max(timeout, floor) if floor else timeout
 
 
+def resolve_task_execution_timeout(task: BenchmarkTask, *, bootstrap: bool = False) -> tuple[int, str]:
+    """Resolve one task's execution timeout and a short provenance note.
+
+    The benchmark definition (catalog timeout, smoke cap, floor) is the minimum.
+    Recent pass history may extend it within the smoke cap but never shortens
+    it; only an explicit operator cap (--timeout /
+    BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS) may stop a task earlier.
+    """
+    cap = get_smoke_cap(task.name)
+    seconds = _default_timeout_for_task(task, cap)
+    s = _history_summary(task.name, max_seconds=cap)
+    note = f"{'bootstrap; ' if bootstrap else ''}benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+    if bootstrap:
+        return seconds, note
+    try:
+        history_timeout = _history_get_timeout(task.name, max_seconds=cap)
+    except InsufficientHistoryError:
+        return seconds, note
+    floor = get_timeout_floor(task.name)
+    history_timeout = max(history_timeout, floor) if floor else history_timeout
+    if history_timeout > seconds:
+        return history_timeout, f"history extends the {seconds}s benchmark timeout; recent_p95={s['recent_p95']}s, n={s['count']}"
+    return seconds, note
+
+
 # ============================================================
 # API helpers
 # ============================================================
@@ -2127,6 +2164,10 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     """Return a task-scoped synthetic identity, leaving ordinary and production tasks unchanged."""
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
+    if task_name == ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME:
+        # A new account every lane: the first lane's Checkout subscribes its user,
+        # so a shared user would start every later lane already subscribed.
+        return str(uuid.uuid4()) if base_url is None or _is_local_base_url(base_url) else None
     if task_name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
         return _new_user_payment_journey_user_id() if base_url is None or _is_local_base_url(base_url) else None
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
@@ -2539,6 +2580,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
         or task.prompt
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    goal = auth_test_site.resolve_goal(goal, auth_test_site.active_manifest())
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
@@ -3503,6 +3545,46 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
         )
 
 
+# The agent names its browser task only after the paused task's bookkeeping
+# (credential judge, diagnostics, recording): 46s after the request on one run.
+AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS = 180
+
+
+async def _browser_task_for_auth_assistance(base_url: str, agent_id: str, req: dict) -> str:
+    """Wait for the agent's own message that names the browser task behind the request."""
+    deadline = time.time() + AUTH_ASSISTANCE_TASK_ID_WAIT_SECONDS
+    while True:
+        data = await get_agent(base_url, agent_id)
+        task_id = auth_assistance_user.browser_task_id(req, data.get("messages") or [])
+        if task_id:
+            return task_id
+        if time.time() >= deadline:
+            raise RuntimeError("the agent never posted the browser task for its sign-in-help request")
+        await asyncio.sleep(3)
+
+
+async def _respond_as_user_to_auth_assistance(base_url: str, agent_id: str, req: dict, user_response: str) -> None:
+    """Play the user for a sign-in-help request on the hosted auth site."""
+    headers = await _api_headers()
+    req_id = str(req.get("id") or "")[:8]
+    if user_response == "decline":
+        await auth_assistance_user.decline(base_url, headers, req)
+        site_id = str((auth_test_site.active_manifest() or {}).get("siteId") or "")
+        if site_id:
+            # Everything the site records from here on happened after the user said no.
+            await auth_test_site.mark_run(base_url, headers, site_id, "user-declined")
+        print(f"    🙅 Declined sign-in-help request {req_id}")
+        return
+    credentials = (auth_test_site.active_manifest() or {}).get("userSignIn")
+    if not isinstance(credentials, dict):
+        raise RuntimeError("the site manifest carries no password for the user to type")
+    task_id = await _browser_task_for_auth_assistance(base_url, agent_id, req)
+    landed = await auth_assistance_user.sign_in_as_user(
+        base_url, headers, req, task_id, credentials, auth_test_site.sign_in_url(auth_test_site.active_manifest())
+    )
+    print(f"    🙋 Signed in as the user for sign-in-help request {req_id} (now on {landed})")
+
+
 def _count_only_release_response() -> str:
     """Response used to unblock counted approval requests without approving side effects."""
     return "__REJECTED__"
@@ -4459,7 +4541,7 @@ async def _poll_agent(
         elapsed = time.time() - start
         if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
-                f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
+                f"Timeout after {elapsed:.0f}s (task timeout={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
                 f" | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             )
@@ -5148,6 +5230,21 @@ async def _poll_agent(
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                 approvals_resolved += 1
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
+                            user_response = (
+                                (auth_test_site.declared_block(task.environment) or {}).get("user_response")
+                                if observed_kind == "auth_assistance"
+                                else None
+                            )
+                            if user_response:
+                                try:
+                                    await _respond_as_user_to_auth_assistance(base_url, agent_id, req, user_response)
+                                except Exception as user_error:
+                                    return (
+                                        data, approvals_triggered, approvals_resolved,
+                                        f"Stand-in user could not {user_response}: {user_error}",
+                                    )
+                                approvals_resolved += 1
+                                continue
                             if task.approval_handling == "ignore":
                                 kind_label = (
                                     f" ({observed_kind})"
@@ -6038,6 +6135,24 @@ def _agent_messages_ready_for_durable_browser_evidence(
     )
 
 
+def _retain_harness_benchmark_state(source: dict, refreshed: dict) -> dict:
+    """Carry harness-only ``_benchmark`` evidence onto a fresh agent read.
+
+    A live agent read knows nothing about evidence the poll loop observed (gates,
+    Checkout, attention order, receipts). Replacing the transcript must not erase
+    it, or evaluation reports contract failures the run never had.
+    """
+    if refreshed is source:
+        return refreshed
+    source_benchmark = source.get("_benchmark")
+    refreshed_benchmark = refreshed.get("_benchmark")
+    refreshed["_benchmark"] = {
+        **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
+        **(source_benchmark if isinstance(source_benchmark, dict) else {}),
+    }
+    return refreshed
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -6068,9 +6183,9 @@ async def _refresh_agent_after_pause_for_browser_terminal(
             continue
         if readiness_check(latest.get("messages")):
             print(f"    ✓ Browser terminal messages landed after pause ({len(latest.get('messages') or [])} messages)")
-            return latest
+            return _retain_harness_benchmark_state(data, latest)
     print("    ⚠ Timed out waiting for browser terminal messages after pause; archiving latest snapshot anyway")
-    return latest
+    return _retain_harness_benchmark_state(data, latest)
 
 
 async def _refresh_browser_archive_snapshot(
@@ -6542,15 +6657,9 @@ async def _seal_payment_abandonment_browser_for_archive(
     except Exception as pause_error:
         return data, f"Failed to seal payment-abandonment browser evidence: {pause_error}"
 
-    # The live agent read does not know about harness-only lifecycle/evaluator
-    # fields. Preserve them while replacing the transcript with the post-pause
-    # terminal snapshot.
-    source_benchmark = data.get("_benchmark")
-    refreshed_benchmark = refreshed.get("_benchmark")
-    refreshed["_benchmark"] = {
-        **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
-        **(source_benchmark if isinstance(source_benchmark, dict) else {}),
-    }
+    # Preserve harness-only lifecycle/evaluator fields while replacing the
+    # transcript with the post-pause terminal snapshot.
+    refreshed = _retain_harness_benchmark_state(data, refreshed)
     if not _agent_messages_ready_for_durable_browser_evidence(refreshed.get("messages")):
         return (
             refreshed,
@@ -7208,11 +7317,11 @@ def _run_free_credit_subscription_fixture(action: str, user_id: Optional[str] = 
     return _parse_last_json_line(result.stdout)
 
 
-def _run_new_user_payment_fixture() -> dict:
+def _run_new_user_payment_fixture(user_id: Optional[str] = None) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"],
         cwd=REPO_ROOT / "back-end",
-        env=_free_credit_subscription_fixture_env(_new_user_payment_journey_user_id()),
+        env=_free_credit_subscription_fixture_env(user_id or _new_user_payment_journey_user_id()),
         capture_output=True,
         text=True,
         timeout=120,
@@ -7222,13 +7331,13 @@ def _run_new_user_payment_fixture() -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-async def _verify_new_user_payment_start_state(base_url: str) -> None:
+async def _verify_new_user_payment_start_state(base_url: str, user_id: Optional[str] = None) -> None:
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             f"{base_url}/api/credits/usage",
             headers=headers,
-            params={"userId": _new_user_payment_journey_user_id()},
+            params={"userId": user_id or _new_user_payment_journey_user_id()},
         )
         response.raise_for_status()
         usage = response.json()
@@ -8641,6 +8750,134 @@ async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[d
             applied.append({"fixture": name, "rows": len(fixture.get("rows", []))})
             print(f"    🧠 memory fixture {name}: {len(fixture.get('rows', []))} row(s) loaded")
     return applied
+
+
+# The worker caches a user's context (their connected inboxes included) for
+# helpers.get_user_context.CACHE_TTL_MINUTES. A lane that connected a fixture
+# inbox therefore leaks it into the next lane's root agent as "the user's
+# connected email", even though the inbox was deleted with its site: an agent
+# then signed up with that address and waited on a code nobody could read.
+USER_CONTEXT_CACHE_SECONDS = 5 * 60 + 15
+_connected_inbox_released_at: Optional[float] = None
+
+
+async def _wait_out_connected_inbox_context(now: Callable[[], float] = time.monotonic) -> float:
+    """Sleep until the previous lane's fixture inbox has aged out of the worker's user context."""
+    global _connected_inbox_released_at
+    released_at = _connected_inbox_released_at
+    _connected_inbox_released_at = None
+    if released_at is None:
+        return 0.0
+    remaining = USER_CONTEXT_CACHE_SECONDS - (now() - released_at)
+    if remaining <= 0:
+        return 0.0
+    print(f"    ⏳ Waiting {remaining:.0f}s for the previous lane's connected inbox to leave the cached user context")
+    await asyncio.sleep(remaining)
+    return remaining
+
+
+async def _apply_auth_test_site(task: "BenchmarkTask", base_url: str) -> Optional[dict]:
+    """Seed this run's Rose Shop site when the task declares one.
+
+    The site is served by the local backend and reached through the public
+    frontend proxy, so it only exists on a local benchmark stack. The returned
+    manifest is also activated for this lane so the goal resolves
+    {auth_test_site_url} and the evaluator can fetch the site's report.
+    """
+    scenario = auth_test_site.declared_scenario(task.environment)
+    if scenario is None:
+        return None
+    if not _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name}: the hosted auth test site only exists on a local benchmark stack")
+    await _wait_out_connected_inbox_context()
+    manifest = await auth_test_site.create_site(
+        base_url,
+        await _api_headers(),
+        user_id=_current_benchmark_user_id(),
+        scenario=scenario,
+        public_base_url=_frontend_url_for_benchmark(base_url),
+    )
+    auth_test_site.set_active_manifest(manifest)
+    print(
+        f"    🔑 Rose Shop site {manifest['siteId']} ({scenario}): "
+        f"{len(manifest.get('savedPasswordUsernames') or [])} saved password(s), "
+        f"minted={manifest.get('mintedEmail') or 'none'}"
+    )
+    first_run_prompt = (auth_test_site.declared_block(task.environment) or {}).get("first_run_prompt")
+    if first_run_prompt:
+        try:
+            await _run_auth_test_site_first_run(task, base_url, manifest, first_run_prompt)
+        except BaseException:
+            await _release_auth_test_site(base_url, manifest)
+            raise
+    return manifest
+
+
+async def _run_auth_test_site_first_run(
+    task: "BenchmarkTask", base_url: str, manifest: dict, first_run_prompt: str
+) -> None:
+    """Run one agent to completion on the site before the graded run.
+
+    Behavior that spans two runs (a login that failed is not offered again, an
+    account made earlier can be signed into) needs a real first run whose only
+    job is to leave that state behind. It must complete; the graded run and the
+    evaluators then see the site's event log split by a run marker.
+    """
+    first_task = replace(
+        task,
+        prompt=first_run_prompt,
+        approval_handling=None,
+        expected_approval_count=None,
+        expected_attention_kind=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+    )
+    first_agent_id = await create_agent(base_url, first_task)
+    manifest["firstRunAgentId"] = first_agent_id
+    print(f"    ① First run agent created: {first_agent_id[:12]}...")
+    data, _triggered, _resolved, early_fail = await poll_agent(base_url, first_agent_id, first_task)
+    status = (data.get("agent") or {}).get("status")
+    if early_fail or status != "COMPLETED":
+        raise auth_test_site.AuthTestSiteFixtureError(
+            f"first run did not complete (status={status}, reason={early_fail}); agent {first_agent_id}"
+        )
+    await auth_test_site.mark_run(base_url, await _api_headers(), str(manifest["siteId"]), "graded-run")
+    print(f"    ① First run completed; graded run starts on site {manifest['siteId']}")
+
+
+async def _release_auth_test_site(base_url: str, manifest: Optional[dict]) -> None:
+    global _connected_inbox_released_at
+    auth_test_site.set_active_manifest(None)
+    if not manifest:
+        return
+    if (manifest.get("authOptionsPreview") or {}).get("emailOtpInboxes"):
+        _connected_inbox_released_at = time.monotonic()
+    try:
+        await auth_test_site.delete_site(
+            base_url,
+            await _api_headers(),
+            str(manifest["siteId"]),
+            user_id=_current_benchmark_user_id(),
+        )
+    except Exception as exc:
+        print(f"    ⚠ Failed to delete Rose Shop site {manifest.get('siteId')}: {exc}")
+
+
+async def _hydrate_auth_test_site_evidence(data: dict, base_url: Optional[str]) -> None:
+    manifest = auth_test_site.active_manifest()
+    evidence: dict = {"manifest": manifest, "report": None, "report_error": None}
+    if not manifest:
+        evidence["report_error"] = "no auth test site was created for this run"
+    elif not base_url:
+        evidence["report_error"] = "no backend base_url to fetch the site report from"
+    else:
+        try:
+            evidence["report"] = await auth_test_site.fetch_report(
+                base_url, await _api_headers(), str(manifest["siteId"])
+            )
+        except Exception as exc:
+            evidence["report_error"] = str(exc)
+    data.setdefault("_benchmark", {})["auth_test_site"] = evidence
 
 
 async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
@@ -12322,6 +12559,16 @@ def _root_deliverable_blob(data: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _root_final_answer_blob(data: dict) -> str:
+    """Root deliverable prose plus the structured outputs its Task Complete card shows the user."""
+    parts = [_root_deliverable_blob(data)]
+    for summary in _final_completion_summaries(data):
+        for output in summary.get("outputs") or []:
+            if isinstance(output, dict) and output.get("value") not in (None, ""):
+                parts.append(f"{output.get('label') or output.get('key')}: {output.get('value')}")
+    return "\n".join(part for part in parts if part)
+
+
 def _final_completion_summaries(data: dict) -> list[dict]:
     """Return durable root completion cards in transcript order."""
     return _completion_cards_from_messages(data.get("messages", []) or [])
@@ -12645,7 +12892,7 @@ async def _await_claude_code_chip_terminality(
             return latest
         await asyncio.sleep(1.5)
         try:
-            latest = await get_agent(base_url, agent_id)
+            latest = _retain_harness_benchmark_state(data, await get_agent(base_url, agent_id))
         except Exception as refresh_error:
             print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
 
@@ -13051,6 +13298,13 @@ def _run_declared_static_check(
             if not compact_tree:
                 return False, "T9: typed tree was empty"
             continue
+        if check_type == auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK:
+            ok, detail = auth_test_site.evaluate_outcome(
+                check, benchmark_state.get("auth_test_site"), _root_final_answer_blob(data)
+            )
+            if not ok:
+                return False, detail
+            continue
         if check_type == "root_deliverable_markers":
             blob = _root_deliverable_blob(data)
             minimum = int(check.get("min_chars", 4000))
@@ -13291,6 +13545,9 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    if _task_declares_static_check(task, auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK):
+        await _hydrate_auth_test_site_evidence(data, base_url)
+
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 
     _needs_cc_hydrate = any(
@@ -13515,14 +13772,16 @@ async def _run_single_task_as_run_user(
     plaid_transactions_fixture_action: Optional[str] = None
     free_credit_subscription_manifest: Optional[dict] = None
     gate_fixture_manifest: Optional[dict] = None
-    if task.name in {FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME, NEW_USER_PAYMENT_JOURNEY_TASK_NAME}:
+    new_user_payment_tasks = {NEW_USER_PAYMENT_JOURNEY_TASK_NAME, ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME}
+    if task.name in {FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME} | new_user_payment_tasks:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        fixture_user_id = (
-            _new_user_payment_journey_user_id()
-            if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME
-            else _free_credit_subscription_gate_user_id()
-        )
+        if task.name == ROSE_SHOP_NO_SUBSCRIPTION_TASK_NAME:
+            fixture_user_id = _current_benchmark_user_id()
+        elif task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
+            fixture_user_id = _new_user_payment_journey_user_id()
+        else:
+            fixture_user_id = _free_credit_subscription_gate_user_id()
         free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply", fixture_user_id)
         print(
             "    💳 Prepared free-credit subscription gate fixture: "
@@ -13530,9 +13789,9 @@ async def _run_single_task_as_run_user(
             f"credit={free_credit_subscription_manifest.get('credit_cents')}c "
             f"used={free_credit_subscription_manifest.get('used_cents')}c"
         )
-        if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
-            _run_new_user_payment_fixture()
-            await _verify_new_user_payment_start_state(base_url)
+        if task.name in new_user_payment_tasks:
+            _run_new_user_payment_fixture(fixture_user_id)
+            await _verify_new_user_payment_start_state(base_url, fixture_user_id)
     if task.name in GATE_FIXTURE_TASK_MODES:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
@@ -13635,6 +13894,7 @@ async def _run_single_task_as_run_user(
     realtime_tree_task: Optional[asyncio.Task] = None
     realtime_tree_stop = asyncio.Event()
     live_fixture_manifests: list[dict] = []
+    auth_test_site_manifest: Optional[dict] = None
     interrupt_cleanup_started = False
     interrupt_cleanup_ready = False
 
@@ -13710,6 +13970,7 @@ async def _run_single_task_as_run_user(
         memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
         if memory_fixture_manifests:
             live_fixture_manifests.append({"kind": "memory", "fixtures": memory_fixture_manifests})
+        auth_test_site_manifest = await _apply_auth_test_site(task, base_url)
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
@@ -14172,6 +14433,14 @@ async def _run_single_task_as_run_user(
         session_evidence_error = (data.get("_benchmark") or {}).get("claude_code_session_evidence_error")
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error
+        auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
+        if not auth_test_site_evidence and auth_test_site.active_manifest():
+            # A run that failed before its evaluators still needs the site's own
+            # record: it is the only account of what the agent actually tried.
+            await _hydrate_auth_test_site_evidence(data, base_url)
+            auth_test_site_evidence = (data.get("_benchmark") or {}).get("auth_test_site")
+        if auth_test_site_evidence:
+            logs["auth_test_site"] = auth_test_site_evidence
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -14495,6 +14764,7 @@ async def _run_single_task_as_run_user(
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
         await _restore_live_fixture_scenarios_async(live_fixture_manifests)
+        await _release_auth_test_site(base_url, auth_test_site_manifest)
         if previous_active_task_name is None:
             os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
         else:
@@ -15419,6 +15689,11 @@ def _parallel_task_runners(
     # The cross-process lock is held by the task runner below. Keep a local
     # semaphore too so one batch does not spin many waiters on the file lock.
     payment_surface = asyncio.Semaphore(1)
+    # The user's agent identity owns one inbox and one phone, and every browser
+    # agent of that user is handed the codes that arrive there. Hosted-auth
+    # lanes therefore run one at a time; other work overlaps. Run several
+    # stacks side by side for parallelism: each stack mints its own identity.
+    agent_inbox = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -15439,11 +15714,17 @@ def _parallel_task_runners(
                 return await run_with_batch_limit(task)
         return await run_with_batch_limit(task)
 
+    async def run_with_inbox_limit(task: BenchmarkTask) -> TaskResult:
+        if auth_test_site.shares_agent_inbox(getattr(task, "environment", None)):
+            async with agent_inbox:
+                return await run_with_other_surface_limits(task)
+        return await run_with_other_surface_limits(task)
+
     async def run_limited(task: BenchmarkTask) -> TaskResult:
         if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
             async with payment_surface:
-                return await run_with_other_surface_limits(task)
-        return await run_with_other_surface_limits(task)
+                return await run_with_inbox_limit(task)
+        return await run_with_inbox_limit(task)
 
     return [run_limited(task) for task in tasks]
 
@@ -15615,43 +15896,15 @@ async def main_async(args):
 
     await _update_world_model_before_simulation(args)
 
-    # Pre-flight: resolve per-task timeout from history corpus.
-    # In bootstrap mode, always use tasks.json timeout_seconds as the ceiling — passes
-    # recorded this run seed/extend the corpus for future dynamic caps. This lets
-    # bootstrap widen the cap when infra slowdown has pushed real durations past the
-    # existing p95 (otherwise the tight dynamic cap kills every run before it can pass).
-    # In non-bootstrap mode, incomplete history falls back to the configured task
-    # timeout so new or low-sample tasks can still run and accumulate pass data.
+    # Pre-flight: resolve each task's execution timeout.
     for t in tasks:
         if polar_wall_clock_disabled(t):
             budget = polar_browser_step_budget(t)
             t._resolved_timeout_seconds = 0
             print(f"  🧭 {t.name} → wall-clock disabled; browser step budget={budget if budget is not None else '—'}")
             continue
-        if args.bootstrap:
-            t._resolved_timeout_seconds = t.timeout_seconds
-            s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
-            print(
-                f"  🔧 bootstrap: {t.name} → {t.timeout_seconds}s "
-                f"(history n={s['count']}, recent_max={s['recent_max']}s)"
-            )
-            continue
-        cap = get_smoke_cap(t.name)
-        try:
-            history_timeout = _history_get_timeout(t.name, max_seconds=cap)
-        except InsufficientHistoryError as e:
-            t._resolved_timeout_seconds = _default_timeout_for_task(t, cap)
-            print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s (default; history n={e.have}/{e.need})")
-        else:
-            floor = get_timeout_floor(t.name)
-            t._resolved_timeout_seconds = max(history_timeout, floor) if floor else history_timeout
-            s = _history_summary(t.name, max_seconds=cap)
-            cap_note = f", cap={cap}s" if cap else ""
-            floor_note = f", floor={floor}s" if floor else ""
-            print(
-                f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                f"(recent_p95={s['recent_p95']}s, n={s['count']}{cap_note}{floor_note})"
-            )
+        t._resolved_timeout_seconds, note = resolve_task_execution_timeout(t, bootstrap=args.bootstrap)
+        print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
 
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector()

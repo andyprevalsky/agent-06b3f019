@@ -111,6 +111,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
       const settled = deferred<void>();
       const disconnected = deferred<void>();
       const closed: string[] = [];
+      const closeObserved = deferred<void>();
       const sessions = new Map([['foreign-session', 'ACTIVE']]);
       const ownedSessionId = `owned-${scenario}`;
       let responseClosed = false;
@@ -138,6 +139,7 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         assert.equal(pause, false, 'unacknowledged allocation must be released, not paused');
         closed.push(sessionId);
         sessions.set(sessionId, scenario === 'close-failure' ? 'ERROR' : 'CLOSED');
+        closeObserved.resolve();
         if (scenario === 'close-failure') throw new Error('fixture provider close unavailable');
       };
       const client = httpRequest({
@@ -170,7 +172,10 @@ export async function runBrowserInitDisconnectCases(): Promise<void> {
         assert.equal(JSON.parse(response.body).session_id, ownedSessionId);
         await observe(disconnected.promise);
       }
-      // Let the real async route consume the settled preparation and close.
+      // A disconnected allocation must reach its exact close; wait for that
+      // observation within the fixture bound instead of one event-loop turn.
+      if (scenario !== 'success' && scenario !== 'init-error') await observe(closeObserved.promise);
+      // Let the real async route consume the settled preparation.
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert(responseClosed, 'native response close was not observed');
       assert.equal(sessions.get('foreign-session'), 'ACTIVE');

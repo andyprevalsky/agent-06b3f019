@@ -39,6 +39,8 @@ import credentialPropagationRouter from './domains/credential-propagation/routes
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
 import agentcardRouter from './domains/agentcard/routes';
 import testPaymentRouter from './domains/test-payment/routes';
+import authTestSiteRouter from './domains/auth-test-site/routes';
+import { AUTH_TEST_SITE_BASE_PATH } from './domains/auth-test-site/config';
 import {
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
@@ -537,6 +539,7 @@ app.use('/api/purchases', purchasesRouter);
 // per-user MCP tool surface. Browser callbacks are public; status/tools require auth.
 app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
+app.use(AUTH_TEST_SITE_BASE_PATH, authTestSiteRouter); // Dev-only hosted sign-in site for auth benchmarks
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)

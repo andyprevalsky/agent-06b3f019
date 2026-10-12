@@ -245,12 +245,11 @@ export interface ReportAgentBugResult {
   success: true;
   name: string;
   url: string;
-  cursor_agent_id: string;
-  launch_source?: 'scm' | 'api';
+  run_id: string;
 }
 
 /**
- * Admin-only: launch a Cursor cloud agent to /rca this Rose agent.
+ * Admin-only: run the boxes.dev Bug Report automation to /rca this Rose agent.
  * Uses the admin token so the call still works while impersonating.
  */
 export async function reportAgentBug(
@@ -270,17 +269,53 @@ export async function reportAgentBug(
   });
 
   if (!response.ok) {
-    let message = 'Failed to report bug';
-    try {
-      const data = (await response.json()) as { error?: string };
-      if (typeof data.error === 'string' && data.error !== '') message = data.error;
-    } catch {
-      // keep default
-    }
-    throw new Error(message);
+    throw await readReportBugError(response, 'Failed to report bug');
   }
 
   return (await response.json()) as ReportAgentBugResult;
+}
+
+export interface BugReportScreenshot {
+  success: true;
+  name: string;
+  /** Signed image URL, valid for `expires_in` seconds. */
+  url: string;
+  expires_in: number;
+}
+
+async function readReportBugError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const data = (await response.json()) as { error?: string };
+    if (typeof data.error === 'string' && data.error !== '') return new Error(data.error);
+  } catch {
+    // keep fallback
+  }
+  return new Error(fallback);
+}
+
+/** Upload one Report Bug screenshot; the caller embeds the returned URL. */
+export async function uploadBugReportScreenshot(
+  agentId: string,
+  file: File,
+): Promise<BugReportScreenshot> {
+  // The browser sets the multipart boundary; drop the JSON content type.
+  const { 'Content-Type': _json, ...headers } = getAuthHeaders();
+  const adminToken = getAdminAccessToken();
+  if (adminToken !== null) {
+    headers.Authorization = `Bearer ${adminToken}`;
+  }
+  const form = new FormData();
+  form.append('file', file, file.name);
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/report-bug/screenshots`, {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+  if (!response.ok) {
+    throw await readReportBugError(response, 'Failed to upload screenshot');
+  }
+  return (await response.json()) as BugReportScreenshot;
 }
 
 // Update agent configuration

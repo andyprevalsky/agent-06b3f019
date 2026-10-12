@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { runTransactionWithRetry } from './database';
+import { databasePoolLimit, runTransactionWithRetry } from './database';
 import { retryWithBackoff } from './retry';
 import {
   type StoreResult,
@@ -321,6 +321,51 @@ function isLockNotAvailable(error: unknown): boolean {
   return meta?.code === POSTGRES_LOCK_NOT_AVAILABLE;
 }
 
+// A holder pins one pooled connection for its whole operation while the
+// operation's own queries need another, so holders of different roots can pin
+// every connection between them and none can run a query until the pool
+// timeout. Admission keeps the roots one process has open to under half its
+// pool; callers for other roots wait here in memory, holding nothing. A caller
+// for a root that is already open goes straight through: it waits in Postgres
+// and gives its connection back between the bounded attempts above. Like the
+// advisory lock itself, admission is not re-entrant.
+const openManifestRoots = new Map<string, number>();
+const manifestRootWaiters: Array<{ rootAgentId: string; admit: () => void }> = [];
+
+function manifestRootLimit(): number {
+  return Math.max(1, Math.floor((databasePoolLimit() - 1) / 2));
+}
+
+function admitWaitingManifestRoots(): void {
+  for (let index = 0; index < manifestRootWaiters.length;) {
+    const waiter = manifestRootWaiters[index]!;
+    const open = openManifestRoots.get(waiter.rootAgentId);
+    if (open === undefined && openManifestRoots.size >= manifestRootLimit()) {
+      index += 1;
+      continue;
+    }
+    openManifestRoots.set(waiter.rootAgentId, (open ?? 0) + 1);
+    manifestRootWaiters.splice(index, 1);
+    waiter.admit();
+  }
+}
+
+async function admitManifestLock(rootAgentId: string): Promise<() => void> {
+  await new Promise<void>((admit) => {
+    manifestRootWaiters.push({ rootAgentId, admit });
+    admitWaitingManifestRoots();
+  });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const open = openManifestRoots.get(rootAgentId) ?? 1;
+    if (open > 1) openManifestRoots.set(rootAgentId, open - 1);
+    else openManifestRoots.delete(rootAgentId);
+    admitWaitingManifestRoots();
+  };
+}
+
 export async function withArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
@@ -347,6 +392,7 @@ async function attemptArchiveManifestLock<T>(
   rootAgentId: string,
   operation: (ownership: ManifestLockOwnership) => Promise<T>
 ): Promise<T> {
+  const release = await admitManifestLock(rootAgentId);
   let enteredOperation: Promise<T> | undefined;
   try {
     return await runTransactionWithRetry(
@@ -387,6 +433,7 @@ async function attemptArchiveManifestLock<T>(
     // Prisma can reject on expiry before the callback's bounded storage I/O ends.
     // Join that work; ownership checks prevent another rewrite or a false ACK.
     await enteredOperation?.catch(() => {});
+    release();
   }
 }
 

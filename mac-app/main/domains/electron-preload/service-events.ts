@@ -15,6 +15,7 @@ import type {
   IPC,
   UploadProgress,
   QuickQueryToggleState,
+  QuickQueryHeldSubmit,
   QuickQueryPayload,
   UpdateStatusPayload,
   PasskeyImportResult,
@@ -26,7 +27,6 @@ export function buildEventBridge(
   IPC,
   | 'onProgress'
   | 'onQuickQueryToggle'
-  | 'onQuickQuerySubmit'
   | 'onUpdateStatus'
   | 'onUpdateProgress'
   | 'onFocusInput'
@@ -38,9 +38,6 @@ export function buildEventBridge(
     },
     onQuickQueryToggle: (callback: (state: QuickQueryToggleState) => void) => {
       ipcRenderer.on('quick-query:toggle', (_, state) => callback(state as QuickQueryToggleState));
-    },
-    onQuickQuerySubmit: (callback: (payload: QuickQueryPayload) => void) => {
-      ipcRenderer.on('quick-query:submit', (_, payload) => callback(payload as QuickQueryPayload));
     },
     onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => {
       ipcRenderer.on('update:status', (_, payload) => callback(payload as UpdateStatusPayload));
@@ -59,11 +56,57 @@ export function buildEventBridge(
   };
 }
 
+/**
+ * Launcher submits wait in the main process until the consumer claims them,
+ * because the main window may have been (re)opened to receive one. List what
+ * is held on subscribe and again whenever the main process says one is
+ * waiting, and hand each submit over with the claim that removes it there.
+ */
+function buildQuickQuerySubmitSubscription(
+  ipcRenderer: IpcRenderer
+): (callback: (payload: QuickQueryPayload, claim: () => Promise<boolean>) => void) => () => void {
+  // A held submit is listed until it is claimed; forward each one once.
+  const forwarded = new Set<string>();
+
+  const claimOf = (id: string) => (): Promise<boolean> =>
+    (ipcRenderer.invoke('quick-query:claim', id) as Promise<{ claimed: boolean }>).then(
+      (result) => result.claimed,
+      (error: unknown) => {
+        // Still held by the main process: let the next listing offer it again.
+        forwarded.delete(id);
+        console.error('[QuickQuery] Failed to claim a pending submit', error);
+        return false;
+      }
+    );
+
+  return (callback) => {
+    const take = (): void => {
+      (ipcRenderer.invoke('quick-query:take') as Promise<QuickQueryHeldSubmit[]>)
+        .then((held) => {
+          for (const { id, payload } of held) {
+            if (forwarded.has(id)) continue;
+            forwarded.add(id);
+            callback(payload, claimOf(id));
+          }
+        })
+        .catch((error: unknown) => {
+          console.error('[QuickQuery] Failed to take pending submits', error);
+        });
+    };
+    ipcRenderer.on('quick-query:pending', take);
+    take();
+    return () => {
+      ipcRenderer.removeListener('quick-query:pending', take);
+    };
+  };
+}
+
 export function buildUnsubscribableEventBridge(
   ipcRenderer: IpcRenderer
 ): Pick<
   IPC,
   | 'onOpenAgent'
+  | 'onQuickQuerySubmit'
   | 'onClaudeSetupStatus'
   | 'onGptSetupStatus'
   | 'onWhatsAppQRCode'
@@ -92,6 +135,7 @@ export function buildUnsubscribableEventBridge(
         openAgentCallbacks.delete(callback);
       };
     },
+    onQuickQuerySubmit: buildQuickQuerySubmitSubscription(ipcRenderer),
     onClaudeSetupStatus: (callback: (status: string) => void) => {
       const handler = (_event: IpcRendererEvent, status: unknown) => callback(status as string);
       ipcRenderer.on('claude:setupStatus', handler);

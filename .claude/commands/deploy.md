@@ -16,9 +16,10 @@ Every human approval request in this command—including prompt or
 agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
-composing the request. Its Evidence, Detail, Before Behavior, After Behavior,
-and Downstream Implications sections are mandatory and additive to the
-deploy-specific telemetry, file-link, and snapshot rules below.
+composing the request. Its code-block presentation and its Before Behavior,
+After Behavior, TL;DR, Evidence, Detail, and Downstream Implications sections
+are mandatory and additive to the deploy-specific telemetry, file-link, and
+snapshot rules below.
 
 ---
 
@@ -35,6 +36,25 @@ echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
 If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 14a rename.
+
+## Step 0g: Start the deploy goal
+
+Start the built-in `/goal` with this condition (fill in the branch). If you
+cannot start it yourself, print `/goal <condition>` on its own line for the
+user and continue.
+
+The goal ends when its condition is met. At a defined stop it lets the turn
+end and stays active for the user's reply. Only the user ends it early, with
+`/goal clear`; never clear or pause it yourself.
+
+    /deploy of <branch> is finished: the PR is merged, every applicable
+    production lane is verified, and the scorecard ending in READY TO CLOSE
+    is posted. Stopping earlier is allowed only when the last message is one
+    of /deploy's defined stops: a prompt, agent-behavior or
+    trajectory-injection approval request (Steps 0p/0b/0c); a credential or
+    billing escalation; a request for an explicit gate override; an approval
+    for a destructive or irreversible action; or a deploy failure that cannot
+    be fixed without the user.
 
 ---
 
@@ -203,7 +223,9 @@ CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/(cloud_batch_cleanup_test|cloudbench_(dependency_sync|recovery_review)_test|run_benchmark|wall_clock_backstop_test)\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
-CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
+# Append-only benchmark history ledgers (agents/benchmarks/history/*.jsonl) are
+# data, not payment lifecycle code; a main sync carries other deploys' rows.
+CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/history/' | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
 # Keep the aggregate coverage worker pool within this 14-core deploy host.
 # Backend blackboxes and unit files overlap, so both pools count. An uncapped
@@ -705,7 +727,26 @@ If the failure is renderer-only (jsdom + React), check `mac-app/tests/blackbox/t
 
 ## Step 4cb: Cloud benchmark controller regressions (skip if `$CHANGED_CLOUDBENCH` is empty)
 
-Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run:
+Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run.
+
+**Run this gate on Linux, not on the Mac.** Several of these suites read `/proc` and
+depend on native Linux process semantics; on macOS three of them fail identically on
+`main` and on every branch, which is not a signal about the branch. The gate's home is
+a throwaway machine in the benchmark Fly app, built from the fleet's warm image, that
+fetches the pushed HEAD and runs the suites below:
+
+```bash
+bash scripts/run-deploy-stage cloudbench-controller -- bash scripts/run-cloudbench-controller-gate
+```
+
+It prints `GATE_STEP <suite> exit=N` per suite and exits with the overall result; the
+machine log lands under `.context/cloudbench-gate-<machine>.log` and every failed suite's
+complete output is copied to `.context/cloudbench-gate-<machine>-step-<n>.log` before the
+machine is destroyed. Run one suite with `-- "<command>"`. To
+check whether a failure is pre-existing, run the same command with
+`CLOUDBENCH_GATE_REF=$(git rev-parse origin/main)`. Only run the commands below directly on
+a Linux host; a macOS failure of the `/proc`-dependent suites does not block the deploy and
+does not need a human override, but the Linux gate must pass. These are the suites it runs:
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
@@ -730,7 +771,7 @@ agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync
   agents/benchmarks/cloudbench_recovery_review_test.py \
   agents/benchmarks/cloudbench_codex_auth_test.py \
   agents/benchmarks/cloud_batch_cleanup_test.py \
-  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or evaluated_wrapper_completion_publishes_once or data_plane_mirror_reads_current_owner_port or fleet_publishes_evaluation_before_teardown or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
+  -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or exact_recovery_consumes_runtime_receipt_completed_absent_primary or exact_recovery_consumes_runtime_receipt_publishes_audited_release or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or evaluated_wrapper_completion_publishes_once or data_plane_mirror_reads_current_owner_port or fleet_publishes_evaluation_before_teardown or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'
 if [ -z "$CHANGED_AGENTS" ]; then
   cd agents && ./venv/bin/python scripts/run_blackbox_tests.py benchmark
 fi
@@ -2389,6 +2430,13 @@ spec in one job with four Playwright workers and one shared authenticated
 session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
 
 ```bash
+# The boxes.dev gh wrapper replaces GH_TOKEN with an App token that cannot
+# dispatch workflows; call its binary with the repo's workflow-scoped token.
+if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
+  GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
+  export GH_TOKEN
+  gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
+fi
 python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
@@ -2414,6 +2462,20 @@ python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
 This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+
+If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
+`Resource not accessible by integration`. In that case, run the workflow's two
+steps locally against production with the same secrets from `back-end/.env`.
+Report the lane as `run locally` under SHIPPED WITH:
+
+```bash
+set -a && . back-end/.env && set +a
+export TEST_API_KEY="$BACKEND_API_KEY" BACKEND_URL=https://navi-j9a9.onrender.com \
+  FRONTEND_URL=https://www.roselabs.ai
+SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 \
+  bash front-end/scripts/run-semantic-tests.sh --prod
+SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-lifecycle-latency
+```
 
 ## Step 13c: AgentCard production lifecycle gate
 
@@ -2481,9 +2543,89 @@ Record the completed lifecycle before the final response:
 python3 scripts/record_factory_event.py deploy outcome completed
 ```
 
-After the new branch is created, report to the user:
+After the new branch is created, the final message is only this scorecard in a
+`text` block, with no prose before or after it. Fill every value from recorded
+evidence:
 
-- PR URL
-- Which services were deployed
-- Any review issues that were fixed along the way
-- The new branch name
+- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: sum every
+  attempt of the lane (passed, failed, interrupted) and show the run count and
+  failure causes. Production lane times come from `.context/factory-events.jsonl`
+  and also cover every attempt. Parallel lanes overlap.
+- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event,
+  broken down so it adds up: active gate/review/prod time (union of intervals) +
+  each blocked window + other time (investigation, fixes, waiting on the user).
+- `💸` is the summed benchmark `cost_cents` of this deploy's runs.
+
+Lane marks:
+
+- `✅` means the lane ran and passed.
+- `❌` means failed.
+- `⚠️` is reserved for a required check that was skipped, with the reason.
+- Omit lanes that did not apply, except TEMPORAL, which is always shown.
+
+TEMPORAL reports Step 13–13ab:
+
+- After a cutover: old → new generation, workflows drained, and force-migrated
+  count.
+- Otherwise: `no cutover needed` and the live pointer generation, read with
+  Step 13's queue-pointer `--read` query.
+
+SHIPPED WITH has one `▲` row per warning, override, skip, substitution, or
+unreviewed commit. Each row shows the wall time it wasted: stopped, failed or
+superseded attempts, review cycles that produced no review, retries, and detours
+around it. Use `0s` when it cost nothing, add a total row, or write `▲ none`.
+
+NOT SHIPPED has one `✖` row per piece of this workspace's work that is absent
+from `origin/main` after the merge, each with a concise explanation of what the
+change is and why it was not included:
+
+- Non-ignored uncommitted or untracked changes.
+- Reverted or unmerged commits on branches this workspace created or pushed.
+
+Ignore other workspaces' branches. Write `✖ none` if there is nothing.
+
+End with a `READY TO CLOSE` line: `✅` when nothing is left open; `⚠️` plus the
+open items when work remains outside the merge (unsettled prod state, unshipped
+rows, follow-ups); `❌` when the deploy is not complete.
+
+```text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🚀 DEPLOY SCORECARD                                  ✅ SHIPPED
+ #1456 · bounded Hub index repair · 014727c → main
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATIC     ✅  lint · tsc · structural · 45 gates            4m55s
+ COVERAGE   ✅  BE 190/190 domains · 89.2% lines             11m10s
+ LIVE       ✅  creds 6/7 · amplitude · failover · seed 156MB  2m15s
+ SMOKE      ✅  8/8 benches                                  18m14s
+ SEMANTIC   ✅  8/8 UI · latency p50 0.7–1.9s                10m06s
+ SANDBOX    ✅  Claude Code E2B 56/56                           37s
+ REVIEW     ⚠️  3 cycles · 1 fixed · last skipped (quota)    12m14s
+────────────────────────────────────────────────────────────────
+ PROD       ✅  Render live · 14/14 probes · 0 log errors     6m23s
+            ✅  semantic 6/6 · AgentCard $1 → refunded       11m14s
+ TEMPORAL   ✅  no cutover needed · gen 7d9946f524be live
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⏱ <total> = <active> active + <blocked> blocked + <other> other
+ 💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
+ 🔗 github.com/Rose-Ai-Labs/rose/pull/1456
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ▲ SHIPPED WITH                                          ⌛ wasted
+ ▲ last review cycle skipped · CodeRabbit + Claude quota      4m17s
+ ▲ history-ledger revert · GitHub merge conflict              2m27s
+ ▲ Anthropic API credits exhausted · warn-only                   0s
+ ▲ prod semantic run locally · GH token can't dispatch           0s
+                                                    total     6m44s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ✖ NOT SHIPPED · this workspace
+ ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans · reverted
+   because GitHub flagged a ledger merge conflict
+ ✖ worktree   prod AgentCard history rows · uncommitted; landing them
+   would have changed HEAD after review
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ READY TO CLOSE  ✅  nothing left open
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+That example is the PR #1456 deploy. Keep the layout and replace every value. For
+a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
+failing lane is listed first, and lanes that never ran are omitted.

@@ -31,7 +31,7 @@ const authState = {
   signOut: vi.fn(async () => {}),
 };
 const ctxState = {
-  agent: null as never,
+  agent: null as unknown,
   selectedAgentId: null as string | null,
   messages: [],
   streamingBubbles: new Map(),
@@ -497,10 +497,11 @@ describe('useTerminalAgents', () => {
     resetAnimationState.mockReset();
     ctxState.agent = null;
     ctxState.selectedAgentId = null;
-    (ctxState.setSelectedAgentId as never).mockReset();
+    ctxState.setSelectedAgentId.mockReset();
     authState.isAuthenticated = true;
     authState.isAnonymous = false;
     authState.isFullySignedIn = true;
+    authState.loading = false;
     authState.refreshAuthState.mockClear();
     authState.signOut.mockClear();
     vi.mocked(signOut).mockResolvedValue(undefined);
@@ -613,15 +614,21 @@ describe('useTerminalAgents', () => {
     unmount();
   });
 
-  it('quick-query event (unauthenticated) opens login modal', async () => {
+  it('quick-query event (unauthenticated) opens login modal once auth has resolved', async () => {
     authState.isAuthenticated = false;
     authState.isFullySignedIn = false;
-    const { result, unmount } = renderHook(() =>
+    authState.loading = true;
+    const { result, rerender, unmount } = renderHook(() =>
       useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => {
       dispatchQuickQueryEvent({ query: 'hi there', submittedAt: Date.now() });
     });
+    // A launcher submit can re-create the main window and land while auth is
+    // still resolving, when even a signed-in user reads as signed out: held.
+    expect(result.current.loginModalOpen).toBe(false);
+    authState.loading = false;
+    rerender();
     await waitFor(() => expect(result.current.loginModalOpen).toBe(true));
     unmount();
   });

@@ -14,6 +14,106 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from _test_utils import BlackboxResult, assert_captured_call, setup_mock
 
 
+def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
+    """A page-script result that reads a typed password back must not put it in the model's context.
+
+    Seen in a hosted-auth benchmark lane: the agent ran `evaluate` on the sign-in
+    form, the result carried the decrypted password, and the plaintext then
+    appeared in the agent's reasoning and transcript.
+    """
+    from domains.spawn_browser_agent_v3.service_crypto import mask_secret_values
+
+    secret_refs = {
+        "pwd:avery@example.com": "hunter2-correct#7a",
+        "card_number": "4242424242424242",
+        "card_cvv": "123",
+        "card_name": "Avery Ross",
+    }
+    result = {
+        "success": True,
+        "result": 'email=avery@example.com password="hunter2-correct#7a"',
+        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross"}],
+        "count": 3,
+        # A page script can echo the typed value back as a dictionary KEY too;
+        # what a tool read from the page sits beneath the result's own fields.
+        "page": {"entered-hunter2-correct#7a": True},
+    }
+    masked = mask_secret_values(result, secret_refs)
+    assert masked["page"] == {"entered-pwd:avery@example.com": True}, (
+        "secret in a page-supplied key must be masked too: %r" % masked["page"]
+    )
+    assert masked["result"] == 'email=avery@example.com password="pwd:avery@example.com"', masked
+    assert masked["nested"][0]["value"] == "card card_number cvv 123 for Avery Ross", masked
+    assert masked["count"] == 3 and masked["success"] is True
+    assert result["result"].endswith('hunter2-correct#7a"'), "the caller's result is not mutated"
+    assert mask_secret_values("nothing secret here", secret_refs) == "nothing secret here"
+    assert mask_secret_values({"result": "x"}, None) == {"result": "x"}
+
+    # The result's own field names are the tool's protocol and are read after
+    # masking. A user whose saved password is the word `success` must not get
+    # that field renamed: a failed action would then read as successful (a
+    # missing `success` defaults to true).
+    failed = mask_secret_values(
+        {"success": False, "status": "blocked", "page": {"success": "typed success"}},
+        {"pwd:avery@example.com": "success"},
+    )
+    assert failed["success"] is False and failed["status"] == "blocked", failed
+    assert failed["page"] == {"pwd:avery@example.com": "typed pwd:avery@example.com"}, failed
+
+
+async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed() -> None:
+    """A sign-up password is typed by ref and kept, so the new account can be signed into later.
+
+    Before this the agent made up a password at sign-up and nothing saved it: the
+    account it had just created was unreachable on the next run.
+    """
+    from _test_utils import get_captured_requests, teardown_mock
+    from domains.spawn_browser_agent_v3.repo import save_minted_account_password
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        MINTED_NEW_PASSWORD_REF,
+        build_auth_options_prompt_section,
+    )
+
+    minted = {
+        "id": "minted-row-1",
+        "email": "rose.cedar11@mail.example",
+        "phone": None,
+        "disabled": False,
+        "newPassword": {"ref": "pwd:new", "encryptedPassword": "envelope"},
+    }
+    section, encrypted_refs, _origins, credential_refs = build_auth_options_prompt_section(
+        {"realm": "shop.example", "minted": minted}
+    )
+    assert MINTED_NEW_PASSWORD_REF == "pwd:new"
+    assert (
+        "- Minted account: Email -> rose.cedar11@mail.example (codes mailed here reach you automatically) | Sign-up password ref (new accounts only): pwd:new | enabled" in section
+    ), section
+    assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
+    assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}
+
+    older_backend, refs, _origins, _credential_refs = build_auth_options_prompt_section(
+        {"realm": "shop.example", "minted": {**minted, "newPassword": None}}
+    )
+    assert "password ref" not in older_backend and refs == {}
+
+    setup_mock({"/api/auth-options/minted-password": {"status": 200, "json": {"saved": True}}})
+    try:
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="k1"))
+        saved = await save_minted_account_password(config, "user-1", "https://shop.example/signup")
+        assert saved is True
+        call = assert_captured_call(
+            0,
+            url_contains="/api/auth-options/minted-password",
+            method="POST",
+            body_contains={"origin": "https://shop.example/signup"},
+        )
+        headers = {str(key).lower(): value for key, value in (call.get("requestHeaders") or {}).items()}
+        assert headers.get("x-user-id") in (None, "user-1"), headers
+        assert len(get_captured_requests()) == 1
+    finally:
+        teardown_mock()
+
+
 def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
     from domains.spawn_browser_agent_v3.cdp_urls import steel_cdp_connection_url
 
@@ -205,6 +305,14 @@ def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
         auth_realm_from_url("https://localhost.evil.com/?authRealm=doordash.com")
         != "doordash.com"
     )
+    # Hosted benchmark sign-in sites sit behind whichever dev tunnel run.sh opened.
+    for tunnel_host in ("abc.trycloudflare.com", "abc.ngrok-free.app", "abc.ngrok-free.dev"):
+        site_url = f"https://{tunnel_host}/api/test-sites/rose-shop/abc/login?authRealm=rose-shop-abc"
+        assert auth_realm_from_url(site_url) == "rose-shop-abc"
+        assert auth_realm_matches_url("rose-shop-abc", site_url)
+    assert auth_realm_from_url("https://shop.example.com/?authRealm=amazon.com") == "shop.example.com"
+    # A tunnel anyone can open may stand in for a hosted fixture, never for a real site.
+    assert auth_realm_from_url("https://abc.trycloudflare.com/?authRealm=bank.com") != "bank.com"
     assert (
         auth_realm_from_url("https://anyone.loca.lt/?authRealm=doordash.com")
         != "doordash.com"
@@ -472,7 +580,9 @@ def _webauthn_browser_double():
             return {"credentials": list(creds.values())}
         if method == "Runtime.evaluate":
             return {"result": {"value": "https://www.amazon.com/"}}
-        if method == "Page.reload":
+        if method == "Page.getNavigationHistory":
+            return {"currentIndex": 0, "entries": [{"transitionType": "link"}]}
+        if method == "Page.navigate":
             return {}
         raise AssertionError(method)
 
@@ -825,10 +935,51 @@ async def test_passkey_cdp_session_change_rearms_webauthn() -> None:
     enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
 
     session_holder["id"] = "session-target-a-recycled"
-    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    # Re-arm issues WebAuthn.enable; one_internal retry may enable once more
-    # after disable — both count as correct recovery of the new CDP session.
+    # Nothing new is seeded: the authenticator survives the session change and
+    # only the new session's WebAuthn environment is enabled.
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
     assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") >= enable_before + 1
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_cdp_session_change_keeps_a_healthy_authenticator() -> None:
+    """A new CDP session arrives with every action. Rebuilding the authenticator
+    on each one removed it on the very click that started a passkey ceremony:
+    the site got no assertion and the agent fell back to the password."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    session = _fake_webauthn_session(send, target_id="target-a")
+    session_holder = {"id": "session-1"}
+
+    async def get_or_create_cdp_session(tid, focus=False):
+        async def scoped_send(method, params=None, _tid=tid):
+            return await send(method, params or {}, _tid)
+
+        return SimpleNamespace(send=scoped_send, session_id=session_holder["id"])
+
+    session.get_or_create_cdp_session = get_or_create_cdp_session
+    dom = DOMService(cdp_url="")
+    dom._session = session
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    authenticators_before = dict(state.authenticators)
+    calls_before = len(state.calls)
+
+    session_holder["id"] = "session-2"
+    await dom.ensure_browser_overlays_suppressed()
+
+    after = [method for method, _ in state.calls[calls_before:]]
+    assert "WebAuthn.enable" in after, "the new session must be enabled"
+    rebuilt = [m for m in after if m in ("WebAuthn.removeVirtualAuthenticator", "WebAuthn.addVirtualAuthenticator")]
+    assert rebuilt == [], f"a healthy authenticator was torn down on a session change: {rebuilt}"
+    assert state.authenticators == authenticators_before
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+    # An authenticator Chrome no longer knows is still rebuilt.
+    state.reset_environment("target-a")
+    session_holder["id"] = "session-3"
+    await dom.ensure_browser_overlays_suppressed()
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
 
 
@@ -845,12 +996,13 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
         )
     }
 
+    navigated: list = []
+
     async def send_with_reload(method: str, params: dict, target_id: str):
         if method == "Runtime.evaluate":
             return {"result": {"value": href["value"]}}
-        if method == "Page.reload":
-            state.calls.append((method, target_id))
-            return {}
+        if method == "Page.navigate":
+            navigated.append(params.get("url"))
         return await send(method, params, target_id)
 
     dom = DOMService(cdp_url="")
@@ -859,9 +1011,47 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert any(method == "Page.reload" for method, _ in state.calls), (
-        "VA rebuild on Amazon sign-in must reload so Conditional UI re-probes"
+    assert navigated == [href["value"]], (
+        "VA rebuild on Amazon sign-in must load the page again so Conditional UI re-probes"
     )
+
+
+async def test_passkey_rebuild_never_resubmits_a_form() -> None:
+    """A page produced by a form submit is left alone: loading it again would
+    either send the form a second time (a second failed password, a second
+    order) or throw away the result the agent has not read yet."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    href = "https://www.amazon.com.mx/ap/signin"
+    transition = {"value": "form_submit"}
+
+    async def send_after_submit(method: str, params: dict, target_id: str):
+        if method == "Runtime.evaluate":
+            return {"result": {"value": href}}
+        if method == "Page.getNavigationHistory":
+            state.calls.append((method, target_id))
+            if transition["value"] is None:
+                raise RuntimeError("history unavailable")
+            return {"currentIndex": 1, "entries": [{"transitionType": "link"}, {"transitionType": transition["value"]}]}
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send_after_submit)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    loads = [method for method, _ in state.calls if method in ("Page.reload", "Page.navigate")]
+    assert loads == [], f"a submitted form's result page was loaded again: {loads}"
+
+    # Not knowing how the page was reached is treated the same way.
+    transition["value"] = None
+    dom._passkey_auth_reload_at_by_target.clear()
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    loads = [method for method, _ in state.calls if method in ("Page.reload", "Page.navigate")]
+    assert loads == [], f"page loaded again without knowing how it was reached: {loads}"
 
 
 async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
@@ -874,9 +1064,6 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     async def send_with_reload(method: str, params: dict, target_id: str):
         if method == "Runtime.evaluate":
             return {"result": {"value": href["value"]}}
-        if method == "Page.reload":
-            state.calls.append((method, target_id))
-            return {}
         return await send(method, params, target_id)
 
     dom = DOMService(cdp_url="")
@@ -885,7 +1072,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert not any(method == "Page.reload" for method, _ in state.calls), (
+    assert not any(method == "Page.navigate" for method, _ in state.calls), (
         "Amazon passkey must not reload an unrelated Google sign-in page"
     )
 
@@ -894,7 +1081,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     )
     state.reset_environment("target-a")
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    first_reloads = sum(1 for method, _ in state.calls if method == "Page.reload")
+    first_reloads = sum(1 for method, _ in state.calls if method == "Page.navigate")
     assert first_reloads == 1
 
     # Same href after another rebuild must not reload again (preserve typed fields).
@@ -902,7 +1089,7 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     # Expire cooldown so only the href gate applies.
     dom._passkey_auth_reload_at_by_target.clear()
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert sum(1 for method, _ in state.calls if method == "Page.reload") == first_reloads
+    assert sum(1 for method, _ in state.calls if method == "Page.navigate") == first_reloads
 
 
 async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
@@ -1134,8 +1321,20 @@ async def run_all_tests():
         test_passkey_cdp_session_change_rearms_webauthn,
     )
     await runner.record_async(
+        "passkey_cdp_session_change_keeps_a_healthy_authenticator",
+        test_passkey_cdp_session_change_keeps_a_healthy_authenticator,
+    )
+    await runner.record_async(
         "passkey_rebuild_reloads_amazon_signin_page",
         test_passkey_rebuild_reloads_amazon_signin_page,
+    )
+    await runner.record_async(
+        "passkey_rebuild_never_resubmits_a_form",
+        test_passkey_rebuild_never_resubmits_a_form,
+    )
+    await runner.record_async(
+        "passkey_auth_reload_skips_foreign_host_and_same_href",
+        test_passkey_auth_reload_skips_foreign_host_and_same_href,
     )
     await runner.record_async(
         "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
@@ -1148,6 +1347,14 @@ async def run_all_tests():
     await runner.record_async(
         "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",
         test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site,
+    )
+    await runner.record_async(
+        "minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed",
+        test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed,
+    )
+    runner.record(
+        "tool_results_never_echo_a_saved_password_or_card_number",
+        test_tool_results_never_echo_a_saved_password_or_card_number,
     )
     await runner.record_async(
         "ceremony_capable_actions_arm_the_live_target_before_running",

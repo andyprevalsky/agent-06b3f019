@@ -158,7 +158,9 @@ export async function respond(id: string, userId: string, data: RespondInput) {
   if (request === null) throw new NotFoundError('Attention request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
 
-  if (request.authAssistance !== null) {
+  // A decline is an answer like any other gate's: it must reach the agent as a
+  // decline, never be recorded as the user having signed in.
+  if (request.authAssistance !== null && data.response.trim() !== REJECTED_RESPONSE) {
     const result = await completeAuthAssistanceForUser(id, userId);
     if (result.status === 'not_found') throw new NotFoundError('Attention request not found');
     if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');

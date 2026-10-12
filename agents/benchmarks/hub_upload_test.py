@@ -17,6 +17,7 @@ from benchmarks.hub_upload import (
     _fallback_canonicalize_agent_tree,
     _fallback_tree_child_transcript_count,
     durable_open_agent_url,
+    fit_bundle_to_upload_limit,
     hub_upload_enabled,
     is_ephemeral_hub_url,
     mirror_run_bundle_to_durable_hub,
@@ -60,6 +61,37 @@ def _serve(record: list, *, decoded_limit: int | None = None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_hub_transport_explicit_retry_keeps_group_member_and_physical_attempt(monkeypatch):
+    record = []
+    server, url = _serve(record)
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setenv("BENCHMARK_HUB_GROUP_RUN_ID", "original-fifty-group")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_JOB_ID", "r001-j0001")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_RUN", "1")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "50")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_STARTED_AT", "2026-10-07T22:42:56+00:00")
+    try:
+        for attempt in (1, 2):
+            monkeypatch.setenv("RUN_BENCH_CAMPAIGN_ATTEMPT", str(attempt))
+            bundle = {"run_id": f"physical-attempt-{attempt}", "tasks": [{"name": "unchanged-task", "passed": False,
+                      "status": "INFRA_ERROR" if attempt == 1 else "FAILED", "lifecycle_stage": "released"}]}
+            assert upload_run_bundle(bundle, required=True)
+        bodies = [request['body'] for request in record]
+        assert [body['run_id'] for body in bodies] == ['physical-attempt-1', 'physical-attempt-2']
+        assert [body['group_attempt'] for body in bodies] == [1, 2]
+        assert all(body['group_member_id'] == 'r001-j0001' and body['group_total'] == 50 for body in bodies)
+        assert all(body['group_run_id'] == 'original-fifty-group' and body['group_timestamp'] == '2026-10-07T22:42:56+00:00' for body in bodies)
+        assert bodies[0]['tasks'][0]['passed'] is False and bodies[0]['tasks'][0]['status'] == 'INFRA_ERROR'
+        assert bodies[1]['tasks'][0]['passed'] is False and bodies[1]['tasks'][0]['status'] == 'FAILED'
+        with pytest.raises(ValueError, match='attempt identity changed'):
+            upload_run_bundle({**bundle, 'group_attempt': 1}, required=True)
+        assert len(record) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_hub_transport_keeps_complete_transcripts_without_diagnostic_blobs(monkeypatch):
@@ -118,6 +150,37 @@ def test_upload_timeout_scales_with_payload_size():
     assert timeout >= 120.0
     assert timeout <= 300.0
     assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
+
+
+def test_oversized_bundle_is_fitted_by_dropping_oldest_worker_logs():
+    """A 26-task run record was 125MB, nearly all raw worker log lines; the Hub
+    answered 413 and a fully passing run exited non-zero."""
+    line = "x" * 200
+
+    def task(name: str, lines: int) -> dict:
+        return {
+            "name": name,
+            "passed": True,
+            "logs": {
+                "messages": [{"role": "USER", "text": f"goal of {name}"}],
+                "worker_logs": [f"{index:06d} {line}" for index in range(lines)],
+            },
+        }
+
+    bundle = {"run_id": "r1", "tasks": [task("big", 4000), task("small", 200)]}
+    limit = 300_000
+    fitted = fit_bundle_to_upload_limit(bundle, max_bytes=limit)
+
+    assert len(json.dumps(fitted).encode("utf-8")) <= limit
+    big, small = fitted["tasks"]
+    assert big["logs"]["messages"] == bundle["tasks"][0]["logs"]["messages"], "transcripts are never trimmed"
+    assert small["logs"]["worker_logs"] == bundle["tasks"][1]["logs"]["worker_logs"], "only the heaviest task is cut"
+    kept = big["logs"]["worker_logs"]
+    assert kept and kept[-1].startswith("003999"), "the newest lines are the ones kept"
+    assert big["logs"]["worker_logs_omitted_for_upload"] == 4000 - len(kept)
+    assert len(bundle["tasks"][0]["logs"]["worker_logs"]) == 4000, "the on-disk record is not mutated"
+
+    assert fit_bundle_to_upload_limit(bundle, max_bytes=10_000_000) is bundle, "a bundle that fits is sent as is"
 
 
 def test_hub_requests_preserve_external_proxy_routing(monkeypatch):
@@ -520,6 +583,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
     from datetime import datetime, timezone
     from pathlib import Path
 
+    from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
     from benchmarks.hub_upload import live_bundle_from_report_card
 
     repo = (
@@ -565,10 +629,8 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
-        start = fleet.index("finalize_terminal_projection() {")
-        end = fleet.index("\ncleanup() {", start)
         command = (
-            fleet[start:end]
+            _extract_fleet_function(fleet, "finalize_terminal_projection() {")
             + "\n"
             + setup
             + "PROVISION_POOL=\n"

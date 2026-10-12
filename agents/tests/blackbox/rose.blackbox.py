@@ -150,6 +150,11 @@ def test_oss_pool_is_open_weights_only():
     assert oss.direct_auth_enabled is False
     assert oss.waterfall == ("moonshotai/kimi-k3",)
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
+    # Its funded Azure fallback is open-weights too, never the inert gpt_auth_model.
+    from providers.rose.pools import foundry_model
+
+    assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
+    assert foundry_model(oss) != oss.gpt_auth_model
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
     # The explicit WMH runner pins its exact GPT-6.1 Sol waterfall model.
     auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-wmh-gpt61"}
@@ -5718,6 +5723,7 @@ async def test_collect_retries_a_cut_off_reply_with_a_larger_limit_then_the_next
     # usage, per attempt with the model that produced them.
     assert response.usage.get("prompt_tokens") == 15, response.usage
     assert response.usage.get("completion_tokens") == 27, response.usage
+    assert response.usage.get("total_tokens") == 42, response.usage
     assert len(response.usage.get("abandoned_attempts") or []) == 2, response.usage
     assert response.usage.get("finish_reason") == "stop", response.usage
 
@@ -6200,6 +6206,105 @@ def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
     older = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), model_override="gpt-5.5",
                                        messages=messages, request_id="r", cache_breakpoints=True)
     assert '"prompt_cache_breakpoint"' not in json.dumps(older)
+
+
+async def test_client_foundry_luna_backs_mini_and_speed_pools():
+    """Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter; oss to DeepSeek-V3.2.
+
+    Speed pools keep the direct Cerebras hop first; Foundry serves only after it
+    fails before content. The shared Sol deployment list never receives Luna.
+    """
+    from providers.rose import cerebras as cerebras_route
+
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"luna ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    cerebras_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "from-cerebras"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    foundry_models: list[str] = []
+    foundry_efforts: list[str] = []
+    cerebras_status = {"code": 200}
+
+    def handler(req):
+        host = req.url.host
+        if host == "api.cerebras.ai":
+            attempted.append("cerebras")
+            if cerebras_status["code"] == 200:
+                return httpx.Response(200, text=cerebras_ok, headers={"Content-Type": "text/event-stream"})
+            return httpx.Response(cerebras_status["code"], json={"error": {"message": "quota exceeded"}})
+        if host == "a-4989-resource.openai.azure.com":
+            attempted.append("foundry")
+            foundry_body = json.loads(req.content)
+            foundry_models.append(foundry_body["model"])
+            foundry_efforts.append((foundry_body.get("reasoning") or {}).get("effort"))
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if host == "openrouter.ai":
+            attempted.append("openrouter")
+            return httpx.Response(500, text="OpenRouter must not be reached")
+        return httpx.Response(200, json={"ok": True})
+
+    async def run(pool: str) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool=pool,
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
+                call_site=f"test-foundry-luna-{pool}",
+            )
+        )
+
+    set_mock_handler(handler)
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "CEREBRAS_API_KEY": "csk-test",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    with patch.dict(os.environ, env):
+        cerebras_route._reset_cerebras_cooldown_cache()
+        chunks = await run("rose-1-flash")
+        assert attempted == ["cerebras"], "a healthy Cerebras hop stays primary"
+        assert any(c.kind == "content" and c.data.get("text") == "from-cerebras" for c in chunks)
+
+        for pool in ("rose-1-flash", "rose-1-browser-use"):
+            attempted.clear()
+            cerebras_route._reset_cerebras_cooldown_cache()
+            cerebras_status["code"] = 402
+            chunks = await run(pool)
+            assert attempted == ["cerebras", "foundry"], (pool, attempted)
+            assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
+            assert any(c.kind == "content" and c.data.get("text") == "luna ok" for c in chunks)
+
+        attempted.clear()
+        chunks = await run("rose-1-mini")
+        assert attempted == ["foundry"], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "gpt-5.6-luna-foundry"
+
+        # The open-weights pool keeps its guarantee on Azure: DeepSeek-V3.2.
+        attempted.clear()
+        chunks = await run("rose-1-oss")
+        assert attempted == ["foundry"], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "DeepSeek-V3.2-foundry"
+        cerebras_route._reset_cerebras_cooldown_cache()
+
+    assert foundry_models == ["gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna", "DeepSeek-V3.2"]
+    # A fallback layer keeps the pool's fast effort; xhigh TTFT is slow on fast GPT layers.
+    assert foundry_efforts == ["low", "low", "low", None], "DeepSeek gets no reasoning params"
+    assert get_pool("rose-1-ultra").foundry_enabled
 
 
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
@@ -8569,6 +8674,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",
         test_client_foundry_server_error_falls_through_to_openrouter,
+    )
+    await r.record_async(
+        "client_foundry_luna_backs_mini_and_speed_pools",
+        test_client_foundry_luna_backs_mini_and_speed_pools,
     )
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",

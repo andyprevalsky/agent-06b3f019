@@ -52,6 +52,7 @@ export function buildCredentialClassifierSystemPrompt(): string {
     '# Classification Rules',
     '',
     '- Classify each credential independently.',
+    '- `success`: this exact credential signed in.',
     '- `auth_failed`: this exact credential was submitted and the site rejected it, expired it, or returned a clear invalid/incorrect credential error.',
     '- `unused`: the credential was available but was never typed, submitted, applied, or otherwise relied on.',
     '- `task_level`: the credential may have been used, but the run failed for navigation, looping, missing submit, max iterations, verifier mismatch, unavailable guest path, or another non-credential reason.',

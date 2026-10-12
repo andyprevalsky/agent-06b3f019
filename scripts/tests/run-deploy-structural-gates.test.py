@@ -169,6 +169,112 @@ class StructuralGatePortIsolationTests(unittest.TestCase):
         )
 
 
+class StructuralGatePipefailGrepTests(unittest.TestCase):
+    """Source checks must not fail when a matching grep exits first.
+
+    Under `set -o pipefail`, `printf '%s\\n' "$text" | grep -q pattern` fails
+    with the writer's SIGPIPE (141) whenever grep matches and exits before the
+    writer finishes. Concurrent gate load widens that window: the seed-cache
+    preflight check failed this way 2/6 times in the deploy runner, and 110 of
+    6,000 loaded iterations ended with PIPESTATUS=141 0. Feed the text with a
+    here-string instead, which has no separate writer.
+    """
+
+    def test_pipefail_shell_tests_do_not_pipe_variables_into_grep_q(self) -> None:
+        pattern = re.compile(r"""(?:printf '%s\\n'|echo) "\$\w+" \|\s*grep\s+-\w*q""")
+        offenders = []
+        for script in sorted((ROOT / "scripts" / "tests").glob("*.sh")):
+            text = script.read_text()
+            if "pipefail" not in text:
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{script.name}:{number}: {line.strip()}")
+        self.assertEqual(offenders, [], "use grep ... <<<\"$text\" under pipefail:\n" + "\n".join(offenders))
+
+
+class StructuralGateInterpreterTests(unittest.TestCase):
+    """The agents venv is preferred only when it is the pinned Python 3.11+.
+
+    cloud-build.sh falls back to whatever `python3` exists when Python 3.11
+    setup fails, so a venv can exist with an interpreter the suites cannot run
+    on. Prepending that venv made every gate fail on the wrong interpreter.
+    """
+
+    def _runner_with_venv(self, temporary: str, version: str):
+        spec = importlib.util.spec_from_file_location("deploy_runner_venv", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        venv = Path(temporary) / "venv"
+        venv_bin = venv / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python3").write_text("#!/bin/sh\n")
+        (venv / "pyvenv.cfg").write_text(f"home = /usr/bin\nversion = {version}\n")
+        module.VENV_BIN = venv_bin
+        return module, venv_bin
+
+    def test_supported_venv_interpreter_is_put_first(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-venv-") as temporary:
+            module, venv_bin = self._runner_with_venv(temporary, "3.11.9")
+            self.assertTrue(module.gate_environment()["PATH"].startswith(f"{venv_bin}{os.pathsep}"))
+
+    def test_unsupported_venv_interpreter_is_not_preferred(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-venv-") as temporary:
+            module, venv_bin = self._runner_with_venv(temporary, "3.10.5")
+            self.assertEqual(module.gate_environment().get("PATH"), os.environ.get("PATH"))
+            self.assertNotIn(str(venv_bin), module.gate_environment().get("PATH", ""))
+
+
+class LinuxGateFailedStepTests(unittest.TestCase):
+    """The Linux controller gate names its failed suites from the machine log.
+
+    A log read can miss the summary line, the per-step markers, or both. The
+    controller runs under `set -euo pipefail`, where an unmatched grep in a
+    command substitution used to end it before it told the machine its logs
+    were fetched, leaving the machine to wait out its 900-second window.
+    """
+
+    GATE = ROOT / "scripts" / "run-cloudbench-controller-gate"
+
+    def _parse(self, name: str, log_text: str) -> subprocess.CompletedProcess[str]:
+        function = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", self.GATE.read_text(), re.M | re.S)
+        self.assertIsNotNone(function, f"the gate script must keep {name}()")
+        with tempfile.TemporaryDirectory(prefix="linux-gate-steps-") as temporary:
+            log = Path(temporary) / "machine.log"
+            log.write_text(log_text)
+            script = f'set -euo pipefail\n{function.group(0)}\nsteps="$({name} "$1")"\necho "steps:[$steps]"\n'
+            return subprocess.run(["bash", "-c", script, "gate", str(log)], capture_output=True, text=True, timeout=30)
+
+    def _failed_steps(self, log_text: str) -> subprocess.CompletedProcess[str]:
+        return self._parse("gate_failed_steps", log_text)
+
+    def test_summary_line_names_the_failed_steps(self) -> None:
+        result = self._failed_steps("GATE_STEP_FAILED 9\nGATE_FAILED_STEPS 2 5\nGATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["steps:[", "2", "5]"]), result.stderr)
+
+    def test_step_markers_are_the_fallback(self) -> None:
+        result = self._failed_steps("GATE_STEP_FAILED 3\nGATE_STEP_FAILED 7\nGATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["steps:[3", "7]"]), result.stderr)
+
+    def test_a_log_with_neither_marker_is_an_empty_answer(self) -> None:
+        result = self._failed_steps("GATE_RESULT exit=1\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[]"), result.stderr)
+
+    def test_running_suite_is_the_latest_numbered_start_marker(self) -> None:
+        # Fly returns about 100 lines per read, so the markers for suites 1-5
+        # can be missing from the log by the time suite 6 times out.
+        result = self._parse("gate_running_step", "GATE_STEP bash a exit=0\nGATE_STEP_START #6 bash b\npartial output\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[6]"), result.stderr)
+
+    def test_a_log_without_a_start_marker_names_no_running_suite(self) -> None:
+        result = self._parse("gate_running_step", "GATE_ENV backend_env=yes\n")
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[0]"), result.stderr)
+
+    def test_remote_runner_numbers_its_start_markers(self) -> None:
+        self.assertIn('echo "GATE_STEP_START #$n %s"', self.GATE.read_text())
+
+
 class StructuralGateRunnerTests(unittest.TestCase):
     def test_workflow_behavior_has_one_registered_execution(self) -> None:
         """Execute the real semantic ownership stanza and dispatcher commands.
@@ -338,6 +444,23 @@ class StructuralGateRunnerTests(unittest.TestCase):
             ):
                 self.assertEqual(module.main(), 0)
                 run.assert_called_once_with(module.GATES, max_workers=3)
+
+    def test_missing_host_tool_fails_before_any_gate_runs(self) -> None:
+        spec = importlib.util.spec_from_file_location("deploy_runner_host_tools", RUNNER)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        stderr = io.StringIO()
+        with (
+            patch.object(module.shutil, "which", side_effect=lambda tool: None if tool == "lsof" else "/usr/bin/" + tool),
+            patch.object(module, "run_gates", return_value=0) as run,
+            patch.object(sys, "argv", [str(RUNNER)]),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(module.main(), 1)
+        run.assert_not_called()
+        self.assertIn("lsof", stderr.getvalue())
+        self.assertIn("apt-get install -y lsof", stderr.getvalue())
 
     def test_signal_does_not_wait_for_unlaunched_gates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deploy-runner-signal-") as temporary:

@@ -17,7 +17,7 @@ import structlog
 
 from providers.rose.errors import RoseAuthError, RoseError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import build_codex_responses_body
-from providers.rose.pools import PoolSpec
+from providers.rose.pools import PoolSpec, foundry_model
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.types import StreamChunk
 
@@ -35,15 +35,25 @@ def foundry_configured(pool_spec: PoolSpec) -> bool:
     )
 
 
-def _deployments(pool_spec: PoolSpec) -> list[str]:
-    if pool_spec.foundry_deployments:
-        return list(pool_spec.foundry_deployments)
-    configured = os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", pool_spec.gpt_auth_model)
-    return [item.strip() for item in configured.split(",") if item.strip()]
+# Non-reasoning Foundry models (the open-weights pool's DeepSeek) reject
+# reasoning.effort and reasoning includes with HTTP 400; omit both for them.
+_NO_REASONING_MODELS = frozenset({"DeepSeek-V3.2"})
 
 
-def _ordered_deployments(pool_spec: PoolSpec, route_key: str) -> list[str]:
-    deployments = _deployments(pool_spec)
+def _deployments(model: str) -> list[str]:
+    """Deployments serving ``model``: configured names equal to it or prefixed ``<model>-``.
+
+    AZURE_FOUNDRY_DEPLOYMENTS is shared by every Foundry pool, so one pool's
+    deployments must never receive another pool's model. Without a matching
+    configured name, Foundry's deploymentless inference serves the model id.
+    """
+    configured = [item.strip() for item in os.getenv("AZURE_FOUNDRY_DEPLOYMENTS", "").split(",") if item.strip()]
+    matching = [name for name in configured if name == model or name.startswith(f"{model}-")]
+    return matching or [model]
+
+
+def _ordered_deployments(model: str, route_key: str) -> list[str]:
+    deployments = _deployments(model)
     if not deployments:
         return []
     start = int(hashlib.sha256(route_key.encode()).hexdigest()[:8], 16) % len(deployments)
@@ -94,7 +104,7 @@ async def foundry_complete(
     route_key = route_key or agent_id or request_id
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for deployment in _ordered_deployments(pool_spec, route_key):
+        for deployment in _ordered_deployments(foundry_model(pool_spec), route_key):
             if time.monotonic() < _cooldown_until.get(deployment, 0):
                 continue
             body = build_codex_responses_body(
@@ -113,6 +123,9 @@ async def foundry_complete(
                 # Foundry Standard deployments honor caller cache markers as breakpoints.
                 cache_breakpoints=True,
             )
+            if foundry_model(pool_spec) in _NO_REASONING_MODELS:
+                body.pop("reasoning", None)
+                body.pop("include", None)
             yielded_visible = False
             try:
                 async with client.stream("POST", url, headers={"api-key": key}, json=body) as response:
@@ -144,7 +157,7 @@ async def foundry_complete(
                     try:
                         async for chunk in parse_responses_sse(
                             response,
-                            actual_model=f"{pool_spec.gpt_auth_model}-foundry",
+                            actual_model=f"{foundry_model(pool_spec)}-foundry",
                             pool_name="foundry",
                             request_id=request_id,
                             idle_timeout_s=idle_timeout_s,

@@ -1,5 +1,20 @@
 /** Public run, task, and detail contracts shared by Hub storage and projections. */
 
+export interface HubRunAttempt {
+  group_attempt: number;
+  child_run_id: string;
+  passed: boolean | null;
+  status: string;
+  lifecycle_stage?: string;
+  agent_id: string | null;
+  failure_reason: string | null;
+  duration_seconds: number | null;
+  cost_cents: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  tree_agent_count: number | null;
+}
+
 export interface HubRunTaskSummary {
   name: string;
   passed: boolean | null;
@@ -16,6 +31,8 @@ export interface HubRunTaskSummary {
   row_id?: string;
   child_run_id?: string;
   run_number?: number;
+  group_attempt?: number;
+  attempt_history?: HubRunAttempt[];
   tokens_in?: number | null;
   tokens_out?: number | null;
   cache_hit_pct?: number | null;
@@ -36,6 +53,7 @@ export interface HubRunSummary {
   group_run_number?: number;
   group_timestamp?: string;
   group_total?: number;
+  group_attempt?: number;
   run_group?: {
     members: Array<{ member_id: string; name: string; run_number: number }>;
     status: string;

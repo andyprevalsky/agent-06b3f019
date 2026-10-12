@@ -1,5 +1,7 @@
 WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF THE USER WANTS MORE, OTHERWISE DO NOT OVERCOMMUNICATE. STRICTLY FOLLOWING USER COMMUNICATION PROTOCOL
 
+For code review or approval requests, never give file pointers (paths or line links); paste the exact diff in chat.
+
 # Rose Labs
 
 AI agent platform.
@@ -236,6 +238,48 @@ otherwise selects a different canonical cache key. If a PG17 cache is missing,
 restore the reviewed canonical fixture into an isolated PG17 database, verify
 table content and a dump/restore round trip, then publish that version's key.
 
+### Disk hygiene after a deploy/benchmark session (Andy’s Mac)
+
+The 926 GB data volume filled to 100% on 2026-10-06 and Docker Desktop wedged
+in `Docker: stopping` (every workspace lost its DB container; a smoke lane died
+with `ENOSPC`). Check `df -h /System/Volumes/Data` before Group 3/4 lanes and
+clean up when you finish. Only touch your own workspace’s `.context`, never
+another workspace’s, never Freedom.
+
+- **This workspace:** `rm -rf .context/benchmarks/<run-id>` for finished
+  isolated runs (keep `seed-cache`; check `local-stack-owner.json` pid is gone),
+  `rm -rf .context/frontend-builds/<run-id>` (~400 MB each), and
+  `git worktree remove --force .context/main-tree && git worktree prune` if a
+  main-comparison worktree was created.
+- **Chats older than one week — compress, keep, destroy the raw:** Claude Code
+  `find ~/.claude/projects -name '*.jsonl' -mtime +7 -exec gzip -9 {} +`; Codex
+  `find ~/.codex/sessions -name '*.jsonl' -mtime +7 -exec gzip -9 {} +`
+  (`gzip` keeps the compressed file beside the old name and removes the raw).
+  `~/.claude/gen/codex/transcripts` is already gzip; delete entries older than a
+  week only when `~/.claude/gen/codex/events/<today>.codex_uploader.jsonl`
+  shows `upload.cycle` `"ok":true` with an empty spool — the uploader was
+  returning `server_5xx` on 2026-10-06, so those were kept.
+- **Conductor chats** live in
+  `~/Library/Application Support/com.conductor.app/conductor.db`
+  (`session_messages`, 9.5 GB / 2.6 M rows in Oct 2026). Quit Conductor first,
+  then archive and compact:
+  `sqlite3 -readonly conductor.db ".mode json" "SELECT * FROM session_messages WHERE created_at < strftime('%s','now','-7 days')*1000" | gzip -9 > ~/Archives/conductor-chats/$(date +%F).jsonl.gz`,
+  then `sqlite3 conductor.db "DELETE FROM session_messages WHERE created_at < strftime('%s','now','-7 days')*1000; VACUUM;"`
+  (confirm the `created_at` unit with `SELECT MAX(created_at)` first; freelist
+  is 0 without the delete, so `VACUUM` alone reclaims nothing).
+- **Docker:** `docker builder prune -f` and `docker image prune -f` only.
+  Never `docker system prune` — it removes other workspaces’ stopped DB
+  containers. `Docker.raw` (~115 GB on disk) is every workspace’s volumes.
+- **Updater leftovers are safe:** `/var/folders/*/T/*.ShipIt.*` and
+  `~/Library/Caches/*ShipIt*` are stale app-update staging (GBs). Leave
+  `~/Library/Caches/ms-playwright` (tests need it) and running apps’ caches.
+- **Large but functional (ask before removing):** Claude desktop
+  `vm_bundles/claudevm.bundle` (10 GB, re-downloadable), Cursor
+  `User/globalStorage` (8.6 GB chat/AI state), `~/.codex/thread_history_*.sqlite`.
+- If Docker is already wedged: `osascript -e 'quit app "Docker Desktop"'`,
+  `pkill -TERM -f com.docker.backend` if it lingers, `open -a Docker`, then
+  `docker start victoria-db-<workspace>` — containers come back `Exited (255)`.
+
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 
 ```bash
@@ -275,6 +319,9 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 
 **Benchmarks:** `scripts/run-bench` is the one supported entrypoint for humans,
 `/benchmark`, and `/descend`; see `agents/benchmarks/README.md` for the full CLI.
+The [PR #1450 continuation checkpoint](docs/benchmark-pr1450-continuation.md)
+records the current deployment gaps, source-bound verification and the pending
+five consecutive LIVE 50-task runs. Read it when continuing that work.
 Use `scripts/run-bench list` to inspect tasks, then run a named slice or explicit
 tasks with `scripts/run-bench <slice-or-task...>`. It defaults to the cloud
 fleet, one isolated machine/world/queue per task. Use
@@ -512,7 +559,7 @@ timeouts. The existing publisher browser-validation blackbox owns these cases.
 PR #1299's completed original acceptance required **ten consecutive slices
 of ten distinct daily/Polar benchmarks**. The current five consecutive width-fifty
 LIVE runs follow Eval Suite's Current width-fifty LIVE acceptance instructions:
-1,200 seconds per task and 3,600 seconds from the first uncached image invocation
+1,200 seconds per task and 5,400 seconds from the first uncached image invocation
 through original evidence and exact resource closure. The following 1,800-second
 deadline describes the completed width-ten campaign. Each benchmark must execute meaningful
 real provider work, reach terminal `PASSED` or `FAILED`, and release its exact
@@ -1004,7 +1051,7 @@ complete. The new goal is five consecutive runs of fifty distinct, randomly
 selected eligible DAILY tasks per run. Keep the original completed campaign and
 the cached mass-demo diagnostics separate; neither supplies this new streak.
 Each run gets a temporary 1,200-second execution window per task and a hard
-3,600-second whole-run budget from the start of its uncached image build through
+5,400-second whole-run budget from the start of its uncached image build through
 final durable publication and verified release of every owned resource. The old
 300/600-second temporary task settings, 1,800-second allocation budget and cached
 diagnostic's 1,200-second allocation-to-release guard do not apply to this goal.
@@ -1039,8 +1086,10 @@ names without replacement using a recorded random seed. The existing
 its `minimum_successful_llm=3` filters intentionally zero-LIVE/replay tasks and
 does not require artificial model calls. Retain the concrete name list privately.
 Sample anew for each run; distinctness is required within each fifty-task run.
-Pass all fifty concrete names together to one ordinary fleet, without `-k` or
-`--concurrency`; the sequential proof wrapper's width-32 cap is unrelated.
+Pass all fifty concrete names to the normal CLI with `--retry-infra 1` and
+`--concurrency 50 --strict-barrier`. This opt-in uses the existing isolated
+campaign controllers and shared preflight/inventory, keeping one logical
+fifty-task group. The sequential proof wrapper's width-32 cap is unrelated.
 
 Inspect native provider inventory, controller CPU/memory/disk and normal
 admission before launch. Where this load requires it, use the command-scoped
@@ -1056,8 +1105,30 @@ CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
 CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
 CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200 \
-  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --wait --timeout 1200 --autoscale-max 15
+  scripts/run-bench "${tasks[@]}" --ref "$trial_ref" --timeout 1200 --autoscale-max 15 \
+  --retry-infra 1 --concurrency 50 --strict-barrier --e2e-timeout 5400 \
+  --e2e-started-at "$(cat "$trial_dir/image-start.epoch")"
 ```
+
+The requested retry policy applies only to infrastructure failures. Admit at
+most one fresh attempt for the same task after the prior controller exits,
+its exact native resource audit closes, and its terminal physical result is
+published with lifecycle `released`. Healthy peers continue; genuine task FAIL
+is accepted without retry. Each attempt retains its own physical run, logs,
+evidence and costs under the original logical group member and timestamp.
+The failed attempt stays visible in history and earns no execution credit.
+Retry does not rebuild the image, alter the task, or restart either clock.
+An unclassified result, retained resources or pending publication blocks retry;
+follow the printed exact-owner recovery instructions instead of deleting claims.
+The original image-start epoch includes activation, gaps, all attempts, evidence
+and complete release in the 5,400-second cap. Normal 7,200-second defaults remain
+unchanged. Compact owning scheduler, publication and grouping regressions run
+in the normal deploy gates; large LIVE campaigns remain user-requested.
+
+Fixture readiness files must become visible with a complete payload: write a
+sibling temporary file, then atomically replace the final path. Existence alone
+does not prove that a direct JSON/PID write has finished. Keep cleanup controls
+within the existing fixture host guard rather than adding narrow stage timers.
 
 Poll the exact monitoring command printed by this launch every thirty seconds
 through terminal publication and native release. Keep all fifty rows in one
@@ -1079,7 +1150,13 @@ completed task outputs as history and reconnects only current allocations; retai
 the exact native retirement audit instead of deleting old outputs to match a
 shrinking registry. After the original CLI exits, use a verified current CLI for
 the documented exact-owner recovery while preserving its original guest source,
-owner and private evidence. Recovery's local proxy lease adapter represents an
+owner and private evidence. A positively absent fresh primary with its exact
+original run ACK, complete seal and ownership/source binding can skip reconnect
+while the owner remains quarantined. A destroyed native tombstone also requires
+the exact clone name, original config token/source/Volume, and current unlisted
+Machine identity. This read-only recognition grants no reap
+authority; normal guest acknowledgement, evidence and native reaper stages
+still own latch/policy transitions and full release. Recovery's local proxy lease adapter represents an
 absent preferred port as numeric zero; an explicit nonempty preference retains
 the allocator's validation. A real started startup rejection can retain an exact
 runtime owner without local start acceptance; its supported zero-credit archive
@@ -1100,9 +1177,9 @@ statistics or independent rejection/cancellation timers:
 | Fleet readiness | 900 seconds, target | Partial-run observation upper bound: 686.004 seconds; only 49 executed and one startup failed, so this is diagnostic and does not prove full-fifty readiness. |
 | Task execution | 1,200 seconds per task, hard | Temporary command-scoped execution window. |
 | Evidence and full native release after the last execution | 480 seconds, target | Target pending measured current tail; evidence publication also overlaps execution. |
-| Whole image-start-to-publication-and-release E2E | 3,600 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
+| Whole image-start-to-publication-and-release E2E | 5,400 seconds, hard | Original per-trial clock, including gaps, waits and teardown. |
 
-Stage targets are not additive entitlements: their sum exceeds one hour, and
+Stage targets are not additive entitlements:
 parallel/overlapping work must still fit the hard whole-run limit. Report actual
 stage p95 when comparable task observations support it; do not label a single
 historical invocation or target as p95. Warn and diagnose target overruns while a
@@ -1119,7 +1196,7 @@ sensible; early/chat outcomes can use fewer. Use
 `scripts/verify_successful_llm_queries.py --diagnostics-only`; never force calls,
 change prompts, seed replay or substitute cached acceptance. Unexecuted tasks,
 missing terminals/evidence, incorrect FE presentation, resource leaks, an actual
-parallelism-caused issue or the one-hour breach fail the run. Preserve every
+parallelism-caused issue or the ninety-minute breach fail the run. Preserve every
 original outcome and finish exact cleanup. At a hard cutoff or catastrophe,
 verify native birth and stop only the exact owning controller through normal
 cleanup; interrupted/recovered runs get no retroactive credit. Fix a proven
@@ -1141,6 +1218,16 @@ not a reason to rotate keys or rebuild the image. Use `scripts/run-bench
 --help` for current flags. For a per-run twenty-minute task execution window,
 set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=1200` and pass `--timeout 1200`.
 The CLI flag alone sets the orchestration budget; the normal timeout remains unchanged.
+
+For a credential-restore failure, inspect the first native seed error before the
+later cleanup exception. `PrismaClientInitializationError` with
+`max client connections reached` can occur at the initial database read,
+before any credential payload is read. Selected-user hydration now owns that
+first read through the existing bounded table retry; credential tables still run
+once and retain their own retries. Preserve the selected user and credential
+scopes. Pool occupancy needs separate evidence before changing capacity or env.
+A driver exit without its exact cleanup ACK remains failed; stopped services
+alone do not certify browser/provider release or a benchmark result.
 
 For an explicitly requested cold-image measurement, use the same CLI:
 `scripts/run-bench image-build --builder depot --no-cache --build-context <checkout> --out-dir <private-output>`.
@@ -1435,7 +1522,7 @@ The 20-task selection cap is separate from execution concurrency. `bash scripts/
 
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
-- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
+- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `auth`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
 - Set `deploy_canary: true` if this task should be preferred as the one-per-category floor/path pick (otherwise shortest ready `pipeline-e2e` wins)
 - Tag `smoke` **only** for must-run harness plumbing (always on the floor; counts toward the cap; no history gate)
 - New category? Add it to `FLOOR_CATEGORIES` and/or `PATH_TRIGGERS` in `select_predeploy_benches.py` and to `KNOWN_DEPLOY_CATEGORIES`
@@ -1569,6 +1656,8 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 1. **Bias toward execution — each pause to check for user approval has an extremely high cost.**
 
 0a. **Be a TANK: don't ask, iterate until prod actually works.** When a task is "make X work in prod" (get a gate green, ship a fix, prove a flow end-to-end), OWN it end-to-end without pausing to ask permission for each step — the user has standing authorization to keep going until the real-world outcome is achieved (gate green, agent verified live, purchase completed). **RCA every issue you hit along the way and FIX it, even when the issue is not directly your task** — a stale CI secret, a flaky harness, a broken teardown, a mis-scoped token, someone else's never-green gate. Scope increase is expected, not a reason to stop (see rules 1b and 24). Before assuming an issue is yours to fix from scratch, **check whether another branch already has the fix in flight** (`git log --all`, open PRs) — if so, wait for it or cherry-pick rather than duplicating. Keep a tight iterate loop: reproduce → diagnose from evidence (logs, not guesses) → fix root cause → re-run the real gate → repeat until it is genuinely green. "It probably works now" is not done; a green prod gate (or a verified live run) is done. Only stop to ask when an action is genuinely irreversible/destructive or spends real money beyond what was authorized.
+
+0b. **Resume after user unblocks.** When you get unblocked by user help, always check back in to continue the task you were unblocked from, which is often a /goal or goal to finish a process.
 
 1. **Functionality is not complete until a test cements it in the `/deploy` path.** A feature, fix, or behavior change is unfinished if the only proof is a local demo, a one-off script, or a reviewer's eyeballs. Anything not explicitly tested is prone to regressions — and under agentic coding those regressions are EXTREMELY likely. The app is only as good as the suite that `/deploy` (or an equivalent recurring gate: blackbox, pre-deploy, daily) actually runs.
 
@@ -1841,6 +1930,7 @@ Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typic
 - **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; MANDATORY: User Approval Needed to Write Env Vars.
 - **Codex-cloud `rose` environment:** the cloud sandbox env that mirrors backend secrets. Every key set on Render must also be mirrored here (and vice-versa). Set via the Codex cloud environment settings UI. MANDATORY: User Approval Needed to Write Env Vars.
+- **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
 
 ## Autonomous Agent Testing
 

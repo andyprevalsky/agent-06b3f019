@@ -10,8 +10,11 @@ export function normalizeQuickQueryPayload(payload: unknown): QuickQueryPayload 
     const attachments = normalizeAttachments(maybePayload.attachments);
     return {
       query: typeof maybePayload.query === 'string' ? maybePayload.query : '',
+      // The consumer expires a submit by its age, so the timestamp must be finite.
       submittedAt:
-        typeof maybePayload.submittedAt === 'number' ? maybePayload.submittedAt : Date.now(),
+        typeof maybePayload.submittedAt === 'number' && Number.isFinite(maybePayload.submittedAt)
+          ? maybePayload.submittedAt
+          : Date.now(),
       ...(attachments.length > 0 ? { attachments } : {}),
     };
   }

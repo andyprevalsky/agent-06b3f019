@@ -67,6 +67,19 @@ export interface HubTaskEdit {
   is_chat_mode?: boolean;
 }
 
+export interface HubRunAttempt {
+  group_attempt: number;
+  child_run_id: string;
+  passed: boolean | null;
+  status: string;
+  lifecycle_stage?: string;
+  agent_id: string | null;
+  failure_reason: string | null;
+  duration_seconds: number | null;
+  cost_cents: number | null;
+  tree_agent_count: number | null;
+}
+
 export interface HubRunTask {
   name: string;
   passed: boolean | null;
@@ -83,6 +96,8 @@ export interface HubRunTask {
   row_id?: string;
   child_run_id?: string;
   run_number?: number;
+  group_attempt?: number;
+  attempt_history?: HubRunAttempt[];
 }
 
 export interface HubRun {

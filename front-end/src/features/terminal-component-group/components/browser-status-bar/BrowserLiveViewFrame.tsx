@@ -11,6 +11,11 @@
  *                             s = clipWidth/1280 so Amazon cart stays in frame
  *                             Kernel 1280x800 inset-0 (no chrome)
  *
+ * LOAD STATE: [LOADING] (LiveViewLoading covers the iframe)
+ *   --iframe load for this url--> [STREAMING]; a new url restarts at LOADING.
+ *   live=false (bound session closed/ended) --> [NOT_LIVE] LiveViewLoading and
+ *   no iframe, so a provider "session closed" page is never shown.
+ *
  * The remote browser is never resized from here (antibot / fingerprint-stable
  * session size). Steel session create stays 1288x891.
  */
@@ -23,9 +28,13 @@ import {
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
 } from './liveViewDisplay';
+import { LiveViewLoading } from './LiveViewLoading';
+import { useLiveViewLoaded } from './useLiveViewLoaded';
 
 interface LiveViewFrameProps {
   url: string;
+  /** False when the bound session is closed or ended. */
+  live?: boolean;
   title: string;
   /** The provider viewer may itself accept input; gate it while the agent owns control. */
   interactive?: boolean;
@@ -37,6 +46,7 @@ interface LiveViewFrameProps {
 
 export function LiveViewFrame({
   url,
+  live = true,
   title,
   interactive = true,
   iframeKey,
@@ -50,12 +60,14 @@ export function LiveViewFrame({
   const streamRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [clipWidth, setClipWidth] = useState(0);
+  const { isLoaded, onLoad } = useLiveViewLoaded(url);
   useLayoutEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     if (interactive) iframe.removeAttribute('inert');
     else iframe.setAttribute('inert', '');
-  }, [interactive]);
+    // A new url/key or a live toggle mounts a fresh iframe that needs the attribute too.
+  }, [interactive, live, iframeKey, url]);
   useLayoutEffect(() => {
     const el = streamRef.current;
     if (!el || !needsClipMeasure) return;
@@ -92,20 +104,24 @@ export function LiveViewFrame({
           height: `min(100cqh, calc(100cqw * ${display.height} / ${display.width}))`,
         }}
       >
-        <iframe
-          ref={iframeRef}
-          key={iframeKey ?? `${title}:${url}`}
-          src={url}
-          title={title}
-          className={cn(
-            crop ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
-            !interactive && 'pointer-events-none',
-          )}
-          style={iframeStyle}
-          tabIndex={interactive ? undefined : -1}
-          allow="clipboard-read; clipboard-write"
-          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
-        />
+        {live && (
+          <iframe
+            ref={iframeRef}
+            key={iframeKey ?? `${title}:${url}`}
+            src={url}
+            title={title}
+            className={cn(
+              crop ? 'z-0 border-0' : 'absolute inset-0 z-0 h-full w-full border-0',
+              !interactive && 'pointer-events-none',
+            )}
+            style={iframeStyle}
+            tabIndex={interactive ? undefined : -1}
+            allow="clipboard-read; clipboard-write"
+            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
+            onLoad={onLoad}
+          />
+        )}
+        {(!live || !isLoaded) && <LiveViewLoading />}
         {children}
       </div>
     </div>

@@ -36,7 +36,7 @@ import {
   markAnthropicApiKeyOnCooldown,
   markGptApiKeyOnCooldown,
 } from '../computeCredentials';
-import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
+import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
 import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
@@ -52,7 +52,13 @@ import {
   selectExclusiveCerebrasChatRoute,
 } from './exclusiveCerebrasChatRoute';
 import { createStreamAccumulator, dumpDisplayModel, emitRoseChunk } from './completionChunks';
-import { foundryComplete, foundryConfigured } from './foundry';
+import {
+  chatFoundryLastResort,
+  foundryComplete,
+  foundryConfigured,
+  foundryRequestFor,
+  isChatRouteExhausted,
+} from './foundry';
 
 const log = createLogger('Rose');
 
@@ -246,21 +252,40 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       finalizeDump(error);
       throw error;
     }
+    const foundryRequest = () =>
+      foundryRequestFor({
+        poolSpec,
+        options: opts.options,
+        requestId: opts.requestId,
+        callSite: opts.callSite,
+      });
+    const chatFallback = (exhausted: PreContentFallThroughError | RoseAllFailed) =>
+      chatFoundryLastResort({
+        exhausted,
+        request: foundryRequest(),
+        pool: opts.pool,
+        emit: emitChunk,
+      });
     if (cerebrasRoute !== null) {
       // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
       // (402/429) it keeps the chat on Gemma-4-31B via OpenRouter (unpinned); on a
       // stall it races that spill against the generic multi-provider waterfall.
       try {
-        yield* runCerebrasChatWithWaterfallFallback({
-          cerebrasRoute,
-          poolSpec,
-          options: opts.options,
-          requestId: opts.requestId,
-          pool: opts.pool,
-          callSite: opts.callSite,
-          startedAt,
-          emit: emitChunk,
-        });
+        try {
+          yield* runCerebrasChatWithWaterfallFallback({
+            cerebrasRoute,
+            poolSpec,
+            options: opts.options,
+            requestId: opts.requestId,
+            pool: opts.pool,
+            callSite: opts.callSite,
+            startedAt,
+            emit: emitChunk,
+          });
+        } catch (error) {
+          if (!isChatRouteExhausted(error)) throw error;
+          yield* chatFallback(error);
+        }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
         finalizeDump(cause);
@@ -275,16 +300,21 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     // provider. Missing configuration fails closed before any provider call.
     if (opts.options.provider_route === 'openrouter-waterfall') {
       try {
-        yield* runWithFallThrough({
-          produce: () =>
-            exclusiveOpenRouterWaterfall({
-              poolSpec,
-              options: opts.options,
-              requestId: opts.requestId,
-              callSite: opts.callSite,
-            }),
-          emit: emitChunk,
-        });
+        try {
+          yield* runWithFallThrough({
+            produce: () =>
+              exclusiveOpenRouterWaterfall({
+                poolSpec,
+                options: opts.options,
+                requestId: opts.requestId,
+                callSite: opts.callSite,
+              }),
+            emit: emitChunk,
+          });
+        } catch (error) {
+          if (!isChatRouteExhausted(error)) throw error;
+          yield* chatFallback(error);
+        }
       } catch (error) {
         const cause = error instanceof PreContentFallThroughError ? error.cause : error;
         finalizeDump(cause);
@@ -550,54 +580,6 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       }
     }
 
-    // Microsoft Foundry serves the same GPT model and Responses shape as the
-    // compute-token path. Its shared deployment is funded, so it follows the
-    // user/pool tokens and API keys, before OpenRouter.
-    let foundryFailed: RoseError | null = null;
-    if (allowDirectAuth && foundryConfigured(poolSpec)) {
-      try {
-        yield* runWithFallThrough({
-          produce: () =>
-            foundryComplete({
-              poolSpec,
-              messages: opts.options.messages,
-              responseFormat: opts.options.response_format,
-              tools: opts.options.tools,
-              toolChoice: opts.options.tool_choice,
-              temperature: opts.options.temperature,
-              effort: opts.options.effort,
-              providerFastMode: opts.options.provider_fast_mode,
-              requestId: opts.requestId,
-              routeKey:
-                opts.options.route_key ??
-                opts.options.dump_context?.agent_id ??
-                opts.options.compute_grant?.userId ??
-                opts.requestId,
-              callSite: opts.callSite,
-              abortSignal: opts.options.abort_signal,
-            }),
-          emit: emitChunk,
-        });
-        log.info('foundry.done', { request_id: opts.requestId, pool: opts.pool });
-        finalizeDump();
-        return;
-      } catch (err) {
-        if (err instanceof PreContentFallThroughError) {
-          foundryFailed = err.cause;
-          log.info('fall_through_from_foundry', {
-            request_id: opts.requestId,
-            reason: err.cause.name,
-          });
-        } else {
-          finalizeDump(err);
-          throw err;
-        }
-      }
-    }
-
-    // 3. Waterfall — this is the terminal pipeline; unwrap the internal
-    // fall-through sentinel so callers continue to see typed RoseError
-    // subclasses (their `instanceof RoseError` checks depend on it).
     const cerebrasKey = process.env.CEREBRAS_API_KEY;
     if (poolSpec.cerebrasModel && cerebrasKey) {
       try {
@@ -636,6 +618,36 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       }
     }
 
+    // Microsoft Foundry serves the pool's GPT model with the compute-token
+    // Responses shape. Its shared deployment is funded, so it follows the
+    // user/pool tokens, API keys and the direct Cerebras hop, before OpenRouter.
+    let foundryFailed: RoseError | null = null;
+    if (foundryConfigured(poolSpec)) {
+      try {
+        yield* runWithFallThrough({
+          produce: () => foundryComplete(foundryRequest()),
+          emit: emitChunk,
+        });
+        log.info('foundry.done', { request_id: opts.requestId, pool: opts.pool });
+        finalizeDump();
+        return;
+      } catch (err) {
+        if (err instanceof PreContentFallThroughError) {
+          foundryFailed = err.cause;
+          log.info('fall_through_from_foundry', {
+            request_id: opts.requestId,
+            reason: err.cause.name,
+          });
+        } else {
+          finalizeDump(err);
+          throw err;
+        }
+      }
+    }
+
+    // 3. Waterfall — this is the terminal pipeline; unwrap the internal
+    // fall-through sentinel so callers continue to see typed RoseError
+    // subclasses (their `instanceof RoseError` checks depend on it).
     if (opts.options.disable_waterfall) {
       const error =
         anthropicApiKeyFailed ??

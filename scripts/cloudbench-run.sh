@@ -441,6 +441,45 @@ resolve_task_gate() {
             ;;
     esac
 }
+# Fast Mode cache route. Only fast_cache:on tasks replay the frozen shared
+# cache through the production pooler; every other guest keeps the cache in its
+# isolated local DB (as local isolated stacks already do), so a LIVE fleet holds
+# no production pooler client slots for the cache. Infra probes never run their
+# sampled task and always stay local. The local route also blanks any inherited
+# FAST_MODE_CACHE_DATABASE_URL, which run.sh would otherwise prefer.
+STACK_CACHE_ENV=()
+resolve_fast_cache_route() {
+    local cache_python cache_status
+    STACK_CACHE_ENV=()
+    if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+        STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
+        return 0
+    fi
+    cache_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
+    if [ -z "$cache_python" ]; then
+        echo "[cloudbench] FATAL: no Python interpreter is available for Fast Mode cache routing" >&2
+        return 1
+    fi
+    "$cache_python" "$CATALOG_SCRIPT" needs-shared-fast-cache \
+        "$REPO_DIR/agents/benchmarks/tasks.json" "${BENCH_TASK_LIST[@]}"
+    cache_status=$?
+    case "$cache_status" in
+        0)
+            # A shared-cache (DEMO) guest still reads the production pooler. A
+            # small pool keeps a 50-guest fleet at 200 of its 1,000 clients; Fly's
+            # ~12 ms round trip serves the replay's ~40 reads/s through 4. Clear
+            # an inherited local route so run.sh keeps the shared cache.
+            STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=0" "FAST_CACHE_DB_POOL=${CLOUDBENCH_SHARED_CACHE_DB_POOL:-4}")
+            ;;
+        10)
+            STACK_CACHE_ENV+=("FAST_MODE_CACHE_USE_LOCAL=1" "FAST_MODE_CACHE_DATABASE_URL=")
+            ;;
+        *)
+            echo "[cloudbench] FATAL: Fast Mode cache routing failed (exit $cache_status)" >&2
+            return "$cache_status"
+            ;;
+    esac
+}
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)
@@ -448,8 +487,18 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_PAYMENT_FIXTURE=1
             ;;
+        browser-auth-guest-purchase|browser-auth-member-discount-purchase|browser-auth-member-discount-signup-fails-purchase|browser-auth-paid-membership-purchase|browser-auth-signup-purchase|browser-auth-session-expires-at-checkout)
+            # Rose Shop is served by the backend, so no bundled frontend; the
+            # checkout settles through the same sandbox payment fixture.
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_PAYMENT_FIXTURE=1
+            ;;
         agent-payment-new-user-journey)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_NEW_USER_CHECKOUT=1
+            ;;
+        browser-auth-signup-purchase-no-subscription)
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_NEW_USER_CHECKOUT=1
             ;;
@@ -485,9 +534,15 @@ TASK_WORKER_EXPORTS=""
 
 if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
     resolve_task_gate || exit $?
+    resolve_fast_cache_route || exit $?
     TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
     if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
         for entry in "${TASK_WORKER_ENV[@]}"; do
+            printf 'stack:%s\n' "$entry"
+        done
+    fi
+    if [ "${#STACK_CACHE_ENV[@]}" -gt 0 ]; then
+        for entry in "${STACK_CACHE_ENV[@]}"; do
             printf 'stack:%s\n' "$entry"
         done
     fi
@@ -709,6 +764,11 @@ resolve_task_gate
 task_gate_status=$?
 if [ "$task_gate_status" -ne 0 ]; then
     finish "$task_gate_status"
+fi
+resolve_fast_cache_route
+fast_cache_route_status=$?
+if [ "$fast_cache_route_status" -ne 0 ]; then
+    finish "$fast_cache_route_status"
 fi
 TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
 
@@ -995,6 +1055,9 @@ if [ -n "$BENCHMARK_PEAK_FLY_MACHINES" ]; then
 fi
 if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
     STACK_ENV+=("BENCHMARK_VM_USD_PER_HOUR=$BENCHMARK_VM_USD_PER_HOUR")
+fi
+if [ "${#STACK_CACHE_ENV[@]}" -gt 0 ]; then
+    STACK_ENV+=("${STACK_CACHE_ENV[@]}")
 fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")

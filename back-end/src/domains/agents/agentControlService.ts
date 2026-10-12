@@ -4,7 +4,7 @@
 
 import {
   getTemporalClient,
-  startAgentWorkflow,
+  startAgentWorkflowExecution,
   type StartAgentWorkflowParams,
 } from '../../providers/temporal';
 import { broadcastAgentModeStarted } from '../../providers/chat';
@@ -120,7 +120,7 @@ export async function startAgentMode(agentId: string, userId: string) {
     goal: agent.goal.substring(0, 100),
   });
 
-  const workflowId = await startAgentWorkflow({
+  const execution = await startAgentWorkflowExecution({
     agentId,
     userId: agent.userId,
     goal: agent.goal,
@@ -141,7 +141,13 @@ export async function startAgentMode(agentId: string, userId: string) {
       : {}),
   });
 
-  await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
+  // Record the chain identity, not just the reusable workflow id: terminal
+  // cleanup tells this chain from an earlier one under the same id by run id.
+  const workflowId = execution.workflowId;
+  await repo.updateAgent(agentId, {
+    temporalWorkflowId: workflowId,
+    temporalFirstExecutionRunId: execution.firstExecutionRunId,
+  });
   await broadcastAgentModeStarted(agentId);
 
   log.info('Escalated to agent mode', {

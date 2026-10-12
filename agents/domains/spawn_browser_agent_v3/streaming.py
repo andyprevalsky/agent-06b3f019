@@ -94,6 +94,18 @@ class BrowserThinkingStream:
     async def on_chunk(self, chunk: "StreamChunk") -> None:
         if self._finished:
             return
+        if chunk.kind == "restart":
+            # The attempt that just cut off is abandoned: close what it
+            # published and give the retry its own stream, so the displayed
+            # decision never mixes the two.
+            if self._started:
+                await self._publish_assistant(delta="", done=True)
+            # Tool calls the abandoned attempt announced never get a result from
+            # the retry, so close them under the stream that opened them.
+            await self.finish_tools(status="FAILED")
+            self.stream_id = f"{self.stream_id.rsplit('-', 1)[0]}-{uuid.uuid4().hex[:8]}"
+            self._started = False
+            return
         if not self._started:
             await self.start()
 

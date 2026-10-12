@@ -10,8 +10,11 @@ import { prisma } from '../../providers/database';
 import { transitionBrowserControlState } from '../../domains/browser-session/repo';
 import {
   BrowserControlUnavailableError,
+  getBrowserLiveView,
   setBrowserControlState,
 } from '../../domains/browser-session/service.control';
+import { SessionNotFoundError } from '../../domains/browser-session/service.local-storage';
+import type { BrowserSessionHealth } from '../../providers/browser/types';
 
 const LIVE_URL = 'https://connect.steel.dev/v1/sessions/second-browser/player?interactive=false';
 
@@ -185,6 +188,83 @@ async function testSecondBrowserHandoffDoesNotTouchTheFirst(): Promise<void> {
   }
 }
 
+type LiveViewRecord = NonNullable<
+  Awaited<ReturnType<typeof import('../../domains/browser-session/repo').findBrowserLiveViewRecord>>
+>;
+
+function liveViewRecord(status: LiveViewRecord['status'], userId = 'owner'): LiveViewRecord {
+  return {
+    id: 'task-live-view',
+    sessionId: 'f26ee1ab-f769-42d7-90a0-5d014fc1284f',
+    status,
+    debugUrl: LIVE_URL,
+    context: { userId },
+  };
+}
+
+function health(status: string | null, ttlMs: number | null): BrowserSessionHealth {
+  return {
+    provider: 'steel',
+    sessionId: 'f26ee1ab-f769-42d7-90a0-5d014fc1284f',
+    status,
+    createdAt: null,
+    timeoutMs: null,
+    expiresAt: null,
+    ttlMs,
+    profileId: null,
+  } as BrowserSessionHealth;
+}
+
+/** Agent 8b4d4592: the auth handoff row stayed ACTIVE ~26h after Steel ended the session. */
+async function testLiveViewReportsProviderEndedSessionAsNotLive(): Promise<void> {
+  const before = Date.now();
+  const view = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE'),
+    health: async () => health('released', 0),
+  });
+  assert.equal(view.live, false);
+  assert.equal(view.debugUrl, LIVE_URL);
+  assert.equal(view.status, 'ACTIVE');
+  assert.ok(view.asOf >= before && view.asOf <= Date.now(), 'asOf is the server read time');
+
+  const running = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE'),
+    health: async () => health('live', 600_000),
+  });
+  assert.equal(running.live, true);
+}
+
+async function testLiveViewClosedRowSkipsProviderAndUnknownHealthIsNull(): Promise<void> {
+  let healthCalls = 0;
+  const closed = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('CLOSED'),
+    health: async () => {
+      healthCalls += 1;
+      return health('live', 1);
+    },
+  });
+  assert.equal(closed.live, false);
+  assert.equal(healthCalls, 0, 'a closed row needs no provider call');
+
+  const unknown = await getBrowserLiveView('task-live-view', 'owner', {
+    findRecord: async () => liveViewRecord('ACTIVE'),
+    health: async () => {
+      throw new Error('provider unavailable');
+    },
+  });
+  assert.equal(unknown.live, null, 'unknown provider health is not reported as dead');
+}
+
+async function testLiveViewHidesAnotherUsersTask(): Promise<void> {
+  await assert.rejects(
+    getBrowserLiveView('task-live-view', 'intruder', {
+      findRecord: async () => liveViewRecord('ACTIVE', 'owner'),
+      health: async () => health('live', 1),
+    }),
+    SessionNotFoundError
+  );
+}
+
 async function runAll(): Promise<void> {
   await testActiveTakeControlIsImmediateSameSession();
   await testLeftoverRequestedBecomesUserOnSameSession();
@@ -192,8 +272,11 @@ async function runAll(): Promise<void> {
   await testClosedUserDoesNotReportUser();
   await testClosedRequestedTransitionIsRejectedByStatusFilter();
   await testSecondBrowserHandoffDoesNotTouchTheFirst();
+  await testLiveViewReportsProviderEndedSessionAsNotLive();
+  await testLiveViewClosedRowSkipsProviderAndUnknownHealthIsNull();
+  await testLiveViewHidesAnotherUsersTask();
   await prisma.$disconnect();
-  process.stdout.write('PASS browser-session-control unit (6 cases)\n');
+  process.stdout.write('PASS browser-session-control unit (9 cases)\n');
 }
 
 runAll().catch(async (error) => {

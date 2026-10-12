@@ -1,21 +1,53 @@
-/** Admin-only: launch a Cursor cloud agent to RCA a Rose agent bug. */
+/** Admin-only: run the boxes.dev Bug Report automation to RCA a Rose agent bug. */
 
-import { Router } from 'express';
+import { type NextFunction, type RequestHandler, type Response, Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
+  assertReportBugAdmin,
   ReportBugForbiddenError,
   ReportBugNotConfiguredError,
   ReportBugNotFoundError,
   ReportBugValidationError,
   reportAgentBug,
+  uploadBugReportScreenshot,
 } from './bugReportService';
+import { bugReportScreenshotUpload, MAX_BUG_REPORT_SCREENSHOT_BYTES } from './config';
 
 const log = createLogger('ReportBug');
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+
+function sendReportBugError(res: Response, error: unknown, agentId: string, action: string): void {
+  if (error instanceof ReportBugForbiddenError) {
+    res.status(403).json({ error: error.message });
+    return;
+  }
+  if (error instanceof ReportBugNotFoundError) {
+    res.status(404).json({ error: error.message });
+    return;
+  }
+  if (error instanceof ReportBugValidationError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+  if (error instanceof ReportBugNotConfiguredError) {
+    res.status(503).json({ error: error.message });
+    return;
+  }
+  if (error instanceof BenchmarkHubUnavailableError) {
+    res.set('Retry-After', String(error.retryAfterSeconds));
+    res.status(503).json({ error: error.message });
+    return;
+  }
+  log.error(`Failed to ${action}`, {
+    agent_id: agentId,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  res.status(500).json({ error: `Failed to ${action}` });
+}
 
 router.post(
   '/:id/report-bug',
@@ -29,32 +61,45 @@ router.post(
       const result = await reportAgentBug(req.userId, req.params.id, description);
       res.status(201).json(result);
     } catch (error) {
-      if (error instanceof ReportBugForbiddenError) {
-        res.status(403).json({ error: error.message });
-        return;
-      }
-      if (error instanceof ReportBugNotFoundError) {
-        res.status(404).json({ error: error.message });
-        return;
-      }
-      if (error instanceof ReportBugValidationError) {
-        res.status(400).json({ error: error.message });
-        return;
-      }
-      if (error instanceof ReportBugNotConfiguredError) {
-        res.status(503).json({ error: error.message });
-        return;
-      }
-      if (error instanceof BenchmarkHubUnavailableError) {
-        res.set('Retry-After', String(error.retryAfterSeconds));
-        res.status(503).json({ error: error.message });
-        return;
-      }
-      log.error('Failed to report agent bug', {
-        agent_id: req.params.id,
-        error: error instanceof Error ? error.message : String(error),
+      sendReportBugError(res, error, req.params.id, 'report bug');
+    }
+  })
+);
+
+/**
+ * Gate before buffering the body, then let multer read one image. Multer
+ * reports an oversized screenshot as LIMIT_FILE_SIZE; answer 413, not 500.
+ */
+const receiveScreenshot: RequestHandler = (req, res, next: NextFunction) => {
+  try {
+    assertReportBugAdmin((req as HybridAuthRequest).userId);
+  } catch (error) {
+    sendReportBugError(res, error, req.params.id, 'upload bug report screenshot');
+    return;
+  }
+  bugReportScreenshotUpload.single('file')(req, res, (error: unknown) => {
+    const code =
+      error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    if (code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({
+        error: `Screenshot must be at most ${MAX_BUG_REPORT_SCREENSHOT_BYTES / 1024 / 1024} MB`,
       });
-      res.status(500).json({ error: 'Failed to report bug' });
+      return;
+    }
+    next(error);
+  });
+};
+
+router.post(
+  '/:id/report-bug/screenshots',
+  auth,
+  receiveScreenshot,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const result = await uploadBugReportScreenshot(req.userId, req.params.id, req.file);
+      res.status(201).json(result);
+    } catch (error) {
+      sendReportBugError(res, error, req.params.id, 'upload bug report screenshot');
     }
   })
 );

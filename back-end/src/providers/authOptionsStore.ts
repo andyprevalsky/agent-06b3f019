@@ -85,6 +85,84 @@ export async function upsertAgentIdentityEmail(userId: string, email: string) {
   });
 }
 
+/**
+ * The user's connected inboxes whose mail the backend can read right now: the
+ * same credentials the one-time-code poller fetches from. A code emailed to
+ * any of these reaches the agent.
+ */
+export async function findReadableInboxEmails(userId: string): Promise<string[]> {
+  const rows = await prisma.emailIntegrationCredential.findMany({
+    where: {
+      userId,
+      provider: 'GMAIL',
+      state: { not: 'needs_reconnect' },
+      integration: { name: 'gmail', status: 'CONNECTED' },
+    },
+    select: { email: true, accessToken: true, refreshToken: true },
+    orderBy: { updatedAt: 'desc' },
+  });
+  const readable = rows.filter(
+    (row) =>
+      row.email !== null &&
+      row.email !== '' &&
+      row.accessToken !== null &&
+      row.accessToken !== '' &&
+      row.refreshToken !== null &&
+      row.refreshToken !== ''
+  );
+  return [...new Set(readable.map((row) => (row.email as string).toLowerCase()))];
+}
+
+/**
+ * First writer wins: when two callers mint an inbox for the same user at once,
+ * both get the row that landed first, never two different identities.
+ */
+export async function createAgentIdentityEmailIfAbsent(userId: string, email: string) {
+  await prisma.agentIdentity.createMany({ data: [{ userId, email }], skipDuplicates: true });
+  return prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+}
+
+/** The login a sign-up created, saved the way a synced browser password is. */
+/**
+ * Saves the password the agent created an account with. A login the user's
+ * browser synced for the same site and username is theirs and is never
+ * replaced: each statement below carries that condition itself, so a sync that
+ * lands between them cannot be overwritten.
+ */
+export async function upsertSignupPassword(params: {
+  userId: string;
+  origin: string;
+  username: string;
+  encryptedPassword: string;
+  browserSource: string;
+  nowMs: number;
+}): Promise<{ saved: boolean }> {
+  const now = BigInt(params.nowMs);
+  const key = { userId: params.userId, origin: params.origin, username: params.username };
+  const updateOwnRow = () =>
+    prisma.browserPassword.updateMany({
+      where: { ...key, browserSource: params.browserSource },
+      data: { encryptedPassword: params.encryptedPassword, dateLastUsed: now },
+    });
+  if ((await updateOwnRow()).count > 0) return { saved: true };
+  const created = await prisma.browserPassword.createMany({
+    data: [
+      {
+        ...key,
+        encryptedPassword: params.encryptedPassword,
+        dateLastUsed: now,
+        dateCreated: now,
+        browserSource: params.browserSource,
+      },
+    ],
+    skipDuplicates: true,
+  });
+  if (created.count > 0) return { saved: true };
+  // The key was taken between the two statements: by a concurrent save of this
+  // same sign-up (update it) or by the user's own synced login (keep it).
+  return { saved: (await updateOwnRow()).count > 0 };
+}
+
 export async function setAgentIdentityPhone(params: {
   userId: string;
   phone: string;

@@ -28,6 +28,9 @@ sources:
   - agent 8b054756-bf09-43b9-ab3a-8a6c782e15e8
   - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
   - agent d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc
+  - PR #1459
+  - agent 5b7dd06e-81d9-4bc0-88f7-e65355f75b7c
+  - task agent-payment-production-abandonment
   - task agent-payment-abandonment
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
@@ -229,6 +232,27 @@ release observation.
   held the Step 6b latency ratchet, a separate harness bug fixed in
   `2026-10-07-retained-recovery-stack-held-latency-ratchet`.
 
+`/deploy` Step 6a for PR #1363 (deploy run `20261005-172101-47407`, HEAD
+`4a14f9783`, stack `1791405163-92172-18662`) failed `agent-payment-abandonment`
+(agent `cba71b08-839b-4ab6-ab05-b82d3cedc21b`) the same way. The other three
+lifecycle tasks passed, and the same four-task lane passed in this deploy on
+2026-10-06 with 4396 released. The branch does not touch the mint, cleanup or
+reclaim code.
+
+- Transfer `owt_…d6d22` (card `card_d7608e33491511fdeec32b5d`, $43.96 mint, 4396
+  transferred) was created at 20:48:29. `close_card` succeeded at 20:48:38. The
+  card was never charged. Six release reads through 20:49:40 and seven
+  stale-lease retries from 20:51:01 to 21:08:00 all returned `consumed`,
+  `released_cents=0`: 48 reads over 20.5 minutes, with no provider error, retry
+  or throttle and no recovery created.
+- No read-only provider ledger read was taken, so this run cannot say whether
+  another consumer was on the shared cardholder. No other AgentCard lane was
+  running on this host.
+- The stack was stopped at 21:09:24 because the host disk was nearly full. The
+  purchase was last seen `HELD` with funding `RECLAIMING`; nothing is retrying
+  the release now, and its Stripe test-mode hold was not refunded by our
+  reconciler.
+
 `/deploy` Step 6a for PR #1436 (stabilization run `20261007-220502-355180`,
 HEAD `8f63c272e`, stack `1791413203-595722-63139`) failed
 `agent-payment-abandonment` (agent `d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc`)
@@ -245,14 +269,41 @@ task passed earlier the same day in this deploy's Phase 1 6a run.
   `490787fb-fea5-4f08-9700-8ac6835ef966`) passed in 213s after
   `Abandoned issued payment card and reconciled funding`.
 
+### Recurrence on 2026-10-11 (live production org)
+
+`/deploy` Step 13c for PR #1459 (deploy run `20261009-214158-1894878`, merge
+`75be7489d`) failed `agent-payment-production-abandonment` (agent
+`5b7dd06e-81d9-4bc0-88f7-e65355f75b7c`) the same way after 562s. This is the
+first occurrence on the live production AgentCard org rather than the shared
+sandbox cardholder.
+
+- The agent completed at 21:07:05Z. Transfer `owt_…6234e` (card
+  `card_…b131`, $1.00 mint, 100 transferred, `livemode: true`) stayed
+  `consumed` with `releasedCents: 0` while the card read `CLOSED`, balance 0.
+  The purchase stayed `HELD` and funding `RECLAIMING`. The Stripe charge was
+  captured (100 received) with no refund yet.
+- Prod logs show the stale-lease retry requesting the release again every three
+  to four minutes (`Recording AgentCard company-wallet funding release
+  request`, then `Failed to retry purchase funding reclaim`). The transfer was
+  still `consumed` / 0 released at 22:18:25Z, 71 minutes after close.
+- The unchanged rerun (agent `15ed2603-3eb1-4572-a860-f9229e735ac3`) passed:
+  its transfer read `reclaimed` with 100 released inside the 420s wait, and
+  the purchase reached `VOIDED` with the refund. A second attempt in between
+  died before allocating anything, on a benchmark Hub registration read
+  timeout.
+
 Still open:
 
 - Report the stuck transfers (`owt_…8ce5`, card `card_cb91b224db24a8dd6f1448c0`;
   `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
   `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
   `card_0d8d820f72e50b35fd394b93`; `owt_…a52e`, card
-  `card_aec0bd2ceaea33cfb4e17c36`; `owt_f46e484168f57370a4cda9c6`, card
-  `card_5b1c41fe5dee8907e092e155`) to AgentCard with the ledger reads.
+  `card_aec0bd2ceaea33cfb4e17c36`; `owt_…d6d22`, card
+  `card_d7608e33491511fdeec32b5d`; `owt_f46e484168f57370a4cda9c6`, card
+  `card_5b1c41fe5dee8907e092e155`; live-org `owt_…6234e`, card
+  `card_…b131`) to AgentCard with the ledger reads.
+- Confirm the live-org $1 purchase from 2026-10-11 (agent `5b7dd06e`) reaches
+  `VOIDED` with its Stripe refund once AgentCard records the release.
 - If AgentCard confirms that netting suppresses the release, give each payment
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
@@ -267,7 +318,6 @@ When a benchmark waits on a third-party ledger, its failure has to print that
 ledger's rows next to ours. "Expected VOIDED, got HELD" points at our
 reconciler. The provider rows show the card closed and the provider never
 releasing it.
-
 
 ## Retained original financial gate, October 6
 
@@ -299,3 +349,32 @@ stack remains available to the existing reconciler. The normal terminal wallet
 state and exact native resource release are still pending. There is no new
 causal reproduction or completed fix here; this is updated runtime evidence in
 the existing open case, independent of the five-run DAILY50 acceptance streak.
+
+### Recurrence on 2026-10-11 (PR #1450 deploy, sandbox)
+
+The local AgentCard lifecycle lane for PR #1450 (HEAD `9d9a65e56`, stack
+`1791759656-942305-17040`) failed `agent-payment-abandonment` (agent
+`80ed40fe-fd84-428c-ade3-8abdd010c820`) the same way. The other three tasks
+passed.
+
+- Transfer `owt_db04af54fa18afa2ef9df8aa` (card `card_3d520c1c49a3f8dfc71e8f4c`,
+  $43.96 mint, 4396 transferred) was created at 23:15:43. `close_card`
+  succeeded at 23:15:51. `recover_funds` ran after each of the first five
+  release reads and recovered nothing. All 27 release reads returned
+  `consumed`, `released_cents=0`.
+- Two earlier lane runs of this deploy failed identically: transfers
+  `owt_cf95ac0648d93fa0688885a2` (created 06:12:29) and
+  `owt_ddb33aaa7b5a900245228f2c` (created 07:47:28). A read-only
+  `list_transfers` at about 23:45 still showed all three as `consumed` with
+  `released_cents: 0`, 17.5 hours after the first one.
+- Across the nine local abandonment runs on this box from 2026-10-09 to
+  2026-10-11, six passed. In those runs AgentCard reported `reclaimed` about 2
+  minutes 15 seconds to 2 minutes 50 seconds after the close, when a stale-lease
+  retry's `recover_funds` pulled 4396. Create-to-close timing was about 6s in
+  every passing and failing run, so close timing does not distinguish them.
+- The failed run's retained stack kept re-reading the transfer, which spends
+  the org-wide MCP request budget, and could not make progress. It was
+  stopped with the owner-verified `local.stop_services` path. The sandbox
+  Stripe hold remains in test mode.
+
+The lane reruns unchanged on the post-main-sync HEAD.

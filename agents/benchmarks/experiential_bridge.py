@@ -38,7 +38,7 @@ def pool_sha256(pool):
     from providers.rose import pools
 
     identity = asdict(pools.get_pool(pool))
-    identity.pop("foundry_deployments")
+    identity.pop("foundry_model")
     identity["foundry_enabled"] = False
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

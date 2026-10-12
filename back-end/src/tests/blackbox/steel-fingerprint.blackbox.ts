@@ -211,9 +211,11 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
     ).findUnique = (async () => ({ contextId: null })) as typeof prisma.browserContext.findUnique;
 
+    // A resume keeps the user's city (a rotation deliberately moves state and
+    // drops it), so the rejected-city retry is exercised on the resume path.
     const result = await recreateSession(
       'replacement-city-retry-task',
-      { forceManagedRotation: true },
+      { forceManagedRotation: false },
       {
         createSession: async (input) => {
           createInputs.push(input as unknown as Record<string, unknown>);

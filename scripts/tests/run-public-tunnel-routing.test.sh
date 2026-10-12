@@ -288,11 +288,11 @@ held_line='lvl=crit msg="command failed" err="failed to start tunnel: The endpoi
 
 out="$(run_ngrok_mode 0 "$held_line" 1)" \
   || fail "case 9a: a reserved domain held by another session must not tear the stack down ($(cat "$TMP/ngrok_mode.err"))"
-printf '%s\n' "$out" | grep -qx 'url=https://stub.trycloudflare.com' \
+grep -qx 'url=https://stub.trycloudflare.com' <<<"$out" \
   || fail "case 9a: expected the account-less cloudflare origin, got: $out"
-printf '%s\n' "$out" | grep -q 'rose-held.ngrok.app' \
+grep -q 'rose-held.ngrok.app' <<<"$out" \
   && fail "case 9a: the held domain must not stay in PUBLIC_BASE_URL/ALLOWED_ORIGINS: $out"
-printf '%s\n' "$out" | grep -qx 'names=cloudflared' \
+grep -qx 'names=cloudflared' <<<"$out" \
   || fail "case 9a: the dead ngrok service must be de-registered, got: $out"
 [ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare " ] \
   || fail "case 9a: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
@@ -318,7 +318,7 @@ echo "PASS: other ngrok failures remain fatal in ngrok mode"
 
 out="$(run_ngrok_mode 1 'lvl=info msg="started tunnel"' 1)" \
   || fail "case 9d: a healthy ngrok tunnel must succeed ($(cat "$TMP/ngrok_mode.err"))"
-printf '%s\n' "$out" | grep -qx 'url=https://rose-held.ngrok.app' \
+grep -qx 'url=https://rose-held.ngrok.app' <<<"$out" \
   || fail "case 9d: a healthy reserved domain must stay the public origin, got: $out"
 [ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok " ] \
   || fail "case 9d: a healthy ngrok tunnel must not try fallbacks: $(tr '\n' ' ' < "$TMP/ctx/calls")"
@@ -618,13 +618,13 @@ echo "PASS: the per-worktree ngrok fallback domain is still reserved and bound"
 
 # Provider-specific recurrence: exercise the actual fallback AND actual probe.
 NGROK_RESPONSE_KIND=healthy run_ngrok_fallback krakow-bench-healthy-origin \
-  || fail "case 10: authentic healthy app must pass ngrok route proof"
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: authentic healthy app must pass ngrok route proof"; }
 echo "PASS: ngrok healthy200 matches its owned local app origin"
 NGROK_RESPONSE_KIND=pre-origin-502 run_ngrok_fallback krakow-bench-pre-origin-502 \
   || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: the edge's 502 ERR_NGROK_8012 before the origin listens must prove routing"; }
 echo "PASS: ngrok's 502 ERR_NGROK_8012 before the origin listens proves the owned route"
 NGROK_EVENT_KIND=delayed run_ngrok_fallback krakow-bench-delayed-publication \
-  || fail "case 10: initial log absence must remain pending until the current child publishes"
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: initial log absence must remain pending until the current child publishes"; }
 echo "PASS: delayed current-child log publication remains pending then routes"
 for event in foreign-url wrong-upstream; do
   if NGROK_EVENT_KIND="$event" run_ngrok_fallback krakow-bench-owner-negative; then
@@ -655,7 +655,7 @@ echo "PASS: ngrok offline/unmarked/proxy/CONNECT/wrong-origin responses are reje
 NGROK_ASSERT_PROXY=1 HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-setting ALL_PROXY=fixture-proxy-setting \
   http_proxy=fixture-proxy-setting https_proxy=fixture-proxy-setting all_proxy=fixture-proxy-setting \
   NO_PROXY=fixture-proxy-setting no_proxy=fixture-proxy-setting run_ngrok_fallback krakow-bench-proxy-preservation \
-  || fail "case 10: ngrok proof changed or bypassed inherited proxy settings"
+  || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: ngrok proof changed or bypassed inherited proxy settings"; }
 echo "PASS: actual ngrok route proof preserves all inherited proxy aliases"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

@@ -19,7 +19,7 @@ import tempfile
 from unittest.mock import AsyncMock, patch
 import time
 
-from _test_utils import BlackboxResult
+from _test_utils import BlackboxResult, live_funded_azure
 
 # A command family verifies many native cases. Use the owning coverage domain's
 # generous guard, including in standalone runs, rather than sub-suite race caps.
@@ -184,7 +184,7 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
 
     post_attempts = []
     visible_runs = set()
-    hold_post_response = threading.Event()
+    visibility_served = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -195,7 +195,9 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             run_id = body["run_id"]
             post_attempts.append(run_id)
             visible_runs.add(run_id)
-            hold_post_response.wait(0.2)
+            # Commit first, then withhold the response until the client has
+            # proven visibility, so the timeout is ambiguous on any host load.
+            visibility_served.wait(60)
             payload = json.dumps({"run": {"run_id": run_id}}).encode()
             try:
                 self.send_response(201)
@@ -219,6 +221,7 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            visibility_served.set()
 
         def log_message(self, *_args):
             return
@@ -235,11 +238,13 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
             "suite": "blackbox",
             "tasks": [{"name": "task-a", "status": "starting"}],
         }
+        # The POST still times out; the visibility GET gets the client's normal
+        # five-second ceiling instead of a budget host load can exhaust.
         with patch("benchmarks.hub_upload.time.sleep", lambda _delay: None):
-            require_run_visible(bundle, timeout=0.03)
+            require_run_visible(bundle, timeout=5.0)
         assert post_attempts == ["blackbox-ambiguous-commit"]
     finally:
-        hold_post_response.set()
+        visibility_served.set()
         server.shutdown()
         server.server_close()
         for name, value in prior.items():
@@ -2477,6 +2482,118 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
 
 
+async def test_post_pause_refreshes_retain_observed_harness_evidence():
+    """A post-pause transcript refresh must not erase what the poll loop observed.
+
+    Smoke agent 15ba14eb timed out after its subscription gate, paid Checkout and
+    payment approval had all been observed. The early-fail path paused it and
+    replaced ``data`` with raw agent reads, which carry no harness-only
+    ``_benchmark`` state, so evaluation appended a false "Expected subscription
+    gate before Checkout" to the genuine timeout.
+    """
+    import copy
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-new-user-journey")
+    browser_task_id = "browser-task-1"
+    claude_task_id = "claude-task-1"
+    open_messages = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "browser",
+                "toolStatus": "IN_PROGRESS",
+                "task_id": browser_task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "action_type": "claude_code_started",
+                "task_id": claude_task_id,
+            }
+        },
+    ]
+    terminal_messages = open_messages + [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "task_id": browser_task_id,
+                "recording_view_url": "https://kernel.example/replay.mp4",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+                "task_id": browser_task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "action_type": "task_complete",
+                "task_id": claude_task_id,
+            }
+        },
+    ]
+    observed = {
+        "approvals_triggered": 2,
+        "expected_gate_seen": True,
+        "expected_gate": dict(task.expected_gate),
+        "expected_gate_request_id": "gate-request-1",
+        "subscription_checkout": {
+            "status": "complete",
+            "payment_status": "paid",
+            "webhook_delivered": True,
+            "session_id": "cs_test_1",
+        },
+        "expected_attention_kinds_seen": list(task.expected_attention_kinds),
+    }
+    polled = {"agent": {"status": "ACTIVE"}, "messages": open_messages, "_benchmark": copy.deepcopy(observed)}
+    agent_reads = []
+
+    async def fake_get_agent(base_url, agent_id):
+        agent_reads.append((base_url, agent_id))
+        return {"agent": {"status": "PAUSED"}, "messages": copy.deepcopy(terminal_messages)}
+
+    with patch.object(bench, "get_agent", fake_get_agent):
+        refreshed = await bench._refresh_agent_after_pause_for_browser_terminal(
+            "https://api.example",
+            "root-agent-1",
+            polled,
+            timeout_seconds=5,
+            poll_interval_seconds=0,
+        )
+        assert refreshed["agent"]["status"] == "PAUSED"
+        assert bench._agent_messages_ready_for_browser_hub_archive(refreshed["messages"])
+        assert refreshed["_benchmark"] == observed
+
+        # The Claude Code chip wait re-reads the agent on its own; it must keep
+        # the same evidence. Start it from an unsettled chip transcript.
+        unsettled = {"agent": {"status": "PAUSED"}, "messages": open_messages, "_benchmark": copy.deepcopy(observed)}
+        settled = await bench._await_claude_code_chip_terminality(
+            "https://api.example",
+            "root-agent-1",
+            unsettled,
+            timeout_seconds=10,
+        )
+    assert len(agent_reads) == 2
+    assert claude_task_id in bench._claude_code_terminal_task_ids(settled["messages"])
+    assert settled["_benchmark"] == observed
+
+    passed, reason = bench.evaluate_task(task, settled, approvals_triggered=2)
+    assert passed is False
+    assert "subscription gate" not in str(reason)
+    assert "Stripe test Checkout" not in str(reason)
+    assert "Attention sequence mismatch" not in str(reason)
+
+
 async def test_payment_abandonment_seals_browser_before_hub_archive():
     """A successful abandonment snapshot must include browser terminal evidence.
 
@@ -3678,6 +3795,14 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert production.name not in {task.name for task in suite_tasks()}
 
     assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
+        # Hosted Rose Shop purchases: the same sandbox settlement behind a sign-in gate.
+        "browser-auth-guest-purchase",
+        "browser-auth-member-discount-purchase",
+        "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase",
+        "browser-auth-signup-purchase",
+        "browser-auth-signup-purchase-no-subscription",
+        "browser-auth-session-expires-at-checkout",
         "agent-payment-test-shop",
         "agent-payment-new-user-journey",
         "agent-payment-setup-resume",
@@ -7468,7 +7593,8 @@ async def _assert_blue_bottle_tree_proof_semantics_passes():
     static_passed, static_reason = _run_declared_static_check(task, static, data)
     assert static_passed is True, static_reason
 
-    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    with live_funded_azure():
+        single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
     assert single_score >= 1.0, (
         f"Expected tree-aware single-turn judge to pass; got score={single_score}: {single_turn.get('reasoning')}"
@@ -7491,7 +7617,8 @@ async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
     static_passed, static_reason = _run_declared_static_check(task, static, data)
     assert static_passed is True, static_reason
 
-    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    with live_funded_azure():
+        single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
     assert single_score >= 1.0, (
         f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: {single_turn.get('reasoning')}"
@@ -10484,6 +10611,34 @@ def test_timeout_default_uses_task_config_when_history_is_missing():
     assert _default_timeout_for_task(task) == 120
 
 
+def test_normal_run_never_implicitly_shortens_the_benchmark_timeout():
+    """Only an explicit operator cap may stop a task before its own defined timeout."""
+    from pytest import MonkeyPatch
+
+    with MonkeyPatch.context() as monkeypatch:
+        _assert_benchmark_timeout_is_not_implicitly_shortened(monkeypatch)
+
+
+def _assert_benchmark_timeout_is_not_implicitly_shortened(monkeypatch):
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("job-applications")
+    assert task.timeout_seconds == 900
+    monkeypatch.setattr(
+        bench, "_history_summary", lambda _name, max_seconds=None: {"count": 9, "recent_p95": 80, "recent_max": 90}
+    )
+    # Fast recent passes once derived a 104 s implicit kill for this 900 s task.
+    monkeypatch.setattr(bench, "_history_get_timeout", lambda _name, max_seconds=None: 104)
+    seconds, note = bench.resolve_task_execution_timeout(task)
+    assert seconds == task.timeout_seconds, note
+    assert "recent_p95=80s" in note
+    assert bench.resolve_task_execution_timeout(task, bootstrap=True)[0] == task.timeout_seconds
+    # History may only extend the definition (smoke caps bound it upstream).
+    monkeypatch.setattr(bench, "_history_get_timeout", lambda _name, max_seconds=None: 1500)
+    assert bench.resolve_task_execution_timeout(task)[0] == 1500
+
+
 def test_timeout_default_respects_explicit_floor():
     """Configured fallback timeouts still honor task-specific minimum floors."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -13423,10 +13578,12 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert enabled.returncode == 0, enabled.stderr
     assert enabled.stdout.splitlines() == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
+        "stack:FAST_MODE_CACHE_USE_LOCAL=1",
+        "stack:FAST_MODE_CACHE_DATABASE_URL=",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
     ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
-    assert disabled.stdout == ""
+    assert disabled.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
     with tempfile.TemporaryDirectory() as fake_bin_dir:
         fake_python = Path(fake_bin_dir) / "python3"
@@ -13446,6 +13603,125 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     assert resolver_failure.returncode == 42
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
+
+
+def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
+    """Only fast_cache:on DEMO replays may hold production pooler slots.
+
+    Every other cloud guest keeps its Fast Mode cache in the isolated local DB,
+    matching local isolated stacks; a broken resolver fails closed instead of
+    silently routing a LIVE fleet at the shared pooler. Benchmark stacks that
+    still read the shared cache use bounded Prisma pools (20 per run.sh stack, 4 per
+    cloud DEMO guest) instead of production's 75-client default.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    base_env = {
+        **os.environ,
+        "CLOUDBENCH_REPO_DIR": str(repo_root),
+        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+        "CLOUDBENCH_PRINT_TASK_ENV": "1",
+        "BENCH_TASKS_B64": "",
+    }
+    base_env.pop("CLOUDBENCH_INFRA_PROBE", None)
+
+    def print_env(tasks: str, **extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(script)],
+            env={**base_env, "BENCH_TASKS": tasks, **extra},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    live = print_env("chat-mode")
+    assert live.returncode == 0, live.stderr
+    assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+
+    shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
+    shared = print_env("test-mass-agent-run-0")
+    assert shared.returncode == 0, shared.stderr
+    # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
+    # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
+    assert shared.stdout.splitlines() == shared_route
+
+    # An inherited local route must not divert the replay to the empty local DB.
+    inherited = print_env("test-mass-agent-run-0", FAST_MODE_CACHE_USE_LOCAL="1")
+    assert inherited.returncode == 0, inherited.stderr
+    assert inherited.stdout.splitlines() == shared_route
+
+    mixed = print_env("chat-mode,test-mass-agent-run-0")
+    assert mixed.returncode == 0, mixed.stderr
+    assert mixed.stdout.splitlines() == shared_route
+
+    tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
+    assert tuned.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
+
+    probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
+
+    with tempfile.TemporaryDirectory() as fake_bin_dir:
+        fake_python = Path(fake_bin_dir) / "python3"
+        fake_python.write_text(
+            '#!/bin/sh\ncase "$2" in requires-gate) exit 10 ;; *) echo route-broken >&2; exit 31 ;; esac\n'
+        )
+        fake_python.chmod(0o755)
+        broken = print_env("chat-mode", CLOUDBENCH_TASK_GATE_PYTHON=str(fake_python))
+    assert broken.returncode == 31
+    assert "route-broken" in broken.stderr
+    assert "Fast Mode cache routing failed (exit 31)" in broken.stderr
+    assert "FAST_MODE_CACHE_USE_LOCAL" not in broken.stdout
+
+    unknown = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "cloudbench_catalog.py"),
+            "needs-shared-fast-cache",
+            str(repo_root / "agents" / "benchmarks" / "tasks.json"),
+            "no-such-benchmark-task",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unknown.returncode == 1
+    assert "no-such-benchmark-task" in unknown.stderr
+
+    lib = repo_root / "scripts" / "lib" / "fast-mode-cache-schema.sh"
+    pool_env = {key: value for key, value in os.environ.items() if key != "FAST_CACHE_DB_POOL"}
+
+    def pool_after(mode: str, explicit: str | None = None) -> str:
+        env = dict(pool_env)
+        if explicit is not None:
+            env["FAST_CACHE_DB_POOL"] = explicit
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; apply_fast_cache_pool_default >/dev/null; printf "%s" "${FAST_CACHE_DB_POOL-unset}"',
+                "pool",
+                str(lib),
+                mode,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    # Every run.sh stack (developer or benchmark) shares the pooler and gets 20.
+    assert pool_after("any") == "20"
+    assert pool_after("any", "9") == "9", "an explicit operator pool size wins"
+
+    run_sh = (repo_root / "scripts" / "run.sh").read_text()
+    pool_call = run_sh.index("apply_fast_cache_pool_default\n")
+    assert run_sh.index('export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"') < pool_call
+    assert pool_call < run_sh.index('echo "🧠 Ensuring Fast Mode cache schema..."')
 
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
@@ -21289,6 +21565,10 @@ async def run_all_tests():
     r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
     r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
     r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)
+    r.record(
+        "normal_run_never_implicitly_shortens_benchmark_timeout",
+        test_normal_run_never_implicitly_shortens_the_benchmark_timeout,
+    )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
@@ -21521,6 +21801,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_source_connect_gate_benchmark_non_purchase_env",
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
+    r.record(
+        "cloudbench_fast_cache_route_keeps_live_guests_off_shared_pooler",
+        test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler,
     )
     r.record(
         "cloudbench_task_gate_resolution_fails_closed",
@@ -22521,6 +22805,10 @@ async def run_all_tests():
     r.record(
         "timeout_early_fail_pauses_before_payment_cleanup",
         test_timeout_early_fail_pauses_agent_before_payment_cleanup,
+    )
+    await r.record_async(
+        "post_pause_refreshes_retain_observed_harness_evidence",
+        test_post_pause_refreshes_retain_observed_harness_evidence,
     )
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",

@@ -24,12 +24,13 @@ export {
   type ToolStreamPayload,
   type AttentionStreamPayload,
   type AgentModeStartedPayload,
+  type BrowserSessionBindingPayload,
   // Tool-specific metadata types
   type ToolName,
   type BaseToolMetadata,
   type SpawnBrowserAgentMetadata,
   type SpawnClaudeCodeAgentMetadata,
-  type SpawnSubAgentsMetadata,
+  type SpawnSubAgentMetadata,
   type SetPlanMetadata,
   type PlanArtifactData,
   type SendMessageToUserMetadata,
@@ -71,6 +72,7 @@ export {
   extractAttentionStreamPayload,
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
+  extractBrowserSessionBindingPayload,
   // Legacy utility (deprecated)
   extractRecord,
 } from './realtime-types';
@@ -85,6 +87,7 @@ import {
   type DeleteMessagePayload,
   type AgentStateChangedPayload,
   type AgentModeStartedPayload,
+  type BrowserSessionBindingPayload,
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
@@ -94,6 +97,7 @@ import {
   extractAttentionStreamPayload,
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
+  extractBrowserSessionBindingPayload,
 } from './realtime-types';
 
 // Legacy type aliases for backward compatibility
@@ -219,7 +223,8 @@ export interface AgentHandlers {
   onPlanStream?: (payload: PlanStreamPayload) => void;
   onAttentionStream?: (payload: AttentionStreamPayload) => void;
   onToolStream?: (payload: ToolStreamPayload) => void;
-  onAgentModeStarted?: () => void;
+  onAgentModeStarted?: (payload: AgentModeStartedPayload) => void;
+  onBrowserSession?: (payload: BrowserSessionBindingPayload) => void;
   onDisconnect?: () => void;
 }
 
@@ -286,6 +291,13 @@ export async function subscribeToAgent(
     eventHandlers['AGENT_MODE_STARTED'] = (wrapper: unknown) => {
       const record = extractAgentModeStartedPayload(wrapper);
       if (record) handlers.onAgentModeStarted!(record);
+    };
+  }
+
+  if (handlers.onBrowserSession) {
+    eventHandlers['BROWSER_SESSION'] = (wrapper: unknown) => {
+      const record = extractBrowserSessionBindingPayload(wrapper);
+      if (record) handlers.onBrowserSession!(record);
     };
   }
 

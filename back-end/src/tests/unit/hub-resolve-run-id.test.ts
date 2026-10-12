@@ -33,7 +33,6 @@ import {
   parseHubAgentRunIndexRevision,
   parseHubRunBundle,
   peekHubResolutionForTest,
-  rebuildHubAgentRunIndex,
   recoverableHubAgentRunRevision,
   resolveHubRunIdFromAgentIndex,
   resolveHubRunIdFromIndexes,
@@ -183,49 +182,6 @@ test('revision floor is strict while malformed-index revision salvage trusts no 
   assert.equal(recoverableHubAgentRunRevision('not-json'), 0);
 });
 
-asyncTest(
-  'mutation repair rebuilds every authoritative bundle above the durable floor',
-  async () => {
-    const rebuilt = await rebuildHubAgentRunIndex(
-      [
-        { ...runs[0], run_id: 'newer-run' },
-        { ...runs[0], run_id: 'older-run' },
-      ],
-      async (runId) => ({
-        tasks: [
-          {
-            agent_id: `${runId}-root`,
-            logs: {
-              tree: {
-                shared: { parent_agent_id: `${runId}-root` },
-                [`${runId}-child`]: { parent_agent_id: `${runId}-root` },
-              },
-            },
-          },
-        ],
-      }),
-      73
-    );
-    assert.equal(rebuilt.revision, 73);
-    assert.equal(rebuilt.complete, true);
-    assert.equal(rebuilt.agents.get('shared'), 'newer-run');
-    assert.equal(rebuilt.agents.get('older-run-child'), 'older-run');
-  }
-);
-
-asyncTest('mutation repair stays incomplete by rejecting an unreadable bundle', async () => {
-  await assert.rejects(
-    rebuildHubAgentRunIndex(
-      runs,
-      async () => {
-        throw new Error('synthetic unreadable authoritative bundle');
-      },
-      73
-    ),
-    /synthetic unreadable authoritative bundle/
-  );
-});
-
 test('legacy completion merges concurrent uploads and excludes concurrent deletes', () => {
   const merged = completedHubAgentBackfill(
     {
@@ -241,7 +197,11 @@ test('legacy completion merges concurrent uploads and excludes concurrent delete
       ['legacy-agent', 'run-legacy'],
       ['deleted-agent', 'run-deleted'],
     ]),
-    new Set(['run-new', 'run-current', 'run-legacy'])
+    [
+      { run_id: 'run-new', uploaded_at: '2026-10-08T22:50:00Z' },
+      { run_id: 'run-current', uploaded_at: '2026-10-08T22:45:00Z' },
+      { run_id: 'run-legacy', uploaded_at: '2026-07-16T01:38:37Z' },
+    ]
   );
   assert.equal(merged.complete, true);
   assert.equal(merged.agents.get('reused-agent'), 'run-new');

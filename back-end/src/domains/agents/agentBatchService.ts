@@ -14,6 +14,7 @@
  */
 
 import { startAgentWorkflowExecution } from '../../providers/temporal';
+import { bindStartedRunIdentity } from '../../providers/workflowGeneration';
 import { createLogger } from '../../providers/logger';
 import { DEFAULT_TASK_PRICE_LIMIT_CENTS } from '../../providers/priceLimitDefaults';
 import { resolvePromptSecrets } from './agentLifecycleService';
@@ -162,7 +163,11 @@ async function startManagedBatchWorkflow(
 ): Promise<string> {
   const identity = descendantStartIdentity(body);
   if (identity === null) {
-    return (await startBatchWorkflow(body, userId, verifierType)).workflowId;
+    const execution = await startBatchWorkflow(body, userId, verifierType);
+    // The batch row was created with Workflow ID = agent ID; bind the run so
+    // cleanup can tell this generation from a later follow-up run.
+    await bindStartedRunIdentity(body.agent_id!, execution);
+    return execution.workflowId;
   }
   const execution = await executeDescendantWorkflowStart(identity, (deadlineAtMs) =>
     startBatchWorkflow(body, userId, verifierType, deadlineAtMs)

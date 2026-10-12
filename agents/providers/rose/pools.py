@@ -25,12 +25,14 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
         gptAuth    = gpt-5.6-luna
+        foundry    = gpt-5.6-luna (when configured)
         waterfall  = anthropic/claude-haiku-4.5 -> z-ai/glm-5.3-flash
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
+        foundry    = gpt-5.6-luna (when configured; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
@@ -43,8 +45,14 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-browser-use:  (same rose-fast hop as flash)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
+        foundry    = gpt-5.6-luna (when configured; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
+
+    rose-1-oss:  (open-weights only)
+        direct_auth_enabled = False
+        foundry    = DeepSeek-V3.2 (when configured)
+        waterfall  = moonshotai/kimi-k3
 
 Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b.
 Groq's newer qwen3.8-27b is not on OpenRouter's Groq route. TypeSafe Jev
@@ -89,22 +97,28 @@ class PoolSpec:
     which the transport layer maps to the right endpoint."""
 
     foundry_enabled: bool = False
-    """Try a matching Microsoft Foundry deployment after direct credentials."""
+    """Try the pool's Foundry model on Microsoft Foundry (funded Azure).
 
-    foundry_deployments: Tuple[str, ...] = ()
-    """Foundry deployments serving this pool's GPT model. Empty uses
-    ``AZURE_FOUNDRY_DEPLOYMENTS`` (Ultra's GPT-6 deployments in production)."""
+    It follows direct credentials and the direct Cerebras hop, and precedes the
+    OpenRouter waterfall. ``direct_auth_enabled`` does not gate it."""
+
+    foundry_model: str | None = None
+    """Foundry model when it must differ from ``gpt_auth_model`` (the open-weights
+    pool keeps its guarantee on an open-weights Azure model). Defaults to
+    ``gpt_auth_model``."""
+
 
     waterfall_reasoning_effort: str | None = None
-    """When set, the OpenRouter waterfall stamps this effort instead of the
-    caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
+    """When set, the OpenRouter waterfall and the Foundry fallback stamp this
+    effort instead of the caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
     the fast Gemini/GPT layers jumps from ~1s to 8–24s. claudeAuth and
     gptAuth keep the caller effort. Ultra leaves this unset."""
 
     direct_auth_enabled: bool = True
     """When False, OAuth and funded API-key routes (claudeAuth / gptAuth /
     ANTHROPIC_API_KEY / GPT_API_KEY) are skipped. The pool then starts at
-    `cerebras_model` (if set) and falls through to `waterfall`."""
+    `cerebras_model` (if set), then Foundry (if `foundry_enabled`), and falls
+    through to `waterfall`."""
 
     cerebras_model: str | None = None
     """Bare Cerebras inventory id, posted to api.cerebras.ai (not OpenRouter)."""
@@ -123,7 +137,6 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-6.1-sol",
         # Azure credit first; the same model on OpenRouter is the fallback.
         foundry_enabled=True,
-        foundry_deployments=("gpt-6.1-sol",),
         waterfall=("openai/gpt-6.1-sol",),
         waterfall_reasoning_effort="xhigh",
         direct_auth_enabled=False,
@@ -136,6 +149,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-mini",
         claude_auth_model="claude-haiku-4-5",
         gpt_auth_model="gpt-5.6-luna",
+        foundry_enabled=True,
         waterfall=(
             "anthropic/claude-haiku-4.5",
             "z-ai/glm-5.3-flash",
@@ -154,6 +168,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
+        foundry_enabled=True,
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
@@ -187,6 +202,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
+        foundry_enabled=True,
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
     # open-source model -- currently the behavioral-biometrics benchmark, whose
@@ -203,8 +219,18 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-luna",
         waterfall=("moonshotai/kimi-k3",),
         direct_auth_enabled=False,
+        # Funded Azure fallback stays open-weights: DeepSeek-V3.2 (MIT). On the
+        # pinned biometrics task's spawn_agent schema it produced valid calls
+        # 4/4 where gpt-oss-120b produced 0/4.
+        foundry_enabled=True,
+        foundry_model="DeepSeek-V3.2",
     ),
 }
+
+
+def foundry_model(pool_spec: PoolSpec) -> str:
+    """The model a pool requests from Microsoft Foundry."""
+    return pool_spec.foundry_model or pool_spec.gpt_auth_model
 
 
 def get_pool(name: str) -> PoolSpec:
