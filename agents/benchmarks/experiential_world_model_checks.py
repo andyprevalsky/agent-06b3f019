@@ -264,6 +264,54 @@ def test_distribution_append_prediction_rebases_after_an_intervening_replace():
     asyncio.run(run())
 
 
+def test_a_new_prediction_runs_beside_a_rebase_and_commits_after_it():
+    """Run 7 (2026-10-12): one replace queued a 15-agent fan-out behind one re-prediction at a time.
+    A new operation predicts at once and only its commit yields to the older conflicted one."""
+
+    async def run():
+        first_entered, first_release = asyncio.Event(), asyncio.Event()
+        rebase_entered, rebase_release, third_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        requests, seen = [], {}
+
+        async def complete(request):
+            requests.append(request)
+            call = json.loads(request.messages[1].content)["candidate_response"]["tool_calls"][0]["call_id"]
+            payload = json.loads(distribution_reply(request))
+            if call == "call-1":
+                payload["outcomes"][1]["state_patch"] = [{"op": "replace", "path": "/funds_cents", "value": 500}]
+            elif call == "call-2":
+                seen[call] = seen.get(call, 0) + 1
+                entered, release = (first_entered, first_release) if seen[call] == 1 else (rebase_entered, rebase_release)
+                entered.set()
+                await release.wait()
+            else:
+                third_entered.set()
+            return json.dumps(payload)
+
+        model = distribution_model(complete, sample_uniform=lambda: 0.975)
+        session = model.new_session("Fund, then record two calls", {"receipts": [], "funds_cents": 0}, "root")
+        second = asyncio.create_task(model.step(session.id, action(2), "inv-2"))
+        await asyncio.wait_for(first_entered.wait(), 2)
+        await asyncio.wait_for(model.step(session.id, action(1), "inv-1"), 2)
+        first_release.set()
+        await asyncio.wait_for(rebase_entered.wait(), 2)
+        third = asyncio.create_task(model.step(session.id, action(3), "inv-3"))
+        # The new operation predicts while the conflicted one re-predicts...
+        await asyncio.wait_for(third_entered.wait(), 2)
+        await asyncio.sleep(0.05)
+        # ...but cannot commit ahead of it.
+        assert not third.done() and session.revision == 1
+        rebase_release.set()
+        results = await asyncio.wait_for(asyncio.gather(second, third), 2)
+        assert len(requests) == 4 and session.revision == 3
+        assert session.state == {"receipts": ["call-2", "call-3"], "funds_cents": 500}
+        assert [r["metadata"]["committed_revision"] for r in results] == [2, 3]
+        assert [r["metadata"]["state_retries"] for r in results] == [1, 0]
+        assert results[1]["metadata"]["append_merged_from_revision"] == 1
+
+    asyncio.run(run())
+
+
 def test_distribution_new_record_keys_merge_but_a_shared_new_key_rebases():
     """Creating an absent key is a new record; two creations of the same key are not merged."""
 
@@ -1059,16 +1107,19 @@ def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations()
         assert (await asyncio.wait_for(model.step(s.id, action(1), "sms-1"), 2))["content"] == "call-1"
         slow_release[0].set()
         await asyncio.wait_for(slow_entered[1].wait(), 2)
-        # The conflicted slow operation now owns the next commit; a newer fast
-        # operation waits for it instead of predicting against a doomed revision.
+        # The conflicted slow operation now owns the next commit. A newer fast
+        # operation still predicts at once, but cannot commit ahead of it.
         fast = asyncio.create_task(model.step(s.id, action(2), "sms-2"))
         for _ in range(20):
             await asyncio.sleep(0)
-        assert fast_revisions == [("call-1", 0)] and not fast.done()
+        assert fast_revisions == [("call-1", 0), ("call-2", 1)] and not fast.done()
         slow_release[1].set()
         results = await asyncio.wait_for(asyncio.gather(slow, fast), 2)
-        assert slow_revisions == [0, 1] and fast_revisions == [("call-1", 0), ("call-2", 2)]
+        # Its prediction from revision 1 was overtaken by a replacing commit, so
+        # it rebases once, at its own turn.
+        assert slow_revisions == [0, 1] and fast_revisions == [("call-1", 0), ("call-2", 1), ("call-2", 2)]
         assert [r["metadata"]["committed_revision"] for r in results] == [2, 3]
+        assert [r["metadata"]["state_retries"] for r in results] == [1, 1]
         assert s.state == {"count": 3, "order": ["call-1", "call-0", "call-2"]} and not s.contended
 
     asyncio.run(run())

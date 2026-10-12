@@ -403,13 +403,15 @@ class ParallelWorldModel:
             call = candidate.tool_calls[0]
         # Conflicts are resolved oldest first: a discarded operation predicts
         # again only when it owns the turn, and no other operation commits
-        # meanwhile, so each operation rebases at most once.
+        # meanwhile, so each operation rebases at most once. Operations that
+        # have not conflicted predict at once and yield only at commit, so a
+        # wide fan-out keeps predicting beside a rebase (run 7, 2026-10-12).
         for attempt in count():
             while True:
                 async with session.lock:
                     if session.closed:
                         raise ValueError("Native world session ended before prediction")
-                    turn = self._awaiting_turn(session, key)
+                    turn = self._awaiting_turn(session, key) if key in session.contended else None
                     if turn is None:
                         base = session.state
                         messages = session.messages
