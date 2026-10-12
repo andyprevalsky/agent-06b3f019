@@ -2312,19 +2312,27 @@ build_warm_image() {
         # in-flight controller's publisher.
         source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-image-publisher.sh" || return $?
     fi
-    local attempt build_ok=0 build_status=0
+    local attempt build_ok=0 build_status=0 used_labels=" " build_args=()
     local completion_file="$OUT_DIR/cloudbench-image-publication.json"
-    IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
-    local build_args=(
-        deploy "$IMAGE_BUILD_CONTEXT"
-        -c "$IMAGE_BUILD_CONTEXT/fly.cloudbench-warm.toml"
-        --dockerfile "$IMAGE_BUILD_CONTEXT/Dockerfile.cloudbench-warm"
-        "${builder_args[@]}" --remote-only --build-only --push
-        --image-label "$IMAGE_LABEL" -a "$APP"
-    )
-    [ "$IMAGE_BUILD_NO_CACHE" = 0 ] || build_args+=(--no-cache)
     echo "🏗️  Building dependency image (layer_cache_bypassed=$IMAGE_BUILD_NO_CACHE)..."
     for attempt in 1 2 3; do
+        # A failed attempt's remote builder can still publish after its local
+        # client exits. Each attempt therefore owns a fresh tag, so that output
+        # can never be read back as a later attempt's registry handoff.
+        IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
+        while [[ "$used_labels" == *" $IMAGE_LABEL "* ]]; do
+            command sleep 1
+            IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)-$$"
+        done
+        used_labels+="$IMAGE_LABEL "
+        build_args=(
+            deploy "$IMAGE_BUILD_CONTEXT"
+            -c "$IMAGE_BUILD_CONTEXT/fly.cloudbench-warm.toml"
+            --dockerfile "$IMAGE_BUILD_CONTEXT/Dockerfile.cloudbench-warm"
+            "${builder_args[@]}" --remote-only --build-only --push
+            --image-label "$IMAGE_LABEL" -a "$APP"
+        )
+        [ "$IMAGE_BUILD_NO_CACHE" = 0 ] || build_args+=(--no-cache)
         echo "   build attempt $attempt/3 (label $IMAGE_LABEL)"
         # Fly resolves build files from the config directory. Bind every path
         # and the invocation directory to the selected checkout, even when the
