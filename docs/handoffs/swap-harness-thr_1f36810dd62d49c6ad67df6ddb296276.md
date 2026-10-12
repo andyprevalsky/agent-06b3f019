@@ -1,3 +1,7 @@
+> Superseded by the verified old-filesystem handoff in
+> `swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4.md`.
+> The original preparation record below is retained for provenance.
+
 # Browser-state injection RCA — old-filesystem checkpoint required
 
 This handoff preserves the available GitHub source and visible task context.

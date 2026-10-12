@@ -1,0 +1,154 @@
+{
+  "original_deploy_run": "20261012-222612-3087827",
+  "source_sha": "c199c928721f7dce289cdbd5250833629a3a145e",
+  "lanes": [
+    {
+      "lane": "static",
+      "terminal_line": "STATIC_DONE eslint=0 tsc=0 structural=0",
+      "original_bytes": 65318
+    },
+    {
+      "lane": "structural",
+      "terminal_line": "STRUCTURAL_DONE deploy-command=1 seed-cache=0 whatsapp=0",
+      "original_bytes": 4156
+    },
+    {
+      "lane": "structural2",
+      "terminal_line": "STRUCTURAL_DONE deploy-command=0",
+      "original_bytes": 63510
+    },
+    {
+      "lane": "be-cov",
+      "terminal_line": "BE_COV_DONE exit=0",
+      "original_bytes": 103237
+    },
+    {
+      "lane": "fe-cov",
+      "terminal_line": "FE_COV_DONE exit=0",
+      "original_bytes": 83027
+    },
+    {
+      "lane": "live",
+      "terminal_line": "LIVE_DONE exit=0",
+      "original_bytes": 4207
+    },
+    {
+      "lane": "seed",
+      "terminal_line": "SEED_DONE exit=0",
+      "original_bytes": 1226
+    },
+    {
+      "lane": "cloudbench",
+      "terminal_line": "CLOUDBENCH_DONE gate=0 benchmark-domain=0",
+      "original_bytes": 445867
+    },
+    {
+      "lane": "semantic",
+      "terminal_line": "SEMANTIC_DONE ui=0 latency=0",
+      "original_bytes": 5965
+    },
+    {
+      "lane": "e2b",
+      "terminal_line": "E2B_DONE exit=0",
+      "original_bytes": 1957
+    }
+  ],
+  "repro_receipts": [
+    {
+      "at": "2026-10-12T21:50:01.068Z",
+      "rev": "a040520d5",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 1,
+      "outcome": "error",
+      "elapsedMs": 27436
+    },
+    {
+      "at": "2026-10-12T21:50:29.507Z",
+      "rev": "a040520d5",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 2,
+      "outcome": "error",
+      "elapsedMs": 28439
+    },
+    {
+      "at": "2026-10-12T21:50:56.415Z",
+      "rev": "a040520d5",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 3,
+      "outcome": "error",
+      "elapsedMs": 26908
+    },
+    {
+      "at": "2026-10-12T21:55:00.561Z",
+      "rev": "a040520d5+F2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 1,
+      "outcome": "error",
+      "elapsedMs": 26432
+    },
+    {
+      "at": "2026-10-12T21:55:26.254Z",
+      "rev": "a040520d5+F2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 2,
+      "outcome": "error",
+      "elapsedMs": 25693
+    },
+    {
+      "at": "2026-10-12T21:55:52.884Z",
+      "rev": "a040520d5+F2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 3,
+      "outcome": "error",
+      "elapsedMs": 26631
+    },
+    {
+      "at": "2026-10-12T22:02:17.931Z",
+      "rev": "a040520d5+fix",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 1,
+      "outcome": "ok",
+      "elapsedMs": 20963
+    },
+    {
+      "at": "2026-10-12T22:02:38.089Z",
+      "rev": "a040520d5+fix",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 2,
+      "outcome": "ok",
+      "elapsedMs": 20158
+    },
+    {
+      "at": "2026-10-12T22:03:04.351Z",
+      "rev": "a040520d5+fix",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 3,
+      "outcome": "ok",
+      "elapsedMs": 26262
+    },
+    {
+      "at": "2026-10-12T22:24:28.017Z",
+      "rev": "a040520d5+fix-v2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 1,
+      "outcome": "ok",
+      "elapsedMs": 22944
+    },
+    {
+      "at": "2026-10-12T22:24:53.068Z",
+      "rev": "a040520d5+fix-v2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 2,
+      "outcome": "ok",
+      "elapsedMs": 25050
+    },
+    {
+      "at": "2026-10-12T22:25:15.551Z",
+      "rev": "a040520d5+fix-v2",
+      "startUrl": "https://admin.google.com/ac/users",
+      "run": 3,
+      "outcome": "ok",
+      "elapsedMs": 22482
+    }
+  ]
+}
