@@ -15,6 +15,15 @@ authorize merging/deploying, changing subscriptions, paid API fallbacks, or
 overriding task-specific user constraints. Preserve Freedom and protected
 instructions.
 
+**Hard exclusion:** Never migrate a devbox whose main work is already being
+done on Codex. Skip it even when an older Claude thread on that box shows a
+limit. Establish which thread owns the main task before any checkpoint,
+replacement or archive action. A Codex helper created specifically to migrate
+stalled Claude work is a migration worker, not an existing Codex main task.
+The Codex→Claude direction applies to a halted exhausted task only; it never
+overrides this exclusion for a currently running Codex main task. Preserve any
+additional user exclusions (for this run: Browser Mode P2).
+
 ```text
 project threads → confirm quota stop + identify old box
   → opposite-harness worker on OLD box → checkpoint + handoff → draft PR
@@ -48,6 +57,10 @@ project threads → confirm quota stop + identify old box
    When neither route is available, use the limited recovery mode below.
 4. Group by old devbox, with one worker/replacement per affected box. Include
    all relevant threads on it. Skip the coordinator and already-migrated boxes.
+   Also skip every box with an existing Codex main task, regardless of other
+   threads' quota status. Record the exclusion before dispatch; if a worker
+   discovers an active Codex main task later, stop that box's migration and
+   report the exclusion without touching its task files or lifecycle.
    Save evidence, IDs, phases and stable keys under `.context/swap-harness/`.
    Put nonsecret checkpoint/replacement receipts in the PR handoff as well.
 5. Read `threads options --agent <opposite> --json`, using saved defaults unless
@@ -92,15 +105,16 @@ continuation as usual. Report that archival and complete local preservation
 remain unfinished; never convert a partial recovery into a completed migration
 or delete the old box on the strength of a GitHub checkpoint alone.
 
-If installed tooling has no thread-ID-to-box resolver and no working peer on
-the old box, the user can start a thread with the credited harness on that
-existing devbox through the app's **New thread** action, without supplying any
-ID. Provide the concrete prompt in
-[references/old-box-bootstrap.md](references/old-box-bootstrap.md), filled with
-the actual source thread/PR and published skill revision. This is a required
-access step, not approval to discard work. Once that local worker can run,
-follow the full single-box workflow. Keep the task explicitly unfinished until
-every affected box has a verified complete checkpoint and archive result.
+The workflow must run autonomously; missing routing identity is a platform
+capability blocker, not a normal request for manual IDs or user-started threads.
+Keep the original boxes intact and the task explicitly unfinished. Ask for the
+supported discovery capability to expose same-project execution/devbox IDs
+under existing read access, or a supported thread-target start operation. Contact
+platform staff only when the user explicitly authorizes that communication.
+When the user independently provides old-box Codex threads, coordinate with
+them through managed peer messaging and follow the full single-box workflow.
+The operator bootstrap reference is only for an explicit user request for
+interim manual instructions; it does not satisfy autonomous-skill acceptance.
 
 ## Install and iterate
 

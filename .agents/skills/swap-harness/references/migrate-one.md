@@ -3,6 +3,13 @@
 Execute on the **old devbox**, using the opposite harness. The assignment is
 one box migration; preserve the original task and latest user steering.
 
+First identify the actual main task owner. **If the main work was already being
+done on Codex, skip this devbox.** An exhausted older Claude thread is not a
+reason to migrate that active Codex task. A newly started Codex migration helper
+for a stalled Claude task is eligible. Honor explicit excluded boxes, including
+Browser Mode P2 in the current run. Report an exclusion without changing its
+files, creating a replacement or requesting archival.
+
 ## Preserve and checkpoint
 
 Read original task threads with the narrowest available managed scope. Inspect
