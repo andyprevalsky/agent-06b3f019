@@ -378,3 +378,29 @@ passed.
   Stripe hold remains in test mode.
 
 The lane reruns unchanged on the post-main-sync HEAD.
+
+## Deploy warn-skip (2026-10-12)
+
+The `sms-supervisor-native-tools` deploy hit the same stall twice. On
+transfer `owt_ff135698c18b095f3a40a249` (card `card_b2e87905c62c34ba8abff4d4`,
+4396 transferred), agent `44c46dff-69fa-4fa8-9e9f-9f591e92bd31` stayed `HELD` /
+`RECLAIMING` with `consumed`, `releasedCents=0`. At the user's request, `/deploy`
+Step 6a now sets `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`. With that flag,
+`run_benchmark.py` reports this exact sandbox state as a loud SKIP and does
+not fail the lane:
+
+- the purchase is `HELD`;
+- funding is `RECLAIMING`;
+- the card is `CLOSED`;
+- the card's own test-mode transfer is `consumed` with nothing released.
+
+Its owned cleanup records a warning instead of an error, so the isolated stack
+is released.
+
+Any other lifecycle, a live transfer, or a different card still fails. Without
+the flag, the runner is unchanged. The skip leaves the Stripe test charge
+captured, and this case stays open until AgentCard releases closed-card
+transfers. The regressions live in the agents `benchmark` blackbox domain
+(`abandonment_timeout_classifies_sandbox_release_stall`,
+`owned_payment_release_stall_warn_skip`,
+`ci_permits_only_opt_in_agentcard_release_skip`).

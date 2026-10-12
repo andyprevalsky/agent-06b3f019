@@ -1266,6 +1266,7 @@ CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   BENCHMARK_ATTEMPT_SUITE=predeploy \
   BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
+  BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
@@ -1286,6 +1287,16 @@ their full purchase, Stripe, AgentCard card, organization transfer, attention,
 and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed
 abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the
 four task results and total cost in `TEST_REPORT`.
+
+One exception is approved for every deploy: `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`
+turns the open sandbox stall in
+`docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md`
+into a loud `⚠️⚠️ SKIPPED` instead of a failure. It applies only when Rose closed
+the card and is reclaiming while AgentCard still reports that card's test-mode
+transfer `consumed` with `releasedCents=0`; any other lifecycle, cleanup or live
+(`livemode=true`) failure still fails. Report the skip as `3/4 pass, 1 ⚠️ skipped
+(AgentCard sandbox release stall)` in `TEST_REPORT` and the scorecard. Step 13c's
+production abandonment stays strict.
 
 ## Step 6b: Semantic tests + fix
 
