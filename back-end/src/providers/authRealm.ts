@@ -30,21 +30,56 @@ export function hostnameFromRealmInput(input: string): string {
   }
 }
 
+/**
+ * Dev tunnel hosts that front a local stack. Only these (plus localhost) may
+ * override their realm with ?authRealm=, so hosted benchmark fixtures can stand
+ * in for a real site without any public host being able to claim another
+ * site's credentials. Keep in sync with agents' auth_realm_from_url.
+ */
+/** Hosted fixture realms (domains/auth-test-site): no TLD, so none can also name a real site. */
+const FIXTURE_REALM_PATTERN = /^rose-shop-[0-9a-z]+$/;
+
+const AUTH_REALM_OVERRIDE_HOST_SUFFIXES = [
+  '.ngrok-free.dev',
+  '.ngrok-free.app',
+  '.ngrok.app',
+  '.ngrok.io',
+  '.trycloudflare.com',
+];
+
+/**
+ * The domain a start URL's session cookies are stored under.
+ *
+ * Normally that is the realm itself. A dev host that took an `?authRealm=`
+ * override is the exception: the realm is only a label there, and the browser
+ * still keeps (and must be given) cookies under the page's real host.
+ */
+export function cookieDomainForStartUrl(input: string): string {
+  const realm = canonicalAuthRealm(input);
+  const hostname = hostnameFromRealmInput(input);
+  if (hostname === '' || realm === canonicalAuthRealm(hostname)) return realm;
+  return hostname;
+}
+
 export function canonicalAuthRealm(input: string): string {
   const raw = input.trim();
   if (raw.startsWith('http://') || raw.startsWith('https://')) {
     try {
       const url = new URL(raw);
       const hostname = url.hostname.toLowerCase();
-      const allowQueryOverride =
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        ['.ngrok-free.dev', '.ngrok.app', '.ngrok.io'].some((suffix) => hostname.endsWith(suffix));
+      const localHost = hostname === 'localhost' || hostname === '127.0.0.1';
+      const tunnelHost = AUTH_REALM_OVERRIDE_HOST_SUFFIXES.some((suffix) =>
+        hostname.endsWith(suffix)
+      );
       const override =
         url.searchParams.get('authRealm') ?? url.searchParams.get('auth_realm') ?? '';
-      if (allowQueryOverride && override !== '') {
+      if ((localHost || tunnelHost) && override !== '') {
         const overrideRealm = canonicalAuthRealm(override);
-        if (overrideRealm !== '') return overrideRealm;
+        // Anyone can open a tunnel on these domains, so a tunnel may only claim
+        // a hosted-fixture realm, never a real site's saved logins or passkeys.
+        if (overrideRealm !== '' && (localHost || FIXTURE_REALM_PATTERN.test(overrideRealm))) {
+          return overrideRealm;
+        }
       }
     } catch {
       // Fall through to the normal hostname parser below.

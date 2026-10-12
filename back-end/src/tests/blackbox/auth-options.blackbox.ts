@@ -1,12 +1,11 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from 'node:crypto';
-import { config } from 'dotenv';
+import 'dotenv/config';
 import { IntegrationStatus, IntegrationType, EmailProvider } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { getAuthOptions, markSteelSessionAuthFailed } from '../../domains/auth-options/service';
-
-config();
+import { identityCases } from './auth-options.identity.cases';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -623,7 +622,7 @@ test('passwords last used over a year ago are excluded', async () => {
 
 async function main() {
   const results: Array<{ name: string; passed: boolean; error?: string }> = [];
-  for (const item of tests) {
+  for (const item of [...tests, ...identityCases]) {
     try {
       await item.fn();
       results.push({ name: item.name, passed: true });

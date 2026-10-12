@@ -277,7 +277,45 @@ async function testSteelWithoutProfileFailsClosed(): Promise<void> {
   });
 }
 
+/** Answers the request the way the app does when the user says no. */
+async function decline(requestId: string, userId: string, route: 'respond' | 'reject') {
+  const response = await fetch(`${BASE_URL}/api/attention-requests/${requestId}/${route}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY, 'X-User-Id': userId },
+    body: JSON.stringify(route === 'respond' ? { response: '__REJECTED__' } : {}),
+  });
+  return { status: response.status, data: (await response.json()) as unknown };
+}
+
+/**
+ * A "no" must reach the agent as a no. Answering through /respond used to
+ * complete the request whatever the answer was, so a declined sign-in was
+ * recorded as the user having signed in.
+ */
+async function testDeclineDoesNotCompleteAuthAssistance(): Promise<void> {
+  for (const route of ['respond', 'reject'] as const) {
+    await withFixture(`decline-${route}`, 'kernel', async (fixture) => {
+      const requestId = await createLiveViewRequest(fixture, 'example.com');
+      assertStatus(await decline(requestId, fixture.userId, route), 200);
+      const assistance = await prisma.userAuthAssistanceRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      });
+      assert(assistance.completedAt === null, `${route}: a declined request must not be completed`);
+      const attention = await prisma.agentAttentionRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      });
+      assert(
+        attention.userResponse === '__REJECTED__',
+        `${route}: the agent must be told the user declined, got ${attention.userResponse}`
+      );
+      const steelAuth = await prisma.steelSessionAuth.count({ where: { userId: fixture.userId } });
+      assert(steelAuth === 0, `${route}: a decline must not record an authenticated session`);
+    });
+  }
+}
+
 export const authAssistanceProviderCompletionTests: TestCase[] = [
+  ['a declined live_view request is not completed', testDeclineDoesNotCompleteAuthAssistance],
   ['POST /api/auth-assistance/:id/complete resumes Kernel live_view', testKernelCompletion],
   [
     'POST /api/auth-assistance/:id/complete resumes Browser Use live_view',

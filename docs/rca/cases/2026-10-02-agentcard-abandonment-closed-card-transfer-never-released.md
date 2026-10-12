@@ -232,6 +232,27 @@ release observation.
   held the Step 6b latency ratchet, a separate harness bug fixed in
   `2026-10-07-retained-recovery-stack-held-latency-ratchet`.
 
+`/deploy` Step 6a for PR #1363 (deploy run `20261005-172101-47407`, HEAD
+`4a14f9783`, stack `1791405163-92172-18662`) failed `agent-payment-abandonment`
+(agent `cba71b08-839b-4ab6-ab05-b82d3cedc21b`) the same way. The other three
+lifecycle tasks passed, and the same four-task lane passed in this deploy on
+2026-10-06 with 4396 released. The branch does not touch the mint, cleanup or
+reclaim code.
+
+- Transfer `owt_…d6d22` (card `card_d7608e33491511fdeec32b5d`, $43.96 mint, 4396
+  transferred) was created at 20:48:29. `close_card` succeeded at 20:48:38. The
+  card was never charged. Six release reads through 20:49:40 and seven
+  stale-lease retries from 20:51:01 to 21:08:00 all returned `consumed`,
+  `released_cents=0`: 48 reads over 20.5 minutes, with no provider error, retry
+  or throttle and no recovery created.
+- No read-only provider ledger read was taken, so this run cannot say whether
+  another consumer was on the shared cardholder. No other AgentCard lane was
+  running on this host.
+- The stack was stopped at 21:09:24 because the host disk was nearly full. The
+  purchase was last seen `HELD` with funding `RECLAIMING`; nothing is retrying
+  the release now, and its Stripe test-mode hold was not refunded by our
+  reconciler.
+
 `/deploy` Step 6a for PR #1436 (stabilization run `20261007-220502-355180`,
 HEAD `8f63c272e`, stack `1791413203-595722-63139`) failed
 `agent-payment-abandonment` (agent `d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc`)
@@ -277,7 +298,8 @@ Still open:
   `owt_…6bfce1`, card `card_f…8f8a92`; `owt_…ed2cc2`, card
   `card_89cb339d5e85f43880ff1e5a`; `owt_…f4112b`, card
   `card_0d8d820f72e50b35fd394b93`; `owt_…a52e`, card
-  `card_aec0bd2ceaea33cfb4e17c36`; `owt_f46e484168f57370a4cda9c6`, card
+  `card_aec0bd2ceaea33cfb4e17c36`; `owt_…d6d22`, card
+  `card_d7608e33491511fdeec32b5d`; `owt_f46e484168f57370a4cda9c6`, card
   `card_5b1c41fe5dee8907e092e155`; live-org `owt_…6234e`, card
   `card_…b131`) to AgentCard with the ledger reads.
 - Confirm the live-org $1 purchase from 2026-10-11 (agent `5b7dd06e`) reaches
@@ -296,7 +318,6 @@ When a benchmark waits on a third-party ledger, its failure has to print that
 ledger's rows next to ours. "Expected VOIDED, got HELD" points at our
 reconciler. The provider rows show the card closed and the provider never
 releasing it.
-
 
 ## Retained original financial gate, October 6
 

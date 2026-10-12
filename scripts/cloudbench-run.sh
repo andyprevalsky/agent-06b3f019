@@ -487,8 +487,18 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_PAYMENT_FIXTURE=1
             ;;
+        browser-auth-guest-purchase|browser-auth-member-discount-purchase|browser-auth-member-discount-signup-fails-purchase|browser-auth-paid-membership-purchase|browser-auth-signup-purchase|browser-auth-session-expires-at-checkout)
+            # Rose Shop is served by the backend, so no bundled frontend; the
+            # checkout settles through the same sandbox payment fixture.
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_PAYMENT_FIXTURE=1
+            ;;
         agent-payment-new-user-journey)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_NEW_USER_CHECKOUT=1
+            ;;
+        browser-auth-signup-purchase-no-subscription)
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             BENCH_NEEDS_NEW_USER_CHECKOUT=1
             ;;

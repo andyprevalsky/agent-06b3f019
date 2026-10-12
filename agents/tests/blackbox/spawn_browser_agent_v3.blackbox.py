@@ -8,6 +8,7 @@ and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 import ast
 import warnings
 import asyncio
+import dataclasses
 import base64
 import contextlib
 import copy
@@ -230,10 +231,12 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
 
     from domains.spawn_browser_agent_v3.config import (
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        DEFAULT_MAX_ITERATIONS,
         MAX_ACTIVITY_ATTEMPTS,
     )
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
+    assert DEFAULT_MAX_ITERATIONS == 250
     assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 30
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
@@ -5360,6 +5363,81 @@ async def test_fetch_recent_otps_extracts_codes():
     assert result[0].sender == "Acme"
     assert result[0].credential_id == "email-cred-1"
 
+async def test_fetch_recent_otps_surfaces_sign_in_links_from_the_agent_inbox():
+    """A site that emails a link instead of a code must not leave the agent waiting forever.
+
+    Only the agent's own (minted) inbox is read for links: every mail there is
+    meant for the agent, while the user's connected inbox is full of unrelated
+    links. A mail that carries a code is still handled as a code.
+    """
+    from domains.spawn_browser_agent_v3.handler import _append_new_otp_user_messages
+    from domains.spawn_browser_agent_v3.service_crypto import fetch_recent_otps, format_otp_user_message
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    link = "https://shop.example/login/link?token=abc&authRealm=shop.test"
+    setup_mock(
+        {
+            "/api/integrations/email/messages": {
+                "status": 200,
+                "json": {
+                    "emails": [
+                        {
+                            "id": "minted-link-mail",
+                            "subject": "Sign in to Rose Shop",
+                            "bodyText": f"Open this link to sign in to Rose Shop:\n\n{link}\n\nIt can be used once.",
+                            "bodyHtml": f'<p>Open this link:</p><p><a href="{link.replace("&", "&amp;")}">Sign in</a></p>',
+                            "date": now,
+                            "fromName": "Rose Shop",
+                            "credentialId": "rose.cedar11@mail.example",
+                            "labels": ["primitive"],
+                        },
+                        {
+                            "id": "user-newsletter",
+                            "subject": "This week's deals",
+                            "bodyText": "See the deals: https://deals.example/week",
+                            "date": now,
+                            "fromName": "Deals",
+                            "credentialId": "gmail-cred-1",
+                            "labels": ["INBOX"],
+                        },
+                        {
+                            "id": "minted-code-mail",
+                            "subject": "Your code",
+                            "bodyText": "Your sign-in code is 246810. Details: https://shop.example/help",
+                            "date": now,
+                            "fromName": "Rose Shop",
+                            "credentialId": "rose.cedar11@mail.example",
+                            "labels": ["primitive"],
+                        },
+                    ]
+                },
+            },
+            "/api/agentphone/messages": {"status": 200, "json": {"messages": []}},
+        }
+    )
+    result = await fetch_recent_otps("u1", "https://backend.example.com", "k1")
+    by_source = {otp.source_message_id: otp for otp in result}
+    assert set(by_source) == {"minted-link-mail", "minted-code-mail"}, by_source
+    assert by_source["minted-code-mail"].code == "246810" and by_source["minted-code-mail"].links == []
+    link_mail = by_source["minted-link-mail"]
+    assert link_mail.links == [link], link_mail.links
+    message = format_otp_user_message(link_mail)
+    assert link in message and "Sign in to Rose Shop" in message and "Code:" not in message, message
+
+    seen: set[str] = set()
+    injected: list[dict] = []
+    with patch("domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message", AsyncMock()):
+        for _ in range(2):
+            await _append_new_otp_user_messages(
+                otps=[link_mail],
+                seen_otp_codes=seen,
+                otp_user_messages=injected,
+                agent_id="agent-1",
+                task_id="task-1",
+            )
+    assert len(injected) == 1 and link in injected[0]["content"], "a link mail is handed to the agent exactly once"
+
+
 async def test_fetch_recent_otps_extracts_codes_from_html_body():
     from domains.spawn_browser_agent_v3.service_crypto import fetch_recent_otps
 
@@ -6058,7 +6136,8 @@ def test_build_auth_options_prompt_section_minted_account_ref():
         [],
     )
 
-    assert "- Minted account: Email -> agent+example@example.com | Phone -> +19125550199 | enabled" in section
+    assert "- Minted account: Email -> agent+example@example.com (codes mailed here reach you automatically) | Phone -> +19125550199 | enabled" in section
+    assert "- Email OTP (user's inboxes): unavailable, none connected" in section
     assert "use agent email" not in section
     assert refs == {}
     assert origins == {}
@@ -9251,6 +9330,7 @@ async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
     assert all(item["agent_id"] == "agent-1" for item in published)
     assert all(item["sub_agent_id"] == "browser-task-1" for item in published)
     assert all(item["llm_started_at_ms"] == 123_000 for item in published)
+
     assert all(item["clear_on_done"] is True for item in published)
     assert any(item["is_gpt"] is True for item in published[1:])
     assert "Inspecting page" in "".join(item["delta"] for item in published)
@@ -9277,6 +9357,143 @@ async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
         "status": "FINISHED",
         "sub_agent_id": "browser-task-1",
     }
+
+
+async def test_browser_thinking_stream_restart_closes_the_abandoned_attempt():
+    """A reply cut off at the output limit is retried; the retry must not append to
+    the abandoned attempt's stream, or the displayed decision mixes the two."""
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    stream = BrowserThinkingStream(agent_id="agent-1", task_id="browser-task-1", iteration=2)
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
+            new_callable=AsyncMock,
+        ) as publish,
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_tool_event",
+            new_callable=AsyncMock,
+        ) as tool_events,
+    ):
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "half an ans"}))
+        await stream.on_chunk(
+            StreamChunk(kind="tool_call", data={"id": "call-abandoned", "name": "click", "arguments": {}})
+        )
+        first_stream_id = stream.stream_id
+        await stream.on_chunk(StreamChunk(kind="restart", data={"reason": "output_limit"}))
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "full answer"}))
+        await stream.finish_tools(status="FINISHED")
+        await stream.finish()
+
+    # The abandoned attempt's tool call never gets a result from the retry: it is
+    # closed as failed under the stream that opened it, and the retry's
+    # finish_tools has nothing left from it to publish under the new stream.
+    tool_calls = [call.kwargs for call in tool_events.await_args_list]
+    abandoned = [item for item in tool_calls if item["tool_call_id"] == "call-abandoned"]
+    assert abandoned, tool_calls
+    closing = [item for item in abandoned if item.get("status") in {"FAILED", "FINISHED"}]
+    assert closing and all(item["stream_id"] == first_stream_id for item in closing), abandoned
+    assert all(item["status"] == "FAILED" for item in closing), closing
+
+    published = [call.kwargs for call in publish.await_args_list]
+    first = [item for item in published if item["stream_id"] == first_stream_id]
+    retry = [item for item in published if item["stream_id"] != first_stream_id]
+    assert first and first[-1]["done"] is True, "the abandoned stream was not closed"
+    assert "full answer" not in "".join(item["delta"] for item in first)
+    assert retry and any(item["delta"] == "full answer" for item in retry), retry
+    assert retry[-1]["done"] is True
+
+
+async def test_credential_propagation_failure_keeps_the_browser_run_outcome():
+    """A backend error while recording credential liveness is bookkeeping: the
+    finished browser run keeps its outcome instead of failing and being retried
+    (a Prisma transaction expired under load and failed a completed sign-in, 2026-10-06)."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import handler
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from tools.base import MessageStatus
+
+    saved: list = []
+
+    async def record(**kwargs):
+        saved.append(kwargs)
+
+    request = httpx.Request("POST", "http://backend.test/api/credential-propagation/browser-run")
+    response = httpx.Response(500, request=request, text="Transaction already closed")
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=httpx.HTTPStatusError("500", request=request, response=response)),
+        ),
+        patch.object(handler, "save_browser_action_message", record),
+    ):
+        result = await handler._propagate_browser_credentials_with_progress(
+            config=MagicMock(),
+            agent_id="agent-1",
+            task_id="browser-task-1",
+            browser_url="https://shop.example/account",
+            status="completed",
+            success=True,
+            message="Signed in.",
+        )
+    assert result["outcome"] == "unknown" and result["refs"] == 0 and result["applied"] == 0, result
+    assert "500" in result["error"], result
+    assert [item["status"] for item in saved] == [MessageStatus.IN_PROGRESS, MessageStatus.ERROR], saved
+    assert saved[-1]["title"] == "Credential state update failed"
+
+    # The diagnostic write is best-effort: when the same backend refuses that
+    # message too, the fallback result is still returned instead of raising.
+    async def record_then_fail(**kwargs):
+        if kwargs.get("status") == MessageStatus.ERROR:
+            raise RuntimeError("backend unavailable")
+        saved.append(kwargs)
+
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=httpx.HTTPStatusError("500", request=request, response=response)),
+        ),
+        patch.object(handler, "save_browser_action_message", record_then_fail),
+    ):
+        fallback = await handler._propagate_browser_credentials_with_progress(
+            config=MagicMock(),
+            agent_id="agent-1",
+            task_id="browser-task-1",
+            browser_url="https://shop.example/account",
+            status="completed",
+            success=True,
+            message="Signed in.",
+        )
+    assert fallback["outcome"] == "unknown" and "500" in fallback["error"], fallback
+
+    # A replaced workflow generation still stops the run.
+    with (
+        patch.object(
+            handler,
+            "propagate_browser_run_credentials",
+            AsyncMock(side_effect=WorkflowGenerationSealed("sealed")),
+        ),
+        patch.object(handler, "save_browser_action_message", record),
+    ):
+        try:
+            await handler._propagate_browser_credentials_with_progress(
+                config=MagicMock(),
+                agent_id="agent-1",
+                task_id="browser-task-1",
+                browser_url="",
+                status="completed",
+                success=True,
+                message="Signed in.",
+            )
+        except WorkflowGenerationSealed:
+            pass
+        else:
+            raise AssertionError("a sealed generation must not be swallowed as bookkeeping")
+
 
 async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
@@ -19536,6 +19753,85 @@ async def test_append_new_otp_user_messages_dedupes_and_logs():
     assert credential_refs == {"123456": {"kind": "email_otp", "id": "email-cred-1"}}
     save_mock.assert_awaited_once()
 
+async def test_otp_received_before_the_task_started_is_not_handed_to_the_agent():
+    """A code mailed two minutes before this task began belongs to an earlier
+    task (the previous benchmark lane, or the user's last run). Presented as
+    'recently received' it sent the agent to the site with a code the site never
+    issued it, and the agent spent its whole budget on it."""
+    from domains.spawn_browser_agent_v3.handler import _append_new_otp_user_messages
+    from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
+
+    def otp(code: str, age_seconds: int) -> ExtractedOTP:
+        return ExtractedOTP(
+            code=code,
+            sender="Rose Shop",
+            received_at="now",
+            age_seconds=age_seconds,
+            ttl_seconds=300 - age_seconds,
+            credential_id="email-cred-1",
+            source_message_id=f"m-{code}",
+        )
+
+    seen: set = set()
+    messages: list = []
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message",
+        AsyncMock(),
+    ):
+        count = await _append_new_otp_user_messages(
+            otps=[otp("646055", age_seconds=120), otp("778899", age_seconds=5)],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=20.0,
+        )
+    assert count == 1 and [m["content"] for m in messages if "778899" in m["content"]], messages
+    assert not any("646055" in m["content"] for m in messages), "the earlier task's code leaked"
+    # The stale MESSAGE is remembered, not its code: the same mail stays
+    # skipped on a later poll, while a fresh mail reissuing that code for this
+    # sign-in still reaches the agent.
+    assert "stale-message:m-646055" in seen and "646055" not in seen, seen
+    messages.clear()
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message",
+        AsyncMock(),
+    ):
+        count = await _append_new_otp_user_messages(
+            otps=[otp("646055", age_seconds=150)],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=50.0,
+        )
+        assert count == 0 and not messages, "the stale mail was handed over on a later poll"
+        fresh = dataclasses.replace(otp("646055", age_seconds=5), source_message_id="m-fresh-646055")
+        count = await _append_new_otp_user_messages(
+            otps=[fresh],
+            seen_otp_codes=seen,
+            otp_user_messages=messages,
+            credential_refs_by_secret_ref={},
+            agent_id="ag1",
+            task_id="task-1",
+            task_elapsed_seconds=60.0,
+        )
+    assert count == 1 and any("646055" in m["content"] for m in messages), "a reissued code was suppressed"
+
+    # Without a task clock (older call sites) nothing changes.
+    messages.clear()
+    count = await _append_new_otp_user_messages(
+        otps=[otp("111222", age_seconds=120)],
+        seen_otp_codes=set(),
+        otp_user_messages=messages,
+        agent_id="ag1",
+        task_id=None,
+    )
+    assert count == 1
+
+
 async def test_append_new_otp_user_messages_requires_email_credential_id_for_ref():
     from domains.spawn_browser_agent_v3.handler import _append_new_otp_user_messages
     from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
@@ -19780,6 +20076,56 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     assert fetch_mock.await_args.args[1] == "task-1"
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     resume_mock.assert_not_awaited()
+
+async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance():
+    """A declined sign-in-help request releases the kept-alive browser and ends the task.
+
+    The decline used to be read as "the user signed in": the task reconnected to a
+    signed-out page and asked the user again. Now it must not touch the session
+    except to release it, and must report the decline as its (non-error) result.
+    The handoff may have replaced the provider session while the task was paused,
+    so the task's current session is what gets released, not the saved id.
+    """
+    from domains.spawn_browser_agent_v3.handler import AUTH_ASSISTANCE_DECLINED, spawn_browser_agent_activity_v3
+
+    close_mock = AsyncMock()
+    fetch_mock = AsyncMock(return_value={"session_id": "session-refreshed-by-auth-page"})
+    resume_mock = AsyncMock()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+    ):
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Tell me my member number",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            is_resume=True,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            write_lock_resume_state={
+                "approval_type": AUTH_ASSISTANCE_DECLINED,
+                "task_id": "task-1",
+                "session_id": "session-1",
+                "cdp_url": "ws://old",
+                "auth_realm": "shop.example",
+            },
+        )
+
+    assert result["status"] == "completed" and result["success"] is False, result
+    assert result["user_declined_auth"] is True and result["task_id"] == "task-1", result
+    assert result["message"] == "User declined to sign in to shop.example.", result
+    assert close_mock.await_count == 1
+    assert close_mock.await_args.args[1] == "session-refreshed-by-auth-page", close_mock.await_args
+    assert close_mock.await_args.kwargs == {"pause": False}
+    assert fetch_mock.await_count == 1 and fetch_mock.await_args.args[1] == "task-1"
+    resume_mock.assert_not_awaited()
+
 
 @_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
@@ -21879,6 +22225,95 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
         "selected_black_beanie_url": "https://amazon.com/item",
         "added_to_cart": False,
     }
+
+async def test_manager_ends_the_browser_task_when_the_user_declines_auth_assistance():
+    """A decline is passed to the browser activity as a decline, and ends as a clean result."""
+    from domains.spawn_browser_agent_v3.handler import AUTH_ASSISTANCE_DECLINED, SpawnBrowserAgentManagerV3
+    from tools.base import MessageStatus
+    from utils.attention_requests import REJECTION_SENTINEL
+
+    class _FakeActivityHandle:
+        def __init__(self, result):
+            self._result = result
+
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return self._result
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+    )
+    first = _FakeActivityHandle(
+        {
+            "status": "awaiting_auth_assistance",
+            "request_id": "uar1",
+            "auth_realm": "example.com",
+            "base_site": "example.com",
+            "auth_assistance_request": {"handoff": {"liveViewUrl": "https://steel/live"}},
+            "task_id": "task-1",
+            "session_id": "session-1",
+            "browser_url": "https://steel/debug",
+            "cdp_url": "ws://old",
+            "step_count": 3,
+        }
+    )
+    declined_message = "User declined to sign in to example.com."
+    second = _FakeActivityHandle(
+        {
+            "status": "completed",
+            "success": False,
+            "user_declined_auth": True,
+            "message": declined_message,
+            "task_id": "task-1",
+            "output_files": [],
+        }
+    )
+    start_calls = []
+
+    async def fake_wait_condition(*_args, **_kwargs):
+        workflow_instance._signal_responses["uar1"] = REJECTION_SENTINEL
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return [first, second][len(start_calls) - 1]
+
+    manager = SpawnBrowserAgentManagerV3()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", fake_wait_condition),
+    ):
+        events = []
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Member number"}, "tool-1"):
+            events.append(event)
+
+    titles = [getattr(event, "title", "") for event in events]
+    assert "User Declined To Sign In" in titles and "User Assistance Received" not in titles, titles
+    assert len(start_calls) == 2, "the declined browser task must be ended by one more activity call, not respawned"
+    resume_states = [
+        arg for arg in start_calls[1][1]["args"] if isinstance(arg, dict) and "approval_type" in arg
+    ]
+    assert [state["approval_type"] for state in resume_states] == [AUTH_ASSISTANCE_DECLINED], resume_states
+    assert resume_states[0]["session_id"] == "session-1"
+    assert events[-1].status == MessageStatus.FINISHED, "a decline is a clean end, not a tool error"
+    assert events[-1].message == declined_message
+    assert events[-1].metadata["authAssistanceDeclined"] is True
+    assert events[-1].metadata["action_type"] == "task_complete"
+    assert workflow_instance.is_paused is False
+
 
 async def test_manager_auth_assistance_pauses_and_resumes():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
@@ -24819,6 +25254,10 @@ async def run_all_tests():
     await r.record_async("fetch_recent_otps_empty", test_fetch_recent_otps_empty)
     await r.record_async("fetch_recent_otps_extracts_codes", test_fetch_recent_otps_extracts_codes)
     await r.record_async(
+        "fetch_recent_otps_surfaces_sign_in_links_from_the_agent_inbox",
+        test_fetch_recent_otps_surfaces_sign_in_links_from_the_agent_inbox,
+    )
+    await r.record_async(
         "fetch_recent_otps_extracts_html_codes",
         test_fetch_recent_otps_extracts_codes_from_html_body,
     )
@@ -26407,6 +26846,10 @@ async def run_all_tests():
         test_append_new_otp_user_messages_dedupes_and_logs,
     )
     await r.record_async(
+        "otp_received_before_the_task_started_is_not_handed_to_the_agent",
+        test_otp_received_before_the_task_started_is_not_handed_to_the_agent,
+    )
+    await r.record_async(
         "append_new_otp_user_messages_requires_email_credential_id",
         test_append_new_otp_user_messages_requires_email_credential_id_for_ref,
     )
@@ -26422,6 +26865,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_thinking_stream_routes_chunks",
         test_browser_thinking_stream_routes_chunks_to_browser_message_list,
+    )
+    await r.record_async(
+        "browser_thinking_stream_restart_closes_abandoned_attempt",
+        test_browser_thinking_stream_restart_closes_the_abandoned_attempt,
+    )
+    await r.record_async(
+        "credential_propagation_failure_keeps_browser_run_outcome",
+        test_credential_propagation_failure_keeps_the_browser_run_outcome,
     )
     await r.record_async(
         "browser_streaming_rose_client_forwards_chunks",
@@ -26448,6 +26899,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_auth_assistance_resume_reuses_live",
         test_spawn_browser_activity_auth_assistance_resume_reuses_live_session,
+    )
+    await r.record_async(
+        "manager_ends_the_browser_task_when_the_user_declines_auth_assistance",
+        test_manager_ends_the_browser_task_when_the_user_declines_auth_assistance,
+    )
+    await r.record_async(
+        "activity_ends_cleanly_when_the_user_declines_auth_assistance",
+        test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance,
     )
     await r.record_async(
         "activity_auth_assistance_resume_reuses_backend_refreshed",

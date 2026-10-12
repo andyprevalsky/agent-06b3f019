@@ -20,3 +20,17 @@ export async function isAgentOwnedByUser(userId: string, agentId: string): Promi
   });
   return agent !== null;
 }
+
+/** Texts stored for a number on this stack, newest first. */
+export async function findStoredInboundMessages(params: {
+  userId: string;
+  to: string;
+  since: Date;
+  limit: number;
+}) {
+  return prisma.agentPhoneMessage.findMany({
+    where: { userId: params.userId, to: params.to, receivedAt: { gte: params.since } },
+    orderBy: { receivedAt: 'desc' },
+    take: params.limit,
+  });
+}

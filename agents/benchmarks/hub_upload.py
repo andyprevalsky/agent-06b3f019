@@ -86,6 +86,61 @@ def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0
     return min(300.0, max(float(base_timeout), derived))
 
 
+# The backend accepts JSON bodies up to 100MB (back-end/src/server.ts). A
+# 26-task run record is ~125MB, almost all of it raw worker log lines, and the
+# 413 that came back turned a fully passing run into a failed invocation.
+HUB_UPLOAD_MAX_BYTES = 90 * 1024 * 1024
+WORKER_LOG_TRIM_KEY = "worker_logs"
+
+
+def _encoded_size(value) -> int:
+    return len(json.dumps(value, default=str).encode("utf-8"))
+
+
+def fit_bundle_to_upload_limit(body: dict, *, max_bytes: int = HUB_UPLOAD_MAX_BYTES) -> dict:
+    """Keep the upload under the Hub's body limit by shortening raw worker logs.
+
+    Transcripts, trees and evaluator evidence are what the Hub renders, so they
+    are never touched. Worker log lines are dropped oldest-first from the task
+    that has the most, and each task records how many were left out. The full
+    record stays on disk in ``runs/*.json``.
+    """
+    if _encoded_size(body) <= max_bytes:
+        return body
+    fitted = dict(body)
+    tasks = [dict(task) if isinstance(task, dict) else task for task in fitted.get("tasks") or []]
+    fitted["tasks"] = tasks
+    for task in tasks:
+        if isinstance(task, dict) and isinstance(task.get("logs"), dict):
+            task["logs"] = dict(task["logs"])
+    while _encoded_size(fitted) > max_bytes:
+        candidates = [
+            task
+            for task in tasks
+            if isinstance(task, dict)
+            and isinstance((task.get("logs") or {}).get(WORKER_LOG_TRIM_KEY), list)
+            and task["logs"][WORKER_LOG_TRIM_KEY]
+        ]
+        if not candidates:
+            break
+        heaviest = max(candidates, key=lambda task: _encoded_size(task["logs"][WORKER_LOG_TRIM_KEY]))
+        lines = heaviest["logs"][WORKER_LOG_TRIM_KEY]
+        keep = len(lines) // 2
+        dropped = len(lines) - keep
+        heaviest["logs"][WORKER_LOG_TRIM_KEY] = lines[dropped:]
+        heaviest["logs"]["worker_logs_omitted_for_upload"] = (
+            int(heaviest["logs"].get("worker_logs_omitted_for_upload") or 0) + dropped
+        )
+    omitted = sum(
+        int((task.get("logs") or {}).get("worker_logs_omitted_for_upload") or 0)
+        for task in tasks
+        if isinstance(task, dict)
+    )
+    limit_mb = max_bytes // (1024 * 1024)
+    print(f"✂️  Hub upload: left out {omitted} oldest worker log line(s) to fit the {limit_mb}MB body limit")
+    return fitted
+
+
 def hub_upload_enabled() -> bool:
     return bool(os.getenv("BENCHMARK_HUB_UPLOAD_URL"))
 
@@ -314,6 +369,7 @@ def _post_run_bundle(
         return False
     body = prepare_run_bundle_for_upload(_with_run_group(bundle), live=live, required=required)
     body.setdefault("source", "manual-run")
+    body = fit_bundle_to_upload_limit(body)
     payload = json.dumps(body, default=str).encode("utf-8")
     effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
     payload = gzip.compress(payload, mtime=0)

@@ -21,12 +21,18 @@ import {
   steelCdpUrl,
   steelDebugUrl,
 } from './session';
+import { rotationGeolocation } from './sessionProxy';
 import {
   STEEL_CDP_TIMEOUT_MESSAGE,
   steelStartupProbe,
   validateBrowserConnection,
 } from './sessionConnection';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import {
+  newOwnedSteelSessionId,
+  registerInFlightSteelSession,
+  unregisterInFlightSteelSession,
+} from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 
@@ -190,7 +196,12 @@ export async function recreateSession(
       ? oldSession.startUrl
       : undefined;
   log.info(`  Found old session with saved URL: ${savedUrl ?? 'NONE'}`);
-  const proxyGeo = await proxyLocationForAgent(oldSession.agentId);
+  const baseGeo = await proxyLocationForAgent(oldSession.agentId);
+  // A rotation must land on a different egress IP; see rotationGeolocation. The
+  // caller already reserved this rotation, so the row's count is its step.
+  const proxyGeo = options.forceManagedRotation
+    ? rotationGeolocation(baseGeo, taskId, oldSession.proxyRotationCount)
+    : baseGeo;
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
   const steelRecordedProfileId = options.forceFreshProfile
@@ -231,6 +242,7 @@ export async function recreateSession(
         boundProfile
       );
       const session = await dependencies.createSession({
+        sessionId: newOwnedSteelSessionId(),
         profileId: profile.profileId,
         persistProfile: profile.persistProfile,
         userAgent:
@@ -245,6 +257,7 @@ export async function recreateSession(
         dimensions: { width: 1288, height: 891 },
       });
       createdSessionId = session.id;
+      registerInFlightSteelSession(session.id);
 
       if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
         throw new Error(
@@ -284,6 +297,7 @@ export async function recreateSession(
       });
       if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
       committed = true;
+      unregisterInFlightSteelSession(session.id);
       await announceBrowserSessionBinding({ id: taskId });
 
       if (

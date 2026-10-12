@@ -130,6 +130,7 @@ from helpers.llm import (
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
+from helpers.process_exit import run_then_exit
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from helpers.save_tool_usage import save_tool_usage
 from helpers.sms_activities import (
@@ -1528,4 +1529,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    run_worker_event_loop(main())
+    run_then_exit(main, run=run_worker_event_loop)

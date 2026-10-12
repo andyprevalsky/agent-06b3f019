@@ -12,7 +12,9 @@
  */
 
 export const BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES = 30;
-export const BROWSER_DEFAULT_MAX_ITERATIONS = 60;
+export const BROWSER_DEFAULT_MAX_ITERATIONS = 250;
+/** Only an explicit BROWSER_MAX_ITERATIONS above this many steps lengthens the budget. */
+export const BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT = 60;
 export const STEEL_SESSION_TEARDOWN_HEADROOM_MINUTES = 5;
 /** Steel rejects longer timeouts on our plan with "exceeds the maximum for your plan (60 min)". */
 export const STEEL_PLAN_MAX_SESSION_MS = 60 * 60_000;
@@ -24,19 +26,19 @@ export const STEEL_PLAN_MAX_SESSION_MS = 60 * 60_000;
  */
 export const BROWSER_SESSION_MIN_REMAINING_MS = 7 * 60_000;
 
-function browserMaxIterations(env: NodeJS.ProcessEnv): number {
+function browserMaxIterationsOverride(env: NodeJS.ProcessEnv): number | null {
   const raw = (env.BROWSER_MAX_ITERATIONS ?? '').trim();
   if (/^\d+$/.test(raw)) {
     const value = Number.parseInt(raw, 10);
     if (value > 0) return value;
   }
-  return BROWSER_DEFAULT_MAX_ITERATIONS;
+  return null;
 }
 
 /** Longest start-to-close budget a browser activity can be scheduled with. */
 export function browserActivityBudgetMinutes(env: NodeJS.ProcessEnv = process.env): number {
-  const steps = browserMaxIterations(env);
-  if (steps > BROWSER_DEFAULT_MAX_ITERATIONS) {
+  const steps = browserMaxIterationsOverride(env);
+  if (steps !== null && steps > BROWSER_STEPS_COVERED_BY_BASE_TIMEOUT) {
     return Math.max(BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES, Math.floor(steps * 0.35) + 15);
   }
   return BROWSER_ACTIVITY_START_TO_CLOSE_MINUTES;

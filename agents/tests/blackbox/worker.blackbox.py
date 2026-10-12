@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import importlib.util
 import json
 import os
 import signal
@@ -398,6 +399,85 @@ def test_activity_admission_closes_on_cpu_pressure():
         raise AssertionError("expected ValueError for open_cpu >= close_cpu")
     except ValueError:
         pass
+
+
+_FINALIZATION_BLOCKER_CHILD = """
+import asyncio, importlib.util, sys, threading
+spec = importlib.util.spec_from_file_location("process_exit", {module_path!r})
+process_exit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(process_exit)
+
+async def main():
+    # Stands in for the Temporal bridge thread pyo3 parks during finalization.
+    threading.Thread(target=threading.Event().wait).start()
+    sys.stdout.write("Worker stopped\\n")
+    {tail}
+
+{entry}
+"""
+
+
+def _run_finalization_blocker(*, entry: str, tail: str = "pass", timeout_s: float) -> tuple[int | None, str]:
+    module_path = str(WORKER_PATH.parent / "helpers" / "process_exit.py")
+    child = _FINALIZATION_BLOCKER_CHILD.format(module_path=module_path, entry=entry, tail=tail)
+    proc = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        out, _ = proc.communicate(timeout=timeout_s)
+        return proc.returncode, out.decode()
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+        return None, out.decode()
+
+
+def test_run_then_exit_survives_a_finalization_deadlock():
+    """A thread that never finishes hangs plain asyncio.run exit; run_then_exit must not."""
+    control_code, _ = _run_finalization_blocker(entry="asyncio.run(main())", timeout_s=3)
+    assert control_code is None, "control must hang, or this test no longer models the deadlock"
+
+    started = time.monotonic()
+    code, out = _run_finalization_blocker(entry="process_exit.run_then_exit(main)", timeout_s=15)
+    assert code == 0, f"run_then_exit must exit cleanly despite the blocked thread, got {code}: {out}"
+    assert time.monotonic() - started < 10
+    assert "Worker stopped" in out, f"buffered stdout must be flushed before os._exit: {out!r}"
+
+    code, out = _run_finalization_blocker(
+        entry="process_exit.run_then_exit(main)", tail="raise SystemExit(3)", timeout_s=15
+    )
+    assert code == 3, f"SystemExit status must be preserved, got {code}: {out}"
+    code, out = _run_finalization_blocker(
+        entry="process_exit.run_then_exit(main)", tail="raise RuntimeError('boom')", timeout_s=15
+    )
+    assert code == 1 and "RuntimeError: boom" in out, f"crash must exit 1 with traceback: {code} {out}"
+
+
+def test_exit_code_for_matches_cpython_system_exit():
+    spec = importlib.util.spec_from_file_location("process_exit", WORKER_PATH.parent / "helpers" / "process_exit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.exit_code_for(None) == 0
+    assert module.exit_code_for(4) == 4
+    assert module.exit_code_for(True) == 1
+    assert module.exit_code_for("fatal: missing BACKEND_API_KEY") == 1
+
+
+def test_worker_entrypoint_skips_interpreter_finalization():
+    """worker.py must exit through run_then_exit so the Temporal bridge cannot orphan it."""
+    tree = _worker_tree()
+    main_guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+    ]
+    assert len(main_guards) == 1
+    body = main_guards[0].body
+    assert len(body) == 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Call)
+    call = body[0].value
+    assert isinstance(call.func, ast.Name) and call.func.id == "run_then_exit"
+    assert [arg.id for arg in call.args if isinstance(arg, ast.Name)] == ["main"]
 
 
 def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup():
@@ -1372,6 +1452,9 @@ async def run_all_tests():
     )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
+    r.record("run_then_exit_survives_a_finalization_deadlock", test_run_then_exit_survives_a_finalization_deadlock)
+    r.record("exit_code_for_matches_cpython_system_exit", test_exit_code_for_matches_cpython_system_exit)
+    r.record("worker_entrypoint_skips_interpreter_finalization", test_worker_entrypoint_skips_interpreter_finalization)
     r.record("local_workers_do_not_alias_occupied_ports", test_local_workers_do_not_alias_an_occupied_secondary_port)
     r.record(
         "local_worker_fixture_preserves_primary_socket_ownership",

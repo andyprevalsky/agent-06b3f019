@@ -5491,6 +5491,7 @@ async def test_collect_retries_a_cut_off_reply_with_a_larger_limit_then_the_next
     # usage, per attempt with the model that produced them.
     assert response.usage.get("prompt_tokens") == 15, response.usage
     assert response.usage.get("completion_tokens") == 27, response.usage
+    assert response.usage.get("total_tokens") == 42, response.usage
     assert len(response.usage.get("abandoned_attempts") or []) == 2, response.usage
     assert response.usage.get("finish_reason") == "stop", response.usage
 

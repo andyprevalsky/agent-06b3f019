@@ -58,6 +58,8 @@ const rejectedProxyCities = new Set<string>(
     .filter((entry) => entry.split('|').length === 3 && entry.split('|')[2] !== '')
 );
 
+export { rotationGeolocation } from '../browser/rotationGeolocation';
+
 export function proxyCityKey(geolocation: ProxyGeoLocation): string {
   return `${geolocation.country}|${geolocation.state ?? ''}|${geolocation.city ?? ''}`.toLowerCase();
 }

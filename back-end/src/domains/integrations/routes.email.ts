@@ -201,6 +201,9 @@ router.get(
           bodyHtml: email.bodyHtml,
           credentialId: email.credentialId,
           credentialEmail: email.credentialEmail,
+          messageId: email.messageId,
+          // `primitive` marks mail to the agent's own minted inbox.
+          labels: email.labels,
         })),
         count: emails.length,
         since: since.toISOString(),

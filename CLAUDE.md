@@ -238,6 +238,48 @@ otherwise selects a different canonical cache key. If a PG17 cache is missing,
 restore the reviewed canonical fixture into an isolated PG17 database, verify
 table content and a dump/restore round trip, then publish that version's key.
 
+### Disk hygiene after a deploy/benchmark session (Andy’s Mac)
+
+The 926 GB data volume filled to 100% on 2026-10-06 and Docker Desktop wedged
+in `Docker: stopping` (every workspace lost its DB container; a smoke lane died
+with `ENOSPC`). Check `df -h /System/Volumes/Data` before Group 3/4 lanes and
+clean up when you finish. Only touch your own workspace’s `.context`, never
+another workspace’s, never Freedom.
+
+- **This workspace:** `rm -rf .context/benchmarks/<run-id>` for finished
+  isolated runs (keep `seed-cache`; check `local-stack-owner.json` pid is gone),
+  `rm -rf .context/frontend-builds/<run-id>` (~400 MB each), and
+  `git worktree remove --force .context/main-tree && git worktree prune` if a
+  main-comparison worktree was created.
+- **Chats older than one week — compress, keep, destroy the raw:** Claude Code
+  `find ~/.claude/projects -name '*.jsonl' -mtime +7 -exec gzip -9 {} +`; Codex
+  `find ~/.codex/sessions -name '*.jsonl' -mtime +7 -exec gzip -9 {} +`
+  (`gzip` keeps the compressed file beside the old name and removes the raw).
+  `~/.claude/gen/codex/transcripts` is already gzip; delete entries older than a
+  week only when `~/.claude/gen/codex/events/<today>.codex_uploader.jsonl`
+  shows `upload.cycle` `"ok":true` with an empty spool — the uploader was
+  returning `server_5xx` on 2026-10-06, so those were kept.
+- **Conductor chats** live in
+  `~/Library/Application Support/com.conductor.app/conductor.db`
+  (`session_messages`, 9.5 GB / 2.6 M rows in Oct 2026). Quit Conductor first,
+  then archive and compact:
+  `sqlite3 -readonly conductor.db ".mode json" "SELECT * FROM session_messages WHERE created_at < strftime('%s','now','-7 days')*1000" | gzip -9 > ~/Archives/conductor-chats/$(date +%F).jsonl.gz`,
+  then `sqlite3 conductor.db "DELETE FROM session_messages WHERE created_at < strftime('%s','now','-7 days')*1000; VACUUM;"`
+  (confirm the `created_at` unit with `SELECT MAX(created_at)` first; freelist
+  is 0 without the delete, so `VACUUM` alone reclaims nothing).
+- **Docker:** `docker builder prune -f` and `docker image prune -f` only.
+  Never `docker system prune` — it removes other workspaces’ stopped DB
+  containers. `Docker.raw` (~115 GB on disk) is every workspace’s volumes.
+- **Updater leftovers are safe:** `/var/folders/*/T/*.ShipIt.*` and
+  `~/Library/Caches/*ShipIt*` are stale app-update staging (GBs). Leave
+  `~/Library/Caches/ms-playwright` (tests need it) and running apps’ caches.
+- **Large but functional (ask before removing):** Claude desktop
+  `vm_bundles/claudevm.bundle` (10 GB, re-downloadable), Cursor
+  `User/globalStorage` (8.6 GB chat/AI state), `~/.codex/thread_history_*.sqlite`.
+- If Docker is already wedged: `osascript -e 'quit app "Docker Desktop"'`,
+  `pkill -TERM -f com.docker.backend` if it lingers, `open -a Docker`, then
+  `docker start victoria-db-<workspace>` — containers come back `Exited (255)`.
+
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 
 ```bash
@@ -1480,7 +1522,7 @@ The 20-task selection cap is separate from execution concurrency. `bash scripts/
 
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
-- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
+- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `auth`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
 - Set `deploy_canary: true` if this task should be preferred as the one-per-category floor/path pick (otherwise shortest ready `pipeline-e2e` wins)
 - Tag `smoke` **only** for must-run harness plumbing (always on the floor; counts toward the cap; no history gate)
 - New category? Add it to `FLOOR_CATEGORIES` and/or `PATH_TRIGGERS` in `select_predeploy_benches.py` and to `KNOWN_DEPLOY_CATEGORIES`

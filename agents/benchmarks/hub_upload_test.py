@@ -17,6 +17,7 @@ from benchmarks.hub_upload import (
     _fallback_canonicalize_agent_tree,
     _fallback_tree_child_transcript_count,
     durable_open_agent_url,
+    fit_bundle_to_upload_limit,
     hub_upload_enabled,
     is_ephemeral_hub_url,
     mirror_run_bundle_to_durable_hub,
@@ -149,6 +150,37 @@ def test_upload_timeout_scales_with_payload_size():
     assert timeout >= 120.0
     assert timeout <= 300.0
     assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
+
+
+def test_oversized_bundle_is_fitted_by_dropping_oldest_worker_logs():
+    """A 26-task run record was 125MB, nearly all raw worker log lines; the Hub
+    answered 413 and a fully passing run exited non-zero."""
+    line = "x" * 200
+
+    def task(name: str, lines: int) -> dict:
+        return {
+            "name": name,
+            "passed": True,
+            "logs": {
+                "messages": [{"role": "USER", "text": f"goal of {name}"}],
+                "worker_logs": [f"{index:06d} {line}" for index in range(lines)],
+            },
+        }
+
+    bundle = {"run_id": "r1", "tasks": [task("big", 4000), task("small", 200)]}
+    limit = 300_000
+    fitted = fit_bundle_to_upload_limit(bundle, max_bytes=limit)
+
+    assert len(json.dumps(fitted).encode("utf-8")) <= limit
+    big, small = fitted["tasks"]
+    assert big["logs"]["messages"] == bundle["tasks"][0]["logs"]["messages"], "transcripts are never trimmed"
+    assert small["logs"]["worker_logs"] == bundle["tasks"][1]["logs"]["worker_logs"], "only the heaviest task is cut"
+    kept = big["logs"]["worker_logs"]
+    assert kept and kept[-1].startswith("003999"), "the newest lines are the ones kept"
+    assert big["logs"]["worker_logs_omitted_for_upload"] == 4000 - len(kept)
+    assert len(bundle["tasks"][0]["logs"]["worker_logs"]) == 4000, "the on-disk record is not mutated"
+
+    assert fit_bundle_to_upload_limit(bundle, max_bytes=10_000_000) is bundle, "a bundle that fits is sent as is"
 
 
 def test_hub_requests_preserve_external_proxy_routing(monkeypatch):

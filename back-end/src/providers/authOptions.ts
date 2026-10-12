@@ -11,6 +11,7 @@ import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
+import { MINTED_PASSWORD_BROWSER_SOURCE, mintedNewPasswordOption } from './mintedAccountPassword';
 import * as repo from './authOptionsStore';
 import type { AuthOptionsResponse } from './authOptionsTypes';
 
@@ -71,14 +72,16 @@ export async function getAuthOptions(
     throw new Error('realm query parameter is required');
   }
 
-  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity] = await Promise.all([
-    repo.findSteelSessionAuth(userId, realm, scope.steelContextId),
-    repo.findCookieBundles(userId, realm),
-    repo.findBrowserPasswords(userId),
-    repo.findPasskeys(userId, realm),
-    repo.findMintedAccount(userId, realm),
-    repo.findAgentIdentity(userId),
-  ]);
+  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity, readableInboxes] =
+    await Promise.all([
+      repo.findSteelSessionAuth(userId, realm, scope.steelContextId),
+      repo.findCookieBundles(userId, realm),
+      repo.findBrowserPasswords(userId),
+      repo.findPasskeys(userId, realm),
+      repo.findMintedAccount(userId, realm),
+      repo.findAgentIdentity(userId),
+      repo.findReadableInboxEmails(userId),
+    ]);
 
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
   const cookieBundles = await resolveCookieBundles(userId, realm, bundles, hideSavedBrowserAuth);
@@ -91,19 +94,28 @@ export async function getAuthOptions(
     credentialId: pk.credentialId,
     disabled: pk.disabledAt !== null,
   }));
-  const emailOtpEmails: string[] = [];
-  const emailOtpAvailable = false;
+  // A code a site emails to one of the user's connected inboxes is read by the
+  // one-time-code poller and handed to the agent, so those inboxes are a real
+  // sign-in path and the agent has to know which addresses they are.
+  const emailOtpEmails = hideSavedBrowserAuth ? [] : readableInboxes;
+  const emailOtpAvailable = emailOtpEmails.length > 0;
   const enabledSteelSession =
     steelAuth !== null && steelAuth.disabledAt === null && !hideSavedBrowserAuth;
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
   const enabledPasswordOptions = passwordOptions.filter((password) => !password.disabled);
   const enabledPasskeys = passkeyOptions.filter((pk) => !pk.disabled);
+  // A login the agent saved while typing pwd:new on a sign-up form is the minted
+  // account itself, recorded before the site confirmed the signup. It is offered
+  // as a saved login, but it must not hide the minted email and pwd:new: if that
+  // signup failed, the next run has to be able to sign up again.
+  const confirmedPasswordOptions = enabledPasswordOptions.filter(
+    (password) => password.browserSource !== MINTED_PASSWORD_BROWSER_SOURCE
+  );
   const shouldExposeMinted =
     !enabledSteelSession &&
     enabledCookieBundles.length === 0 &&
-    enabledPasswordOptions.length === 0 &&
-    enabledPasskeys.length === 0 &&
-    !emailOtpAvailable;
+    confirmedPasswordOptions.length === 0 &&
+    enabledPasskeys.length === 0;
   const mintedIdentity = shouldExposeMinted
     ? await ensureMintedIdentity(userId, agentIdentity, minted)
     : agentIdentity;
@@ -143,6 +155,7 @@ export async function getAuthOptions(
             provider: 'primitive',
             phoneProvider: mintedIdentity?.phoneProvider === 'agentphone' ? 'agentphone' : null,
             disabled: mintedAccount.disabledAt !== null,
+            newPassword: mintedNewPasswordOption(userId, realm),
           }
         : null,
   };
@@ -223,6 +236,7 @@ function resolvePasswordOptions(
     username: password.username,
     ref: passwordRefWithCollisionSuffix(baseRefs[index], password.id, baseRefCounts),
     disabled: password.disabledAt !== null,
+    browserSource: password.browserSource,
     dateLastUsed: serializeBigInt(password.dateLastUsed),
   }));
 }
@@ -255,22 +269,50 @@ async function resolveMintedAccount({
   });
 }
 
+type AgentIdentityRow = Awaited<ReturnType<typeof repo.findAgentIdentity>>;
+
+/**
+ * One in-flight mint per user in this process. Browser agents that start
+ * together each ask for auth options at once; without this every one of them
+ * minted its own inbox (and provisioned its own phone number), and each was
+ * told a different identity than the one finally stored.
+ */
+const identityMints = new Map<string, Promise<AgentIdentityRow>>();
+
 async function ensureMintedIdentity(
   userId: string,
-  existingIdentity: Awaited<ReturnType<typeof repo.findAgentIdentity>>,
+  existingIdentity: AgentIdentityRow,
   existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
-) {
+): Promise<AgentIdentityRow> {
+  // Callers that already hold a minted account label must not inherit a mint
+  // that started without one, or the fresh inbox no longer matches their label.
+  const key = `${userId}|${existingMintedAccount?.accountLabel ?? ''}`;
+  const inFlight = identityMints.get(key);
+  if (inFlight !== undefined) return inFlight;
+  const mint = mintIdentity(userId, existingIdentity, existingMintedAccount).finally(() => {
+    identityMints.delete(key);
+  });
+  identityMints.set(key, mint);
+  return mint;
+}
+
+async function mintIdentity(
+  userId: string,
+  existingIdentity: AgentIdentityRow,
+  existingMintedAccount: Awaited<ReturnType<typeof repo.findMintedAccount>>
+): Promise<AgentIdentityRow> {
   const agentName = await repo.findUserAgentName(userId);
-  let identity = existingIdentity;
+  // A caller that queued behind another mint read "no identity" before it landed.
+  let identity = existingIdentity ?? (await repo.findAgentIdentity(userId));
 
   if (identity === null) {
     const existingEmail = existingMintedAccount?.accountLabel ?? null;
     if (existingEmail !== null) {
-      identity = await repo.upsertAgentIdentityEmail(userId, existingEmail);
+      identity = await repo.createAgentIdentityEmailIfAbsent(userId, existingEmail);
     } else {
       const inbox = await createMintedInbox({ userId, authRealm: 'agent-identity', agentName });
       if (inbox === null) return null;
-      identity = await repo.upsertAgentIdentityEmail(userId, inbox.email);
+      identity = await repo.createAgentIdentityEmailIfAbsent(userId, inbox.email);
     }
   } else {
     const hasCurrentMintedDomain = emailUsesCurrentMintedDomain(identity.email);

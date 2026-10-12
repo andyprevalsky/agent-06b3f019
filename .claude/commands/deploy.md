@@ -722,7 +722,26 @@ If the failure is renderer-only (jsdom + React), check `mac-app/tests/blackbox/t
 
 ## Step 4cb: Cloud benchmark controller regressions (skip if `$CHANGED_CLOUDBENCH` is empty)
 
-Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run:
+Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run.
+
+**Run this gate on Linux, not on the Mac.** Several of these suites read `/proc` and
+depend on native Linux process semantics; on macOS three of them fail identically on
+`main` and on every branch, which is not a signal about the branch. The gate's home is
+a throwaway machine in the benchmark Fly app, built from the fleet's warm image, that
+fetches the pushed HEAD and runs the suites below:
+
+```bash
+bash scripts/run-deploy-stage cloudbench-controller -- bash scripts/run-cloudbench-controller-gate
+```
+
+It prints `GATE_STEP <suite> exit=N` per suite and exits with the overall result; the
+machine log lands under `.context/cloudbench-gate-<machine>.log` and every failed suite's
+complete output is copied to `.context/cloudbench-gate-<machine>-step-<n>.log` before the
+machine is destroyed. Run one suite with `-- "<command>"`. To
+check whether a failure is pre-existing, run the same command with
+`CLOUDBENCH_GATE_REF=$(git rev-parse origin/main)`. Only run the commands below directly on
+a Linux host; a macOS failure of the `/proc`-dependent suites does not block the deploy and
+does not need a human override, but the Linux gate must pass. These are the suites it runs:
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
