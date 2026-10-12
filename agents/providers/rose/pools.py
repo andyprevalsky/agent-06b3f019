@@ -95,12 +95,6 @@ class PoolSpec:
     """Foundry deployments serving this pool's GPT model. Empty uses
     ``AZURE_FOUNDRY_DEPLOYMENTS`` (Ultra's GPT-6 deployments in production)."""
 
-    explicit_cache_breakpoints: bool = False
-    """GPT-5.6+ Foundry calls cache only at breakpoints. When True, content blocks
-    marked ``cache_breakpoint`` become explicit ``prompt_cache_breakpoint``s in
-    explicit mode, so only those prefixes are written (1.25x) and read (0.05x).
-    Implicit mode writes the whole latest message on every call instead."""
-
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall stamps this effort instead of the
     caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
@@ -130,8 +124,6 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         # Azure credit first; the same model on OpenRouter is the fallback.
         foundry_enabled=True,
         foundry_deployments=("gpt-6.1-sol",),
-        # Each append-only evidence stream unit is a cache breakpoint.
-        explicit_cache_breakpoints=True,
         waterfall=("openai/gpt-6.1-sol",),
         waterfall_reasoning_effort="xhigh",
         direct_auth_enabled=False,

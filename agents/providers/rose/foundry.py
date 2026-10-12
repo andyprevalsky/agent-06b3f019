@@ -110,7 +110,8 @@ async def foundry_complete(
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,
-                cache_breakpoints=pool_spec.explicit_cache_breakpoints,
+                # Foundry Standard deployments honor caller cache markers as breakpoints.
+                cache_breakpoints=True,
             )
             yielded_visible = False
             try:

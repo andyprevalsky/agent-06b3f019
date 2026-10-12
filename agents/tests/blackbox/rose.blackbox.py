@@ -6115,15 +6115,16 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
 
 
-async def test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_writes():
-    """GPT-6.1 caches only at breakpoints (measured on Azure 2026-10-12).
+async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes():
+    """GPT-5.6+ caches only at breakpoints (measured on Azure 2026-10-12).
 
-    Without them every call wrote ~95% of its input at 1.25x and read back only the
-    instructions. The WMH pool marks each append-only stream unit as an explicit
-    breakpoint; other pools are unchanged. Rose's internal marker never reaches a
-    provider, and a reported zero cache write is not re-derived as a full write.
+    Rose maps the caller's ordinary ``cache_control`` markers to GPT-5.6+
+    ``prompt_cache_breakpoint``s, as it maps them to Anthropic's own markers;
+    prompts do not change. Implicit mode stays on, so the latest message is
+    still cached for chat-style callers. A reported zero cache write stays zero.
     """
     import providers.rose.foundry as foundry
+    from providers.rose.gpt_auth import supports_prompt_cache_breakpoints
 
     def sse(details):
         usage = {"input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001}
@@ -6139,16 +6140,16 @@ async def test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_
 
     def handler(req):
         body = json.loads(req.content)
-        bodies.append((str(req.url.host), body))
+        bodies.append(body)
         if "a-4989-resource.openai.azure.com" in str(req.url):
             return httpx.Response(200, content=replies.pop(0), headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected route")
 
+    marker = {"type": "ephemeral"}
     messages = [
         {"role": "system", "content": "policy"},
-        {"role": "user", "content": [{"type": "text", "text": "unit one", "cache_breakpoint": True}]},
-        {"role": "user", "content": [{"type": "text", "text": "unit two", "cache_breakpoint": True,
-                                      "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": [{"type": "text", "text": "unit one", "cache_control": marker}]},
+        {"role": "user", "content": [{"type": "text", "text": "unit two", "cache_control": marker}]},
         {"role": "user", "content": "this call only"},
     ]
     set_mock_handler(handler)
@@ -6164,7 +6165,6 @@ async def test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_
             patch.dict(os.environ, env):
         for pool, details in (
             ("rose-wmh-gpt61", {"cached_tokens": 900, "cache_write_tokens": 0}),
-            ("rose-wmh-gpt61", {"cached_tokens": 0}),
             ("rose-1-ultra", {"cached_tokens": 0}),
         ):
             replies.append(sse(details))
@@ -6173,28 +6173,33 @@ async def test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_
             ))
             usages.append(next(c.data for c in chunks if c.kind == "usage"))
 
-    wmh, _, ultra = (body for _, body in bodies)
-    assert wmh["prompt_cache_options"] == {"mode": "explicit"}
-    marked = [part.get("prompt_cache_breakpoint") for item in wmh["input"] for part in item["content"]]
-    assert marked == [{"mode": "explicit"}, {"mode": "explicit"}, None]
-    assert "prompt_cache_options" not in ultra
-    assert not any("prompt_cache_breakpoint" in part for item in ultra["input"] for part in item["content"])
-    for _, body in bodies:
-        assert '"cache_breakpoint"' not in json.dumps(body) and '"cache_control"' not in json.dumps(body["input"])
+    assert [body["model"] for body in bodies] == ["gpt-6.1-sol", "gpt-6-sol"]
+    for body in bodies:
+        marked = [part.get("prompt_cache_breakpoint") for item in body["input"] for part in item["content"]]
+        assert marked == [{"mode": "explicit"}, {"mode": "explicit"}, None]
+        assert "prompt_cache_options" not in body and '"cache_control"' not in json.dumps(body["input"])
     # Reported zero writes stay zero; an absent field keeps the inclusive fallback.
     assert usages[0]["cache_creation_input_tokens"] == 0 and usages[0]["cache_read_input_tokens"] == 900
     assert usages[1]["cache_creation_input_tokens"] == 1000
+    # Earlier models reject the field; only GPT-5.6 and later receive it.
+    assert [supports_prompt_cache_breakpoints(m) for m in (
+        "gpt-5.5", "gpt-5", "gpt-5.6", "gpt-6-sol", "gpt-6.1-sol", "claude-opus-5-5", None,
+    )] == [False, False, True, True, True, False, False]
 
 
-def test_openrouter_transform_strips_rose_cache_breakpoint_marker():
-    from providers.rose.transforms import transform_messages_for_openai
+def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
 
-    out = transform_messages_for_openai([
-        {"role": "system", "content": "policy"},
-        {"role": "user", "content": [{"type": "text", "text": "unit", "cache_breakpoint": True,
-                                      "cache_control": {"type": "ephemeral"}}]},
-    ])
-    assert out[1]["content"] == [{"type": "text", "text": "unit", "cache_control": {"type": "ephemeral"}}]
+    messages = [{"role": "user", "content": [{"type": "text", "text": f"unit {i}", "cache_control": {"type": "ephemeral"}}]}
+                for i in range(60)]
+    body = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r",
+                                      cache_breakpoints=True)
+    marked = ["prompt_cache_breakpoint" in item["content"][0] for item in body["input"]]
+    assert marked == [False] * 10 + [True] * 50
+    older = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), model_override="gpt-5.5",
+                                       messages=messages, request_id="r", cache_breakpoints=True)
+    assert '"prompt_cache_breakpoint"' not in json.dumps(older)
 
 
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
@@ -8553,10 +8558,10 @@ async def run_all_tests():
         test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter,
     )
     await r.record_async(
-        "wmh_pool_sends_explicit_cache_breakpoints_and_true_cache_writes",
-        test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_writes,
+        "gpt56_foundry_cache_markers_become_breakpoints_and_true_writes",
+        test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes,
     )
-    r.record("openrouter_transform_strips_rose_cache_breakpoint", test_openrouter_transform_strips_rose_cache_breakpoint_marker)
+    r.record("responses_body_keeps_latest_50_cache_breakpoints", test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints)
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,

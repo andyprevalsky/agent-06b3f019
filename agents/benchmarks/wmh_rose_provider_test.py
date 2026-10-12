@@ -458,9 +458,6 @@ def _native_wire_checked(request, messages, system):
     # so only the final message carries it.
     for key in (*_PER_CALL_EVIDENCE, "tools"):
         assert f'"{key}":' not in "".join(texts[:-1])
-    markers = [block for message in messages[1:] if isinstance(message["content"], list)
-               for block in message["content"] if "cache_control" in block]
-    assert len(markers) <= 4
     canonical = [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(request)}]
     assert wmh_rose_provider._wmh_cache_key_material({"messages": messages}) == (
         wmh_rose_provider._wmh_cache_key_material({"messages": canonical})
@@ -550,14 +547,14 @@ def test_native_cache_complete_parallel_results_can_arrive_out_of_order():
     assert len(texts) == 3 and texts[1].endswith('"content":"result a"}')
 
 
-def test_native_cache_marks_at_most_the_two_latest_history_messages():
+def test_native_cache_marks_every_completed_history_message():
     history = [entry for call in "abcdef" for entry in _native_history_batch(call)]
     messages = _to_rose_messages("fixed system", [
         Message(role="user", content=json.dumps(_native_history_cache_request(history)))
     ])
     marked = [index for index, message in enumerate(messages)
               if isinstance(message["content"], list) and "cache_control" in message["content"][-1]]
-    assert len(messages) == 8 and marked == [5, 6]
+    assert len(messages) == 8 and marked == [1, 2, 3, 4, 5, 6]
 
 
 def test_native_evidence_fold_stops_at_the_first_non_user_turn():
@@ -619,7 +616,7 @@ def test_native_stream_wire_appends_per_agent_and_folds_to_the_canonical_request
     wires = [call["messages"] for call in fake.calls]
     for wire, step in zip(wires, steps):
         assert wire[0]["content"] == system + STREAM_GUIDE
-        assert all(message["content"][0]["cache_breakpoint"] is True for message in wire[1:-1])
+        assert all(message["content"][0]["cache_control"] == {"type": "ephemeral"} for message in wire[1:-1])
         assert isinstance(wire[-1]["content"], str) and wire[-1]["content"].startswith('{"current_call":')
         canonical = [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(step)}]
         # Replay keys, outcome validation and call ids all read the canonical request.
@@ -631,8 +628,8 @@ def test_native_stream_wire_appends_per_agent_and_folds_to_the_canonical_request
     units = [[wmh_rose_provider._prompt_text(m["content"]) for m in wire[1:-1]] for wire in wires]
     assert units[1][: len(units[0])] == units[0] and units[2][: len(units[1])] == units[1]
     assert len(units[2]) > len(units[1]) > len(units[0])
-    namespaces = {call["cache_namespace"] for call in fake.calls}
-    assert len(namespaces) == 1 and next(iter(namespaces)).startswith("wmh:session:s1:agent:")
+    # One routing key per world: every agent reads the shared static prefix.
+    assert {call["cache_namespace"] for call in fake.calls} == {"wmh:session:s1"}
     # Retiring the scope drops its streams.
     asyncio.run(provider._retire_scope_on_loop("s1"))
     assert not provider._streams._streams
@@ -649,7 +646,7 @@ def test_unstreamable_native_evidence_keeps_the_canonical_layout_with_breakpoint
     wire = fake.calls[0]["messages"]
     assert not wire[0]["content"].endswith(STREAM_GUIDE)
     assert wire[0]["content"].startswith("fixed system" + wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
-    assert [m["content"][0].get("cache_breakpoint") for m in wire[1:-1]] == [True]
+    assert [m["content"][0].get("cache_control") for m in wire[1:-1]] == [{"type": "ephemeral"}]
     assert wmh_rose_provider._native_environment_state(wire) == request["environment_state"]
 
 

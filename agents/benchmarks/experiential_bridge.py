@@ -34,13 +34,11 @@ def pool_sha256(pool):
 
     Azure Foundry is a billing route for the pool's own GPT model, so it is
     normalized out; otherwise enabling Azure credit would orphan every artifact.
-    Prompt-cache breakpoints change billing, never the model, and are dropped too.
     """
     from providers.rose import pools
 
     identity = asdict(pools.get_pool(pool))
     identity.pop("foundry_deployments")
-    identity.pop("explicit_cache_breakpoints")
     identity["foundry_enabled"] = False
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

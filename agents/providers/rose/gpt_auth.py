@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -116,7 +117,8 @@ def _content_to_responses_parts(content: Any, *, role: str, cache_breakpoints: b
             text = block.get("text") or ""
             if text:
                 part = {"type": _text_part_type(role), "text": text}
-                if cache_breakpoints and role == "user" and block.get("cache_breakpoint") is True:
+                if cache_breakpoints and role == "user" and isinstance(block.get("cache_control"), dict):
+                    # The caller's cache marker, in GPT-5.6+'s form.
                     part["prompt_cache_breakpoint"] = {"mode": "explicit"}
                 parts.append(part)
             continue
@@ -233,6 +235,27 @@ def _normalize_codex_reasoning_item(item: Any) -> Optional[Dict[str, Any]]:
         "encrypted_content": encrypted,
         "summary": item.get("summary") if isinstance(item.get("summary"), list) else [],
     }
+
+
+_MAX_PROMPT_CACHE_BREAKPOINTS = 50
+_BREAKPOINT_MODEL_RE = re.compile(r"gpt-(\d+)(?:\.(\d+))?")
+
+
+def supports_prompt_cache_breakpoints(model: Optional[str]) -> bool:
+    """GPT-5.6 and later cache only at breakpoints; earlier models reject the field (HTTP 400)."""
+    match = _BREAKPOINT_MODEL_RE.search(model or "")
+    if not match:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2) or 0)
+    return major > 5 or (major == 5 and minor >= 6)
+
+
+def _cap_prompt_cache_breakpoints(items: List[Dict[str, Any]]) -> None:
+    """Reads consider the latest 50 breakpoints; drop older marks beyond that."""
+    marked = [part for item in items for part in item.get("content", []) if isinstance(item.get("content"), list)
+              and isinstance(part, dict) and "prompt_cache_breakpoint" in part]
+    for part in marked[: max(len(marked) - _MAX_PROMPT_CACHE_BREAKPOINTS, 0)]:
+        part.pop("prompt_cache_breakpoint", None)
 
 
 def _build_responses_input(messages: List[Dict[str, Any]], *, cache_breakpoints: bool = False) -> List[Dict[str, Any]]:
@@ -440,7 +463,11 @@ def build_codex_responses_body(
     static_cache_scope = _build_static_cache_scope(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     body: Dict[str, Any] = {
         "model": model_override or pool_spec.gpt_auth_model,
-        "input": _build_responses_input(messages, cache_breakpoints=cache_breakpoints),
+        "input": _build_responses_input(
+            messages,
+            cache_breakpoints=cache_breakpoints
+            and supports_prompt_cache_breakpoints(model_override or pool_spec.gpt_auth_model),
+        ),
         "stream": True,
         "store": False,
         "parallel_tool_calls": True,
@@ -458,9 +485,7 @@ def build_codex_responses_body(
         },
     }
     body["instructions"] = instructions
-    if cache_breakpoints:
-        # Only marked prefixes are read and written; the per-call tail is not.
-        body["prompt_cache_options"] = {"mode": "explicit"}
+    _cap_prompt_cache_breakpoints(body["input"])
     responses_tools = _responses_tools(tools)
     # Responses input may retain historical function_call/output items without
     # re-declaring those functions. Definitions in body.tools are selectable,
@@ -612,6 +637,7 @@ async def openai_api_key_complete(
     body = build_codex_responses_body(
         pool_spec=pool_spec,
         model_override=model,
+        cache_breakpoints=True,
         messages=messages,
         response_format=response_format,
         tools=tools,

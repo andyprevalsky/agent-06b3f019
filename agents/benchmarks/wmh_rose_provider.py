@@ -924,15 +924,15 @@ class RoseWMHProvider:
             fallbacks=len(self._streams.fallbacks),
         )
         wire = [{"role": "system", "content": system + STREAM_GUIDE}]
-        for index, unit in enumerate(units):
-            block = {"type": "text", "text": unit, "cache_breakpoint": True}
-            if index >= len(units) - 2:
-                block["cache_control"] = {"type": "ephemeral"}
-            wire.append({"role": "user", "content": [block]})
+        # Every unit is a cache boundary. One routing key per world lets every
+        # agent read the shared static prefix (policy, task, researched examples).
+        wire.extend(
+            {"role": "user", "content": [{"type": "text", "text": unit, "cache_control": {"type": "ephemeral"}}]}
+            for unit in units
+        )
         wire.append({"role": "user", "content": final})
         wire.extend({"role": m.role, "content": m.content} for m in messages[1:])
-        # Route each agent's stream to its own cache shard.
-        return wire, f"{cache_namespace}:agent:{agent_key}"
+        return wire, cache_namespace
 
     def _record_usage(self, usage: dict, actual_model: str) -> tuple[int, int]:
         token_used = usage.get("compute_token_used")
@@ -1031,12 +1031,10 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                             "content": rose[0]["content"] + _SYSTEM_EVIDENCE_MARKER + fragments[0],
                         }
                         history = fragments[1:-1]
-                        for index, text in enumerate(history):
-                            # Each completed history batch is a GPT-5.6+ explicit cache breakpoint.
-                            block = {"type": "text", "text": text, "cache_breakpoint": True}
-                            # Anthropic-style routes cache through the two latest batches.
-                            if index >= len(history) - 2:
-                                block["cache_control"] = {"type": "ephemeral"}
+                        for text in history:
+                            # Every completed history batch is a cache boundary; Rose maps
+                            # the marker per provider (GPT-5.6+ breakpoints, Anthropic's cap).
+                            block = {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
                             rose.append({"role": "user", "content": [block]})
                         content = fragments[-1]
                 elif next(iter(native)) != "task":

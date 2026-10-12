@@ -1083,6 +1083,7 @@ def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations()
         slow_entered = [asyncio.Event(), asyncio.Event()]
         slow_release = [asyncio.Event(), asyncio.Event()]
         slow_revisions, fast_revisions = [], []
+        fast_entered = asyncio.Event()
 
         async def complete(request):
             e = json.loads(request.messages[1].content)
@@ -1096,6 +1097,8 @@ def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations()
                 await slow_release[attempt].wait()
             else:
                 fast_revisions.append((call, state["count"]))
+                if call == "call-2":
+                    fast_entered.set()
             state["count"] += 1
             state.setdefault("order", []).append(call)
             return reply(request, state, call)
@@ -1110,8 +1113,9 @@ def test_rebased_slow_prediction_gets_commit_turn_before_newer_fast_operations()
         # The conflicted slow operation now owns the next commit. A newer fast
         # operation still predicts at once, but cannot commit ahead of it.
         fast = asyncio.create_task(model.step(s.id, action(2), "sms-2"))
-        for _ in range(20):
-            await asyncio.sleep(0)
+        # Wait for the observable event, not a count of loop ticks (flaked under gate load).
+        await asyncio.wait_for(fast_entered.wait(), 2)
+        await asyncio.sleep(0.05)
         assert fast_revisions == [("call-1", 0), ("call-2", 1)] and not fast.done()
         slow_release[1].set()
         results = await asyncio.wait_for(asyncio.gather(slow, fast), 2)
