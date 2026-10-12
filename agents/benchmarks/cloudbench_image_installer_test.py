@@ -429,3 +429,53 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
         assert not (work / "back-end/node_modules/.hoisted-to-root").exists()
     else:
         assert (work / "back-end/prisma-generated").exists()
+
+
+def test_vendored_python_wheels_install_offline_from_every_image_context(tmp_path):
+    """A removed upstream repository cannot break image builds again.
+
+    world-model-harness is vendored as a reproducible wheel. Its local version label never
+    resolves from PyPI, whose unrelated 0.1.0 differs, and the requirements-relative
+    `--find-links` works from the repository root and agents/ alike. Every image that installs
+    agents/requirements.txt before copying the checkout must copy the wheel first.
+    """
+    import hashlib
+    import re
+
+    requirements = (ROOT / "agents/requirements.txt").read_text()
+    lines = [line.strip() for line in requirements.splitlines()]
+    assert "--find-links ./vendor" in lines
+    assert "experientiallabs" not in requirements
+    pins = [line for line in lines if re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+\+rose\.[0-9a-f]+", line)]
+    assert pins == ["world-model-harness==0.1.0+rose.8e6d55dd"], pins
+
+    vendor = ROOT / "agents/vendor"
+    sources = (vendor / "SOURCES.txt").read_text()
+    wheels = sorted(path.name for path in vendor.glob("*.whl"))
+    assert wheels == ["world_model_harness-0.1.0+rose.8e6d55dd-py3-none-any.whl"], wheels
+    digest = hashlib.sha256((vendor / wheels[0]).read_bytes()).hexdigest()
+    assert f"sha256: {digest}" in sources, "vendored wheel bytes differ from SOURCES.txt"
+
+    agents_dockerfile = (ROOT / "agents/Dockerfile").read_text()
+    assert agents_dockerfile.index("COPY vendor/ ./vendor/") < agents_dockerfile.index(
+        "RUN pip install --no-cache-dir -r requirements.txt"
+    )
+    for name in ("Dockerfile.cloudbench-warm", "Dockerfile.cloudbench"):
+        dockerfile = (ROOT / name).read_text()
+        copied = dockerfile.index("COPY --chown=rose:rose agents/vendor /app/agents/vendor")
+        assert copied < dockerfile.index("RUN bash /tmp/rose-cloudbench-install-image-deps.sh"), name
+
+    # Resolve offline exactly as the image installer does: from the checkout root, with the
+    # relative find-links interpreted beside the requirements file.
+    checkout = tmp_path / "checkout"
+    (checkout / "agents/vendor").mkdir(parents=True)
+    shutil.copy2(vendor / wheels[0], checkout / "agents/vendor" / wheels[0])
+    (checkout / "agents/requirements.txt").write_text("--find-links ./vendor\n" + pins[0] + "\n")
+    for cwd, requirements_path in ((checkout, "agents/requirements.txt"), (checkout / "agents", "requirements.txt")):
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--dry-run", "--no-deps", "--no-index",
+             "--ignore-installed", "--disable-pip-version-check", "-r", requirements_path],
+            cwd=cwd, capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Would install world-model-harness-0.1.0+rose.8e6d55dd" in result.stdout, result.stdout
