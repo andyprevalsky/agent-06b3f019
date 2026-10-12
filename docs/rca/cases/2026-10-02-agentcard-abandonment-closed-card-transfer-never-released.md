@@ -404,3 +404,29 @@ transfers. The regressions live in the agents `benchmark` blackbox domain
 (`abandonment_timeout_classifies_sandbox_release_stall`,
 `owned_payment_release_stall_warn_skip`,
 `ci_permits_only_opt_in_agentcard_release_skip`).
+
+### Recurrence on 2026-10-12 (PR #1472 deploy, sandbox)
+
+The local AgentCard lifecycle lane for PR #1472 (deploy run
+`20261012-183520-3245684`, HEAD `5b3d1bed3`, stack `1791832677-4117771-72325`)
+failed `agent-payment-abandonment` (agent
+`9a0d0586-cd83-4a64-a5a1-f30bee192082`) the same way after 583s. The other
+three tasks passed. The branch changes chat routing, tunnel-log handling and
+cloudbench recovery classification; it does not touch mint, cleanup or reclaim.
+
+- Transfer `owt_d0a7890d3b2bc32b8b3767d7` (card
+  `card_110723c941f30359b9f47586`, $43.96 mint, 4396 transferred).
+  `create_card` succeeded at 19:30:59 and `close_card` at 19:31:05.
+  `recover_funds` ran after each of the first five release reads. The
+  stale-lease retry (`failed_company_transfer_release_retry`) requested the
+  release again 13 times through 20:06. All 80 release reads through 20:08:05
+  returned `consumed`, `released_cents=0`.
+- From 19:48 the retained stack's reconciler logged `Purchase funding reclaim is
+  already owned; skipping duplicate card close` every one to two minutes, with
+  no progress.
+- The retained stack was stopped at about 20:08 with the owner-verified
+  `local.stop_services` path (`state=clean`, no birth mismatch). The sandbox
+  Stripe hold remains in test mode.
+
+The unchanged lane rerun at 20:09 on the same HEAD passed all four tasks.
+`agent-payment-abandonment` (agent `0b475599-c482-4d55-a988-2e43de5710ac`) passed in 208s.

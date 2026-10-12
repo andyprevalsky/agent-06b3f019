@@ -84,12 +84,42 @@ function scanCompleteJsonString(json: string, startIndex: number): ScannedJsonSt
   return null;
 }
 
+/** A complete `["…", …]` array of strings starting at `startIndex`. */
+function scanCompleteJsonStringArray(
+  json: string,
+  startIndex: number
+): { value: string[]; nextIndex: number } | null {
+  if (json[startIndex] !== '[') return null;
+  const value: string[] = [];
+  let index = startIndex + 1;
+  const skipWhitespace = (): void => {
+    while (/\s/.test(json[index] ?? '')) index++;
+  };
+  skipWhitespace();
+  if (json[index] === ']') return { value, nextIndex: index + 1 };
+  while (index < json.length) {
+    const item = scanCompleteJsonString(json, index);
+    if (!item) return null;
+    value.push(item.value);
+    index = item.nextIndex;
+    skipWhitespace();
+    if (json[index] === ']') return { value, nextIndex: index + 1 };
+    if (json[index] !== ',') return null;
+    index++;
+    skipWhitespace();
+  }
+  return null;
+}
+
 /**
- * Read only complete top-level string fields from an in-progress JSON object.
- * Values embedded inside another string can never masquerade as route fields.
+ * Read only complete top-level string and string-array fields from an
+ * in-progress JSON object. Values embedded inside another string can never
+ * masquerade as route fields.
  */
-export function extractCompleteTopLevelStringFields(json: string): Record<string, string> | null {
-  const fields: Record<string, string> = {};
+export function extractCompleteTopLevelFields(
+  json: string
+): Record<string, string | string[]> | null {
+  const fields: Record<string, string | string[]> = {};
   let index = 0;
   const skipWhitespace = (): void => {
     while (/\s/.test(json[index] ?? '')) index++;
@@ -115,7 +145,7 @@ export function extractCompleteTopLevelStringFields(json: string): Record<string
     index++;
     skipWhitespace();
 
-    const value = scanCompleteJsonString(json, index);
+    const value = scanCompleteJsonString(json, index) ?? scanCompleteJsonStringArray(json, index);
     if (!value) return fields;
     fields[key.value] = value.value;
     index = value.nextIndex;
@@ -156,8 +186,17 @@ export function formatWebSearchStreamTitle(query: string): string {
   return `🔍 Searching the web for ${displayQuery}`;
 }
 
+/** The first complete query, from `queries` or a legacy cached `query`. */
+function extractFirstCompleteQuery(json: string): string | null {
+  const queries = /"queries"\s*:\s*\[\s*/.exec(json);
+  if (queries) {
+    return scanCompleteJsonString(json, queries.index + queries[0].length)?.value ?? null;
+  }
+  return extractCompleteStringField(json, 'query');
+}
+
 export function getWebSearchStreamTitleFromPartialRouterJson(json: string): string | null {
   if (detectActionFromPartialJson(json) !== 'web_search') return null;
-  const query = extractCompleteStringField(json, 'query')?.trim();
+  const query = extractFirstCompleteQuery(json)?.trim();
   return query ? formatWebSearchStreamTitle(query) : null;
 }

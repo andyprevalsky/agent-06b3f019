@@ -869,6 +869,7 @@ async def mock_spawn_browser_agent_activity_v3(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
+    agent_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser task that checkpoints once (drain yield or write approval), then completes.
 
@@ -889,6 +890,7 @@ async def mock_spawn_browser_agent_activity_v3(
             "is_resume": is_resume,
             "start_url": start_url,
             "write_lock_resume_state": dict(write_lock_resume_state or {}),
+            "agent_model": agent_model,
         }
     )
     continuity = {
@@ -1566,6 +1568,14 @@ async def _start_cutover_workflow(client, agent_id: str, workflow_id: str):
 
 
 def _assert_browser_resumed_on_new_generation(agent_id: str) -> tuple:
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    # A drifted mock signature fails every scheduled call before it records one.
+    assert list(inspect.signature(mock_spawn_browser_agent_activity_v3).parameters) == list(
+        inspect.signature(spawn_browser_agent_activity_v3).parameters
+    ), "mock_spawn_browser_agent_activity_v3 must mirror the real activity signature"
     calls = CUTOVER_BROWSER[agent_id]["calls"]
     assert len(calls) == 2, f"expected one interrupted + one resumed browser activity, got {len(calls)}"
     first, second = calls
@@ -1575,6 +1585,8 @@ def _assert_browser_resumed_on_new_generation(agent_id: str) -> tuple:
     assert second["tool_call_id"] == first["tool_call_id"], "resume must re-enter the same tool call"
     assert second["task_id"] == first["task_id"], "resume must keep the browser task identity"
     assert second["is_resume"] is True, "second browser activity must resume, not start fresh"
+    # The browser agent runs on the root's model pool in both generations.
+    assert [call["agent_model"] for call in calls] == ["rose-labs/rose-1-flash"] * 2, calls
     assert second["session_id"] == "steel-session-1", second
     assert second["cdp_url"] == "wss://steel.example/cdp/1", second
     resume = second["write_lock_resume_state"]

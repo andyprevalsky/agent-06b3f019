@@ -148,6 +148,10 @@
     "0e60c86aec61f6d6618b4752266305af3d78d556162803dfec925b8da88ba760": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "9cef403be81636cdd2c4e897dab32e611097b9ad9e4a33ae1cc3f2060cf897af": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   }
 }

@@ -306,6 +306,29 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
+    def test_public_tunnel_start_is_past_the_index_source_boundary(self):
+        # Restore path with healthy dependencies and no local Fast Mode cache:
+        # the next stack.log lines after the index step are the DDL hook and
+        # then the public tunnel, the first provider allocation.
+        index_tail = self.original["repo/.context/cloudbench/stack.log"] + (
+            b"Applied local workflow and trajectory search functions and triggers.\n"
+        )
+        self.original["repo/.context/cloudbench/stack.log"] = index_tail
+        self.make_capture()
+        _, receipt = self.verify()
+        self.assertEqual(receipt["bootstrap_phase"], "agent-network-index-bootstrap")
+        for line in (
+            "🌐 Starting run-scoped public frontend tunnel → localhost:5051 (attempt 1/3)\n",
+            "🌐 Falling back to an ephemeral ngrok tunnel → localhost:5051\n",
+            "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel\n",
+        ):
+            self.original["repo/.context/cloudbench/stack.log"] = (
+                index_tail + line.encode()
+            )
+            self.make_capture()
+            with self.assertRaises(ValueError):
+                self.verify()
+
     def test_every_injected_executable_must_match_even_with_a_new_envelope_checksum(
         self,
     ):
