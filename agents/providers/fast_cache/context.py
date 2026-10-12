@@ -22,6 +22,11 @@ WRITE_THROUGH_USER_IDS = {
 }
 
 
+def demo_recording_enabled() -> bool:
+    """Return whether a deliberate DEMO re-recording may write its replay namespace."""
+    return os.environ.get("FAST_MODE_CACHE_RECORD_DEMO", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def cache_writes_disabled() -> bool:
     """Return whether this process is in authoritative read-only cache mode."""
     return os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower() in {
@@ -56,6 +61,10 @@ class FastCacheContext:
     @property
     def should_write(self) -> bool:
         if cache_writes_disabled():
+            return False
+        # A DEMO replay is a frozen recording: a live miss must not add an entry
+        # that later replays mix with the recorded steps.
+        if self.soft_complete_allowed and not demo_recording_enabled():
             return False
         return self.enabled if self.write_enabled is None else self.write_enabled
 

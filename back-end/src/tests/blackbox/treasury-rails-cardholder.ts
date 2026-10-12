@@ -32,3 +32,36 @@ export async function selectTreasuryRailCardholder(
   }
   return undefined;
 }
+
+export interface IdleCardholderWaitOptions {
+  timeoutMs: number;
+  pollMs: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+/**
+ * Other workspaces' payment runs hold OPEN cards on the shared sandbox cardholders for a few
+ * minutes at a time. Re-read until a cardholder is observed idle, within a bounded wait,
+ * instead of failing on one busy snapshot. An OPEN card still always disqualifies.
+ */
+export async function waitForIdleTreasuryRailCardholder(
+  cardholderIds: readonly string[],
+  paymentBenchmarkCardholderId: string | undefined,
+  callOrgTool: AgentCardOrgToolCaller,
+  options: IdleCardholderWaitOptions
+): Promise<string | undefined> {
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + options.timeoutMs;
+  for (;;) {
+    const selected = await selectTreasuryRailCardholder(
+      cardholderIds,
+      paymentBenchmarkCardholderId,
+      callOrgTool
+    );
+    if (selected !== undefined || now() >= deadline) return selected;
+    await sleep(Math.min(options.pollMs, Math.max(0, deadline - now())));
+  }
+}

@@ -193,15 +193,25 @@ export function isRetryableKernelNavigationError(error: unknown): boolean {
   ].some((fragment) => message.includes(fragment));
 }
 
-export async function navigateKernelPage(page: Page, url: string): Promise<void> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+/** A residential exit can answer with its own gateway error page instead of failing the socket. */
+export function isRetryableKernelGatewayStatus(status: number | null): boolean {
+  return status !== null && status >= 502 && status <= 504;
+}
+
+/** Navigate through a transient proxy failure; returns the final HTTP status. */
+export async function navigateKernelPage(page: Page, url: string): Promise<number | null> {
+  for (let attempt = 1; ; attempt++) {
+    let status: number | null;
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      return;
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      status = response?.status() ?? null;
     } catch (error) {
       if (attempt === 3 || !isRetryableKernelNavigationError(error)) throw error;
       await page.waitForTimeout(attempt * 1_000);
+      continue;
     }
+    if (attempt === 3 || !isRetryableKernelGatewayStatus(status)) return status;
+    await page.waitForTimeout(attempt * 1_000);
   }
 }
 

@@ -1,6 +1,11 @@
 import { getRunBundle, listRuns } from './benchmarkHubStore';
 import { groupedRunCatalog, HUB_GROUP_PAGE_SIZE } from './benchmarkHubRunProjection';
-import type { HubRunCost, HubRunDetail, HubRunTaskDetail } from './benchmarkHubTypes';
+import type {
+  HubRunAttempt,
+  HubRunCost,
+  HubRunDetail,
+  HubRunTaskDetail,
+} from './benchmarkHubTypes';
 
 export type { HubRunCost, HubRunDetail, HubRunTaskDetail } from './benchmarkHubTypes';
 
@@ -38,16 +43,19 @@ export async function getRunDetail(
       message_count: num(raw.message_count),
     };
   });
+  const physicalTasks = tasks.flatMap<HubRunAttempt | HubRunTaskDetail>(
+    (task) => task.attempt_history ?? [task]
+  );
   const totals = {
     passed: tasks.filter((t) => t.passed === true).length,
     failed: tasks.filter((t) => t.passed === false).length,
     running: tasks.filter(
       (t) => t.passed === null && !['INFRA_ERROR', 'error', 'cancelled'].includes(t.status)
     ).length,
-    cost_cents: tasks.reduce((s, t) => s + (t.cost_cents ?? 0), 0),
-    tokens_in: tasks.reduce((s, t) => s + (t.tokens_in ?? 0), 0),
-    tokens_out: tasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
-    agents: tasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
+    cost_cents: physicalTasks.reduce((s, t) => s + (t.cost_cents ?? 0), 0),
+    tokens_in: physicalTasks.reduce((s, t) => s + (t.tokens_in ?? 0), 0),
+    tokens_out: physicalTasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
+    agents: physicalTasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
   };
   const rawCost = (bundle?.cost ?? summary.cost ?? null) as Record<string, unknown> | null;
   const cost: HubRunCost | null =

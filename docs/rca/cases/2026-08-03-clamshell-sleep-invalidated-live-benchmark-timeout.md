@@ -21,8 +21,12 @@ sources:
   - agent 43ffeb05-a5e4-4073-9293-0c1c2870ee77
   - agent 1aa492a0-8865-493a-804f-a7fe5a3347a7
   - agent 3e067004-c801-4710-a589-070958c1e08f
+  - agent 63ad6d6c-52af-48ad-bc6a-b371973dd478
+  - agent 862f930f-09b9-4167-a773-aabed261f9e9
+  - agent a14febca-34c7-4e21-a9c1-6797723863ff
+  - commit 7d9426189546d72268c6dd1da473724f0f31cffc
 repro: macOS pmset sleep log aligned with the benchmark and all twelve local worker logs
-status: mitigated
+status: open
 ---
 
 ## Problem
@@ -85,6 +89,54 @@ across the clamshell sleep and post-wake R2 DNS retries. Its first GET at
 benchmark's wall-clock deadline check before its chat-answer check, so it
 reported the timeout. This task also needs an unchanged awake-host rerun;
 the response latency measured on this sleeping host is invalid.
+
+### Open recurrence on 2026-10-08: predeploy smoke and payment checks
+
+These separate original tasks ran at source
+`7d9426189546d72268c6dd1da473724f0f31cffc`. Native power logs show clamshell
+sleep from 20:17:12 to 20:20:19 UTC (187 seconds), then maintenance sleep from
+20:20:28 to 20:35:34 UTC (906 seconds). Total recorded suspension was 1,093
+seconds. Original failed outcomes remain failed; later cleanup is not execution
+success. No runtime, prompt, model, task, evaluator or timeout change was made.
+
+- `spawn-sub-agents`, root `63ad6d6c-52af-48ad-bc6a-b371973dd478`, remained
+  ACTIVE with 13 messages and no child rows; original timeout was 1126/480
+  seconds. Its own parameter-population activity 45 crossed suspension before
+  child creation. Wall intervals were 1190.293 and 912.654 seconds; reported
+  client/span elapsed was 99.574 and 7.773 seconds. Post-wake DNS failure and
+  later fallback do not establish a completed task.
+- `parallel-tool-calls`, root `862f930f-09b9-4167-a773-aabed261f9e9`, remained
+  ACTIVE with 44 messages; original timeout was 1127/600 seconds. Three in-place
+  Explore activities crossed the 187-second sleep: wall intervals were about
+  201 seconds versus reported span elapsed about 15 seconds. Two ended with
+  CancelledError and one OK. Original cancellation attribution remains open;
+  finished tool messages do not prove root completion. Root dispatch remained
+  unclosed across maintenance sleep. Pre-sleep tool validation feedback is a
+  separate observation whose contribution to this outcome is unproven.
+- `agent-payment-test-shop`, root `a14febca-34c7-4e21-a9c1-6797723863ff`,
+  remained ACTIVE with 38 messages; original timeout was 1173/900 seconds.
+  Its own resumed browser traceback records a heartbeat TimeoutError just after
+  the 187-second sleep; the unchanged heartbeat budget is 120 seconds. A browser
+  request's wall interval was 1102.427 seconds, reported client elapsed 11.697
+  seconds, and nominal direct sleep overlap 1091.984 seconds. Client elapsed is
+  not provider execution time. Post-wake requests also recorded DNS failures.
+  Later database payment/browser sealing does not establish native release.
+
+Each task's original stack logs, request dumps, DB/messages and diagnostic
+summaries are retained privately under `.context/final-composed-deploy.private/`.
+Literal and behavioral archive searches identified this host-suspension case.
+Unchanged offline polling replays independently reproduce the spawn and parallel
+reporting failures with no network calls; they establish neither a source bug
+nor a live benchmark success. Payment's own captured traceback establishes the
+heartbeat boundary. Independent review is archived in
+`sleep-recurrence-independent-review/safe.json`, SHA256
+`42e9f57430b5fb8d4431e3c8614895808b0d22622c12b4c967a5915303cf7ef8`.
+
+The earlier mitigation did not prevent these recurrences. Original Temporal
+history/cancellation attribution and every exact unchanged awake-host outcome
+remain open. This archive records historical evidence, not a completed RCA,
+verified fix or acceptance credit. Keep normal budgets and Freedom intact;
+validate on an awake execution host before interpreting active runtime latency.
 
 ## Solution
 

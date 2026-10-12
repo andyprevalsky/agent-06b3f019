@@ -6,12 +6,15 @@
  *
  * claudeAuth = direct Anthropic Messages API call (user/pool OAuth token).
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
- * foundry    = GPT-6 Sol fallback for ultra after direct credentials.
+ * foundry    = funded Azure fallback for the pool's gptAuthModel (GPT-6 Sol for
+ *              ultra, GPT-5.6 Luna for mini/flash/browser-use). It follows
+ *              direct credentials and the direct Cerebras hop.
  * waterfall  = OpenRouter sequential fallback after the direct routes.
  *
  * rose-1-flash / rose-1-browser-use skip Claude/GPT auth. Primary is
  * Cerebras qwen-3.8-27b (direct). OpenRouter fallback is qwen/qwen3.8-27b
- * then google/gemini-3.8-flash. Planner stays rose-1-ultra (Opus 5.5).
+ * then google/gemini-3.8-flash, after the Foundry GPT-5.6 Luna fallback.
+ * Planner stays rose-1-ultra (Opus 5.5).
  */
 
 export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
@@ -25,13 +28,18 @@ export interface PoolSpec {
   claudeAuthModel: string;
   /** OpenAI model ID used when a ChatGPT/Codex OAuth token is supplied. */
   gptAuthModel: string;
-  /** Try a matching Microsoft Foundry deployment after direct credentials. */
+  /**
+   * Try gptAuthModel on Microsoft Foundry (funded Azure) after direct
+   * credentials and the Cerebras hop, before OpenRouter. directAuthEnabled
+   * does not gate it.
+   */
   foundryEnabled?: boolean;
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
   /**
-   * When set, the OpenRouter waterfall stamps this effort instead of the
-   * caller / xhigh default. claudeAuth and gptAuth are unchanged.
+   * When set, the OpenRouter waterfall and the Foundry fallback stamp this
+   * effort instead of the caller / xhigh default. claudeAuth and gptAuth are
+   * unchanged.
    */
   waterfallReasoningEffort?: string;
   /**
@@ -48,6 +56,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-mini',
     claudeAuthModel: 'claude-haiku-4-5',
     gptAuthModel: 'gpt-5.6-luna',
+    foundryEnabled: true,
     // Haiku stays first so anthropic-family skip tests still have a layer.
     // Second layer is glm-5.3-flash (vision, index 42, TTFT ~0.5s).
     waterfall: ['anthropic/claude-haiku-4.5', 'z-ai/glm-5.3-flash'],
@@ -62,6 +71,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     directAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
+    foundryEnabled: true,
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
@@ -81,6 +91,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     directAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
     cerebrasReasoningEffort: 'high',
+    foundryEnabled: true,
   },
 };
 

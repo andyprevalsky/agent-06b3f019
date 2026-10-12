@@ -107,7 +107,14 @@ async def cached_browser_decision(
     result = await call_llm()
     if write_enabled:
         try:
-            await cache_client.cache_set(key, "browser_use", normalize.goal_hash(goal), result)
+            # A non-DEMO child under a DEMO root must not write into the frozen
+            # replay namespace; only the agent's resolved tree root knows.
+            if agent_id and not await cache_client.cache_write_allowed_for_agent(agent_id, goal):
+                logger.info("fast_cache.browser_use_write_skipped", key=key, reason="demo_tree_root")
+                return result
+            await cache_client.cache_set(
+                key, "browser_use", normalize.goal_hash(goal), result, goal=goal, root_goal=root_goal
+            )
             logger.info("fast_cache.browser_use_stored", key=key)
         except Exception as exc:
             logger.warning("fast_cache.browser_use_set_error", key=key, error=str(exc))

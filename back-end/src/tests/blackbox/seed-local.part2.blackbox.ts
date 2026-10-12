@@ -247,13 +247,16 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
 
 test('every seed mode hydrates the selected user before dependent writes', async () => {
   const source = readSeedLocalSource();
-  const connectivity = source.indexOf('await remote.$queryRaw`SELECT 1`');
-  const identity = source.indexOf('await ensureSeedUserExists()', connectivity);
-  const computeMode = source.indexOf('if (COMPUTE_TOKENS_ONLY)', connectivity);
-  const emailMode = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)', connectivity);
+  const sync = source.indexOf('async function sync()');
+  const identity = source.indexOf(
+    "await syncRequiredCredentialTable('Seed identity', ensureSeedUserExists)",
+    sync
+  );
+  const computeMode = source.indexOf('if (COMPUTE_TOKENS_ONLY)', sync);
+  const emailMode = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)', sync);
 
-  assert(connectivity > 0, 'expected remote connectivity check');
-  assert(identity > connectivity, 'expected selected-user hydration after connectivity');
+  assert(sync > 0, 'expected seed orchestration');
+  assert(identity > sync, 'expected selected-user hydration through its bounded retry owner');
   assert(identity < computeMode, 'expected selected-user hydration before compute-token writes');
   assert(identity < emailMode, 'expected selected-user hydration before email-credential writes');
 });

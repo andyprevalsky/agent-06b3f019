@@ -36,6 +36,9 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Prisma } from '@prisma/client';
+import ts from 'typescript';
+import { syncUserRecord } from '../../../scripts/seed-local-helpers';
 import {
   CREDENTIAL_TABLE_SYNC_ATTEMPTS,
   syncRequiredCredentialTable,
@@ -139,12 +142,117 @@ function case4WholeGraphWrapperNoLongerMultiplies(): void {
   );
 }
 
+async function case5InitialAdmissionHasAnOwner(): Promise<void> {
+  // Run the actual CLI orchestration, without importing its top-level clients
+  // or starting a database. Only the database/credential edges are fixtures;
+  // identity hydration and its bounded retry owner are the production helpers.
+  const source = readFileSync(join(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const ast = ts.createSourceFile('seed-local.ts', source, ts.ScriptTarget.ES2022, true);
+  const functions = ast.statements.filter(
+    (node) =>
+      ts.isFunctionDeclaration(node) &&
+      ['ensureSeedUserExists', 'sync'].includes(node.name?.text ?? '')
+  );
+  if (functions.length !== 2) throw new Error('seed orchestration functions not found');
+  const executable = ts.transpileModule(functions.map((node) => node.getText(ast)).join('\n'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+
+  for (const mode of ['transient', 'success', 'permanent', 'auth', 'missing'] as const) {
+    let requests = 0;
+    let userReads = 0;
+    let credentialPasses = 0;
+    let rejected = false;
+    const userId = 'selected-seed-user';
+    const foreign = { id: 'foreign-local-row', userId: 'foreign-user' };
+    const users = new Map<string, { id: string; userId: string }>([[foreign.userId, foreign]]);
+    const admit = async () => {
+      requests += 1;
+      if (mode === 'permanent' || (mode === 'transient' && requests === 1)) {
+        throw new Prisma.PrismaClientInitializationError(
+          'FATAL: Max client connections reached',
+          '5.20.0'
+        );
+      }
+      if (mode === 'auth') {
+        throw new Prisma.PrismaClientInitializationError('Authentication failed', '5.20.0');
+      }
+    };
+    const bindings = {
+      console: { log: () => {} },
+      process: { env: { DATABASE_URL: 'postgresql://localhost/seed-fixture' } },
+      REMOTE_URL: 'postgresql://localhost/remote-fixture',
+      SEED_USER_ID: userId,
+      SEED_COOKIE_DOMAINS: ['fixture.example'],
+      COMPUTE_TOKENS_ONLY: false,
+      PASSKEYS_ONLY: false,
+      CREDENTIALS_ONLY: true,
+      EMAIL_CREDENTIALS_ONLY: false,
+      remote: {
+        $queryRaw: admit,
+        user: {
+          findUnique: async ({ where }: { where: { userId: string } }) => {
+            userReads += 1;
+            if (where.userId !== userId) throw new Error('foreign remote identity read');
+            await admit();
+            return mode === 'missing' ? null : { id: 'remote-user-row', userId };
+          },
+        },
+      },
+      local: {
+        user: {
+          upsert: async ({
+            where,
+            create,
+            update,
+          }: {
+            where: { userId: string };
+            create: { id: string; userId: string };
+            update: { userId: string };
+          }) => {
+            if (where.userId !== userId) throw new Error('foreign local identity write');
+            users.set(userId, { ...(users.get(userId) ?? create), ...update });
+          },
+        },
+      },
+      syncUserRecord,
+      syncRequiredCredentialTable: <T>(name: string, operation: () => Promise<T>) =>
+        syncRequiredCredentialTable(name, operation, { sleep: noSleep }),
+      syncBrowserAuthWithRetries: async () => {
+        if (!users.has(userId)) throw new Error('credentials reached before identity hydration');
+        credentialPasses += 1;
+      },
+    };
+    const sync = new Function(...Object.keys(bindings), `${executable}\nreturn sync;`)(
+      ...Object.values(bindings)
+    ) as () => Promise<void>;
+    try {
+      await sync();
+    } catch {
+      rejected = true;
+    }
+    const shouldSucceed = mode === 'transient' || mode === 'success';
+    const expectedReads = mode === 'success' ? 1 : mode === 'transient' ? 2 : 3;
+    check(
+      `case 5 ${mode}: initial admission completes or fails closed within the identity owner`,
+      rejected !== shouldSucceed &&
+        userReads === expectedReads &&
+        requests === expectedReads &&
+        credentialPasses === Number(shouldSucceed) &&
+        users.has(userId) === shouldSucceed &&
+        users.get(foreign.userId) === foreign,
+      `rejected=${rejected} requests=${requests} userReads=${userReads} credentialPasses=${credentialPasses}`
+    );
+  }
+}
+
 async function main(): Promise<void> {
   console.log('🔐 seed credential retry scope');
   await case1TransientTableIsRetriedInPlace();
   await case2RetryDoesNotReplayTheWholeGraph();
   await case3PermanentFailureStillFailsClosed();
   case4WholeGraphWrapperNoLongerMultiplies();
+  await case5InitialAdmissionHasAnOwner();
 
   if (failures > 0) {
     console.error(`\n❌ seed credential retry scope: ${failures} case(s) failed`);

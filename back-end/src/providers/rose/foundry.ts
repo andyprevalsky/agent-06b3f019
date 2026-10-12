@@ -4,16 +4,27 @@ import { createHash } from 'node:crypto';
 
 import { buildCodexResponsesBody } from './gptAuth';
 import {
+  RoseAllFailed,
   RoseAuthError,
   RoseError,
   RoseInvalidRequest,
   RoseRateLimitError,
   RoseServerError,
 } from './errors';
+import { createLogger } from '../logger';
+import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import type { PoolSpec } from './pools';
 import { parseResponsesSSE } from './streaming';
 import { postFoundryResponsesStream } from './transport';
-import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
+import type {
+  CompletionChunk,
+  CompletionMessage,
+  CompletionOptions,
+  ResponseFormat,
+  RoseStreamChunk,
+} from './types';
+
+const log = createLogger('Rose');
 
 const cooldownUntil = new Map<string, number>();
 let authCooldownUntil = 0;
@@ -27,12 +38,19 @@ export function foundryConfigured(poolSpec: PoolSpec): boolean {
   );
 }
 
+/**
+ * Deployments serving `model`: configured names equal to it or prefixed
+ * `<model>-`. AZURE_FOUNDRY_DEPLOYMENTS is shared by every Foundry pool, so one
+ * pool's deployments never receive another pool's model; without a matching
+ * name, Foundry's deploymentless inference serves the model id.
+ */
 export function orderedFoundryDeployments(model: string, routeKey: string): string[] {
-  const names = (process.env.AZURE_FOUNDRY_DEPLOYMENTS ?? model)
+  const configured = (process.env.AZURE_FOUNDRY_DEPLOYMENTS ?? '')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean);
-  if (!names.length) return [];
+  const matching = configured.filter((name) => name === model || name.startsWith(`${model}-`));
+  const names = matching.length ? matching : [model];
   const start =
     parseInt(createHash('sha256').update(routeKey).digest('hex').slice(0, 8), 16) % names.length;
   return [...names.slice(start), ...names.slice(0, start)];
@@ -47,7 +65,7 @@ function cooldownMs(headers: Headers): number {
   return 1_000;
 }
 
-interface FoundryOptions {
+export interface FoundryOptions {
   poolSpec: PoolSpec;
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
@@ -157,4 +175,68 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
     }
   }
   throw lastError;
+}
+
+/** Foundry request for one completion: the pool's GPT model and the caller's routing identity. */
+export function foundryRequestFor(params: {
+  poolSpec: PoolSpec;
+  options: CompletionOptions;
+  requestId: string;
+  callSite?: string;
+}): FoundryOptions {
+  const { options } = params;
+  return {
+    poolSpec: params.poolSpec,
+    messages: options.messages,
+    responseFormat: options.response_format,
+    tools: options.tools,
+    toolChoice: options.tool_choice,
+    temperature: options.temperature,
+    // A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
+    effort: params.poolSpec.waterfallReasoningEffort ?? options.effort,
+    providerFastMode: options.provider_fast_mode,
+    requestId: params.requestId,
+    routeKey:
+      options.route_key ??
+      options.dump_context?.agent_id ??
+      options.compute_grant?.userId ??
+      params.requestId,
+    callSite: params.callSite,
+    abortSignal: options.abort_signal,
+  };
+}
+
+/** Pre-content exhaustion: a fall-through sentinel, or a waterfall whose every step failed. */
+export function isChatRouteExhausted(
+  error: unknown
+): error is PreContentFallThroughError | RoseAllFailed {
+  return error instanceof PreContentFallThroughError || error instanceof RoseAllFailed;
+}
+
+/**
+ * The chat-exclusive routes end at OpenRouter. When every one of their own
+ * fallbacks failed before content, the pool's GPT model on funded Azure serves
+ * the turn instead of failing it; normal chat latency is unchanged.
+ */
+export async function* chatFoundryLastResort(params: {
+  /** Pre-content exhaustion: a fall-through sentinel or a waterfall whose every step failed. */
+  exhausted: PreContentFallThroughError | RoseAllFailed;
+  request: FoundryOptions;
+  pool: string;
+  emit: (chunk: RoseStreamChunk) => CompletionChunk | null;
+}): AsyncIterable<CompletionChunk> {
+  const { exhausted, request } = params;
+  const cause = exhausted instanceof PreContentFallThroughError ? exhausted.cause : exhausted;
+  if (!foundryConfigured(request.poolSpec) || request.abortSignal?.aborted) throw cause;
+  log.warn('chat_foundry_last_resort.start', {
+    request_id: request.requestId,
+    pool: params.pool,
+    reason: cause.name,
+  });
+  try {
+    yield* runWithFallThrough({ produce: () => foundryComplete(request), emit: params.emit });
+  } catch (error) {
+    throw error instanceof PreContentFallThroughError ? cause : error;
+  }
+  log.info('chat_foundry_last_resort.done', { request_id: request.requestId, pool: params.pool });
 }

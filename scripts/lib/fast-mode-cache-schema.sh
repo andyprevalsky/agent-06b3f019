@@ -50,3 +50,19 @@ ensure_fast_mode_cache_schema() {
     echo "❌ Fast Mode cache schema ensure failed after ${max_attempts} attempts (shared prod pooler saturated)" >&2
     return "$rc"
 }
+
+# Every run.sh stack sits outside production's pooler budget: database.ts gives
+# the production backend about 480 of the shared pooler's 1,000 clients, and all
+# developer and benchmark stacks share the rest. A Fast Mode cache Prisma pool
+# otherwise inherits production's 75-client default, so a fleet plus idle dev
+# stacks exhausted the pooler (EMAXCONN) on 2026-10-11. Every stack now defaults
+# to 20, sized for the 50-child DEMO replay that both the predeploy smoke and
+# `scripts/test.sh --port=3001` run (at 3, 7,709 shared reads queued at p50 8.5s
+# and the replay hit its 900s limit; at 20 it passed in 263s). An explicit
+# FAST_CACHE_DB_POOL still wins.
+FAST_CACHE_DB_POOL_DEFAULT=20
+apply_fast_cache_pool_default() {
+    [ -z "${FAST_CACHE_DB_POOL:-}" ] || return 0
+    export FAST_CACHE_DB_POOL="$FAST_CACHE_DB_POOL_DEFAULT"
+    echo "🧠 Fast Mode cache pool limited to ${FAST_CACHE_DB_POOL} connections"
+}

@@ -106,6 +106,33 @@ existing owner avoids a manual repair or a parallel uploader.
 
 ## Human feedback
 
+### October 8 opt-in retry and whole-experiment cutoff
+
+The user authorized one fresh retry for infrastructure failures only and a
+90-minute image-start through durable publication/full-release limit. During
+implementation, the existing expired-clock scheduler control failed because a
+previous cutoff suppressed the ordinary final group publication entirely.
+The unchanged control then passed after distinguishing a prior stop from a new
+stop during the final publication. Both retry-enabled and E2E-only invocations
+now exercise this handoff; ordinary flag-off cancellation remains unchanged.
+
+The physical attempt must first have an exact run/owner/workspace release audit,
+matching copied metadata and positive release epoch, absent owner registry,
+released terminal row and healthy publication. A retry preserves the original
+logical member and timestamp, retains the failed physical attempt, and uses a
+fresh controller without restarting healthy peers or either clock. Independent
+review supplied an actual failing contradictory PASS/INFRA inverse; a genuine
+PASS or task FAIL now prevents retry even when another marker says error.
+
+The compact owning scheduler, normal CLI and real HTTP uploader controls run
+through the existing deploy gate. Focused cutoff verification passed ten checks
+in 5.28 seconds; final combined campaign/barrier/uploader qualification passed
+81 checks with one existing skip in 60.12 seconds. Earlier source-qualified
+normal-gate evidence is 511 passes/four skips in 449.01 seconds and is not
+claimed as an exact final-source rerun. No LIVE retry, fleet acceptance or
+production rollout is established by these local controls. The whole original
+90-minute clock remains authoritative even when cleanup finishes later.
+
 The user required accurate live frontend results and supported CLI shepherding
 through complete owner release. The parent review required actual foreground
 remote reconciliation rather than a pending receipt alone. It also required an

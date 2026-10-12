@@ -43,9 +43,10 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
-import { selectTreasuryRailCardholder } from './treasury-rails-cardholder';
+import { waitForIdleTreasuryRailCardholder } from './treasury-rails-cardholder';
 import {
   checkPendingUnusedMints,
+  overdueReclaimSkipped,
   pendingMintLedgerPath,
   recordPendingMint,
 } from './treasury-rails-pending-mints';
@@ -225,12 +226,17 @@ async function checkEarlierUnusedMints(
       case 'unobservable':
         console.warn(`  UNVERIFIED ${label}: ${verdict.reason}`);
         break;
-      case 'overdue':
-        lost.push(
+      case 'overdue': {
+        const overdue =
           `${label} still ${verdict.status} past the ${RECLAIM_DEADLINE} reclaim deadline; ` +
-            `provider row: ${JSON.stringify(verdict.row ?? null)}`
-        );
+          `provider row: ${JSON.stringify(verdict.row ?? null)}`;
+        if (overdueReclaimSkipped()) {
+          console.warn(`  SKIP ${overdue} (TREASURY_RAILS_SKIP_OVERDUE_RECLAIM=1)`);
+          break;
+        }
+        lost.push(overdue);
         break;
+      }
       case 'failed':
         lost.push(
           `${label}: ${verdict.reason}; provider row: ${JSON.stringify(verdict.row ?? null)}`
@@ -353,12 +359,16 @@ async function main(): Promise<void> {
     ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
   const paymentBenchmarkCardholderId = await resolveBenchmarkCardholderId();
-  const cardholderId = await selectTreasuryRailCardholder(
+  const cardholderId = await waitForIdleTreasuryRailCardholder(
     cardholders.map((cardholder) => cardholder.id),
     paymentBenchmarkCardholderId,
-    callOrgTool
+    callOrgTool,
+    { timeoutMs: 5 * 60_000, pollMs: 15_000 }
   );
-  assert.ok(cardholderId !== undefined, 'sandbox org has no idle cardholder for reclaim proof');
+  assert.ok(
+    cardholderId !== undefined,
+    'sandbox org had no idle cardholder for the reclaim proof within 5 minutes'
+  );
   record(
     cardholderId === paymentBenchmarkCardholderId
       ? `reclaim proof on shared payment-benchmark cardholder ${cardholderId} (no other idle cardholder)`

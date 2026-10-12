@@ -8,7 +8,7 @@ import pytest
 from providers.rose import foundry
 from providers.rose.errors import RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import _openai_credit_error, build_codex_responses_body
-from providers.rose.pools import get_pool
+from providers.rose.pools import foundry_model, get_pool
 from providers.rose.pricing import get_model_pricing
 
 
@@ -255,3 +255,58 @@ async def test_postcontent_protocol_error_never_retries(monkeypatch):
             chunks.append(chunk)
     assert len(calls) == 1
     assert chunks[1].data["text"] == "Partial"
+
+
+def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
+    """Prod's AZURE_FOUNDRY_DEPLOYMENTS names Sol; Luna pools must not inherit it."""
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol, gpt-6-sol-b")
+    assert foundry._deployments(get_pool("rose-1-ultra").gpt_auth_model) == ["gpt-6-sol", "gpt-6-sol-b"]
+    for pool in ("rose-1-mini", "rose-1-flash", "rose-1-browser-use"):
+        spec = get_pool(pool)
+        assert spec.foundry_enabled, pool
+        assert foundry._deployments(spec.gpt_auth_model) == ["gpt-5.6-luna"], pool
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-5.6-luna-east")
+    assert foundry._deployments("gpt-5.6-luna") == ["gpt-5.6-luna-east"]
+    assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
+    monkeypatch.delenv("AZURE_FOUNDRY_DEPLOYMENTS")
+    assert foundry._deployments("gpt-6-sol") == ["gpt-6-sol"]
+    # The open-weights pool's Foundry fallback stays open-weights.
+    oss = get_pool("rose-1-oss")
+    assert oss.foundry_enabled and foundry_model(oss) == "DeepSeek-V3.2"
+    assert foundry._deployments(foundry_model(oss)) == ["DeepSeek-V3.2"]
+
+
+@pytest.mark.asyncio
+async def test_open_weights_foundry_omits_reasoning_params(monkeypatch):
+    """Azure DeepSeek rejects reasoning params (HTTP 400); GPT pools keep their effort."""
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, text=_sse({"type": "response.output_text.delta", "delta": "ok"}))
+
+    _install_http(monkeypatch, handler)
+    for pool in ("rose-1-oss", "rose-1-ultra"):
+        async for _chunk in foundry.foundry_complete(
+            pool_spec=get_pool(pool),
+            messages=[{"role": "user", "content": "hi"}],
+            response_format=None,
+            tools=None,
+            context_tools=None,
+            tool_choice=None,
+            temperature=None,
+            effort=None,
+            provider_fast_mode=False,
+            request_id=f"reasoning-{pool}",
+            route_key="agent-1",
+            agent_id="agent-1",
+            call_site="test",
+            cache_namespace=None,
+            ttft_timeout_s=2,
+            idle_timeout_s=2,
+        ):
+            pass
+    oss, ultra = bodies
+    assert oss["model"] == "DeepSeek-V3.2"
+    assert "reasoning" not in oss and "include" not in oss
+    assert ultra["model"] == "gpt-6-sol" and ultra["reasoning"]["effort"] == "xhigh"

@@ -175,6 +175,24 @@ regression provides no cloud-fleet acceptance credit.
 
 ## Human feedback
 
+### October 8 recurrence in campaign publisher cleanup fixture
+
+The final campaign-inventory qualification failed one check while 45 passed:
+the final-publication cleanup control observed its JSON owner path, then read
+an empty document at line 1170. The fixture wrote directly to that path, so
+existence preceded a complete PID/child payload. The actual cancellation and
+resource-release assertions had not run. This is the same archived publication
+contract, not an observed provider failure.
+
+The fixture now writes a sibling temporary file and atomically replaces the
+readiness path. Its existing parent/child retirement, unrelated-process
+survival, group-state and admission assertions remain intact. Cancellation
+uses the existing fixture host guard instead of a separate 15-second limit;
+no production or harness timer changed. Final campaign/barrier/uploader
+qualification passed 81 checks with one existing skip in 60.12 seconds.
+Original private failure evidence is retained. This fixture correction grants
+no LIVE execution or production deployment credit.
+
 None recorded for the original incident. During the September recurrence the
 user required continued execution without repeated permission requests, ten
 sequential ten-task cloud slices with no infrastructure outcomes, and a
