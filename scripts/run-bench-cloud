@@ -3713,6 +3713,14 @@ stop_on_exit() {
     local ec=$?
     local retirement_deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} - 2))
     local remaining shutdown_confirmed=0
+    # A second cancellation signal (the supervisor's residual group TERM after
+    # its grace, or controller teardown of the child process tree) used to run
+    # the `exit` TERM trap inside this EXIT trap and abort it midway, skipping
+    # proxy retirement, port-lease release, viewer teardown and the exit
+    # status. Record such a signal instead. Child commands still receive it
+    # with their default dispositions, and every caller bounds this cleanup
+    # with SIGKILL.
+    trap 'CLOUDBENCH_EXIT_CLEANUP_SIGNALLED=1' HUP INT TERM
     [ -z "${POLL_SLEEP_PID:-}" ] || kill "$POLL_SLEEP_PID" 2>/dev/null || true
     release_boot_config_update_slot
     if [ -n "${GUEST_SHUTDOWN_RESULT:-}" ]; then

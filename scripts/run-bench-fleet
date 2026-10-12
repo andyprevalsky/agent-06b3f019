@@ -13123,7 +13123,7 @@ wait_for_autoscaler_finalization() {
 
 terminate_fleet_runner_group() {  # <runner-pgid> <HUP|INT|TERM>
     local runner_pid="$1" signal_name="$2" grace deadline residual_deadline
-    local kill_deadline leader_state
+    local kill_deadline leader_state next_zombie_check
     grace="${CLOUDBENCH_RUNNER_TERM_SECONDS:-15}"
     case "$grace" in ''|*[!0-9]*) grace=15 ;; esac
     # Stay strictly inside cleanup's 30s supervisor ceiling, leaving time for
@@ -13140,14 +13140,31 @@ terminate_fleet_runner_group() {  # <runner-pgid> <HUP|INT|TERM>
     # waiter's group TERM left both requests with HTTP 000 and the guest kept
     # executing until its own backstop. Residual members (proxies, sleeps) are
     # signalled only after the runner has exited or its grace has expired.
-    kill -s "$signal_name" "$runner_pid" 2>/dev/null || true
+    #
+    # The runner is started from this asynchronous subshell of a non-interactive
+    # shell, so it (and its proxies) inherit SIGINT ignored and its INT trap can
+    # never run. Deliver every forwarded cancellation (a campaign's TERM, a
+    # terminal Ctrl-C's INT or a HUP) to the runner and residual members as
+    # TERM, which the runner traps; the caller keeps the original signal for
+    # its own exit status.
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    next_zombie_check=$((SECONDS + 1))
     while [ "$SECONDS" -lt "$deadline" ]; do
-        leader_state="$(ps -o stat= -p "$runner_pid" 2>/dev/null)" || break
-        case "$leader_state" in ''|Z*) break ;; esac
+        # A builtin liveness check each tick. The runner is this shell's own
+        # child and normally reaped at once; a once-per-second ps check covers
+        # an unreaped zombie. A failed ps read (for example fork pressure) is
+        # not evidence of exit, so it never ends the grace early.
+        kill -0 "$runner_pid" 2>/dev/null || break
+        if [ "$SECONDS" -ge "$next_zombie_check" ]; then
+            next_zombie_check=$((SECONDS + 1))
+            if leader_state="$(ps -o stat= -p "$runner_pid" 2>/dev/null)"; then
+                case "$leader_state" in ''|*Z*) break ;; esac
+            fi
+        fi
         sleep 0.1
     done
     if kill -0 -- "-$runner_pid" 2>/dev/null; then
-        kill -s "$signal_name" -- "-$runner_pid" 2>/dev/null || true
+        kill -TERM -- "-$runner_pid" 2>/dev/null || true
         residual_deadline=$((SECONDS + 3))
         [ "$deadline" -le "$residual_deadline" ] || residual_deadline="$deadline"
         while kill -0 -- "-$runner_pid" 2>/dev/null; do
