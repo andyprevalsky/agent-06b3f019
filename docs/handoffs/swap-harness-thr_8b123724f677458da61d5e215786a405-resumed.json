@@ -31,5 +31,30 @@
   "oldBoxPreserved": true,
   "archiveStatus": "pending exact ownership and complete preservation; no archive requested",
   "deployed": false,
-  "merged": false
+  "merged": false,
+  "replacementNativeThreadId": "01a13267-f29a-74c0-a5de-272887587744",
+  "allFilesPreservationStatus": "INCOMPLETE / OLD BOX RETAINED",
+  "migrationComplete": false,
+  "lastReconciledUtc": "2026-10-12T23:20:47.156140+00:00",
+  "routingAudit": {
+    "projectThreadListing": "Complete, 10 threads; no box IDs. Relevant opposite-harness threads are coordinator, this replacement and Google reauth; none proven co-located with original.",
+    "delegatedThreadListing": "Complete; empty on replacement.",
+    "installedKnownThreadRoute": "Absent. Supported start targets current-devbox, new-devbox, devbox:<instance-id>; no thread target.",
+    "originalLatestSuccessfulTurns": "claude:47 WMH healthy after854s, benchmark stack starting; claude:48 stack booting, no agents. Later replies quota stop.",
+    "canonicalArtifactReader": "hub_upload.verify_run_visible requires exact run_id. Launcher generates run_id after WMH health and writes old local run.env; no run12 ID/root/session available in bounded successful history. Cannot use fresh localhost progress reader as old-box evidence."
+  },
+  "freshOfflineChecks": {
+    "seedMemoryRatchet": "8 passed",
+    "launcherSyntax": "passed",
+    "worldClockAndWireStream": "26 passed in0.24s under Python3.11.9; confirmed registered in WMH blackbox",
+    "diffCheck": "passed",
+    "providerInitialStateCost": "155 passed in12.62s under Python3.11.9"
+  },
+  "remainingUnpreserved": [
+    "old staged/unstaged/untracked source and unpushed commits",
+    "stashes, other worktrees and nested repositories",
+    "important ignored model/RAG/fixtures and local memory",
+    "run12 logs, receipts, prediction state and initial-state override",
+    "raw quality A/B artifacts and exact resource ownership"
+  ]
 }
