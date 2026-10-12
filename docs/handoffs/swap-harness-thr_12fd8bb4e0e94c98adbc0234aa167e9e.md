@@ -100,7 +100,7 @@ and skip mac-app execution on Linux. Never copy old runtime identity or replace
 complete secrets with example env files.
 
 Skill source: `feat/swap-harness`, commit
-`b4d97fd6aa` (resolve the complete SHA from the branch if needed), canonical
+`42994a2b267785ab99e01609fe46514aff7be3cd`, canonical
 `.agents/skills/swap-harness`. Install only that folder for both harnesses.
 
 Push a receipt next to this file named
@@ -110,3 +110,11 @@ handoff path and meaningful first continuation action/result. Mark
 `preservation: partial` and `archive: blocked_old_filesystem_unavailable`.
 Retain the old box until its unpushed source, artifacts and owned resources are
 positively accounted for. No archive request has been made.
+
+The user clarified that **ALL original task files must be in the PR before
+branching any continuation**. This prepared handoff and previously pushed code
+do not satisfy that requirement: obtain an opposite-harness worker on the old
+filesystem, recover original244a961d2 and all other local changes, and verify
+complete preservation. Do not start source-changing or paid continuation from
+this incomplete checkpoint. The coordinator has requested a user/app access
+route to start that worker without requiring manual devbox IDs.
