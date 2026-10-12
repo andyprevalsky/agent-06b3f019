@@ -17935,10 +17935,12 @@ def test_refresh_deps_snapshot_baseline_survives_transient_empty_listing(tmp_pat
         state.mkdir()
         (state / "reads").write_text("0\n")
         older = f'{{"id":"snap-older","status":"created","size":99,"created_at":"{older_created_at}"}}'
-        owned = '{"id":"snap-owned","status":"created","size":10,"created_at":"0001-01-01T00:00:00Z"}'
+        # The request's own snapshot is pending (zero date) when first listed.
+        pending = '{"id":"snap-owned","status":"running","size":0,"created_at":"0001-01-01T00:00:00Z"}'
+        owned = f'{{"id":"snap-owned","status":"created","size":10,"created_at":"{recent}"}}'
         script = f"""set -uo pipefail
 APP=bench-app
-CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=3
 CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS=3
 FLY() {{
   echo "$*" >> "$STATE/calls"
@@ -17946,7 +17948,7 @@ FLY() {{
     touch "$STATE/created"
     return 0
   elif [ -f "$STATE/created" ]; then
-    echo '[{older},{owned}]'
+    if [ -f "$STATE/polled" ]; then echo '[{older},{owned}]'; else touch "$STATE/polled"; echo '[{older},{pending}]'; fi
   else
     reads=$(( $(cat "$STATE/reads") + 1 ))
     printf '%s\n' "$reads" > "$STATE/reads"
@@ -17977,6 +17979,51 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     dated_older = run("[]", empty_baseline_reads=3, older_created_at="2020-01-01T00:00:00Z")
     assert dated_older.returncode == 0, dated_older.stderr
     assert "EXACT=snap-owned" in dated_older.stdout
+
+    # With no baseline, a lone snapshot that is already complete cannot be the
+    # request just made, even when Fly dates it recently: never adopt it.
+    lone_state = tmp_path / "lone-complete"
+    lone_state.mkdir()
+    lone_script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS=2
+FLY() {{
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then touch "$STATE/created"; return 0; fi
+  if [ -f "$STATE/created" ]; then
+    echo '[{{"id":"snap-foreign","status":"created","size":7,"created_at":"{recent}"}}]'
+  else
+    echo '[]'
+  fi
+}}
+sleep() {{ :; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1 || exit $?
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+    lone = subprocess.run(
+        ["bash", "-c", lone_script],
+        env={"STATE": str(lone_state), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert lone.returncode != 0
+    assert "refusing to adopt it" in lone.stderr
+    assert "EXACT=" not in lone.stdout
+
+    # Invalid attempt budgets fail before any provider request.
+    invalid = subprocess.run(
+        ["bash", "-c", f"set -uo pipefail\nAPP=bench-app\nCLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=0\n"
+         f"FLY() {{ echo called >> \"$STATE/calls\"; }}\n{create_snapshot}\ncreate_volume_snapshot_exact vol-1"],
+        env={"STATE": str(lone_state), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert invalid.returncode != 0
+    assert "must be positive integers" in invalid.stderr
+    assert not (lone_state / "calls").exists()
 
     # A recent unlisted snapshot could be a concurrent transaction: fail closed.
     concurrent = run("[]", empty_baseline_reads=3, older_created_at=recent)
