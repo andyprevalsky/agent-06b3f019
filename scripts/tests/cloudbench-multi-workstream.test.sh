@@ -3549,6 +3549,25 @@ assert payload["status"] == "failed", payload
 assert payload["controller_exit_code"] != 0, payload
 PY
     [ "$?" -eq 0 ] || fail "startup failure lifecycle was not preserved"
+    # --retry-infra admits a fresh attempt only for a released INFRA row. A
+    # startup exit before provisioning must still close the frozen bench's
+    # E2E clock at the verified audit release, without inventing execution.
+    python3 - "$WS_A/.context/fleet/runs/$run_id" "$audit" <<'PY'
+import json
+import sys
+from pathlib import Path
+run, audit = map(Path, sys.argv[1:3])
+task = run / "bench-alpha"
+release = (audit / "provider-teardown-verified.epoch").read_text()
+assert (task / "bench-e2e.finished-epoch").read_text() == release, "startup INFRA never released"
+assert 0 < int((task / "bench-e2e.started-epoch").read_text()) <= int(release)
+assert not (task / ".cid").exists() and not (task / "cloudbench-run.json").exists()
+rows = json.loads((run / "_batch/run.json").read_text())["tasks"]
+assert [(row["name"], row["status"], row["passed"], row["lifecycle_stage"]) for row in rows] == [
+    ("bench-alpha", "INFRA_ERROR", False, "released")
+], rows
+PY
+    [ "$?" -eq 0 ] || fail "pre-provisioning startup INFRA was not released for a fresh attempt"
     assert_no_controller_script_snapshots "startup visibility failure"
     echo "PASS: project Python and exact teardown survive pre-allocation Hub import failure"
 }

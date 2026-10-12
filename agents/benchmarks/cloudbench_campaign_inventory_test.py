@@ -16,7 +16,7 @@ from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
-@pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing"))
+@pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing", "lifecycle-failed"))
 def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
     scripts = tmp_path / "scripts"
@@ -39,6 +39,8 @@ audit.mkdir(parents=True)
 status = 'INFRA_ERROR' if task == 'broken' and (attempt == 1 or mode == 'exhausted') else 'PASSED'
 if task == 'broken' and mode == 'task':
     status = 'FAILED'
+if task == 'broken' and mode == 'lifecycle-failed':
+    status = 'PASSED'
 row = {'name': task, 'status': status, 'passed': status == 'PASSED', 'lifecycle_stage': 'released'}
 if mode == 'contradictory' and task == 'broken':
     row['passed'] = True
@@ -46,9 +48,12 @@ if mode == 'retained' and task == 'broken':
     row['lifecycle_stage'] = 'teardown'
     (root / '.git/cloudbench-fleet-ownership' / owner).mkdir(parents=True)
 (fleet / '_batch/run.json').write_text(json.dumps({'run_id': run_id, 'tasks': [row]}))
+# The fleet verifies a genuinely evaluated FAILED task; a released attempt whose
+# mandatory autoscaler failed (controller exit 2) keeps a failed lifecycle.
+lifecycle_failed = status == 'INFRA_ERROR' or (mode == 'lifecycle-failed' and task == 'broken')
 (fleet / '_batch/lifecycle.json').write_text(json.dumps({
     'run_id': run_id, 'fleet_owner_token': owner, 'workspace_root': str(root),
-    'status': 'verified' if status == 'PASSED' else 'failed', 'hub_publication_failed': False}))
+    'status': 'failed' if lifecycle_failed else 'verified', 'hub_publication_failed': False}))
 meta = f'run_id={run_id}\nfleet_owner_token={owner}\nworkspace_root={root}\nstatus=provider-teardown-verified\n'
 (audit / 'meta').write_text(meta)
 (audit / 'provider-teardown-verified.epoch').write_text(str(time.time()))
@@ -74,7 +79,7 @@ if task == 'broken' and attempt == 2:
 fd = os.open(root / 'events.jsonl', os.O_WRONLY | os.O_APPEND)
 os.write(fd, (json.dumps({'task': task, 'attempt': attempt, 'event': 'finished'}) + '\n').encode())
 os.close(fd)
-sys.exit(0 if status == 'PASSED' else 1)
+sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status == 'PASSED' else 1)
 '''
     (tmp_path / "child.py").write_text(child)
     uploader = tmp_path / "agents/benchmarks/hub_upload.py"
@@ -144,7 +149,13 @@ sys.exit(0 if status == 'PASSED' else 1)
             assert cohort['expected_count'] == 2 and cohort['released_count'] == cohort['failed_count'] == 1
     else:
         assert len([event for event in started if event['task'] == 'broken']) == 1
-        assert result.returncode == (0 if failure == 'task' else 1), result.stdout + result.stderr
+        assert result.returncode == (0 if failure == 'task' else 1 if failure != 'lifecycle-failed' else 2), (
+            result.stdout + result.stderr)
+        if failure == 'lifecycle-failed':
+            # Released resources and a PASSED row alone are not a healthy attempt.
+            assert broken['status'] != 'passed' and summary['status'] != 'passed'
+            assert broken['attempts'][0]['resources_released'] is True
+            assert broken['attempts'][0]['lifecycle_verified'] is False
 
 
 @pytest.mark.parametrize('explicit_concurrency', (False, True))

@@ -13468,18 +13468,24 @@ def test_cloudbench_fast_cache_route_keeps_live_guests_off_the_shared_pooler():
     assert live.returncode == 0, live.stderr
     assert live.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=1", "stack:FAST_MODE_CACHE_DATABASE_URL="]
 
+    shared_route = ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=4"]
     shared = print_env("test-mass-agent-run-0")
     assert shared.returncode == 0, shared.stderr
     # fast_cache:on replay keeps the frozen shared cache with a small pool, so a
     # 50-guest DEMO fleet holds 200 of the production pooler's 1,000 clients.
-    assert shared.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=4"]
+    assert shared.stdout.splitlines() == shared_route
+
+    # An inherited local route must not divert the replay to the empty local DB.
+    inherited = print_env("test-mass-agent-run-0", FAST_MODE_CACHE_USE_LOCAL="1")
+    assert inherited.returncode == 0, inherited.stderr
+    assert inherited.stdout.splitlines() == shared_route
 
     mixed = print_env("chat-mode,test-mass-agent-run-0")
     assert mixed.returncode == 0, mixed.stderr
-    assert mixed.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=4"]
+    assert mixed.stdout.splitlines() == shared_route
 
     tuned = print_env("test-mass-agent-run-0", CLOUDBENCH_SHARED_CACHE_DB_POOL="6")
-    assert tuned.stdout.splitlines() == ["stack:FAST_CACHE_DB_POOL=6"]
+    assert tuned.stdout.splitlines() == ["stack:FAST_MODE_CACHE_USE_LOCAL=0", "stack:FAST_CACHE_DB_POOL=6"]
 
     probe = print_env("test-mass-agent-run-0", CLOUDBENCH_INFRA_PROBE="1")
     assert probe.returncode == 0, probe.stderr

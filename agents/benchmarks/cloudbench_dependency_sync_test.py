@@ -11578,7 +11578,7 @@ reap_volume vol_exact || reap_status=$?
     assert not any("volumes list" in call for call in postcondition_log)
     assert not any("volumes destroy vol_neighbor" in call for call in postcondition_log)
 
-    functions = "\n".join(
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "fly_with_timeout() {",
@@ -15803,6 +15803,9 @@ capacity_release_stale_owner_reservations() {{
 fleet_audit_finalize_recovered_registry() {{
   printf 'audit_finalize %s\n' "$*" >> "$CALLS"
 }}
+fleet_publish_recovered_terminal_projection() {{
+  printf 'terminal_projection %s\n' "$*" >> "$CALLS"
+}}
 {functions}
 
 if ! recover_exact_stale_fleet_owner {owner}; then
@@ -15825,6 +15828,8 @@ fi
         "recover_exact_pool_claims",
         f"capacity_release {registry / 'meta'} {owner}-primary",
         f"audit_finalize {registry}",
+        # Terminal publication follows exact registry retirement.
+        f"terminal_projection {audit}",
     ]
     assert not record.exists()
 
@@ -17047,6 +17052,7 @@ INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 SNAPSHOT_LOOP_PID=$$
 SNAPSHOT_LOOP_TOKEN=test-token
+{_fleet_pid_identity_helpers(fleet)}
 {health}
 {record_path}
 {field}
@@ -17083,6 +17089,7 @@ INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 SNAPSHOT_LOOP_PID=$$
 SNAPSHOT_LOOP_TOKEN=test-token
+{_fleet_pid_identity_helpers(fleet)}
 {health}
 {path}
 {exists}
@@ -20709,6 +20716,106 @@ finish_clock
         )
         if already_released:
             assert marker.read_text() == "2\n", "legacy completed release receipt was overwritten"
+
+
+def test_fleet_retained_resources_do_not_claim_release_until_preprovision_start_is_released(tmp_path: Path) -> None:
+    """A startup INFRA exit before provisioning still reaches a released row.
+
+    --retry-infra admits a fresh attempt only for lifecycle_stage=released.
+    The start clock precedes every post-finalizer startup exit, provisioning
+    never moves it later, and only a verified full audit writes the release.
+    """
+    fleet = fleet_source_text()
+    trap = fleet.index("\ntrap cleanup EXIT\n")
+    mark = fleet.index('        fleet_mark_bench_e2e_started "$bench" || {', trap)
+    armed = [line.strip() for line in fleet[trap:mark].splitlines() if not line.lstrip().startswith("#")]
+    armed_exits = [line for line in armed if re.search(r"\bexit\b", line)]
+    assert armed_exits and all(line.startswith("trap ") for line in armed_exits), armed_exits
+    provisioning = fleet.index('write_startup_card "provisioning')
+    loop = fleet.index('for bench in "${BENCHES[@]}"; do', provisioning)
+    prelude = fleet[loop : fleet.index("\n    (\n", loop)] + "\ndone\n"
+    assert "fleet_mark_bench_e2e_started" in prelude and "rm -rf" not in prelude
+    start = fleet.index("    # Report each bench's end-to-end duration")
+    release_code = fleet[start : fleet.index("    # Keep the parent live while releasing resources.", start)]
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, name)
+        for name in (
+            "registry_meta_value() {",
+            "fleet_mark_bench_e2e_started() {",
+            "fleet_finalize_released_projection() {",
+        )
+    )
+    names, owner = ["preprovision-alpha", "preprovision-beta"], "c" * 32
+    for keep, failed in ((1, 0), (0, 1), (0, 0)):
+        run, audit = tmp_path / f"run-{keep}-{failed}", tmp_path / f"audit-{keep}-{failed}"
+        (run / "_batch").mkdir(parents=True)
+        audit.mkdir()
+        (run / "_batch/benches.json").write_text(json.dumps([{"name": name, "mode": "REAL"} for name in names]))
+        (audit / "meta").write_text(
+            f"status=provider-teardown-verified\nfleet_owner_token={owner}\nrun_id={run.name}\n"
+        )
+        (audit / "provider-teardown-verified.epoch").write_text("400\n")
+        script = f"""set -eu
+FLEET_DIR={shlex.quote(str(run))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+FLEET_OWNER_TOKEN={owner}
+RUN_ID={run.name}
+PROVISION_POOL=
+BENCHES=({" ".join(names)})
+KEEP_CLONES={keep}
+teardown_failed={failed}
+ec=0
+{helpers}
+for unsafe in '' . .. nested/name; do
+    if fleet_mark_bench_e2e_started "$unsafe"; then exit 91; fi
+done
+date() {{ [ "$1" = +%s ] && printf '100\\n'; }}
+for bench in "${{BENCHES[@]}}"; do fleet_mark_bench_e2e_started "$bench"; done
+# Startup checks and provisioning run later; the original clock must survive.
+date() {{ [ "$1" = +%s ] && printf '900\\n'; }}
+{prelude}
+finish_clock() {{
+{release_code}
+}}
+finish_clock
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+        released = not keep and not failed
+        for name in names:
+            expected = {"bench-e2e.started-epoch"} | ({"bench-e2e.finished-epoch"} if released else set())
+            assert {path.name for path in (run / name).iterdir()} == expected
+            assert (run / name / "bench-e2e.started-epoch").read_text() == "100\n", "start clock moved later"
+            if released:
+                assert (run / name / "bench-e2e.finished-epoch").read_text() == "400\n"
+        aggregated = subprocess.run(
+            [sys.executable, str(AGGREGATE_SCRIPT), str(run), str(run / "_batch/run.json")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "CLOUDBENCH_CONTROLLER_EXIT_CODE": "1"},
+        )
+        assert aggregated.returncode == 0, aggregated.stderr
+        rows = json.loads((run / "_batch/run.json").read_text())["tasks"]
+        assert [(row["name"], row["status"], row["passed"], row["lifecycle_stage"]) for row in rows] == [
+            (name, "INFRA_ERROR", False, "released" if released else None) for name in names
+        ], "pre-provisioning INFRA exit cannot become retry-eligible"
+    symlinked = tmp_path / "symlinked-start"
+    (symlinked / "linked-task").mkdir(parents=True)
+    (symlinked / "linked-task/bench-e2e.started-epoch").symlink_to(tmp_path / "foreign-clock")
+    unsafe = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""FLEET_DIR={shlex.quote(str(symlinked))}
+{helpers}
+fleet_mark_bench_e2e_started linked-task""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert unsafe.returncode != 0 and not (tmp_path / "foreign-clock").exists()
 
 
 @pytest.mark.parametrize("pooled", [False, True])
@@ -25979,7 +26086,7 @@ def test_private_fleet_source_native_identity_uses_existing_inventory(tmp_path: 
     result, _ = _private_source_preflight_fixture(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     fleet = fleet_source_text()
-    helpers = "\n".join(
+    helpers = _fleet_pid_identity_helpers(fleet) + "\n".join(
         _extract_fleet_function(fleet, name)
         for name in (
             "inventory_index_healthy() {",
@@ -30213,6 +30320,182 @@ recover_exact_stale_fleet_owner {owner}
         server.server_close()
         thread.join(timeout=30)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("hub_at_recovery", ["live", "absent"])
+def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after_hub_retires_post_seal(
+    tmp_path: Path, hub_at_recovery: str
+) -> None:
+    """A controller sealed its audit and immutable run-local snapshot, then died
+    before registry retirement. Re-verifying that sealed audit after its retained
+    Hub retired must not unbind the snapshot and strand recovery after reaping."""
+    root = tmp_path.resolve()
+    owner, run_id, hub_token, hub_port = "5e" * 16, "sealed-before-retirement", "6f" * 16, 43123
+    workspace = root / "workspace"
+    runs = workspace / ".context/fleet/runs"
+    run = runs / run_id
+    batch = run / "_batch"
+    batch.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True, timeout=30)
+    common = (workspace / ".git").resolve()
+    registry, audit = common / "cloudbench-fleet-ownership" / owner, common / "cloudbench-fleet-audits" / owner
+    for directory in (
+        registry,
+        runs / "_hub",
+        *(audit / name for name in ("fresh", "expected-fresh", "by-machine-id")),
+    ):
+        directory.mkdir(parents=True)
+    for name in ("owned-clones.ids", "owned-clones.names"):
+        (audit / name).write_text("")
+    birth = "Mon Jan 1 00:00:00 2001"
+    hub_owner = runs / "_hub" / f"agent-link-server.{hub_port}.{hub_token}.owner"
+    hub_owner.write_text(
+        f"port={hub_port}\nowner_token={hub_token}\npid=4242\npid_start={birth}\nargv_sha256={'a' * 64}\n"
+    )
+    (registry / "meta").write_text(
+        f"version=2\napp=bench-app\nfleet_owner_token={owner}\nhost=test-host\npid=99999999\npid_start={birth}\n"
+        f"cleanup_policy=reap\nrun_id={run_id}\nworkspace_root={workspace}\nruns_root={runs}\naudit_dir={audit}\n"
+        f"owned_ids_file={audit / 'owned-clones.ids'}\nowned_names_file={audit / 'owned-clones.names'}\n"
+    )
+    (audit / "meta").write_text(
+        f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\nworkspace_root={workspace}\n"
+        f"status=incomplete\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file={hub_owner}\n"
+        f"hub_owner_token={hub_token}\nhub_pid=4242\nhub_pid_start={birth}\nhub_argv_sha256={'a' * 64}\n"
+    )
+    names = ["sealed-alpha", "sealed-beta"]
+    (batch / "benches.json").write_text(json.dumps([{"name": name, "mode": "REAL"} for name in names]))
+    (batch / "report-card.json").write_text(json.dumps({"timestamp": "2026-10-11T00:00:00+00:00"}))
+    (batch / "hub-live-publication.json").write_text(
+        json.dumps(
+            {"epoch": 1791415838, "signature": [[name, "failed", None, None, "teardown", None] for name in names]}
+        )
+    )
+    for name in names:
+        (run / name).mkdir()
+        (run / name / "bench-e2e.started-epoch").write_text("1791412976\n")
+        (run / name / "benchmark-child.finished").write_text("1\n")
+        task = {
+            "name": name,
+            "passed": False,
+            "status": "FAILED",
+            "world_model_mode": "real",
+            "duration_seconds": 9,
+            "cost_cents": 1,
+        }
+        (run / name / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
+    original = subprocess.run(
+        [sys.executable, str(AGGREGATE_SCRIPT), str(run), str(batch / "run.json")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "CLOUDBENCH_CONTROLLER_EXIT_CODE": "1"},
+    )
+    assert original.returncode == 0, original.stderr
+    received = []
+
+    class Hub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            bundle = json.loads(gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw)
+            received.append(bundle)
+            response = json.dumps({"run": bundle}).encode()
+            self.send_response(201)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, *_args):
+            pass
+
+    fleet = fleet_source_text()
+    functions = _fleet_pid_identity_helpers(fleet) + "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_cleanup_state() {",
+            "registry_owner_alive() {",
+            "acquire_registry_recovery_lock() {",
+            "release_cleanup_disk_reserve() {",
+            "recover_exact_stale_fleet_owner() {",
+            "fleet_registry_remove_if_empty() {",
+            "fleet_audit_finalize_provider_teardown() {",
+            "fleet_audit_finalize_recovered_registry() {",
+            "fleet_finalize_released_projection() {",
+            "fleet_publish_recovered_terminal_projection() {",
+            "finalize_terminal_projection() {",
+        )
+    )
+
+    def phase(body: str, birth_state: str, url: str = "http://127.0.0.1:9") -> subprocess.CompletedProcess:
+        script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+GIT_COMMON_DIR={shlex.quote(str(common))}
+POOL_CLAIMS_DIR={shlex.quote(str(common / "cloudbench-pool-claims"))}
+ROOT_DIR={shlex.quote(str(ROOT))}
+RUNS_ROOT={shlex.quote(str(root / "caller-runs"))}
+FLEET_DIR={shlex.quote(str(root / "caller-runs/caller"))}
+RUN_ID=caller
+FLEET_OWNER_TOKEN={"9a" * 16}
+FLEET_TEARDOWN_OWNERSHIP_DIR=
+OWNED_CLONES_FILE=
+OWNED_CLONE_NAMES_FILE=
+CENTRAL_HUB_OWNER_FILE=
+DASH_BASE=8765
+PROVISION_POOL=
+FLEET_CONTROLLER_STARTED_EPOCH=1791412976
+AGGREGATE_RUNS_SCRIPT={shlex.quote(str(AGGREGATE_SCRIPT))}
+HUB_UPLOAD_HELPER={shlex.quote(str(ROOT / "agents/benchmarks/hub_upload.py"))}
+{functions}
+cloudbench_pid_birth_state() {{ printf '%s\\n' {birth_state}; }}
+cloudbench_central_hub_owner_matches() {{ [ "$1" = {hub_port} ] && [ "$4" = {shlex.quote(str(hub_owner))} ]; }}
+fleet_recovery_confirm_pool_claims() {{ return 0; }}
+recover_registry_audit_only_fresh() {{ return 0; }}
+reap_registry_clones() {{ return 0; }}
+recover_exact_pool_claims() {{ return 0; }}
+capacity_release_stale_owner_reservations() {{ return 0; }}
+{body}
+"""
+        environment = {
+            k: v for k, v in os.environ.items() if not k.startswith(("BENCHMARK_HUB_", "RUN_BENCH_CAMPAIGN_"))
+        }
+        environment.update({"BENCHMARK_HUB_UPLOAD_URL": url, "BENCHMARK_HUB_API_KEY": "fixture-key"})
+        return subprocess.run(["bash", "-c", script], env=environment, capture_output=True, text=True, timeout=60)
+
+    # The original controller seals the audit and its run-local snapshot, then
+    # dies before retiring its registry.
+    sealed = phase(f"fleet_audit_finalize_recovered_registry {shlex.quote(str(registry))}", "live")
+    assert sealed.returncode == 0, sealed.stdout + sealed.stderr
+    snapshot = run / "teardown-ownership"
+    sealed_audit = {str(p.relative_to(audit)): p.read_bytes() for p in audit.rglob("*") if p.is_file()}
+    sealed_snapshot = {str(p.relative_to(snapshot)): p.read_bytes() for p in snapshot.rglob("*") if p.is_file()}
+    release = (audit / "provider-teardown-verified.epoch").read_text().strip()
+    assert "hub_disposition=retained-exact-owner-transfer-required\n" in sealed_audit["meta"].decode()
+    assert registry.is_dir() and not list(run.glob("*/bench-e2e.finished-epoch"))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        recovered = phase(
+            f"recover_exact_stale_fleet_owner {owner}", hub_at_recovery, f"http://127.0.0.1:{server.server_address[1]}"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert not registry.exists(), "recovery reaped resources but left the exact registry"
+    assert {str(p.relative_to(audit)): p.read_bytes() for p in audit.rglob("*") if p.is_file()} == sealed_audit, (
+        "re-verification republished a sealed audit"
+    )
+    assert {str(p.relative_to(snapshot)): p.read_bytes() for p in snapshot.rglob("*") if p.is_file()} == sealed_snapshot
+    assert {(run / name / "bench-e2e.finished-epoch").read_text().strip() for name in names} == {release}
+    assert len(received) == 1, "recovered release never reached terminal publication"
+    assert [(t["name"], t["lifecycle_stage"]) for t in received[0]["tasks"]] == [(n, "released") for n in names]
 
 
 @pytest.mark.parametrize(

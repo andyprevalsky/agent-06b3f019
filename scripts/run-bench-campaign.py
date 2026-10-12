@@ -249,8 +249,11 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
             and lifecycle.get("hub_publication_failed") is False
             and task.get("lifecycle_stage") == "released"
         )
+        # The fleet's lifecycle verdict also covers execution completion, the
+        # mandatory autoscaler and the controller exit; release alone does not.
         return {"run_id": run_id, "fleet_dir": str(fleet), "fleet_owner_token": owner,
                 "task_status": status, "resources_released": closed,
+                "lifecycle_verified": closed and lifecycle.get("status") == "verified",
                 "infra_failure": status in {"INFRA_ERROR", "ERROR"} and (task.get("passed") is False or task.get("passed") is None),
                 "terminal_task": isinstance(task.get("passed"), bool) and status in {
                     "PASSED", "FAILED", "SUCCEEDED", "SUCCESS", "FAILURE", "TIMED_OUT", "TIMEOUT", "WINDOW_FAILED"},
@@ -941,15 +944,17 @@ def main() -> int:
                 if args.retry_infra:
                     disposition = released_attempt(root, job)
                     for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
-                                "resources_released", "infra_failure", "terminal_task",
+                                "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
                                 "released_at_epoch", "retry_blocked"):
                         job.pop(key, None)
                     job.update(disposition)
                     job["attempts"].append({key: job.get(key) for key in (
                         "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
                         "controller_exit_code", "status", "run_id", "fleet_dir", "fleet_owner_token", "task_status",
-                        "resources_released", "infra_failure", "terminal_task", "released_at_epoch", "retry_blocked")})
-                    if disposition.get("resources_released") and disposition.get("terminal_task") and job["status"] != "cancelled":
+                        "resources_released", "lifecycle_verified", "infra_failure", "terminal_task", "released_at_epoch",
+                        "retry_blocked")})
+                    if (disposition.get("lifecycle_verified") and disposition.get("terminal_task")
+                            and job["status"] != "cancelled"):
                         job["status"] = "passed"  # infrastructure health; task verdict is retained separately
                     elif (disposition.get("resources_released") and disposition.get("infra_failure")
                           and job["attempt"] <= args.retry_infra and not stop_signal and not barrier_failure and not deadline_expired()):
