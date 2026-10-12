@@ -113,6 +113,7 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
     adjust_iteration_after_action,
+    browser_pool_for_agent_model,
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
 )
@@ -2420,6 +2421,7 @@ async def _call_browser_use_with_rotation(
     extra_user_messages: Optional[List[Dict[str, str]]] = None,
     call_site: Optional[str] = None,
     skip_cache_write: bool = False,
+    pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
@@ -2447,6 +2449,7 @@ async def _call_browser_use_with_rotation(
         cache_namespace=_browser_prompt_cache_namespace(browser_task_id, effective_call_site),
         skip_cache_write=skip_cache_write,
         dump_extra=dump_extra,
+        pool=pool,
     )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -3813,6 +3816,7 @@ async def _generate_write_lock_notification(
     write_lock_result: Dict[str, Any],
     system_name: str,
     fallback_question: str,
+    pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Fork browser-use context to generate write-lock approval metadata."""
     from browser_tools.schemas import GenerateWriteLockNotificationTool
@@ -3853,6 +3857,7 @@ async def _generate_write_lock_notification(
                 call_site=f"write_lock_notification_fork_{iteration}"
                 + (f"_retry{attempt}" if attempt else ""),
                 skip_cache_write=True,
+                pool=pool,
                 dump_extra={
                     "write_lock_notification_fork": True,
                     "approval_type": approval_type,
@@ -4638,7 +4643,10 @@ async def spawn_browser_agent_activity_v3(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
+    agent_model: Optional[str] = None,
 ) -> Dict[str, Any]:
+    # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
+    browser_pool = browser_pool_for_agent_model(agent_model)
     # A browser is its own stateful environment. Do not inherit either the
     # benchmark runner's explicit session or the parent agent's module-cached
     # session. The latter uses ``agent_id`` as its cache key and can be created
@@ -4673,6 +4681,7 @@ async def spawn_browser_agent_activity_v3(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             world_model=world_model,
+            browser_pool=browser_pool,
         )
     return await _spawn_browser_agent_activity_v3_real(
         user_id=user_id,
@@ -4695,6 +4704,7 @@ async def spawn_browser_agent_activity_v3(
         gpt_token_source=gpt_token_source,
         gpt_token_pool_id=gpt_token_pool_id,
         fast_mode_cache_enabled=fast_mode_cache_enabled,
+        browser_pool=browser_pool,
     )
 
 
@@ -5404,6 +5414,8 @@ def _simulated_browser_usage_items(
     total_output_tokens: int,
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+    *,
+    pricing_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> List[Dict[str, Any]]:
     """Simulated twin of `build_usage_items`: same per-actual-model llm rows,
     a free World-Model-Harness service row instead of a paid browser row."""
@@ -5412,6 +5424,7 @@ def _simulated_browser_usage_items(
         total_output_tokens,
         model_pricing,
         usage_by_model,
+        pricing_pool=pricing_pool,
     )
     items.append({"type": "service", "cost_cents": 0, "provider": "World Model Harness"})
     return items
@@ -5439,6 +5452,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
     world_model: WorldModelToolExecutionAdapter,
+    browser_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Run the real browser-use policy against WMH state without creating a browser."""
 
@@ -5494,7 +5508,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
         else:
             browser_use_mode = None
 
-    model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
+    model_pricing = await get_model_pricing_with_fallback(browser_pool)
     task_prompt = build_browser_task_prompt(goal)
     dynamic_system_context = build_browser_dynamic_system_context(
         "# Simulated Browser Runtime\n"
@@ -5712,6 +5726,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     browser_use_mode=browser_use_mode,
                     call_site=f"browser_use_simulated_step_{iteration}",
                     dump_extra={"browser_session_metadata": {"provider": "wmh", "simulated": True}},
+                    pool=browser_pool,
                 )
             finally:
                 rose_client.set_thinking_stream(None)
@@ -5889,6 +5904,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                             total_output_tokens,
                             model_pricing,
                             usage_by_model,
+                            pricing_pool=browser_pool,
                         ),
                     }
                 rejection = {"success": False, "score": score, "reasoning": reasoning}
@@ -6123,6 +6139,7 @@ async def _spawn_browser_agent_activity_v3_real(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
+    browser_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -6177,6 +6194,7 @@ async def _spawn_browser_agent_activity_v3_real(
             {"input_cents_per_1k": 0, "output_cents_per_1k": 0},
             0.0,
             usage_by_model,
+            pricing_pool=browser_pool,
             fast_mode_cache_enabled=True,
         )
         return {
@@ -7003,7 +7021,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
             _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
-            _model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
+            _model_pricing = await get_model_pricing_with_fallback(browser_pool)
             _record_timing("parallel.data.instructions", t)
 
             return (
@@ -7701,6 +7719,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 model_pricing,
                                 (safe_time() - start_time) * 1000,
                                 usage_by_model,
+                                pricing_pool=browser_pool,
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             ),
                             **drain_continuity,
@@ -8216,6 +8235,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             if browser_recorder
                             else {"iteration": iteration_snapshot}
                         ),
+                        pool=browser_pool,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -8705,6 +8725,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     model_pricing,
                     execution_time_ms,
                     usage_by_model,
+                    pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
                 )
@@ -9494,6 +9515,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             model_pricing,
                             execution_time_ms,
                             usage_by_model,
+                            pricing_pool=browser_pool,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             provider=browser_session_metadata.get("provider"),
                         )
@@ -9954,6 +9976,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             write_lock_result=result,
                             system_name=system_name,
                             fallback_question=question,
+                            pool=browser_pool,
                         ),
                         timeout=_notification_timeout_s,
                     )
@@ -10127,6 +10150,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_result=result,
                         system_name=system_name,
                         fallback_question=f"{system_name} wants to make a purchase. Approve?",
+                        pool=browser_pool,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
                     payment_write_lock_notification_usage = {
@@ -10456,6 +10480,7 @@ Based on this feedback, I need to continue working on the task and address the i
             model_pricing,
             execution_time_ms,
             usage_by_model,
+            pricing_pool=browser_pool,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
             provider=browser_session_metadata.get("provider"),
         )
@@ -10990,8 +11015,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
                     ]
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                    if world_model_mode != "real":
-                        activity_args.append(world_model_mode)
+                    activity_args.append(world_model_mode if world_model_mode != "real" else None)
+                    activity_args.append(getattr(workflow_instance, "model", None))
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

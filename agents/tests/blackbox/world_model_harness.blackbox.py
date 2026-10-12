@@ -2247,10 +2247,12 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         start_url="https://shop.example.test", write_lock_resume_state=None,
         system_name="Rose", use_claude_mode=False, gpt_token=None, gpt_account_id=None,
         gpt_token_source=None, gpt_token_pool_id=None, world_model=FakeWorldModel(),
+        browser_pool="rose-1-ultra",
     )
+    pricing = AsyncMock(return_value={})
     with (
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
-        patch.object(browser_handler, "get_model_pricing_with_fallback", AsyncMock(return_value={})),
+        patch.object(browser_handler, "get_model_pricing_with_fallback", pricing),
         patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
@@ -2274,6 +2276,9 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         completed = await browser_handler._spawn_browser_agent_activity_v3_simulated(**kwargs)
 
     assert completed["status"] == "completed"
+    # Simulated browser steps run and price on the spawning agent's pool.
+    assert {call.kwargs["pool"] for call in policy.await_args_list} == {"rose-1-ultra"}
+    assert {call.args[0] for call in pricing.await_args_list} == {"rose-1-ultra"}
     resumed_turns = policy.await_args_list[1].kwargs["turn_messages"]
     assert json.loads(resumed_turns[-1]["content"])["status"] == "payment_card_ready"
     assert "4111111111111111" not in resumed_turns[-1]["content"]
