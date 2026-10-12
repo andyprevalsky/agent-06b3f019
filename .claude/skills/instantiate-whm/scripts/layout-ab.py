@@ -6,8 +6,9 @@ usage (from the repo's agents/ directory, with its venv active and .env loaded):
       [--count 8] [--concurrency 8] --out results.json
 
 Replays the session's recorded native requests in order through a fresh
-StreamBook (render only), then picks the requests whose streams carry the most
-world-change operations: the hardest case for change-based state. For each it
+world StreamBook (render only), then picks the requests whose streams carry the
+most world-change operations plus unused reference items: the hardest cases for
+change-based state and a shared reference library. For each it
 calls the same Rose pool three times: snapshot layout, the snapshot layout
 again (natural variation), and the stream. Reports patch validity against the
 true current state, outcome counts, top outcomes and the probability-weighted
@@ -87,11 +88,19 @@ async def main() -> None:
         system, user = record["request"]["messages"][0]["content"], record["request"]["messages"][1]["content"]
         evidence = json.loads(user)
         agent = evidence["candidate_response"]["tool_calls"][0].get("arguments", {}).get("agent_id") or "-"
-        rendered = await book.render(f"ab:{agent}", evidence)
+        # One stream per world, as the provider renders it.
+        rendered = await book.render("ab:world", evidence)
         if rendered is None:
             continue
         units, final = rendered
         changes = sum(len(json.loads(u).get("environment_state_changes", [])) for u in units)
+        # Reference items present in the stream that this call does not use.
+        library = set()
+        for u in units:
+            material = json.loads(u).get("reference_material") or {}
+            library |= set(material.get("grounding_contexts", {})) | {e["transition_id"] for e in material.get("grounded_examples", [])}
+        used = set(evidence.get("grounding_contexts", {})) | {e["transition_id"] for e in evidence.get("grounded_examples", [])}
+        changes += len(library - used)
         stream = [{"role": "system", "content": system + STREAM_GUIDE}]
         stream += [{"role": "user", "content": [{"type": "text", "text": u, "cache_breakpoint": True}]} for u in units]
         stream.append({"role": "user", "content": final})
@@ -127,7 +136,7 @@ async def main() -> None:
     results = await asyncio.gather(*(run_and_save(case) for case in picked))
     args.out.write_text(json.dumps({"session": args.session, "cases": results}, indent=1) + "\n")
     for case in results:
-        print(f"\n## {case['prediction_id'][:8]} agent {case['agent'][:8]} stream changes {case['stream_change_ops']}")
+        print(f"\n## {case['prediction_id'][:8]} agent {case['agent'][:8]} stream changes + unused refs {case['stream_change_ops']}")
         for arm in ("snapshot", "snapshot_repeat", "stream"):
             value = case[arm]
             print(f"  {arm:16s} valid={value['valid']} outcomes={value.get('outcomes')} top="

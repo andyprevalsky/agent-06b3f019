@@ -230,6 +230,16 @@ cache simulator (validated within 6 tokens per call on run 10, realistic timing)
 | 8 | 0.55× (0.58×) | 86% (11%) |
 | 10 | 0.33× (0.60×) | 79% (13%) |
 
+World-layout prediction-quality A/B (run 7's 8 hardest requests, 112–121 stream
+change operations plus unused reference items each, against at most 34 in the
+per-agent A/B):
+- All 24 predictions were valid against the true state.
+- Patch-target overlap was 0.818 between two snapshot runs (natural variation),
+  0.898 from snapshot to world stream, and 0.862 from the repeat to the world
+  stream.
+- Top outcomes matched in meaning and probability. Evidence:
+  `.context/wmh-resume-20261009/fundraiser/cache-layout-20261012/layout-ab-world.json`.
+
 Rose (Python and TypeScript, `bd43e6a95`) marks a breakpoint after every
 completed user message for GPT-5.6+. Over 911 real agent calls that costs 0.51×,
 against 0.55× for implicit mode alone and 0.61× for explicit mode.
