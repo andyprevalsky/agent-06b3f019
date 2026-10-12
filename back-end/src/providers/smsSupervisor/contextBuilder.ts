@@ -673,7 +673,7 @@ Think step by step. Parallelize as many tool calls per turn as reasonable so you
 - Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
 - Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.
-- Only say something happened (an agent started, an order was placed, a form was submitted, a booking was confirmed) when a tool result in this run or the current state block shows it.`;
+- If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it.`;
 
 /**
  * Compose the three-block SMS supervisor system prompt:

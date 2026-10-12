@@ -153,11 +153,11 @@ Testing GPT-6 Sol (rose-1-ultra, served by Azure Foundry) on the matched benchma
    - Fix: `formatSnippet` now follows ripgrep content mode, as Claude Code's Grep does: every match with `-A/-B/-C` context, merged windows separated by `--`, and at most 250 lines per record with an explicit omission note.
    - Repro: `testDocumentReturnsEveryMatchingLine` in the data-grep blackbox domain. It returned the header line only before the fix.
 6. **A regex guard rejected honest questions as claims.** The guard's confirmation-code alternative `confirmation\s*[#:]?\s*[a-z0-9-]{4,}` matched "…email for the confirmation⏎⏎Send…", because `\s` crosses line breaks and any four-letter word counted as a code. Eight questions were rejected, and the run ended in the fallback apology. The same loop recurred on the closed-restaurant benchmark (A/B run 2).
-   - Fix (user direction, CLAUDE.md rule 25b): remove the harness classifiers in `messageGrounding.ts` (order-progress, agent-start and agent-kill claims) and the purchase-intent completion block. One SMS overlay line now states the rule: "Only say something happened … when a tool result in this run or the current state block shows it."
+   - Fix (user direction, CLAUDE.md rule 25b): remove the harness classifiers in `messageGrounding.ts` (order-progress, agent-start and agent-kill claims) and the purchase-intent completion block. The overlay's existing grounding rule covers claims. Per the user, the single added overlay line targets the incident itself: "If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it."
    - The exact-duplicate send check stays, since it is equality, not classification.
    - Replaced tests:
      - `sms-message-grounding.test.ts` and the two guard-only Blue Bottle fixture cases are gone.
-     - `sms-prompt-layering` pins the overlay line and that sends are not rejected for their wording.
+     - `sms-prompt-layering` pins the escalate line and that sends are not rejected for their wording.
    - Qwen started an agent for the closed restaurant in 0/2 runs with the guard and 0/2 with main's schema text, so that failure predates this change.
 
 Matched benchmark `sms-supervisor-fill-form-searches-then-delegates` (local), across the fix stages:

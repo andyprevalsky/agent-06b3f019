@@ -324,15 +324,16 @@ for (const tool of TOOL_SCHEMAS) {
   );
 }
 
-// Grounding of user-visible claims is a prompt rule, not a harness regex. The
-// regex guard rejected honest questions ("…email for the confirmation") eight
-// times in a row and ended the run in the fallback apology.
+// Missing information escalates to an agent instead of a questionnaire for
+// the user (2026-10-07 eTA incident). Claim grounding is a prompt concern, not
+// a harness regex: the regex guard rejected honest questions ("…email for the
+// confirmation") eight times in a row and ended the run in the fallback apology.
 runCheck(
-  'block 3 owns the grounded-claims rule',
+  'block 3 escalates missing information instead of asking the user',
   SMS_SURFACE_OVERLAY.includes(
-    'Only say something happened (an agent started, an order was placed, a form was submitted, a booking was confirmed) when a tool result in this run or the current state block shows it.'
+    "- If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it."
   ),
-  'SMS overlay is missing the grounded-claims rule'
+  'SMS overlay is missing the escalate-instead-of-ask rule'
 );
 runCheck(
   'send_user_message text is not classified by the harness',
