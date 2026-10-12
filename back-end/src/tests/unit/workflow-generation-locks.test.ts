@@ -6,6 +6,7 @@ import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { resolveAndSignal } from '../../providers/gateResolution';
 import {
   acceptChatWorkflowExecution,
+  bindStartedRunIdentity,
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   lockAgentWorkflowGeneration,
   lockAgentWorkflowGenerationShared,
@@ -213,6 +214,13 @@ async function main(): Promise<void> {
         false,
         'a deleted agent never adopts a new run'
       );
+      // The start already succeeded, so binding must never fail the caller.
+      await bindStartedRunIdentity(agentId, {
+        workflowId: agentId,
+        firstExecutionRunId: `run-4-${randomUUID()}`,
+      });
+      const unchanged = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(unchanged.temporalFirstExecutionRunId, null);
     });
   });
 

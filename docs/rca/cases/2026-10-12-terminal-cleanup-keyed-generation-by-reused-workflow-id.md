@@ -113,8 +113,9 @@ Step 5a ladder:
 Local repro (identical command before and after the fix):
 
 ```
-cd back-end && DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria \
-  DIRECT_URL=postgresql://postgres:postgres@localhost:5432/victoria \
+cd back-end && export LOCAL=postgresql://postgres:postgres@localhost:5432/victoria
+DATABASE_URL=$LOCAL bash scripts/apply-local-runtime-sql-hooks.sh   # current cleanup trigger
+DATABASE_URL=$LOCAL DIRECT_URL=$LOCAL \
   npx tsx src/tests/unit/workflow-terminal-cleanup-follow-up.test.ts
 ```
 
@@ -125,7 +126,7 @@ generation` failed with `terminations = [<agent>:<agent>:run-2-…]` (the live r
 was terminated, `interrupted_count=1`). `follow-up run survives cleanup of an
 exact-run completed generation` failed with
 `temporalWorkflowId = <agent>:deployment-sealed:…`. Post-fix the suite passes
-(8/8 follow-up cases after the review hardening below, plus the original 10), including the guard `still-terminal
+(9/9 follow-up cases after the review hardening below, plus the original 10), including the guard `still-terminal
 agent with an unknown run is still sealed and terminated`.
 
 An adversarial review then found five more holes in the same identity class.
@@ -180,7 +181,15 @@ query and task loops showed no analog.
   - The exact terminal chain still installed on a live agent keeps the
     original seal.
   - `finishCleanup` requeues, rather than deletes, an obligation that a newer
-    generation retargeted during the lease.
+    generation retargeted during the lease, and the failure backoff never
+    shortens a newer generation's grace.
+  - On the follow-up path, only tool calls opened before the obligation was
+    enqueued are finalized. The follow-up shares the generation string, so its
+    own calls stay untouched. An unknown-run obligation discharged there is
+    logged as a warning.
+- A failed run-identity bind after a successful start (create, batch) is
+  logged, never surfaced as a failed start. SMS terminates its started run
+  when the agent was removed before the bind.
 - Migration `20261012040000_temporal_cleanup_newest_generation`: on conflict,
   the newest known run wins and the later grace is kept.
   `apply-local-runtime-sql-hooks.sh` (coverage and blackbox) applies it after
@@ -199,7 +208,7 @@ Siblings prevented:
 - Unknown-run obligations from every lossy start path (API create, SMS, manual
   escalation).
 
-Regression coverage: `workflow-terminal-cleanup-follow-up.test.ts` (8 cases),
+Regression coverage: `workflow-terminal-cleanup-follow-up.test.ts` (9 cases),
 `workflow-generation-locks.test.ts` (+1), `generation-queue-cutover.test.ts`
 (the run-scoped orphan) and `coverage-script.test.ts` (hook order) all run via
 `scripts/run-unit-tests.ts` inside `run-coverage.sh`, the `/deploy` backend

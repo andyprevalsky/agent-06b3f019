@@ -125,7 +125,19 @@ async function forceCleanup(agentIds: string[], dependencies: WorkflowTerminalCl
   });
 }
 
+/** Coverage applies the migration's trigger first; a run.sh stack's hook does not. */
+async function assertCurrentCleanupTrigger(): Promise<void> {
+  const rows = await prisma.$queryRaw<Array<{ definition: string }>>`
+    SELECT pg_get_functiondef('enqueue_temporal_workflow_cleanup'::regproc) AS definition`;
+  assert.match(
+    rows[0]?.definition ?? '',
+    /GREATEST/,
+    'local DB runs an old cleanup trigger; run scripts/apply-local-runtime-sql-hooks.sh first'
+  );
+}
+
 async function main(): Promise<void> {
+  await assertCurrentCleanupTrigger();
   // Prod agent 572da2a5 (2026-10-12): the first run's start never recorded its
   // first-run ID, so its completion obligation had none. The follow-up run
   // reused Workflow ID = agent ID, and cleanup resolved, sealed, and terminated it.
@@ -241,7 +253,7 @@ async function main(): Promise<void> {
     const knownAgent = await createRootAgent(runId, knownRun);
     try {
       for (const agentId of [unknownAgent, knownAgent]) {
-        await postLiveTool(agentId, `chip-${agentId}`);
+        await postLiveTool(agentId, `finished-run-chip-${agentId}`);
         await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
         const before = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
         assert.strictEqual(
@@ -255,6 +267,7 @@ async function main(): Promise<void> {
           ).count,
           1
         );
+        await postLiveTool(agentId, `next-run-chip-${agentId}`);
       }
 
       const terminations: string[] = [];
@@ -268,7 +281,15 @@ async function main(): Promise<void> {
         const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
         assert.strictEqual(after.status, 'ACTIVE');
         assert.strictEqual(after.temporalWorkflowId, null);
-        assert.strictEqual(await latestToolStatus(agentId, `chip-${agentId}`), 'IN_PROGRESS');
+        assert.strictEqual(
+          await latestToolStatus(agentId, `finished-run-chip-${agentId}`),
+          'FINISHED',
+          'the finished run left this chip spinning; cleanup still closes it'
+        );
+        assert.strictEqual(
+          await latestToolStatus(agentId, `next-run-chip-${agentId}`),
+          'IN_PROGRESS'
+        );
       }
       await assertNoPendingTerminalAgentWorkflowCleanup([unknownAgent, knownAgent]);
     } finally {
@@ -321,6 +342,7 @@ async function main(): Promise<void> {
       const reopenMayCommit = new Promise<void>((resolve) => {
         releaseReopen = resolve;
       });
+      let reopenPid = 0;
       let announceRowLocked = () => {};
       const rowLocked = new Promise<void>((resolve) => {
         announceRowLocked = resolve;
@@ -328,6 +350,9 @@ async function main(): Promise<void> {
       const reopen = prisma.$transaction(
         async (tx) => {
           await tx.$queryRaw`SELECT id FROM "Agent" WHERE id = ${agentId} FOR UPDATE`;
+          const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`
+            SELECT pg_backend_pid() AS pid`;
+          reopenPid = backend.pid;
           announceRowLocked();
           await reopenMayCommit;
           await tx.agent.update({
@@ -339,12 +364,11 @@ async function main(): Promise<void> {
       );
       await rowLocked;
       const cleanup = forceCleanup([agentId], realToolDependencies([], terminalRun));
+      // Only the seal can wait on the reopen's own row lock.
       const sealBlocked = async (): Promise<boolean> => {
         const rows = await prisma.$queryRaw<Array<{ waiting: bigint }>>`
           SELECT count(*) AS waiting FROM pg_stat_activity
-          WHERE datname = current_database()
-            AND wait_event_type = 'Lock'
-            AND query ILIKE 'UPDATE "public"."Agent"%'`;
+          WHERE ${reopenPid}::int = ANY(pg_blocking_pids(pid))`;
         return Number(rows[0]?.waiting ?? 0) > 0;
       };
       const blocked = await retryWithBackoff(sealBlocked, {
@@ -364,6 +388,53 @@ async function main(): Promise<void> {
       const retained = await pendingObligation(agentId);
       assert.strictEqual(retained?.attemptCount, 1);
       assert.match(retained?.lastError ?? '', /generation changed during terminal cleanup/);
+    } finally {
+      await deleteRun(runId);
+    }
+  });
+
+  await test('a failed cleanup never shortens a newer generation grace', async () => {
+    const runId = `workflow-terminal-retain-grace-${randomUUID()}`;
+    const firstRun = `run-1-${randomUUID()}`;
+    const agentId = await createRootAgent(runId, firstRun);
+    const newerRun = `run-2-${agentId}`;
+    try {
+      await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+      await prisma.temporalWorkflowCleanup.update({
+        where: { agentId_workflowId: { agentId, workflowId: agentId } },
+        data: { notBefore: new Date(Date.now() - 1_000) },
+      });
+      await assert.rejects(
+        cleanupTerminalAgentWorkflowZombies(
+          {
+            ...realToolDependencies([], null),
+            terminate: async () => {
+              const sealed = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+              await clearWorkflowForTerminalAgent(
+                agentId,
+                sealed.status,
+                sealed.temporalWorkflowId ?? '',
+                null
+              );
+              await acceptChatWorkflowExecution(agentId, {
+                workflowId: agentId,
+                firstExecutionRunId: newerRun,
+              });
+              await prisma.agent.update({ where: { id: agentId }, data: { status: 'FAILED' } });
+              throw new Error('synthetic Temporal outage');
+            },
+          },
+          { agentIds: [agentId], batchSize: 20, maxConcurrency: 4 }
+        ),
+        /cleanup obligation.*failed/i
+      );
+      const retained = await pendingObligation(agentId);
+      assert.strictEqual(retained?.firstExecutionRunId, newerRun);
+      assert.strictEqual(retained?.attemptCount, 1);
+      assert(
+        (retained?.notBefore.getTime() ?? 0) > Date.now() + 4 * 60_000,
+        'the newer generation keeps its full five-minute grace'
+      );
     } finally {
       await deleteRun(runId);
     }

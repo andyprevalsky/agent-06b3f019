@@ -1,8 +1,10 @@
 import type { Message, Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from './database';
+import { createLogger } from './logger';
 import type { TemporalWorkflowExecutionRef } from './temporal';
 
 const WORKFLOW_GENERATION_LOCK_SEED = 6_901_733;
+const log = createLogger('WorkflowGeneration');
 
 export const DEPLOY_INTERRUPTED_TOOL_MESSAGE = 'new code version deployed, retry this tool';
 
@@ -101,6 +103,32 @@ export async function recordAgentWorkflowExecution(
     });
     return true;
   });
+}
+
+/**
+ * Bind an already-running execution to an agent row created with its Workflow
+ * ID. The run is live, so a failed bind is logged, never surfaced as a failed
+ * start; terminal cleanup treats an unbound run conservatively.
+ */
+export async function bindStartedRunIdentity(
+  agentId: string,
+  execution: TemporalWorkflowExecutionRef
+): Promise<void> {
+  try {
+    if (!(await recordAgentWorkflowExecution(agentId, execution))) {
+      log.warn('Started workflow was superseded before its run identity was recorded', {
+        agent_id: agentId,
+        workflow_id: execution.workflowId,
+        first_execution_run_id: execution.firstExecutionRunId,
+      });
+    }
+  } catch (error) {
+    log.error('Failed to record started workflow run identity', {
+      agent_id: agentId,
+      workflow_id: execution.workflowId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

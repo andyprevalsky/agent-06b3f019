@@ -11,8 +11,11 @@ import {
   resolveTemporalWorkflowExecutionRef,
   type TemporalWorkflowExecutionRef,
 } from './temporal';
+import { createLogger } from './logger';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { terminateStaleTemporalWorkflow } from './workflowReplacement';
+
+const log = createLogger('WorkflowTerminalCleanup');
 
 const CLEANUP_LEASE_MS = 60_000;
 const CLEANUP_RETRY_DELAY_MS = 60_000;
@@ -22,6 +25,7 @@ interface CleanupObligation {
   agentId: string;
   workflowId: string;
   firstExecutionRunId: string | null;
+  enqueuedAt: Date;
   leaseToken: string;
 }
 
@@ -46,7 +50,8 @@ export interface WorkflowTerminalCleanupDependencies {
   finalizeInterruptedTools: (
     agentId: string,
     workflowGeneration: string,
-    snapshot: ToolProgressCandidate[]
+    snapshot: ToolProgressCandidate[],
+    openedBefore?: Date
   ) => Promise<unknown>;
 }
 
@@ -158,6 +163,7 @@ async function claimCleanup(
       agentId: candidate.agentId,
       workflowId: candidate.workflowId,
       firstExecutionRunId: candidate.firstExecutionRunId,
+      enqueuedAt: candidate.createdAt,
       leaseToken,
     };
   });
@@ -280,19 +286,32 @@ async function finishCleanup(snapshot: CleanupSnapshot): Promise<void> {
 }
 
 async function retainFailedCleanup(obligation: CleanupObligation, error: unknown): Promise<void> {
-  await prisma.temporalWorkflowCleanup.updateMany({
-    where: {
-      agentId: obligation.agentId,
-      workflowId: obligation.workflowId,
-      leaseToken: obligation.leaseToken,
-    },
-    data: {
-      leaseToken: null,
-      leaseUntil: null,
-      notBefore: new Date(Date.now() + CLEANUP_RETRY_DELAY_MS),
-      attemptCount: { increment: 1 },
-      lastError: error instanceof Error ? error.message : String(error),
-    },
+  const retryAt = new Date(Date.now() + CLEANUP_RETRY_DELAY_MS);
+  await runTransactionWithRetry(async (tx) => {
+    const released = await tx.temporalWorkflowCleanup.updateMany({
+      where: {
+        agentId: obligation.agentId,
+        workflowId: obligation.workflowId,
+        leaseToken: obligation.leaseToken,
+      },
+      data: {
+        leaseToken: null,
+        leaseUntil: null,
+        attemptCount: { increment: 1 },
+        lastError: error instanceof Error ? error.message : String(error),
+      },
+    });
+    if (released.count === 0) return;
+    // Backoff may delay a retry but never shortens the grace a newer terminal
+    // generation gave this row through the trigger.
+    await tx.temporalWorkflowCleanup.updateMany({
+      where: {
+        agentId: obligation.agentId,
+        workflowId: obligation.workflowId,
+        notBefore: { lt: retryAt },
+      },
+      data: { notBefore: retryAt },
+    });
   });
 }
 
@@ -326,7 +345,22 @@ async function cleanupOne(
         obligation.agentId,
         deadlineAtMs
       );
+    } else if (completedRunId === null) {
+      log.warn('Discharged unknown-run terminal cleanup while a follow-up may own the workflow', {
+        agent_id: obligation.agentId,
+        workflow_id: obligation.workflowId,
+        installed_first_execution_run_id: sealOutcome.installedFirstExecutionRunId,
+      });
     }
+    // The follow-up shares this generation string; only calls opened before
+    // the finished generation went terminal belong to it.
+    assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} reconciliation`);
+    await dependencies.finalizeInterruptedTools(
+      obligation.agentId,
+      obligation.workflowId,
+      [],
+      obligation.enqueuedAt
+    );
     await finishCleanup({ ...obligation, inProgressTools });
     return { sealed: false, terminated: terminateCompleted };
   }

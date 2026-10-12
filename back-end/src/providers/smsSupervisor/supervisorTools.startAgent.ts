@@ -7,6 +7,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
 import { reconcileWorkflowStart, startAgentWorkflowExecution } from '../temporal';
 import { recordAgentWorkflowExecution } from '../workflowGeneration';
+import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 import type { FilePointer } from '../storage';
@@ -207,8 +208,8 @@ export async function commitStartNewAgent(
       memoryEnabled: resolvedMemory,
     });
 
-    // A superseded record means the row was deleted or another start won; the
-    // row's own terminal/deletion cleanup obligation owns the started run.
+    // The row has no Workflow ID until this record, so a deletion in between
+    // leaves no cleanup obligation; the started run must be closed here.
     if (!(await recordAgentWorkflowExecution(startedAgent.id, execution))) {
       log.warn('Started workflow was superseded before its run identity was recorded', {
         phase: 'start',
@@ -216,6 +217,13 @@ export async function commitStartNewAgent(
         workflowId: execution.workflowId,
         firstExecutionRunId: execution.firstExecutionRunId,
       });
+      await terminateStaleTemporalWorkflow(execution, startedAgent.id);
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error: `Agent [${agent.id.substring(0, 6)}] was removed before its workflow started`,
+      };
     }
     const workflowId = execution.workflowId;
 
