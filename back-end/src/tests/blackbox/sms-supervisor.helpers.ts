@@ -222,6 +222,13 @@ export function buildGrepFixture(params: {
         arguments: {
           pattern: params.pattern,
           source: params.source,
+          role: null,
+          record_kind: null,
+          surface: null,
+          trace_path: null,
+          order: null,
+          page_after: null,
+          until: null,
           '-B': null,
           '-A': null,
           '-C': null,

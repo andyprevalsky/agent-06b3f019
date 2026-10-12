@@ -156,6 +156,31 @@ export function stripNamedGroups(pattern: string): string {
   return pattern.replace(/\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g, '(');
 }
 
+/**
+ * Patterns are validated as JS RegExp but run as Postgres ARE, where `\b` is a
+ * backspace and `\B` a synonym for `\`. Map JS word-boundary escapes to ARE's
+ * `\y` / `\Y` outside bracket expressions so `\bpassport\b` keeps its JS
+ * meaning instead of silently matching nothing. Escaped backslashes and `[\b]`
+ * (backspace in both dialects) are left alone.
+ */
+export function translateWordBoundaries(pattern: string): string {
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\' && i + 1 < pattern.length) {
+      const next = pattern[i + 1];
+      out += !inClass && next === 'b' ? '\\y' : !inClass && next === 'B' ? '\\Y' : ch + next;
+      i++;
+      continue;
+    }
+    if (ch === '[') inClass = true;
+    else if (ch === ']') inClass = false;
+    out += ch;
+  }
+  return out;
+}
+
 /** True if a thrown DB error is a Postgres "invalid regular expression" (SQLSTATE 2201B). */
 export function isPostgresRegexError(error: unknown): boolean {
   const e = error as { code?: string; meta?: { code?: string }; message?: string };

@@ -25,7 +25,7 @@ import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
 import { deliverUserMessageToWorkflow } from '../agentResume';
 import {
-  resolveAgentPrefix,
+  resolveAgentTarget,
   smsIntendsAgentReply,
   unknownSupervisorToolError,
 } from './supervisorTools.helpers';
@@ -68,6 +68,8 @@ function formatTaskLabel(goal: string, maxLength = 80): string {
 export interface ToolCall {
   tool: string;
   arguments: Record<string, unknown>;
+  /** Provider tool-call id on the native path; replayed in the next round's history. */
+  id?: string;
 }
 
 export interface ToolResult {
@@ -104,7 +106,7 @@ interface IncreaseBudgetArgs {
 // Prefix Resolution Helper
 // ============================================
 
-// resolveAgentPrefix lives in supervisorTools.helpers.ts
+// resolveAgentTarget / resolveAgentPrefix live in supervisorTools.helpers.ts
 // so this file stays under the max-lines budget. Both are pure DB/Temporal
 // operations with no tool-specific logic.
 
@@ -287,7 +289,7 @@ async function validateReplyToAgent(
   pendingWrites: PendingOp[],
   invocationContext?: ToolInvocationContext
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'reply_to_agent',
@@ -299,13 +301,15 @@ async function validateReplyToAgent(
   const attentionMatches =
     args.attention_request_id !== undefined &&
     invocationContext?.pendingAttentionRequestIds.includes(args.attention_request_id) === true;
+  // An agent this run started was started for the current SMS.
   const currentSmsMatches =
-    invocationContext !== undefined &&
-    smsIntendsAgentReply({
-      currentUserMessage: invocationContext.currentUserMessage,
-      visibleSessionHistory: invocationContext.visibleSessionHistory,
-      agentGoal: agent.goal,
-    });
+    agent.queuedThisRun ||
+    (invocationContext !== undefined &&
+      smsIntendsAgentReply({
+        currentUserMessage: invocationContext.currentUserMessage,
+        visibleSessionHistory: invocationContext.visibleSessionHistory,
+        agentGoal: agent.goal,
+      }));
   if (!attentionMatches && !currentSmsMatches) {
     return {
       tool: 'reply_to_agent',
@@ -345,7 +349,7 @@ async function validateKillAgent(
   userId: string,
   pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'kill_agent',
@@ -367,7 +371,7 @@ async function validateIncreaseBudget(
   userId: string,
   pendingWrites: PendingOp[]
 ): Promise<ToolResult> {
-  const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
+  const agent = await resolveAgentTarget(args.agent_id_or_prefix, userId, pendingWrites);
   if (!agent) {
     return {
       tool: 'increase_budget',

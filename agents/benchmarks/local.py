@@ -1814,7 +1814,11 @@ def start_services(
     # A/B the SMS supervisor against another model with everything else held
     # fixed. Read from the caller's env so `BENCHMARK_SMS_SUPERVISOR_MODEL=x
     # scripts/run-bench --local <task>` just works; the backend needs it at boot.
-    for key in ("BENCHMARK_SMS_SUPERVISOR_MODEL", "BENCHMARK_SMS_SUPERVISOR_ROUTE"):
+    for key in (
+        "BENCHMARK_SMS_SUPERVISOR_MODEL",
+        "BENCHMARK_SMS_SUPERVISOR_ROUTE",
+        "BENCHMARK_SMS_SUPERVISOR_TOKEN_TYPE",
+    ):
         if os.environ.get(key):
             env[key] = os.environ[key]
 

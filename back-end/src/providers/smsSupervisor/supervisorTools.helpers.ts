@@ -9,6 +9,7 @@
 
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import type { PendingOp } from './supervisorTools';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -123,4 +124,28 @@ export async function resolveAgentPrefix(
   }
 
   return agent;
+}
+
+/**
+ * Resolve a write-tool target, including an agent this run queued with
+ * start_new_agent. The queued result advertises its provisional id, the start
+ * commit creates the row with exactly that id, and pending writes commit in
+ * order, so a write queued against it lands after the agent exists.
+ */
+export async function resolveAgentTarget(
+  prefixOrId: string,
+  userId: string,
+  pendingWrites: readonly PendingOp[]
+): Promise<{ id: string; goal: string; queuedThisRun: boolean } | null> {
+  const input = prefixOrId.trim();
+  const queued =
+    input.length > 0
+      ? pendingWrites.find(
+          (op): op is Extract<PendingOp, { kind: 'start_new_agent' }> =>
+            op.kind === 'start_new_agent' && op.provisionalId.startsWith(input)
+        )
+      : undefined;
+  if (queued) return { id: queued.provisionalId, goal: queued.args.goal, queuedThisRun: true };
+  const agent = await resolveAgentPrefix(input, userId);
+  return agent ? { id: agent.id, goal: agent.goal, queuedThisRun: false } : null;
 }

@@ -126,6 +126,38 @@ function testHonestProgressAllowed(): void {
   }
 }
 
+/**
+ * 2026-10-12 eTA benchmark (Qwen 3.8): "5. Your email for the confirmation\n\nSend
+ * those…" matched the confirmation-code branch because `\s` crossed the line
+ * break and any 4-letter word counted as a code. Eight plain questions were
+ * rejected and the run ended in the fallback apology. A confirmation claim
+ * needs a code-like token carrying a digit.
+ */
+function testConfirmationWordWithoutCodeAllowed(): void {
+  const questions = [
+    'For the eTA I need:\n1. Passport number\n5. Your email for the confirmation\n\nSend those and I will handle the rest.',
+    'Which email should get the confirmation email from Canada?',
+    'Can you confirm the confirmation number goes to your Gmail?',
+  ];
+  for (const message of questions) {
+    assert.equal(
+      ungroundedSendUserMessageError(message, emptySmsRunSideEffectEvidence()),
+      null,
+      `A question mentioning confirmation must stay allowed: ${message}`
+    );
+  }
+  for (const claim of [
+    'Confirmation #4421',
+    'confirmation: ABC-1234',
+    'Done, confirmation 88A1Z2.',
+  ]) {
+    assert.ok(
+      ungroundedSendUserMessageError(claim, emptySmsRunSideEffectEvidence()),
+      `A confirmation code claim must stay rejected: ${claim}`
+    );
+  }
+}
+
 function testSignInBlockerAllowedWithoutTools(): void {
   const error = ungroundedSendUserMessageError(
     "blue bottle needs you to sign in at order.online before i can place the order (including the waffle). once you do that, i'll submit it immediately",
@@ -188,6 +220,10 @@ const cases: Array<{ name: string; fn: () => void }> = [
   {
     name: 'purchase completion requires start_new_agent',
     fn: testPurchaseCompletionRequiresStartNewAgent,
+  },
+  {
+    name: 'the word confirmation without a code is not a claim',
+    fn: testConfirmationWordWithoutCodeAllowed,
   },
 ];
 

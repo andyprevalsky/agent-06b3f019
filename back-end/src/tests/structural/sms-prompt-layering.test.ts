@@ -292,6 +292,37 @@ for (const forbidden of [
   );
 }
 
+// TOOL_SCHEMAS is derived from the live response schema, so these pin what the
+// model actually receives. A hand-written copy once carried all of this while
+// the model saw bare tool names, and grep without agent_trajectories.
+const startNewAgent = TOOL_SCHEMAS.find((tool) => tool.name === 'start_new_agent');
+runCheck(
+  'start_new_agent tells the model the agent starts with zero context',
+  Boolean(
+    startNewAgent &&
+    /starts with zero context/i.test(startNewAgent.description) &&
+    /Every relevant fact you already have/i.test(startNewAgent.description) &&
+    /What is still unknown/i.test(startNewAgent.description)
+  ),
+  'start_new_agent is missing the self-contained briefing contract'
+);
+const grepTool = TOOL_SCHEMAS.find((tool) => tool.name === 'grep');
+runCheck(
+  'grep exposes agent_trajectories to the model',
+  Boolean(
+    grepTool?.parameters.properties.source?.enum?.includes('agent_trajectories') &&
+    grepTool.parameters.properties.trace_path
+  ),
+  'live grep schema hides the agent_trajectories source the executor supports'
+);
+for (const tool of TOOL_SCHEMAS) {
+  runCheck(
+    `${tool.name} reaches the model with a description and flat parameters`,
+    tool.description.length > 0 && !('arguments' in tool.parameters.properties),
+    `${tool.name} is undocumented or still wrapped in arguments`
+  );
+}
+
 out(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 if (failed > 0) {
   for (const f of failures) out(`  ${f}`);

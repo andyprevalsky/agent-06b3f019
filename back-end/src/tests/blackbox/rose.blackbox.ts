@@ -776,9 +776,19 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
-  const startAgentArgs = (
-    (startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  // Parameters are flat, as in every Python tool model: the `arguments`
+  // wrapper of the response envelope must not reach the native tool schema.
+  const startAgentArgs = startAgent?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
+  assert(!('arguments' in startAgentArgs.properties), 'native tool parameters must be flat');
+  for (const tool of extracted.tools) {
+    assert(
+      typeof tool.description === 'string' && tool.description.length > 0,
+      `${tool.name as string} must reach the model with a description`
+    );
+  }
   const budget = startAgentArgs.properties;
   assert(
     typeof budget.budget_dollars.description === 'string' &&
@@ -959,8 +969,9 @@ async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
   } as Parameters<typeof extractToolsFromResponseFormat>[0]);
   assert(extracted !== null, 'probe envelope must lift to a native tool');
 
-  const root = extracted.tools[0].input_schema as JsonSchemaNode;
-  const schema = root.properties?.arguments as JsonSchemaNode;
+  // `{ tool, arguments }` variants lift to flat native parameters.
+  const schema = extracted.tools[0].input_schema as JsonSchemaNode;
+  assert(!('arguments' in (schema.properties ?? {})), 'arguments wrapper must be flattened');
   assertEqual(
     JSON.stringify(schema.properties?.budget_dollars),
     '{"type":"number"}',

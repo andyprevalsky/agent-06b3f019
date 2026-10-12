@@ -20,7 +20,10 @@ import {
   SUPERVISOR_RESPONSE_MODEL,
 } from './schema';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
-import type { SupervisorComputeToken } from './supervisorComputeToken';
+import {
+  benchmarkSupervisorTokenType,
+  type SupervisorComputeToken,
+} from './supervisorComputeToken';
 import type { ToolCall } from './supervisorTools';
 
 const log = createLogger('SmsSupervisor');
@@ -52,21 +55,32 @@ export async function callSupervisorLlm(
     modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
   const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
   const hasBenchmarkModel = modelOverride !== undefined && modelOverride !== '';
-  const providerRoute: CompletionOptions['provider_route'] | undefined = hasBenchmarkModel
-    ? routeOverride === 'direct-cerebras' ||
-      routeOverride === 'openrouter-cerebras' ||
-      routeOverride === 'shared-openai-priority' ||
-      routeOverride === 'openrouter-waterfall'
-      ? routeOverride
-      : 'openrouter-waterfall'
-    : undefined;
+  // 'pool-default' evaluates another pool on its normal pool path, as it would
+  // serve SMS_SUPERVISOR_MODEL. Tokenless by default; with
+  // BENCHMARK_SMS_SUPERVISOR_TOKEN_TYPE it carries a leased compute token the way
+  // Rose.complete callers reach providers (rose-1-ultra: claude → Opus, gpt → Sol).
+  const benchmarkPoolLease =
+    hasBenchmarkModel &&
+    routeOverride === 'pool-default' &&
+    benchmarkSupervisorTokenType() !== undefined;
+  const providerRoute: CompletionOptions['provider_route'] | undefined =
+    hasBenchmarkModel && routeOverride !== 'pool-default'
+      ? routeOverride === 'direct-cerebras' ||
+        routeOverride === 'openrouter-cerebras' ||
+        routeOverride === 'shared-openai-priority' ||
+        routeOverride === 'openrouter-waterfall'
+        ? routeOverride
+        : 'openrouter-waterfall'
+      : undefined;
+  // Production's default path stays tokenless (rose-fast has directAuthEnabled=false).
+  const sendComputeTokens = providerRoute !== undefined || benchmarkPoolLease;
 
   log.info('[SmsSupervisorLLM] Request', {
     model: activeModel,
     providerRoute: providerRoute ?? 'pool-default',
     messageCount: messages.length,
-    hasClaudeToken: !!claudeToken && providerRoute !== undefined,
-    hasGptToken: !!gptToken && providerRoute !== undefined,
+    hasClaudeToken: !!claudeToken && sendComputeTokens,
+    hasGptToken: !!gptToken && sendComputeTokens,
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -98,13 +112,13 @@ export async function callSupervisorLlm(
     messages,
     temperature: 0.3,
     response_model: SUPERVISOR_RESPONSE_MODEL,
+    // Dev/benchmark request+response dump (llmDump is a no-op in production), so a
+    // supervisor decision can be replayed and its raw output inspected.
+    dump_context: { call_site: 'sms_supervisor', agent_id: `sms-supervisor-${userId}` },
     ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),
-    // Compute tokens only on benchmark-overridden routes that need them.
-    // Default rose-fast has directAuthEnabled=false; never send tokens there.
-    ...(providerRoute !== undefined && claudeToken ? { claude_token: claudeToken } : {}),
-    ...(providerRoute !== undefined && gptToken
-      ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
-      : {}),
+    // Compute tokens only on benchmark overrides that need them.
+    ...(sendComputeTokens && claudeToken ? { claude_token: claudeToken } : {}),
+    ...(sendComputeTokens && gptToken ? { gpt_token: gptToken, gpt_account_id: gptAccountId } : {}),
   });
 
   let accumulatedContent = '';
@@ -135,7 +149,11 @@ export async function callSupervisorLlm(
             parsedInput && typeof parsedInput === 'object' && 'arguments' in parsedInput
               ? (parsedInput as { arguments: Record<string, unknown> }).arguments
               : (parsedInput as Record<string, unknown>);
-          accumulatedToolCalls.push({ tool: name, arguments: innerArgs ?? {} });
+          accumulatedToolCalls.push({
+            tool: name,
+            arguments: innerArgs ?? {},
+            ...(tc.id ? { id: tc.id } : {}),
+          });
         } catch (err) {
           log.warn('[SmsSupervisorLLM] Failed to parse tool_use arguments', {
             tool: name,

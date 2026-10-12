@@ -756,6 +756,25 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     _run_owned_benchmark_commands(commands, cwd=repo_root)
 
 
+def test_sms_runner_scoring_contract_is_in_permanent_gate():
+    """The SMS benchmark scoring/seed contract (agents/benchmarks/sms_runner_test.py).
+
+    It pins what lets an SMS benchmark fail a spamming or questionnaire-only
+    supervisor, including the fill-form task's search-only proof values. It was
+    previously only text-checked by a structural gate and never executed.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/sms_runner_test.py")],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -20831,6 +20850,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ("test_boot_terminal_runtime_evidence_is_in_permanent_gate", "boot_terminal_runtime_evidence_permanent_gate"),
         ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
         ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
+        ("test_sms_runner_scoring_contract_is_in_permanent_gate", "sms_runner_scoring_contract_permanent_gate"),
         ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
         ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
     ]
@@ -21175,6 +21195,7 @@ async def run_all_tests():
             ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
             ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
             ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
+            ("sms_runner_scoring_contract_permanent_gate", test_sms_runner_scoring_contract_is_in_permanent_gate),
             (
                 "live_query_proof_zero_spend_admission",
                 test_live_query_proof_rejects_zero_spend_tasks_before_provisioning,

@@ -31,7 +31,13 @@ const AGENT_KILL_CLAIM =
  * placement / submission), not one captured sentence.
  */
 const ORDER_PROGRESS_PHRASES =
-  /\b(?:placing\s+now|order\s+submitted|order\s+(?:is\s+)?confirmed|(?:placed|submitted)\s+(?:the\s+|your\s+)?(?:order|blue\s*bottle)|waiting\s+on\s+confirmation|confirmation\s*[#:]?\s*[a-z0-9-]{4,})\b/i;
+  /\b(?:placing\s+now|order\s+submitted|order\s+(?:is\s+)?confirmed|(?:placed|submitted)\s+(?:the\s+|your\s+)?(?:order|blue\s*bottle)|waiting\s+on\s+confirmation)\b/i;
+/**
+ * "confirmation #4421" / "confirmation: ABC-1234" — a reported confirmation
+ * code. The code must carry a digit and sit on the same line: a bare word
+ * ("your email for the confirmation\n\nSend those…") is a question, not a claim.
+ */
+const ORDER_CONFIRMATION_CODE = /\bconfirmation[ \t]*[#:]?[ \t]*(?=[a-z0-9-]*\d)[a-z0-9-]{4,}\b/i;
 
 /** "is/has been/was/got/I've placed" — completion, any subject. */
 const ORDER_PLACED_COPULA =
@@ -63,6 +69,7 @@ export function claimsOrderOrPlacementProgress(message: string): boolean {
   const text = normalizeSmsClaimText(message);
   return (
     ORDER_PROGRESS_PHRASES.test(text) ||
+    ORDER_CONFIRMATION_CODE.test(text) ||
     ORDER_PLACED_COPULA.test(text) ||
     ORDER_PLACED_FOR_FULFILLMENT.test(text) ||
     ORDER_PLACING_NOW.test(text) ||

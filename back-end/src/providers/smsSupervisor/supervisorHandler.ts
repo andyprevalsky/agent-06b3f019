@@ -465,6 +465,24 @@ export async function handleSmsSupervisorMessage(config: {
     // Resolve reads/writes before user delivery. A same-round tool failure must
     // not allow an ungrounded success message to escape first.
     const toolResults: ToolResult[] = [];
+    // Each result is replayed on the tool call that produced it (native tool
+    // history); results owned by no single call ride on the last one.
+    const resultsByCall = new Map<ToolCall, ToolResult[]>();
+    const recordResult = (toolCall: ToolCall, result: ToolResult): void => {
+      toolResults.push(result);
+      resultsByCall.set(toolCall, [...(resultsByCall.get(toolCall) ?? []), result]);
+    };
+    const respondedCalls = llmResponse.tool_calls;
+    const nativeFeedback = (guidance: string) => {
+      const owned = new Set([...resultsByCall.values()].flat());
+      return environment.buildNativeToolFeedbackMessages({
+        round,
+        toolCalls: respondedCalls,
+        resultsByCall,
+        roundResults: toolResults.filter((result) => !owned.has(result)),
+        guidance,
+      });
+    };
     let terminalFailureReported = false;
     for (const toolCall of dispatchCalls) {
       const toolStart = Date.now();
@@ -483,7 +501,7 @@ export async function handleSmsSupervisorMessage(config: {
             }
           : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext)
       );
-      toolResults.push(result);
+      recordResult(toolCall, result);
       allToolsExecuted.push(toolCall.tool);
       recordToolTrace(round, toolCall, result, 'dispatch');
 
@@ -546,7 +564,7 @@ export async function handleSmsSupervisorMessage(config: {
           } else {
             sendResult = await deliverUserMessage(resolved.text);
           }
-          toolResults.push(sendResult);
+          recordResult(toolCall, sendResult);
           allToolsExecuted.push(toolCall.tool);
           recordToolTrace(round, toolCall, sendResult, 'dispatch');
         }
@@ -559,7 +577,7 @@ export async function handleSmsSupervisorMessage(config: {
           result: '',
           error: 'Not sent because another tool in this response failed',
         };
-        toolResults.push(result);
+        recordResult(toolCall, result);
         allToolsExecuted.push(toolCall.tool);
         recordToolTrace(round, toolCall, result, 'dispatch');
       }
@@ -600,7 +618,7 @@ export async function handleSmsSupervisorMessage(config: {
               ? 'Rejected: this run has not successfully called send_user_message'
               : 'Rejected: at least one tool failed'),
         };
-        toolResults.push(completionFailure);
+        recordResult(completionCall, completionFailure);
         recordToolTrace(round, completionCall, completionFailure, 'completion');
         log.warn('[SmsSupervisor] attempt_completion rejected', {
           round,
@@ -611,21 +629,10 @@ export async function handleSmsSupervisorMessage(config: {
           })),
         });
 
-        const toolResultSummary = toolResults
-          .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
-          .join('\n');
-
         messages.push(
-          ...environment.buildToolFeedbackMessages({
-            round,
-            assistantPayload: JSON.stringify({
-              reasoning: llmResponse.reasoning,
-              tool_calls: llmResponse.tool_calls,
-            }),
-            toolResultSummary: `Tool results:\n${toolResultSummary}\n[attempt_completion] ERROR: ${completionFailure.error}`,
-            guidance:
-              'Correct the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.',
-          })
+          ...nativeFeedback(
+            'Correct the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.'
+          )
         );
         continue;
       }
@@ -636,28 +643,18 @@ export async function handleSmsSupervisorMessage(config: {
         const failureMessage = buildToolFailureMessage(commitFailures, 'commit');
         const delivery = await deliverUserMessage(failureMessage);
         toolResults.push(...commitResults, delivery);
-        recordToolTrace(
-          round,
-          completionCall,
-          {
-            tool: 'attempt_completion',
-            success: false,
-            result: '',
-            error: 'Rejected: at least one pending write failed to commit',
-          },
-          'completion'
-        );
+        const commitRejection: ToolResult = {
+          tool: 'attempt_completion',
+          success: false,
+          result: '',
+          error: 'Rejected: at least one pending write failed to commit',
+        };
+        recordResult(completionCall, commitRejection);
+        recordToolTrace(round, completionCall, commitRejection, 'completion');
         messages.push(
-          ...environment.buildToolFeedbackMessages({
-            round,
-            assistantPayload: JSON.stringify({
-              reasoning: llmResponse.reasoning,
-              tool_calls: llmResponse.tool_calls,
-            }),
-            toolResultSummary: `Tool results:\n${toolResults.map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`).join('\n')}`,
-            guidance:
-              'The write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.',
-          })
+          ...nativeFeedback(
+            'The write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.'
+          )
         );
         continue;
       }
@@ -715,22 +712,11 @@ export async function handleSmsSupervisorMessage(config: {
     }
     consecutiveEmptyRounds = 0;
 
-    // Append tool results to messages for next LLM call
-    const toolResultSummary = toolResults
-      .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
-      .join('\n');
-
+    // Append this round's tool calls and their results for the next LLM call.
     messages.push(
-      ...environment.buildToolFeedbackMessages({
-        round,
-        assistantPayload: JSON.stringify({
-          reasoning: llmResponse.reasoning,
-          tool_calls: llmResponse.tool_calls,
-        }),
-        toolResultSummary: `Tool results:\n${toolResultSummary}`,
-        guidance:
-          'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.',
-      })
+      ...nativeFeedback(
+        'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.'
+      )
     );
 
     if (round === environment.MAX_TOOL_ROUNDS - 1) {

@@ -55,6 +55,7 @@ def turn(
     lifecycle=(),
     completion_accepted=True,
     tool_calls=(),
+    started_agent_goals=(),
 ):
     return SmsTurn(
         inbound=inbound,
@@ -68,6 +69,7 @@ def turn(
         spend_after=SpendState(*spend_after),
         allow_spend=allow_spend,
         tool_calls=list(tool_calls),
+        started_agent_goals=list(started_agent_goals),
     )
 
 
@@ -764,7 +766,7 @@ def test_sms_tasks_are_serialized_against_each_other():
     the fixture last decides what BOTH see. Observed live: the open and closed
     tasks started in the same instant.
     """
-    source = pathlib.Path("benchmarks/run_benchmark.py").read_text()
+    source = (pathlib.Path(__file__).resolve().parent / "run_benchmark.py").read_text()
     assert 'getattr(task, "runner", "agent") == "sms"' in source
     assert "async with sms_surface:" in source
     assert "sms_surface = asyncio.Semaphore(1)" in source
@@ -899,3 +901,291 @@ def test_cloud_box_gets_the_web_search_fixture_contract():
     # One occurrence configures the stack/backend, one configures the sibling
     # benchmark process that publishes the fixture.
     assert image_driver.count("BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE") >= 2
+
+
+# ── Fill-a-form: search the user's data, then start the agent ────────────────
+
+FILL_FORM_TASK_NAME = "sms-supervisor-fill-form-searches-then-delegates"
+GOAL_CHECK = {
+    "id": "goal",
+    "method": "static_check",
+    "criteria": ["the agent receives the facts the search found"],
+    "checks": [{"type": "sms_agent_goal_contains", "values": ["G58219473", "72914836"]}],
+}
+
+
+def psql_returning(row_id: str) -> str:
+    """What `psql -t -A -c "INSERT ... RETURNING id"` actually prints."""
+    return f"{row_id}\nINSERT 0 1"
+
+
+DOC_ID = "11111111-1111-4111-8111-111111111111"
+ATTN_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def _recording_deps(responses=None):
+    from benchmarks.sms_runner import SmsRunnerDeps
+
+    executed: list[str] = []
+
+    def fake_sql(query: str) -> str:
+        executed.append(query)
+        for marker, response in (responses or {}).items():
+            if marker in query:
+                return response
+        return ""
+
+    deps = SmsRunnerDeps(
+        run_sql=fake_sql,
+        sql_literal=lambda v: "'" + str(v).replace("'", "''") + "'",
+        is_local_base_url=lambda _u: True,
+        benchmark_user_id=lambda: "u1",
+    )
+    return deps, executed
+
+
+def test_agent_goal_carrying_the_searched_facts_passes():
+    passed, reasoning = run_sms_static_check(
+        GOAL_CHECK,
+        [turn(["On it, starting your eTA with the passport and visa from your Travel docs note."],
+              allow_spend=True, spend_before=(0, 0), spend_after=(100, 1),
+              started_agent_goals=["Apply for a Canada eTA. Passport G58219473, US visa foil 72914836."])],
+    )
+    assert passed is True, reasoning
+
+
+def test_questionnaire_without_an_agent_fails_the_goal_check():
+    """The prod incident: the supervisor asked for every field and started nothing."""
+    passed, reasoning = run_sms_static_check(
+        GOAL_CHECK,
+        [turn(["To fill out your eTA I need: 1. Full name 2. Date of birth 3. Passport number"],
+              allow_spend=True, spend_before=(0, 0), spend_after=(0, 0))],
+    )
+    assert passed is False
+    assert "missing ['G58219473', '72914836']" in reasoning
+
+
+def test_agent_started_without_the_found_facts_fails_the_goal_check():
+    passed, reasoning = run_sms_static_check(
+        GOAL_CHECK,
+        [turn(["On it."], allow_spend=True, spend_before=(0, 0), spend_after=(100, 1),
+              started_agent_goals=["Apply for a Canada eTA; ask the user for their passport details."])],
+    )
+    assert passed is False
+    assert "missing" in reasoning
+
+
+def test_goal_check_without_values_fails_closed():
+    passed, reasoning = run_sms_static_check(
+        {"id": "g", "method": "static_check", "criteria": ["c"], "checks": [{"type": "sms_agent_goal_contains"}]},
+        [turn(["On it."], allow_spend=True, started_agent_goals=["anything"])],
+    )
+    assert passed is False
+    assert "declares no values" in reasoning
+
+
+def test_report_keeps_started_goals_but_the_judge_input_does_not():
+    turns = [turn(["On it."], allow_spend=True, started_agent_goals=["Apply for a Canada eTA."])]
+    assert build_report_transcript(turns)[0]["started_agent_goals"] == ["Apply for a Canada eTA."]
+    assert "started_agent_goals" not in build_judge_transcript(turns)[0]
+
+
+def test_seed_documents_are_validated():
+    from types import SimpleNamespace
+
+    def script(documents):
+        return SimpleNamespace(name="t", sms_script={"turns": [{"inbound": "hi"}], "seed_documents": documents})
+
+    with pytest.raises(SmsScriptError, match="source must be one of"):
+        parse_sms_script(script([{"source": "gmail", "title": "x", "content": "y"}]))
+    with pytest.raises(SmsScriptError, match="content must be non-empty"):
+        parse_sms_script(script([{"source": "apple_notes", "title": "x", "content": " "}]))
+    with pytest.raises(SmsScriptError, match="must be a list"):
+        parse_sms_script(script({"source": "apple_notes"}))
+
+
+def test_seeded_document_lands_where_documents_grep_reads_and_is_reaped():
+    """Rows go into UserDataDocument for the run user and are deleted by id."""
+    from benchmarks.sms_runner import _cleanup, _seed_documents
+
+    deps, executed = _recording_deps({'INSERT INTO "UserDataDocument"': psql_returning(DOC_ID)})
+    ids = _seed_documents(deps, "u1", [{"source": "apple_notes", "title": "Travel docs", "content": "Passport G58219473"}])
+    assert ids == [DOC_ID]
+    insert = next(q for q in executed if 'INSERT INTO "UserDataDocument"' in q)
+    for fragment in ("'u1'", "'apple_notes'", "'Travel docs'", "'Passport G58219473'", "'sms-bench-' || gen_random_uuid()"):
+        assert fragment in insert
+    # deletedAt stays NULL: the documents grep filters on deletedAt IS NULL.
+    assert "deletedAt" not in insert
+
+    _cleanup(deps, "u1", [], set(), ids)
+    assert any(f"DELETE FROM \"UserDataDocument\" WHERE id = '{DOC_ID}'" in q for q in executed)
+
+
+def test_seed_that_returns_no_row_is_a_hard_failure():
+    from benchmarks.sms_runner import _seed_documents
+
+    deps, _ = _recording_deps()
+    with pytest.raises(RuntimeError, match="expected exactly one row id"):
+        _seed_documents(deps, "u1", [{"source": "apple_notes", "title": "Travel docs", "content": "x"}])
+
+
+def test_started_goals_are_read_for_new_agents_only():
+    from benchmarks.sms_runner import _started_agent_goals
+
+    deps, executed = _recording_deps({'SELECT id FROM "Agent"': "old\nnew", "regexp_replace(goal": "Apply for a Canada eTA"})
+    assert _started_agent_goals(deps, "u1", {"old"}) == ["Apply for a Canada eTA"]
+    select = next(q for q in executed if "regexp_replace(goal" in q)
+    assert "'new'" in select and "'old'" not in select
+
+
+def test_fill_form_task_can_only_pass_by_searching():
+    """The catalog contract for the 2026-10-07 eTA incident.
+
+    The values the agent goal must carry exist only in the seeded note: not in the
+    seeded thread, the inbound text, the web-search stub or the user's profile. So
+    a pass proves the supervisor's lookup answered the questions.
+    """
+    task = get_task_by_name(FILL_FORM_TASK_NAME)
+    assert task.runner == "sms" and task.group == "daily" and task.status == "ready"
+    assert task.enforce_declared_evaluators is True
+    script = parse_sms_script(task)
+    assert [t["inbound"] for t in script["turns"]] == ["Filled it for me"]
+    assert script["turns"][0]["allow_spend"] is True
+    for turn_spec in script["turns"]:
+        assert turn_spec["inbound"] in task.prompt
+
+    checks = {
+        check["type"]: check
+        for evaluator in task.evaluators
+        if evaluator["method"] == "static_check"
+        for check in evaluator["checks"]
+    }
+    assert set(checks) <= SMS_STATIC_CHECK_TYPES
+    assert checks["sms_agents_started"]["count"] == 1
+    values = checks["sms_agent_goal_contains"]["values"]
+    assert values
+
+    note = "\n".join(d["content"] for d in script["seed_documents"])
+    elsewhere = json.dumps([script["seed_messages"], script["turns"], script["web_search_fixture"], task.prompt])
+    for value in values:
+        assert value in note
+        assert value not in elsewhere
+
+    # The judge must see the note as ground truth, or a fact quoted from it reads as invented.
+    scenario = build_judge_scenario(script)
+    assert scenario["user_data_the_assistant_could_search"][0]["content"] == note
+    assert any(e["method"] == "single_turn_llm_judge" for e in task.evaluators)
+
+
+# ── Prod-state seeding: agent trees, activity, pending requests ──────────────
+
+
+def uid(n: int) -> str:
+    return f"00000000-0000-4000-8000-{n:012d}"
+
+
+def test_returned_id_strips_the_psql_command_tag():
+    """The 2026-10-10 bench died on Message_agentId_fkey: the seeded root's "id"
+    was psql's whole output, "<uuid>\\nINSERT 0 1", reused as a foreign key."""
+    from benchmarks.sms_runner import _returned_id
+
+    assert _returned_id(psql_returning(uid(7)), "agent") == uid(7)
+    with pytest.raises(RuntimeError, match="expected exactly one row id"):
+        _returned_id("INSERT 0 1", "agent")
+
+
+def test_seeded_tree_has_children_under_the_root_and_activity_in_prod_order():
+    from benchmarks.sms_runner import _seed_agents
+
+    counter = iter(range(1000))
+    deps, executed = _recording_deps()
+
+    def numbered_ids(query: str) -> str:
+        executed.append(query)
+        return psql_returning(uid(next(counter))) if 'INSERT INTO "Agent"' in query else "INSERT 0 1"
+
+    deps.run_sql = numbered_ids
+    ids: list[str] = []
+    _seed_agents(
+        deps,
+        "u1",
+        [{
+            "goal": "root goal", "status": "COMPLETED", "completion_summary": "root done",
+            "children": [{"goal": "child goal", "status": "COMPLETED", "count": 3, "completion_summaries": ["c0 done", "c1 done"]}],
+        }],
+        ids,
+    )
+    assert ids == [uid(0), uid(1), uid(2), uid(3)]
+    agent_inserts = [q for q in executed if 'INSERT INTO "Agent"' in q]
+    assert "NULL, 0, NOW()" in agent_inserts[0]
+    # Children reference the bare root id, not the raw psql output with its tag.
+    assert all(f"'{uid(0)}', 1, NOW()" in q for q in agent_inserts[1:])
+    summaries = [q for q in executed if 'INSERT INTO "Message"' in q]
+    # Root first and newest; children follow in the given order, each one second older.
+    assert [f"'{uid(0)}'" in summaries[0], f"'{uid(1)}'" in summaries[1], f"'{uid(2)}'" in summaries[2]] == [True, True, True]
+    assert ["'0 seconds'" in summaries[0], "'1 seconds'" in summaries[1], "'2 seconds'" in summaries[2]] == [True, True, True]
+    assert '"isFinalSummary": true' in summaries[0] and "'TOOL'" in summaries[0]
+
+
+def test_tree_seed_failure_keeps_already_inserted_rows_for_cleanup():
+    from benchmarks.sms_runner import _seed_agents
+
+    calls = {"n": 0}
+
+    def flaky(query: str) -> str:
+        if 'INSERT INTO "Agent"' in query:
+            calls["n"] += 1
+            return "" if calls["n"] == 3 else psql_returning(uid(calls["n"]))
+        return ""
+
+    deps, _ = _recording_deps()
+    deps.run_sql = flaky
+    ids: list[str] = []
+    with pytest.raises(RuntimeError, match="expected exactly one row id"):
+        _seed_agents(deps, "u1", [{"goal": "root", "children": [{"goal": "child", "count": 3}]}], ids)
+    assert ids == [uid(1), uid(2)]
+
+
+def test_orphan_attention_request_is_seeded_and_reaped():
+    from benchmarks.sms_runner import _cleanup, _seed_attention_requests
+
+    deps, executed = _recording_deps({'INSERT INTO "AgentAttentionRequest"': psql_returning(ATTN_ID)})
+    ids = _seed_attention_requests(deps, "u1", [{"question": "Sign in to walmart.com", "metadata": {"attentionKind": "auth_assistance"}}])
+    assert ids == [ATTN_ID]
+    insert = next(q for q in executed if 'INSERT INTO "AgentAttentionRequest"' in q)
+    assert "gen_random_uuid()::text, 'sms-bench-seeded'" in insert
+    assert "'Sign in to walmart.com'" in insert and "auth_assistance" in insert
+    # No userResponse: it must read as pending to the context builder.
+    assert "userResponse" not in insert
+    _cleanup(deps, "u1", [], set(), [], ids)
+    assert any(f"DELETE FROM \"AgentAttentionRequest\" WHERE id = '{ATTN_ID}'" in q for q in executed)
+
+
+def test_seed_shapes_are_validated():
+    from types import SimpleNamespace
+
+    def script(**extra):
+        return SimpleNamespace(name="t", sms_script={"turns": [{"inbound": "hi"}], **extra})
+
+    with pytest.raises(SmsScriptError, match="children\\[0\\].goal"):
+        parse_sms_script(script(seed_agents=[{"goal": "root", "children": [{"count": 2}]}]))
+    with pytest.raises(SmsScriptError, match="seed_attention_requests\\[0\\].question"):
+        parse_sms_script(script(seed_attention_requests=[{"metadata": {}}]))
+
+
+def test_fill_form_task_replays_the_prod_supervisor_state():
+    """The 2026-10-07 turn happened inside a 30-message thread, beside a completed
+    50-child agent tree and a pending Walmart sign-in request. A slimmer replay let
+    the same model pass far more often, so the benchmark carries the prod state."""
+    script = parse_sms_script(get_task_by_name(FILL_FORM_TASK_NAME))
+    assert len(script["seed_messages"]) == 30
+    assert script["seed_messages"][-2:] == [
+        {"role": "user", "content": "I have a US visa"},
+        script["seed_messages"][-1],
+    ]
+    assert script["seed_messages"][-1]["content"].startswith("Good news: with your US visa you qualify for an eTA")
+    (root,) = script["seed_agents"]
+    assert root["status"] == "COMPLETED" and root["completion_summary"]
+    (children,) = root["children"]
+    assert children["count"] == 50 and len(children["completion_summaries"]) == 4
+    assert [r["question"] for r in script["seed_attention_requests"]] == ["Sign in to walmart.com"]

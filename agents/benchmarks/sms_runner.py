@@ -52,9 +52,14 @@ SMS_STATIC_CHECK_TYPES = {
     "sms_no_repeated_outbound",
     "sms_no_unrequested_spend",
     "sms_agents_started",
+    "sms_agent_goal_contains",
     "sms_completion_accepted",
     "sms_lifecycle_announced",
 }
+# Synced-document providers the supervisor's grep reads as `source="documents"`.
+# Google Drive/Calendar rows are excluded by the documents grep, so they are not
+# seedable here.
+SEED_DOCUMENT_SOURCES = {"apple_notes", "obsidian", "chatgpt", "claude"}
 
 
 @dataclass
@@ -99,6 +104,8 @@ class SmsTurn:
     # Ordered, machine-recorded supervisor calls/results for this inbound turn.
     # Kept out of the LLM judge input but included in the durable run report.
     tool_calls: list[dict] = field(default_factory=list)
+    # Goals of the agents this turn started, read from the Agent rows it created.
+    started_agent_goals: list[str] = field(default_factory=list)
 
 
 class SmsScriptError(RuntimeError):
@@ -122,6 +129,34 @@ def parse_sms_script(task: BenchmarkTask) -> dict:
     for index, agent in enumerate(seed_agents):
         if not isinstance(agent, dict) or not str(agent.get("goal") or "").strip():
             raise SmsScriptError(f"{task.name}: sms_script.seed_agents[{index}].goal must be non-empty")
+        children = agent.get("children", [])
+        if not isinstance(children, list):
+            raise SmsScriptError(f"{task.name}: sms_script.seed_agents[{index}].children must be a list")
+        for child_index, child in enumerate(children):
+            if not isinstance(child, dict) or not str(child.get("goal") or "").strip():
+                raise SmsScriptError(
+                    f"{task.name}: sms_script.seed_agents[{index}].children[{child_index}].goal must be non-empty"
+                )
+    attention_requests = script.get("seed_attention_requests", [])
+    if not isinstance(attention_requests, list):
+        raise SmsScriptError(f"{task.name}: sms_script.seed_attention_requests must be a list")
+    for index, request in enumerate(attention_requests):
+        if not isinstance(request, dict) or not str(request.get("question") or "").strip():
+            raise SmsScriptError(f"{task.name}: sms_script.seed_attention_requests[{index}].question must be non-empty")
+    seed_documents = script.get("seed_documents", [])
+    if not isinstance(seed_documents, list):
+        raise SmsScriptError(f"{task.name}: sms_script.seed_documents must be a list")
+    for index, document in enumerate(seed_documents):
+        if not isinstance(document, dict):
+            raise SmsScriptError(f"{task.name}: sms_script.seed_documents[{index}] must be an object")
+        if document.get("source") not in SEED_DOCUMENT_SOURCES:
+            raise SmsScriptError(
+                f"{task.name}: sms_script.seed_documents[{index}].source must be one of "
+                f"{sorted(SEED_DOCUMENT_SOURCES)}"
+            )
+        for key in ("title", "content"):
+            if not str(document.get(key) or "").strip():
+                raise SmsScriptError(f"{task.name}: sms_script.seed_documents[{index}].{key} must be non-empty")
     return script
 
 
@@ -212,34 +247,157 @@ def _seed_transcript(deps: SmsRunnerDeps, user_id: str, seed_messages: list[dict
     )
 
 
-def _seed_agents(deps: SmsRunnerDeps, user_id: str, seed_agents: list[dict]) -> list[str]:
-    """Insert the active-agent state a turn needs, without spending a workflow.
+_UUID_LINE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _returned_id(output: str, what: str) -> str:
+    """The one row id from ``INSERT ... RETURNING id`` output.
+
+    ``psql -t -A`` prints the returned row and then the command tag, so the raw
+    output is ``<uuid>\nINSERT 0 1``. Using it verbatim as an id silently breaks
+    every later foreign key and every cleanup DELETE keyed on it.
+    """
+    ids = [line.strip() for line in output.splitlines() if _UUID_LINE.match(line.strip())]
+    if len(ids) != 1:
+        raise RuntimeError(f"Seeding {what} returned {output!r}, expected exactly one row id")
+    return ids[0]
+
+
+def _insert_agent(
+    deps: SmsRunnerDeps, user_id: str, spec: dict, parent_id: Optional[str] = None, depth: int = 0
+) -> str:
+    goal = str(spec["goal"])
+    status = str(spec.get("status", "ACTIVE")).upper()
+    progress = float(spec.get("progress", 0.1))
+    # Explicit budget headroom. A seeded agent left at the schema default
+    # sits at spent==limit, which is a trap: it invites the supervisor to
+    # "helpfully" top it up and turns a trajectory test into a budget test.
+    price_limit_cents = int(spec.get("price_limit_cents", 500))
+    tree_cost_cents = int(spec.get("tree_cost_cents", 0))
+    parent_sql = deps.sql_literal(parent_id) if parent_id is not None else "NULL"
+    row = deps.run_sql(
+        'INSERT INTO "Agent" (id, "userId", goal, status, progress, source, "isBenchmark", '
+        '"memoryEnabled", "priceLimitCents", "treeCostCents", "parentAgentId", depth, "createdAt", "updatedAt") '
+        "VALUES (gen_random_uuid(), "
+        f"{deps.sql_literal(user_id)}, {deps.sql_literal(goal)}, "
+        f'{deps.sql_literal(status)}::"AgentStatus", {progress}, \'SMS\'::"AgentSource", true, false, '
+        f"{price_limit_cents}, {tree_cost_cents}, {parent_sql}, {depth}, NOW(), NOW()) RETURNING id;"
+    )
+    return _returned_id(row, f"agent {goal[:60]!r}")
+
+
+def _insert_completion_summary(deps: SmsRunnerDeps, agent_id: str, summary: str, age_seconds: int) -> None:
+    """The final-summary TOOL message the context builder lists under Recent Agent Activity."""
+    metadata = json.dumps(
+        {
+            "toolName": "completion_summary",
+            "title": "✅ Task Complete",
+            "isFinalSummary": True,
+            "completionSummary": {"summary": summary},
+        }
+    )
+    deps.run_sql(
+        'INSERT INTO "Message" (id, "agentId", text, role, metadata, timestamp, "createdAt") VALUES (gen_random_uuid(), '
+        f"{deps.sql_literal(agent_id)}, {deps.sql_literal(summary)}, 'TOOL'::\"MessageRole\", "
+        f"{deps.sql_literal(metadata)}::jsonb, NOW() - interval '{int(age_seconds)} seconds', NOW());"
+    )
+
+
+def _seed_agents(
+    deps: SmsRunnerDeps, user_id: str, seed_agents: list[dict], ids: Optional[list[str]] = None
+) -> list[str]:
+    """Insert the agent state a turn needs, without spending a workflow.
 
     The supervisor reads agent state straight from ``Agent`` rows, so a row is a
     faithful fixture for "an agent is running right now" — which is the exact
     condition that used to tempt it into narrating progress forever. Rows are
     marked ``isBenchmark`` so the lifecycle-SMS dispatcher suppresses their texts.
+
+    A spec may also carry ``completion_summary`` and ``children`` (each with an
+    optional ``count`` and ``completion_summaries``), which reproduces a prod
+    agent tree and its Recent Agent Activity lines. Summaries are stamped newest
+    first in the order given, so the activity list keeps the prod order.
+    Ids are appended to ``ids`` as each row lands, so a failure partway through
+    a tree still leaves the caller every row it must reap.
+    """
+    ids = [] if ids is None else ids
+    summary_age = 0
+    for agent in seed_agents:
+        root_id = _insert_agent(deps, user_id, agent)
+        ids.append(root_id)
+        if agent.get("completion_summary"):
+            _insert_completion_summary(deps, root_id, str(agent["completion_summary"]), summary_age)
+            summary_age += 1
+        for child in agent.get("children", []):
+            summaries = [str(text) for text in child.get("completion_summaries", [])]
+            for index in range(int(child.get("count", 1))):
+                child_id = _insert_agent(deps, user_id, child, parent_id=root_id, depth=1)
+                ids.append(child_id)
+                if index < len(summaries):
+                    _insert_completion_summary(deps, child_id, summaries[index], summary_age)
+                    summary_age += 1
+    return ids
+
+
+def _seed_attention_requests(deps: SmsRunnerDeps, user_id: str, requests: list[dict]) -> list[str]:
+    """Pending attention requests, as the Pending Requests section shows them.
+
+    A prod request can outlive its agent row (the attention table has no foreign
+    key), so a request may be seeded without one; ``agent_id`` defaults to a
+    fresh orphan id, which renders exactly like the prod orphan.
     """
     ids: list[str] = []
-    for agent in seed_agents:
-        goal = str(agent["goal"])
-        status = str(agent.get("status", "ACTIVE")).upper()
-        progress = float(agent.get("progress", 0.1))
-        # Explicit budget headroom. A seeded agent left at the schema default
-        # sits at spent==limit, which is a trap: it invites the supervisor to
-        # "helpfully" top it up and turns a trajectory test into a budget test.
-        price_limit_cents = int(agent.get("price_limit_cents", 500))
-        tree_cost_cents = int(agent.get("tree_cost_cents", 0))
+    for request in requests:
+        agent_sql = (
+            deps.sql_literal(str(request["agent_id"])) if request.get("agent_id") else "gen_random_uuid()::text"
+        )
+        metadata = json.dumps(request.get("metadata") or {})
         row = deps.run_sql(
-            'INSERT INTO "Agent" (id, "userId", goal, status, progress, source, "isBenchmark", '
-            '"memoryEnabled", "priceLimitCents", "treeCostCents", "createdAt", "updatedAt") VALUES (gen_random_uuid(), '
-            f"{deps.sql_literal(user_id)}, {deps.sql_literal(goal)}, "
-            f'{deps.sql_literal(status)}::"AgentStatus", {progress}, \'SMS\'::"AgentSource", true, false, '
-            f"{price_limit_cents}, {tree_cost_cents}, NOW(), NOW()) RETURNING id;"
-        ).strip()
-        if row:
-            ids.append(row)
+            'INSERT INTO "AgentAttentionRequest" (id, "userId", "agentId", "workflowId", question, metadata, '
+            '"createdAt", "updatedAt") VALUES (gen_random_uuid()::text, '
+            f"{deps.sql_literal(user_id)}, {agent_sql}, 'sms-bench-seeded', "
+            f"{deps.sql_literal(str(request['question']))}, {deps.sql_literal(metadata)}::jsonb, NOW(), NOW()) RETURNING id;"
+        )
+        ids.append(_returned_id(row, f"attention request {request['question']!r}"))
     return ids
+
+
+def _seed_documents(deps: SmsRunnerDeps, user_id: str, seed_documents: list[dict]) -> list[str]:
+    """Insert synced-document rows the supervisor's grep can find.
+
+    A task about whether the supervisor *looks things up* needs the answer to
+    exist in the user's data; otherwise asking the user is the only correct
+    move and the task measures nothing. Rows go straight into
+    ``UserDataDocument``, the table ``grep source="documents"`` reads, with a
+    per-run externalId so a crashed earlier run can never collide.
+    """
+    ids: list[str] = []
+    for document in seed_documents:
+        content = str(document["content"])
+        row = deps.run_sql(
+            'INSERT INTO "UserDataDocument" (id, "userId", source, "externalId", title, content, metadata, '
+            '"contentHash", "sourceUpdatedAt", "lastSeenAt", "createdAt", "updatedAt") VALUES (gen_random_uuid(), '
+            f"{deps.sql_literal(user_id)}, {deps.sql_literal(str(document['source']))}, "
+            "'sms-bench-' || gen_random_uuid(), "
+            f"{deps.sql_literal(str(document['title']))}, {deps.sql_literal(content)}, '{{}}'::jsonb, "
+            f"md5({deps.sql_literal(content)}), NOW(), NOW(), NOW(), NOW()) RETURNING id;"
+        )
+        ids.append(_returned_id(row, f"document {document['title']!r}"))
+    return ids
+
+
+def _started_agent_goals(deps: SmsRunnerDeps, user_id: str, before: set[str]) -> list[str]:
+    """Goals of the agents created since ``before`` was read, oldest first."""
+    started = sorted(_live_agent_ids(deps, user_id) - before)
+    if not started:
+        return []
+    id_list = ", ".join(deps.sql_literal(agent_id) for agent_id in started)
+    # One output line per agent: psql would split a multi-line goal across rows.
+    rows = deps.run_sql(
+        f"SELECT regexp_replace(goal, E'[\\\\r\\\\n]+', ' ', 'g') FROM \"Agent\" "
+        f'WHERE id IN ({id_list}) ORDER BY "createdAt";'
+    )
+    return [line for line in rows.splitlines() if line.strip()]
 
 
 def web_search_fixture_path() -> pathlib.Path:
@@ -371,6 +529,8 @@ def _cleanup(
     user_id: str,
     agent_ids: list[str],
     pre_existing: set[str] | None = None,
+    document_ids: list[str] | None = None,
+    attention_request_ids: list[str] | None = None,
 ) -> None:
     """Reap every agent this run is responsible for, seeded or supervisor-made.
 
@@ -378,13 +538,18 @@ def _cleanup(
     supervisor calls start_new_agent produces agents the runner never recorded.
     Deleting only the seeded list leaves those behind — with a live Temporal
     workflow — on any stack whose database outlives the run. So diff against the
-    agents that existed before the run and remove the difference.
+    agents that existed before the run and remove the difference. Seeded
+    documents are removed by id so the next task's grep never sees them.
     """
     doomed = set(agent_ids)
     if pre_existing is not None:
         doomed |= _live_agent_ids(deps, user_id) - pre_existing
     for agent_id in doomed:
         deps.run_sql(f'DELETE FROM "Agent" WHERE id = {deps.sql_literal(agent_id)};')
+    for document_id in document_ids or []:
+        deps.run_sql(f'DELETE FROM "UserDataDocument" WHERE id = {deps.sql_literal(document_id)};')
+    for request_id in attention_request_ids or []:
+        deps.run_sql(f'DELETE FROM "AgentAttentionRequest" WHERE id = {deps.sql_literal(request_id)};')
     _reset_session(deps, user_id)
 
 
@@ -418,6 +583,7 @@ async def _drive_turn(
     baseline = len(_read_transcript(deps, user_id))
     log_marker = _backend_log_size()
     spend_before = _read_spend_state(deps, user_id)
+    agents_before = _live_agent_ids(deps, user_id)
     started = time.monotonic()
 
     async with session.post(
@@ -464,6 +630,7 @@ async def _drive_turn(
         spend_after=_read_spend_state(deps, user_id),
         allow_spend=bool(turn.get("allow_spend", False)),
         tool_calls=_tool_trace_after(log_marker),
+        started_agent_goals=_started_agent_goals(deps, user_id, agents_before),
     )
 
 
@@ -554,6 +721,24 @@ def run_sms_static_check(evaluator: dict, turns: list[SmsTurn]) -> tuple[bool, s
                 if spawned != expected:
                     return False, (f"Turn {index} ({turn.inbound!r}) started {spawned} agent(s), expected {expected}")
             continue
+        if check_type == "sms_agent_goal_contains":
+            # Proof that a lookup answered the question rather than the user:
+            # the values exist only in seeded user data, so an agent whose goal
+            # carries them was handed facts the supervisor found by searching.
+            values = [str(value) for value in check.get("values", []) if str(value).strip()]
+            if not values:
+                return False, "sms_agent_goal_contains declares no values"
+            for index, turn in enumerate(turns):
+                if not turn.allow_spend:
+                    continue
+                goals = " \n".join(turn.started_agent_goals).lower()
+                missing = [value for value in values if value.lower() not in goals]
+                if missing:
+                    return False, (
+                        f"Turn {index} ({turn.inbound!r}) started agent goal(s) "
+                        f"{turn.started_agent_goals!r} missing {missing}"
+                    )
+            continue
         if check_type == "sms_lifecycle_announced":
             # Starting work the user never hears about is its own failure, and it
             # is invisible to the supervisor's own send budget.
@@ -591,6 +776,7 @@ def build_report_transcript(turns: list[SmsTurn]) -> list[dict]:
     transcript = build_judge_transcript(turns)
     for entry, turn in zip(transcript, turns):
         entry["tool_calls"] = turn.tool_calls
+        entry["started_agent_goals"] = turn.started_agent_goals
     return transcript
 
 
@@ -598,9 +784,23 @@ def build_judge_scenario(script: dict) -> dict:
     """Ground truth the judge needs to separate "grounded" from "invented".
 
     Without the pre-existing agent state, a judge reads a correct reference to a
-    running agent's goal as a hallucination and fails a clean run.
+    running agent's goal as a hallucination and fails a clean run. Seeded user
+    documents are listed for the same reason: a fact the assistant found in them
+    is grounded, and a question asking the user for one is avoidable.
     """
+    documents = script.get("seed_documents", [])
+    searchable = (
+        {
+            "user_data_the_assistant_could_search": [
+                {"source": str(d.get("source", "")), "title": str(d.get("title", "")), "content": str(d.get("content", ""))}
+                for d in documents
+            ]
+        }
+        if documents
+        else {}
+    )
     return {
+        **searchable,
         "agents_already_running_before_the_thread": [
             {
                 "goal": str(agent.get("goal", "")),
@@ -622,6 +822,16 @@ def build_judge_scenario(script: dict) -> dict:
             "invention. What counts as invented is a fact about an order that has not happened: "
             "a confirmation number, an order total, or a pickup time for an order still being "
             "placed. Judge those two categories separately."
+        ),
+        **(
+            {
+                "user_data_note": (
+                    "The user data above is also GROUNDED: it was in the user's own synced data, "
+                    "searchable by the assistant's grep tool. Facts quoted from it are not inventions."
+                )
+            }
+            if documents
+            else {}
         ),
     }
 
@@ -723,6 +933,8 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
 
     started = time.monotonic()
     seeded_agent_ids: list[str] = []
+    seeded_document_ids: list[str] = []
+    seeded_request_ids: list[str] = []
     turns: list[SmsTurn] = []
     # Bound before the try: the finally-block cleanup reads it, so an exception
     # raised by the very first statement inside must not surface as a NameError
@@ -747,10 +959,17 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
                     f"messages, read back {len(landed)}. The supervisor would have started from "
                     "an empty thread, so this run would not be the mid-thread repro it claims."
                 )
-        seeded_agent_ids = _seed_agents(deps, user_id, script.get("seed_agents", []))
+        # Rows are recorded as they land so a failure mid-seed still reaps them.
+        _seed_agents(deps, user_id, script.get("seed_agents", []), seeded_agent_ids)
+        for request in script.get("seed_attention_requests", []):
+            seeded_request_ids.extend(_seed_attention_requests(deps, user_id, [request]))
+        seed_documents = script.get("seed_documents", [])
+        for document in seed_documents:
+            seeded_document_ids.extend(_seed_documents(deps, user_id, [document]))
         print(
             f"    📱 SMS bench: user={user_id[:8]} phone={phone[:7]}**** "
             f"seeded_history={len(seed_messages)} seeded_agents={len(seeded_agent_ids)} "
+            f"seeded_documents={len(seeded_document_ids)} seeded_requests={len(seeded_request_ids)} "
             f"turns={len(script['turns'])}"
         )
 
@@ -781,7 +1000,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         failure_reason = f"SMS runner error: {exc}"
         evaluator_results = []
     finally:
-        _cleanup(deps, user_id, seeded_agent_ids, pre_existing_agents)
+        _cleanup(deps, user_id, seeded_agent_ids, pre_existing_agents, seeded_document_ids, seeded_request_ids)
 
     total_outbound = sum(len(turn.outbound) for turn in turns)
     return TaskResult(

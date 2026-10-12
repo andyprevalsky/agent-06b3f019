@@ -5,7 +5,12 @@
 
 import { MAX_RESULTS } from './config';
 import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from './errors';
-import { checkPatternSafety, extractInlineFlags, stripNamedGroups } from './regexSafety';
+import {
+  checkPatternSafety,
+  extractInlineFlags,
+  stripNamedGroups,
+  translateWordBoundaries,
+} from './regexSafety';
 import {
   parseBoundedNumber,
   parseDocumentFilters,
@@ -267,8 +272,12 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
 
   return {
     pattern,
-    // Strip named-capture syntax for Postgres ARE (we only boolean-match).
-    dbPattern: databaseRegexPattern(stripNamedGroups(normalizedPattern), multiline),
+    // JS → Postgres ARE: strip named captures (we only boolean-match) and map
+    // word boundaries, which ARE spells \y / \Y.
+    dbPattern: databaseRegexPattern(
+      translateWordBoundaries(stripNamedGroups(normalizedPattern)),
+      multiline
+    ),
     sources: resolvedSources,
     regex,
     caseInsensitive,

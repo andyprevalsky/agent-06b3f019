@@ -1,6 +1,6 @@
 import type { CompletionMessage } from '../rose';
 import { buildSmsContext } from './contextBuilder';
-import type { ToolInvocationContext } from './supervisorTools';
+import type { ToolCall, ToolInvocationContext, ToolResult } from './supervisorTools';
 
 export const MAX_TOOL_ROUNDS = 10;
 
@@ -47,6 +47,57 @@ export function buildToolFeedbackMessages(params: {
       tool_call_id: callId,
       content: body,
     },
+  ];
+}
+
+/** Provider call id for a supervisor tool call; content-path calls carry none. */
+export function supervisorToolCallId(round: number, index: number, toolCall: ToolCall): string {
+  return toolCall.id ?? `sms-${String(round)}-${String(index)}`;
+}
+
+export function formatToolResult(result: ToolResult): string {
+  return `[${result.tool}] ${result.success ? 'OK' : 'ERROR'}: ${result.result || result.error}`;
+}
+
+/**
+ * Replay a round in the native tool-calling shape (Rose.complete standard): the
+ * assistant turn carries the model's actual tool calls and each call gets its
+ * own tool result. Round-level outcomes that belong to no single call (queued
+ * writes committing, a failure notice sent to the user) and the loop guidance
+ * travel on the last result, so control text never becomes a user turn.
+ */
+export function buildNativeToolFeedbackMessages(params: {
+  round: number;
+  toolCalls: ToolCall[];
+  resultsByCall: ReadonlyMap<ToolCall, ToolResult[]>;
+  roundResults: ToolResult[];
+  guidance: string;
+}): CompletionMessage[] {
+  const ids = params.toolCalls.map((toolCall, index) =>
+    supervisorToolCallId(params.round, index, toolCall)
+  );
+  const results: CompletionMessage[] = params.toolCalls.map((toolCall, index) => {
+    const own = params.resultsByCall.get(toolCall) ?? [];
+    return {
+      role: 'tool',
+      tool_call_id: ids[index],
+      content: own.length > 0 ? own.map(formatToolResult).join('\n') : 'No result recorded.',
+    };
+  });
+  const last = results[results.length - 1];
+  const trailer = [...params.roundResults.map(formatToolResult), params.guidance].join('\n');
+  last.content = `${String(last.content)}\n\n${trailer}`;
+  return [
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: params.toolCalls.map((toolCall, index) => ({
+        id: ids[index],
+        type: 'function',
+        function: { name: toolCall.tool, arguments: JSON.stringify(toolCall.arguments ?? {}) },
+      })),
+    },
+    ...results,
   ];
 }
 
