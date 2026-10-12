@@ -1713,8 +1713,12 @@ start_cloudflare_quick_tunnel() {
         [ "$tunnel_attempt" -gt 1 ] && tunnel_log="$RUN_CONTEXT_DIR/cloudflared.attempt${tunnel_attempt}.log"
 
         echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT (attempt $tunnel_attempt/$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS)"
+        # Truncate here, not in the backgrounded redirect: that one runs in the
+        # forked child, so this shell's first read can still see a previous
+        # run's endpoint in a reused run context.
+        : > "$tunnel_log"
         HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
-            > "$tunnel_log" 2>&1 &
+            >> "$tunnel_log" 2>&1 &
         NGROK_PID=$!
         PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
 
@@ -1825,8 +1829,10 @@ start_ngrok_ephemeral_tunnel() {
         echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
     fi
 
+    # Truncate before the fork (see the cloudflared launch above).
+    : > "$ngrok_log"
     ngrok "${ngrok_args[@]}" \
-        --log stdout --log-format json --log-level info > "$ngrok_log" 2>&1 &
+        --log stdout --log-format json --log-level info >> "$ngrok_log" 2>&1 &
     NGROK_PID=$!
     PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
     PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
@@ -1957,12 +1963,14 @@ EOF
         ngrok_config_args=(--config "$ngrok_base_config" --config "$NGROK_CONFIG_FILE")
     fi
     echo "🌐 Starting public frontend tunnel: $PUBLIC_BASE_URL → localhost:$FRONTEND_PORT"
+    # Truncate before the fork (see the cloudflared launch above).
+    : > "$RUN_CONTEXT_DIR/ngrok.log"
     ngrok http "$FRONTEND_PORT" \
         "${ngrok_config_args[@]}" \
         "${NGROK_ENDPOINT_ARGS[@]}" \
         --log stdout \
         --log-format logfmt \
-        --log-level info > "$RUN_CONTEXT_DIR/ngrok.log" 2>&1 &
+        --log-level info >> "$RUN_CONTEXT_DIR/ngrok.log" 2>&1 &
     NGROK_PID=$!
     PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
     PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")

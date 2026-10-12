@@ -658,4 +658,20 @@ NGROK_ASSERT_PROXY=1 HTTP_PROXY=fixture-proxy-setting HTTPS_PROXY=fixture-proxy-
   || { cat "$TMP/ngrok-fallback.out" >&2; fail "case 10: ngrok proof changed or bypassed inherited proxy settings"; }
 echo "PASS: actual ngrok route proof preserves all inherited proxy aliases"
 
+# A redirect on a backgrounded command is applied in the forked child, so the
+# parent's first log read can see a previous run's endpoint from a reused run
+# context (case 10 failed this way under host load with "ngrok emitted an
+# endpoint that does not match"). Every tunnel launch whose log the parent
+# polls must truncate it before forking and append in the child.
+python3 - "$RUN_SH" <<'PY' || fail "a tunnel launch truncates its polled log only in the forked child"
+import re, sys
+source = open(sys.argv[1]).read()
+launches = re.findall(r'(?m)^\s*(?:HOME="[^"]+"\s+)?(?:ngrok|cloudflared)\b(?:[^\n]*\\\n)*[^\n]*?\s(>>?)\s*"([^"]+)"\s*2>&1\s*&\s*$', source)
+assert len(launches) >= 3, f"expected the cloudflared and both ngrok launches, found {launches}"
+for op, log in launches:
+    assert op == ">>", f"{log} is truncated by the backgrounded redirect"
+    assert f': > "{log}"' in source, f"{log} is not truncated before the fork"
+PY
+echo "PASS: tunnel logs are truncated before the fork, so a stale endpoint is never read"
+
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

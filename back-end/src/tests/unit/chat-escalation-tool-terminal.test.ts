@@ -18,10 +18,12 @@ const handler = readFileSync(
   'utf8'
 );
 
+// Both the initial route and the route after the web search escalate here.
 const escalationBranch = handler.slice(
-  handler.indexOf("if (decision.action === 'start_superintelligence')"),
-  handler.indexOf("if (decision.action === 'web_search')")
+  handler.indexOf('const escalate = async ('),
+  handler.indexOf("if (decision.action === 'start_superintelligence')")
 );
+assert.ok(escalationBranch.length > 0, 'escalation function must precede the initial-route branch');
 
 assert.ok(
   escalationBranch.includes("toolStatus: 'IN_PROGRESS'"),
