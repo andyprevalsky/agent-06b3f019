@@ -230,54 +230,6 @@ test('terminal cleanup never seals a Start-agent follow-up when no run id is kno
   await assertFollowUpUntouched(fixture, terminated, 'start-agent');
 });
 
-test('terminal cleanup between runs never resolves onto the next run (agent 572da2a5)', async () => {
-  // A direct start records no run id. The user then reopens the agent: the row
-  // is ACTIVE with no workflow, and its next run starts under the agent id.
-  // If Temporal already runs that chain before chat commits it, describing the
-  // workflow id returns the new run, which an unknown-run cleanup must not kill.
-  const session = await createAnonymousSession('followup-cleanup-between-runs');
-  const agentId = randomUUID();
-  trackedAgentIds.add(agentId);
-  await withTransientDbRetry('create-followup-cleanup-between-runs', async () => {
-    await prisma.agent.create({
-      data: {
-        id: agentId,
-        userId: session.user.id,
-        goal: 'find a manga by its plot',
-        status: 'ACTIVE',
-        model: 'rose-labs/rose-1-ultra',
-        busId: agentId,
-        temporalWorkflowId: agentId,
-        temporalFirstExecutionRunId: null,
-      },
-    });
-  });
-  await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
-  const cleared = await clearWorkflowForTerminalAgent(agentId, 'COMPLETED', agentId, null);
-  assert(cleared.count === 1, 'the follow-up message must reopen the completed agent');
-
-  const nextRunId = `next-run-${randomUUID()}`;
-  const terminated: string[] = [];
-  await cleanupTerminalAgentWorkflowZombies(temporalWithLiveFollowUp(nextRunId, terminated), {
-    agentIds: [agentId],
-    ignoreGrace: true,
-  });
-  assert(
-    !terminated.includes(nextRunId),
-    `cleanup must not terminate the next run starting under the agent id (${terminated.join(',')})`
-  );
-  const row = await prisma.agent.findUniqueOrThrow({
-    where: { id: agentId },
-    select: { status: true, temporalWorkflowId: true },
-  });
-  assert(
-    row.status === 'ACTIVE' && row.temporalWorkflowId === null,
-    `the reopened agent must stay ready for its next run, got ${row.status}/${row.temporalWorkflowId}`
-  );
-  const pending = await prisma.temporalWorkflowCleanup.count({ where: { agentId } });
-  assert(pending === 0, `the finished chain's obligation is discharged, ${pending} remain`);
-});
-
 test('a follow-up that also ended before the sweep gets its own exact cleanup', async () => {
   const fixture = await completeThenFollowUp(
     'followup-cleanup-rebind',

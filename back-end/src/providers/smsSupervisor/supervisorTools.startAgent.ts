@@ -5,7 +5,11 @@
 
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
-import { reconcileWorkflowStart, startAgentWorkflowExecution } from '../temporal';
+import {
+  reconcileWorkflowStart,
+  startAgentWorkflowExecution,
+  type TemporalWorkflowExecutionRef,
+} from '../temporal';
 import { recordAgentWorkflowExecution } from '../workflowGeneration';
 import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { getAgentUrl } from '../smsTemplates';
@@ -33,6 +37,40 @@ export interface StartNewAgentArgs {
 
 export interface WebSearchArgs {
   query: string;
+}
+
+/**
+ * The agent row disappeared (or another start won) between the workflow start
+ * and recording its identity. Close the started run here: no cleanup
+ * obligation exists for a row that never carried this Workflow ID.
+ */
+async function closeRunOfRemovedAgent(
+  startedAgentId: string,
+  displayId: string,
+  execution: TemporalWorkflowExecutionRef
+) {
+  log.warn('Started workflow was superseded before its run identity was recorded', {
+    phase: 'start',
+    agentId: startedAgentId,
+    workflowId: execution.workflowId,
+    firstExecutionRunId: execution.firstExecutionRunId,
+  });
+  try {
+    await terminateStaleTemporalWorkflow(execution, startedAgentId);
+  } catch (error) {
+    log.error('Failed to close the started workflow of a removed agent', {
+      phase: 'start',
+      agentId: startedAgentId,
+      workflowId: execution.workflowId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return {
+    tool: 'start_new_agent',
+    success: false,
+    result: '',
+    error: `Agent [${displayId.substring(0, 6)}] was removed before its workflow started`,
+  };
 }
 
 export async function commitStartNewAgent(
@@ -211,30 +249,7 @@ export async function commitStartNewAgent(
     // The row has no Workflow ID until this record, so a deletion in between
     // leaves no cleanup obligation; the started run must be closed here.
     if (!(await recordAgentWorkflowExecution(startedAgent.id, execution))) {
-      log.warn('Started workflow was superseded before its run identity was recorded', {
-        phase: 'start',
-        agentId: startedAgent.id,
-        workflowId: execution.workflowId,
-        firstExecutionRunId: execution.firstExecutionRunId,
-      });
-      try {
-        await terminateStaleTemporalWorkflow(execution, startedAgent.id);
-      } catch (error) {
-        // Never re-enter ambiguous-start adoption for a removed agent.
-        log.error('Failed to close the started workflow of a removed agent', {
-          phase: 'start',
-          agentId: startedAgent.id,
-          workflowId: execution.workflowId,
-          firstExecutionRunId: execution.firstExecutionRunId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      return {
-        tool: 'start_new_agent',
-        success: false,
-        result: '',
-        error: `Agent [${agent.id.substring(0, 6)}] was removed before its workflow started`,
-      };
+      return closeRunOfRemovedAgent(startedAgent.id, agent.id, execution);
     }
     const workflowId = execution.workflowId;
 
@@ -271,10 +286,13 @@ export async function commitStartNewAgent(
           data: { temporalWorkflowId: startedAgent.id },
         });
       } else {
-        await recordAgentWorkflowExecution(startedAgent.id, {
+        const adopted = {
           workflowId: startedAgent.id,
           firstExecutionRunId: reconciled.firstExecutionRunId,
-        });
+        };
+        if (!(await recordAgentWorkflowExecution(startedAgent.id, adopted))) {
+          return closeRunOfRemovedAgent(startedAgent.id, agent.id, adopted);
+        }
       }
       return {
         tool: 'start_new_agent',

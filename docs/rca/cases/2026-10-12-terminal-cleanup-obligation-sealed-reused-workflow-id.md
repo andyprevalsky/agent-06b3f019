@@ -228,16 +228,21 @@ Follow-up hardening (PR #1470, from the 572da2a5 RCA, reconciled onto this fix):
   plan/execute create, batch root, SMS `start_new_agent` and its
   ambiguous-start adoption (`reconcileWorkflowStart` now returns the chain's
   first run id), and the checkpoint scripts. The lossy `startAgentWorkflow`
-  helper is deleted, so new obligations almost never need `describe`.
-- `between-runs` scope: the agent is live with no installed workflow (reopened,
-  chat not yet escalated) and the obligation names the agent id. Its next run
-  reuses that id, so an unknown-run obligation never describes the id; Temporal
-  may already run the follow-up before chat commits it. An exact known chain is
-  still terminated exactly. The new blackbox case `terminal cleanup between runs
-  never resolves onto the next run (agent 572da2a5)` failed against this fix
-  (245/246, it terminated `next-run-…`) and passes with the scope (246/246).
+  helper is deleted, so new obligations almost never need `describe`. The
+  best-effort bind requires the row to still carry that workflow id, so a run
+  that finished and was reopened before the bind is never written back onto
+  the chat-mode row.
 - `force-clear-generation-queue` terminates the exact run it listed on the
   superseded queue, never the latest run of an id a follow-up may reuse.
+
+A `between-runs` scope was prototyped and dropped: it skipped `describe` for
+an unknown-run obligation while a reopened agent had no installed workflow,
+to avoid a follow-up that Temporal started milliseconds before chat committed
+it. Review showed the cost. For pre-existing rows with no run id, it would leave
+a chain still parked at COST_LIMIT_REACHED or OUT_OF_CREDITS running, and a
+later escalation would adopt that chain and hang. The fix above terminates it.
+Now that new starts record their run ids, that millisecond window only affects
+legacy rows, so this fix's `describe` behavior stays.
 
 Still open: a terminal generation that goes terminal while the earlier
 obligation is leased merges into the leased row (COALESCE keeps the older run),

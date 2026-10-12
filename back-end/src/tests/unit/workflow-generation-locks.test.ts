@@ -224,6 +224,20 @@ async function main(): Promise<void> {
     });
   });
 
+  await test('a late bind never writes a finished run onto a reopened row', async () => {
+    await withAgent(async (agentId) => {
+      // The run finished and a follow-up reopened the row before the create
+      // path's bind committed; the row is back in chat mode.
+      await bindStartedRunIdentity(agentId, {
+        workflowId: agentId,
+        firstExecutionRunId: `finished-run-${randomUUID()}`,
+      });
+      const reopened = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(reopened.temporalWorkflowId, null);
+      assert.strictEqual(reopened.temporalFirstExecutionRunId, null);
+    });
+  });
+
   await test('approval resolution follows deployment cleanup lock order', async () => {
     await withAgent(async (agentId) => {
       const requestId = randomUUID();

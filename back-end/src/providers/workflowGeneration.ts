@@ -71,7 +71,7 @@ export async function lockAgentWorkflowGenerationShared(
 export async function recordAgentWorkflowExecution(
   agentId: string,
   execution: TemporalWorkflowExecutionRef,
-  options: { requireActive?: boolean } = {}
+  options: { requireActive?: boolean; requireInstalledWorkflowId?: boolean } = {}
 ): Promise<boolean> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
@@ -88,6 +88,8 @@ export async function recordAgentWorkflowExecution(
       agent === null ||
       agent.deletedAt !== null ||
       (options.requireActive === true && agent.status !== 'ACTIVE') ||
+      (options.requireInstalledWorkflowId === true &&
+        agent.temporalWorkflowId !== execution.workflowId) ||
       (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== execution.workflowId) ||
       (agent.temporalFirstExecutionRunId !== null &&
         agent.temporalFirstExecutionRunId !== execution.firstExecutionRunId)
@@ -107,15 +109,20 @@ export async function recordAgentWorkflowExecution(
 
 /**
  * Bind an already-running execution to an agent row created with its Workflow
- * ID. The run is live, so a failed bind is logged, never surfaced as a failed
- * start; terminal cleanup treats an unbound run conservatively.
+ * ID. The row must still carry that ID: a run that finished and was reopened
+ * before the bind must not be written back onto the chat-mode row. The run is
+ * live, so a failed bind is logged, never surfaced as a failed start.
  */
 export async function bindStartedRunIdentity(
   agentId: string,
   execution: TemporalWorkflowExecutionRef
 ): Promise<void> {
   try {
-    if (!(await recordAgentWorkflowExecution(agentId, execution))) {
+    if (
+      !(await recordAgentWorkflowExecution(agentId, execution, {
+        requireInstalledWorkflowId: true,
+      }))
+    ) {
       log.warn('Started workflow was superseded before its run identity was recorded', {
         agent_id: agentId,
         workflow_id: execution.workflowId,

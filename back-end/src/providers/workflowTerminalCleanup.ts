@@ -73,13 +73,10 @@ export interface WorkflowTerminalCleanupResult {
 /**
  * `sealed`: the agent is still ended on this chain and was fenced off it.
  * `released`: the agent already moved to another workflow id.
- * `between-runs`: the agent is live with no installed workflow, so its next
- *   run reuses this workflow id (the agent id); an unknown chain under it may
- *   be that run mid-start and is never resolved.
  * `live`: the agent is live again under the same workflow id; see sealCleanup.
  * `rebound`: a newer chain under the same id ended too; see rebindCleanup.
  */
-type CleanupScope = 'sealed' | 'released' | 'between-runs' | 'live' | 'rebound';
+type CleanupScope = 'sealed' | 'released' | 'live' | 'rebound';
 
 const defaultDependencies: WorkflowTerminalCleanupDependencies = {
   resolveExecution: resolveTemporalWorkflowExecutionRef,
@@ -284,16 +281,10 @@ async function sealCleanup(obligation: CleanupObligation): Promise<CleanupScope>
       },
     });
     if (current === null) return 'released';
+    if (current.temporalWorkflowId !== obligation.workflowId) return 'released';
     const ended =
       current.deletedAt !== null ||
       (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(current.status);
-    if (current.temporalWorkflowId !== obligation.workflowId) {
-      const nextRunReusesId =
-        !ended &&
-        current.temporalWorkflowId === null &&
-        obligation.workflowId === obligation.agentId;
-      return nextRunReusesId ? 'between-runs' : 'released';
-    }
     if (!ended) {
       await dischargeCleanup(tx, obligation);
       return 'live';
@@ -359,7 +350,7 @@ async function cleanupOne(
           workflowId: obligation.workflowId,
           firstExecutionRunId: obligation.firstExecutionRunId,
         };
-  if (execution === null && scope !== 'between-runs') {
+  if (execution === null) {
     try {
       execution = await dependencies.resolveExecution(obligation.workflowId, deadlineAtMs);
     } catch (error) {
