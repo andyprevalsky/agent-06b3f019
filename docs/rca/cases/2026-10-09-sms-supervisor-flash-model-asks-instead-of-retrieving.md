@@ -138,26 +138,14 @@ Testing GPT-6 Sol (rose-1-ultra, served by Azure Foundry) on the matched benchma
    - Repro: `sms-supervisor.queued-agent.behavior.ts`.
 3. **Word boundaries in grep matched nothing.** Patterns are validated as JS RegExp but run as Postgres ARE, where `\b` is a backspace. So `\bpassport\b` silently matched nothing. `translateWordBoundaries` maps `\b` and `\B` to `\y` and `\Y` outside bracket expressions.
    - Repro: `testDialectNormalization` in the data-grep blackbox domain (0 matches before the fix).
-4. **The live tool schema differed from `TOOL_SCHEMAS`.** This is the contributing defect above, with three parts:
-   - The zod envelope that reached the model described only grep. Its other tools went out with empty descriptions.
-   - It omitted `agent_trajectories`.
-   - Its native projection wrapped every parameter in an `arguments` object.
-
-   `TOOL_SCHEMAS` is now derived from the zod schema, so they cannot drift. Extraction flattens the parameters, as Python's tool models do. The descriptions are grounded in the reference harnesses:
-   - Claude Code's Agent "Writing the prompt" section and Hermes `delegate_task`: the agent starts with zero context, so brief it with every known fact.
-   - Claude Code's SendUserMessage and OpenClaw's `message`: only this tool reaches the user.
-   - Hermes `session_search` and OpenClaw `memory_search`: search before asking the user.
-
-   Approved 2026-10-12.
+4. **The live tool schema differs from `TOOL_SCHEMAS`.** The zod envelope that reaches the model describes only grep, and omits `agent_trajectories`. The hand-written `TOOL_SCHEMAS` is read only by tests. Native projection no longer wraps every parameter in an `arguments` object (`transforms.ts` flattens it, as Python's tool models do). The user kept the tool text unchanged in this change, so the drift remains open.
 5. **Grep returned only the first match window.** Qwen read the Travel docs note with pattern `.` and got back only the synthetic `source: documents` header line. It replied "no numbers in it" and asked for them.
    - Fix: `formatSnippet` now follows ripgrep content mode, as Claude Code's Grep does: every match with `-A/-B/-C` context, merged windows separated by `--`, and at most 250 lines per record with an explicit omission note.
    - Repro: `testDocumentReturnsEveryMatchingLine` in the data-grep blackbox domain. It returned the header line only before the fix.
 6. **A regex guard rejected honest questions as claims.** The guard's confirmation-code alternative `confirmation\s*[#:]?\s*[a-z0-9-]{4,}` matched "…email for the confirmation⏎⏎Send…", because `\s` crosses line breaks and any four-letter word counted as a code. Eight questions were rejected, and the run ended in the fallback apology. The same loop recurred on the closed-restaurant benchmark (A/B run 2).
-   - Fix (user direction, CLAUDE.md rule 25b): remove the harness classifiers in `messageGrounding.ts` (order-progress, agent-start and agent-kill claims) and the purchase-intent completion block. The overlay's existing grounding rule covers claims. Per the user, the single added overlay line targets the incident itself: "If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it."
-   - The exact-duplicate send check stays, since it is equality, not classification.
-   - Replaced tests:
-     - `sms-message-grounding.test.ts` and the two guard-only Blue Bottle fixture cases are gone.
-     - `sms-prompt-layering` pins the escalate line and that sends are not rejected for their wording.
+   - Fix (user direction, CLAUDE.md rule 25b): delete the harness text classifiers. That covers the `messageGrounding.ts` claim regexes, the purchase-intent completion block, and the `reply_to_agent` word-overlap check (`smsIntendsAgentReply`). The exact-duplicate send check, argument validation, and the reject-needs-`attention_request_id` rule stay.
+   - The single added overlay line targets the incident: "If grep and web_search can't find information you need, escalate with start_new_agent instead of asking the user for it."
+   - Removed tests: `sms-message-grounding.test.ts`, the two guard-only Blue Bottle fixture cases, and "unrelated current SMS cannot reply to stale agent". `sms-prompt-layering` now pins the escalate line and that sends are not rejected for their wording.
    - Qwen started an agent for the closed restaurant in 0/2 runs with the guard and 0/2 with main's schema text, so that failure predates this change.
 
 Matched benchmark `sms-supervisor-fill-form-searches-then-delegates` (local), across the fix stages:
@@ -172,6 +160,10 @@ Hub runs for the final stage:
 - Sol: 826deccc, 29ff802c, 04e0e091
 
 The remaining Qwen failure asked for an email address that is already in the profile.
+
+Shipped configuration: native tools, main's tool text plus one grep line ("Search here before asking the user for a fact about themselves…"), the escalate overlay line, and no classifiers.
+- Qwen fill-form: 2/3 (Hub 94768ca2, 979711af pass; 6b309cb1 asked for the profile email).
+- Without the grep line: 0/2, and Qwen never searched.
 
 The production decision remains a model-selection question.
 
