@@ -44,6 +44,7 @@ from benchmarks.wmh_outcomes import (
     TIMED_DISTRIBUTION_PROTOCOL,
     parse_distribution,
 )
+from benchmarks.wmh_wire_stream import STREAM_GUIDE, StreamBook, completed_batch_ends, fold_stream
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
     ClaudeAuthContext,
@@ -126,12 +127,44 @@ _SYSTEM_EVIDENCE_MARKER = (
 )
 
 
+def _fold_stream_evidence(messages: list) -> list:
+    """Canonical layout for an append-only stream: its units and current call rejoin as one evidence message."""
+    content = messages[0]["content"]
+    units, final_index = [], None
+    for index in range(1, len(messages)):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            break
+        try:
+            text = _prompt_text(message.get("content"))
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            break
+        if isinstance(value, dict) and list(value) == ["current_call"]:
+            final_index = index
+            break
+        units.append(text)
+    if final_index is None:
+        return messages
+    try:
+        evidence = fold_stream(units, _prompt_text(messages[final_index]["content"]))
+    except (KeyError, TypeError, ValueError):
+        return messages
+    return [
+        {**messages[0], "content": content[: -len(STREAM_GUIDE)]},
+        {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))},
+        *messages[final_index + 1 :],
+    ]
+
+
 def _fold_system_evidence(messages: list) -> list:
     """Canonical layout: the system task part and its consecutive user fragments
     rejoin as one user evidence message."""
     if not messages or not isinstance(messages[0], dict) or messages[0].get("role") != "system":
         return messages
     content = messages[0].get("content")
+    if isinstance(content, str) and content.endswith(STREAM_GUIDE):
+        return _fold_stream_evidence(messages)
     if not isinstance(content, str) or _SYSTEM_EVIDENCE_MARKER not in content:
         return messages
     system, _, carried = content.partition(_SYSTEM_EVIDENCE_MARKER)
@@ -634,6 +667,9 @@ class RoseWMHProvider:
         self._native_retirements: dict[str, asyncio.Task] = {}
         self._native_closed_scopes: set[str] = set()
         self._maximum_native_scopes = 16384
+        # One append-only wire stream per world session and agent; WMH_WIRE_STREAM=0
+        # keeps the canonical layout for a diagnostic comparison.
+        self._streams = StreamBook() if os.environ.get("WMH_WIRE_STREAM", "1") != "0" else None
 
     # -- WMH Provider protocol -------------------------------------------------
 
@@ -734,6 +770,8 @@ class RoseWMHProvider:
             ):
                 raise ValueError("Native provider retirement capacity reached")
             self._native_closed_scopes.add(session_id)
+            if self._streams is not None:
+                self._streams.forget(f"wmh:session:{session_id}:")
 
             async def join():
                 tasks = [item[1] for item in self._native_operations.get(session_id, {}).values()]
@@ -791,7 +829,7 @@ class RoseWMHProvider:
             set_context,
         )
 
-        rose_messages = _to_rose_messages(system, messages)
+        rose_messages, cache_namespace = await self._wire_messages(system, messages, cache_namespace)
         demo_goal = _demo_cache_goal_from_messages(messages)
         cache_token = None
         existing_cache_context = current_context()
@@ -847,6 +885,54 @@ class RoseWMHProvider:
             usage=TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
             **extra,
         )
+
+    async def _wire_messages(
+        self, system: str, messages: List["Message"], cache_namespace: str | None
+    ) -> tuple[List[dict], str | None]:
+        """Rose messages for one prediction: the agent's append-only stream when possible.
+
+        Every stream rendering folds back to exactly the canonical request (checked
+        inside StreamBook); anything else keeps the canonical layout.
+        """
+        if (
+            self._streams is None
+            or self._protocol not in DISTRIBUTION_PROTOCOLS
+            or not (isinstance(cache_namespace, str) and cache_namespace.startswith("wmh:session:"))
+            or not messages
+            or messages[0].role != "user"
+            or not isinstance(messages[0].content, str)
+        ):
+            return _to_rose_messages(system, messages), cache_namespace
+        try:
+            evidence = json.loads(messages[0].content)
+        except ValueError:
+            return _to_rose_messages(system, messages), cache_namespace
+        calls = evidence.get("candidate_response", {}).get("tool_calls") if isinstance(evidence, dict) else None
+        first = calls[0] if isinstance(calls, list) and calls and isinstance(calls[0], dict) else {}
+        arguments = first.get("arguments") if isinstance(first.get("arguments"), dict) else {}
+        agent = str(arguments.get("agent_id") or "-")
+        agent_key = hashlib.sha256(agent.encode()).hexdigest()[:16]
+        before = len(self._streams.resets)
+        rendered = await self._streams.render(f"{cache_namespace}:{agent_key}", evidence)
+        if rendered is None:
+            return _to_rose_messages(system, messages), cache_namespace
+        units, final = rendered
+        logger.info(
+            "wmh.stream.rendered",
+            stream_units=len(units),
+            reset=self._streams.resets[-1] if len(self._streams.resets) > before else None,
+            fallbacks=len(self._streams.fallbacks),
+        )
+        wire = [{"role": "system", "content": system + STREAM_GUIDE}]
+        for index, unit in enumerate(units):
+            block = {"type": "text", "text": unit, "cache_breakpoint": True}
+            if index >= len(units) - 2:
+                block["cache_control"] = {"type": "ephemeral"}
+            wire.append({"role": "user", "content": [block]})
+        wire.append({"role": "user", "content": final})
+        wire.extend({"role": m.role, "content": m.content} for m in messages[1:])
+        # Route each agent's stream to its own cache shard.
+        return wire, f"{cache_namespace}:agent:{agent_key}"
 
     def _record_usage(self, usage: dict, actual_model: str) -> tuple[int, int]:
         token_used = usage.get("compute_token_used")
@@ -946,7 +1032,8 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                         }
                         history = fragments[1:-1]
                         for index, text in enumerate(history):
-                            block = {"type": "text", "text": text}
+                            # Each completed history batch is a GPT-5.6+ explicit cache breakpoint.
+                            block = {"type": "text", "text": text, "cache_breakpoint": True}
                             # Anthropic-style routes cache through the two latest batches.
                             if index >= len(history) - 2:
                                 block["cache_control"] = {"type": "ephemeral"}
@@ -964,29 +1051,7 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
     return rose
 
 
-def _completed_batch_ends(history: list) -> set[int]:
-    """Indices that end a complete assistant tool-call batch (every declared result present)."""
-    ends = set()
-    pending = None
-    for index, entry in enumerate(history):
-        if entry.get("role") == "assistant":
-            action = entry.get("assistant_action")
-            calls = action.get("tool_calls") if isinstance(action, dict) else None
-            ids = [call.get("call_id") for call in calls] if isinstance(calls, list) and all(isinstance(call, dict) for call in calls) else []
-            valid = ids and all(isinstance(value, str) and value for value in ids)
-            pending = set(ids) if valid and len(set(ids)) == len(ids) else None
-        elif entry.get("role") == "tool" and pending is not None:
-            result_id = entry.get("tool_call_id")
-            if not isinstance(result_id, str) or result_id not in pending:
-                pending = None
-            else:
-                pending.remove(result_id)
-                if not pending and (index + 1 == len(history) or history[index + 1].get("role") != "tool"):
-                    ends.add(index)
-                    pending = None
-        else:
-            pending = None
-    return ends
+_completed_batch_ends = completed_batch_ends
 
 
 def _native_prompt_fragments(native: dict) -> List[str]:

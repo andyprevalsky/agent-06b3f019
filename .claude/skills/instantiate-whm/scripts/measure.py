@@ -82,6 +82,11 @@ def measure(paths: list[Path]) -> dict:
         "provider_cache_write_tokens": write,
         "provider_output_tokens": output,
         "provider_token_hit_pct": round(100.0 * read / total, 6) if total else None,
+        # GPT-5.6+ (incl. gpt-6.1-sol) bills cache writes at 1.25x and reads at 0.05x.
+        "provider_plain_input_tokens": max(total - read - write, 0),
+        "provider_input_cost_vs_no_cache": (
+            round((0.05 * read + 1.25 * write + max(total - read - write, 0)) / total, 4) if total else None
+        ),
         "actual_models": sorted({r.get("actual_model", "") for r in metered}),
         "demo_hits": demo["replay"],
         "demo_misses": demo["miss"],

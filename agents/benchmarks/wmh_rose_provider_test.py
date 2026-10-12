@@ -570,6 +570,100 @@ def test_native_evidence_fold_stops_at_the_first_non_user_turn():
     assert json.loads(folded[1]["content"]) == request and folded[2]["content"] == "later turn"
 
 
+def _stream_request(history, receipts, *, examples=("t1",)):
+    request = _native_history_cache_request(history)
+    request["grounding_contexts"] = {"one": {"instruction": "formatting"}}
+    request["grounded_examples"] = [{"transition_id": tid, "context_ref": "one", "observation": f"observed {tid}"}
+                                    for tid in examples]
+    request["environment_state"] = {"receipts": receipts, "private_company": None}
+    request["candidate_response"] = {"tool_calls": [
+        {"call_id": "call-1", "name": "browser", "arguments": {"agent_id": "agent-a"}}
+    ]}
+    return request
+
+
+def _stream_provider(monkeypatch):
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
+
+    fake = _FakeRoseClient(_canned_response(content=json.dumps(outcome_fixture()), prompt=10, completion=5,
+                                            token_used=None))
+    provider = RoseWMHProvider(client=fake, protocol=DISTRIBUTION_PROTOCOL, usage=RoseUsageAccumulator())
+
+    async def no_auth():
+        return None, None
+
+    monkeypatch.setattr(provider, "_lease_auth", no_auth)
+    return provider, fake
+
+
+def test_native_stream_wire_appends_per_agent_and_folds_to_the_canonical_request(monkeypatch):
+    """GPT-6.1 caches only at breakpoints; each agent's evidence is an append-only stream (2026-10-12)."""
+    from benchmarks.wmh_execution_policy import execution_policy
+    from benchmarks.wmh_wire_stream import STREAM_GUIDE
+
+    provider, fake = _stream_provider(monkeypatch)
+    system = execution_policy("rose-outcome-distribution-v2").text
+    head = [{"role": "user", "content": "go"}]
+    steps = [
+        _stream_request(head, ["prior"]),
+        _stream_request(head + _native_history_batch("a"), ["prior", "a"], examples=("t1", "t2")),
+        _stream_request(head + _native_history_batch("a") + _native_history_batch("b"), ["prior", "a", "b"]),
+    ]
+
+    async def run():
+        for step in steps:
+            await provider._complete_async(system, [Message(role="user", content=json.dumps(step))],
+                                           max_tokens=16384, cache_namespace="wmh:session:s1")
+
+    asyncio.run(run())
+    wires = [call["messages"] for call in fake.calls]
+    for wire, step in zip(wires, steps):
+        assert wire[0]["content"] == system + STREAM_GUIDE
+        assert all(message["content"][0]["cache_breakpoint"] is True for message in wire[1:-1])
+        assert isinstance(wire[-1]["content"], str) and wire[-1]["content"].startswith('{"current_call":')
+        canonical = [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(step)}]
+        # Replay keys, outcome validation and call ids all read the canonical request.
+        assert wmh_rose_provider._wmh_cache_key_material({"messages": wire}) == (
+            wmh_rose_provider._wmh_cache_key_material({"messages": canonical})
+        )
+        assert wmh_rose_provider._native_environment_state(wire) == step["environment_state"]
+        assert wmh_rose_provider._native_call_ids(wire) == ("call-1",)
+    units = [[wmh_rose_provider._prompt_text(m["content"]) for m in wire[1:-1]] for wire in wires]
+    assert units[1][: len(units[0])] == units[0] and units[2][: len(units[1])] == units[1]
+    assert len(units[2]) > len(units[1]) > len(units[0])
+    namespaces = {call["cache_namespace"] for call in fake.calls}
+    assert len(namespaces) == 1 and next(iter(namespaces)).startswith("wmh:session:s1:agent:")
+    # Retiring the scope drops its streams.
+    asyncio.run(provider._retire_scope_on_loop("s1"))
+    assert not provider._streams._streams
+
+
+def test_unstreamable_native_evidence_keeps_the_canonical_layout_with_breakpoints(monkeypatch):
+    from benchmarks.wmh_wire_stream import STREAM_GUIDE
+
+    provider, fake = _stream_provider(monkeypatch)
+    request = _stream_request([{"role": "user", "content": "go"}] + _native_history_batch("a"), ["prior"])
+    request["grounded_examples"] = [{"context_ref": "one", "observation": "no transition id"}]
+    asyncio.run(provider._complete_async("fixed system", [Message(role="user", content=json.dumps(request))],
+                                         max_tokens=16384, cache_namespace="wmh:session:s1"))
+    wire = fake.calls[0]["messages"]
+    assert not wire[0]["content"].endswith(STREAM_GUIDE)
+    assert wire[0]["content"].startswith("fixed system" + wmh_rose_provider._SYSTEM_EVIDENCE_MARKER)
+    assert [m["content"][0].get("cache_breakpoint") for m in wire[1:-1]] == [True]
+    assert wmh_rose_provider._native_environment_state(wire) == request["environment_state"]
+
+
+def test_stream_fold_keeps_protocol_repair_turns_after_the_evidence(monkeypatch):
+    provider, _ = _stream_provider(monkeypatch)
+    request = _stream_request([{"role": "user", "content": "go"}], ["prior"])
+    messages = [Message(role="user", content=json.dumps(request)), Message(role="assistant", content="bad"),
+                Message(role="user", content="Return valid JSON")]
+    wire, _ = asyncio.run(provider._wire_messages("fixed system", messages, "wmh:session:s1"))
+    folded = wmh_rose_provider._fold_system_evidence(wire)
+    assert [m["role"] for m in folded] == ["system", "user", "assistant", "user"]
+    assert json.loads(folded[1]["content"]) == request and folded[3]["content"] == "Return valid JSON"
+
+
 def test_native_protocol_uses_same_rose_transport_and_retains_actual_model(monkeypatch):
     text = json.dumps(
         {

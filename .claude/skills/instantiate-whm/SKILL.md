@@ -111,21 +111,24 @@ one example per action. Keep the file and the run-state with the run's evidence.
   check OpenRouter credit (`GET https://openrouter.ai/api/v1/credits`); on
   2026-10-10 it ran out mid-run (HTTP 402 on every step). Local
   `agents/.env`/`back-end/.env` need the Render `AZURE_FOUNDRY_*` values.
-- **Prompt caching** (measured on Azure `gpt-6.1-sol`, 2026-10-12). Azure reuses
-  only an exactly repeated leading instructions/developer block, or an
-  identical whole request. User-role content is never prefix-cached, and a
-  block that grew since the last request caches nothing, not even its
-  unchanged start. A request that chains a stored response
-  (`previous_response_id`, `store: true`) reuses the whole chain, user content
-  included. OpenAI via OpenRouter reuses ordinary prefixes. WMH therefore
-  carries the session-constant task fields (seed state, examples, network) at
-  the end of the system message. Each completed history batch follows as its
-  own user message, and one final message holds everything that changes per
-  call (the candidate's tools, retrieval, world state, candidate). Replays of
-  run 5 measured 7.8% on Azure (the system block) against about 37% reusable
-  under a prefix cache. Rates are `llm.cache` rows for the WMH call site,
-  denominator `cache_total_input` (`scripts/measure.py`). The DEMO response
-  cache is fresh per run (expect 0 hits).
+- **Prompt caching** (GPT-5.6+ incl. `gpt-6.1-sol`, measured 2026-10-12). The
+  cache is read and written only at **breakpoints**. In the default implicit mode
+  the only one is the end of the latest message, so a growing history never
+  matches and almost the whole prompt is billed as a cache write (1.25×; reads
+  are 0.05×). Run 7 wrote 4.40M of 4.64M input tokens: 1.19× the cost of no
+  caching. The WMH pool therefore sends explicit breakpoints
+  (`PoolSpec.explicit_cache_breakpoints`, explicit mode) and each agent's
+  evidence goes out as an **append-only stream** (`benchmarks/wmh_wire_stream.py`):
+  task, world baseline, completed history batches, world changes as JSON Patch
+  since the agent's last call, and reference examples sent once by id, each a
+  breakpoint. A final per-call message carries the example ids, tools and
+  candidate. Every rendering must fold back to the exact canonical evidence or
+  the call keeps the canonical layout, so no evidence is lost. Replay keys,
+  outcome checks and records keep using the canonical evidence. A long-lived
+  agent reaches 90–98% cached (live replay of run 8: 60% overall, 0.52× cost).
+  `WMH_WIRE_STREAM=0` restores the canonical layout for a diagnostic. Report
+  reads, writes and cost per call (`scripts/measure.py`), not just the hit rate.
+  Compare layouts on recorded requests with `scripts/layout-ab.py`.
 - **Devbox memory.** A cold native load peaks near 40 GB and takes 13–25 min.
   Run it in its own systemd scope (`MemoryHigh` ≤ 11G, swap ≥ 40 GB) so the
   devbox OOM watcher spares it; keep `MemAvailable` above ~1.1 GB. Serve the WMH

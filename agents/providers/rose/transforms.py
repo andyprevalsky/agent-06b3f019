@@ -1053,6 +1053,11 @@ def transform_messages_for_openai(
         # Cache markers mutate nested content blocks, so isolate the outbound
         # transform from the caller's append-only history.
         rewritten = copy.deepcopy(message)
+        if isinstance(rewritten.get("content"), list):
+            # Rose's GPT-5.6+ breakpoint marker is Foundry-only wire metadata.
+            for block in rewritten["content"]:
+                if isinstance(block, dict):
+                    block.pop("cache_breakpoint", None)
         if rewritten.get("role") == "assistant":
             tool_calls = rewritten.get("tool_calls")
             if isinstance(tool_calls, list):

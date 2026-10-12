@@ -110,6 +110,7 @@ async def foundry_complete(
                 provider_fast_mode=provider_fast_mode,
                 cache_namespace=cache_namespace,
                 request_id=request_id,
+                cache_breakpoints=pool_spec.explicit_cache_breakpoints,
             )
             yielded_visible = False
             try:

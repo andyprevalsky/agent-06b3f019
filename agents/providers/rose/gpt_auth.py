@@ -99,7 +99,7 @@ def _text_part_type(role: str) -> str:
     return "output_text" if role == "assistant" else "input_text"
 
 
-def _content_to_responses_parts(content: Any, *, role: str) -> Any:
+def _content_to_responses_parts(content: Any, *, role: str, cache_breakpoints: bool = False) -> Any:
     if isinstance(content, str):
         return [{"type": _text_part_type(role), "text": content}]
     if not isinstance(content, list):
@@ -115,7 +115,10 @@ def _content_to_responses_parts(content: Any, *, role: str) -> Any:
         if block_type in ("text", "input_text", "output_text") or isinstance(block.get("text"), str):
             text = block.get("text") or ""
             if text:
-                parts.append({"type": _text_part_type(role), "text": text})
+                part = {"type": _text_part_type(role), "text": text}
+                if cache_breakpoints and role == "user" and block.get("cache_breakpoint") is True:
+                    part["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                parts.append(part)
             continue
 
         if block_type in ("image_url", "input_image") and role == "user":
@@ -232,7 +235,7 @@ def _normalize_codex_reasoning_item(item: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_responses_input(messages: List[Dict[str, Any]], *, cache_breakpoints: bool = False) -> List[Dict[str, Any]]:
     out: list[dict[str, Any]] = []
     emitted_call_ids: set[str] = set()
     for msg_index, msg in enumerate(messages):
@@ -300,7 +303,9 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
             continue
 
         response_role = "assistant" if role == "assistant" else "user"
-        content = _content_to_responses_parts(msg.get("content", ""), role=response_role)
+        content = _content_to_responses_parts(
+            msg.get("content", ""), role=response_role, cache_breakpoints=cache_breakpoints
+        )
         if not content:
             continue
         out.append({"role": response_role, "content": content})
@@ -424,6 +429,7 @@ def build_codex_responses_body(
     provider_fast_mode: bool = True,
     cache_namespace: Optional[str] = None,
     request_id: str,
+    cache_breakpoints: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the Codex Responses request body.
 
@@ -434,7 +440,7 @@ def build_codex_responses_body(
     static_cache_scope = _build_static_cache_scope(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     body: Dict[str, Any] = {
         "model": model_override or pool_spec.gpt_auth_model,
-        "input": _build_responses_input(messages),
+        "input": _build_responses_input(messages, cache_breakpoints=cache_breakpoints),
         "stream": True,
         "store": False,
         "parallel_tool_calls": True,
@@ -452,6 +458,9 @@ def build_codex_responses_body(
         },
     }
     body["instructions"] = instructions
+    if cache_breakpoints:
+        # Only marked prefixes are read and written; the per-call tail is not.
+        body["prompt_cache_options"] = {"mode": "explicit"}
     responses_tools = _responses_tools(tools)
     # Responses input may retain historical function_call/output items without
     # re-declaring those functions. Definitions in body.tools are selectable,

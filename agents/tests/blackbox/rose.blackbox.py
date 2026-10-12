@@ -6115,6 +6115,88 @@ async def test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter():
     assert seen == [("gpt-6.1-sol", "xhigh"), ("gpt-6-sol", "xhigh")], seen
 
 
+async def test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_writes():
+    """GPT-6.1 caches only at breakpoints (measured on Azure 2026-10-12).
+
+    Without them every call wrote ~95% of its input at 1.25x and read back only the
+    instructions. The WMH pool marks each append-only stream unit as an explicit
+    breakpoint; other pools are unchanged. Rose's internal marker never reaches a
+    provider, and a reported zero cache write is not re-derived as a full write.
+    """
+    import providers.rose.foundry as foundry
+
+    def sse(details):
+        usage = {"input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001}
+        if details is not None:
+            usage["input_tokens_details"] = details
+        return (
+            b'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
+            + b'data: {"type":"response.completed","response":{"usage":' + json.dumps(usage).encode() + b"}}\n\n"
+            + b"data: [DONE]\n\n"
+        )
+
+    bodies, replies = [], []
+
+    def handler(req):
+        body = json.loads(req.content)
+        bodies.append((str(req.url.host), body))
+        if "a-4989-resource.openai.azure.com" in str(req.url):
+            return httpx.Response(200, content=replies.pop(0), headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": [{"type": "text", "text": "unit one", "cache_breakpoint": True}]},
+        {"role": "user", "content": [{"type": "text", "text": "unit two", "cache_breakpoint": True,
+                                      "cache_control": {"type": "ephemeral"}}]},
+        {"role": "user", "content": "this call only"},
+    ]
+    set_mock_handler(handler)
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    usages = []
+    with patch.object(foundry, "_auth_cooldown_until", 0.0), patch.object(foundry, "_cooldown_until", {}), \
+            patch.dict(os.environ, env):
+        for pool, details in (
+            ("rose-wmh-gpt61", {"cached_tokens": 900, "cache_write_tokens": 0}),
+            ("rose-wmh-gpt61", {"cached_tokens": 0}),
+            ("rose-1-ultra", {"cached_tokens": 0}),
+        ):
+            replies.append(sse(details))
+            chunks = await _drain(RoseClient(openrouter_key="ork-x").complete(
+                pool=pool, messages=messages, _exclude_anthropic_family=True, call_site="test-foundry-breakpoints",
+            ))
+            usages.append(next(c.data for c in chunks if c.kind == "usage"))
+
+    wmh, _, ultra = (body for _, body in bodies)
+    assert wmh["prompt_cache_options"] == {"mode": "explicit"}
+    marked = [part.get("prompt_cache_breakpoint") for item in wmh["input"] for part in item["content"]]
+    assert marked == [{"mode": "explicit"}, {"mode": "explicit"}, None]
+    assert "prompt_cache_options" not in ultra
+    assert not any("prompt_cache_breakpoint" in part for item in ultra["input"] for part in item["content"])
+    for _, body in bodies:
+        assert '"cache_breakpoint"' not in json.dumps(body) and '"cache_control"' not in json.dumps(body["input"])
+    # Reported zero writes stay zero; an absent field keeps the inclusive fallback.
+    assert usages[0]["cache_creation_input_tokens"] == 0 and usages[0]["cache_read_input_tokens"] == 900
+    assert usages[1]["cache_creation_input_tokens"] == 1000
+
+
+def test_openrouter_transform_strips_rose_cache_breakpoint_marker():
+    from providers.rose.transforms import transform_messages_for_openai
+
+    out = transform_messages_for_openai([
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": [{"type": "text", "text": "unit", "cache_breakpoint": True,
+                                      "cache_control": {"type": "ephemeral"}}]},
+    ])
+    assert out[1]["content"] == [{"type": "text", "text": "unit", "cache_control": {"type": "ephemeral"}}]
+
+
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
 
@@ -8470,6 +8552,11 @@ async def run_all_tests():
         "wmh_pool_uses_azure_gpt_6_1_deployment_before_openrouter",
         test_wmh_pool_uses_its_azure_gpt_6_1_deployment_before_openrouter,
     )
+    await r.record_async(
+        "wmh_pool_sends_explicit_cache_breakpoints_and_true_cache_writes",
+        test_wmh_pool_sends_explicit_cache_breakpoints_and_reports_true_cache_writes,
+    )
+    r.record("openrouter_transform_strips_rose_cache_breakpoint", test_openrouter_transform_strips_rose_cache_breakpoint_marker)
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,
