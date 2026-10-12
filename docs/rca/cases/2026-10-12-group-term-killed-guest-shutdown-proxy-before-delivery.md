@@ -140,15 +140,21 @@ The runner's `fleet-child.log` showed `❌ guest cleanup request failed (HTTP
 only the native-stop backstop (leader-first delivery reverted) still logged
 `guest cleanup request failed (HTTP 000)` and failed the delivery assertion,
 proving the group signal is the first-bad boundary. The supervisor unit test
-`test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup` exits 97
-(`proxy-killed-before-runner-cleanup`) on `origin/main`.
+(now `test_guest_shutdown_child_confirmation_supervisor_forwards_termination_and_awaits_cleanup`,
+first committed as `test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup`)
+exits 97 (`proxy-killed-before-runner-cleanup`) on `origin/main`.
 
 ## Solution
 
-The fix landed in two rounds. An independent adversarial review of the first
+The fix landed in three rounds. An independent adversarial review of the first
 round (APPROVE-WITH-CHANGES) found that its native-stop trigger mistook the
 controller's own failed request for "never delivered", that INT never reached
-the runner, and that the stop phase was unbounded. The final design is below.
+the runner, and that the stop phase was unbounded. A second independent review
+(APPROVE-WITH-CHANGES) found that a delivered guest with a retired proxy was
+polled on a dead port for the full 30 s, that HTTP 409 was accepted as
+delivery, that a pending TERM could lose the receipt, that the tree-teardown
+helper could `wait` on a job Bash had lost, and that the group-signal harness
+leaked a hung session-leader controller. The final design is below.
 
 ### Deliver the stop while its transport is alive
 
@@ -176,8 +182,8 @@ the runner, and that the stop phase was unbounded. The final design is below.
 - `run-bench-cloud`'s poll sleep is interruptible (`sleep & wait`), so the
   runner's EXIT trap starts at once instead of after a deferred 15–20 s
   foreground sleep; `stop_on_exit` reaps that sleep.
-- `stop_on_exit` records a second HUP/INT/TERM instead of running the `exit`
-  trap inside itself. Previously the supervisor's residual group TERM, or the
+- `stop_on_exit` absorbs a second HUP/INT/TERM (a `:` trap) instead of running
+  the `exit` trap inside itself. Previously the supervisor's residual group TERM, or the
   controller's process-tree teardown, aborted the EXIT cleanup midway and
   skipped proxy retirement, port-lease release, viewer teardown and the exit
   status line. Child commands keep default dispositions, and every caller still
@@ -185,31 +191,52 @@ the runner, and that the stop phase was unbounded. The final design is below.
 
 ### Natively stop only a guest that no party delivered a stop to
 
-- When the guest accepts the runner's `/shutdown` (HTTP 202, 204 or 409), the
+- When the guest accepts the runner's `/shutdown` (HTTP 202 or 204 only), the
   runner publishes `guest-shutdown.requested` in its bench output before it
   waits for the cleanup acknowledgement, on both the EXIT-trap path and the
   execution-window (`TIMED_OUT`) path. The receipt binds the fleet run ID, the
   runner token (`<owner>-<index>`), the Machine ID, the bench and the HTTP
   status. It is written to an `O_EXCL` temporary file with mode 0600,
   fsynced and hard-linked into place, so it never replaces an existing
-  receipt; the directory is fsynced.
+  receipt; the directory is fsynced. HTTP 409 is never delivery: the
+  unchanged guest status server answers it when the run token or credential
+  is unconfigured (nothing recorded) or when the driver PID does not own the
+  run (the request is written but the executing benchmark is not signalled
+  and runs to its backstop). The runner still keeps polling after a 409, as
+  before, but records no receipt.
+- `confirm_guest_shutdown` holds HUP/INT/TERM from the POST through receipt
+  publication and replays a held signal immediately afterwards. On the
+  execution-window path the runner sets `GUEST_SHUTDOWN_RESULT=1` before the
+  call, so its EXIT trap never re-posts; a TERM pending while curl waited used
+  to run `exit 143` after the guest's 202 but before the receipt existed.
 - `cloudbench_confirm_guest_shutdowns --native-stop-undelivered` (controller
   EXIT cleanup only) classifies a failed controller request (no status proxy,
   transport failure or a non-accepting status) with that receipt:
   - **exact match** (regular file, bounded size, same run, owner token prefix,
-    Machine, bench, and an accepted status): the stop was delivered and the
-    guest may still be draining. It stays on the existing `/shutdown-health`
-    poll and, unacknowledged, on the existing retention path
-    (`KEEP_CLONES`, `guest-cleanup-unconfirmed`, retained-started guest). It is
-    never stopped natively. This is the old, recoverable behaviour for a
-    delivered guest.
+    Machine, bench, and HTTP 202/204): the stop was delivered and the guest may
+    still be draining. It is never stopped natively. It stays on the existing
+    `/shutdown-health` poll only while its proxy still accepts connections; a
+    missing port or a refused loopback connection (curl exit 7) means the
+    runner retired the proxy after its own window, so nothing can acknowledge
+    the guest any more and it goes straight to the existing retention path
+    (`KEEP_CLONES`, `guest-cleanup-unconfirmed`, retained-started guest). The
+    first round polled that dead port until the 30 s deadline: about 39 s of
+    controller cleanup after the runner exited against main's 5.7 s, and a
+    campaign's 30 s SIGKILL then cut off the retention writes.
   - **absent**: nothing was delivered (the original incident). The guest is
     natively stopped.
-  - **foreign, symlinked, oversized, malformed or non-accepted**: logged as
-    unusable and treated as undelivered, so the guest is natively stopped. The
-    fail-safe direction is to stop a guest that may be executing; its volume
-    and owner remain for the forensic original-volume archive.
-  Recovery callers do not pass the flag and keep their previous contract.
+  - **foreign, symlinked, oversized, malformed or non-accepted (including
+    409)**: logged as unusable and treated as undelivered, so the guest is
+    natively stopped. The fail-safe direction is to stop a guest that may be
+    executing; its volume and owner remain for the forensic original-volume
+    archive.
+  The controller's own POST follows the same rule: a 409 is undelivered under
+  `--native-stop-undelivered`. Recovery callers do not pass the flag and keep
+  their previous contract, including polling after a 409.
+- Acknowledgement polls send `X-Cloudbench-Run-Token` (`<owner>-<index>`) and
+  `X-Cloudbench-Machine-Id`, which the guest status server already verifies.
+  Siblings share the barrier credential, so a reused local port can no longer
+  credit another guest's 204.
 - The native stop runs concurrently with the acknowledgement polling, under one
   deadline of `min(CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS (20), remaining
   cleanup deadline)`, so neither phase starves the other. Every Machines API
@@ -219,8 +246,10 @@ the runner, and that the stop phase was unbounded. The final design is below.
   `registry_machine_details` and `machine_volume_id` gained an optional timeout
   argument for this.
   - Phase 1 proves exact ownership from this controller's immutable audit (as
-    before) and the live name and single mounted volume, then sends the first
-    stop request. It runs through a sliding window of
+    before) and the live name and single mounted volume, re-reads the delivery
+    receipt (the runner may have published it after the controller's own
+    request failed while its POST was still in flight; such a guest is not
+    stopped), then sends the first stop request. It runs through a sliding window of
     `CLOUDBENCH_GUEST_NATIVE_STOP_CONCURRENCY` (16), so every stop request is
     sent before any verification polling and no batch waits for its slowest
     member.
@@ -228,7 +257,8 @@ the runner, and that the stop phase was unbounded. The final design is below.
     deadline. While it reads anything but `stopped` or `stopping` (including a
     429/5xx-rejected request that left it `started`), the stop is re-issued
     with 1 s and 2 s backoff, at most `CLOUDBENCH_GUEST_NATIVE_STOP_REQUEST_ATTEMPTS`
-    (3) requests in total.
+    (3) requests in total. Only requests actually sent are counted; a spent
+    budget sends nothing and is not reported as a stop request.
   - Only `stopped` verifies. `created`, `suspended` or any other state is
     unresolved, matching recovery's started-or-stopped contract: the receipt
     records `verified: false`, the call fails and the log names the exact
@@ -243,7 +273,7 @@ the runner, and that the stop phase was unbounded. The final design is below.
   returns its status explicitly; the unit regression runs the native stop from
   an `exit 143` EXIT trap to keep that boundary covered.
 
-### Auxiliary-loop teardown race exposed by the group-signal regression
+### Tree teardown must never wait on a job Bash has lost
 
 The group-signal cases also intermittently logged `Owned process root <pid>
 was absent from the teardown snapshot` and `an owned aggregator/snapshot
@@ -253,17 +283,32 @@ aggregator and inventory snapshot loop are background jobs that die from the
 same group signal. Inside the controller's EXIT trap, Bash 5.2.21 can leave
 such a job marked Running: `wait` returns at once (status -1) and `jobs -pr`
 keeps listing a PID that `/proc` no longer has. `cloudbench_terminate_tree_and_wait`
-then treats it as an unaccounted live job and fails closed.
+then treated it as an unaccounted live job and failed closed. A standalone
+reproduction of that trap sequence against the real helper failed 13 of 160
+iterations.
 
-A standalone reproduction of that trap sequence against the real helper failed
-13 of 160 iterations. With the fix it failed 0 of 60. Controller cleanup now
-passes the helper only auxiliary roots that still exist (`kill -0`). A
-kernel-absent root is terminal, exactly like one that exits between the job
-sample and the process snapshot, which the helper already accepts. The guest
-helper in `scripts/lib/cloudbench-env.sh` is unchanged.
+The helper also called `wait` on any listed root missing from its process
+snapshot. For a root that is still alive, that `wait` blocks until the root
+exits. Under INT the aggregator ignores the signal and keeps running, which
+matches the hung controller the second review found: a group-INT case left a
+session-leader controller and its aggregator running for about five hours.
 
-Each group-signal case now asserts its own controller log carries neither
-message, so a focused run catches the race too.
+The shared helper now classifies a root missing from the snapshot from the
+kernel and never waits without positive evidence that the wait returns at
+once. A root `/proc` no longer has is terminal, like one that exits between
+the job sample and the snapshot (already accepted). A zombie is reaped at
+once. A live root the snapshot cannot account for fails closed immediately,
+without a signal or a `wait`. The round-two controller-only `kill -0`
+pre-filter was removed in favour of this single mechanism. The helper lives in
+`scripts/lib/cloudbench-env.sh`, which guests source, but no guest script calls
+it; only the host-side controller, runner and inventory loop do.
+
+Each group-signal case asserts that its own controller log carries neither
+teardown message and that no fixture process from it survives. The harness
+records every controller it starts in its own session (exact PID and birth)
+and reaps it, and every fixture process naming its private TMP_ROOT, on any
+exit, including a failed or timed-out case. A self-test proves the reaper
+finds and stops a leaked, TERM-ignoring session leader.
 
 ### Scaling
 
@@ -295,8 +340,11 @@ retained and the Machine named.
   30 s SIGKILL ceiling for the controller's own cleanup, so it was not made
   part of this fix.
 - **Receipt window.** A runner killed with SIGKILL after the guest's 202 but
-  before it publishes the receipt leaves no receipt, and controller cleanup
-  then stops that draining guest natively; it needs the forensic archive.
+  before it publishes the receipt leaves no receipt. A catchable signal is
+  held across that window, and phase 1 re-reads the receipt just before the
+  first stop, but a SIGKILL or a failed publication (for example ENOSPC) still
+  leads to a native stop of that draining guest, which then needs the forensic
+  archive.
 - **Delivered guest that never drains.** It is no longer stopped natively; it
   is bounded by the guest's own drain controls and stays retained and owned.
 - **Not implemented.** Reconnecting a fresh exact-Machine status proxy and
@@ -304,14 +352,21 @@ retained and the Machine named.
   suggestion) is not done; the native stop remains the first response to an
   undelivered guest.
 - **Controller cleanup ceiling.** The acknowledgement poll keeps its existing
-  30 s deadline, so a never-acknowledging delivered guest can still push
-  controller cleanup past the campaign's 30 s SIGKILL; the native stop is
-  started before that poll and fits inside it.
+  30 s deadline for a guest whose proxy is still alive but never answers 204,
+  so such a guest can still push controller cleanup past the campaign's 30 s
+  SIGKILL. A delivered guest with a retired proxy no longer does. The native
+  stop is started before that poll and fits inside it.
 
 ### Regression coverage
 
-All of it runs in deploy Step 4cb and the `scripts/test.sh` cloudbench lane;
-the unit tests also run in the registered `benchmark-live-results` gate.
+- **End-to-end scenario.** It runs in `cloudbench-multi-workstream.test.sh`,
+  which is both a documented Step 4cb Linux-host command and one of
+  `scripts/run-cloudbench-controller-gate`'s `DEFAULT_SUITES`.
+- **Unit tests.** They are selected by the Step 4cb dependency-sync
+  `pytest -k`, a documented Linux-host command that the Fly gate's
+  `DEFAULT_SUITES` do not run. They are also selected by the
+  `benchmark-live-results` gate in `scripts/run-deploy-structural-gates.py`,
+  which is the registry path that always runs them.
 
 - Scenario 2-group-term in `scripts/tests/cloudbench-multi-workstream.test.sh`
   (`CLOUDBENCH_TEST_GROUP_TERM_ONLY=1`; `CLOUDBENCH_TEST_GROUP_TERM_CASES`
@@ -326,22 +381,27 @@ the unit tests also run in the registered `benchmark-live-results` gate.
   - a slow drain: the execution window expires, the runner delivers (202) and
     retires its proxy, and the controller group is cancelled while the guest
     drains for 90 s. There must be no native stop, the drain must complete,
-    and the owner and quarantine must be retained.
-  Every case requires the Machine and volume to be present and no provider
-  deletion.
+    the owner and quarantine must be retained, and controller cleanup must end
+    within 20 s of the runner's exit (main about 6 s; the second round 32–39 s).
+  Every case requires the Machine and volume to be present, no provider
+  deletion, no teardown-failure message and no surviving fixture process.
 - `agents/benchmarks/cloudbench_dependency_sync_test.py`, in the
   `guest_shutdown_child_confirmation` family:
   - the supervisor forwards TERM, INT and HUP as TERM, the proxy outlives the
     runner's trap, and the original status is reported;
   - bounded escalation;
-  - the runner's exact receipt (and none after a rejection or over a foreign
-    receipt);
-  - controller classification across absent, delivered and unusable
-    receipts;
+  - the runner's exact receipt for 202/204, none after a 503, a 409 or over
+    a foreign receipt, and one that survives a TERM pending during the POST;
+  - controller classification across absent, delivered, 409 and unusable
+    receipts and a controller-side 409, with no polling of a retired proxy
+    and exact-identity headers on acknowledgement polls;
   - the native stop across `started`, a throttled first request,
     always-failing stops, `created`, `suspended`, a mismatched volume, a
-    foreign name and a hung status read, all from an EXIT trap;
-  - the runner's EXIT cleanup completing despite a second TERM.
+    foreign name, a hung status read and a receipt that appears late, all from
+    an EXIT trap, counting only requests actually sent;
+  - the runner's EXIT cleanup completing despite a second TERM;
+  - tree teardown that neither fails on a kernel-absent lost job nor waits on
+    a live root missing from its snapshot.
 
 Fail-before evidence on `a7a35124f`:
 
@@ -365,6 +425,21 @@ Fail-before evidence on `a7a35124f`:
 With the receipt fix but the INT forwarding reverted, the INT scenario fails
 with "the runner did not deliver the guest stop itself after the group INT".
 
+Fail-before evidence for the third round, on `fa0ae4ef5`:
+
+- **Retired-proxy slow drain:** "controller cleanup took 32.1s after the runner
+  exited (limit 20s)".
+- **Delivered guest with a retired proxy:** the unit case polled the dead port
+  until the deadline.
+- **HTTP 409:** a 409 POST published a receipt; 409 receipts and controller-side
+  409s were classified as delivered.
+- **TERM during the POST:** exit 143 with no receipt.
+- **Late receipt:** the guest was natively stopped.
+- **Spent budget:** reported as a sent request (status 1, not 2).
+- **Tree teardown:** a lost job made it return 1 ("absent from the teardown
+  snapshot"), and a live root missing from the snapshot blocked it until the
+  test timed out.
+
 ## Human feedback
 
 None recorded from a human directly. The original request required keeping
@@ -384,6 +459,17 @@ The follow-up request that relayed the independent review required:
   throttled stops;
 - never reporting `created` or `suspended` as stopped;
 - proving fail-before and pass-after for each.
+
+The third request relayed the second independent review and required:
+
+- leaving a delivered guest with a refused connection to retention at once,
+  with a timing assertion near main's;
+- counting only HTTP 202/204 as delivered;
+- reaping every controller the group-signal test starts in its own session,
+  and checking that no fixture process survives;
+- keeping the receipt when a TERM arrives during the accepted POST;
+- bounded, identity-checked waits in the shared teardown helper;
+- the receipt, test-name, coverage-claim and identity-header nits.
 
 ## Reusable lesson
 
