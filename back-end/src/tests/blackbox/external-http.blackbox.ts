@@ -1,11 +1,20 @@
 #!/usr/bin/env tsx
 /**
  * Black-box tests for /api/external-http
+ *
+ * The GET and POST round-trips run against seeded outbound replay fixtures,
+ * so the route (validation, public-address checks, request serialization and
+ * response decoding) is tested without depending on httpbin.org's uptime: a
+ * 2026-10-12 httpbin outage returned 503 on every attempt and failed deploy
+ * coverage. The POST case asserts on the captured outbound request itself.
  */
 
 import { config } from 'dotenv';
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+
+import { outboundReplayCacheKey } from '../../providers/fetchCapture';
 
 config();
 
@@ -13,6 +22,7 @@ const BASE_URL = process.env.TEST_BASE_URL ?? 'http://127.0.0.1:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 const USER_ID = process.env.BLACKBOX_TEST_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const GITHUB_TOKEN = process.env.GITHUB_DISPATCH_TOKEN || process.env.GITHUB_TOKEN || '';
+const CAPTURE_TOKEN = `external-http-${randomUUID()}`;
 
 const ResponseSchema = z.object({
   ok: z.boolean(),
@@ -34,6 +44,7 @@ async function requestJson(path: string, body: unknown, expectedStatus = 200) {
       'Content-Type': 'application/json',
       'X-API-Key': API_KEY,
       'X-User-Id': USER_ID,
+      'X-Capture-Token': CAPTURE_TOKEN,
     },
     body: JSON.stringify(body),
   });
@@ -63,7 +74,38 @@ async function testInvalidUrlRejected() {
   );
 }
 
+/** Serve `response` for this exact outbound request from the replay cache. */
+async function seedOutboundReplay(
+  url: string,
+  method: string,
+  requestBody: string | null,
+  responseBody: unknown
+): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/test/captures/cache`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key: outboundReplayCacheKey(url, method, requestBody),
+      value: {
+        __ff_promise_result: true,
+        value: {
+          status: 200,
+          statusText: 'OK',
+          body: JSON.stringify(responseBody),
+          headers: { 'content-type': 'application/json' },
+        },
+      },
+    }),
+  });
+  if (response.status !== 200) {
+    throw new Error(`Failed to seed outbound replay for ${method} ${url}: ${response.status}`);
+  }
+}
+
 async function testHttpbinGet() {
+  await seedOutboundReplay('https://httpbin.org/json', 'GET', null, {
+    slideshow: { author: 'Yours Truly', title: 'Sample Slide Show', slides: [] },
+  });
   const raw = await requestJson('/api/external-http/request', {
     method: 'GET',
     url: 'https://httpbin.org/json',
@@ -79,6 +121,8 @@ async function testHttpbinGet() {
 
 async function testPostEcho() {
   const sent = { title: 'rose', body: 'api_request', userId: 1 };
+  const serialized = JSON.stringify(sent);
+  await seedOutboundReplay('https://httpbin.org/post', 'POST', serialized, { json: sent });
   const raw = await requestJson('/api/external-http/request', {
     method: 'POST',
     url: 'https://httpbin.org/post',
@@ -90,6 +134,28 @@ async function testPostEcho() {
     throw new Error(
       `POST echo mismatch: status ${parsed.status}, body ${JSON.stringify(parsed.body)}`
     );
+  }
+
+  // The fixture echoes; the outbound request itself proves serialization.
+  const captured = await fetch(
+    `${BASE_URL}/api/test/captures?token=${encodeURIComponent(CAPTURE_TOKEN)}`
+  );
+  const { captures } = (await captured.json()) as {
+    captures: Array<{
+      url: string;
+      method: string;
+      requestBody: string | null;
+      requestHeaders: Record<string, string>;
+    }>;
+  };
+  const outbound = captures.find(
+    (capture) => capture.url === 'https://httpbin.org/post' && capture.method === 'POST'
+  );
+  const contentType = Object.entries(outbound?.requestHeaders ?? {}).find(
+    ([name]) => name.toLowerCase() === 'content-type'
+  )?.[1];
+  if (outbound?.requestBody !== serialized || !contentType?.includes('application/json')) {
+    throw new Error(`POST was not sent as JSON: ${JSON.stringify(outbound)}`);
   }
 }
 
