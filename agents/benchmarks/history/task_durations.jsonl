@@ -5899,3 +5899,12 @@
 {"task": "claude-code-agent", "duration_seconds": 55.4, "cost_cents": 0.0, "timestamp": "2026-10-12T21:42:56.842708+00:00", "agent_id": "5b113f82-3dc7-4327-85e7-1f4823657993"}
 {"task": "browser-auth-guest-purchase", "duration_seconds": 130.0, "cost_cents": 0.0, "timestamp": "2026-10-12T21:42:56.842708+00:00", "agent_id": "f8373929-4f7e-4758-b344-cb7cab61b475"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 121.9, "cost_cents": 4.0, "timestamp": "2026-10-12T21:42:56.842708+00:00", "agent_id": "b5f816f2-4c68-42f9-93e7-7ae87cd6abc4"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 150.4, "cost_cents": 6.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "6f470685-9cf7-4fb1-9007-bf9b7e88f607"}
+{"task": "browser-auth-account-locked", "duration_seconds": 87.5, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "4a0f1d1d-c8b1-409d-9db5-0623e7597636"}
+{"task": "spawn-sub-agents", "duration_seconds": 126.0, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "6d8a5fe8-80b5-4747-881d-53f69c6a3d20"}
+{"task": "parallel-tool-calls", "duration_seconds": 100.9, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "b11c987a-384f-4fdc-9a4f-b6da54dd97ae"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 153.2, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "86427357-a9a9-4127-85c1-c0f2e12045db"}
+{"task": "claude-code-agent", "duration_seconds": 60.1, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "b864bf18-f810-45b2-a03f-050d108fd0a5"}
+{"task": "chat-mode", "duration_seconds": 15.0, "cost_cents": 0.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "82ff4b39-9b88-493c-9731-b04eca1af960"}
+{"task": "browser-smoke", "duration_seconds": 116.1, "cost_cents": 1.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "a2510733-708e-490f-b13b-acec498e2f22"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 131.6, "cost_cents": 1.0, "timestamp": "2026-10-12T23:07:58.676155+00:00", "agent_id": "2d1d1165-37d0-4841-8412-165c2c5b17b4"}
