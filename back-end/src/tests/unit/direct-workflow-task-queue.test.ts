@@ -15,9 +15,12 @@ const descendantSource = readFileSync(
 );
 
 const directWorkflowMatch = source.match(
-  /async function startDirectWorkflow[\s\S]*?startAgentWorkflow\(\{([\s\S]*?)\n {2}\}\);/
+  /async function startDirectWorkflow[\s\S]*?startAgentWorkflowExecution\(\{([\s\S]*?)\n {2}\}\);/
 );
-assert.ok(directWorkflowMatch, 'startDirectWorkflow startAgentWorkflow params should be found');
+assert.ok(
+  directWorkflowMatch,
+  'startDirectWorkflow startAgentWorkflowExecution params should be found'
+);
 assert.match(
   directWorkflowMatch[1],
   /\.\.\.\(body\.task_queue !== undefined \? \{ taskQueue: body\.task_queue \} : \{\}\),/,

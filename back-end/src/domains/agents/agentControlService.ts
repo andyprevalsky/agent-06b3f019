@@ -4,10 +4,12 @@
 
 import {
   getTemporalClient,
-  startAgentWorkflow,
+  startAgentWorkflowExecution,
   type StartAgentWorkflowParams,
 } from '../../providers/temporal';
 import { broadcastAgentModeStarted } from '../../providers/chat';
+import { recordAgentWorkflowExecution } from '../../providers/workflowGeneration';
+import { terminateStaleTemporalWorkflow } from '../../providers/workflowReplacement';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import * as repo from './repo';
@@ -120,7 +122,7 @@ export async function startAgentMode(agentId: string, userId: string) {
     goal: agent.goal.substring(0, 100),
   });
 
-  const workflowId = await startAgentWorkflow({
+  const execution = await startAgentWorkflowExecution({
     agentId,
     userId: agent.userId,
     goal: agent.goal,
@@ -141,7 +143,12 @@ export async function startAgentMode(agentId: string, userId: string) {
       : {}),
   });
 
-  await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
+  if (!(await recordAgentWorkflowExecution(agentId, execution))) {
+    // Another start or a deletion won; the agent row stays authoritative.
+    await terminateStaleTemporalWorkflow(execution, agentId);
+    return { error: 'Agent is no longer in chat mode', status: 409 };
+  }
+  const workflowId = execution.workflowId;
   await broadcastAgentModeStarted(agentId);
 
   log.info('Escalated to agent mode', {

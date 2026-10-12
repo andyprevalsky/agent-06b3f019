@@ -497,11 +497,6 @@ export async function startAgentWorkflowExecution(
   return startAgentWorkflowExecutionWithClient(await getTemporalClient(), params, deadlineAtMs);
 }
 
-/** Backwards-compatible helper for callers that only expose Workflow ID. */
-export async function startAgentWorkflow(params: StartAgentWorkflowParams): Promise<string> {
-  return (await startAgentWorkflowExecution(params)).workflowId;
-}
-
 /* c8 ignore start -- getWorkflowStatus requires live Temporal server */
 /**
  * Get workflow status

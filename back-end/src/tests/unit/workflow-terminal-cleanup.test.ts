@@ -6,6 +6,12 @@ import { type AgentStatus } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { clearWorkflowForTerminalAgent } from '../../domains/agents/repoMutations';
 import { prisma } from '../../providers/database';
+import { createMessage } from '../../providers/messages';
+import {
+  captureInProgressWorkflowTools,
+  finalizeInterruptedWorkflowTools,
+} from '../../providers/staleWorkflowTools';
+import { acceptChatWorkflowExecution } from '../../providers/workflowGeneration';
 import {
   assertNoPendingTerminalAgentWorkflowCleanup,
   cleanupTerminalAgentWorkflowZombies,
@@ -31,6 +37,85 @@ async function createAgent(runId: string, status: AgentStatus = 'ACTIVE'): Promi
     },
   });
   return id;
+}
+
+/** A root agent: every run it ever starts reuses Workflow ID = agent ID. */
+async function createRootAgent(runId: string, firstExecutionRunId: string | null): Promise<string> {
+  const id = randomUUID();
+  await prisma.agent.create({
+    data: {
+      id,
+      userId: runId,
+      goal: 'terminal cleanup follow-up run',
+      status: 'ACTIVE',
+      busId: id,
+      temporalWorkflowId: id,
+      temporalFirstExecutionRunId: firstExecutionRunId,
+      verifier: { create: {} },
+    },
+  });
+  return id;
+}
+
+/** The production follow-up path: reopen the completed agent, then escalate a new run. */
+async function startFollowUpRun(agentId: string, firstExecutionRunId: string): Promise<void> {
+  const before = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert.strictEqual(
+    (
+      await clearWorkflowForTerminalAgent(
+        agentId,
+        before.status,
+        agentId,
+        before.temporalFirstExecutionRunId
+      )
+    ).count,
+    1
+  );
+  assert.strictEqual(
+    await acceptChatWorkflowExecution(agentId, { workflowId: agentId, firstExecutionRunId }),
+    true
+  );
+}
+
+async function postLiveTool(agentId: string, toolCallId: string): Promise<void> {
+  await createMessage({
+    agentId,
+    role: 'TOOL',
+    text: '',
+    metadata: {
+      workflowGeneration: agentId,
+      toolCallId,
+      toolName: 'spawn_agent',
+      toolStatus: 'IN_PROGRESS',
+    },
+    enforceCurrentWorkflowGeneration: true,
+  });
+}
+
+async function latestToolStatus(agentId: string, toolCallId: string): Promise<unknown> {
+  const rows = await prisma.message.findMany({
+    where: { agentId, role: 'TOOL', metadata: { path: ['toolCallId'], equals: toolCallId } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const latest = rows.at(-1)?.metadata as Record<string, unknown> | undefined;
+  return latest?.toolStatus;
+}
+
+function realToolDependencies(
+  terminations: string[],
+  runningChain: string | null
+): WorkflowTerminalCleanupDependencies {
+  return {
+    resolveExecution: async (workflowId) => {
+      if (runningChain === null) throw new WorkflowNotFoundError('closed', workflowId, undefined);
+      return { workflowId, firstExecutionRunId: runningChain };
+    },
+    terminate: async (execution, agentId) => {
+      terminations.push(`${agentId}:${execution.workflowId}:${execution.firstExecutionRunId}`);
+    },
+    captureInProgressTools: captureInProgressWorkflowTools,
+    finalizeInterruptedTools: finalizeInterruptedWorkflowTools,
+  };
 }
 
 async function deleteRun(runId: string): Promise<void> {
@@ -289,6 +374,86 @@ async function main(): Promise<void> {
       const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
       assert.strictEqual(after.temporalWorkflowId, currentWorkflow);
       assert.strictEqual(after.status, 'ACTIVE');
+    } finally {
+      await deleteRun(runId);
+    }
+  });
+
+  // Prod agent 572da2a5 (2026-10-12): the first run's start never recorded its
+  // first-run ID, so its completion obligation had none. The follow-up run
+  // reused Workflow ID = agent ID, and cleanup resolved, sealed, and terminated it.
+  await test('follow-up run survives cleanup of an unknown-run completed generation', async () => {
+    const runId = `workflow-terminal-follow-up-unknown-${randomUUID()}`;
+    const agentId = await createRootAgent(runId, null);
+    const followUpRun = `run-2-${agentId}`;
+    const liveCall = `live-${agentId}`;
+    try {
+      await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+      await startFollowUpRun(agentId, followUpRun);
+      await postLiveTool(agentId, liveCall);
+
+      const terminations: string[] = [];
+      await forceCleanup([agentId], realToolDependencies(terminations, followUpRun));
+
+      assert.deepStrictEqual(terminations, []);
+      const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(after.status, 'ACTIVE');
+      assert.strictEqual(after.temporalWorkflowId, agentId);
+      assert.strictEqual(after.temporalFirstExecutionRunId, followUpRun);
+      assert.strictEqual(await latestToolStatus(agentId, liveCall), 'IN_PROGRESS');
+      await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
+    } finally {
+      await deleteRun(runId);
+    }
+  });
+
+  // Prod agent 2dd470aa (2026-10-12): the obligation named the exact completed
+  // chain, but sealing compared only Workflow ID, so the follow-up generation
+  // was fenced and every later write returned 409 while its run kept going.
+  await test('follow-up run survives cleanup of an exact-run completed generation', async () => {
+    const runId = `workflow-terminal-follow-up-exact-${randomUUID()}`;
+    const completedRun = `run-1-${randomUUID()}`;
+    const agentId = await createRootAgent(runId, completedRun);
+    const followUpRun = `run-2-${agentId}`;
+    const liveCall = `live-${agentId}`;
+    try {
+      await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+      await startFollowUpRun(agentId, followUpRun);
+      await postLiveTool(agentId, liveCall);
+
+      const terminations: string[] = [];
+      await forceCleanup([agentId], realToolDependencies(terminations, followUpRun));
+
+      assert.deepStrictEqual(terminations, [`${agentId}:${agentId}:${completedRun}`]);
+      const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(after.status, 'ACTIVE');
+      assert.strictEqual(after.temporalWorkflowId, agentId);
+      assert.strictEqual(after.temporalFirstExecutionRunId, followUpRun);
+      assert.strictEqual(await latestToolStatus(agentId, liveCall), 'IN_PROGRESS');
+      await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
+    } finally {
+      await deleteRun(runId);
+    }
+  });
+
+  await test('still-terminal agent with an unknown run is still sealed and terminated', async () => {
+    const runId = `workflow-terminal-unknown-zombie-${randomUUID()}`;
+    const agentId = await createRootAgent(runId, null);
+    const zombieRun = `zombie-${agentId}`;
+    const liveCall = `zombie-call-${agentId}`;
+    try {
+      await postLiveTool(agentId, liveCall);
+      await prisma.agent.update({ where: { id: agentId }, data: { status: 'FAILED' } });
+
+      const terminations: string[] = [];
+      await forceCleanup([agentId], realToolDependencies(terminations, zombieRun));
+
+      assert.deepStrictEqual(terminations, [`${agentId}:${agentId}:${zombieRun}`]);
+      const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(after.status, 'FAILED');
+      assert(after.temporalWorkflowId?.includes(':deployment-sealed:'));
+      assert.strictEqual(await latestToolStatus(agentId, liveCall), 'FINISHED');
+      await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
     } finally {
       await deleteRun(runId);
     }

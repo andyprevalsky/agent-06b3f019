@@ -59,13 +59,17 @@ export async function lockAgentWorkflowGenerationShared(
 }
 
 /**
- * Commit a chat escalation only while the agent still belongs to chat mode.
- * A deployment replacement or another workflow start that wins first remains
- * authoritative; delayed fire-and-forget chat work may never overwrite it.
+ * Commit a started execution's full chain identity to its agent. A root agent
+ * reuses Workflow ID = agent ID for every run, so the first-execution run ID
+ * is what distinguishes one generation from the next; recording only the
+ * Workflow ID lets terminal cleanup mistake a follow-up run for the finished
+ * one. A deployment replacement or another start that wins first remains
+ * authoritative.
  */
-export async function acceptChatWorkflowExecution(
+export async function recordAgentWorkflowExecution(
   agentId: string,
-  execution: TemporalWorkflowExecutionRef
+  execution: TemporalWorkflowExecutionRef,
+  options: { requireActive?: boolean } = {}
 ): Promise<boolean> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
@@ -81,7 +85,7 @@ export async function acceptChatWorkflowExecution(
     if (
       agent === null ||
       agent.deletedAt !== null ||
-      agent.status !== 'ACTIVE' ||
+      (options.requireActive === true && agent.status !== 'ACTIVE') ||
       (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== execution.workflowId) ||
       (agent.temporalFirstExecutionRunId !== null &&
         agent.temporalFirstExecutionRunId !== execution.firstExecutionRunId)
@@ -97,4 +101,15 @@ export async function acceptChatWorkflowExecution(
     });
     return true;
   });
+}
+
+/**
+ * Commit a chat escalation only while the agent still belongs to chat mode;
+ * delayed fire-and-forget chat work may never overwrite a winning start.
+ */
+export async function acceptChatWorkflowExecution(
+  agentId: string,
+  execution: TemporalWorkflowExecutionRef
+): Promise<boolean> {
+  return recordAgentWorkflowExecution(agentId, execution, { requireActive: true });
 }

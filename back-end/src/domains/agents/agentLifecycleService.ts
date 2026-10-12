@@ -3,7 +3,8 @@
  */
 
 import { randomUUID } from '../../providers/crypto';
-import { startAgentWorkflow } from '../../providers/temporal';
+import { startAgentWorkflowExecution } from '../../providers/temporal';
+import { recordAgentWorkflowExecution } from '../../providers/workflowGeneration';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
@@ -77,7 +78,7 @@ async function startDirectWorkflow(
   verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
-  const workflowId = await startAgentWorkflow({
+  const execution = await startAgentWorkflowExecution({
     agentId: agentDbId,
     userId,
     goal: body.goal,
@@ -96,9 +97,17 @@ async function startDirectWorkflow(
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
-  // startSubAgentWorkflow above), so no UPDATE is needed here.
+  // startSubAgentWorkflow above); bind the run so cleanup can tell this
+  // generation from a later follow-up that reuses the same Workflow ID.
+  if (!(await recordAgentWorkflowExecution(agentDbId, execution))) {
+    log.warn('Started workflow was superseded before its run identity was recorded', {
+      agent_id: agentDbId,
+      workflow_id: execution.workflowId,
+      first_execution_run_id: execution.firstExecutionRunId,
+    });
+  }
   await broadcastAgentModeStarted(agentDbId);
-  return workflowId;
+  return execution.workflowId;
 }
 
 /** Start root agent in chat mode (fire-and-forget). */

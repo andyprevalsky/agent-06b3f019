@@ -9,6 +9,7 @@ import {
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   lockAgentWorkflowGeneration,
   lockAgentWorkflowGenerationShared,
+  recordAgentWorkflowExecution,
 } from '../../providers/workflowGeneration';
 import { createTestHarness } from './trace-archive-test-utils';
 
@@ -151,6 +152,67 @@ async function main(): Promise<void> {
         releaseCutover();
         await Promise.allSettled(transactions);
       }
+    });
+  });
+
+  // Every start must leave the agent row naming its exact chain: root agents
+  // reuse Workflow ID = agent ID, so a row with only that ID cannot tell
+  // terminal cleanup which generation finished (prod agent 572da2a5).
+  await test('a started run binds its exact chain identity without overwriting another', async () => {
+    await withAgent(async (agentId) => {
+      const firstRun = `run-1-${randomUUID()}`;
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { status: 'STARTING_UP', temporalWorkflowId: agentId },
+      });
+      assert.strictEqual(
+        await acceptChatWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: firstRun,
+        }),
+        false,
+        'chat acceptance still requires a chat-mode ACTIVE agent'
+      );
+      assert.strictEqual(
+        await recordAgentWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: firstRun,
+        }),
+        true
+      );
+      assert.strictEqual(
+        await recordAgentWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: firstRun,
+        }),
+        true,
+        'recording the same chain again is idempotent'
+      );
+      assert.strictEqual(
+        await recordAgentWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: `run-2-${randomUUID()}`,
+        }),
+        false,
+        'a different chain under the same Workflow ID is a different generation'
+      );
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(stored.temporalWorkflowId, agentId);
+      assert.strictEqual(stored.temporalFirstExecutionRunId, firstRun);
+
+      await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { temporalWorkflowId: null, temporalFirstExecutionRunId: null },
+      });
+      assert.strictEqual(
+        await recordAgentWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: `run-3-${randomUUID()}`,
+        }),
+        false,
+        'a deleted agent never adopts a new run'
+      );
     });
   });
 

@@ -5,7 +5,8 @@
 
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
-import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
+import { reconcileWorkflowStart, startAgentWorkflowExecution } from '../temporal';
+import { recordAgentWorkflowExecution } from '../workflowGeneration';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 import type { FilePointer } from '../storage';
@@ -140,10 +141,10 @@ export async function commitStartNewAgent(
         throw error;
       }
       // The row existing is not the same as the agent RUNNING. If the previous
-      // attempt committed the transaction and died before startAgentWorkflow,
+      // attempt committed the transaction and died before the workflow start,
       // the agent sits in STARTING_UP with no temporalWorkflowId forever. Fall
       // through and (re)start the workflow rather than reporting success for an
-      // agent nothing is driving; startAgentWorkflow is itself idempotent on
+      // agent nothing is driving; the workflow start is itself idempotent on
       // workflow id.
       if (
         existing.temporalWorkflowId === null ||
@@ -191,7 +192,7 @@ export async function commitStartNewAgent(
 
   // Start Temporal workflow
   try {
-    const workflowId = await startAgentWorkflow({
+    const execution = await startAgentWorkflowExecution({
       agentId: startedAgent.id,
       userId,
       goal,
@@ -206,10 +207,15 @@ export async function commitStartNewAgent(
       memoryEnabled: resolvedMemory,
     });
 
-    await prisma.agent.update({
-      where: { id: startedAgent.id },
-      data: { temporalWorkflowId: workflowId },
-    });
+    if (!(await recordAgentWorkflowExecution(startedAgent.id, execution))) {
+      log.warn('Started workflow was superseded before its run identity was recorded', {
+        phase: 'start',
+        agentId: startedAgent.id,
+        workflowId: execution.workflowId,
+        firstExecutionRunId: execution.firstExecutionRunId,
+      });
+    }
+    const workflowId = execution.workflowId;
 
     log.info('Agent created and workflow started', {
       phase: 'start',

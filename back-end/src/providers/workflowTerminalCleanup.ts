@@ -180,15 +180,39 @@ async function claimCleanupBatch(
   return claims;
 }
 
-async function sealCleanup(obligation: CleanupObligation): Promise<boolean> {
+type SealOutcome =
+  | { kind: 'sealed' | 'not-installed' }
+  | { kind: 'live-follow-up'; installedFirstExecutionRunId: string | null };
+
+/**
+ * A root agent reuses Workflow ID = agent ID for every follow-up run, so the
+ * Workflow ID alone never names the generation that went terminal. Once the
+ * agent is live again on that Workflow ID, the installed run and every tool
+ * chip stamped with that generation string belong to the follow-up run.
+ */
+async function sealCleanup(obligation: CleanupObligation): Promise<SealOutcome> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, obligation.agentId);
     const current = await tx.agent.findUnique({
       where: { id: obligation.agentId },
-      select: { temporalWorkflowId: true },
+      select: {
+        temporalWorkflowId: true,
+        temporalFirstExecutionRunId: true,
+        status: true,
+        deletedAt: true,
+      },
     });
-    if (current === null) return false;
-    if (current.temporalWorkflowId !== obligation.workflowId) return false;
+    if (current === null) return { kind: 'not-installed' };
+    if (current.temporalWorkflowId !== obligation.workflowId) return { kind: 'not-installed' };
+    if (
+      current.deletedAt === null &&
+      !(TERMINAL_AGENT_STATUSES as readonly string[]).includes(current.status)
+    ) {
+      return {
+        kind: 'live-follow-up',
+        installedFirstExecutionRunId: current.temporalFirstExecutionRunId,
+      };
+    }
     await tx.agent.update({
       where: { id: obligation.agentId },
       data: {
@@ -197,7 +221,7 @@ async function sealCleanup(obligation: CleanupObligation): Promise<boolean> {
         toolsInUse: [],
       },
     });
-    return true;
+    return { kind: 'sealed' };
   });
 }
 
@@ -251,7 +275,28 @@ async function cleanupOne(
     obligation.agentId,
     obligation.workflowId
   );
-  const sealed = await sealCleanup(obligation);
+  const sealOutcome = await sealCleanup(obligation);
+  if (sealOutcome.kind === 'live-follow-up') {
+    // Only the terminal generation's exact chain may be closed, and only when
+    // it is provably not the installed run. Temporal scopes the terminate to
+    // that chain, so the follow-up keeps running.
+    const completedRunId = obligation.firstExecutionRunId;
+    const terminateCompleted =
+      completedRunId !== null &&
+      sealOutcome.installedFirstExecutionRunId !== null &&
+      completedRunId !== sealOutcome.installedFirstExecutionRunId;
+    if (terminateCompleted) {
+      assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} termination`);
+      await dependencies.terminate(
+        { workflowId: obligation.workflowId, firstExecutionRunId: completedRunId },
+        obligation.agentId,
+        deadlineAtMs
+      );
+    }
+    await finishCleanup({ ...obligation, inProgressTools });
+    return { sealed: false, terminated: terminateCompleted };
+  }
+  const sealed = sealOutcome.kind === 'sealed';
   let execution: TemporalWorkflowExecutionRef | null =
     obligation.firstExecutionRunId === null
       ? null

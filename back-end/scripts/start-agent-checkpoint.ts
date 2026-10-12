@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
-import { startAgentWorkflow } from '../src/providers/temporal';
+import { startAgentWorkflowExecution } from '../src/providers/temporal';
 import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type Options = {
@@ -45,8 +45,7 @@ function parseArgs(argv: string[]): Options {
         throw new Error('--start-phase must be execute or execute_dag_resume');
       }
       opts.startPhase = value;
-    }
-    else throw new Error(`Unknown argument: ${arg}`);
+    } else throw new Error(`Unknown argument: ${arg}`);
   }
 
   if (!opts.agentId) throw new Error('--agent-id is required');
@@ -91,7 +90,7 @@ async function main() {
     },
   });
 
-  const workflowId = await startAgentWorkflow({
+  const execution = await startAgentWorkflowExecution({
     agentId: agent.id,
     userId: agent.userId,
     goal: agent.goal,
@@ -104,6 +103,11 @@ async function main() {
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
   });
+  await prisma.agent.updateMany({
+    where: { id: agent.id, temporalWorkflowId: execution.workflowId },
+    data: { temporalFirstExecutionRunId: execution.firstExecutionRunId },
+  });
+  const workflowId = execution.workflowId;
 
   console.log(`agent_id=${agent.id}`);
   console.log(`workflow_id=${workflowId}`);
