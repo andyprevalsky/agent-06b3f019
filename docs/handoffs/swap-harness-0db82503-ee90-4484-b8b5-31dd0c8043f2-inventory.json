@@ -455,5 +455,24 @@
       }
     ]
   },
-  "archive_status": "not_requested_waiting_for_replacement"
+  "archive_status": "ready_to_request_self_archival_after_final_checks",
+  "replacement": {
+    "devbox_id": "acc001c9-41fa-46c7-8e16-04bb9d3223bd",
+    "internal_thread_id": "ph73gw0z0k506fn7733xknr30h8g5276",
+    "thread_url": "https://boxes.dev/thread/thr_87085cb874ce4cbca5c4ceac73cb6e90",
+    "starting_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+    "resumed_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-resumed.json",
+    "verified_receipt_commit": "5f7de8cc7ca73bf8b5a01545468371ebe384e925",
+    "first_continuation": {
+      "action": "Audited exact original 244a961d warning-skip diff and saved original deploy/test/review timeline; ran bash scripts/tests/semantic-deploy-gate.test.sh at exact checkpoint",
+      "result": "PASS: All semantic deploy gate checks passed; exit 0. Offline fixture failures were expected negative-path assertions. No paid runtime lane rerun claimed."
+    },
+    "archive_read_back": {
+      "archives_verified": 4,
+      "source_blobs_verified": 32,
+      "archive_read_back": "PASS",
+      "sha256": "PASS"
+    }
+  },
+  "updated_utc": "2026-10-12T23:49:32.838198+00:00"
 }
