@@ -18,6 +18,7 @@ import {
   createAnonymousSession,
   prisma,
   randomUUID,
+  sleep,
   test,
   trackedAgentIds,
   withTransientDbRetry,
@@ -134,6 +135,14 @@ async function assertFollowUpUntouched(
   restart: FollowUpRestart = 'chat'
 ): Promise<void> {
   const { agentId, liveRunId, liveToolCallId } = fixture;
+  // Run the next liveness tick as prod would. Temporal runs the live chain
+  // under the agent id; a sealed sentinel id does not exist there.
+  await prisma.$executeRaw`UPDATE "Agent" SET "updatedAt" = '2020-01-01T00:00:00.000Z' WHERE id = ${agentId}`;
+  await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (workflowId: string) =>
+      workflowId.startsWith(`${agentId}:`) ? 'NOT_FOUND' : 'RUNNING',
+  });
   const row = await prisma.agent.findUniqueOrThrow({
     where: { id: agentId },
     select: { status: true, temporalWorkflowId: true, temporalFirstExecutionRunId: true },
@@ -167,19 +176,6 @@ async function assertFollowUpUntouched(
   assert(status === 'IN_PROGRESS', `the live browser chip must stay IN_PROGRESS, got ${status}`);
   const pending = await prisma.temporalWorkflowCleanup.count({ where: { agentId } });
   assert(pending === 0, `the superseded obligation must be discharged, ${pending} remain`);
-
-  // The next liveness tick must see the live chain, not a sealed sentinel.
-  await prisma.$executeRaw`UPDATE "Agent" SET "updatedAt" = '2020-01-01T00:00:00.000Z' WHERE id = ${agentId}`;
-  await reconcileWorkflowLiveness({
-    batchSize: 1000,
-    describeStatus: async (workflowId: string) =>
-      workflowId === agentId ? 'WORKFLOW_EXECUTION_STATUS_RUNNING' : 'RUNNING',
-  });
-  const after = await prisma.agent.findUniqueOrThrow({
-    where: { id: agentId },
-    select: { status: true },
-  });
-  assert(after.status === 'ACTIVE', `liveness must not fail the follow-up, got ${after.status}`);
 }
 
 test('terminal cleanup after a follow-up leaves the live chain under the reused workflow id', async () => {
@@ -282,4 +278,77 @@ test('a follow-up that also ended before the sweep gets its own exact cleanup', 
   );
   const pending = await prisma.temporalWorkflowCleanup.count({ where: { agentId } });
   assert(pending === 0, `the rebound obligation is discharged, ${pending} remain`);
+});
+
+test('terminal cleanup and a concurrent follow-up reactivation never deadlock', async () => {
+  // A follow-up reactivation writes the Agent row, and the schema trigger then
+  // upserts the obligation row in the same transaction. Cleanup must take the
+  // Agent row before the obligation row, and read the agent only after that
+  // write commits.
+  const session = await createAnonymousSession('followup-cleanup-lock-order');
+  const agentId = randomUUID();
+  const firstRunId = `first-run-${randomUUID()}`;
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-followup-cleanup-lock-order', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'compare SOC 2 platforms',
+        status: 'ACTIVE',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+        temporalWorkflowId: agentId,
+        temporalFirstExecutionRunId: firstRunId,
+      },
+    });
+  });
+  await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+
+  let signalLocked = (): void => undefined;
+  const agentLocked = new Promise<void>((resolve) => {
+    signalLocked = resolve;
+  });
+  const followUp = prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM "Agent" WHERE id = ${agentId} FOR UPDATE`;
+      signalLocked();
+      await sleep(1_500);
+      // The same write clearWorkflowForTerminalAgent performs.
+      await tx.$executeRaw`UPDATE "Agent" SET "temporalWorkflowId" = NULL, "temporalFirstExecutionRunId" = NULL, status = 'ACTIVE' WHERE id = ${agentId} AND status = 'COMPLETED'`;
+    },
+    { maxWait: 10_000, timeout: 30_000 }
+  );
+  await agentLocked;
+  const terminated: string[] = [];
+  const sweep = cleanupTerminalAgentWorkflowZombies(
+    temporalWithLiveFollowUp(`unused-${randomUUID()}`, terminated),
+    { agentIds: [agentId], ignoreGrace: true }
+  );
+  const [followUpResult, sweepResult] = await Promise.allSettled([followUp, sweep]);
+  assert(
+    followUpResult.status === 'fulfilled',
+    `the follow-up reactivation must commit, got ${String((followUpResult as PromiseRejectedResult).reason)}`
+  );
+  assert(
+    sweepResult.status === 'fulfilled',
+    `the cleanup sweep must complete, got ${String((sweepResult as PromiseRejectedResult).reason)}`
+  );
+  const row = await prisma.agent.findUniqueOrThrow({
+    where: { id: agentId },
+    select: { status: true, temporalWorkflowId: true, temporalCleanupPending: true },
+  });
+  assert(
+    row.status === 'ACTIVE' && row.temporalWorkflowId === null,
+    `the reactivated agent must stay ready for its follow-up chain, got ${row.status}/${row.temporalWorkflowId}`
+  );
+  assert(
+    terminated.length === 1 && terminated[0] === firstRunId,
+    `only the finished chain is terminated, got ${terminated.join(',')}`
+  );
+  const pending = await prisma.temporalWorkflowCleanup.count({ where: { agentId } });
+  assert(
+    pending === 0 && !row.temporalCleanupPending,
+    `the finished chain's obligation is discharged, ${pending} remain`
+  );
 });

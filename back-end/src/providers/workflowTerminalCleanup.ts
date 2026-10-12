@@ -218,24 +218,14 @@ async function dischargeCleanup(
 }
 
 /**
- * Hold the claimed obligation row for the rest of the transaction. The schema
- * trigger merges a later terminal transition into this row with ON CONFLICT,
- * so the agent row must be read only after any such merge has committed.
+ * Lock the agent row before touching its obligations. The schema trigger runs
+ * inside Agent writes and then upserts the obligation row, so Agent-then-
+ * obligation is the only order that cannot deadlock with a concurrent
+ * follow-up, delete or status write. Holding it also makes any in-flight
+ * trigger merge commit before the agent is read.
  */
-async function lockClaimedCleanup(
-  tx: Prisma.TransactionClient,
-  obligation: CleanupObligation
-): Promise<void> {
-  const held = await tx.$queryRaw<Array<{ held: number }>>`
-    SELECT 1 AS held FROM "TemporalWorkflowCleanup"
-    WHERE "agentId" = ${obligation.agentId}
-      AND "workflowId" = ${obligation.workflowId}
-      AND "leaseToken" = ${obligation.leaseToken}
-    FOR UPDATE
-  `;
-  if (held.length !== 1) {
-    throw new Error(`Cleanup lease was lost for ${obligation.agentId}/${obligation.workflowId}`);
-  }
+async function lockAgentRow(tx: Prisma.TransactionClient, agentId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS locked FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
 }
 
 /**
@@ -280,7 +270,7 @@ async function rebindCleanup(
 async function sealCleanup(obligation: CleanupObligation): Promise<CleanupScope> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, obligation.agentId);
-    await lockClaimedCleanup(tx, obligation);
+    await lockAgentRow(tx, obligation.agentId);
     const current = await tx.agent.findUnique({
       where: { id: obligation.agentId },
       select: {
@@ -319,6 +309,7 @@ async function sealCleanup(obligation: CleanupObligation): Promise<CleanupScope>
 async function finishCleanup(snapshot: CleanupSnapshot): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, snapshot.agentId);
+    await lockAgentRow(tx, snapshot.agentId);
     await dischargeCleanup(tx, snapshot);
   });
 }

@@ -122,9 +122,13 @@ chat, Start-agent and direct start paths.
 ## Solution
 
 `workflowTerminalCleanup.ts` `sealCleanup` now runs under the per-agent
-generation lock. It first locks the claimed obligation row (`FOR UPDATE`), so a
-concurrent trigger merge commits before the agent row is read. It then picks one
-of four scopes:
+generation lock. It first locks the Agent row (`FOR UPDATE`), then reads it, and
+only then touches the obligation row. The schema trigger runs inside Agent
+writes and then upserts the obligation, so Agent-then-obligation is the only
+lock order that cannot deadlock with a concurrent follow-up, delete or status
+write. It also makes any in-flight trigger merge commit before the agent is
+read. `finishCleanup` takes the same Agent row lock before deleting the
+obligation. The sweep then picks one of four scopes:
 
 - `released`: the row moved to another workflow id. Unchanged behavior.
 - `live`: the row still has this workflow id and the agent is not ended (not
@@ -148,14 +152,24 @@ The regression is in
 is registered in `agents.blackbox.ts` (backend blackbox suite, `/deploy`). It
 replays the production sequence through the real trigger,
 `clearWorkflowForTerminalAgent`, `acceptChatWorkflowExecution` and the
-Start-agent row write, with only Temporal faked. Its four cases are:
+Start-agent row write, with only Temporal faked. Its five cases are:
 
 1. a chat-started chain with a chat follow-up;
 2. a direct-start chain with a chat follow-up;
 3. a direct-start chain with a Start-agent follow-up (both run ids null);
-4. a follow-up that also ends before the sweep (rebind).
+4. a follow-up that also ends before the sweep (rebind);
+5. a follow-up reactivation that holds the Agent row while the sweep runs
+   (lock order).
 
-Pre-fix: 4 FAIL, 240/244 pass. Post-fix: 244/244 pass. The unit suite gains a
+Each of the first three cases also runs the next liveness tick with a Temporal
+double in which only the agent id is running. A sealed sentinel would be failed.
+
+Pre-fix (main): cases 1–4 FAIL, 240/244 pass. Post-fix: 245/245 pass.
+
+Case 5 came from an independent review of the first fix. That version locked the
+obligation row before the Agent row, the reverse of the trigger. Run against
+that version, case 5 failed with `40P01 deadlock detected` and the follow-up
+reactivation was aborted. With the Agent-first order it passes. The unit suite gains a
 test for an unknown-chain obligation adopting the ended row's known chain
 exactly. The `already-closed` fixture now nulls the row's run id too, so it
 models a coherent direct-start state.
@@ -173,8 +187,8 @@ re-checks that the agent row still holds the ended chain. A live owner of the
 same id wins, as in `remove_thread_if_matches`. Unlike `Arc::ptr_eq`, two
 unknown run ids are never treated as proof of the same chain.
 
-10k agents: per obligation, one extra `SELECT … FOR UPDATE` on the claimed
-obligation row and three more columns in the existing per-agent locked read.
+10k agents: per obligation, one extra `SELECT … FOR UPDATE` on that agent's own
+row and three more columns in the existing per-agent locked read.
 There is no new fan-in, polling or cross-agent lock.
 
 ## Human feedback
