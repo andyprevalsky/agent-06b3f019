@@ -483,6 +483,13 @@ expect_venv_check 0 "venv check: a marker that excludes this interpreter is skip
 expect_venv_check 0 "venv check: a direct URL requirement is satisfied by the installed distribution" \
   "pip @ git+https://example.invalid/pip.git@0000000000000000000000000000000000000000"
 expect_venv_check 1 "venv check: pip option lines are never treated as satisfied" "-e ./somewhere"
+# A package-location hint names no distribution (#1471 vendors wheels this way);
+# flagging it made every provisioner reinstall agents/venv on every start.
+expect_venv_check 0 "venv check: a --find-links location hint is skipped" "--find-links ./vendor
+pip>=1"
+expect_venv_check 1 "venv check: requirements after a location hint are still checked" "--find-links ./vendor
+pip>=9999"
+expect_venv_check 1 "venv check: an included requirements file is never treated as satisfied" "-r other.txt"
 
 for venv_provisioner in scripts/cloud-build.sh scripts/run.sh scripts/prepare-deploy-worktree.sh; do
   if ! grep -q 'scripts/lib/agents_venv_satisfied.py agents/requirements.txt' "$ROOT_DIR/$venv_provisioner"; then
