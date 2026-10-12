@@ -41,8 +41,9 @@ interface FollowUpFixture {
 /**
  * How the follow-up chain is installed under the reused workflow id:
  * - `chat`: chat escalation commits it with acceptChatWorkflowExecution.
- * - `start-agent`: POST /:id/start-agent (agentControlService.startAgentMode)
- *   records only the workflow id, so neither chain's run id is known.
+ * - `start-agent`: the workflow-id-only write POST /:id/start-agent made
+ *   before it recorded run ids. Rows written that way are still in the
+ *   database, so neither chain's run id is known.
  */
 type FollowUpRestart = 'chat' | 'start-agent';
 
@@ -210,8 +211,9 @@ test('terminal cleanup of a direct-start chain never resolves onto the live foll
 });
 
 test('terminal cleanup never seals a Start-agent follow-up when no run id is known', async () => {
-  // Direct start, then POST /:id/start-agent: both the obligation and the live
-  // row carry only the workflow id, so their run ids are equal (both unknown).
+  // Direct start, then a Start-agent follow-up written before start-agent
+  // recorded run ids: the obligation and the live row both carry only the
+  // workflow id, so their run ids are equal (both unknown).
   const fixture = await completeThenFollowUp('followup-cleanup-start-agent', null, 'start-agent');
   const terminated: string[] = [];
   const summary = await cleanupTerminalAgentWorkflowZombies(

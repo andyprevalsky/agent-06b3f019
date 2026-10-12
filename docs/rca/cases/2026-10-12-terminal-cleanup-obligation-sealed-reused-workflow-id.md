@@ -147,6 +147,17 @@ obligation. The sweep then picks one of four scopes:
 `WorkflowTerminalCleanupResult.superseded` counts `live` and `rebound`
 obligations.
 
+`agentControlService.startAgentMode` (`POST /:id/start-agent`) now records the
+new chain's `temporalFirstExecutionRunId`, as chat escalation already did.
+CodeRabbit flagged that it stored only the reused workflow id. If such a
+follow-up chain also ended before the sweep, the merged obligation still named
+the older chain. Cleanup then terminated that older, already closed chain
+instead of the newer one. The `agents-configuration` start-agent blackbox now
+asserts the run id: it failed with `null` before this change and passes after
+it. New agents created by direct plan/execute starts and SMS starts still
+record only the workflow id. Their first chain needs nothing more, because any
+later chat or Start-agent chain records its run id.
+
 The regression is in
 `back-end/src/tests/blackbox/agents-followup-cleanup-obligation.cases.ts`, which
 is registered in `agents.blackbox.ts` (backend blackbox suite, `/deploy`). It
