@@ -47,10 +47,13 @@ def _overlap(a: dict, b: dict) -> float:
 async def _predict(messages, evidence, namespace, gate):
     call_ids = tuple(call["call_id"] for call in evidence["candidate_response"]["tool_calls"])
     async with gate:
-        response = await RoseClient().collect(
-            pool="rose-wmh-gpt61", messages=messages, call_site="wmh_layout_ab", dump_context=False,
-            cache_namespace=namespace, result_required=True, max_tokens=16384,
-        )
+        try:
+            response = await RoseClient().collect(
+                pool="rose-wmh-gpt61", messages=messages, call_site="wmh_layout_ab", dump_context=False,
+                cache_namespace=namespace, result_required=True, max_tokens=16384,
+            )
+        except Exception as exc:  # A transport failure voids this arm, not the comparison.
+            return {"valid": False, "transport_error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     usage = response.usage or {}
     result = {"actual_model": response.actual_model, "input": usage.get("prompt_tokens"),
               "cached": usage.get("cache_read_input_tokens"), "written": usage.get("cache_creation_input_tokens")}
@@ -112,14 +115,24 @@ async def main() -> None:
                 "overlap_snapshot_vs_stream": both(snapshot, streamed),
                 "overlap_repeat_vs_stream": both(repeat, streamed)}
 
-    results = await asyncio.gather(*(run(case) for case in picked))
+    results = []
+
+    async def run_and_save(case):
+        result = await run(case)
+        results.append(result)
+        # Keep finished cases even if the process is interrupted later.
+        args.out.write_text(json.dumps({"session": args.session, "cases": results}, indent=1) + "\n")
+        return result
+
+    results = await asyncio.gather(*(run_and_save(case) for case in picked))
     args.out.write_text(json.dumps({"session": args.session, "cases": results}, indent=1) + "\n")
     for case in results:
         print(f"\n## {case['prediction_id'][:8]} agent {case['agent'][:8]} stream changes {case['stream_change_ops']}")
         for arm in ("snapshot", "snapshot_repeat", "stream"):
             value = case[arm]
             print(f"  {arm:16s} valid={value['valid']} outcomes={value.get('outcomes')} top="
-                  + "; ".join(f"{o['id']} {o['p']}" for o in value.get("top", [])) + (f" ERROR {value.get('error')}" if not value["valid"] else ""))
+                  + "; ".join(f"{o['id']} {o['p']}" for o in value.get("top", []))
+                  + (f" ERROR {value.get('error') or value.get('transport_error')}" if not value["valid"] else ""))
         print(f"  overlap: snapshot~repeat {case['overlap_snapshot_vs_repeat']}  snapshot~stream "
               f"{case['overlap_snapshot_vs_stream']}  repeat~stream {case['overlap_repeat_vs_stream']}")
 

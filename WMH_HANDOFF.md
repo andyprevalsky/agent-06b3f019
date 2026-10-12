@@ -191,6 +191,33 @@ earlier message (55/55 run-5 pairs), and DEMO keys are unchanged (73/73). On
 Azure this layout still caches only the system block. Run 7's 5.18% is that
 block over ~64k-token requests.
 
+Caching fix (2026-10-12, `911c8ccde`). GPT-5.6+ caches only at breakpoints.
+Without explicit ones, the implicit breakpoint sits at the end of the latest
+message, so run 7 wrote 4.40M of 4.64M input tokens at 1.25×, costing 1.19× of
+no caching. The WMH pool now sends explicit `prompt_cache_breakpoint`s, and each
+agent's evidence is an append-only stream (`agents/benchmarks/wmh_wire_stream.py`):
+task, world baseline, completed history batches, world changes as JSON Patch,
+and reference examples sent once by id. A per-call final message carries the
+candidate. Every rendering must fold back to the exact canonical evidence, and
+replay keys, outcome checks and records keep using the canonical request.
+
+Measurements:
+- **Exact fold:** all 126 recorded requests from runs 7–8 fold back exactly.
+- **Live Azure replay** of run 8's first 16 requests: 60.4% cached, 36.7%
+  written, 0.52× cost. Long-lived agents reach 92–98%.
+- **Prediction-quality A/B** on run 7's 8 requests with the most accumulated
+  world changes, using `.claude/skills/instantiate-whm/scripts/layout-ab.py`:
+  - all three arms (snapshot, snapshot repeat, stream) were valid against the
+    true state in 8 of 8 cases;
+  - patch-target overlap was 0.981 between the two snapshot arms and 0.93 from
+    snapshot to stream;
+  - the one outlier made the same 0.92 prediction but recorded it under a
+    different key.
+
+The reset rule starts a fresh stream when changes exceed 1× the baseline
+(minimum 20k characters). On runs 7–8 that is −38% and −72% versus today; never
+resetting would be −48% and −76%.
+
 Run 7 also re-serialized its fan-out: one replacing commit queued every other
 operation behind one re-prediction at a time. Since `ac788e8f5`, only a
 conflicted operation waits for its turn before predicting; the others predict
