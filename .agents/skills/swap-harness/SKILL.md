@@ -20,8 +20,8 @@ done on Codex. Skip it even when an older Claude thread on that box shows a
 limit. Establish which thread owns the main task before any checkpoint,
 replacement or archive action. A Codex helper created specifically to migrate
 stalled Claude work is a migration worker, not an existing Codex main task.
-The Codex→Claude direction applies to a halted exhausted task only; it never
-overrides this exclusion for a currently running Codex main task. Preserve any
+For this user's workflow, this hard rule takes precedence over the generic
+Codex→Claude direction, including a quota-stopped Codex main task. Preserve any
 additional user exclusions (for this run: Browser Mode P2).
 
 ```text
@@ -47,6 +47,9 @@ project threads → confirm quota stop + identify old box
    authenticated boxes.dev UI. The scoped API on some runtimes omits devbox
    IDs. Do not confuse thread/session/project/provider-sandbox IDs with devbox
    IDs. `--targets-file` accepts a JSON map of public thread ID → devbox ID.
+   Consume authoritative routing fields when present. An archived child's
+   execution identity can point back to a Template box; use its saved start
+   receipt and verify the target instead of treating that field as its old box.
    If the routing identity remains unavailable, continue preparing context and
    identify the precise platform gap; do not destroy a box or claim its local
    changes were preserved from a read-only thread preview.

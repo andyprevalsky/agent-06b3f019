@@ -24,6 +24,18 @@ task-owned source changes**, including deletions. Account for other worktrees
 and stashes instead of silently dropping them. Keep important ignored
 artifacts, local databases and user-authored files until durably saved or known
 to be regenerable. Check for active writers before committing their files.
+Capture original ignored helper scripts and dirty files from every relevant
+worktree byte-for-byte, with a checksum manifest and their original paths.
+Save unpushed branch ancestry in pushed branches or verified Git bundles; a
+written description of a missing commit is insufficient.
+
+Keep secrets, raw sessions and private runtime evidence out of Git. Preserve
+those in private durable storage linked from the handoff. Record checksums and
+restore instructions, and ensure encryption keys survive the old box privately.
+Verify authenticated download/decryption and content hashes from the replacement
+before archival. A successful upload or old-box-only archive is insufficient.
+Preserve consistent local state or a durable terminal export before canonical
+cleanup removes irreplaceable run data; do not interfere with an active run.
 
 Observe running tests/controllers and exact owned external resources. Finish
 or cooperatively cancel an owned controller through its canonical cleanup,
@@ -90,6 +102,13 @@ does not copy unpushed files and its startup may reset to main. Its prompt must:
    and the actual first continuation action/result; confirm it is durable,
    then keep working on the original task. A launch acknowledgement alone is
    insufficient. Merge/deploy only when separately authorized by that task.
+
+A terminal startup failure is different from an uncertain response. Inspect
+the saved child/events and exact typed error. Reuse or resume a surviving child
+through supported commands. Only when durable records prove no replacement
+box/active agent survives, or a previous replacement is explicitly unavailable,
+record that disposition and use one deliberate new generation key. Never
+target a Template box using an archived child's rebound execution identity.
 
 Observe through managed list/read/wait/result and the PR until the receipt
 proves correct checkout, handoff reading and meaningful continuation. Avoid
