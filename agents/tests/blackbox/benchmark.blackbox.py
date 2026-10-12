@@ -254,6 +254,130 @@ def test_hub_registration_recovers_ambiguous_committed_post_timeout():
                 os.environ[name] = value
 
 
+def test_hub_terminal_upload_reconciles_committed_final_before_replay():
+    """LIVE50 trials 1-2: a terminal POST queued behind the serial Hub writer
+    committed after its client timed out; the replay then queued again and the
+    controller declared publication failed. Read back the exact final first."""
+    from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
+
+    terminal = {
+        "run_id": "live50-terminal",
+        "timestamp": "2026-10-12T20:22:09+00:00",
+        "suite": "cloud-fleet",
+        "source": "cloud-fleet",
+        "status": "failed",
+        "tasks": [
+            {
+                "name": "browser-auth-existing-browser-session",
+                "passed": False,
+                "status": "INFRA_ERROR",
+                "failure_reason": "no current run artifact produced",
+                "lifecycle_stage": "released",
+            }
+        ],
+    }
+    # The real backend's GET /api/benchmarks/runs/:id projection of that bundle.
+    captured_view = {
+        "run_id": "live50-terminal",
+        "timestamp": "2026-10-12T20:22:09+00:00",
+        "suite": "cloud-fleet",
+        "source": "cloud-fleet",
+        "live": False,
+        "tasks": [
+            {
+                "name": "browser-auth-existing-browser-session",
+                "passed": None,
+                "status": "INFRA_ERROR",
+                "agent_id": None,
+                "duration_seconds": None,
+                "cost_cents": None,
+                "world_model_mode": None,
+                "fast_mode": False,
+                "tree_agent_count": None,
+                "failure_reason": "no current run artifact produced",
+                "lifecycle_stage": "released",
+                "tokens_in": None,
+                "tokens_out": None,
+                "cache_hit_pct": None,
+                "llm_call_count": None,
+                "message_count": None,
+            }
+        ],
+        "totals": {"passed": 0, "failed": 0, "running": 0, "cost_cents": 0, "tokens_in": 0, "tokens_out": 0},
+        "code": None,
+        "elapsed_s": 2354,
+        "cost": None,
+    }
+    posts = []
+    views = {}
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            decoded = gzip.decompress(raw) if self.headers.get("Content-Encoding") == "gzip" else raw
+            run_id = json.loads(decoded)["run_id"]
+            posts.append(run_id)
+            # The queued write commits, but only after the client gave up.
+            views.setdefault(run_id, {**captured_view, "run_id": run_id})
+            release.wait(30)
+            try:
+                self.send_response(201)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def do_GET(self):
+            view = views.get(self.path.rsplit("/", 1)[-1])
+            payload = json.dumps({"run": view}).encode() if view else b"{}"
+            self.send_response(200 if view else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BENCHMARK_HUB_UPLOAD_URL": f"http://127.0.0.1:{server.server_address[1]}",
+                    "BENCHMARK_HUB_API_KEY": "terminal-fixture-key",
+                },
+            ),
+            patch("benchmarks.hub_upload.time.sleep", lambda _delay: None),
+        ):
+            assert upload_run_bundle(terminal, required=True, timeout=2.0)
+            assert posts == ["live50-terminal"], "a committed final must not be replayed"
+            # A different committed outcome for the run is not this upload's commit.
+            views["live50-cancelled"] = {**captured_view, "run_id": "live50-cancelled"}
+            cancelled = {
+                **terminal,
+                "run_id": "live50-cancelled",
+                "tasks": [{**terminal["tasks"][0], "status": "cancelled"}],
+            }
+            try:
+                upload_run_bundle(cancelled, required=True, timeout=2.0, max_attempts=2)
+                raise AssertionError("a mismatched final was accepted as committed")
+            except HubVisibilityError as error:
+                assert "timed out" in str(error)
+            assert posts.count("live50-cancelled") == 2, "an unmatched final replays within its budget"
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
 def test_hub_requests_preserve_external_proxy_routing():
     from pytest import MonkeyPatch
 
@@ -21115,6 +21239,10 @@ async def run_all_tests():
     r.record(
         "hub_registration_recovers_ambiguous_committed_post_timeout",
         test_hub_registration_recovers_ambiguous_committed_post_timeout,
+    )
+    r.record(
+        "hub_terminal_upload_reconciles_committed_final_before_replay",
+        test_hub_terminal_upload_reconciles_committed_final_before_replay,
     )
     r.record(
         "hub_upload_rejection_retains_safe_response_identity_without_retry",

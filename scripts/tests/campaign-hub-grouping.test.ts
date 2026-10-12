@@ -82,23 +82,22 @@ function owningBoundary() {
         true,
       ).statements,
     );
-  // Follow the facade's actual detail-owner re-export after module extraction.
-  const detailOwner = tree.statements.find(
-    (node) =>
-      ts.isExportDeclaration(node) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text === "./benchmarkHubRunDetail",
-  );
-  if (detailOwner) {
-    const detailFilename = path.join(
-      path.dirname(filename),
-      "benchmarkHubRunDetail.ts",
+  // Follow the facade's actual detail and run-bundle owner re-exports after
+  // module extraction.
+  for (const owner of ["benchmarkHubRunDetail", "benchmarkHubRunBundles"]) {
+    const reexported = tree.statements.some(
+      (node) =>
+        ts.isExportDeclaration(node) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier) &&
+        node.moduleSpecifier.text === `./${owner}`,
     );
+    if (!reexported) continue;
+    const ownerFilename = path.join(path.dirname(filename), `${owner}.ts`);
     declarations.push(
       ...ts.createSourceFile(
-        detailFilename,
-        readFileSync(detailFilename, "utf8"),
+        ownerFilename,
+        readFileSync(ownerFilename, "utf8"),
         ts.ScriptTarget.Latest,
         true,
       ).statements,

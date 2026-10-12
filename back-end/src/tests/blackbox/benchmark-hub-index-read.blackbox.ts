@@ -18,6 +18,7 @@ import {
   persistHubAgentRunBackfill,
   putRun,
 } from '../../providers/benchmarkHubStore';
+import { concurrentFinalBurst } from './benchmark-hub-burst.cases';
 import {
   delayedStartingRetryAcrossProcesses,
   startingRetryWorker,
@@ -266,10 +267,15 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
   }
 }
 
+/**
+ * 2026-10-06/07: a final upload and a required starting registration waited
+ * behind every queued live snapshot at the serial writer. Whatever its kind, an
+ * upload queued behind the current holder must commit in the very next catalog
+ * publication, together with the snapshots queued beside it.
+ */
 async function queuedUploadAdmission(
   bundle: Record<string, unknown> = { tasks: [] },
-  live = false,
-  expected = ['holder', 'final', 'snapshot-a', 'snapshot-b']
+  live = false
 ): Promise<void> {
   const sender = S3Client.prototype as unknown as {
     send: (command: unknown) => Promise<unknown>;
@@ -287,6 +293,7 @@ async function queuedUploadAdmission(
   const holderWriting = deferred();
   const releaseHolder = deferred();
   const bundleWrites: string[] = [];
+  const publications: Array<Array<{ run_id: string; live: boolean }>> = [];
   sender.send = async (command) => {
     const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
     assert.equal(input.Bucket, 'offline');
@@ -297,6 +304,7 @@ async function queuedUploadAdmission(
       return { Body: Buffer.from(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
+    if (input.Key === 'benchmark-hub/index.json') publications.push(JSON.parse(input.Body!));
     const runId = /^benchmark-hub\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
     if (runId !== undefined) {
       bundleWrites.push(runId.slice(prefix.length + 1));
@@ -325,12 +333,13 @@ async function queuedUploadAdmission(
     ]);
     releaseHolder.resolve();
     await uploads;
-    assert.deepEqual(bundleWrites, expected);
-    const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
-      run_id: string;
-      live: boolean;
-    }>;
-    assert.equal(index.find((run) => run.run_id === `${prefix}-final`)?.live, live);
+    assert.deepEqual(bundleWrites, ['holder', 'snapshot-a', 'snapshot-b', 'final']);
+    assert.equal(publications.length, 2, 'the queued uploads share the next publication');
+    const next = publications[1];
+    assert.equal(next.find((run) => run.run_id === `${prefix}-final`)?.live, live);
+    for (const name of ['snapshot-a', 'snapshot-b']) {
+      assert.equal(next.find((run) => run.run_id === `${prefix}-${name}`)?.live, true);
+    }
   } finally {
     releaseHolder.resolve();
     await Promise.allSettled([uploads]);
@@ -446,8 +455,15 @@ async function main(): Promise<void> {
       }
     }
     try {
+      await concurrentFinalBurst();
+      console.log('PASS: concurrent final uploads share one catalog cycle');
+    } catch (error: unknown) {
+      failures.push(`concurrent final burst: ${String(error)}`);
+      console.error(`FAIL: ${failures.at(-1)}`);
+    }
+    try {
       await queuedUploadAdmission();
-      console.log('PASS: a final upload is admitted ahead of queued live snapshots');
+      console.log('PASS: a queued final upload commits in the next catalog publication');
     } catch (error: unknown) {
       failures.push(`final upload admission: ${String(error)}`);
       console.error(`FAIL: ${failures.at(-1)}`);
@@ -458,22 +474,19 @@ async function main(): Promise<void> {
       source: 'benchmark-runner',
       tasks: [{ name: 'agent-payment-production-abandonment', status: 'starting' }],
     };
-    const snapshotOrder = ['holder', 'snapshot-a', 'snapshot-b', 'final'];
-    for (const [label, bundle, expected] of [
-      ['required starting registration precedes queued snapshots', starting, undefined],
+    for (const [label, bundle] of [
+      ['required starting registration commits in the next publication', starting],
       [
-        'already-owned starting progress retains snapshot admission',
+        'already-owned starting progress commits in the next publication',
         { ...starting, tasks: [{ ...starting.tasks[0], agent_id: 'fixture-owned-agent' }] },
-        snapshotOrder,
       ],
       [
-        'mixed running progress retains snapshot admission',
+        'mixed running progress commits in the next publication',
         { ...starting, tasks: [...starting.tasks, { name: 'fixture-running', status: 'running' }] },
-        snapshotOrder,
       ],
     ] as const) {
       try {
-        await queuedUploadAdmission(bundle, true, expected);
+        await queuedUploadAdmission(bundle, true);
         console.log(`PASS: ${label}`);
       } catch (error: unknown) {
         failures.push(`${label}: ${String(error)}`);

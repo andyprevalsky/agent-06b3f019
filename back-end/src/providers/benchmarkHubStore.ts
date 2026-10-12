@@ -40,8 +40,8 @@ import {
   forgetHubRunFromResolutionCaches,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
-import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { coalesceHubRunPuts } from './benchmarkHubInFlight';
+import { getRunBundleStrict } from './benchmarkHubRunBundles';
 import {
   finiteMetric,
   normalizeAgentId,
@@ -91,6 +91,12 @@ export {
   type HubAgentRunIndexSnapshot,
 } from './benchmarkHubAgentIndex';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
+export {
+  getRunBundle,
+  getRunBundleForAgentLookup,
+  getRunBundleStrict,
+  parseHubRunBundle,
+} from './benchmarkHubRunBundles';
 export { getRunDetail } from './benchmarkHubRunDetail';
 export type {
   HubAgentView,
@@ -236,11 +242,7 @@ export async function isHubRunVisible(runId: string): Promise<boolean | null> {
 }
 
 const INDEX_LOCK_KEY = 'benchmark-hub:index';
-type IndexAdmission = 'foreground' | 'snapshot';
-const indexAdmissionWaiters: Record<IndexAdmission, Array<() => void>> = {
-  foreground: [],
-  snapshot: [],
-};
+const indexAdmissionWaiters: Array<() => void> = [];
 let indexAdmissionHeld = false;
 
 /**
@@ -250,19 +252,16 @@ let indexAdmissionHeld = false;
  * another's update. The transaction-scoped Postgres lock is released even
  * when an R2 operation throws.
  *
- * Live snapshots are superseded by the run's next snapshot, while a final
- * bundle, delete or index read is one-shot. Each process admits its queued
- * foreground work ahead of its snapshots. The shared SQL lock still orders
- * other processes' already-admitted writes; it does not preempt those writes.
+ * Each process admits its work in FIFO order. Uploads never queue here one by
+ * one: a single pending catalog cycle carries every queued upload, so a final
+ * or registration waits for at most the current holder, never a snapshot
+ * backlog. The shared SQL lock orders other processes' admitted writes.
  */
-async function withIndexLock<T>(
-  operation: () => Promise<T>,
-  admission: IndexAdmission = 'foreground'
-): Promise<T> {
+async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
   // Wait before borrowing a connection. Otherwise concurrent uploads occupy
   // the SQL pool while waiting for the same cross-process advisory lock.
   if (indexAdmissionHeld) {
-    await new Promise<void>((resolve) => indexAdmissionWaiters[admission].push(resolve));
+    await new Promise<void>((resolve) => indexAdmissionWaiters.push(resolve));
   }
   indexAdmissionHeld = true;
   try {
@@ -271,14 +270,14 @@ async function withIndexLock<T>(
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
         return operation();
       },
-      // Locked work is bounded to the catalog, the compact index and one run
-      // bundle; index repair never scans the archive under this lock.
+      // Locked work is bounded to the catalog, the compact index and one
+      // bounded cycle of run bundles; index repair never scans the archive.
       { maxWait: 30_000, timeout: 5 * 60_000 }
     );
   } finally {
     // A rejected mutation remains rejected for its caller and hands admission
     // to the next waiter, just as PostgreSQL releases the transaction lock.
-    const next = indexAdmissionWaiters.foreground.shift() ?? indexAdmissionWaiters.snapshot.shift();
+    const next = indexAdmissionWaiters.shift();
     if (next === undefined) indexAdmissionHeld = false;
     else next();
   }
@@ -312,160 +311,285 @@ async function storeRun(
     ...(bundle.run_group !== undefined ? { run_group: runGroupSchedule(bundle) } : {}),
   };
   const agentIds = agentIdsFromHubBundle(bundle);
-  // This one-shot registration must be visible before the caller can create
-  // any agent; it cannot be replaced by an already-running progress stream.
+  // A pre-agent registration retry must not replace progress that a peer
+  // already committed for the same run (see applyQueuedPut).
   const startingRegistration =
     tasks.length > 0 && tasks.every((task) => task.status === 'starting') && agentIds.length === 0;
 
-  let storedSummary = summary;
-  let storedAgentIndexRevision: number | null = null;
-  await withIndexLock(
-    async () => {
-      const index = await listRunsStrict();
-      const existing = index.find((run) => run.run_id === runId);
-      if (existing?.run_group || summary.run_group) {
-        if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
-          throw new Error('Benchmark Hub group ID collides with a physical run');
-        }
-        if (
-          existing?.run_group &&
-          (JSON.stringify(existing.run_group.members) !==
-            JSON.stringify(summary.run_group!.members) ||
-            existing.timestamp !== summary.timestamp)
-        ) {
-          throw new Error('Benchmark Hub group schedule changed');
-        }
-        if (summary.run_group) {
-          const scheduled = new Map(
-            summary.run_group.members.map((member) => [member.member_id, member])
-          );
-          for (const child of index.filter((run) => run.group_run_id === runId)) {
-            const member = scheduled.get(child.group_member_id!);
-            if (
-              !member ||
-              member.run_number !== child.group_run_number ||
-              child.tasks.length !== 1 ||
-              child.tasks[0]?.name !== member.name ||
-              summary.run_group.members.length !== child.group_total
-            ) {
-              throw new Error('Existing Benchmark Hub child differs from its group schedule');
-            }
-          }
-        }
-      }
-      if (!summary.run_group && index.some((run) => run.group_run_id === runId)) {
-        throw new Error('Benchmark Hub group ID collides with a physical run');
-      }
-      if (existing?.group_run_id) {
-        for (const field of HUB_GROUP_FIELDS) {
-          if (
-            summary[field] !== undefined &&
-            summary[field] !==
-              (field === 'group_attempt' ? (existing[field] ?? 1) : existing[field])
-          ) {
-            throw new Error('Benchmark Hub group membership changed');
-          }
-        }
-        Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
-      }
-      if (summary.group_run_id) {
-        const owner = index.find((run) => run.run_id === summary.group_run_id);
-        if (owner && !owner.run_group)
-          throw new Error('Benchmark Hub group ID collides with a physical run');
-        validateGroupAttempt(summary, index, existing);
-        if (owner?.run_group) {
-          const member = owner.run_group.members.find(
-            (item) => item.member_id === summary.group_member_id
-          );
-          if (
-            !member ||
-            member.run_number !== summary.group_run_number ||
-            tasks.length !== 1 ||
-            tasks[0]?.name !== member.name ||
-            owner.run_group.members.length !== summary.group_total
-          ) {
-            throw new Error('Benchmark Hub group member differs from its schedule');
-          }
-        }
-        summary.tasks = tasks.map((task) => ({
-          ...taskSummary(task),
-          cost_cents: finiteMetric(task.cost_cents),
-          duration_seconds: finiteMetric(task.duration_seconds),
-          tree_agent_count: finiteMetric(task.tree_agent_count),
-          tokens_in: finiteMetric(task.tokens_in),
-          tokens_out: finiteMetric(task.tokens_out),
-          cache_hit_pct: finiteMetric(task.cache_hit_pct),
-          llm_call_count: finiteMetric(task.llm_call_count),
-          message_count: finiteMetric(task.message_count),
-        }));
-        summary.code =
-          typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
-        summary.elapsed_s = finiteMetric(bundle.elapsed_s);
-        summary.cost =
-          typeof bundle.cost === 'object' && bundle.cost !== null
-            ? Object.fromEntries(
-                [
-                  'agents_llm_usd',
-                  'wmh_grounding_usd',
-                  'infra_usd',
-                  'total_usd',
-                  'fast_cache_hit_rate',
-                ].map((field) => [
-                  field,
-                  finiteMetric((bundle.cost as Record<string, unknown>)[field]),
-                ])
-              )
-            : null;
-      }
-      // Final is an absorbing state. A snapshot loop already in flight may
-      // arrive after completion; it must not regress either the bundle or index
-      // back to live/running.
-      if (existing !== undefined && !existing.live && summary.live) {
-        storedSummary = existing;
-        return;
-      }
-      const persisted = await readAgentRunIndexForMutation(index);
-      // An unknown-ACK registration retry can arrive after another process
-      // has committed progress. Preserve that durable handoff; distinct
-      // pre-agent starting packets may still update until ownership advances.
-      if (
-        existing !== undefined &&
-        summary.live &&
-        startingRegistration &&
-        (existing.tasks.some(
-          (task) =>
-            (typeof task.status === 'string' && task.status !== 'starting') ||
-            (typeof task.agent_id === 'string' && task.agent_id.length > 0)
-        ) ||
-          Array.from(persisted?.agents.values() ?? []).includes(runId))
-      ) {
-        storedSummary = existing;
-        return;
-      }
-      const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
-      await putObject(
-        `runs/${runId}.json`,
-        JSON.stringify({ ...bundle, tasks, ...runGroupFields({ ...summary, run_id: runId }) })
-      );
-      const next = [summary, ...index.filter((r) => r.run_id !== runId)];
-      next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-      await putObject('index.json', JSON.stringify(next));
-      await writeAgentRunIndex(agentIndex);
-      await putObject(`visibility/${runId}.json`, 'true');
-      storedAgentIndexRevision = agentIndex.revision;
-    },
-    summary.live && !startingRegistration ? 'snapshot' : 'foreground'
-  );
+  const stored = await new Promise<StoredPut>((resolve, reject) => {
+    queuedPuts.push({
+      bundle,
+      runId,
+      tasks,
+      summary,
+      agentIds,
+      startingRegistration,
+      resolve,
+      reject,
+    });
+    if (!putCycleQueued) {
+      putCycleQueued = true;
+      void commitQueuedPuts();
+    }
+  });
   log.info('Stored benchmark run bundle', {
     runId,
-    live: storedSummary.live,
-    tasks: storedSummary.tasks.length,
+    live: stored.summary.live,
+    tasks: stored.summary.tasks.length,
   });
-  if (storedAgentIndexRevision !== null) {
-    await slotHubAncestorSkeletonsFromBundle(bundle);
-    applyHubRunToResolutionCaches(runId, agentIds, storedAgentIndexRevision);
+  if (stored.revision !== null) await slotHubAncestorSkeletonsFromBundle(bundle);
+  return stored.summary;
+}
+
+type StoredPut = { summary: HubRunSummary; revision: number | null };
+type QueuedPut = {
+  bundle: Record<string, unknown>;
+  runId: string;
+  tasks: Array<Record<string, unknown>>;
+  summary: HubRunSummary;
+  agentIds: string[];
+  startingRegistration: boolean;
+  resolve: (stored: StoredPut) => void;
+  reject: (error: unknown) => void;
+};
+type PutCycle = { index: HubRunSummary[]; agentIndex: HubAgentRunIndexSnapshot | null };
+
+const queuedPuts: QueuedPut[] = [];
+let putCycleQueued = false;
+// One cycle's locked work stays bounded; later uploads take the next cycle.
+const PUT_CYCLE_LIMIT = 64;
+const PUT_WRITE_LANES = 8;
+
+/**
+ * Group commit for the single catalog writer. Uploads that queue while the
+ * writer is busy share one catalog/agent-index read-modify-write, so a burst of
+ * N uploads costs about two catalog cycles instead of N. Each catalog round
+ * trip moves the whole archive index (7.7 MB in production on 2026-10-12, about
+ * 3 s per cycle), so per-upload cycles capped the Hub at ~20 writes a minute
+ * and a 40-controller terminal burst outlived the clients' response window.
+ * Uploads apply in arrival order against the cycle's evolving state; a
+ * validation error rejects only its own upload. A storage failure rejects the
+ * whole cycle, whose catalog was not published.
+ */
+async function commitQueuedPuts(): Promise<void> {
+  let cycle: QueuedPut[] = [];
+  try {
+    await withIndexLock(async () => {
+      cycle = queuedPuts.splice(0, PUT_CYCLE_LIMIT);
+      putCycleQueued = queuedPuts.length > 0;
+      if (putCycleQueued) void commitQueuedPuts();
+      await commitPutCycle(cycle);
+    });
+  } catch (error: unknown) {
+    if (cycle.length === 0) {
+      // Admission failed before this cycle claimed its uploads.
+      cycle = queuedPuts.splice(0);
+      putCycleQueued = false;
+    }
+    for (const put of cycle) put.reject(error);
   }
-  return storedSummary;
+}
+
+async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
+  if (queued.length === 0) return;
+  const committed = await listRunsStrict();
+  const cycle: PutCycle = {
+    index: committed,
+    agentIndex: await readAgentRunIndexForMutation(committed),
+  };
+  const outcomes: Array<{ put: QueuedPut; stored: StoredPut }> = [];
+  // Bodies serialize inside the write lanes, so a cycle holds at most
+  // PUT_WRITE_LANES serialized copies of large bundles at once.
+  const bundles: Array<[string, Record<string, unknown>]> = [];
+  for (const put of queued) {
+    let summary: HubRunSummary | null;
+    try {
+      summary = applyQueuedPut(put, cycle);
+    } catch (error: unknown) {
+      put.reject(error);
+      continue;
+    }
+    if (summary !== null) {
+      outcomes.push({ put, stored: { summary, revision: null } });
+      continue;
+    }
+    cycle.agentIndex = hubAgentIndexAfterPut(
+      cycle.agentIndex,
+      cycle.index.length === 0,
+      put.runId,
+      put.agentIds
+    );
+    cycle.index = [put.summary, ...cycle.index.filter((r) => r.run_id !== put.runId)];
+    const fields = runGroupFields({ ...put.summary, run_id: put.runId });
+    bundles.push([put.runId, { ...put.bundle, tasks: put.tasks, ...fields }]);
+    outcomes.push({ put, stored: { summary: put.summary, revision: cycle.agentIndex.revision } });
+  }
+  if (bundles.length > 0) {
+    const writes = new Map<string, Array<Record<string, unknown>>>();
+    for (const [runId, body] of bundles) writes.set(runId, [...(writes.get(runId) ?? []), body]);
+    // Each run keeps its own upload order; distinct runs write concurrently.
+    await inLanes([...writes], async ([runId, bodies]) => {
+      for (const body of bodies) await putObject(`runs/${runId}.json`, JSON.stringify(body));
+    });
+    const next = [...cycle.index];
+    next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+    await putObject('index.json', JSON.stringify(next));
+    const agentIndex = cycle.agentIndex!;
+    await writeAgentRunIndex(agentIndex);
+    await inLanes([...writes.keys()], (runId) => putObject(`visibility/${runId}.json`, 'true'));
+  }
+  log.info('Committed Benchmark Hub upload cycle', {
+    uploads: queued.length,
+    stored: bundles.length,
+    absorbed: outcomes.length - bundles.length,
+    rejected: queued.length - outcomes.length,
+  });
+  for (const { put, stored } of outcomes) {
+    if (stored.revision !== null) {
+      applyHubRunToResolutionCaches(put.runId, put.agentIds, stored.revision);
+    }
+    put.resolve(stored);
+  }
+}
+
+/** Bounded concurrent writes; stops claiming items after the first failure. */
+async function inLanes<T>(items: T[], write: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failed = false;
+  const lane = async (): Promise<void> => {
+    while (!failed && next < items.length) {
+      const item = items[next++];
+      try {
+        await write(item);
+      } catch (error: unknown) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  const lanes = Array.from({ length: Math.min(PUT_WRITE_LANES, items.length) }, lane);
+  for (const result of await Promise.allSettled(lanes)) {
+    if (result.status === 'rejected') throw result.reason;
+  }
+}
+
+/**
+ * Validate one upload against the cycle's current catalog. Returns the existing
+ * summary when the upload is absorbed, or null when it should be stored.
+ */
+function applyQueuedPut(put: QueuedPut, cycle: PutCycle): HubRunSummary | null {
+  const { bundle, runId, tasks, summary, startingRegistration } = put;
+  const existing = cycle.index.find((run) => run.run_id === runId);
+  if (existing?.run_group || summary.run_group) {
+    if ((existing && !existing.run_group) || (existing?.run_group && !summary.run_group)) {
+      throw new Error('Benchmark Hub group ID collides with a physical run');
+    }
+    if (
+      existing?.run_group &&
+      (JSON.stringify(existing.run_group.members) !== JSON.stringify(summary.run_group!.members) ||
+        existing.timestamp !== summary.timestamp)
+    ) {
+      throw new Error('Benchmark Hub group schedule changed');
+    }
+    if (summary.run_group) {
+      const scheduled = new Map(
+        summary.run_group.members.map((member) => [member.member_id, member])
+      );
+      for (const child of cycle.index.filter((run) => run.group_run_id === runId)) {
+        const member = scheduled.get(child.group_member_id!);
+        if (
+          !member ||
+          member.run_number !== child.group_run_number ||
+          child.tasks.length !== 1 ||
+          child.tasks[0]?.name !== member.name ||
+          summary.run_group.members.length !== child.group_total
+        ) {
+          throw new Error('Existing Benchmark Hub child differs from its group schedule');
+        }
+      }
+    }
+  }
+  if (!summary.run_group && cycle.index.some((run) => run.group_run_id === runId)) {
+    throw new Error('Benchmark Hub group ID collides with a physical run');
+  }
+  if (existing?.group_run_id) {
+    for (const field of HUB_GROUP_FIELDS) {
+      if (
+        summary[field] !== undefined &&
+        summary[field] !== (field === 'group_attempt' ? (existing[field] ?? 1) : existing[field])
+      ) {
+        throw new Error('Benchmark Hub group membership changed');
+      }
+    }
+    Object.assign(summary, runGroupFields({ ...existing, run_id: runId }));
+  }
+  if (summary.group_run_id) {
+    const owner = cycle.index.find((run) => run.run_id === summary.group_run_id);
+    if (owner && !owner.run_group)
+      throw new Error('Benchmark Hub group ID collides with a physical run');
+    validateGroupAttempt(summary, cycle.index, existing);
+    if (owner?.run_group) {
+      const member = owner.run_group.members.find(
+        (item) => item.member_id === summary.group_member_id
+      );
+      if (
+        !member ||
+        member.run_number !== summary.group_run_number ||
+        tasks.length !== 1 ||
+        tasks[0]?.name !== member.name ||
+        owner.run_group.members.length !== summary.group_total
+      ) {
+        throw new Error('Benchmark Hub group member differs from its schedule');
+      }
+    }
+    summary.tasks = tasks.map((task) => ({
+      ...taskSummary(task),
+      cost_cents: finiteMetric(task.cost_cents),
+      duration_seconds: finiteMetric(task.duration_seconds),
+      tree_agent_count: finiteMetric(task.tree_agent_count),
+      tokens_in: finiteMetric(task.tokens_in),
+      tokens_out: finiteMetric(task.tokens_out),
+      cache_hit_pct: finiteMetric(task.cache_hit_pct),
+      llm_call_count: finiteMetric(task.llm_call_count),
+      message_count: finiteMetric(task.message_count),
+    }));
+    summary.code =
+      typeof bundle.code === 'string' && bundle.code.length <= 128 ? bundle.code : null;
+    summary.elapsed_s = finiteMetric(bundle.elapsed_s);
+    summary.cost =
+      typeof bundle.cost === 'object' && bundle.cost !== null
+        ? Object.fromEntries(
+            [
+              'agents_llm_usd',
+              'wmh_grounding_usd',
+              'infra_usd',
+              'total_usd',
+              'fast_cache_hit_rate',
+            ].map((field) => [field, finiteMetric((bundle.cost as Record<string, unknown>)[field])])
+          )
+        : null;
+  }
+  // Final is an absorbing state. A snapshot loop already in flight may
+  // arrive after completion; it must not regress either the bundle or index
+  // back to live/running.
+  if (existing !== undefined && !existing.live && summary.live) return existing;
+  // An unknown-ACK registration retry can arrive after another process
+  // has committed progress. Preserve that durable handoff; distinct
+  // pre-agent starting packets may still update until ownership advances.
+  if (
+    existing !== undefined &&
+    summary.live &&
+    startingRegistration &&
+    (existing.tasks.some(
+      (task) =>
+        (typeof task.status === 'string' && task.status !== 'starting') ||
+        (typeof task.agent_id === 'string' && task.agent_id.length > 0)
+    ) ||
+      Array.from(cycle.agentIndex?.agents.values() ?? []).includes(runId))
+  ) {
+    return existing;
+  }
+  return null;
 }
 
 /**
@@ -537,76 +661,6 @@ function parseRunCatalog(raw: string): HubRunSummary[] {
 export async function listRunsStrict(): Promise<HubRunSummary[]> {
   const raw = await getObjectStrict('index.json');
   return raw === null ? [] : parseRunCatalog(raw);
-}
-
-export async function getRunBundle(runId: string): Promise<Record<string, unknown> | null> {
-  if (!/^[A-Za-z0-9._-]+$/.test(runId)) return null;
-  const raw = await getObject(`runs/${runId}.json`);
-  if (!raw) return null;
-  try {
-    return parseHubRunBundle(raw);
-  } catch {
-    return null;
-  }
-}
-
-/** Agent resolution preserves transport faults so callers do not cache a false miss. */
-export async function getRunBundleForAgentLookup(
-  runId: string
-): Promise<Record<string, unknown> | null> {
-  if (!/^[A-Za-z0-9._-]+$/.test(runId)) return null;
-  let raw: string | null;
-  try {
-    raw = await getObjectStrict(`runs/${runId}.json`);
-  } catch (error: unknown) {
-    log.warn('Benchmark Hub run bundle read is temporarily unavailable', {
-      runId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw new BenchmarkHubUnavailableError(
-      'Benchmark Hub run bundle is temporarily unavailable; retry shortly'
-    );
-  }
-  if (raw === null) return null;
-  try {
-    return parseHubRunBundle(raw);
-  } catch (error: unknown) {
-    log.warn('Benchmark Hub run bundle is malformed', {
-      runId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
-/**
- * Strictly parse a stored run bundle. Writers before 2026-10 stored any
- * non-array task list verbatim and cataloged that run with zero tasks; only a
- * caller holding that zero-task catalog summary may read it as an empty run.
- */
-export function parseHubRunBundle(
-  raw: string,
-  catalogSummary?: { tasks: unknown[] }
-): Record<string, unknown> {
-  const parsed = JSON.parse(raw) as unknown;
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Invalid Benchmark Hub run bundle');
-  }
-  const bundle = parsed as Record<string, unknown>;
-  if (Array.isArray(bundle.tasks)) return bundle;
-  if (catalogSummary?.tasks.length === 0) return { ...bundle, tasks: [] };
-  throw new Error('Invalid Benchmark Hub run bundle');
-}
-
-/** Legacy-index migration must distinguish an absent/corrupt bundle from success. */
-export async function getRunBundleStrict(
-  runId: string,
-  catalogSummary?: { tasks: unknown[] }
-): Promise<Record<string, unknown>> {
-  if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error(`Invalid Hub run id: ${runId}`);
-  const raw = await getObjectStrict(`runs/${runId}.json`);
-  if (raw === null) throw new Error(`Missing Hub run bundle: ${runId}`);
-  return parseHubRunBundle(raw, catalogSummary);
 }
 
 /**

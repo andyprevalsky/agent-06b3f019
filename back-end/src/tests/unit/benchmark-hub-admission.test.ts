@@ -7,8 +7,7 @@ import ts from 'typescript';
 import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
 
 type Operation = () => Promise<unknown>;
-type Admission = 'foreground' | 'snapshot';
-type Owner = (operation: Operation, admission?: Admission) => Promise<unknown>;
+type Owner = (operation: Operation) => Promise<unknown>;
 type Transaction = { $executeRaw: (sql: TemplateStringsArray, key: string) => Promise<void> };
 type Prisma = {
   $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => Promise<unknown>;
@@ -192,7 +191,7 @@ test('50 Hub mutations wait for process admission before borrowing SQL connectio
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
 });
 
-test('queued foreground Hub work is admitted ahead of queued live snapshots', async () => {
+test('Hub mutations are admitted in FIFO order behind the current holder', async () => {
   const database = databaseBoundary(4);
   const owner = loadOwner(database.prisma);
   let release: (() => void) | undefined;
@@ -200,25 +199,55 @@ test('queued foreground Hub work is admitted ahead of queued live snapshots', as
     release = resolve;
   });
   const admitted: string[] = [];
-  const run = (label: string, admission?: Admission) =>
+  const run = (label: string) =>
     owner(async () => {
       admitted.push(label);
       if (label === 'holder') await gate;
       return label;
-    }, admission);
-  const outcomes = Promise.all([
-    run('holder', 'snapshot'),
-    run('snapshot-1', 'snapshot'),
-    run('snapshot-2', 'snapshot'),
-    run('final-1', 'foreground'),
-    run('index-read'),
-  ]);
+    });
+  const outcomes = Promise.all([run('holder'), run('put-cycle'), run('delete'), run('index-read')]);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(admitted, ['holder']);
   release?.();
-  assert.deepEqual(await outcomes, ['holder', 'snapshot-1', 'snapshot-2', 'final-1', 'index-read']);
-  assert.deepEqual(admitted, ['holder', 'final-1', 'index-read', 'snapshot-1', 'snapshot-2']);
+  assert.deepEqual(await outcomes, ['holder', 'put-cycle', 'delete', 'index-read']);
+  assert.deepEqual(admitted, ['holder', 'put-cycle', 'delete', 'index-read']);
   assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+});
+
+test('a failed catalog write rejects its whole cycle and an unchanged retry commits', async () => {
+  const marker = new Error('fixture catalog write failure');
+  let fail = true;
+  const entered = deferred();
+  const gate = deferred();
+  const boundary = putBoundary(async (key) => {
+    if (key === 'runs/fixture-holder.json') {
+      entered.resolve();
+      await gate.promise;
+    }
+    if (key === 'index.json' && fail && boundary.objects.has('runs/fixture-a.json')) throw marker;
+  });
+  const holder = boundary.putRun({ ...packet, run_id: 'fixture-holder' }, { live: true });
+  await entered.promise;
+  const outcomes = Promise.allSettled([
+    boundary.putRun({ ...packet, run_id: 'fixture-a' }, { live: false }),
+    boundary.putRun({ ...packet, run_id: 'fixture-b' }, { live: true }),
+  ]);
+  gate.resolve();
+  await holder;
+  const settled = await outcomes;
+  assert.ok(settled.every((outcome) => outcome.status === 'rejected' && outcome.reason === marker));
+  assert.equal(boundary.stats().cacheUpdates, 1, 'an unpublished cycle never reaches caches');
+  assert.equal(boundary.stats().ancestors, 1);
+  const unpublished = JSON.parse(boundary.objects.get('index.json')!) as Array<{ run_id: string }>;
+  assert.deepEqual(
+    unpublished.map((run) => run.run_id),
+    ['fixture-holder']
+  );
+  fail = false;
+  const retried = await boundary.putRun({ ...packet, run_id: 'fixture-a' }, { live: false });
+  assert.equal(retried.live, false);
+  const catalog = JSON.parse(boundary.objects.get('index.json')!) as Array<{ run_id: string }>;
+  assert.deepEqual(catalog.map((run) => run.run_id).sort(), ['fixture-a', 'fixture-holder']);
 });
 
 test('a failed Hub mutation releases admission and preserves its rejection', async () => {
@@ -313,7 +342,7 @@ test('50 identical pending Hub packets share one publication before SQL admissio
   assert.ok(results.every((result) => result === results[0]));
 });
 
-test('distinct packet content, run, source and live mode retain publication order', async () => {
+test('distinct packet content, run, source and live mode retain per-run publication order', async () => {
   const boundary = putBoundary();
   const results = await Promise.all([
     boundary.putRun(packet, { live: true, source: 'fixture' }),
@@ -321,24 +350,27 @@ test('distinct packet content, run, source and live mode retain publication orde
     boundary.putRun({ ...packet, run_id: 'fixture-other' }, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: true, source: 'other-source' }),
   ]);
-  // A final is admitted ahead of queued snapshots and absorbs its run's later
-  // ones, so live mode is distinguished against one pending identical snapshot.
+  // Each batch commits in one catalog cycle and applies uploads in arrival
+  // order, so live mode is distinguished against one identical snapshot.
   const modes = await Promise.all([
     boundary.putRun(packet, { live: true, source: 'fixture' }),
     boundary.putRun(packet, { live: false, source: 'fixture' }),
   ]);
-  assert.equal(boundary.stats().transactions, 6);
-  assert.deepEqual(
-    boundary.runWrites().map(({ value }) => JSON.parse(value)),
-    [
-      packet,
-      { ...packet, marker: 'changed' },
-      { ...packet, run_id: 'fixture-other' },
-      packet,
-      packet,
-      packet,
-    ]
-  );
+  assert.equal(boundary.stats().transactions, 2);
+  const writesFor = (runId: string) =>
+    boundary
+      .runWrites()
+      .filter(({ key }) => key === `runs/${runId}.json`)
+      .map(({ value }) => JSON.parse(value));
+  assert.equal(boundary.runWrites().length, 6, 'no distinct packet is coalesced');
+  assert.deepEqual(writesFor(packet.run_id), [
+    packet,
+    { ...packet, marker: 'changed' },
+    packet,
+    packet,
+    packet,
+  ]);
+  assert.deepEqual(writesFor('fixture-other'), [{ ...packet, run_id: 'fixture-other' }]);
   assert.equal(results[3].source, 'other-source');
   assert.deepEqual(
     modes.map((mode) => mode.live),
@@ -439,7 +471,8 @@ for (const mode of ['source', 'live'] as const) {
     gate.resolve();
     const results = await Promise.all([first, second, last]);
     assert.notEqual(last, first);
-    assert.equal(boundary.stats().transactions, 3);
+    // The uploads queued behind the first share its next catalog cycle.
+    assert.equal(boundary.stats().transactions, 2);
     assert.equal(boundary.runWrites().length, mode === 'source' ? 3 : 2);
     assert.equal(results[2].source, 'fixture');
     assert.equal(results[2].live, options.live);
@@ -495,7 +528,8 @@ for (const fails of [false, true]) {
     assert.equal(peer, last);
     assert.equal(await lastOutcome, undefined);
     assert.ok(results.every((result) => result.status === 'fulfilled'));
-    assert.equal(boundary.stats().transactions, 3);
+    // The uploads queued behind the first share its next catalog cycle.
+    assert.equal(boundary.stats().transactions, 2);
     assert.equal(boundary.runWrites().length, fails ? 2 : 3);
     assert.deepEqual(JSON.parse(boundary.objects.get(`runs/${packet.run_id}.json`)!), packet);
   });
@@ -550,7 +584,8 @@ test('coalescing follows the same normalized run identity as actual persistence'
   gate.resolve();
   await Promise.all([first, second, last]);
   assert.notEqual(last, first);
-  assert.equal(boundary.stats().transactions, 3);
+  // The uploads queued behind the first share its next catalog cycle.
+  assert.equal(boundary.stats().transactions, 2);
   assert.equal(boundary.runWrites().length, 3);
   assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
 });

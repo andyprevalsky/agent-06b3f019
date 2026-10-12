@@ -409,28 +409,27 @@ def _post_run_bundle(
                 if isinstance(exc, urllib.error.HTTPError)
                 else isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
             )
-            recovered_visible_run = False
             run_id = str(body.get("run_id") or "")
-            if required and live and retryable and run_id:
-                try:
-                    verify_run_visible(run_id, timeout=min(timeout, 5.0))
-                    recovered_visible_run = True
-                except HubVisibilityError:
-                    pass
-            if recovered_visible_run:
-                print(
-                    f"✅ benchmark Hub upload attempt {attempt} committed before "
-                    "its response timed out; continuing from verified visibility"
-                )
-                return True
-            if required and retryable and attempt < max_attempts:
+            if required and retryable:
                 delay = min(2 ** (attempt - 1), 4)
-                print(
-                    f"⚠️  benchmark Hub upload attempt {attempt}/{max_attempts} "
-                    f"failed transiently; retrying in {delay}s: {failure}"
-                )
+                if attempt < max_attempts:
+                    print(
+                        f"⚠️  benchmark Hub upload attempt {attempt}/{max_attempts} "
+                        f"failed transiently; retrying in {delay}s: {failure}"
+                    )
+                # The Hub keeps processing a request after its client gives
+                # up. Reconcile the exact read identity before replaying the
+                # mutation or declaring it failed.
                 time.sleep(delay)
-                continue
+                if run_id and _upload_committed(base, body, live=live, timeout=min(timeout, 5.0)):
+                    record = "visibility" if live else "final record"
+                    print(
+                        f"✅ benchmark Hub upload attempt {attempt} committed before "
+                        f"its response failed; continuing from the verified {record}"
+                    )
+                    return True
+                if attempt < max_attempts:
+                    continue
             if required:
                 raise HubVisibilityError(f"benchmark Hub upload failed: {failure}") from exc
             print(f"⚠️  hub upload failed (non-fatal): {failure}")
@@ -483,6 +482,42 @@ def live_response_matches(bundle: dict, stored: dict) -> bool:
         and stored.get("run_id") == bundle.get("run_id")
         and [identity(t) for t in stored.get("tasks") or []] == [identity(t) for t in bundle["tasks"]]
     )
+
+
+def final_record_matches(bundle: dict, stored: dict) -> bool:
+    """A terminal upload is committed only when the Hub reads back its exact final outcome."""
+
+    def projected(task: dict) -> tuple:
+        # Mirrors taskSummary in back-end/src/providers/benchmarkHubRunProjection.ts.
+        status = task.get("status")
+        infrastructure = task.get("passed") is not True and status in ("INFRA_ERROR", "error")
+        passed = task.get("passed") if not infrastructure and isinstance(task.get("passed"), bool) else None
+        if passed is not None:
+            status = "passed" if passed else "failed"
+        elif not (isinstance(status, str) and status):
+            status = "running"
+        agent_id = task.get("agent_id").strip() if isinstance(task.get("agent_id"), str) else ""
+        labels = tuple(
+            task.get(key) if isinstance(task.get(key), str) else None
+            for key in ("lifecycle_stage", "startup_label", "failure_reason")
+        )
+        return (str(task.get("name") or ""), passed, status, agent_id or None, *labels)
+
+    expected = [projected(task) for task in bundle.get("tasks") or [] if isinstance(task, dict)]
+    actual = [projected(task) for task in stored.get("tasks") or [] if isinstance(task, dict)]
+    return stored.get("live") is False and stored.get("run_id") == bundle.get("run_id") and actual == expected
+
+
+def _upload_committed(base: str, body: dict, *, live: bool, timeout: float) -> bool:
+    """Read back an ambiguously failed upload from the Hub it was sent to."""
+    run_id = str(body.get("run_id") or "")
+    try:
+        if live:
+            verify_run_visible(run_id, timeout=timeout, base=base)
+            return True
+        return final_record_matches(body, _read_hub_run(run_id, timeout=timeout, base=base))
+    except HubVisibilityError:
+        return False
 
 
 def live_bundle_from_report_card(card: dict, *, run_id: str, source: str) -> dict:
@@ -633,11 +668,11 @@ def print_durable_agent_links(bundle: dict) -> None:
         print("   (rehydrates from the in-app Benchmark Hub after the local stack is gone)")
 
 
-def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
-    """Prove that the in-app read path resolves an exact run identifier."""
+def _read_hub_run(run_id: str, *, timeout: float, base: str | None = None) -> dict:
+    """Read one exact run through the in-app read path."""
     if not run_id:
         raise HubVisibilityError("benchmark run_id is required for Hub registration")
-    base = _hub_url(required=True)
+    base = (base or _hub_url(required=True)).rstrip("/")
     headers = _auth_headers(required=True)
     assert headers is not None
     request = urllib.request.Request(
@@ -651,7 +686,13 @@ def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
             payload = json.loads(response.read() or b"{}")
     except Exception as exc:
         raise HubVisibilityError(f"benchmark Hub visibility check failed: {exc}") from exc
-    visible_id = ((payload.get("run") or {}).get("run_id")) if isinstance(payload, dict) else None
+    run = payload.get("run") if isinstance(payload, dict) else None
+    return run if isinstance(run, dict) else {}
+
+
+def verify_run_visible(run_id: str, *, timeout: float = 30.0, base: str | None = None) -> None:
+    """Prove that the in-app read path resolves an exact run identifier."""
+    visible_id = _read_hub_run(run_id, timeout=timeout, base=base).get("run_id")
     if visible_id != run_id:
         raise HubVisibilityError(f"benchmark Hub returned the wrong run after registration: {visible_id!r}")
     print(f"✅ in-app Benchmark Hub registration verified: run={run_id}")
