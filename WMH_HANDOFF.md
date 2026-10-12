@@ -160,6 +160,9 @@ OpenRouter credit ran out on 2026-10-10 ($11,003.17 used of $11,000); local
 | `ee95747b` root `062da7ea` | OpenRouter | 1,099 s | false tree-stall (fixed) | 140,181 / 421,594 (33.25%) | 0/19 | ~8% |
 | `291bb810` root `161810ab` | OpenRouter | 1,412 s | OpenRouter 402 | 265,023 / 1,197,051 (22.14%) | 0/66 | ~15% |
 | `e4cd9280` root `a1495e13` | Azure | 3,618 s | 60-min cap | 0 / 2,703,298 (0%) | 0/66 | ~18% |
+| `cecb966b` root `6c7b7005` | Azure | 60-min cap | world clock, policy v3 | 150,234 / 1,681,496 (8.93%) | 0/45 | ~15% |
+| `11a85869` root `59f70a24` | Azure | 60-min cap | pinned world date; 28-fund fan-out serialized by `as_of_utc` writes (fixed) | 217,953 / 3,688,480 (5.91%) | 0/73 | ~12% |
+| `8abbd152` root `d3a9812a` | Azure (1 OpenRouter fallback, $0.08) | 3,602 s | 60-min cap; 63 commits, ~14 pitches delivered, 1 later-interest signal, no replies | 240,128 / 4,637,772 (5.18%), output 600,653 | 0/78 | ~20% |
 
 Run 3 had no world-model errors (65/66 predictions; one cancelled at
 teardown): research, a $0 Brex check, then a for-each outreach to ~20 funds
@@ -172,6 +175,26 @@ not cover (fixed in `6752dc48`). Azure prompt caching reuses only a shared
 input (measured 0 cached tokens for a 4.5k-token shared input prefix; 9,208 of
 9,230 when the same text sat in instructions), so the WMH layout gets 0% there.
 FE: https://www.roselabs.ai/?agent-id=a1495e13-6262-47d3-98fe-9f93a5840dd4#benchmark-share=e4cd9280-b953-4383-affa-50723fe0bc89.1794290166.5134b4f7bfbec86bb7d0ebf5d589c6365526e09a8ca20ee400e51707a11fc900
+
+Azure caching, measured on `gpt-6.1-sol` (2026-10-12, probes plus a replay of
+run 5's requests): Azure reuses only an exactly repeated leading
+instructions/developer block, or an identical whole request. User-role content
+is never prefix-cached (an identical user chunk got 0), and a block that grew
+since the last request caches nothing, not even its unchanged start. A request
+chaining a stored response (`previous_response_id`, `store: true`) reused the
+whole chain: 7,572 / 11,203 and 11,200 / 14,831. The layout (`88e4dee7a`) keeps
+the session task in the system message and splits the user evidence at
+completed history batches. Per-call evidence (the candidate's tools, retrieval,
+world state, candidate) comes last. An agent's next request then repeats every
+earlier message (55/55 run-5 pairs), and DEMO keys are unchanged (73/73). On
+Azure this layout still caches only the system block. Run 7's 5.18% is that
+block over ~64k-token requests.
+
+Run 7 also re-serialized its fan-out: one replacing commit queued every other
+operation behind one re-prediction at a time. Since `ac788e8f5`, only a
+conflicted operation waits for its turn before predicting; the others predict
+at once and yield only at commit.
+FE (run 7): https://www.roselabs.ai/?agent-id=d3a9812a-c539-4432-b855-de18d69b7bac#benchmark-share=8abbd152-6cf6-42bd-90b6-8216b1216346.1794373952.df3d9fb0a98c643ee1ae3e96a4924ff3a7228f3c0fd9ee1bc619273402f84cea
 
 ### Still open
 
