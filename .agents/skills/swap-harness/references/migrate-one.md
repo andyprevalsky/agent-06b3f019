@@ -87,7 +87,8 @@ dvb-onbox threads start --target new-devbox --agent <opposite> \
 
 Keep this continuation unmuted for the user. After an uncertain response,
 reuse the same key and **identical arguments**, or recover its child record;
-never mint another key. Save returned box/thread IDs immediately. The new box
+never mint another key while the outcome is uncertain. Save returned box/thread
+IDs immediately. The new box
 does not copy unpushed files and its startup may reset to main. Its prompt must:
 
 1. Read `CLAUDE.md`/`AGENTS.md`, fetch the task branch, check out the verified
