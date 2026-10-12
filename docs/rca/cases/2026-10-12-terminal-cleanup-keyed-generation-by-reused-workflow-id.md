@@ -24,7 +24,7 @@ tags:
 sources:
   - agent 572da2a5-4fc0-45f4-b9a7-d20b08e19a4e
   - agent 2dd470aa-b3b9-41ab-9475-75e37986298f
-repro: back-end/src/tests/unit/workflow-terminal-cleanup.test.ts
+repro: back-end/src/tests/unit/workflow-terminal-cleanup-follow-up.test.ts
 status: fixed
 ---
 
@@ -115,7 +115,7 @@ Local repro (identical command before and after the fix):
 ```
 cd back-end && DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria \
   DIRECT_URL=postgresql://postgres:postgres@localhost:5432/victoria \
-  npx tsx src/tests/unit/workflow-terminal-cleanup.test.ts
+  npx tsx src/tests/unit/workflow-terminal-cleanup-follow-up.test.ts
 ```
 
 The test uses the real trigger, `clearWorkflowForTerminalAgent`,
@@ -125,11 +125,11 @@ generation` failed with `terminations = [<agent>:<agent>:run-2-…]` (the live r
 was terminated, `interrupted_count=1`). `follow-up run survives cleanup of an
 exact-run completed generation` failed with
 `temporalWorkflowId = <agent>:deployment-sealed:…`. Post-fix the suite passes
-(18/18 after the review hardening below), including the guard `still-terminal
+(8/8 follow-up cases after the review hardening below, plus the original 10), including the guard `still-terminal
 agent with an unknown run is still sealed and terminated`.
 
 An adversarial review then found five more holes in the same identity class.
-Each now has a case in the same file that fails on the first fix (`8f87649da`)
+Each now has a case in the same suite that fails on the first fix (`8f87649da`)
 and passes after:
 
 - `a live agent still on the exact terminal chain is sealed and terminated`
@@ -197,7 +197,7 @@ Siblings prevented:
 - Unknown-run obligations from every lossy start path (API create, SMS, manual
   escalation).
 
-Regression coverage: `workflow-terminal-cleanup.test.ts` (+8),
+Regression coverage: `workflow-terminal-cleanup-follow-up.test.ts` (8 cases),
 `workflow-generation-locks.test.ts` (+1), `generation-queue-cutover.test.ts`
 (the run-scoped orphan) and `coverage-script.test.ts` (hook order) all run via
 `scripts/run-unit-tests.ts` inside `run-coverage.sh`, the `/deploy` backend
