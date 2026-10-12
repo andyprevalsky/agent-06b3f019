@@ -907,13 +907,9 @@ class RoseWMHProvider:
             evidence = json.loads(messages[0].content)
         except ValueError:
             return _to_rose_messages(system, messages), cache_namespace
-        calls = evidence.get("candidate_response", {}).get("tool_calls") if isinstance(evidence, dict) else None
-        first = calls[0] if isinstance(calls, list) and calls and isinstance(calls[0], dict) else {}
-        arguments = first.get("arguments") if isinstance(first.get("arguments"), dict) else {}
-        agent = str(arguments.get("agent_id") or "-")
-        agent_key = hashlib.sha256(agent.encode()).hexdigest()[:16]
         before = len(self._streams.resets)
-        rendered = await self._streams.render(f"{cache_namespace}:{agent_key}", evidence)
+        # One stream per world: every agent sees the world's shared history.
+        rendered = await self._streams.render(f"{cache_namespace}:world", evidence)
         if rendered is None:
             return _to_rose_messages(system, messages), cache_namespace
         units, final = rendered
@@ -921,6 +917,7 @@ class RoseWMHProvider:
             "wmh.stream.rendered",
             stream_units=len(units),
             reset=self._streams.resets[-1] if len(self._streams.resets) > before else None,
+            branches=self._streams.branches,
             fallbacks=len(self._streams.fallbacks),
         )
         wire = [{"role": "system", "content": system + STREAM_GUIDE}]

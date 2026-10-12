@@ -197,24 +197,60 @@ def test_an_older_world_after_a_newer_one_is_still_exact():
     render(book, "s:a", old)
 
 
-@pytest.mark.parametrize("reason", ["history_rewritten", "task_changed", "example_redefined", "changes_exceed_baseline"])
-def test_a_break_in_append_only_evidence_starts_a_fresh_stream(reason):
+@pytest.mark.parametrize("reason", ["task_changed", "changes_exceed_baseline"])
+def test_a_new_task_or_outgrown_baseline_starts_a_fresh_world_stream(reason):
     book = StreamBook(max_change_ratio=0.5, min_change_chars=0)
     history = [{"role": "user", "content": "go"}] + batch("a")
-    units, _ = render(book, "s:a", evidence(history))
+    units, _ = render(book, "w", evidence(history))
     nxt = evidence(history + batch("b"))
-    if reason == "history_rewritten":
-        nxt = evidence([{"role": "user", "content": "compacted summary"}] + batch("b"))
-    elif reason == "task_changed":
+    if reason == "task_changed":
         nxt["task"]["instruction"] = "Raise more"
-    elif reason == "example_redefined":
-        nxt["grounded_examples"][0]["observation"] = "different text, same id"
     else:
         nxt["environment_state"]["structured"]["notes"] = "x" * 5_000
-    fresh, _ = render(book, "s:a", nxt)
+    fresh, _ = render(book, "w", nxt)
     assert fresh[: len(units)] != units
     assert [next(iter(json.loads(unit))) for unit in fresh[:2]] == ["task", "environment_state_baseline"]
     assert book.resets[-1] == reason
+
+
+def test_a_new_agent_reuses_everything_other_agents_already_sent():
+    """Run 7 (2026-10-12): every child's first call carried the world's shared history,
+    re-sent uncached by per-agent streams (first calls read 11-40%)."""
+    book = StreamBook()
+    history = [{"role": "user", "content": "go"}] + batch("a") + batch("b")
+    root, _ = render(book, "w", evidence(history, call="root-next"))
+    child = evidence(history, call="child-first")
+    child["candidate_response"]["tool_calls"][0]["arguments"]["agent_id"] = "child"
+    units, final = render(book, "w", child)
+    assert units == root and json.loads(final)["current_call"]["candidate_response"]["tool_calls"][0]["call_id"] == "child-first"
+    assert book.branches == 0
+
+
+def test_an_older_request_branches_without_moving_the_world_stream():
+    book = StreamBook()
+    head = [{"role": "user", "content": "go"}] + batch("a")
+    newer, _ = render(book, "w", evidence(head + batch("b"), state={"structured": {"funds": ["a", "b"]}, "scratchpad": ""}))
+    older, _ = render(book, "w", evidence(head + batch("c"), state={"structured": {"funds": ["a"]}, "scratchpad": ""},
+                                          call="older"))
+    # It reuses the shared prefix up to its last common batch, then branches.
+    shared = next(i for i, (x, y) in enumerate(zip(newer, older)) if x != y)
+    assert json.loads(newer[shared - 1]) == {"visible_conversation": head}
+    assert book.branches == 1
+    # The world stream still belongs to the newest request.
+    latest, _ = render(book, "w", evidence(head + batch("b") + batch("d"),
+                                           state={"structured": {"funds": ["a", "b"]}, "scratchpad": ""}))
+    assert latest[: len(newer)] == newer
+
+
+def test_a_redefined_reference_is_sent_again_and_the_later_one_applies():
+    book = StreamBook()
+    first = evidence([{"role": "user", "content": "go"}], examples=("t1",))
+    units, _ = render(book, "w", first)
+    changed = evidence([{"role": "user", "content": "go"}], examples=("t1",), call="later")
+    changed["grounded_examples"][0]["observation"] = "different text, same id"
+    later, _ = render(book, "w", changed)
+    assert later[: len(units)] == units and not book.resets
+    assert json.loads(later[-1])["reference_material"]["grounded_examples"] == changed["grounded_examples"]
 
 
 def test_unrecognized_evidence_is_not_streamed():

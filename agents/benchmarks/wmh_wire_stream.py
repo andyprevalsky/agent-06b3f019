@@ -1,4 +1,4 @@
-"""Append-only wire stream for native WMH evidence: one stream per world session and acting agent.
+"""Append-only wire stream for native WMH evidence: one stream per world session.
 
 The native world model's evidence object (full world snapshot, retrieval,
 history, candidate) stays the source of truth: replay keys, outcome checks and
@@ -205,112 +205,118 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _final(evidence: dict, history_len: int) -> str:
+    call: dict = {}
+    if "grounding_contexts" in evidence:
+        call["grounding_context_ids"] = list(evidence["grounding_contexts"])
+    if "grounded_examples" in evidence:
+        call["grounded_example_ids"] = [e["transition_id"] for e in evidence["grounded_examples"]]
+    call["visible_conversation_tail"] = evidence["visible_conversation"][history_len:]
+    remainder = {key: value for key, value in evidence["task"].items() if key not in STABLE_TASK_KEYS}
+    if remainder:
+        call["task"] = remainder
+    for key, value in evidence.items():
+        if key not in _STREAMED_KEYS and key != "candidate_response":
+            call[key] = value
+    if "candidate_response" in evidence:
+        call["candidate_response"] = evidence["candidate_response"]
+    # Fixed field order (candidate last), byte-stable values.
+    fields = ",".join(f"{json.dumps(key, ensure_ascii=False)}:{encode(value)}" for key, value in call.items())
+    return '{"current_call":{' + fields + "}}"
+
+
 @dataclass
-class _Stream:
+class _WorldStream:
+    """A world's append-only stream and the evidence it encodes after each prefix.
+
+    Index k of ``history``, ``worlds`` and ``refs`` describes ``units[:k]``.
+    """
+
     task: str
     units: list[str] = field(default_factory=list)
-    world: dict = field(default_factory=dict)
-    history_len: int = 0
-    history_digest: str = _digest("")
-    contexts: dict = field(default_factory=dict)
-    examples: dict = field(default_factory=dict)
+    history: list[int] = field(default_factory=list)
+    worlds: list = field(default_factory=list)
+    refs: list[dict] = field(default_factory=list)
     baseline_chars: int = 0
     change_chars: int = 0
     chars: int = 0
 
     @classmethod
-    def start(cls, evidence: dict) -> "_Stream":
-        task = encode({key: evidence["task"][key] for key in STABLE_TASK_KEYS})
-        stream = cls(task=task)
-        stream._append(encode({"task": json.loads(task)}))
+    def start(cls, evidence: dict) -> "_WorldStream":
+        stable = {key: evidence["task"][key] for key in STABLE_TASK_KEYS}
+        stream = cls(task=encode(stable), history=[0], worlds=[None], refs=[{}])
+        stream.append(encode({"task": stable}), 0, None, {})
         baseline = encode({"environment_state_baseline": evidence["environment_state"]})
-        stream._append(baseline)
-        stream.world = deepcopy(evidence["environment_state"])
+        stream.append(baseline, 0, deepcopy(evidence["environment_state"]), {})
         stream.baseline_chars = len(baseline)
         return stream
 
-    def _append(self, unit: str) -> None:
+    def append(self, unit: str, history: int, world, refs: dict) -> None:
         self.units.append(unit)
+        self.history.append(history)
+        self.worlds.append(world)
+        self.refs.append(refs)
         self.chars += len(unit)
 
-    def break_reason(self, evidence: dict, changes: list, *, max_change_ratio: float, min_change_chars: int,
-                     max_stream_chars: int) -> str | None:
-        if encode({key: evidence["task"][key] for key in STABLE_TASK_KEYS}) != self.task:
-            return "task_changed"
-        history = evidence["visible_conversation"]
-        if len(history) < self.history_len or _digest(encode(history[: self.history_len])) != self.history_digest:
-            return "history_rewritten"
-        for cid, context in evidence.get("grounding_contexts", {}).items():
-            if cid in self.contexts and self.contexts[cid] != _digest(encode(context)):
-                return "context_redefined"
-        for example in evidence.get("grounded_examples", []):
-            tid = example["transition_id"]
-            if tid in self.examples and self.examples[tid] != _digest(encode(example)):
-                return "example_redefined"
-        change_chars = self.change_chars + (len(encode(changes)) if changes else 0)
-        if change_chars > max(max_change_ratio * self.baseline_chars, min_change_chars):
-            return "changes_exceed_baseline"
-        if self.chars > max_stream_chars:
-            return "stream_too_long"
-        return None
+    def deepest_prefix(self, history: list) -> int:
+        """Longest prefix whose history units are this request's history, in order."""
+        k, covered = 2, 0
+        for index in range(2, len(self.units)):
+            unit = self.units[index]
+            if unit.startswith('{"visible_conversation":'):
+                entries = json.loads(unit)["visible_conversation"]
+                if encode(history[covered : covered + len(entries)]) != encode(entries):
+                    break
+                covered += len(entries)
+            k = index + 1
+        return k
 
-    def extend(self, evidence: dict, changes: list) -> None:
-        history = evidence["visible_conversation"]
-        start = self.history_len
-        for end in sorted(completed_batch_ends(history)):
-            if end >= start:
-                self._append(encode({"visible_conversation": history[start : end + 1]}))
-                start = end + 1
-        self.history_len = start
-        self.history_digest = _digest(encode(history[:start]))
-        if changes:
-            unit = encode({"environment_state_changes": changes})
-            self._append(unit)
-            self.change_chars += len(unit)
-            self.world = deepcopy(evidence["environment_state"])
-        material: dict = {}
-        contexts = {cid: c for cid, c in evidence.get("grounding_contexts", {}).items() if cid not in self.contexts}
-        examples = [e for e in evidence.get("grounded_examples", []) if e["transition_id"] not in self.examples]
-        if contexts:
-            material["grounding_contexts"] = contexts
-        if examples:
-            material["grounded_examples"] = examples
-        if material:
-            self._append(encode({"reference_material": material}))
-            self.contexts.update({cid: _digest(encode(c)) for cid, c in contexts.items()})
-            self.examples.update({e["transition_id"]: _digest(encode(e)) for e in examples})
 
-    def final(self, evidence: dict) -> str:
-        call: dict = {}
-        if "grounding_contexts" in evidence:
-            call["grounding_context_ids"] = list(evidence["grounding_contexts"])
-        if "grounded_examples" in evidence:
-            call["grounded_example_ids"] = [e["transition_id"] for e in evidence["grounded_examples"]]
-        call["visible_conversation_tail"] = evidence["visible_conversation"][self.history_len :]
-        remainder = {key: value for key, value in evidence["task"].items() if key not in STABLE_TASK_KEYS}
-        if remainder:
-            call["task"] = remainder
-        for key, value in evidence.items():
-            if key not in _STREAMED_KEYS and key != "candidate_response":
-                call[key] = value
-        if "candidate_response" in evidence:
-            call["candidate_response"] = evidence["candidate_response"]
-        # Fixed field order (candidate last), byte-stable values.
-        fields = ",".join(f"{json.dumps(key, ensure_ascii=False)}:{encode(value)}" for key, value in call.items())
-        return '{"current_call":{' + fields + "}}"
+def _delta(evidence: dict, history_len: int, world: dict, refs: dict) -> tuple[list[tuple], int, int]:
+    """Units this request adds after a prefix, each as (unit, history_len, world, refs)."""
+    units, changes_chars = [], 0
+    history = evidence["visible_conversation"]
+    for end in sorted(completed_batch_ends(history)):
+        if end >= history_len:
+            units.append((encode({"visible_conversation": history[history_len : end + 1]}), end + 1, world, refs))
+            history_len = end + 1
+    changes = diff_state(world, evidence["environment_state"])
+    if changes:
+        unit = encode({"environment_state_changes": changes})
+        world = deepcopy(evidence["environment_state"])
+        units.append((unit, history_len, world, refs))
+        changes_chars = len(unit)
+    material: dict = {}
+    contexts = {cid: c for cid, c in evidence.get("grounding_contexts", {}).items()
+                if refs.get(f"c:{cid}") != _digest(encode(c))}
+    examples = [e for e in evidence.get("grounded_examples", [])
+                if refs.get(f"e:{e['transition_id']}") != _digest(encode(e))]
+    if contexts:
+        material["grounding_contexts"] = contexts
+    if examples:
+        material["grounded_examples"] = examples
+    if material:
+        # A redefined id is sent again; the later definition wins when folding.
+        refs = {**refs, **{f"c:{cid}": _digest(encode(c)) for cid, c in contexts.items()},
+                **{f"e:{e['transition_id']}": _digest(encode(e)) for e in examples}}
+        units.append((encode({"reference_material": material}), history_len, world, refs))
+    return units, history_len, changes_chars
 
 
 class StreamBook:
-    """Per (world session, agent) streams for one provider process.
+    """One append-only stream per world session for one provider process.
 
-    Calls of one agent render under that agent's lock, so parallel calls see the
-    same prefix and only their final messages differ. After a process restart an
-    agent simply starts a fresh stream.
+    The native world model shows every agent the world's shared history, so a
+    new agent's first call repeats what other agents already sent. Each call
+    reuses the deepest prefix of its world's stream that matches its evidence
+    and appends only its own delta. The newest request advances the stream; a
+    request from an older revision branches without moving it. Calls render
+    under the world's lock. After a process restart a world starts afresh.
     """
 
-    def __init__(self, *, max_change_ratio: float = 1.0, min_change_chars: int = 20_000,
+    def __init__(self, *, max_change_ratio: float = 3.0, min_change_chars: int = 60_000,
                  max_stream_chars: int = 1_200_000, max_streams: int = 512):
-        self._streams: OrderedDict[str, _Stream] = OrderedDict()
+        self._streams: OrderedDict[str, _WorldStream] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._max_change_ratio = max_change_ratio
         self._min_change_chars = min_change_chars
@@ -318,6 +324,7 @@ class StreamBook:
         self._max_streams = max_streams
         self.resets: list[str] = []
         self.fallbacks: list[str] = []
+        self.branches = 0
 
     def forget(self, prefix: str) -> None:
         for key in [key for key in self._streams if key.startswith(prefix)]:
@@ -330,30 +337,42 @@ class StreamBook:
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             stream = self._streams.get(key)
-            changes = diff_state(stream.world, evidence["environment_state"]) if stream else []
+            task = encode({k: evidence["task"][k] for k in STABLE_TASK_KEYS})
             reason = None
-            if stream is not None:
-                reason = stream.break_reason(
-                    evidence, changes, max_change_ratio=self._max_change_ratio,
-                    min_change_chars=self._min_change_chars, max_stream_chars=self._max_stream_chars,
-                )
-            if stream is None or reason:
-                if reason:
-                    self.resets = [*self.resets[-99:], reason]
-                stream = _Stream.start(evidence)
-                changes = []
-            stream.extend(evidence, changes)
-            final = stream.final(evidence)
-            units = list(stream.units)
+            if stream is not None and stream.task != task:
+                reason, stream = "task_changed", None
+            if stream is None:
+                stream = _WorldStream.start(evidence)
+            k = stream.deepest_prefix(evidence["visible_conversation"])
+            delta, history_len, change_chars = _delta(evidence, stream.history[k], stream.worlds[k], stream.refs[k])
+            if reason is None and stream.change_chars + change_chars > max(
+                self._max_change_ratio * stream.baseline_chars, self._min_change_chars
+            ):
+                reason = "changes_exceed_baseline"
+            elif reason is None and stream.chars > self._max_stream_chars:
+                reason = "stream_too_long"
+            if reason in ("changes_exceed_baseline", "stream_too_long"):
+                stream = _WorldStream.start(evidence)
+                k = 2
+                delta, history_len, change_chars = _delta(evidence, 0, stream.worlds[2], {})
+            if reason:
+                self.resets = [*self.resets[-99:], reason]
+            units = stream.units[:k] + [unit for unit, *_ in delta]
+            final = _final(evidence, history_len)
             try:
                 exact = _same(fold_stream(units, final), evidence)
             except (KeyError, TypeError, ValueError):
                 exact = False
             if not exact:
                 # Never send a rendering that loses or alters evidence.
-                self._streams.pop(key, None)
                 self.fallbacks = [*self.fallbacks[-99:], "fold_mismatch"]
                 return None
+            if k == len(stream.units):
+                for unit, history, world, refs in delta:
+                    stream.append(unit, history, world, refs)
+                stream.change_chars += change_chars
+            else:
+                self.branches += 1
             self._streams[key] = stream
             self._streams.move_to_end(key)
             while len(self._streams) > self._max_streams:
