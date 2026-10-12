@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { AgentStatus, Prisma } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma, runTransactionWithRetry } from './database';
 import {
@@ -11,14 +12,13 @@ import {
   resolveTemporalWorkflowExecutionRef,
   type TemporalWorkflowExecutionRef,
 } from './temporal';
-import { createLogger } from './logger';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { terminateStaleTemporalWorkflow } from './workflowReplacement';
 
-const log = createLogger('WorkflowTerminalCleanup');
-
 const CLEANUP_LEASE_MS = 60_000;
 const CLEANUP_RETRY_DELAY_MS = 60_000;
+/** Same grace the schema trigger gives every terminal transition. */
+const TERMINAL_CLEANUP_GRACE_MS = 5 * 60_000;
 const TERMINAL_AGENT_STATUSES = ['COMPLETED', 'FAILED'] as const;
 
 interface CleanupObligation {
@@ -65,8 +65,21 @@ export interface WorkflowTerminalCleanupResult {
   discovered: number;
   sealed: number;
   terminated: number;
+  /** Obligations left alone because their workflow id now names a newer chain. */
+  superseded: number;
   interruptedGenerations: number;
 }
+
+/**
+ * `sealed`: the agent is still ended on this chain and was fenced off it.
+ * `released`: the agent already moved to another workflow id.
+ * `between-runs`: the agent is live with no installed workflow, so its next
+ *   run reuses this workflow id (the agent id); an unknown chain under it may
+ *   be that run mid-start and is never resolved.
+ * `live`: the agent is live again under the same workflow id; see sealCleanup.
+ * `rebound`: a newer chain under the same id ended too; see rebindCleanup.
+ */
+type CleanupScope = 'sealed' | 'released' | 'between-runs' | 'live' | 'rebound';
 
 const defaultDependencies: WorkflowTerminalCleanupDependencies = {
   resolveExecution: resolveTemporalWorkflowExecutionRef,
@@ -183,132 +196,147 @@ async function claimCleanupBatch(
   return claims;
 }
 
-type SealOutcome =
-  | { kind: 'sealed' | 'not-installed' | 'raced' }
-  | { kind: 'follow-up-owned'; installedFirstExecutionRunId: string | null };
+/** Remove a held obligation and recompute the agent's pending-cleanup flag. */
+async function dischargeCleanup(
+  tx: Prisma.TransactionClient,
+  obligation: CleanupObligation
+): Promise<void> {
+  const deleted = await tx.temporalWorkflowCleanup.deleteMany({
+    where: {
+      agentId: obligation.agentId,
+      workflowId: obligation.workflowId,
+      leaseToken: obligation.leaseToken,
+    },
+  });
+  if (deleted.count !== 1) {
+    throw new Error(`Cleanup lease was lost for ${obligation.agentId}/${obligation.workflowId}`);
+  }
+  const remaining = await tx.temporalWorkflowCleanup.count({
+    where: { agentId: obligation.agentId },
+  });
+  await tx.agent.updateMany({
+    where: { id: obligation.agentId },
+    data: { temporalCleanupPending: remaining > 0 },
+  });
+}
 
 /**
- * A root agent reuses Workflow ID = agent ID for every follow-up run, so the
- * Workflow ID alone never names the generation that went terminal. While the
- * agent is live and its installed run (or, between runs, its next run) can
- * reuse this Workflow ID, that run and every tool chip stamped with the same
- * generation string belong to the follow-up. Only the exact terminal chain
- * still installed on a live agent (a start that adopted the finishing chain)
- * keeps the original seal.
+ * Lock the agent row before touching its obligations. The schema trigger runs
+ * inside Agent writes and then upserts the obligation row, so Agent-then-
+ * obligation is the only order that cannot deadlock with a concurrent
+ * follow-up, delete or status write. Holding it also makes any in-flight
+ * trigger merge commit before the agent is read.
  */
-async function sealCleanup(obligation: CleanupObligation): Promise<SealOutcome> {
+async function lockAgentRow(tx: Prisma.TransactionClient, agentId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS locked FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+}
+
+/**
+ * The obligation's chain ended, but the agent has since run another chain
+ * under the same workflow id, and that chain has ended too. The trigger keys
+ * obligations by (agent, workflow id), so it merged the newer terminal
+ * transition into this row. Point the row at the newer chain and give that
+ * chain its own grace for final-summary tail work.
+ */
+async function rebindCleanup(
+  tx: Prisma.TransactionClient,
+  obligation: CleanupObligation,
+  firstExecutionRunId: string
+): Promise<void> {
+  const rebound = await tx.temporalWorkflowCleanup.updateMany({
+    where: {
+      agentId: obligation.agentId,
+      workflowId: obligation.workflowId,
+      leaseToken: obligation.leaseToken,
+    },
+    data: {
+      firstExecutionRunId,
+      notBefore: new Date(Date.now() + TERMINAL_CLEANUP_GRACE_MS),
+      leaseToken: null,
+      leaseUntil: null,
+    },
+  });
+  if (rebound.count !== 1) {
+    throw new Error(`Cleanup lease was lost for ${obligation.agentId}/${obligation.workflowId}`);
+  }
+}
+
+/**
+ * Seal and clean only an agent that is still ended on this workflow id.
+ *
+ * Root follow-ups restart under the same workflow id (the agent id). Once the
+ * agent is live again, that id names its live workflow. Temporal keeps at most
+ * one open run per workflow id, so the ended chain is closed, or a start
+ * adopted it as the live chain. A live agent therefore owns whatever the id
+ * runs, and nothing about it may be sealed, terminated or reconciled.
+ */
+async function sealCleanup(obligation: CleanupObligation): Promise<CleanupScope> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, obligation.agentId);
+    await lockAgentRow(tx, obligation.agentId);
     const current = await tx.agent.findUnique({
       where: { id: obligation.agentId },
       select: {
-        temporalWorkflowId: true,
-        temporalFirstExecutionRunId: true,
         status: true,
         deletedAt: true,
+        temporalWorkflowId: true,
+        temporalFirstExecutionRunId: true,
       },
     });
-    if (current === null) return { kind: 'not-installed' };
-    const live =
-      current.deletedAt === null &&
-      !(TERMINAL_AGENT_STATUSES as readonly string[]).includes(current.status);
-    const terminalChainInstalled =
-      obligation.firstExecutionRunId !== null &&
-      current.temporalWorkflowId === obligation.workflowId &&
-      current.temporalFirstExecutionRunId === obligation.firstExecutionRunId;
-    const nextRunMayReuse =
-      current.temporalWorkflowId === obligation.workflowId ||
-      (current.temporalWorkflowId === null && obligation.workflowId === obligation.agentId);
-    if (live && !terminalChainInstalled && nextRunMayReuse) {
-      return {
-        kind: 'follow-up-owned',
-        installedFirstExecutionRunId: current.temporalFirstExecutionRunId,
-      };
+    if (current === null) return 'released';
+    const ended =
+      current.deletedAt !== null ||
+      (TERMINAL_AGENT_STATUSES as readonly AgentStatus[]).includes(current.status);
+    if (current.temporalWorkflowId !== obligation.workflowId) {
+      const nextRunReusesId =
+        !ended &&
+        current.temporalWorkflowId === null &&
+        obligation.workflowId === obligation.agentId;
+      return nextRunReusesId ? 'between-runs' : 'released';
     }
-    if (current.temporalWorkflowId !== obligation.workflowId) return { kind: 'not-installed' };
-    // A follow-up reopening the agent does not take this lock; seal only the
-    // exact row state that was read.
-    const sealedRows = await tx.agent.updateMany({
-      where: {
-        id: obligation.agentId,
-        temporalWorkflowId: obligation.workflowId,
-        temporalFirstExecutionRunId: current.temporalFirstExecutionRunId,
-        status: current.status,
-        deletedAt: current.deletedAt,
-      },
+    if (!ended) {
+      await dischargeCleanup(tx, obligation);
+      return 'live';
+    }
+    const currentRunId = current.temporalFirstExecutionRunId;
+    if (currentRunId !== null && currentRunId !== obligation.firstExecutionRunId) {
+      await rebindCleanup(tx, obligation, currentRunId);
+      return 'rebound';
+    }
+    await tx.agent.update({
+      where: { id: obligation.agentId },
       data: {
         temporalWorkflowId: `${obligation.agentId}:deployment-sealed:${randomUUID()}`,
         temporalFirstExecutionRunId: null,
         toolsInUse: [],
       },
     });
-    return { kind: sealedRows.count === 1 ? 'sealed' : 'raced' };
+    return 'sealed';
   });
 }
 
 async function finishCleanup(snapshot: CleanupSnapshot): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, snapshot.agentId);
-    const deleted = await tx.temporalWorkflowCleanup.deleteMany({
-      where: {
-        agentId: snapshot.agentId,
-        workflowId: snapshot.workflowId,
-        leaseToken: snapshot.leaseToken,
-        firstExecutionRunId: snapshot.firstExecutionRunId,
-      },
-    });
-    if (deleted.count !== 1) {
-      // A newer generation under this Workflow ID went terminal while this
-      // lease was held; keep its obligation for the next sweep.
-      const requeued = await tx.temporalWorkflowCleanup.updateMany({
-        where: {
-          agentId: snapshot.agentId,
-          workflowId: snapshot.workflowId,
-          leaseToken: snapshot.leaseToken,
-        },
-        data: { leaseToken: null, leaseUntil: null },
-      });
-      if (requeued.count !== 1) {
-        throw new Error(`Cleanup lease was lost for ${snapshot.agentId}/${snapshot.workflowId}`);
-      }
-    }
-    const remaining = await tx.temporalWorkflowCleanup.count({
-      where: { agentId: snapshot.agentId },
-    });
-    await tx.agent.updateMany({
-      where: { id: snapshot.agentId },
-      data: { temporalCleanupPending: remaining > 0 },
-    });
+    await lockAgentRow(tx, snapshot.agentId);
+    await dischargeCleanup(tx, snapshot);
   });
 }
 
 async function retainFailedCleanup(obligation: CleanupObligation, error: unknown): Promise<void> {
-  const retryAt = new Date(Date.now() + CLEANUP_RETRY_DELAY_MS);
-  await runTransactionWithRetry(async (tx) => {
-    const released = await tx.temporalWorkflowCleanup.updateMany({
-      where: {
-        agentId: obligation.agentId,
-        workflowId: obligation.workflowId,
-        leaseToken: obligation.leaseToken,
-      },
-      data: {
-        leaseToken: null,
-        leaseUntil: null,
-        attemptCount: { increment: 1 },
-        lastError: error instanceof Error ? error.message : String(error),
-      },
-    });
-    if (released.count === 0) return;
-    // Backoff may delay a retry but never shortens the grace a newer terminal
-    // generation gave this row through the trigger.
-    await tx.temporalWorkflowCleanup.updateMany({
-      where: {
-        agentId: obligation.agentId,
-        workflowId: obligation.workflowId,
-        notBefore: { lt: retryAt },
-      },
-      data: { notBefore: retryAt },
-    });
+  await prisma.temporalWorkflowCleanup.updateMany({
+    where: {
+      agentId: obligation.agentId,
+      workflowId: obligation.workflowId,
+      leaseToken: obligation.leaseToken,
+    },
+    data: {
+      leaseToken: null,
+      leaseUntil: null,
+      notBefore: new Date(Date.now() + CLEANUP_RETRY_DELAY_MS),
+      attemptCount: { increment: 1 },
+      lastError: error instanceof Error ? error.message : String(error),
+    },
   });
 }
 
@@ -316,46 +344,14 @@ async function cleanupOne(
   obligation: CleanupObligation,
   dependencies: WorkflowTerminalCleanupDependencies,
   deadlineAtMs?: number
-): Promise<{ sealed: boolean; terminated: boolean }> {
+): Promise<{ scope: CleanupScope; terminated: boolean }> {
   assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} capture`);
   const inProgressTools = await dependencies.captureInProgressTools(
     obligation.agentId,
     obligation.workflowId
   );
-  const sealOutcome = await sealCleanup(obligation);
-  if (sealOutcome.kind === 'raced') {
-    throw new Error(
-      `Agent ${obligation.agentId} workflow generation changed during terminal cleanup; retrying`
-    );
-  }
-  if (sealOutcome.kind === 'follow-up-owned') {
-    // Close only the terminal generation's exact, known chain. Temporal scopes
-    // the terminate to that chain, so a follow-up run under the same Workflow
-    // ID keeps running; an unknown chain is never resolved here.
-    const completedRunId = obligation.firstExecutionRunId;
-    const terminateCompleted =
-      completedRunId !== null && completedRunId !== sealOutcome.installedFirstExecutionRunId;
-    if (terminateCompleted) {
-      assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} termination`);
-      await dependencies.terminate(
-        { workflowId: obligation.workflowId, firstExecutionRunId: completedRunId },
-        obligation.agentId,
-        deadlineAtMs
-      );
-    } else if (completedRunId === null) {
-      log.warn('Discharged unknown-run terminal cleanup while a follow-up may own the workflow', {
-        agent_id: obligation.agentId,
-        workflow_id: obligation.workflowId,
-        installed_first_execution_run_id: sealOutcome.installedFirstExecutionRunId,
-      });
-    }
-    // The follow-up shares this generation string, so its tool chips and
-    // attention requests are indistinguishable from the finished run's; leave
-    // all of them to the follow-up's own lifecycle.
-    await finishCleanup({ ...obligation, inProgressTools });
-    return { sealed: false, terminated: terminateCompleted };
-  }
-  const sealed = sealOutcome.kind === 'sealed';
+  const scope = await sealCleanup(obligation);
+  if (scope === 'live' || scope === 'rebound') return { scope, terminated: false };
   let execution: TemporalWorkflowExecutionRef | null =
     obligation.firstExecutionRunId === null
       ? null
@@ -363,7 +359,7 @@ async function cleanupOne(
           workflowId: obligation.workflowId,
           firstExecutionRunId: obligation.firstExecutionRunId,
         };
-  if (execution === null) {
+  if (execution === null && scope !== 'between-runs') {
     try {
       execution = await dependencies.resolveExecution(obligation.workflowId, deadlineAtMs);
     } catch (error) {
@@ -381,7 +377,7 @@ async function cleanupOne(
     inProgressTools
   );
   await finishCleanup({ ...obligation, inProgressTools });
-  return { sealed, terminated: execution !== null };
+  return { scope, terminated: execution !== null };
 }
 
 /**
@@ -402,21 +398,30 @@ export async function cleanupTerminalAgentWorkflowZombies(
   const discovered = new Set<string>();
   let sealed = 0;
   let terminated = 0;
+  let superseded = 0;
   let interruptedGenerations = 0;
 
   while (true) {
     assertBeforeDeadline(options.deadlineAtMs, 'terminal workflow cleanup discovery');
     const claims = await claimCleanupBatch(batchSize, options);
     if (claims.length === 0) {
-      return { discovered: discovered.size, sealed, terminated, interruptedGenerations };
+      return {
+        discovered: discovered.size,
+        sealed,
+        terminated,
+        superseded,
+        interruptedGenerations,
+      };
     }
     for (const claim of claims) discovered.add(`${claim.agentId}:${claim.workflowId}`);
     const failures = await mapConcurrently(claims, concurrency, async (claim) => {
       try {
         const result = await cleanupOne(claim, dependencies, options.deadlineAtMs);
-        sealed += Number(result.sealed);
+        sealed += Number(result.scope === 'sealed');
         terminated += Number(result.terminated);
-        interruptedGenerations += 1;
+        const left = result.scope === 'live' || result.scope === 'rebound';
+        superseded += Number(left);
+        interruptedGenerations += Number(!left);
       } catch (error) {
         await retainFailedCleanup(claim, error);
         throw error;

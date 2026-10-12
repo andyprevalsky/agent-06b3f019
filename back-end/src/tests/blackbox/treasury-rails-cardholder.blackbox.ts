@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 import assert from 'node:assert/strict';
-import { selectTreasuryRailCardholder } from './treasury-rails-cardholder';
+import {
+  selectTreasuryRailCardholder,
+  waitForIdleTreasuryRailCardholder,
+} from './treasury-rails-cardholder';
 
 type Card = { id: string; status: string };
 
@@ -76,6 +79,48 @@ async function main(): Promise<void> {
       org.callOrgTool
     );
     assert.equal(selected, 'ch-b', 'without a payment cardholder, the first idle one is chosen');
+  }
+
+  {
+    // 2026-10-12: a foreign workspace's payment run held an OPEN card on every sandbox
+    // cardholder for a few minutes, and one immediate read failed the deploy gate. The proof
+    // waits for a cardholder it observes idle instead.
+    let polls = 0;
+    const slept: number[] = [];
+    const selected = await waitForIdleTreasuryRailCardholder(
+      ['ch-payment-float', 'ch-quiet'],
+      'ch-payment-float',
+      async (_name, args) => {
+        const cardholderId = String(args.cardholder_id);
+        if (cardholderId === 'ch-quiet') polls += 1;
+        const busy = polls < 3;
+        return {
+          structuredContent: { cards: busy ? [{ id: 'card-foreign', status: 'OPEN' }] : [] },
+        };
+      },
+      { timeoutMs: 60_000, pollMs: 5_000, sleep: async (ms) => void slept.push(ms) }
+    );
+    assert.equal(selected, 'ch-quiet', 'the proof must use a cardholder once it is observed idle');
+    assert.deepEqual(slept, [5_000, 5_000], 'it re-reads every poll interval until one is idle');
+  }
+
+  {
+    let now = 0;
+    const selected = await waitForIdleTreasuryRailCardholder(
+      ['ch-a'],
+      undefined,
+      async () => ({ structuredContent: { cards: [{ id: 'card-a', status: 'OPEN' }] } }),
+      {
+        timeoutMs: 20_000,
+        pollMs: 5_000,
+        sleep: async (ms) => {
+          now += ms;
+        },
+        now: () => now,
+      }
+    );
+    assert.equal(selected, undefined, 'a cardholder that never goes idle is never chosen');
+    assert.equal(now, 20_000, 'the wait is bounded by its timeout');
   }
 
   console.log('Treasury rails cardholder selection blackbox passed');

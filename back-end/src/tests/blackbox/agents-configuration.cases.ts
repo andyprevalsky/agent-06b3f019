@@ -237,6 +237,23 @@ test('POST /:id/start-agent — happy path (no Temporal)', async () => {
   if (res.status !== 200 && res.status !== 500) {
     throw new Error(`Expected 200 or 500 for start-agent, got ${res.status}`);
   }
+  if (res.status === 200) {
+    // Terminal cleanup identifies a chain by workflow id plus first run id; a
+    // started chain without its run id cannot be told apart from an older one.
+    const started = await prisma.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { temporalWorkflowId: true, temporalFirstExecutionRunId: true },
+    });
+    assert(
+      started.temporalWorkflowId === agentId,
+      `start-agent must record its workflow id, got ${started.temporalWorkflowId}`
+    );
+    assert(
+      typeof started.temporalFirstExecutionRunId === 'string' &&
+        started.temporalFirstExecutionRunId.length > 0,
+      `start-agent must record its first execution run id, got ${started.temporalFirstExecutionRunId}`
+    );
+  }
   await deleteTestAgent(agentId, session.user.id);
 });
 

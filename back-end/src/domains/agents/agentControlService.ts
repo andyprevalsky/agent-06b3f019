@@ -8,8 +8,6 @@ import {
   type StartAgentWorkflowParams,
 } from '../../providers/temporal';
 import { broadcastAgentModeStarted } from '../../providers/chat';
-import { recordAgentWorkflowExecution } from '../../providers/workflowGeneration';
-import { terminateStaleTemporalWorkflow } from '../../providers/workflowReplacement';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import * as repo from './repo';
@@ -143,12 +141,13 @@ export async function startAgentMode(agentId: string, userId: string) {
       : {}),
   });
 
-  if (!(await recordAgentWorkflowExecution(agentId, execution))) {
-    // Another start or a deletion won; the agent row stays authoritative.
-    await terminateStaleTemporalWorkflow(execution, agentId);
-    return { error: 'Agent is no longer in chat mode', status: 409 };
-  }
+  // Record the chain identity, not just the reusable workflow id: terminal
+  // cleanup tells this chain from an earlier one under the same id by run id.
   const workflowId = execution.workflowId;
+  await repo.updateAgent(agentId, {
+    temporalWorkflowId: workflowId,
+    temporalFirstExecutionRunId: execution.firstExecutionRunId,
+  });
   await broadcastAgentModeStarted(agentId);
 
   log.info('Escalated to agent mode', {
