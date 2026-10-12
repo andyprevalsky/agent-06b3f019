@@ -12,11 +12,16 @@ ddgs>=9.14.1
 supabase>=2.0.0
 
 # LLM and AI
-openai>=1.12.0
+# browser-use 0.13.10/0.13.11 pin this exact release; an open range makes pip download
+# metadata for every newer openai (69 releases) before backtracking to it.
+openai==2.26.0
 instructor>=1.0.0
 google-generativeai==0.8.3
 google-genai>=0.1.0
-world-model-harness @ git+https://github.com/experientiallabs/world-model-harness.git@8e6d55ddc4b846d6a4e5a141983cbdfc0c22c364
+# Vendored: the upstream repository was removed. The +rose local version never resolves
+# from PyPI, whose unrelated world-model-harness 0.1.0 differs. See vendor/SOURCES.txt.
+--find-links ./vendor
+world-model-harness==0.1.0+rose.8e6d55dd
 tomli-w>=1.0.0
 gepa>=0.1.1
 stagehand==0.5.5

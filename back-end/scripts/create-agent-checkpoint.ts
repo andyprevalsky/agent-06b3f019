@@ -4,7 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
-import { startAgentWorkflow } from '../src/providers/temporal';
+import { startAgentWorkflowExecution } from '../src/providers/temporal';
 import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type ExportMessage = {
@@ -124,8 +124,7 @@ function parseArgs(argv: string[]): Options {
         throw new Error('--start-phase must be execute or execute_dag_resume');
       }
       opts.startPhase = value;
-    }
-    else if (arg === '--out') opts.out = next();
+    } else if (arg === '--out') opts.out = next();
     else throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -436,7 +435,7 @@ async function main() {
 
   let workflowId: string | null = null;
   if (!opts.noStart) {
-    workflowId = await startAgentWorkflow({
+    const execution = await startAgentWorkflowExecution({
       agentId: newAgentId,
       userId,
       goal,
@@ -449,6 +448,11 @@ async function main() {
       priceLimitCents,
       fastModeCacheEnabled: opts.fastModeCacheEnabled,
     });
+    await prisma.agent.updateMany({
+      where: { id: newAgentId, temporalWorkflowId: execution.workflowId },
+      data: { temporalFirstExecutionRunId: execution.firstExecutionRunId },
+    });
+    workflowId = execution.workflowId;
   }
 
   const manifestPath =
