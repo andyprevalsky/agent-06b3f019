@@ -3358,6 +3358,86 @@ cloudbench_skip_held_driver_teardown_race() {
         || [ "${CLOUDBENCH_SKIP_AUTOSCALER:-0}" = "1" ]
 }
 
+# Controller cleanup natively stops an owned guest that no party ever
+# delivered an authenticated /shutdown to. Its own request can fail merely
+# because this runner already delivered the stop and retired the proxy while
+# the guest drains (an execution-window timeout, or an acknowledgement window
+# that ends first). Record the accepted delivery durably, before waiting for
+# the guest's acknowledgement. The receipt binds this exact fleet run, runner
+# token, Machine and bench, and is linked into place without ever replacing an
+# existing receipt.
+publish_guest_shutdown_delivery_receipt() {  # <http-status>
+    python3 - "$OUT_DIR" "${CLOUDBENCH_FLEET_RUN_ID:-$RUN_LOG_TOKEN}" "$RUN_LOG_TOKEN" \
+        "$FLEET_MACHINE_ID" "${TASKS_CSV:-}" "$1" <<'PY'
+import json
+import os
+import stat
+import sys
+import time
+
+output, run_id, run_token, machine, bench, status = sys.argv[1:]
+receipt = {
+    "version": 1,
+    "kind": "guest-shutdown-requested",
+    "run_id": run_id,
+    "run_token": run_token,
+    "machine_id": machine,
+    "bench": bench,
+    "http_status": int(status),
+    "requested_epoch": int(time.time()),
+}
+binding = ("version", "kind", "run_id", "run_token", "machine_id", "bench")
+target = os.path.join(output, "guest-shutdown.requested")
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+
+def existing_matches():
+    try:
+        descriptor = os.open(target, os.O_RDONLY | os.O_NONBLOCK | nofollow)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            return False
+        current = json.loads(os.read(descriptor, 4097))
+    except (OSError, ValueError):
+        return False
+    finally:
+        os.close(descriptor)
+    return isinstance(current, dict) and all(current.get(key) == receipt[key] for key in binding)
+
+
+directory = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+try:
+    matched = existing_matches()
+    if matched is not None:
+        raise SystemExit(0 if matched else 1)
+    temporary = f"{target}.tmp.{os.getpid()}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            raise SystemExit(0 if existing_matches() else 1)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
 confirm_guest_shutdown() {
     local deadline status_code port marker_tmp confirmation_id
     [ -n "$FLEET_MACHINE_ID" ] || return 0
@@ -3411,7 +3491,11 @@ confirm_guest_shutdown() {
         # and a naturally exiting driver can publish its cleanup acknowledgement
         # moments after DONE. Keep the proxy alive and let /shutdown-health
         # decide completion; only HTTP 204 is an acknowledgement.
-        202|204|409) ;;
+        202|204|409)
+            if ! publish_guest_shutdown_delivery_receipt "$status_code"; then
+                echo "⚠️  guest shutdown was delivered (HTTP $status_code) but its delivery receipt could not be published; controller cleanup will treat the stop as undelivered" >&2
+            fi
+            ;;
         *)
             echo "❌ guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
             return 1

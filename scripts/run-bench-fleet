@@ -1632,10 +1632,19 @@ print(volume_ids[0])
 '
 }
 
-machine_status_exact_read() {  # <machine-id>; 0=exact status, 1=exactly absent, 2=unsafe read
-    local id="$1" output status
+machine_status_exact_read() {  # <machine-id> [timeout-seconds]; 0=exact status, 1=exactly absent, 2=unsafe read
+    local id="$1" timeout="${2:-}" output status
     case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
-    if output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
+    case "$timeout" in *[!0-9]*) return 2 ;; esac
+    # A caller with a wall-clock budget bounds this exact read; a timed-out
+    # read is an unsafe read, never an absence.
+    if [ -n "$timeout" ]; then
+        if output="$(fly_with_timeout "$timeout" machine status "$id" -a "$APP")"; then
+            status=0
+        else
+            status=$?
+        fi
+    elif output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
         status=0
     else
         status=$?
@@ -1653,15 +1662,22 @@ machine_status_exact_read() {  # <machine-id>; 0=exact status, 1=exactly absent,
     return 2
 }
 
-machine_config_exact_read() {  # <machine-id>; exact config JSON or non-zero
-    local id="$1"
+machine_config_exact_read() {  # <machine-id> [timeout-seconds]; exact config JSON or non-zero
+    local id="$1" timeout="${2:-}"
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    case "$timeout" in *[!0-9]*) return 1 ;; esac
+    if [ -n "$timeout" ]; then
+        # Explicit status: cleanup calls this from an EXIT trap, where a bare
+        # `return` reports the status from before the trap.
+        fly_with_timeout "$timeout" machine status "$id" -a "$APP" -d
+        return "$?"
+    fi
     FLY machine status "$id" -a "$APP" -d 2>/dev/null
 }
 
-machine_volume_id() {  # machine_volume_id <machine_id> → its mounted volume id (or empty)
+machine_volume_id() {  # machine_volume_id <machine_id> [timeout-seconds] → its mounted volume id (or empty)
     local config
-    config="$(machine_config_exact_read "$1")" || return 1
+    config="$(machine_config_exact_read "$1" "${2:-}")" || return 1
     python3 -c '
 import json
 import sys
@@ -4429,9 +4445,9 @@ else:
     done
 }
 
-registry_machine_details() {  # registry_machine_details <id>; 0="state name", 1=absent, 2=unsafe read
+registry_machine_details() {  # registry_machine_details <id> [timeout-seconds]; 0="state name", 1=absent, 2=unsafe read
     local id="$1" output status
-    if output="$(machine_status_exact_read "$id")"; then
+    if output="$(machine_status_exact_read "$id" "${2:-}")"; then
         status=0
     else
         status=$?
@@ -7660,98 +7676,61 @@ cleanup_stale_owner_recovery_proxies() {
     return "$status"
 }
 
-# A guest whose authenticated /shutdown cannot be delivered keeps executing its
+# A guest whose authenticated /shutdown was never delivered keeps executing its
 # benchmark, and holding its shared production connections, until its own
 # execution backstop. Stop (never destroy) only an exact Machine this controller
 # owns and verify its native state. The original volume, the durable owner and
 # its unconfirmed-cleanup quarantine stay retained: exact-owner recovery already
 # treats a stopped guest as requiring its original-volume runtime archive.
-fleet_native_stop_guest() {  # <child-index>
-    local j="$1" out id bench kind="" clone_name="" record="" volume_id="" details
-    local observed_state="" observed_name="" mounted_volume="" requested=0 attempt
-    local requested_epoch="" verified_epoch=""
-    out="${CHILD_OUT[$j]:-}"
-    id="${CHILD_MACHINE[$j]:-}"
-    bench="${CHILD_BENCH[$j]:-unknown}"
-    case "$id" in
-        ''|*[!0-9a-f]*)
-            echo "❌ [$bench] undelivered guest has no exact Machine identity; retaining ownership without a native stop" >&2
-            return 1
-            ;;
-    esac
-    [ -n "$out" ] && [ -d "$out" ] && [ ! -L "$out" ] || return 1
-    # Ownership comes only from this controller's own immutable audit.
-    if [ -f "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" ] \
-        && grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null \
-        && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" disposition)" = claimed ]; then
-        kind=pool
-        volume_id="$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" volume_id)"
-    else
-        clone_name="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/by-machine-id/$id" 2>/dev/null || true)"
-        case "$clone_name" in cloudbench-[a-zA-Z0-9._-]*) record="$FLEET_TEARDOWN_OWNERSHIP_DIR/fresh/$clone_name" ;; esac
-        if [ -n "$record" ] && [ -f "$record" ] \
-            && [ "$(registry_meta_value "$record" machine_id)" = "$id" ] \
-            && [ "$(registry_meta_value "$record" disposition)" = owned ]; then
-            kind=fresh
-            volume_id="$(registry_meta_value "$record" volume_id)"
-        fi
-    fi
-    if [ -z "$kind" ] || [ -z "$volume_id" ]; then
-        echo "❌ [$bench] Machine $id is not exactly owned by this controller; no native stop" >&2
-        return 1
-    fi
-    # The live Machine must still be that exact owned guest and its volume.
-    if ! details="$(registry_machine_details "$id")"; then
-        echo "❌ [$bench] exact owned Machine $id could not be read before its native stop" >&2
-        return 1
-    fi
-    read -r observed_state observed_name _ <<< "$details"
-    mounted_volume="$(machine_volume_id "$id" 2>/dev/null || true)"
-    if [ "$mounted_volume" != "$volume_id" ] \
-        || { [ "$kind" = fresh ] && [ "$observed_name" != "$clone_name" ]; } \
-        || { [ "$kind" = pool ] && [[ "$observed_name" != cloudbench-* ]]; }; then
-        echo "❌ [$bench] Machine $id no longer matches its exact owned identity; no native stop" >&2
-        return 1
-    fi
-    requested_epoch="$(date +%s)"
-    case "$observed_state" in
-        stopped|suspended|created) ;;
-        *)
-            requested=1
-            fly_with_timeout "${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-20}" \
-                machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            ;;
-    esac
-    for attempt in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-        if details="$(registry_machine_details "$id")"; then
-            observed_state="${details%% *}"
-        else
-            observed_state=""
-        fi
-        case "$observed_state" in stopped|suspended|created) break ;; esac
-        sleep 1
-    done
-    verified_epoch="$(date +%s)"
-    python3 - "$out/guest-native-stop.json" "$RUN_ID" "$FLEET_OWNER_TOKEN" "$bench" \
-        "$id" "$volume_id" "$kind" "$requested" "$observed_state" \
-        "$requested_epoch" "$verified_epoch" <<'PY' || return 1
+#
+# The whole phase has one wall-clock deadline inside cleanup's existing child
+# ceiling, and every Machines API call is individually bounded. Every stop
+# request is issued first, through a sliding concurrency window, before any
+# verification polling, so a slow or throttled guest delays neither the other
+# requests nor a later batch. A stop that is throttled or fails while the guest
+# still reads anything but stopped is re-issued a bounded number of times.
+# Only `stopped` verifies: recovery accepts only started or stopped guests, and
+# a `created` or `suspended` Machine stays unresolved and owned. Work is
+# O(undelivered owned guests): exact per-Machine reads, never an app-wide list.
+fleet_native_stop_call_budget() {  # <deadline-SECONDS>; seconds for one bounded provider call
+    local remaining per_call="${CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT:-8}"
+    case "$per_call" in ''|*[!0-9]*|0) per_call=8 ;; esac
+    remaining=$(( $1 - SECONDS ))
+    [ "$remaining" -gt 0 ] || return 1
+    [ "$remaining" -ge "$per_call" ] || per_call="$remaining"
+    printf '%s\n' "$per_call"
+}
+
+fleet_native_stop_send() {  # <machine-id> <deadline-SECONDS>; one bounded stop request
+    local budget
+    budget="$(fleet_native_stop_call_budget "$2")" || return 1
+    fly_with_timeout "$budget" machine stop "$1" -a "$APP" >/dev/null 2>&1
+}
+
+fleet_native_stop_publish_receipt() {  # <out> <bench> <id> <volume> <kind> <requests> <state> <requested-epoch> <delivery>
+    python3 - "$1/guest-native-stop.json" "$RUN_ID" "$FLEET_OWNER_TOKEN" "$2" "$3" "$4" "$5" \
+        "$6" "$7" "$8" "$(date +%s)" "$9" <<'PY'
 import json
 import os
 import sys
 
-path, run_id, owner, bench, machine, volume, kind, requested, state, asked, seen = sys.argv[1:]
+(path, run_id, owner, bench, machine, volume, kind, requests, state, asked, seen,
+ delivery) = sys.argv[1:]
 receipt = {
     "version": 1,
     "kind": "guest-native-stop",
     "reason": "authenticated guest shutdown was not delivered",
+    "delivery_receipt": delivery,
     "run_id": run_id,
     "fleet_owner_token": owner,
     "bench": bench,
     "machine_id": machine,
     "volume_id": volume,
     "ownership": kind,
-    "stop_requested": requested == "1",
+    "stop_requested": int(requests) > 0,
+    "stop_requests": int(requests),
     "verified_state": state or "unknown",
+    "verified": state == "stopped",
     "requested_epoch": int(asked),
     "verified_epoch": int(seen),
     "destroyed": False,
@@ -7770,40 +7749,255 @@ try:
 finally:
     os.close(directory)
 PY
-    case "$observed_state" in
-        stopped|suspended|created)
-            echo "🛑 [$bench] guest shutdown was not delivered; exact Machine $id is natively $observed_state (volume $volume_id and ownership retained for exact-owner recovery)" >&2
-            return 0
+}
+
+# Phase 1: prove exact ownership and live identity, then request the stop.
+fleet_native_stop_request_guest() {  # <child-index> <state-dir> <deadline-SECONDS>
+    local j="$1" state_dir="$2" deadline="$3" out id bench kind="" clone_name="" record=""
+    local volume_id="" details budget observed_state="" observed_name="" mounted_volume=""
+    local requests=0 requested_epoch
+    out="${CHILD_OUT[$j]:-}"
+    id="${CHILD_MACHINE[$j]:-}"
+    bench="${CHILD_BENCH[$j]:-unknown}"
+    case "$id" in
+        ''|*[!0-9a-f]*)
+            echo "❌ [$bench] undelivered guest has no exact Machine identity; retaining ownership without a native stop" >&2
+            return 1
             ;;
     esac
-    echo "❌ [$bench] exact Machine $id did not verify stopped after its native stop (state=${observed_state:-unknown}); retaining ownership" >&2
+    if [ -z "$out" ] || [ ! -d "$out" ] || [ -L "$out" ]; then
+        echo "❌ [$bench] undelivered guest Machine $id has no exact bench output; retaining ownership without a native stop" >&2
+        return 1
+    fi
+    # Ownership comes only from this controller's own immutable audit.
+    if [ -f "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" ] \
+        && grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null \
+        && [ "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" disposition)" = claimed ]; then
+        kind=pool
+        volume_id="$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" volume_id)"
+    else
+        clone_name="$(cat "$FLEET_TEARDOWN_OWNERSHIP_DIR/by-machine-id/$id" 2>/dev/null || true)"
+        case "$clone_name" in cloudbench-[a-zA-Z0-9._-]*) record="$FLEET_TEARDOWN_OWNERSHIP_DIR/fresh/$clone_name" ;; esac
+        if [ -n "$record" ] && [ -f "$record" ] \
+            && [ "$(registry_meta_value "$record" machine_id)" = "$id" ] \
+            && [ "$(registry_meta_value "$record" disposition)" = owned ]; then
+            kind=fresh
+            volume_id="$(registry_meta_value "$record" volume_id)"
+        fi
+    fi
+    if [ -z "$kind" ] || [ -z "$volume_id" ]; then
+        echo "❌ [$bench] Machine $id is not exactly owned by this controller; no native stop (retaining ownership)" >&2
+        return 1
+    fi
+    # The live Machine must still be that exact owned guest and its volume.
+    if ! budget="$(fleet_native_stop_call_budget "$deadline")" \
+        || ! details="$(registry_machine_details "$id" "$budget")"; then
+        echo "❌ [$bench] exact owned Machine $id could not be read within the native-stop budget; no native stop, retaining ownership for exact-owner recovery" >&2
+        return 1
+    fi
+    read -r observed_state observed_name _ <<< "$details"
+    if ! budget="$(fleet_native_stop_call_budget "$deadline")" \
+        || ! mounted_volume="$(machine_volume_id "$id" "$budget" 2>/dev/null)"; then
+        mounted_volume=""
+    fi
+    if [ "$mounted_volume" != "$volume_id" ] \
+        || { [ "$kind" = fresh ] && [ "$observed_name" != "$clone_name" ]; } \
+        || { [ "$kind" = pool ] && [[ "$observed_name" != cloudbench-* ]]; }; then
+        echo "❌ [$bench] Machine $id no longer matches its exact owned identity (volume ${mounted_volume:-unreadable}); no native stop, retaining ownership for exact-owner recovery" >&2
+        return 1
+    fi
+    requested_epoch="$(date +%s)"
+    case "$observed_state" in
+        stopped|stopping) ;;
+        *)
+            # A rejected request is retried by the verification phase.
+            fleet_native_stop_send "$id" "$deadline" || true
+            requests=1
+            ;;
+    esac
+    printf 'kind=%s\nvolume_id=%s\nrequests=%s\nlast_request=%s\nrequested_epoch=%s\n' \
+        "$kind" "$volume_id" "$requests" "$SECONDS" "$requested_epoch" \
+        > "$state_dir/$j.request.tmp" && mv "$state_dir/$j.request.tmp" "$state_dir/$j.request"
+}
+
+# Phase 2: verify against the shared deadline, re-issuing a bounded stop.
+fleet_native_stop_verify_guest() {  # <child-index> <state-dir> <deadline-SECONDS>
+    local j="$1" state_dir="$2" deadline="$3" id bench out request kind volume_id requests
+    local last_request requested_epoch max_requests next_request details budget state=""
+    out="${CHILD_OUT[$j]}"
+    id="${CHILD_MACHINE[$j]}"
+    bench="${CHILD_BENCH[$j]:-unknown}"
+    request="$state_dir/$j.request"
+    kind="$(registry_meta_value "$request" kind)"
+    volume_id="$(registry_meta_value "$request" volume_id)"
+    requests="$(registry_meta_value "$request" requests)"
+    last_request="$(registry_meta_value "$request" last_request)"
+    requested_epoch="$(registry_meta_value "$request" requested_epoch)"
+    max_requests="${CLOUDBENCH_GUEST_NATIVE_STOP_REQUEST_ATTEMPTS:-3}"
+    case "$max_requests" in ''|*[!0-9]*|0) max_requests=3 ;; esac
+    next_request=$((last_request + 1))
+    while budget="$(fleet_native_stop_call_budget "$deadline")"; do
+        if details="$(registry_machine_details "$id" "$budget")"; then
+            state="${details%% *}"
+        else
+            state=""
+        fi
+        [ "$state" != stopped ] || break
+        case "$state" in
+            # In transition, or an unsafe/absent read: keep observing.
+            ''|stopping) ;;
+            *)
+                if [ "$requests" -lt "$max_requests" ] && [ "$SECONDS" -ge "$next_request" ]; then
+                    fleet_native_stop_send "$id" "$deadline" || true
+                    requests=$((requests + 1))
+                    next_request=$((SECONDS + (1 << (requests - 1))))
+                fi
+                ;;
+        esac
+        [ "$SECONDS" -lt "$deadline" ] || break
+        sleep 1
+    done
+    fleet_native_stop_publish_receipt "$out" "$bench" "$id" "$volume_id" "$kind" "$requests" \
+        "$state" "$requested_epoch" "${FLEET_GUEST_DELIVERY_STATE[$j]:-absent}" || {
+        echo "❌ [$bench] could not publish the native-stop receipt for exact Machine $id; retaining ownership" >&2
+        return 1
+    }
+    if [ "$state" = stopped ]; then
+        echo "🛑 [$bench] guest shutdown was not delivered; exact Machine $id is natively stopped (volume $volume_id and ownership retained for exact-owner recovery)" >&2
+        return 0
+    fi
+    echo "❌ [$bench] exact Machine $id reads ${state:-unreadable}, not verified stopped, after $requests native stop request(s); retaining ownership for exact-owner recovery of Machine $id" >&2
     return 1
 }
 
-fleet_native_stop_undelivered_guests() {  # <child-index...>
-    local j pid failed=0 limit="${CLOUDBENCH_GUEST_NATIVE_STOP_CONCURRENCY:-16}"
-    local -a stop_pids=()
-    case "$limit" in ''|*[!0-9]*|0) limit=16 ;; esac
-    # Each stop is an independent bounded provider call. Concurrency keeps a
-    # wide fleet's backstop inside one stop budget instead of one per guest.
+fleet_native_stop_run_window() {  # <limit> <function> <state-dir> <deadline> <child-index...>
+    local limit="$1" function_name="$2" state_dir="$3" deadline="$4" j pid running failed=0
+    local -a active=() still=()
+    shift 4
     for j in "$@"; do
-        fleet_native_stop_guest "$j" &
-        stop_pids+=("$!")
-        if [ "${#stop_pids[@]}" -ge "$limit" ]; then
-            for pid in "${stop_pids[@]}"; do wait "$pid" || failed=1; done
-            stop_pids=()
-        fi
+        while [ "${#active[@]}" -ge "$limit" ]; do
+            running=" $(jobs -pr | tr '\n' ' ') "
+            still=()
+            for pid in "${active[@]}"; do
+                if [[ "$running" == *" $pid "* ]]; then
+                    still+=("$pid")
+                else
+                    wait "$pid" || failed=1
+                fi
+            done
+            active=(${still[@]+"${still[@]}"})
+            [ "${#active[@]}" -lt "$limit" ] || sleep 0.2
+        done
+        "$function_name" "$j" "$state_dir" "$deadline" &
+        active+=("$!")
     done
-    for pid in "${stop_pids[@]:-}"; do
-        [ -z "$pid" ] || wait "$pid" || failed=1
+    for pid in ${active[@]+"${active[@]}"}; do
+        wait "$pid" || failed=1
     done
     return "$failed"
+}
+
+fleet_native_stop_undelivered_guests() {  # <child-index...>
+    local j failed=0 state_dir deadline
+    local limit="${CLOUDBENCH_GUEST_NATIVE_STOP_CONCURRENCY:-16}"
+    local seconds="${CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS:-20}"
+    local -a requested=()
+    case "$limit" in ''|*[!0-9]*|0) limit=16 ;; esac
+    case "$seconds" in ''|*[!0-9]*|0) seconds=20 ;; esac
+    deadline=$((SECONDS + seconds))
+    state_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-native-stop.XXXXXX")" || return 1
+    fleet_native_stop_run_window "$limit" fleet_native_stop_request_guest \
+        "$state_dir" "$deadline" "$@" || failed=1
+    for j in "$@"; do
+        [ ! -f "$state_dir/$j.request" ] || requested+=("$j")
+    done
+    if [ "${#requested[@]}" -gt 0 ] \
+        && ! fleet_native_stop_run_window "$limit" fleet_native_stop_verify_guest \
+            "$state_dir" "$deadline" "${requested[@]}"; then
+        failed=1
+    fi
+    rm -rf "$state_dir"
+    return "$failed"
+}
+
+# A controller request can fail only because this child's runner already
+# delivered the same authenticated stop and retired its proxy. The runner's
+# exact run-scoped receipt is the only proof of that delivery; an absent,
+# foreign or unreadable receipt proves nothing.
+fleet_guest_shutdown_delivery_state() {  # <child-index>; prints delivered | absent | invalid:<reason>
+    local j="$1"
+    python3 - "${CHILD_OUT[$j]:-}/guest-shutdown.requested" "$RUN_ID" "$FLEET_OWNER_TOKEN" \
+        "${CHILD_MACHINE[$j]:-}" "${CHILD_BENCH[$j]:-}" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+path, run_id, owner, machine, bench = sys.argv[1:]
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+except FileNotFoundError:
+    print("absent")
+    raise SystemExit(0)
+except OSError as error:
+    print(f"invalid:unreadable-errno-{error.errno}")
+    raise SystemExit(0)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+        print("invalid:not-a-bounded-regular-file")
+        raise SystemExit(0)
+    data = os.read(descriptor, 4097)
+finally:
+    os.close(descriptor)
+try:
+    receipt = json.loads(data)
+except ValueError:
+    print("invalid:malformed")
+    raise SystemExit(0)
+if not isinstance(receipt, dict) or receipt.get("version") != 1 \
+        or receipt.get("kind") != "guest-shutdown-requested":
+    print("invalid:wrong-family")
+elif receipt.get("run_id") != run_id:
+    print("invalid:foreign-run")
+elif not re.fullmatch(re.escape(owner) + r"-[0-9]+", str(receipt.get("run_token", ""))):
+    print("invalid:foreign-owner")
+elif receipt.get("machine_id") != machine:
+    print("invalid:foreign-machine")
+elif receipt.get("bench") != bench:
+    print("invalid:foreign-bench")
+elif receipt.get("http_status") not in (202, 204, 409):
+    print("invalid:not-accepted")
+else:
+    print("delivered")
+PY
+}
+
+fleet_guest_shutdown_delivered_by_runner() {  # <child-index> <controller-observation>
+    local j="$1" observation="$2" state
+    state="$(fleet_guest_shutdown_delivery_state "$j" 2>/dev/null)" || state=""
+    case "$state" in
+        delivered)
+            echo "⏳ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed ($observation) after its runner delivered the authenticated shutdown; tracking the draining guest for acknowledgement without a native stop" >&2
+            return 0
+            ;;
+        absent)
+            FLEET_GUEST_DELIVERY_STATE[$j]=absent
+            ;;
+        *)
+            FLEET_GUEST_DELIVERY_STATE[$j]="invalid:${state#invalid:}"
+            echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest shutdown delivery receipt is unusable (${state:-unreadable}); treating the stop as undelivered" >&2
+            ;;
+    esac
+    return 1
 }
 
 # Shared by the early exact-owner recovery entrypoint and the normal controller
 # EXIT cleanup. Keep the one definition before either caller can execute.
 cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
     local deadline j out port status_code failed=0 native_stop=0 responses pid
+    local native_stop_pid="" native_stop_seconds
     local -a pending_indices next_pending_indices request_indices request_pids
     local -a undelivered_indices
     pending_indices=()
@@ -7811,6 +8005,7 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
     request_indices=()
     request_pids=()
     undelivered_indices=()
+    FLEET_GUEST_DELIVERY_STATE=()
     [ "${1:-}" != "--native-stop-undelivered" ] || native_stop=1
     [ "${#CHILD_OUT[@]}" -gt 0 ] || return 0
     deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
@@ -7840,6 +8035,11 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
                 if [ -s "$out/boot-config-unapplied" ] \
                     && [ ! -e "$out/cloudbench-run.json" ]; then
                     echo "ℹ️  [${CHILD_BENCH[$j]:-unknown}] boot config was never applied; no guest cleanup is owed"
+                    continue
+                fi
+                if [ "$native_stop" = "1" ] \
+                    && fleet_guest_shutdown_delivered_by_runner "$j" "no status proxy"; then
+                    pending_indices+=("$j")
                     continue
                 fi
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] no status proxy for guest cleanup acknowledgement" >&2
@@ -7880,18 +8080,33 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
                     && [ "$(cat "$out/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
                     continue
                 fi
+                # The runner can have delivered this same stop (HTTP 202) and
+                # retired the proxy while the guest still drains. That guest
+                # stays on the acknowledgement and retention path below.
+                if [ "$native_stop" = "1" ] \
+                    && fleet_guest_shutdown_delivered_by_runner "$j" "HTTP ${status_code:-transport-error}"; then
+                    pending_indices+=("$j")
+                    continue
+                fi
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
                 failed=1
                 undelivered_indices+=("$j")
                 ;;
         esac
     done
-    # Undelivered guests are still executing. Stop them now, before waiting
-    # for any sibling's acknowledgement, so the stop fits a caller's bounded
-    # cancellation window. Recovery callers retain their existing contract.
-    if [ "$native_stop" = "1" ] && [ "${#undelivered_indices[@]}" -gt 0 ] \
-        && ! fleet_native_stop_undelivered_guests "${undelivered_indices[@]}"; then
-        failed=1
+    # No party delivered a stop to these guests, so they are still executing.
+    # Stop them natively now, concurrently with the acknowledgement polling
+    # below and within the same cleanup deadline, so neither phase starves the
+    # other. Recovery callers retain their existing contract.
+    if [ "$native_stop" = "1" ] && [ "${#undelivered_indices[@]}" -gt 0 ]; then
+        native_stop_seconds="${CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS:-20}"
+        case "$native_stop_seconds" in ''|*[!0-9]*|0) native_stop_seconds=20 ;; esac
+        [ "$((deadline - SECONDS))" -ge "$native_stop_seconds" ] \
+            || native_stop_seconds=$((deadline - SECONDS))
+        [ "$native_stop_seconds" -gt 0 ] || native_stop_seconds=1
+        CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS="$native_stop_seconds" \
+            fleet_native_stop_undelivered_guests "${undelivered_indices[@]}" &
+        native_stop_pid=$!
     fi
 
     while [ "${#pending_indices[@]}" -gt 0 ] && [ "$SECONDS" -le "$deadline" ]; do
@@ -7946,6 +8161,9 @@ cloudbench_confirm_guest_shutdowns() {  # [--native-stop-undelivered]
         [ "${#pending_indices[@]}" -eq 0 ] || sleep 0.25
     done
     rm -rf "$responses"
+    if [ -n "$native_stop_pid" ] && ! wait "$native_stop_pid"; then
+        failed=1
+    fi
     if [ "${#pending_indices[@]}" -gt 0 ]; then
         echo "❌ ${#pending_indices[@]} guest(s) did not acknowledge browser/session cleanup; retaining provider ownership" >&2
         failed=1
