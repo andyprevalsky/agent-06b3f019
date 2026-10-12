@@ -63,6 +63,11 @@ October 2026.
   say so without inventing prior correspondence, interest or money.
 - Small, session-constant context (a network up to ~15k tokens) can ride in
   the seed state: it lands in the cached system evidence (section 5).
+- The account snapshot copies only the latest 10,000 messages across all
+  channels. To start from a user's whole history, build the fixture source with
+  `SEED_MESSAGE_LIMIT` above the prod count, and pass the same value to the run
+  (`run.env` records it). On 2026-10-12 Tamy had 42,910 messages: the default
+  cap kept 546 of her 23,130 iMessages once WhatsApp and Gmail were connected.
 
 ## 3. Calibrate outcome distributions from research
 

@@ -69,6 +69,9 @@ printf 'commit=%s\nrun_id=%s\ntask=%s\ntimeout_seconds=%s\nstate_file=%s\nstate_
     "$commit" "$run_id" "$task" "$timeout" "$state_file" \
     "$([ -n "$state_file" ] && sha256sum "$state_file" | cut -d' ' -f1)" "$wmh_root" "$wmh_port" "$base_port" \
     "$(date -u +%s)" > "$out/run.env"
+# The fixture source and message cap define the run's starting data; record them without credentials.
+printf 'seed_source_db=%s\nseed_message_limit=%s\n' "${SEED_REMOTE_DATABASE_URL##*/}" \
+    "${SEED_MESSAGE_LIMIT:-10000}" >> "$out/run.env"
 extra=()
 [ -z "$state_file" ] || extra=(--wmh-initial-state-file "$state_file")
 (
