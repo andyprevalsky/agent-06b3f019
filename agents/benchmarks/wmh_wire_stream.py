@@ -42,7 +42,7 @@ STREAM_GUIDE = (
     '"environment_state_baseline" is the environment_state when this stream began; each later '
     '"environment_state_changes" is a JSON Patch list, applied in order, so the supplied environment_state '
     "(the state your state_patch applies to) is the baseline with every change applied. "
-    '"visible_conversation" messages are the acting agent\'s history, in order. "reference_material" adds '
+    '"visible_conversation" messages are the world\'s shared history, in order. "reference_material" adds '
     'grounding contexts and grounded examples, keyed by id. The final "current_call" message completes the '
     "object: grounding_context_ids and grounded_example_ids name the material that applies to this step, "
     "visible_conversation_tail ends the history, task adds the candidate's tools, and candidate_response is "
