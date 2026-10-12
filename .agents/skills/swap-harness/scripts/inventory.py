@@ -46,14 +46,15 @@ def collect(targets: dict[str, str] | None = None) -> dict:
         preview = managed("read", "--scope", "project", "--thread", thread["id"], "--turns", "10")
         records.append({
             "thread": thread,
-            "devboxId": targets.get(thread["publicId"]),
+            "devboxId": targets.get(thread["publicId"])
+            or thread.get("executionInstanceId") or thread.get("devboxId"),
             "transcript": preview["transcript"],
         })
     return {
         "schemaVersion": 1,
         "capturedAt": datetime.now(timezone.utc).isoformat(),
         "scope": "project", "complete": True,
-        "note": "Previews may be shortened; null devboxId needs routing resolution. No quota classification was inferred.",
+        "note": "Previews may be shortened; null devboxId needs supported routing resolution. Determine main-task ownership and exclude active Codex main work before dispatch. No quota classification was inferred.",
         "threads": records,
     }
 

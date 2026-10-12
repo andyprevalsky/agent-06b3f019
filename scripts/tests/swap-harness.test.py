@@ -15,6 +15,19 @@ SKILL = ROOT / ".agents/skills/swap-harness"
 
 
 class SwapHarnessHelpers(unittest.TestCase):
+    def test_inventory_uses_authoritative_routing_fields_without_user_mapping(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("swap_inventory", SKILL / "scripts/inventory.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        thread = {"id": "internal", "publicId": "thr_original", "agent": "claude", "executionInstanceId": "actual-box"}
+        with patch.object(module, "managed", side_effect=[
+            {"threads": [thread], "pagination": {"complete": True}},
+            {"transcript": {"messages": []}},
+        ]):
+            self.assertEqual(module.collect()["threads"][0]["devboxId"], "actual-box")
+
     def test_inventory_pages_empty_results_and_keeps_transcripts_private(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
