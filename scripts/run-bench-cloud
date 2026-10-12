@@ -2576,6 +2576,43 @@ fi
 # clone pays the multi-minute rsync refresh on bring-up (the fleet's dominant
 # cost). Refresh centrally ONCE here instead; clones then no-op their dep sync.
 # ═════════════════════════════════════════════════════════════════════════════
+# Print the snapshot a peer published while this refresh request waited for the
+# app environment lock, when its proof covers the exact expected manifests and
+# passes the same complete-snapshot/epoch check the fleet applies afterwards.
+peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
+    local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
+    [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
+    written="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
+    [ "${written:-0}" -ge "$since" ] || return 1
+    read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
+    [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
+    vol="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("name") == os.environ["MN"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts: print(mounts[0].get("volume", ""))
+        break
+' 2>/dev/null)" || return 1
+    [ -n "$vol" ] || return 1
+    FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null \
+        | SID="$s_snap" EPOCH="${s_epoch:-0}" python3 -c '
+import json, os, sys
+from datetime import datetime
+valid = {"created", "complete", "completed", "ready"}
+records = [s for s in json.load(sys.stdin) or [] if isinstance(s, dict) and s.get("id") == os.environ["SID"]]
+def proven(snapshot):
+    try:
+        created = datetime.fromisoformat(str(snapshot.get("created_at") or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False
+    return (str(snapshot.get("status") or "").lower() in valid and int(snapshot.get("size") or 0) > 0
+            and created >= int(os.environ["EPOCH"]) - 60)
+raise SystemExit(0 if any(proven(s) for s in records) else 1)
+' 2>/dev/null || return 1
+    printf '%s\n' "$s_snap"
+}
+
 if [ "$MODE" = "refresh-deps" ]; then
     if ! EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
         echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
@@ -2627,8 +2664,15 @@ if [ "$MODE" = "refresh-deps" ]; then
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
+    REFRESH_REQUESTED_EPOCH="$(date +%s)"
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
+    # Concurrent controllers queue here for the same refresh. Once one finishes,
+    # the rest reuse its proof instead of each repeating a refresh and snapshot.
+    if PEER_SNAP="$(peer_refreshed_snapshot "$REFRESH_REQUESTED_EPOCH")"; then
+        echo "✅ a peer refreshed these exact manifests while this request waited; reusing snapshot $PEER_SNAP"
+        exit 0
+    fi
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }

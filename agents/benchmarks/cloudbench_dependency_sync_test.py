@@ -17557,7 +17557,18 @@ def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path
 
 
 @pytest.mark.parametrize(
-    "scenario", ["pinned", "direct", "bad_digest", "tampered_upload", "fetch_failure", "patch_conflict", "no_delta"]
+    "scenario",
+    [
+        "pinned",
+        "direct",
+        "bad_digest",
+        "tampered_upload",
+        "fetch_failure",
+        "patch_conflict",
+        "no_delta",
+        "peer_refreshed",
+        "peer_stale",
+    ],
 )
 def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, scenario: str) -> None:
     """Execute maintenance with real git/patches and a local transport boundary.
@@ -17599,6 +17610,7 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     apply_helper = ""
     if "warm_source_apply_patch() {" in cloud:
         apply_helper = _extract_fleet_function(cloud, "warm_source_apply_patch() {")
+    peer_helper = _extract_fleet_function(cloud, "peer_refreshed_snapshot() {")
     common = tmp_path / "common"
     common.mkdir()
     built = tmp_path / "built-requirements"
@@ -17622,7 +17634,13 @@ WARM_DEPS_STATE_FILE={shlex.quote(str(common / "cloudbench-warm-deps.fp"))}
 CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT={shlex.quote(str(ROOT / "scripts/cloudbench-prepare-patch.sh"))}
 CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
 ensure_app() {{ echo ensure >> "$CALLS"; }}
-acquire_app_environment_lock() {{ echo lock >> "$CALLS"; }}
+acquire_app_environment_lock() {{
+    echo lock >> "$CALLS"
+    # A queued controller's peer finishes the same refresh while it waits.
+    if [ "$SCENARIO" = peer_refreshed ]; then
+        printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
+    fi
+}}
 release_app_environment_lock() {{ :; }}
 resolve_machine_id() {{ echo warm-fixture; }}
 write_state() {{ :; }}
@@ -17647,12 +17665,23 @@ FLY() {{
         if [ "$SCENARIO" = tampered_upload ] && [ "${{@: -2:1}}" = "$CLOUDBENCH_LOCAL_PATCH_SOURCE" ]; then
             echo corrupt >> "${{@: -1}}"
         fi
+    elif [ "$1 $2 $3" = 'volume snapshots list' ]; then
+        printf '[{{"id":"snap-peer","status":"created","size":9,"created_at":"%s"}}]\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     else
         echo '[{{"name":"cloudbench-warm","config":{{"mounts":[{{"volume":"vol-exact"}}]}}}}]'
     fi
 }}
 stop_machine_strict() {{ echo stopped >> "$CALLS"; }}
 create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID=snap-exact; }}
+if [ "$SCENARIO" = peer_stale ]; then
+    # Matching manifests, but written before this request began waiting: an
+    # older proof the fleet already rejected must not satisfy this refresh.
+    printf '%s %s %s %s\n' "$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" \
+        "$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${{CLOUDBENCH_PYTHON_MANIFESTS[@]}}")" \
+        "$(date +%s)" snap-peer > "$WARM_DEPS_STATE_FILE"
+    python3 -c 'import os, sys; os.utime(sys.argv[1], (1, 1))' "$WARM_DEPS_STATE_FILE"
+fi
+{peer_helper}
 {apply_helper}
 {mode}
 """
@@ -17669,9 +17698,14 @@ create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID
             CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest),
         )
     result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
-    success = scenario in ("pinned", "direct", "no_delta")
+    success = scenario in ("pinned", "direct", "no_delta", "peer_refreshed", "peer_stale")
     assert (result.returncode == 0) == success, result.stdout + result.stderr
-    if success:
+    if scenario == "peer_refreshed":
+        assert "reusing snapshot snap-peer" in result.stdout
+        assert calls.read_text().splitlines() == ["ensure", "lock"]
+        assert not built.exists(), "a peer's exact proof must not trigger another install"
+        assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-peer"
+    elif success:
         assert built.read_bytes() == (repo / "agents/requirements.txt").read_bytes()
         assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-exact"
         assert calls.read_text().splitlines()[-4:] == ["stopped", "snapshot", "metadata", "parked"]
@@ -18031,7 +18065,9 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
         env={
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
-            "FLY_BENCH_API_TOKEN": "test-token",
+            # At least 20 characters: shorter values are refused as injected stubs,
+            # which made this pass only on hosts with a real `flyctl auth login`.
+            "FLY_BENCH_API_TOKEN": "fixture-token-not-a-real-fly-token",
             "FLY_CALLS": str(calls),
         },
         text=True,
