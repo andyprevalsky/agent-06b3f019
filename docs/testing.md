@@ -147,10 +147,14 @@ snapshot unless dependency manifests or the donor contents actually changed.
 
 Current LIVE acceptance is documented in CLAUDE.md's **Current width-fifty LIVE
 acceptance** subsection: five consecutive runs of fifty distinct random eligible
-DAILY tasks, temporary 1,200-second execution per task and hard 3,600-second
+DAILY tasks, temporary 1,200-second execution per task and hard 5,400-second
 image-build-start through final durable publication/native release per run.
-Use the normal uncached image build/activation and one ordinary fleet of fifty
-concrete names without repetition/concurrency flags. Keep LIVE autoscale maximum
+Use the normal uncached image build/activation, then the normal CLI with fifty
+concrete names and `--retry-infra 1 --concurrency 50 --strict-barrier
+--e2e-timeout 5400 --e2e-started-at <original-image-epoch>`. One released and
+published INFRA attempt may be retried without restarting healthy peers or either
+clock; retain every physical attempt in its original logical group. Genuine
+task FAIL remains valid and is not retried. Keep LIVE autoscale maximum
 15, scoped native admission, thirty-second exact-handle monitoring and grouped
 early task verdicts. Intermediate observations warn/retry; usable stage handoffs
 and the whole-run limit remain authoritative. Compare generous fixed historical

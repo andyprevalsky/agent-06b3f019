@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { UNUSED_MINT_RECLAIM_DEADLINE_MS } from '../../providers/agentcard/unused-mint-settle';
 import {
   checkPendingUnusedMints,
+  overdueReclaimSkipped,
   pendingMintLedgerPath,
   readOpenPendingMints,
   recordPendingMint,
@@ -47,6 +48,11 @@ function transferRow(cardId: string, status: string, releasedCents: number): Row
 }
 
 async function main(): Promise<void> {
+  // Overdue reclaims are skippable only through the exact opt-in flag.
+  assert.equal(overdueReclaimSkipped({ TREASURY_RAILS_SKIP_OVERDUE_RECLAIM: '1' }), true);
+  for (const value of [undefined, '', '0', 'true', 'yes']) {
+    assert.equal(overdueReclaimSkipped({ TREASURY_RAILS_SKIP_OVERDUE_RECLAIM: value }), false);
+  }
   const dir = mkdtempSync(join(tmpdir(), 'treasury-pending-'));
   const ledgerPath = join(dir, 'nested', 'pending.jsonl');
   const ours = new Set(['holder-ours']);

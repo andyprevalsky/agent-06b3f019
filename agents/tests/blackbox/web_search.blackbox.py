@@ -152,6 +152,24 @@ def _mock_execute(calls: list, *, result: dict | None = None, raises: bool = Fal
     return mock
 
 
+async def test_manager_passes_cache_write_agent_without_changing_world_model_args():
+    """Real agents keep world-model args empty but always pass the cache-write agent id."""
+    from tools.web_search.handler import WebSearchManager
+
+    for mode, expected in (("real", [None, None, "agent-1"]), ("simulate", ["agent-1", "simulate", "agent-1"])):
+        calls = []
+        await WebSearchManager().execute_tool(
+            execute_activity=_mock_execute(calls),
+            tool_call={"query": "AI trends", "max_tokens": 1000},
+            tool_call_id="tc-1",
+            agent_id="agent-1",
+            user_id="user-1",
+            world_model_mode=mode,
+        )
+        search = next(c for c in calls if c["activity"] == "web_search_activity")
+        assert search["kwargs"]["args"][-3:] == expected, mode
+
+
 async def test_manager_execute_tool_happy():
     """WebSearchManager.execute_tool returns result + usage with per-query cost."""
     from tools.web_search.handler import WebSearchManager
@@ -317,6 +335,10 @@ async def run_all_tests():
     await r.record_async("boundary", test_web_search_boundary)
     await r.record_async("ddgs_fallback", test_web_search_ddgs_fallback)
     await r.record_async("ddgs_no_api_key", test_web_search_ddgs_no_api_key)
+    await r.record_async(
+        "manager_passes_cache_write_agent",
+        test_manager_passes_cache_write_agent_without_changing_world_model_args,
+    )
     await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
     await r.record_async("manager_fast_cache_no_cost", test_manager_execute_tool_fast_cache_hit_has_no_service_cost)
     await r.record_async("activity_fast_cache_marks_result", test_web_search_activity_fast_cache_hit_marks_cached_result)

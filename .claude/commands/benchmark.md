@@ -13,9 +13,14 @@ scripts/run-bench $ARGUMENTS
 
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
-uses fifty distinct randomly selected eligible names together in one ordinary
-fleet, without `-k` or `--concurrency`, temporary execution 1,200 seconds and
-hard image-build-start through final publication/native release 3,600 seconds.
+uses fifty distinct randomly selected eligible names through the normal CLI
+with `--retry-infra 1 --concurrency 50 --strict-barrier`, temporary execution
+1,200 seconds and `--e2e-timeout 5400 --e2e-started-at <original-image-epoch>`.
+The 90-minute clock includes all attempts, durable publication and full release.
+Only infrastructure failures get one fresh isolated retry, after the prior
+attempt releases resources and publishes its terminal result. Genuine task
+FAIL remains valid. Keep every attempt visible within its original group;
+healthy peers continue and neither clock resets.
 Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
 exact-image activation every trial. LIVE autoscale remains 15; the cached mass
 profile's maximum 2 and allocation deadline do not apply. Keep the original

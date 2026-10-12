@@ -63,6 +63,37 @@ def _serve(record: list, *, decoded_limit: int | None = None):
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+def test_hub_transport_explicit_retry_keeps_group_member_and_physical_attempt(monkeypatch):
+    record = []
+    server, url = _serve(record)
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", url)
+    monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "fixture-key")
+    monkeypatch.setenv("BENCHMARK_HUB_GROUP_RUN_ID", "original-fifty-group")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_JOB_ID", "r001-j0001")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_RUN", "1")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_TOTAL_JOBS", "50")
+    monkeypatch.setenv("RUN_BENCH_CAMPAIGN_STARTED_AT", "2026-10-07T22:42:56+00:00")
+    try:
+        for attempt in (1, 2):
+            monkeypatch.setenv("RUN_BENCH_CAMPAIGN_ATTEMPT", str(attempt))
+            bundle = {"run_id": f"physical-attempt-{attempt}", "tasks": [{"name": "unchanged-task", "passed": False,
+                      "status": "INFRA_ERROR" if attempt == 1 else "FAILED", "lifecycle_stage": "released"}]}
+            assert upload_run_bundle(bundle, required=True)
+        bodies = [request['body'] for request in record]
+        assert [body['run_id'] for body in bodies] == ['physical-attempt-1', 'physical-attempt-2']
+        assert [body['group_attempt'] for body in bodies] == [1, 2]
+        assert all(body['group_member_id'] == 'r001-j0001' and body['group_total'] == 50 for body in bodies)
+        assert all(body['group_run_id'] == 'original-fifty-group' and body['group_timestamp'] == '2026-10-07T22:42:56+00:00' for body in bodies)
+        assert bodies[0]['tasks'][0]['passed'] is False and bodies[0]['tasks'][0]['status'] == 'INFRA_ERROR'
+        assert bodies[1]['tasks'][0]['passed'] is False and bodies[1]['tasks'][0]['status'] == 'FAILED'
+        with pytest.raises(ValueError, match='attempt identity changed'):
+            upload_run_bundle({**bundle, 'group_attempt': 1}, required=True)
+        assert len(record) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_hub_transport_keeps_complete_transcripts_without_diagnostic_blobs(monkeypatch):
     """The same decoded-size boundary accepts full FE transcripts, not raw logs."""
     import pytest
@@ -552,6 +583,7 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
     from datetime import datetime, timezone
     from pathlib import Path
 
+    from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
     from benchmarks.hub_upload import live_bundle_from_report_card
 
     repo = (
@@ -597,10 +629,8 @@ def test_live_response_preserves_phase_and_startup_label_with_stable_fleet_times
         command = setup + 'UNIFIED_DIR="$FLEET_DIR/_batch"\nDASH_BASE=8765\nSELF_MANAGED_HUB_RUN=0\n' + fleet[start:end]
         phases = ("queued", "running", "evaluated", "teardown", "released")
     elif producer == "terminal":
-        start = fleet.index("finalize_terminal_projection() {")
-        end = fleet.index("\ncleanup() {", start)
         command = (
-            fleet[start:end]
+            _extract_fleet_function(fleet, "finalize_terminal_projection() {")
             + "\n"
             + setup
             + "PROVISION_POOL=\n"

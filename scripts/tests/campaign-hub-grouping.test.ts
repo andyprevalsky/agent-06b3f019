@@ -68,6 +68,20 @@ function owningBoundary() {
         ).statements
       : []),
   ];
+  // Follow the actual shared attempt owner imported by storage/projection.
+  const attemptFilename = path.join(
+    path.dirname(filename),
+    "benchmarkHubGroupAttempts.ts",
+  );
+  if (existsSync(attemptFilename))
+    declarations.push(
+      ...ts.createSourceFile(
+        attemptFilename,
+        readFileSync(attemptFilename, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+      ).statements,
+    );
   // Follow the facade's actual detail-owner re-export after module extraction.
   const detailOwner = tree.statements.find(
     (node) =>
@@ -116,15 +130,13 @@ function owningBoundary() {
     putObject: async (key: string, value: string) => {
       objects.set(key, value);
     },
-    readAgentRunIndexForMutation: async () => ({ revision }),
+    readAgentRunIndexForMutation: async () => ({ revision, agents: new Map() }),
     writeAgentRunIndex: async () => {},
     hubAgentIndexAfterPut: () => ({ revision: ++revision }),
     hubAgentIndexAfterDelete: (value: unknown) => value,
     agentIdsFromHubBundle: (bundle: { tasks?: Array<{ agent_id?: string }> }) =>
-      new Set(
-        (bundle.tasks ?? []).flatMap((task) =>
-          task.agent_id ? [task.agent_id] : [],
-        ),
+      (bundle.tasks ?? []).flatMap((task) =>
+        task.agent_id ? [task.agent_id] : [],
       ),
     slotHubAncestorSkeletonsFromBundle: async () => {},
     applyHubRunToResolutionCaches: () => {},
@@ -934,4 +946,257 @@ test("full internal task history survives a viewer preview beyond member100", as
   } finally {
     await api.close();
   }
+});
+
+function infraAttempt(group: string, member: string, attempt = 1) {
+  return {
+    run_id: `${group}-${member}-attempt-${attempt}`,
+    timestamp: "2026-10-06T20:00:01+00:00",
+    ...metadata(group, member, 1, 50),
+    group_attempt: attempt,
+    tasks: [
+      {
+        name: "repeat-task",
+        passed: false,
+        status: "INFRA_ERROR",
+        lifecycle_stage: "released",
+        agent_id: `agent-${attempt}`,
+        cost_cents: 11,
+        tokens_in: 7,
+        tokens_out: 3,
+        tree_agent_count: 1,
+      },
+    ],
+    cost: { agents_llm_usd: 0.11, total_usd: 0.11 },
+  };
+}
+
+test("released infrastructure retry retains fifty logical members and every physical attempt", async () => {
+  const boundary = owningBoundary();
+  const { owner } = boundary;
+  const members = Array.from({ length: 50 }, (_, i) => `m${i + 1}`);
+  await owner.putRun(schedule("retry-group", members), { live: true });
+  const first = infraAttempt("retry-group", "m1");
+  await owner.putRun(first, { live: false });
+  assert.equal((await owner.getRunDetail(first.run_id)).tasks[0].passed, null);
+  assert.equal(
+    JSON.parse(boundary.objects.get(`runs/${first.run_id}.json`)!).tasks[0]
+      .passed,
+    false,
+  );
+  const healthy = {
+    ...infraAttempt("retry-group", "m2"),
+    ...metadata("retry-group", "m2", 2, 50),
+    tasks: [{ name: "repeat-task", passed: true, agent_id: "healthy-agent" }],
+  };
+  await owner.putRun(healthy, { live: false });
+  const firstBytes = boundary.objects.get(`runs/${first.run_id}.json`);
+  const healthyBytes = boundary.objects.get(`runs/${healthy.run_id}.json`);
+  const retry = {
+    ...infraAttempt("retry-group", "m1", 2),
+    tasks: [
+      {
+        name: "repeat-task",
+        passed: true,
+        status: "passed",
+        lifecycle_stage: "released",
+        agent_id: "retry-agent",
+        cost_cents: 13,
+        tokens_in: 17,
+        tokens_out: 5,
+        tree_agent_count: 2,
+      },
+    ],
+    cost: { agents_llm_usd: 0.13, total_usd: 0.13 },
+  };
+  await owner.putRun(retry, { live: false });
+  boundary.archiveReads.length = 0;
+  const detail = await owner.getRunDetail("retry-group");
+  assert.equal(detail.tasks.length, 50);
+  assert.equal(detail.task_total, 50);
+  assert.equal(detail.timestamp, first.group_timestamp);
+  assert.equal(detail.tasks[0].child_run_id, retry.run_id);
+  assert.equal(detail.tasks[0].group_attempt, 2);
+  assert.equal(detail.totals.passed, 2);
+  assert.equal(detail.task_counts.queued, 48);
+  assert.equal(detail.totals.cost_cents, 24);
+  assert.equal(detail.totals.tokens_in, 24);
+  assert.equal(detail.totals.tokens_out, 8);
+  assert.equal(detail.totals.agents, 3);
+  assert.equal(detail.cost.total_usd, 0.35);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(detail.tasks[0].attempt_history)).map(
+      (a: any) => [
+        a.group_attempt,
+        a.child_run_id,
+        a.passed,
+        a.status,
+        a.lifecycle_stage,
+        a.agent_id,
+      ],
+    ),
+    [
+      [1, first.run_id, null, "INFRA_ERROR", "released", "agent-1"],
+      [2, retry.run_id, true, "passed", "released", "retry-agent"],
+    ],
+  );
+  assert.equal(
+    boundary.archiveReads.length,
+    0,
+    "history must use compact committed summaries",
+  );
+  assert.equal(boundary.objects.get(`runs/${first.run_id}.json`), firstBytes);
+  assert.equal(
+    boundary.objects.get(`runs/${healthy.run_id}.json`),
+    healthyBytes,
+  );
+  assert.equal(
+    (await owner.getRunDetail(first.run_id)).tasks[0].status,
+    "INFRA_ERROR",
+  );
+  assert.equal((await owner.getRunDetail(retry.run_id)).tasks[0].passed, true);
+  await assert.rejects(
+    owner.putRun({ ...retry, run_id: "same-attempt-collision" }),
+    /member already/,
+  );
+  await assert.rejects(
+    owner.putRun({ ...retry, group_attempt: 3 }),
+    /membership changed/,
+  );
+  await assert.rejects(
+    owner.putRun(infraAttempt("retry-group", "m1", 3)),
+    /retry requires/,
+  );
+  await owner.putRun(first, { live: false });
+  assert.equal(
+    (await owner.getRunDetail("retry-group")).tasks[0].child_run_id,
+    retry.run_id,
+  );
+  await assert.rejects(
+    owner.putRun(
+      {
+        ...schedule("retry-group", members),
+        timestamp: "2026-10-07T20:00:00+00:00",
+      },
+      { live: true },
+    ),
+    /schedule changed/,
+  );
+  await owner.deleteRun("retry-group");
+  assert.deepEqual(
+    boundary.deleted.sort(),
+    [first.run_id, healthy.run_id, retry.run_id, "retry-group"].sort(),
+  );
+});
+
+for (const variant of [
+  "passed",
+  "failed",
+  "contradictory-pass",
+  "live",
+  "not-released",
+  "starting",
+  "cancelled",
+  "legacy",
+  "gap",
+  "timestamp",
+  "task",
+  "run-number",
+  "total",
+] as const) {
+  test(`infrastructure retry rejects ${variant} without a durable write`, async () => {
+    const boundary = owningBoundary();
+    const first: any = infraAttempt("reject-group", "m1");
+    if (variant === "passed" || variant === "failed")
+      first.tasks[0].passed = variant === "passed";
+    if (variant === "contradictory-pass") first.tasks[0].passed = true;
+    if (variant === "passed" || variant === "failed")
+      first.tasks[0].status = variant;
+    if (variant === "not-released") first.tasks[0].lifecycle_stage = "teardown";
+    if (variant === "starting" || variant === "cancelled")
+      first.tasks[0].status = variant;
+    if (variant === "legacy") delete first.group_attempt;
+    await boundary.owner.putRun(first, { live: variant === "live" });
+    const next: any = infraAttempt(
+      "reject-group",
+      "m1",
+      variant === "gap" ? 3 : 2,
+    );
+    if (variant === "legacy") delete next.group_attempt;
+    if (variant === "timestamp")
+      next.group_timestamp = "2026-10-07T20:00:00+00:00";
+    if (variant === "task") next.tasks[0].name = "different-task";
+    if (variant === "run-number") next.group_run_number = 2;
+    if (variant === "total") next.group_total = 51;
+    const before = [...boundary.objects];
+    await assert.rejects(
+      boundary.owner.putRun(next, { live: true }),
+      /retry requires|member already/,
+    );
+    assert.deepEqual([...boundary.objects], before);
+  });
+}
+
+test("legacy first attempt admits explicit retry but invalid attempt metadata cannot escape membership validation", async () => {
+  const boundary = owningBoundary();
+  const first: any = infraAttempt("legacy-retry", "m1");
+  delete first.group_attempt;
+  await boundary.owner.putRun(first, { live: false });
+  await boundary.owner.putRun(infraAttempt("legacy-retry", "m1", 2), {
+    live: true,
+  });
+  assert.equal(
+    (await boundary.owner.getRunDetail("legacy-retry")).tasks.length,
+    1,
+  );
+  for (const attempt of [0, -1, 1.5, "2", null, Number.MAX_SAFE_INTEGER + 1]) {
+    const before = [...boundary.objects];
+    await assert.rejects(
+      boundary.owner.putRun({
+        ...infraAttempt("invalid-attempt", "m1"),
+        group_attempt: attempt,
+      }),
+      /Invalid Benchmark Hub group membership/,
+    );
+    assert.deepEqual([...boundary.objects], before);
+  }
+  await assert.rejects(
+    boundary.owner.putRun({
+      run_id: "orphan-attempt",
+      group_attempt: 2,
+      tasks: [],
+    }),
+    /Invalid Benchmark Hub group membership/,
+  );
+});
+
+test("third infrastructure attempt requires the complete physical history and restores omitted retry membership", async () => {
+  const boundary = owningBoundary();
+  const { owner } = boundary;
+  const first = infraAttempt("three-attempts", "m1");
+  const second = infraAttempt("three-attempts", "m1", 2);
+  const third = infraAttempt("three-attempts", "m1", 3);
+  await owner.putRun(first, { live: false });
+  await owner.putRun(second, { live: false });
+  await owner.putRun(third, { live: true });
+  await owner.putRun(
+    { run_id: third.run_id, tasks: third.tasks },
+    { live: false },
+  );
+  assert.equal(
+    JSON.parse(boundary.objects.get(`runs/${third.run_id}.json`)!)
+      .group_attempt,
+    3,
+  );
+  const detail = await owner.getRunDetail("three-attempts");
+  assert.equal(detail.tasks.length, 1);
+  assert.equal(detail.tasks[0].group_attempt, 3);
+  assert.equal(detail.tasks[0].attempt_history.length, 3);
+  await owner.deleteRun(first.run_id);
+  const before = [...boundary.objects];
+  await assert.rejects(
+    owner.putRun(infraAttempt("three-attempts", "m1", 4)),
+    /retry requires/,
+  );
+  assert.deepEqual([...boundary.objects], before);
 });

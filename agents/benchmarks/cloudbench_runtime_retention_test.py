@@ -386,7 +386,10 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
     audit = tmp_path / "audit" / token
     (audit / "pool").mkdir(parents=True)
     (audit / "fresh").mkdir()
-    (audit / "meta").write_text(f"fleet_owner_token={token}\napp=app\n")
+    (audit / "meta").write_text(
+        f"fleet_owner_token={token}\napp=app\nrun_id=original-run\n"
+        f"workspace_root={tmp_path / 'removed-workspace'}\n"
+    )
     (registry / "meta").write_text(
         f"version=2\napp=app\nfleet_owner_token={token}\nhost=host\ncleanup_policy=reap\naudit_dir={audit}\n"
     )
@@ -398,6 +401,7 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
             "fleet_registry_cleanup_state",
             "exact_owner_pool_claim_ids",
             "fleet_recovery_confirm_pool_claims",
+            "fleet_publish_recovered_terminal_projection",
             "recover_exact_stale_fleet_owner",
         )
     )
@@ -420,8 +424,13 @@ recover_registry_audit_only_fresh() { :; }
 reap_registry_clones() { echo destroy >> "$EVENTS"; }
 recover_exact_pool_claims() { :; }
 capacity_release_stale_owner_reservations() { :; }
-fleet_audit_finalize_recovered_registry() { :; }
-fleet_registry_remove_if_empty() { :; }
+fleet_audit_finalize_recovered_registry() {
+    printf 'status=provider-teardown-verified\\n' >> "$FLEET_AUDIT_ROOT/$TOKEN/meta"
+}
+fleet_registry_remove_if_empty() {
+    rm "$1/meta"
+    rmdir "$1"
+}
 recover_exact_stale_fleet_owner "$TOKEN"
 """,
         ],

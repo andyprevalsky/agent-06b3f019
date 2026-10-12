@@ -45,7 +45,7 @@ RESTORE_BRANCH="$(awk '
 [ -n "$RESTORE_BRANCH" ] || fail "could not locate the 'if \$DB_RESTORED; then ... else' branch in run.sh"
 
 # ── 1: restore branch must run the grep-index readiness step ─────────────────
-echo "$RESTORE_BRANCH" | grep -q 'ensure-agent-network-grep-indexes.ts' \
+grep -q 'ensure-agent-network-grep-indexes.ts' <<<"$RESTORE_BRANCH" \
   || fail "fast-restore branch does not run ensure-agent-network-grep-indexes.ts (readiness/index parity skipped)"
 echo "PASS 1 — fast-restore branch ensures agent-network grep indexes"
 
@@ -54,7 +54,7 @@ RESTORE_HELPER="$ROOT_DIR/scripts/restore-seed-dump.sh"
 [ -f "$RESTORE_HELPER" ] || fail "missing restore-seed-dump.sh"
 RESTORE_CALL="$(grep -A2 -E 'bash scripts/restore-seed-dump\.sh' "$RUN_SH" || true)"
 [ -n "$RESTORE_CALL" ] || fail "could not find the restore-seed-dump.sh call in run.sh"
-echo "$RESTORE_CALL" | grep -q '"\$LOCAL_DB_NAME"' \
+grep -q '"\$LOCAL_DB_NAME"' <<<"$RESTORE_CALL" \
   || fail "restore helper must receive \$LOCAL_DB_NAME (found: $RESTORE_CALL)"
 RESTORE_DB_ARG="$(grep -E -- '-d "\$DB_NAME"' "$RESTORE_HELPER" || true)"
 [ -n "$RESTORE_DB_ARG" ] \
@@ -70,9 +70,9 @@ SAVE_HELPER="$ROOT_DIR/scripts/save-seed-dump.sh"
 [ -f "$SAVE_HELPER" ] || fail "missing save-seed-dump.sh"
 SAVE_CALL="$(grep -A2 -E 'bash scripts/save-seed-dump\.sh' "$RUN_SH" || true)"
 [ -n "$SAVE_CALL" ] || fail "could not find the save-seed-dump.sh call in run.sh"
-echo "$SAVE_CALL" | grep -q '"\$LOCAL_DB_NAME"' \
+grep -q '"\$LOCAL_DB_NAME"' <<<"$SAVE_CALL" \
   || fail "save helper must receive \$LOCAL_DB_NAME (found: $SAVE_CALL)"
-echo "$SAVE_CALL" | grep -q '"\$_SEED_DUMP_CONTAINER"' \
+grep -q '"\$_SEED_DUMP_CONTAINER"' <<<"$SAVE_CALL" \
   || fail "save helper must receive the target container (found: $SAVE_CALL)"
 grep -q '_SEED_DUMP_CONTAINER="\$DB_CONTAINER"' "$RUN_SH" \
   || fail "Docker mode must select the target DB container for pg_dump"
@@ -83,7 +83,7 @@ grep -q 'mv "\$DUMP_TMP" "\$DUMP_PATH"' "$SAVE_HELPER" \
 echo "PASS 3 — seed-dump uses the target DB/client and publishes atomically"
 
 # ── 4: restore must NOT swallow stderr to /dev/null (keep it diagnosable) ─────
-echo "$RESTORE_CALL" | grep -qE '2>&1' \
+grep -qE '2>&1' <<<"$RESTORE_CALL" \
   && fail "restore call merges stderr into /dev/null — partial-restore errors are hidden"
 grep -E 'pg_restore' "$RESTORE_HELPER" | grep -qE '2>&1' \
   && fail "restore helper merges pg_restore stderr into /dev/null"
@@ -104,16 +104,16 @@ PLAIN_BRANCH="$(awk '
   grab                                            { print }
 ' "$RESTORE_HELPER")"
 [ -n "$PLAIN_BRANCH" ] || fail "could not locate the plain-SQL branch in restore-seed-dump.sh"
-echo "$PLAIN_BRANCH" | grep -q 'RESET_SQL' \
+grep -q 'RESET_SQL' <<<"$PLAIN_BRANCH" \
   || fail "plain-SQL branch must apply the schema reset before replaying the dump"
-echo "$PLAIN_BRANCH" | grep -q 'ON_ERROR_STOP=1' \
+grep -q 'ON_ERROR_STOP=1' <<<"$PLAIN_BRANCH" \
   || fail "plain-SQL restore must still fail closed on the first error"
 echo "PASS 5 — plain-SQL base image restores into a reset schema, still fail-closed"
 
 # ── 6: anything ensured before the restore must be re-ensured after it ────────
 # The reset in case 5 drops whatever the dump does not carry, so a dump
 # published before a table existed would otherwise leave it missing at runtime.
-echo "$RESTORE_BRANCH" | grep -q 'ensure-fast-mode-cache-schema.ts' \
+grep -q 'ensure-fast-mode-cache-schema.ts' <<<"$RESTORE_BRANCH" \
   || fail "fast-restore branch must re-ensure the Fast Mode cache schema after a reset restore"
 echo "PASS 6 — fast-restore re-ensures pre-restore schema (Fast Mode cache)"
 

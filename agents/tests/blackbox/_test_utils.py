@@ -7,6 +7,7 @@ and provides mock response helpers.
 
 import inspect
 import json
+import contextlib
 import os
 import sys
 import traceback
@@ -27,8 +28,28 @@ os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
 # let a developer's funded GPT fallback key from agents/.env alter route order
 # process-wide; tests that cover that route set GPT_API_KEY explicitly.
 os.environ["GPT_API_KEY"] = ""
-# Likewise, only Foundry-specific tests opt into the funded Azure route.
+# Likewise, only Foundry-specific tests opt into the funded Azure route; real
+# provider replays (declared LLM judges) opt back in with live_funded_azure().
+_LIVE_AZURE_FOUNDRY_API_KEY = os.environ.get("AZURE_FOUNDRY_API_KEY", "")
 os.environ["AZURE_FOUNDRY_API_KEY"] = ""
+
+
+@contextlib.contextmanager
+def live_funded_azure():
+    """Restore the developer's funded Azure Foundry key for a real-provider replay.
+
+    Production judges reach Foundry after direct credentials; a live replay must
+    use the same funded route instead of depending on OpenRouter credit alone.
+    """
+    previous = os.environ.get("AZURE_FOUNDRY_API_KEY")
+    os.environ["AZURE_FOUNDRY_API_KEY"] = _LIVE_AZURE_FOUNDRY_API_KEY
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AZURE_FOUNDRY_API_KEY", None)
+        else:
+            os.environ["AZURE_FOUNDRY_API_KEY"] = previous
 
 import httpx
 from helpers.httpx_capture import (

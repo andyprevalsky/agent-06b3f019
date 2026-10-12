@@ -205,3 +205,27 @@ is introduced. This source-bound control proves rejection of extra inputs;
 normal final committed-snapshot recovery qualification and production rollout
 remain pending. Private original RED, unchanged GREEN and independent-review
 packet are retained under the deployment context.
+
+### October 7 completed-primary recovery recipe registration
+
+The completed-primary reconnect repair changed the full run-bench-fleet input
+in the existing recipe. After its partial commit, the normal pre-service
+preservation control correctly refused unregistered HEAD 200fe31; the original
+failed related command remains preserved. Binding that same fixture to reviewed
+original ccc4 passed, but did not qualify the new default source.
+
+The actual native_recipe on an immutable final candidate Git object derives
+77b2cf34137ab2fe4feda08338e9b7123f5dbeed4eedff88c6f39752ae4329aa.
+Its 39-input comparison has 38 unchanged inputs and only the reconnect-only
+controller change. Root independently reviewed the changed controller and
+unchanged bootstrap/index paths, certifying only before-stack-launch and
+agent-network-index-bootstrap in root-independent-source-phase-review.safe.json
+(SHA256 f6999e60bc6223d0b1b916771b8c13c116b5b88e4321befce074bf06964f2bfe).
+The existing policy adds only that fingerprint with those same two phases.
+No input exclusion, source predicate, historical entry or phase is broadened.
+The unchanged default related selection on committed ef4401d10 then passed all
+59 controls in 36.23 seconds without a fixture override, including both
+pre-service preservation controls, child-ACK/snapshot contracts and the 22
+reconnect controls. Original registration RED and reviewed-source compatibility
+receipts remain preserved. The parent independently confirmed source phases;
+this source qualification supplies no benchmark credit or original release proof.

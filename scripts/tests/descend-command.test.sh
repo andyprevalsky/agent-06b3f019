@@ -586,7 +586,8 @@ esac
             return clock
 
         args = argparse.Namespace(
-            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[]
+            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[],
+            retry_infra=0, e2e_timeout=None, e2e_started_at=None,
         )
         with (
             patch.dict(os.environ, self.environment),

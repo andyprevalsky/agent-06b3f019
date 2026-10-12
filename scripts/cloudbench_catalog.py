@@ -174,6 +174,22 @@ def selected_tasks_require_gate_type(
     )
 
 
+def selected_tasks_need_shared_fast_cache(
+    catalog_path: Path, task_names: Iterable[str]
+) -> bool:
+    """Return whether a selected task replays the shared frozen Fast Mode cache.
+
+    Only ``fast_cache: on`` tasks read the shared (production pooler) cache;
+    every other cloud guest keeps its cache in the isolated local database.
+    """
+    names = list(task_names)
+    by_name = index_unified_catalog(catalog_path)
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise CatalogError(f"unknown benchmark task(s): {', '.join(missing)}")
+    return any(by_name[name].get("fast_cache") == "on" for name in names)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -188,6 +204,12 @@ def _build_parser() -> argparse.ArgumentParser:
     requires_gate.add_argument("catalog", type=Path)
     requires_gate.add_argument("gate_type")
     requires_gate.add_argument("tasks", nargs="+")
+    shared_cache = subparsers.add_parser(
+        "needs-shared-fast-cache",
+        help="exit 0 when any requested task declares fast_cache: on",
+    )
+    shared_cache.add_argument("catalog", type=Path)
+    shared_cache.add_argument("tasks", nargs="+")
     resolve = subparsers.add_parser(
         "resolve", help="print exact task names for task and named-slice selectors"
     )
@@ -206,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "requires-gate":
             return 0 if selected_tasks_require_gate_type(
                 args.catalog, args.tasks, args.gate_type
+            ) else 10
+        if args.command == "needs-shared-fast-cache":
+            return 0 if selected_tasks_need_shared_fast_cache(
+                args.catalog, args.tasks
             ) else 10
         if args.command == "resolve":
             for task in resolve_task_selection(args.catalog, args.selectors):
