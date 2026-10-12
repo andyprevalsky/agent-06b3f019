@@ -449,6 +449,13 @@ def test_vendored_python_wheels_install_offline_from_every_image_context(tmp_pat
     pins = [line for line in lines if re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+\+rose\.[0-9a-f]+", line)]
     assert pins == ["world-model-harness==0.1.0+rose.8e6d55dd"], pins
 
+    # An open openai range made pip walk every newer release before reaching
+    # browser-use's exact pin; keep ours equal to the installed browser-use requirement.
+    from importlib.metadata import requires
+
+    browser_use_openai = [r for r in requires("browser-use") or [] if r.replace(" ", "").startswith("openai==")]
+    assert browser_use_openai and browser_use_openai[0].replace(" ", "") in lines, (browser_use_openai, "openai pin")
+
     vendor = ROOT / "agents/vendor"
     sources = (vendor / "SOURCES.txt").read_text()
     wheels = sorted(path.name for path in vendor.glob("*.whl"))
