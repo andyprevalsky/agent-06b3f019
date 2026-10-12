@@ -455,4 +455,97 @@ for cloud_root in "$cloud_linked" "$controller"; do
 done
 echo "PASS: a copied .cloud-env cannot make a linked worktree pass as primary"
 
+# Root dependency install: no root lockfile is committed, so a fresh root
+# `npm install` re-resolves the live registry (npm 10.9's arborist crashed on
+# that graph on 2026-10-12). Preparation seeds the worktree lockfile from the
+# source workspace's recorded installation only when the manifests match.
+SEED_LOCKFILE="$ROOT_DIR/scripts/lib/seed_root_npm_lockfile.py"
+seed_line="$(grep -n 'seed_root_npm_lockfile.py' "$PREFLIGHT" | head -n 1 | cut -d: -f1)"
+install_line="$(grep -n 'npm install --no-audit --no-fund$' "$PREFLIGHT" | head -n 1 | cut -d: -f1)"
+[ -n "$seed_line" ] && [ -n "$install_line" ] && [ "$seed_line" -lt "$install_line" ] \
+  || fail "root dependency install must seed the source workspace's resolved tree before npm install"
+echo "PASS: root dependency install seeds the source lockfile before npm install"
+
+seed_source="$TMP_ROOT/seed-source"
+seed_target="$TMP_ROOT/seed-target"
+write_seed_manifests() {
+  local root="$1"
+  local backend_zod="$2"
+  mkdir -p "$root/back-end" "$root/front-end"
+  printf '%s\n' '{"name":"fixture-root","version":"1.0.1","scripts":{"prepare":"true"},"workspaces":["back-end","front-end"],"devDependencies":{"husky":"^9.0.11"}}' \
+    >"$root/package.json"
+  printf '{"name":"fixture-backend","version":"1.0.0","dependencies":{"zod":"%s"}}\n' "$backend_zod" \
+    >"$root/back-end/package.json"
+  printf '%s\n' '{"name":"fixture-frontend","version":"0.0.0","devDependencies":{"vite":"^5.0.0"}}' \
+    >"$root/front-end/package.json"
+}
+write_seed_manifests "$seed_source" "3.25.67"
+mkdir -p "$seed_source/node_modules"
+printf '%s\n' '{"name":"fixture-root","version":"1.0.1","lockfileVersion":3,"requires":true,"packages":{"back-end":{"name":"fixture-backend","version":"1.0.0","dependencies":{"zod":"3.25.67"}},"front-end":{"name":"fixture-frontend","version":"0.0.0","devDependencies":{"vite":"^5.0.0"}},"node_modules/fixture-backend":{"resolved":"back-end","link":true},"node_modules/zod":{"version":"3.25.67","resolved":"https://registry.npmjs.org/zod/-/zod-3.25.67.tgz"}}}' \
+  >"$seed_source/node_modules/.package-lock.json"
+source_hidden_before="$(cksum <"$seed_source/node_modules/.package-lock.json")"
+write_seed_manifests "$seed_target" "3.25.67"
+
+seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
+  || fail "seeding a matching worktree must succeed"
+[[ "$seed_output" == *"reused the source workspace's verified npm tree"* ]] \
+  || fail "seeding a matching worktree must report the reused tree"
+[ -f "$seed_target/package-lock.json" ] || fail "matching manifests must produce a root lockfile"
+python3 - "$seed_target/package-lock.json" <<'PY' || fail "seeded root lockfile must carry the source tree and the worktree root entry"
+import json
+import sys
+
+lock = json.load(open(sys.argv[1]))
+packages = lock["packages"]
+assert lock["lockfileVersion"] == 3, lock
+assert packages["node_modules/zod"]["version"] == "3.25.67", packages
+assert packages["node_modules/fixture-backend"] == {"resolved": "back-end", "link": True}, packages
+root = packages[""]
+assert root["name"] == "fixture-root", root
+assert root["workspaces"] == ["back-end", "front-end"], root
+assert root["devDependencies"] == {"husky": "^9.0.11"}, root
+assert root["hasInstallScript"] is True, root
+PY
+expect_eq "$(cksum <"$seed_source/node_modules/.package-lock.json")" "$source_hidden_before" \
+  "seeding never modifies the source workspace installation record"
+
+seeded_before="$(cksum <"$seed_target/package-lock.json")"
+seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
+  || fail "seeding with an existing root lockfile must be a no-op"
+[[ "$seed_output" == *"already has a root package-lock.json"* ]] \
+  || fail "an existing worktree lockfile must be reported and preserved"
+expect_eq "$(cksum <"$seed_target/package-lock.json")" "$seeded_before" \
+  "an existing worktree root lockfile is never replaced"
+
+rm -f "$seed_target/package-lock.json"
+write_seed_manifests "$seed_target" "3.25.76"
+seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
+  || fail "a workspace dependency mismatch must fall back without failing"
+[[ "$seed_output" == *"back-end dependencies differ"* ]] \
+  || fail "a workspace dependency mismatch must name the differing workspace"
+[ ! -e "$seed_target/package-lock.json" ] \
+  || fail "a workspace dependency mismatch must leave ordinary resolution untouched"
+echo "PASS: a workspace dependency mismatch never reuses the source tree"
+
+write_seed_manifests "$seed_target" "3.25.67"
+printf '%s\n' '{"name":"fixture-root","version":"1.0.2","workspaces":["back-end","front-end"]}' \
+  >"$seed_target/package.json"
+seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
+  || fail "a root manifest mismatch must fall back without failing"
+[[ "$seed_output" == *"root package.json differs"* ]] \
+  || fail "a root manifest mismatch must be reported"
+[ ! -e "$seed_target/package-lock.json" ] \
+  || fail "a root manifest mismatch must leave ordinary resolution untouched"
+echo "PASS: a root manifest mismatch never reuses the source tree"
+
+write_seed_manifests "$seed_target" "3.25.67"
+rm -f "$seed_source/node_modules/.package-lock.json"
+seed_output="$(python3 "$SEED_LOCKFILE" "$seed_target" "$seed_source")" \
+  || fail "a source without a recorded installation must fall back without failing"
+[[ "$seed_output" == *"no recorded npm installation"* ]] \
+  || fail "a source without a recorded installation must be reported"
+[ ! -e "$seed_target/package-lock.json" ] \
+  || fail "a source without a recorded installation must leave ordinary resolution untouched"
+echo "PASS: a source without a recorded installation falls back to ordinary resolution"
+
 echo "All deploy-worktree preflight tests passed."
