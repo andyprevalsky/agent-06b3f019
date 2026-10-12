@@ -130,6 +130,10 @@ one example per action. Keep the file and the run-state with the run's evidence.
   `WMH_WIRE_STREAM=0` restores the canonical layout for a diagnostic. Report
   reads, writes and cost per call (`scripts/measure.py`), not just the hit rate.
   Compare layouts on recorded requests with `scripts/layout-ab.py`.
+  `scripts/cache-sim/` replays recorded requests through the measured GPT-5.6+
+  cache rule (validated within 6 tokens per call on run 10): `marking.py`
+  compares marking patterns over `.llm-dumps`, `new_agents.py` compares WMH
+  stream designs (run from `agents/` with `PYTHONPATH=.:<that dir>`).
 - **Devbox memory.** A cold native load peaks near 40 GB and takes 13–25 min.
   Run it in its own systemd scope (`MemoryHigh` ≤ 11G, swap ≥ 40 GB) so the
   devbox OOM watcher spares it; keep `MemAvailable` above ~1.1 GB. Serve the WMH

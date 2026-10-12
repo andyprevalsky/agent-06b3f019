@@ -130,6 +130,23 @@ function hasCacheMarker(block: ContentBlock): boolean {
   return typeof marker === 'object' && marker !== null;
 }
 
+/**
+ * Breakpoint after every user message before the final item (its last text part).
+ * Replaying 911 real agent calls through the measured GPT-5.6+ rule (2026-10-12):
+ * implicit mode plus these marks cost 0.51x of no caching, against 0.55x for implicit
+ * mode alone and 0.61x for explicit mode.
+ */
+function markCompletedUserMessages(items: ResponsesInputItem[]): void {
+  for (const item of items.slice(0, -1)) {
+    const message = item as ResponsesInputMessage;
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    const texts = message.content.filter((part) => part.type === 'input_text');
+    const last = texts[texts.length - 1] as
+      { prompt_cache_breakpoint?: { mode: 'explicit' } } | undefined;
+    if (last) last.prompt_cache_breakpoint = { mode: 'explicit' };
+  }
+}
+
 /** Reads consider the latest 50 breakpoints; drop older marks beyond that. */
 function capPromptCacheBreakpoints(items: ResponsesInputItem[]): void {
   const marked = items.flatMap((item) => {
@@ -373,10 +390,9 @@ function normalizeReasoningEffort(effort?: string): string {
 export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, unknown> {
   const instructions = buildInstructions(opts.messages) ?? DEFAULT_CODEX_INSTRUCTIONS;
   const model = opts.modelOverride ?? opts.poolSpec.gptAuthModel;
-  const input = buildResponsesInput(
-    opts.messages,
-    opts.cacheBreakpoints === true && supportsPromptCacheBreakpoints(model)
-  );
+  const breakpoints = opts.cacheBreakpoints === true && supportsPromptCacheBreakpoints(model);
+  const input = buildResponsesInput(opts.messages, breakpoints);
+  if (breakpoints) markCompletedUserMessages(input);
   capPromptCacheBreakpoints(input);
   const body: Record<string, unknown> = {
     model,

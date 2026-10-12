@@ -1977,6 +1977,70 @@ function testGpt56CacheMarkers_becomeResponsesBreakpoints() {
   );
 }
 
+/**
+ * Replaying 911 real agent calls (2026-10-12) through the measured GPT-5.6+ cache rule:
+ * implicit mode plus a breakpoint after every user message before the final item cost
+ * 0.51x of no caching (0.55x implicit only; explicit mode 0.61x). Rose applies it for
+ * every caller, marked or not; assistant and tool items and the final item stay unmarked.
+ */
+function testResponsesBody_marksEveryCompletedUserMessage() {
+  const messages = [
+    { role: 'system', content: 'policy' },
+    { role: 'user', content: 'stable context' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'result' },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'part a' },
+        { type: 'text', text: 'part b' },
+      ],
+    },
+    { role: 'user', content: 'this call only' },
+  ] as unknown as CompletionMessage[];
+  const shape = (body: Record<string, unknown>) =>
+    (body.input as Array<Record<string, unknown>>).map((item) =>
+      Array.isArray(item.content)
+        ? (item.content as Array<Record<string, unknown>>).map(
+            (part) => part.prompt_cache_breakpoint ?? null
+          )
+        : item.type
+    );
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages,
+    tools: [{ type: 'function', function: { name: 'lookup', parameters: {} } }],
+    requestId: 'r',
+    cacheBreakpoints: true,
+  });
+  assertEqual(
+    JSON.stringify(shape(body)),
+    JSON.stringify([
+      [{ mode: 'explicit' }],
+      'function_call',
+      'function_call_output',
+      [null, { mode: 'explicit' }],
+      [null],
+    ]),
+    'every completed user message ends at a breakpoint'
+  );
+  const plain = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages,
+    requestId: 'r',
+  });
+  assert(
+    !JSON.stringify(plain).includes('prompt_cache_breakpoint'),
+    'routes without support unchanged'
+  );
+}
+
 async function testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites() {
   process.env.ANTHROPIC_API_KEY = '';
   process.env.GPT_API_KEY = '';
@@ -4228,6 +4292,10 @@ async function main(): Promise<void> {
     {
       name: 'foundry / sends breakpoints and keeps reported zero cache writes',
       fn: testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites,
+    },
+    {
+      name: 'responses / every completed user message is a breakpoint',
+      fn: testResponsesBody_marksEveryCompletedUserMessage,
     },
     {
       name: 'shared OpenAI priority / exclusive route preserves router config',

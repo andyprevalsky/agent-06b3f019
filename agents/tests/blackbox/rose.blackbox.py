@@ -6193,6 +6193,41 @@ async def test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_tr
     )] == [False, False, True, True, True, False, False]
 
 
+def test_responses_body_marks_every_completed_user_message_without_caller_markers():
+    """Replaying 911 real agent calls (2026-10-12) through the measured GPT-5.6+ cache rule:
+    implicit mode plus a breakpoint after every user message before the final item cost 0.51x
+    of no caching (0.55x implicit only; explicit mode 0.61x). Rose applies it for every caller."""
+    from providers.rose.gpt_auth import build_codex_responses_body
+    from providers.rose.pools import get_pool
+
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "stable context"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "result"},
+        {"role": "user", "content": [{"type": "text", "text": "part a"}, {"type": "text", "text": "part b"}]},
+        {"role": "user", "content": "this call only"},
+    ]
+    body = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r",
+                                      tools=[{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
+                                      cache_breakpoints=True)
+    marked = [
+        [part.get("prompt_cache_breakpoint") for part in item["content"]] if isinstance(item.get("content"), list)
+        else item.get("type")
+        for item in body["input"]
+    ]
+    assert marked == [
+        [{"mode": "explicit"}],
+        "function_call",
+        "function_call_output",
+        [None, {"mode": "explicit"}],
+        [None],
+    ], marked
+    plain = build_codex_responses_body(pool_spec=get_pool("rose-wmh-gpt61"), messages=messages, request_id="r")
+    assert '"prompt_cache_breakpoint"' not in json.dumps(plain), "routes without breakpoint support are unchanged"
+
+
 def test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints():
     from providers.rose.gpt_auth import build_codex_responses_body
     from providers.rose.pools import get_pool
@@ -8667,6 +8702,7 @@ async def run_all_tests():
         test_gpt56_foundry_turns_cache_markers_into_breakpoints_and_reports_true_writes,
     )
     r.record("responses_body_keeps_latest_50_cache_breakpoints", test_responses_body_keeps_at_most_the_latest_50_cache_breakpoints)
+    r.record("responses_body_marks_completed_user_messages", test_responses_body_marks_every_completed_user_message_without_caller_markers)
     await r.record_async(
         "client_foundry_stream_exit_closes_http_owner",
         test_client_foundry_stream_exit_closes_http_owner,

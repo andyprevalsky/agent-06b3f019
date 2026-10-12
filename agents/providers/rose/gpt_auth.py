@@ -250,6 +250,23 @@ def supports_prompt_cache_breakpoints(model: Optional[str]) -> bool:
     return major > 5 or (major == 5 and minor >= 6)
 
 
+def _mark_completed_user_messages(items: List[Dict[str, Any]]) -> None:
+    """Breakpoint after every user message before the final item (its last text part).
+
+    Replaying 911 real agent calls through the measured GPT-5.6+ rule (2026-10-12):
+    implicit mode plus these marks cost 0.51x of no caching, against 0.55x for
+    implicit mode alone and 0.61x for explicit mode, which loses the latest-message
+    and opening-instructions caching that chat-style calls rely on.
+    """
+    for item in items[:-1]:
+        content = item.get("content")
+        if item.get("role") != "user" or not isinstance(content, list):
+            continue
+        texts = [part for part in content if isinstance(part, dict) and part.get("type") == "input_text"]
+        if texts:
+            texts[-1]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+
+
 def _cap_prompt_cache_breakpoints(items: List[Dict[str, Any]]) -> None:
     """Reads consider the latest 50 breakpoints; drop older marks beyond that."""
     marked = [part for item in items for part in item.get("content", []) if isinstance(item.get("content"), list)
@@ -461,13 +478,10 @@ def build_codex_responses_body(
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     static_cache_scope = _build_static_cache_scope(messages) or _DEFAULT_CODEX_INSTRUCTIONS
+    breakpoints = cache_breakpoints and supports_prompt_cache_breakpoints(model_override or pool_spec.gpt_auth_model)
     body: Dict[str, Any] = {
         "model": model_override or pool_spec.gpt_auth_model,
-        "input": _build_responses_input(
-            messages,
-            cache_breakpoints=cache_breakpoints
-            and supports_prompt_cache_breakpoints(model_override or pool_spec.gpt_auth_model),
-        ),
+        "input": _build_responses_input(messages, cache_breakpoints=breakpoints),
         "stream": True,
         "store": False,
         "parallel_tool_calls": True,
@@ -485,6 +499,8 @@ def build_codex_responses_body(
         },
     }
     body["instructions"] = instructions
+    if breakpoints:
+        _mark_completed_user_messages(body["input"])
     _cap_prompt_cache_breakpoints(body["input"])
     responses_tools = _responses_tools(tools)
     # Responses input may retain historical function_call/output items without
