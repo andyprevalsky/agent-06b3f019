@@ -180,6 +180,16 @@ async function main(): Promise<void> {
       await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
       await startFollowUpRun(agentId, followUpRun);
       await postLiveTool(agentId, liveCall);
+      // The follow-up is parked on an approval under the same Workflow ID.
+      const approval = await prisma.agentAttentionRequest.create({
+        data: {
+          userId: runId,
+          agentId,
+          workflowId: agentId,
+          question: 'Approve the follow-up purchase?',
+          metadata: { requestUserApproval: true, toolCallId: liveCall },
+        },
+      });
       assert.strictEqual((await pendingObligation(agentId))?.firstExecutionRunId, completedRun);
 
       const terminations: string[] = [];
@@ -191,6 +201,14 @@ async function main(): Promise<void> {
       assert.strictEqual(after.temporalWorkflowId, agentId);
       assert.strictEqual(after.temporalFirstExecutionRunId, followUpRun);
       assert.strictEqual(await latestToolStatus(agentId, liveCall), 'IN_PROGRESS');
+      const stillPending = await prisma.agentAttentionRequest.findUniqueOrThrow({
+        where: { id: approval.id },
+      });
+      assert.strictEqual(
+        stillPending.userResponse,
+        null,
+        "the follow-up's pending approval must not be answered by cleanup"
+      );
       await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
     } finally {
       await deleteRun(runId);
@@ -253,7 +271,6 @@ async function main(): Promise<void> {
     const knownAgent = await createRootAgent(runId, knownRun);
     try {
       for (const agentId of [unknownAgent, knownAgent]) {
-        await postLiveTool(agentId, `finished-run-chip-${agentId}`);
         await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
         const before = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
         assert.strictEqual(
@@ -281,11 +298,6 @@ async function main(): Promise<void> {
         const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
         assert.strictEqual(after.status, 'ACTIVE');
         assert.strictEqual(after.temporalWorkflowId, null);
-        assert.strictEqual(
-          await latestToolStatus(agentId, `finished-run-chip-${agentId}`),
-          'FINISHED',
-          'the finished run left this chip spinning; cleanup still closes it'
-        );
         assert.strictEqual(
           await latestToolStatus(agentId, `next-run-chip-${agentId}`),
           'IN_PROGRESS'

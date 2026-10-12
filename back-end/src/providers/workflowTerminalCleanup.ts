@@ -25,7 +25,6 @@ interface CleanupObligation {
   agentId: string;
   workflowId: string;
   firstExecutionRunId: string | null;
-  enqueuedAt: Date;
   leaseToken: string;
 }
 
@@ -50,8 +49,7 @@ export interface WorkflowTerminalCleanupDependencies {
   finalizeInterruptedTools: (
     agentId: string,
     workflowGeneration: string,
-    snapshot: ToolProgressCandidate[],
-    openedBefore?: Date
+    snapshot: ToolProgressCandidate[]
   ) => Promise<unknown>;
 }
 
@@ -163,7 +161,6 @@ async function claimCleanup(
       agentId: candidate.agentId,
       workflowId: candidate.workflowId,
       firstExecutionRunId: candidate.firstExecutionRunId,
-      enqueuedAt: candidate.createdAt,
       leaseToken,
     };
   });
@@ -352,15 +349,9 @@ async function cleanupOne(
         installed_first_execution_run_id: sealOutcome.installedFirstExecutionRunId,
       });
     }
-    // The follow-up shares this generation string; only calls opened before
-    // the finished generation went terminal belong to it.
-    assertBeforeDeadline(deadlineAtMs, `terminal workflow ${obligation.agentId} reconciliation`);
-    await dependencies.finalizeInterruptedTools(
-      obligation.agentId,
-      obligation.workflowId,
-      [],
-      obligation.enqueuedAt
-    );
+    // The follow-up shares this generation string, so its tool chips and
+    // attention requests are indistinguishable from the finished run's; leave
+    // all of them to the follow-up's own lifecycle.
     await finishCleanup({ ...obligation, inProgressTools });
     return { sealed: false, terminated: terminateCompleted };
   }

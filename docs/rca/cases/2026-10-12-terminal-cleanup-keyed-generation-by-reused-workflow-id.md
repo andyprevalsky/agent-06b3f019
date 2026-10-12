@@ -183,10 +183,10 @@ query and task loops showed no analog.
   - `finishCleanup` requeues, rather than deletes, an obligation that a newer
     generation retargeted during the lease, and the failure backoff never
     shortens a newer generation's grace.
-  - On the follow-up path, only tool calls opened before the obligation was
-    enqueued are finalized. The follow-up shares the generation string, so its
-    own calls stay untouched. An unknown-run obligation discharged there is
-    logged as a warning.
+  - The follow-up path never finalizes tool calls or attention requests: the
+    follow-up shares the generation string, so a finalize would also answer its
+    pending approvals (caught by review; covered by the exact-run case). An
+    unknown-run obligation discharged there is logged as a warning.
 - A failed run-identity bind after a successful start (create, batch) is
   logged, never surfaced as a failed start. SMS terminates its started run
   when the agent was removed before the bind.
@@ -214,7 +214,13 @@ Regression coverage: `workflow-terminal-cleanup-follow-up.test.ts` (9 cases),
 `scripts/run-unit-tests.ts` inside `run-coverage.sh`, the `/deploy` backend
 coverage gate.
 
-Still open, and pre-existing: a chat escalation whose start hits
+Still open: tool chips a FAILED run left IN_PROGRESS stay open when the user
+reopens the agent within the grace window. Messages carry no run identity, so
+cleanup cannot tell them from the follow-up's own calls. Closing this needs
+per-run message identity, not a time cutoff: `TemporalWorkflowCleanup.createdAt`
+is session-timezone dependent and is not refreshed on conflict.
+
+Also still open, and pre-existing: a chat escalation whose start hits
 `WorkflowExecutionAlreadyStartedError` adopts the still-finishing chain, so
 that follow-up is never processed. Separately, `routeUserMessage` re-reads a
 just-sealed row and signals the tombstone when its reopen compare-and-set loses

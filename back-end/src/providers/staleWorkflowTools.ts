@@ -128,15 +128,10 @@ function hasForeignGateWaiter(
   });
 }
 
-/**
- * Read the latest lifecycle state for every call in one workflow generation.
- * `openedBefore` limits the result to calls whose first row predates it, so a
- * later run that reuses the same generation string keeps its own calls.
- */
+/** Read the latest lifecycle state for every call in one workflow generation. */
 export async function captureInProgressWorkflowTools(
   agentId: string,
-  workflowGeneration = agentId,
-  openedBefore?: Date
+  workflowGeneration = agentId
 ): Promise<ToolProgressCandidate[]> {
   const lifecycleMessages = await prisma.message.findMany({
     where: {
@@ -162,7 +157,7 @@ export async function captureInProgressWorkflowTools(
 
   const latestLifecycle = new Map<
     string,
-    { candidate: ToolProgressCandidate; terminal: boolean; openedAt: Date }
+    { candidate: ToolProgressCandidate; terminal: boolean }
   >();
   for (const message of lifecycleMessages) {
     if (messageWorkflowGeneration(message) !== workflowGeneration) continue;
@@ -175,14 +170,12 @@ export async function captureInProgressWorkflowTools(
       latestLifecycle.set(toolCallId, {
         candidate: { toolCallId, workflowGeneration, metadata },
         terminal: isTerminalToolStatus(toolStatus),
-        openedAt: latestLifecycle.get(toolCallId)?.openedAt ?? message.createdAt,
       });
     }
   }
 
   return Array.from(latestLifecycle.values())
     .filter((lifecycle) => !lifecycle.terminal)
-    .filter((lifecycle) => openedBefore === undefined || lifecycle.openedAt < openedBefore)
     .map((lifecycle) => lifecycle.candidate);
 }
 
@@ -229,14 +222,9 @@ async function parentScopedCallIds(
 export async function finalizeInterruptedWorkflowTools(
   agentId: string,
   workflowGeneration: string,
-  preTerminationSnapshot: ToolProgressCandidate[] = [],
-  openedBefore?: Date
+  preTerminationSnapshot: ToolProgressCandidate[] = []
 ): Promise<InterruptedWorkflowToolsResult> {
-  const postTerminationSnapshot = await captureInProgressWorkflowTools(
-    agentId,
-    workflowGeneration,
-    openedBefore
-  );
+  const postTerminationSnapshot = await captureInProgressWorkflowTools(agentId, workflowGeneration);
   const candidates = new Map<string, ToolProgressCandidate>();
   for (const candidate of preTerminationSnapshot) {
     candidates.set(candidate.toolCallId, candidate);

@@ -217,7 +217,18 @@ export async function commitStartNewAgent(
         workflowId: execution.workflowId,
         firstExecutionRunId: execution.firstExecutionRunId,
       });
-      await terminateStaleTemporalWorkflow(execution, startedAgent.id);
+      try {
+        await terminateStaleTemporalWorkflow(execution, startedAgent.id);
+      } catch (error) {
+        // Never re-enter ambiguous-start adoption for a removed agent.
+        log.error('Failed to close the started workflow of a removed agent', {
+          phase: 'start',
+          agentId: startedAgent.id,
+          workflowId: execution.workflowId,
+          firstExecutionRunId: execution.firstExecutionRunId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return {
         tool: 'start_new_agent',
         success: false,
