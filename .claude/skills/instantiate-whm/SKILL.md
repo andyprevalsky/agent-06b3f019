@@ -123,7 +123,9 @@ one example per action. Keep the file and the run-state with the run's evidence.
   externally: `run.sh`'s 600 s readiness bound is shorter than the load.
   Stop it by TERM to the exact owner PID only.
 - **World clock** (policy `rose-outcome-distribution-v3`, the scripts' default):
-  one clock per world starting at the seed's `as_of_utc`. Each action runs at
+  one clock per world starting at the seed's `as_of_utc`, which every seeded
+  world must pin (ISO UTC). Simulated agents see that world date in their
+  planner prompt and `wait_for`, never today's wall-clock date. Each action runs at
   its agent's world time and every outcome states `elapsed_ms`; later results
   go into `structured.scheduled_events` with `available_at_ms` and stay hidden
   from earlier actions. `wait_for` in simulate mode waits on the shared clock

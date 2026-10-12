@@ -21,7 +21,7 @@ repo=${repo:-$(git -C "$here" rev-parse --show-toplevel)}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 [ -z "$state_file" ] || state_file=$(cd "$(dirname "$state_file")" && pwd)/$(basename "$state_file")
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$out/orchestrator.log"; }
-unit="wmh-serve-$(basename "$out" | tr -c '[:alnum:]-' '-' | cut -c1-60)"
+unit="wmh-serve-$(printf '%s' "$(basename "$out")" | tr -c '[:alnum:]-' '-' | cut -c1-60)"
 cgroup="/sys/fs/cgroup/system.slice/$unit.scope/cgroup.procs"
 commit=$(git -C "$repo" rev-parse HEAD)
 # A transient scope has no main PID: TERM the exact recorded owner. It stops its native
