@@ -18575,8 +18575,16 @@ def test_refresh_deps_mode_contract() -> None:
     assert "::DEPS-REFRESH-DONE::" in mode
     # stop precedes the snapshot cut
     assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
-    # bounded wait for a COMPLETE fresh snapshot
-    assert "CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90" in snapshot_helper
+    # bounded wait for a COMPLETE fresh snapshot: a measured donor snapshot ran
+    # about 14 minutes after waiting 7, so 90 x 10s polls was too short
+    assert "CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-180" in snapshot_helper
+    assert "CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS:-120" in snapshot_helper
+    # Queued controllers wait on the app lock while the holder refreshes and
+    # snapshots; their budget must outlast both snapshot waits (10s polls)
+    # plus the refresh itself.
+    lock_lib = (ROOT / "scripts/lib/cloudbench-app-env-lock.sh").read_text()
+    lock_budget = int(re.search(r"CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:=(\d+)", lock_lib).group(1))
+    assert lock_budget >= (180 + 120) * 10 + 600
     # shared freshness state recorded for fleet preflights
     assert "WARM_DEPS_STATE_FILE" in mode
     assert "cloudbench-warm-deps.fp" in cloud

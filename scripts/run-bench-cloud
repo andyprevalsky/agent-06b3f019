@@ -2055,7 +2055,9 @@ create_volume_snapshot_exact() {  # create_volume_snapshot_exact <volume-id>
     local vol="$1" before_ids="" listed_ids="" create_output="" snapshots_json=""
     local candidate="" state="" requested_at="" attempt="" schedule_attempt=""
     local baseline_attempts="${CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS:-6}"
-    local schedule_attempts="${CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS:-60}"
+    # Measured 2026-10-12 on the warm donor: a snapshot ran about 14 minutes, and
+    # one scheduled while the donor was running waited 7 more before starting.
+    local schedule_attempts="${CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS:-120}"
     CREATED_SNAPSHOT_ID=""
     for schedule_attempt in $(seq 1 "$schedule_attempts"); do
         # Fly can briefly return a valid but empty list while older snapshots
@@ -2093,7 +2095,7 @@ for snapshot in snapshots:
         return 1
     done
     [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /'
-    for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90}"); do
+    for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-180}"); do
         if ! snapshots_json="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null)"; then
             echo "❌ could not verify snapshot inventory" >&2
             return 1
