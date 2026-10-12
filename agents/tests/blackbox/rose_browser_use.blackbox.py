@@ -2366,6 +2366,79 @@ async def test_complete_browser_use_auth_tokens_are_ignored():
     assert all("chatgpt.com" not in u for u in captured)
 
 
+async def test_complete_browser_use_runs_on_spawning_agents_pool():
+    """An ultra root's browser step uses ultra's Claude auth (Opus) with the
+    screenshot, and still bypasses Fast Cache on a non-browser call site."""
+    captured: list[str] = []
+    anthropic_bodies: list[dict] = []
+
+    def handler(req):
+        url = str(req.url)
+        captured.append(url)
+        if "fast-cache" in url:
+            return httpx.Response(500, text="browser-use should bypass fast-cache")
+        if "api.anthropic.com" in url:
+            anthropic_bodies.append(json.loads(req.content.decode()))
+            return httpx.Response(
+                200, text=_anthropic_tool_sse("click", '{"index": 3}'), headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(500, text="ultra must not reach Cerebras or OpenRouter")
+
+    set_mock_handler(handler)
+    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    for path in dump_root.glob("*write_lock_notification_fork_3.json"):
+        path.unlink()
+    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    try:
+        with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test", "GPT_API_KEY": ""}, clear=False):
+            result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+                task="click submit",
+                browser_state=_browser_state(),
+                action_history=[],
+                available_actions=["click"],
+                include_screenshot=True,
+                turn_messages=[
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "call_1", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}}
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                        ],
+                    },
+                ],
+                claude_auth=claude_auth_from_token("good-token"),
+                call_site="write_lock_notification_fork_3",
+                pool="rose-1-ultra",
+            )
+    finally:
+        reset_context(token)
+
+    assert result["mode"] == "claude"
+    assert result["actual_model"] == "claude-opus-5-5-claude"
+    assert result["action"]["action"] == "click"
+    assert [u for u in captured if "api.anthropic.com" not in u] == []
+    body = anthropic_bodies[0]
+    assert body["model"] == "claude-opus-5-5"
+    images = [
+        block
+        for message in body["messages"]
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "image"
+    ]
+    assert images, "the screenshot reaches the inherited pool's model"
+    payload = json.loads(sorted(dump_root.glob("*write_lock_notification_fork_3.json"))[-1].read_text())
+    assert payload["config"]["pool"] == "rose-1-ultra"
+    assert payload["config"]["candidate_models"]["claude_auth"] == "claude-opus-5-5"
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -2565,6 +2638,9 @@ async def run_all_tests():
         test_complete_browser_use_cerebras_failure_preserves_tools_on_openrouter,
     )
     await r.record_async("complete_browser_use_auth_tokens_ignored", test_complete_browser_use_auth_tokens_are_ignored)
+    await r.record_async(
+        "complete_browser_use_runs_on_spawning_agents_pool", test_complete_browser_use_runs_on_spawning_agents_pool
+    )
 
     await r.record_async("execute_read_browser_state", test_execute_read_browser_state_returns_formatted_snapshot)
 

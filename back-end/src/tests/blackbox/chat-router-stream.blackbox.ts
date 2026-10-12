@@ -150,6 +150,27 @@ function testRequireRouterDecisionTypesEveryMiss(): void {
     (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
     'unparseable stream is a typed regenerate miss'
   );
+  const webSearch = {
+    decision: { action: 'web_search' as const, reasoning: 'search again', queries: ['manga'] },
+    fullJson: '{}',
+  };
+  assert.throws(
+    () =>
+      requireRouterDecision({
+        finalized: webSearch,
+        deadlineExpired: false,
+        stage: 'search_budget_spent',
+      }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
+    "a search after the turn's search rounds are spent is outside its schema: regenerate"
+  );
+  for (const stage of ['initial', 'after_search'] as const) {
+    assert.equal(
+      requireRouterDecision({ finalized: webSearch, deadlineExpired: false, stage }),
+      webSearch.decision,
+      `the ${stage} route may search`
+    );
+  }
 }
 
 function testRequireGeneratorParsedJsonTypesEveryMiss(): void {
@@ -414,7 +435,7 @@ function testCallSitesUseSharedRegenerate(): void {
     /isChatLlmTransientMiss/,
     'speculative commit must not kill the turn on a typed miss'
   );
-  const requireDecision = router.indexOf('requireRouterDecision({ finalized, deadlineExpired })');
+  const requireDecision = router.indexOf('requireRouterDecision({ finalized, deadlineExpired');
   const deadlineClose = router.indexOf('!finalized.decision && deadlineExpired');
   assert.ok(
     deadlineClose > 0 && deadlineClose < requireDecision,

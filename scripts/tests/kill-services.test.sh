@@ -577,6 +577,111 @@ echo "PASS: retained isolated stacks are reaped only through their owner record"
 
 kill_pid_tree "$retained_stack_pid"
 
+# ── The sweep never matches, or climbs into, a process that is not the stack ───
+#
+# Regression (2026-10-12): an agent tool shell whose argv only mentioned
+# `scripts/run.sh` (inside a `pgrep -af` pattern) matched the run.sh root
+# pattern, and the ancestor walk climbed from it into the agent CLI, whose cwd
+# was the worktree. The sweep SIGTERMed the agent and ended its session. A root
+# must be executing run.sh, and the upward walk enters only a wrapper shell
+# whose sole child is the process below it.
+rm -rf "$WORKTREE/.context/benchmarks"
+cat > "$WORKTREE/scripts/run.sh" <<'FAKE'
+#!/usr/bin/env bash
+sleep 1000
+FAKE
+chmod +x "$WORKTREE/scripts/run.sh"
+
+wait_for_stack_child() {
+    local parent="$1" child attempt
+    for attempt in $(seq 1 30); do
+        child="$(pgrep -P "$parent" -f 'scripts/run\.sh' 2>/dev/null | head -1 || true)"
+        if [ -n "$child" ]; then
+            printf '%s' "$child"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: $parent did not start its run.sh child" >&2
+    exit 1
+}
+
+(cd "$WORKTREE" && exec python3 -c \
+    'import subprocess, time; subprocess.Popen(["bash", "scripts/run.sh", "--benchmark"]).wait(); time.sleep(1000)') &
+agent_pid=$!
+(cd "$WORKTREE" && exec bash -c 'bash scripts/run.sh --benchmark & sleep 1000 & wait') &
+busy_shell_pid=$!
+(cd "$WORKTREE" && exec -a "pgrep -af scripts/run.sh --benchmark" sleep 1000) &
+mention_pid=$!
+(cd "$WORKTREE" && exec bash -c 'bash scripts/run.sh --benchmark; true') &
+wrapper_pid=$!
+PIDS+=("$agent_pid" "$busy_shell_pid" "$mention_pid" "$wrapper_pid")
+agent_stack_pid="$(wait_for_stack_child "$agent_pid")"
+busy_stack_pid="$(wait_for_stack_child "$busy_shell_pid")"
+wrapper_stack_pid="$(wait_for_stack_child "$wrapper_pid")"
+busy_sibling_pid="$(pgrep -P "$busy_shell_pid" -x sleep | head -1)"
+PIDS+=("$agent_stack_pid" "$busy_stack_pid" "$wrapper_stack_pid" "$busy_sibling_pid")
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/caller-sweep.log" 2>&1) || true
+
+assert_dead "$agent_stack_pid" "run.sh started by a non-shell process"
+assert_alive "$agent_pid" "non-shell parent of a run.sh stack (an agent CLI)"
+assert_dead "$busy_stack_pid" "run.sh started by a shell with other children"
+assert_alive "$busy_shell_pid" "shell with a child beside the stack"
+assert_alive "$busy_sibling_pid" "unrelated child of that shell"
+assert_alive "$mention_pid" "process whose argv only mentions scripts/run.sh"
+assert_dead "$wrapper_stack_pid" "run.sh under a pure wrapper shell"
+assert_dead "$wrapper_pid" "pure wrapper shell of the stack"
+echo "PASS: the sweep reaps only run.sh stacks and their pure wrapper shells"
+
+# A recorded wrapper is rechecked at signal time: it may still be signaled while
+# it wraps only its recorded child (or that child already exited), but not once
+# it has started other work, and never when it is not a shell.
+(
+    source "$ROOT_DIR/scripts/kill-services.sh"
+    wait_for_children() {
+        local parent="$1" want="$2" attempt
+        for attempt in $(seq 1 30); do
+            [ "$(pgrep -P "$parent" | wc -l | tr -d ' ')" -ge "$want" ] && return 0
+            sleep 0.1
+        done
+        echo "FAIL: $parent did not start $want child(ren)" >&2
+        exit 1
+    }
+    bash -c 'sleep 1000 & wait' & sole_wrapper=$!
+    bash -c 'sleep 1000 & sleep 1000 & wait' & busy_wrapper=$!
+    python3 -c 'import subprocess, time; subprocess.Popen(["sleep", "1000"]).wait(); time.sleep(1000)' &
+    non_shell=$!
+    trap 'kill_pid_tree "$sole_wrapper"; kill_pid_tree "$busy_wrapper"; kill_pid_tree "$non_shell"' EXIT
+    wait_for_children "$sole_wrapper" 1
+    wait_for_children "$busy_wrapper" 2
+    wait_for_children "$non_shell" 1
+    sole_child="$(pgrep -P "$sole_wrapper" | head -1)"
+    busy_child="$(pgrep -P "$busy_wrapper" | head -1)"
+    non_shell_child="$(pgrep -P "$non_shell" | head -1)"
+
+    wrapper_relationship_holds "$sole_wrapper" "$sole_child" || {
+        echo "FAIL: a wrapper with only its recorded child must remain signalable" >&2
+        exit 1
+    }
+    if wrapper_relationship_holds "$busy_wrapper" "$busy_child"; then
+        echo "FAIL: a wrapper that started other work must not be signaled" >&2
+        exit 1
+    fi
+    if wrapper_relationship_holds "$non_shell" "$non_shell_child"; then
+        echo "FAIL: a non-shell process is never a wrapper" >&2
+        exit 1
+    fi
+    (
+        pgrep() { :; }
+        wrapper_relationship_holds "$sole_wrapper" "$sole_child"
+    ) || {
+        echo "FAIL: a wrapper whose recorded child already exited must remain signalable" >&2
+        exit 1
+    }
+)
+echo "PASS: recorded wrappers are rechecked before they are signaled"
+
 # The protection walk must not stop before classifying PID 1. On a Fly cloudbench
 # guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
 # bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor

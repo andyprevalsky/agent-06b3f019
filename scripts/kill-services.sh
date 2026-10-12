@@ -310,6 +310,39 @@ is_tmux_process() {
     echo "$cmd" | grep -Eq '(^|[[:space:]/])tmux([:[:space:]]|$)'
 }
 
+# A wrapper shell exists only to run the process below it. An ancestor that is
+# not a shell, or that has other children, is not part of the stack: an agent
+# CLI or tool shell whose cwd is the worktree must never be climbed into.
+is_sole_wrapper_shell_of() {
+    local parent=$1 child=$2 children
+    case "$(ps -p "$parent" -o comm= 2>/dev/null | tr -d ' ')" in
+        bash|sh|dash|zsh) ;;
+        *) return 1 ;;
+    esac
+    children=$(pgrep -P "$parent" 2>/dev/null) || return 1
+    [ "$children" = "$child" ]
+}
+
+# Signal-time recheck of a recorded wrapper: still a shell, and every current
+# child is the one recorded at discovery (it may already have exited). A wrapper
+# that started other work since then is no longer only part of the stack.
+wrapper_relationship_holds() {
+    local pid=$1 child=$2 children current
+    case "$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')" in
+        bash|sh|dash|zsh) ;;
+        *) return 1 ;;
+    esac
+    children=$(pgrep -P "$pid" 2>/dev/null) || children=""
+    for current in $children; do
+        [ "$current" = "$child" ] || return 1
+    done
+}
+
+recorded_wrapper_child() {
+    [ -n "${WRAPPERS_FILE:-}" ] || return 1
+    awk -F'\t' -v pid="$1" '$1 == pid { print $2; found = 1; exit } END { exit !found }' "$WRAPPERS_FILE"
+}
+
 is_protected_process() {
     is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" \
         || is_protected_isolated_stack_tree "$1" || is_tmux_process "$1"
@@ -431,7 +464,9 @@ add_pid_with_tree_and_ancestors() {
         [ -n "$ppid_start" ] || return
         is_protected_process "$ppid" && return
         cwd_matches "$ppid" || return
+        is_sole_wrapper_shell_of "$ppid" "$current" || return
         record_pid "$ALL_FILE" "$ppid" "$ppid_start" || return
+        [ -z "${WRAPPERS_FILE:-}" ] || printf '%s\t%s\n' "$ppid" "$current" >> "$WRAPPERS_FILE"
         current="$ppid"
         current_start="$ppid_start"
     done
@@ -449,7 +484,9 @@ TARGETS_FILE=$(mktemp)
 KEPT_FILE=$(mktemp)
 SCRATCH_FILE=$(mktemp)
 SURVIVORS_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE"' EXIT
+WRAPPERS_FILE=$(mktemp)
+SKIPPED_FILE=$(mktemp)
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE" "$WRAPPERS_FILE" "$SKIPPED_FILE"' EXIT
 load_isolated_stack_owners
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
@@ -460,9 +497,11 @@ while read -r pid; do
 done < <(manifest_pids)
 
 # Patterns that identify service roots. The worktree-prefixed patterns catch
-# grandchildren (node, python, vite) that carry the absolute path in argv.
+# grandchildren (node, python, vite) that carry the absolute path in argv. The
+# run.sh pattern requires a shell executing the script: a process whose argv
+# only mentions it (an agent's `pgrep -af` or `grep`) is not a stack.
 for pattern in \
-    "scripts/run\.sh" \
+    "^([^ ]*/)?(ba|da|z)?sh( -[A-Za-z]+)* ([^ ]*/)?scripts/run\.sh( |$)" \
     "$WORKTREE_DIR/back-end/src/server\.ts" \
     "$WORKTREE_DIR/back-end.*tsx.*server\.ts" \
     "$WORKTREE_DIR/agents/scripts/run_local_worker" \
@@ -564,14 +603,38 @@ if [[ $DRY -eq 1 ]]; then
     exit 0
 fi
 
-# SIGTERM pass
+# Signal a recorded wrapper only while its relationship still holds; the
+# relationship was observed at discovery, before any signal was sent.
+signal_wrapper_if_unchanged() {
+    local pid=$1 start_time=$2 sig=$3 child
+    child=$(recorded_wrapper_child "$pid") || return 2
+    if ! wrapper_relationship_holds "$pid" "$child"; then
+        echo "🛡️  Refusing $sig for wrapper PID $pid: it started other work since discovery" >&2
+        printf '%s\n' "$pid" >> "$SKIPPED_FILE"
+        return 1
+    fi
+    signal_if_same_identity "$pid" "$start_time" "$sig"
+}
+
+was_skipped() {
+    grep -qx "$1" "$SKIPPED_FILE"
+}
+
+# SIGTERM pass: wrappers first, while their recorded child is still running,
+# so a restart loop cannot launch a fresh stack between the two signals.
 while IFS=$'\t' read -r pid start_time; do
+    recorded_wrapper_child "$pid" >/dev/null || continue
+    signal_wrapper_if_unchanged "$pid" "$start_time" TERM || true
+done < "$TARGETS_FILE"
+while IFS=$'\t' read -r pid start_time; do
+    recorded_wrapper_child "$pid" >/dev/null && continue
     signal_if_same_identity "$pid" "$start_time" TERM || true
 done < "$TARGETS_FILE"
 sleep 2
 
 # SIGKILL any survivors
 while IFS=$'\t' read -r pid start_time; do
+    was_skipped "$pid" && continue
     if identity_matches "$pid" "$start_time" && kill -0 "$pid" 2>/dev/null; then
         printf '%s\t%s\n' "$pid" "$start_time" >> "$SURVIVORS_FILE"
     fi
@@ -579,7 +642,11 @@ done < "$TARGETS_FILE"
 if [[ -s "$SURVIVORS_FILE" ]]; then
     echo "   SIGTERM survivors → SIGKILL: $(cut -f1 "$SURVIVORS_FILE" | tr '\n' ' ')"
     while IFS=$'\t' read -r pid start_time; do
-        signal_if_same_identity "$pid" "$start_time" KILL || true
+        if recorded_wrapper_child "$pid" >/dev/null; then
+            signal_wrapper_if_unchanged "$pid" "$start_time" KILL || true
+        else
+            signal_if_same_identity "$pid" "$start_time" KILL || true
+        fi
     done < "$SURVIVORS_FILE"
     sleep 1
 fi
@@ -587,6 +654,7 @@ fi
 # Final verify
 STILL=""
 while IFS=$'\t' read -r pid start_time; do
+    was_skipped "$pid" && continue
     identity_matches "$pid" "$start_time" && kill -0 "$pid" 2>/dev/null && STILL="$STILL $pid"
 done < "$TARGETS_FILE"
 if [[ -n "$STILL" ]]; then

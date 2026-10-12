@@ -631,6 +631,10 @@ def verify_bootstrap_current(
                     "🌱 Syncing production data to local database",
                 )
             )
+            # Every public-tunnel step (domain reservation, launch or skip)
+            # prints a 🌐 line; on Linux guests none of the markers above sits
+            # between the index step and that first provider allocation.
+            and not any(line.startswith("🌐 ") for line in lines)
         ):
             # Native cancellation can append command help/cleanup diagnostics
             # after the final phase marker. Bound source review proves this
