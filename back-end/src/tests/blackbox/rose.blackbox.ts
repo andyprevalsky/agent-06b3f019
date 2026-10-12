@@ -59,7 +59,10 @@ import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCere
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import { buildEnvironmentToolMessages } from '../../providers/smsSupervisor/environmentMessages';
-import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
+import {
+  buildCodexResponsesBody,
+  supportsPromptCacheBreakpoints,
+} from '../../providers/rose/gptAuth';
 import {
   boundedRateLimitBackoffMs,
   extractRateLimitedUntil,
@@ -1898,6 +1901,145 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
     delete process.env.AZURE_FOUNDRY_API_KEY;
     delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
     await __resetGptApiKeyCooldown();
+  }
+}
+
+/**
+ * GPT-5.6+ caches only at breakpoints (measured on Azure 2026-10-12): without them the
+ * latest message is the only write point and a growing prompt is billed as 1.25x writes.
+ * Rose maps the caller's ordinary cache_control markers to prompt_cache_breakpoint on
+ * routes that honor them, as the Python client does. Prompts do not change.
+ */
+function testGpt56CacheMarkers_becomeResponsesBreakpoints() {
+  const marker = { type: 'ephemeral' };
+  const messages = [
+    { role: 'system', content: 'policy' },
+    { role: 'user', content: [{ type: 'text', text: 'unit one', cache_control: marker }] },
+    { role: 'user', content: [{ type: 'text', text: 'unit two', cache_control: marker }] },
+    { role: 'user', content: 'this call only' },
+  ] as unknown as CompletionMessage[];
+  const marks = (body: Record<string, unknown>) =>
+    (body.input as Array<{ content?: Array<Record<string, unknown>> }>).flatMap((item) =>
+      (item.content ?? []).map((part) => part.prompt_cache_breakpoint ?? null)
+    );
+  const build = (modelOverride: string, cacheBreakpoints?: boolean) =>
+    buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-ultra'),
+      modelOverride,
+      messages,
+      requestId: 'r',
+      cacheBreakpoints,
+    });
+  const sol = build('gpt-6.1-sol', true);
+  assertEqual(
+    JSON.stringify(marks(sol)),
+    JSON.stringify([{ mode: 'explicit' }, { mode: 'explicit' }, null]),
+    'each marked block becomes a breakpoint'
+  );
+  assert(!('prompt_cache_options' in sol), 'implicit mode keeps the latest-message cache');
+  assert(!JSON.stringify(sol.input).includes('cache_control'), 'no Anthropic marker on the wire');
+  assertEqual(
+    JSON.stringify(marks(build('gpt-5.5', true))),
+    '[null,null,null]',
+    'earlier models reject the field'
+  );
+  assertEqual(JSON.stringify(marks(build('gpt-6.1-sol'))), '[null,null,null]', 'routes opt in');
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    role: 'user',
+    content: [{ type: 'text', text: `unit ${i}`, cache_control: marker }],
+  })) as unknown as CompletionMessage[];
+  const capped = buildCodexResponsesBody({
+    poolSpec: getPool('rose-1-ultra'),
+    modelOverride: 'gpt-6-sol',
+    messages: many,
+    requestId: 'r',
+    cacheBreakpoints: true,
+  });
+  assertEqual(
+    JSON.stringify(marks(capped).map((mark) => mark !== null)),
+    JSON.stringify([...Array(10).fill(false), ...Array(50).fill(true)]),
+    'reads consider the latest 50 breakpoints'
+  );
+  assertEqual(
+    JSON.stringify(
+      [
+        'gpt-5.5',
+        'gpt-5',
+        'gpt-5.6-luna',
+        'gpt-6-sol',
+        'gpt-6.1-sol',
+        'claude-opus-5-5',
+        undefined,
+      ].map(supportsPromptCacheBreakpoints)
+    ),
+    JSON.stringify([false, false, true, true, true, false, false]),
+    'GPT-5.6 and later only'
+  );
+}
+
+async function testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites() {
+  process.env.ANTHROPIC_API_KEY = '';
+  process.env.GPT_API_KEY = '';
+  process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  const bodies: Array<Record<string, unknown>> = [];
+  const usages = [
+    '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":900,"cache_write_tokens":0}}',
+    '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":0}}',
+  ];
+  installFetchStub((url, init) => {
+    if (url === 'https://a-4989-resource.openai.azure.com/openai/v1/responses') {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return sseResponse([
+        'data: {"type":"response.output_text.delta","delta":"ok"}',
+        '',
+        `data: {"type":"response.completed","response":{"usage":${usages[bodies.length - 1]}}}`,
+        '',
+        'data: [DONE]',
+        '',
+      ]);
+    }
+    throw new Error(`Unexpected provider URL: ${url}`);
+  });
+  try {
+    const written: Array<number | undefined> = [];
+    for (let i = 0; i < 2; i++) {
+      const chunks = await collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [
+            { role: 'system', content: 'policy' },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'stable prefix', cache_control: { type: 'ephemeral' } },
+              ],
+            },
+            { role: 'user', content: 'this call only' },
+          ] as unknown as CompletionMessage[],
+        })
+      );
+      written.push(chunks[chunks.length - 1].usage?.cache_creation_input_tokens);
+    }
+    assertEqual(bodies.length, 2, 'Foundry served both requests');
+    const parts = (bodies[0].input as Array<{ content: Array<Record<string, unknown>> }>).flatMap(
+      (item) => item.content
+    );
+    assertEqual(
+      JSON.stringify(parts.map((part) => part.prompt_cache_breakpoint ?? null)),
+      JSON.stringify([{ mode: 'explicit' }, null]),
+      'Foundry request carries the caller breakpoint'
+    );
+    assertEqual(written[0], 0, 'a reported zero cache write stays zero');
+    assertEqual(written[1], 1000, 'an unreported write keeps the inclusive fallback');
+  } finally {
+    restoreFetch();
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GPT_API_KEY;
+    delete process.env.AZURE_FOUNDRY_ENDPOINT;
+    delete process.env.AZURE_FOUNDRY_API_KEY;
+    delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
   }
 }
 
@@ -4078,6 +4220,14 @@ async function main(): Promise<void> {
     {
       name: 'openai api-key / insufficient quota cools later requests before Foundry',
       fn: testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry,
+    },
+    {
+      name: 'responses / GPT-5.6+ cache markers become breakpoints',
+      fn: testGpt56CacheMarkers_becomeResponsesBreakpoints,
+    },
+    {
+      name: 'foundry / sends breakpoints and keeps reported zero cache writes',
+      fn: testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites,
     },
     {
       name: 'shared OpenAI priority / exclusive route preserves router config',
