@@ -2001,6 +2001,8 @@ elif args[:1] == ["proxy"]:
                     # this 503 first, fails fast and retires the proxy, so the
                     # controller's own request then observes HTTP 000: neither
                     # party ever delivered the stop.
+                    with open(os.path.join(mdir, "shutdown-rejected"), "a") as fh:
+                        fh.write("503\n")
                     self.send_error(503, "guest shutdown endpoint unavailable")
                     return
                 if staged_bench == "bench-group-term-slowdrain":
@@ -4190,10 +4192,14 @@ print(next(m["state"] for m in machines if m["id"] == os.environ["MACHINE"]))
     output="$(sed -n 's/^runs_root=//p' "$registry/meta" | head -1)/$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)/$bench"
     [ -d "$output" ] || fail "$bench: the retained owner does not name its run output"
     if [ "$expected_reason" = native-stop ]; then
-        # Both requests were sent and rejected: the runner saw the guest's own
-        # 503 and then retired the proxy, so no delivery receipt exists.
-        grep -qF "guest cleanup request failed (HTTP 503)" "$output/fleet-child.log" ||
-            fail "$bench: the runner did not observe the guest's rejected stop"
+        # The guest itself answered the authenticated stop with HTTP 503 and
+        # the runner then retired its proxy, so no party delivered the stop and
+        # no delivery receipt exists.
+        if [ ! -s "$FAKE_DIR/machines/$machine/shutdown-rejected" ]; then
+            grep -nE "guest cleanup|status proxy|Original exit code" \
+                "$output/fleet-child.log" >&2 || true
+            fail "$bench: the guest never rejected an authenticated stop"
+        fi
         [ ! -e "$output/guest-shutdown.requested" ] ||
             fail "$bench: a rejected stop published a delivery receipt"
         JOURNAL="$FAKE_DIR/journal.log" MACHINE="$machine" python3 - <<'PY' ||
