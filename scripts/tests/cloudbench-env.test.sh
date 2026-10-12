@@ -147,7 +147,9 @@ class WorldModelLaunch(unittest.TestCase):
             with self.subTest(policy=name):
                 result = run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name})
                 self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ("rose-outcome-distribution-v3", "upstream;id"):
+        unregistered = "rose-outcome-distribution-v999"
+        self.assertNotIn(unregistered, policies)
+        for name in (unregistered, "upstream;id"):
             with self.subTest(policy=name):
                 self.assertEqual(run(":", {"WMH_ENGINE": "experiential", "WMH_EXECUTION_POLICY": name}).returncode, 2)
 

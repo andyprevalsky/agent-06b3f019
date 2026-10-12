@@ -26,11 +26,10 @@ else
     fi
 fi
 "$native_python" - <<'PY'
-import importlib.metadata,json,sys
+import importlib.metadata,sys
 assert sys.version_info >= (3,12), 'Native world model requires Python >=3.12'
 dist=importlib.metadata.distribution('experiential')
-assert dist.version=='0.7.158', 'Unexpected experiential version'
-origin=json.loads(dist.read_text('direct_url.json'))
-assert origin['vcs_info']['commit_id']=='bf75987eac5e8c984d8f3868249f84e4095d1733', 'Unexpected upstream commit'
+# The vendored wheel's local label pins upstream commit bf75987e (see agents/vendor/world-model/SOURCES.txt).
+assert dist.version=='0.7.158+rose.bf75987e', 'Unexpected experiential version'
 PY
 printf '%s\n' "$native_python"
