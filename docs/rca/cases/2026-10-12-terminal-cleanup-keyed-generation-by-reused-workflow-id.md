@@ -182,8 +182,10 @@ query and task loops showed no analog.
   - `finishCleanup` requeues, rather than deletes, an obligation that a newer
     generation retargeted during the lease.
 - Migration `20261012040000_temporal_cleanup_newest_generation`: on conflict,
-  the newest known run wins and the later grace is kept. The local SQL hooks
-  apply it after the original trigger.
+  the newest known run wins and the later grace is kept.
+  `apply-local-runtime-sql-hooks.sh` (coverage and blackbox) applies it after
+  the original trigger. The `run.sh` DDL hook is a reviewed cloudbench recipe
+  input and stays unchanged; the cleanup cron is production-only.
 - `force-clear-generation-queue.ts` / `generationQueueCutover.ts`: the orphan
   terminate is scoped to the exact run listed on the superseded queue, never
   the latest run of a Workflow ID that a follow-up may reuse.
