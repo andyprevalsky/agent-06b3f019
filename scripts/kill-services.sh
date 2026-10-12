@@ -310,6 +310,19 @@ is_tmux_process() {
     echo "$cmd" | grep -Eq '(^|[[:space:]/])tmux([:[:space:]]|$)'
 }
 
+# A wrapper shell exists only to run the process below it. An ancestor that is
+# not a shell, or that has other children, is not part of the stack: an agent
+# CLI or tool shell whose cwd is the worktree must never be climbed into.
+is_sole_wrapper_shell_of() {
+    local parent=$1 child=$2 children
+    case "$(ps -p "$parent" -o comm= 2>/dev/null | tr -d ' ')" in
+        bash|sh|dash|zsh) ;;
+        *) return 1 ;;
+    esac
+    children=$(pgrep -P "$parent" 2>/dev/null) || return 1
+    [ "$children" = "$child" ]
+}
+
 is_protected_process() {
     is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" \
         || is_protected_isolated_stack_tree "$1" || is_tmux_process "$1"
@@ -431,6 +444,7 @@ add_pid_with_tree_and_ancestors() {
         [ -n "$ppid_start" ] || return
         is_protected_process "$ppid" && return
         cwd_matches "$ppid" || return
+        is_sole_wrapper_shell_of "$ppid" "$current" || return
         record_pid "$ALL_FILE" "$ppid" "$ppid_start" || return
         current="$ppid"
         current_start="$ppid_start"
@@ -460,9 +474,11 @@ while read -r pid; do
 done < <(manifest_pids)
 
 # Patterns that identify service roots. The worktree-prefixed patterns catch
-# grandchildren (node, python, vite) that carry the absolute path in argv.
+# grandchildren (node, python, vite) that carry the absolute path in argv. The
+# run.sh pattern requires a shell executing the script: a process whose argv
+# only mentions it (an agent's `pgrep -af` or `grep`) is not a stack.
 for pattern in \
-    "scripts/run\.sh" \
+    "^([^ ]*/)?(ba|da|z)?sh( -[A-Za-z]+)* ([^ ]*/)?scripts/run\.sh( |$)" \
     "$WORKTREE_DIR/back-end/src/server\.ts" \
     "$WORKTREE_DIR/back-end.*tsx.*server\.ts" \
     "$WORKTREE_DIR/agents/scripts/run_local_worker" \

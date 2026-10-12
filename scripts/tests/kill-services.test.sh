@@ -577,6 +577,63 @@ echo "PASS: retained isolated stacks are reaped only through their owner record"
 
 kill_pid_tree "$retained_stack_pid"
 
+# ── The sweep never matches, or climbs into, a process that is not the stack ───
+#
+# Regression (2026-10-12): an agent tool shell whose argv only mentioned
+# `scripts/run.sh` (inside a `pgrep -af` pattern) matched the run.sh root
+# pattern, and the ancestor walk climbed from it into the agent CLI, whose cwd
+# was the worktree. The sweep SIGTERMed the agent and ended its session. A root
+# must be executing run.sh, and the upward walk enters only a wrapper shell
+# whose sole child is the process below it.
+rm -rf "$WORKTREE/.context/benchmarks"
+cat > "$WORKTREE/scripts/run.sh" <<'FAKE'
+#!/usr/bin/env bash
+sleep 1000
+FAKE
+chmod +x "$WORKTREE/scripts/run.sh"
+
+wait_for_stack_child() {
+    local parent="$1" child attempt
+    for attempt in $(seq 1 30); do
+        child="$(pgrep -P "$parent" -f 'scripts/run\.sh' 2>/dev/null | head -1 || true)"
+        if [ -n "$child" ]; then
+            printf '%s' "$child"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: $parent did not start its run.sh child" >&2
+    exit 1
+}
+
+(cd "$WORKTREE" && exec python3 -c \
+    'import subprocess, time; subprocess.Popen(["bash", "scripts/run.sh", "--benchmark"]).wait(); time.sleep(1000)') &
+agent_pid=$!
+(cd "$WORKTREE" && exec bash -c 'bash scripts/run.sh --benchmark & sleep 1000 & wait') &
+busy_shell_pid=$!
+(cd "$WORKTREE" && exec -a "pgrep -af scripts/run.sh --benchmark" sleep 1000) &
+mention_pid=$!
+(cd "$WORKTREE" && exec bash -c 'bash scripts/run.sh --benchmark; true') &
+wrapper_pid=$!
+PIDS+=("$agent_pid" "$busy_shell_pid" "$mention_pid" "$wrapper_pid")
+agent_stack_pid="$(wait_for_stack_child "$agent_pid")"
+busy_stack_pid="$(wait_for_stack_child "$busy_shell_pid")"
+wrapper_stack_pid="$(wait_for_stack_child "$wrapper_pid")"
+busy_sibling_pid="$(pgrep -P "$busy_shell_pid" -x sleep | head -1)"
+PIDS+=("$agent_stack_pid" "$busy_stack_pid" "$wrapper_stack_pid" "$busy_sibling_pid")
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > "$TMP_ROOT/caller-sweep.log" 2>&1) || true
+
+assert_dead "$agent_stack_pid" "run.sh started by a non-shell process"
+assert_alive "$agent_pid" "non-shell parent of a run.sh stack (an agent CLI)"
+assert_dead "$busy_stack_pid" "run.sh started by a shell with other children"
+assert_alive "$busy_shell_pid" "shell with a child beside the stack"
+assert_alive "$busy_sibling_pid" "unrelated child of that shell"
+assert_alive "$mention_pid" "process whose argv only mentions scripts/run.sh"
+assert_dead "$wrapper_stack_pid" "run.sh under a pure wrapper shell"
+assert_dead "$wrapper_pid" "pure wrapper shell of the stack"
+echo "PASS: the sweep reaps only run.sh stacks and their pure wrapper shells"
+
 # The protection walk must not stop before classifying PID 1. On a Fly cloudbench
 # guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
 # bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor
