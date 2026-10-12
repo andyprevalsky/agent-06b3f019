@@ -216,6 +216,23 @@ Measurements:
   - the one outlier made the same 0.92 prediction but recorded it under a
     different key.
 
+World stream (2026-10-12, `171e66847`). The native world model shows every
+agent the world's shared history: all 18 child first calls in run 7 carried an
+identical history, which per-agent streams re-sent uncached (first calls read
+11–40%). Each world now has one stream. A call reuses its deepest matching
+prefix; older-revision calls branch without moving it. Replayed through the
+cache simulator (validated within 6 tokens per call on run 10, realistic timing):
+
+| Run | Cost (per-agent streams) | New agents' first call read (per-agent streams) |
+| --- | --- | --- |
+| 7 | 0.79× (0.93×) | 70% (40%) |
+| 8 | 0.55× (0.58×) | 86% (11%) |
+| 10 | 0.33× (0.60×) | 79% (13%) |
+
+Rose (Python and TypeScript, `bd43e6a95`) marks a breakpoint after every
+completed user message for GPT-5.6+. Over 911 real agent calls that costs 0.51×,
+against 0.55× for implicit mode alone and 0.61× for explicit mode.
+
 The reset rule starts a fresh stream when changes exceed 1× the baseline
 (minimum 20k characters). On runs 7–8 that is −38% and −72% versus today; never
 resetting would be −48% and −76%.
