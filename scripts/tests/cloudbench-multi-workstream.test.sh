@@ -4153,6 +4153,11 @@ group_term_cancellation_contract() {  # <bench> <expected-stop-reason> [TERM|INT
         fail "$bench: a cancelled controller reported success"
     grep -qF "controller received $signal_name" "$log" ||
         fail "$bench: the controller did not observe the group $signal_name"
+    # Auxiliary loops die from the same group signal; their teardown must
+    # still account for every owned local process.
+    if grep -E 'survived local teardown|Could not capture the process table' "$log" >&2; then
+        fail "$bench: controller teardown left owned local processes unaccounted after the group $signal_name"
+    fi
     python3 - "$stop_file" "$expected_reason" "$term_epoch" "$budget" <<'PY' ||
 import json
 import sys
@@ -4335,6 +4340,9 @@ group_term_delivered_slow_drain_contract() {
     PIDS=("${remaining_pids[@]}")
     [ "$launcher_status" -ne 0 ] ||
         fail "$bench: an unacknowledged guest cleanup reported success"
+    if grep -E 'survived local teardown|Could not capture the process table' "$log" >&2; then
+        fail "$bench: controller teardown left owned local processes unaccounted after the group TERM"
+    fi
     requested_at="$(cat "$FAKE_DIR/machines/$machine/shutdown-requested")"
     stop_file="$FAKE_DIR/machines/$machine/benchmark.stopped"
     # The controller finished while the delivered drain was still running.
