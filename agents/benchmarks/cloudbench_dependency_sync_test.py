@@ -21,6 +21,7 @@ import threading
 import time
 import warnings
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -17882,6 +17883,137 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     assert "multiple new snapshots appeared" in ambiguous.stderr
     assert "snap-owned,snap-racing" in ambiguous.stderr
     assert "EXACT=" not in ambiguous.stdout
+
+
+def test_refresh_deps_snapshot_baseline_survives_transient_empty_listing(tmp_path: Path) -> None:
+    """A transiently empty pre-snapshot list must not make older snapshots look new.
+
+    On 2026-10-12 a LIVE50 central refresh read an empty baseline while the donor
+    volume held nine older snapshots; all ten then looked new and the refresh
+    failed with "multiple new snapshots appeared".
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+    recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def run(baseline: str, *, empty_baseline_reads: int, older_created_at: str) -> subprocess.CompletedProcess[str]:
+        state = tmp_path / f"state-{empty_baseline_reads}-{older_created_at[:4]}-{len(baseline)}"
+        state.mkdir()
+        (state / "reads").write_text("0\n")
+        older = f'{{"id":"snap-older","status":"created","size":99,"created_at":"{older_created_at}"}}'
+        owned = '{"id":"snap-owned","status":"created","size":10,"created_at":"0001-01-01T00:00:00Z"}'
+        script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS=3
+FLY() {{
+  echo "$*" >> "$STATE/calls"
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then
+    touch "$STATE/created"
+    return 0
+  elif [ -f "$STATE/created" ]; then
+    echo '[{older},{owned}]'
+  else
+    reads=$(( $(cat "$STATE/reads") + 1 ))
+    printf '%s\n' "$reads" > "$STATE/reads"
+    if [ "$reads" -le {empty_baseline_reads} ]; then echo '[]'; else echo '{baseline}'; fi
+  fi
+}}
+sleep() {{ :; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1 || exit $?
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+        return subprocess.run(
+            ["bash", "-c", script],
+            env={"STATE": str(state), "PATH": os.environ["PATH"]},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    # The baseline is re-read until Fly returns the existing inventory.
+    reread = run(f'[{{"id":"snap-older","status":"created","size":99,"created_at":"{recent}"}}]',
+                 empty_baseline_reads=2, older_created_at=recent)
+    assert reread.returncode == 0, reread.stderr
+    assert "EXACT=snap-owned" in reread.stdout
+
+    # If every baseline read stays empty, a snapshot Fly dated before the request
+    # is still excluded; the pending owned snapshot (zero date) is bound.
+    dated_older = run("[]", empty_baseline_reads=3, older_created_at="2020-01-01T00:00:00Z")
+    assert dated_older.returncode == 0, dated_older.stderr
+    assert "EXACT=snap-owned" in dated_older.stdout
+
+    # A recent unlisted snapshot could be a concurrent transaction: fail closed.
+    concurrent = run("[]", empty_baseline_reads=3, older_created_at=recent)
+    assert concurrent.returncode != 0
+    assert "multiple new snapshots appeared" in concurrent.stderr
+    assert "snap-older,snap-owned" in concurrent.stderr
+    assert "EXACT=" not in concurrent.stdout
+
+
+def test_refresh_deps_snapshot_waits_for_already_scheduled_snapshot(tmp_path: Path) -> None:
+    """Fly allows one scheduled snapshot per volume; a pending one is waited out.
+
+    On 2026-10-12 a failed LIVE50 refresh left its snapshot pending, and the
+    next queued controller's request was rejected with "snapshot is already
+    scheduled" instead of waiting for it.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+
+    def run(rejections: int, schedule_attempts: int) -> tuple[subprocess.CompletedProcess[str], str]:
+        state = tmp_path / f"scheduled-{rejections}-{schedule_attempts}"
+        state.mkdir()
+        (state / "creates").write_text("0\n")
+        script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS={schedule_attempts}
+FLY() {{
+  echo "$*" >> "$STATE/calls"
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then
+    creates=$(( $(cat "$STATE/creates") + 1 ))
+    printf '%s\n' "$creates" > "$STATE/creates"
+    if [ "$creates" -le {rejections} ]; then
+      echo "Error: failed to snapshot vol-1: failed_precondition: snapshot is already scheduled at 2026-10-12T20:28:17Z" >&2
+      return 1
+    fi
+    touch "$STATE/created"
+    return 0
+  elif [ -f "$STATE/created" ]; then
+    echo '[{{"id":"snap-pending-foreign","status":"created","size":50}},{{"id":"snap-owned","status":"created","size":10}}]'
+  else
+    echo '[{{"id":"snap-pending-foreign","status":"waiting","size":0}}]'
+  fi
+}}
+sleep() {{ echo "sleep $*" >> "$STATE/sleeps"; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1 || exit $?
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"STATE": str(state), "PATH": os.environ["PATH"]},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, (state / "calls").read_text()
+
+    waited, calls = run(rejections=2, schedule_attempts=5)
+    assert waited.returncode == 0, waited.stderr
+    assert waited.stdout.count("is still scheduled") == 2
+    assert calls.count("volumes snapshots create") == 3
+    # The pending foreign snapshot was in the baseline, so it is never adopted.
+    assert "EXACT=snap-owned" in waited.stdout
+
+    exhausted, calls = run(rejections=10, schedule_attempts=2)
+    assert exhausted.returncode != 0
+    assert calls.count("volumes snapshots create") == 2
+    assert "snapshot is already scheduled" in exhausted.stderr
+    assert "snapshot creation request failed" in exhausted.stderr
+    assert "EXACT=" not in exhausted.stdout
 
 
 def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:

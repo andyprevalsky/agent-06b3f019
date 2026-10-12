@@ -2052,25 +2052,46 @@ park_warm_source() {
 # that never carried the dependency trees this transaction just verified.
 CREATED_SNAPSHOT_ID=""
 create_volume_snapshot_exact() {  # create_volume_snapshot_exact <volume-id>
-    local vol="$1" before_ids="" create_output="" snapshots_json=""
-    local candidate="" state=""
+    local vol="$1" before_ids="" listed_ids="" create_output="" snapshots_json=""
+    local candidate="" state="" requested_at="" attempt="" schedule_attempt=""
+    local baseline_attempts="${CLOUDBENCH_SNAPSHOT_BASELINE_ATTEMPTS:-6}"
+    local schedule_attempts="${CLOUDBENCH_SNAPSHOT_SCHEDULE_ATTEMPTS:-60}"
     CREATED_SNAPSHOT_ID=""
-    if ! before_ids="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | python3 -c '
+    for schedule_attempt in $(seq 1 "$schedule_attempts"); do
+        # Fly can briefly return a valid but empty list while older snapshots
+        # exist. An empty baseline makes every existing snapshot look new, so
+        # re-read it before accepting that the volume has none.
+        for attempt in $(seq 1 "$baseline_attempts"); do
+            if ! listed_ids="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | python3 -c '
 import json, sys
 snapshots = json.load(sys.stdin)
 if not isinstance(snapshots, list): raise SystemExit(1)
 for snapshot in snapshots:
     if isinstance(snapshot, dict) and snapshot.get("id"): print(snapshot["id"])
 ')"; then
-        echo "❌ could not capture the authoritative pre-snapshot inventory" >&2
-        return 1
-    fi
-    echo "🧊 cutting a fresh snapshot of $vol ..."
-    if ! create_output="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>&1)"; then
+                echo "❌ could not capture the authoritative pre-snapshot inventory" >&2
+                return 1
+            fi
+            before_ids="$listed_ids"
+            [ -n "$before_ids" ] && break
+            [ "$attempt" -ge "$baseline_attempts" ] || sleep $(( attempt * 3 ))
+        done
+        requested_at="$(date +%s)"
+        echo "🧊 cutting a fresh snapshot of $vol ..."
+        create_output="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>&1)" && break
+        # Fly accepts one scheduled snapshot per volume. One left by an earlier
+        # (possibly failed) transaction blocks this request until it finishes;
+        # wait for it rather than failing every queued controller in turn.
+        if printf '%s' "$create_output" | grep -qi 'snapshot is already scheduled' \
+            && [ "$schedule_attempt" -lt "$schedule_attempts" ]; then
+            echo "   ⏳ another snapshot of $vol is still scheduled — retry $schedule_attempt/$schedule_attempts in 10s"
+            sleep 10
+            continue
+        fi
         [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /' >&2
         echo "❌ snapshot creation request failed" >&2
         return 1
-    fi
+    done
     [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /'
     for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90}"); do
         if ! snapshots_json="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null)"; then
@@ -2078,13 +2099,25 @@ for snapshot in snapshots:
             return 1
         fi
         read -r candidate state candidate_ids <<< "$(printf '%s' "$snapshots_json" \
-            | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" python3 -c '
+            | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" REQUESTED_AT="$requested_at" \
+                CLOCK_SKEW="${CLOUDBENCH_SNAPSHOT_CLOCK_SKEW_SECONDS:-300}" python3 -c '
 import json, os, sys
+from datetime import datetime
 snapshots = json.load(sys.stdin)
 if not isinstance(snapshots, list): raise SystemExit(1)
 valid = {"created", "complete", "completed", "ready"}
 before = set(os.environ.get("BEFORE_IDS", "").splitlines())
 bound = os.environ.get("BOUND_ID", "")
+# A snapshot Fly dated well before this request cannot be its result, even if a
+# transiently empty baseline omitted it. Pending snapshots carry a zero date and
+# unparseable dates stay candidates, so this never adopts by time.
+predates = float(os.environ["REQUESTED_AT"]) - float(os.environ["CLOCK_SKEW"])
+def created_before_request(snapshot):
+    try:
+        created = datetime.fromisoformat(str(snapshot.get("created_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return created.year > 1 and created.tzinfo is not None and created.timestamp() < predates
 if bound:
     matches = [s for s in snapshots if isinstance(s, dict) and s.get("id") == bound]
     ready = any(str(s.get("status") or "").lower() in valid and int(s.get("size") or 0) > 0 for s in matches)
@@ -2094,7 +2127,7 @@ else:
     for snapshot in snapshots:
         if not isinstance(snapshot, dict): continue
         snapshot_id = snapshot.get("id")
-        if snapshot_id and snapshot_id not in before:
+        if snapshot_id and snapshot_id not in before and not created_before_request(snapshot):
             new_by_id.setdefault(snapshot_id, []).append(snapshot)
     if len(new_by_id) > 1:
         print("ambiguous ambiguous", ",".join(sorted(new_by_id)))
