@@ -16,17 +16,23 @@
  *   [RESULT] <-> [RECORDING]   (default RESULT)
  *   RECORDING = video player + live trajectory side panel (scrub-synced)
  *
- * RECORDING URL (lazy, only when RECORDING tab first opened):
- *   recording_view_url (Kernel replay): [IDLE] --open--> [READY] (iframe URL directly)
- *   recording_file_pointer (Supabase):  [IDLE] --open--> [LOADING] --ok--> [READY]
- *                                                                  \--err-> [ERROR]
- *   (neither present => [UNAVAILABLE])
+ * RECORDING SEGMENTS (buildRecordingSegments): every recording the task saved,
+ * earliest first. An approval/auth-assistance pause splits one task into
+ * several activities, each with its own saved recording; one activity's Kernel
+ * per-session replays expand in place. (none => [UNAVAILABLE])
+ *   [SEGMENT 0] --video ended | click part i--> [SEGMENT i]
+ *
+ * SEGMENT LOAD (lazy, only once the RECORDING tab has been opened):
+ *   view (Kernel replay URL):          [READY] (streamed by <video> directly)
+ *   video/html (Supabase FilePointer): [IDLE] --select--> [LOADING] --ok--> [READY]
+ *                                                                   \--err-> [ERROR]
+ *   READY Blob URLs are cached per segment and revoked on unmount/segment reset.
  *
  * RECORDING PLAYHEAD ↔ LIVE TRAJECTORY (while RECORDING tab READY + <video>):
  *   video.timeupdate|seeked
  *        │
  *        ▼
- *   playheadSec = sum(priorSegmentDurations) + currentTime
+ *   playheadSec = partStart + sum(prior durations in the part) + currentTime
  *        │
  *        ▼
  *   activeStep = last traj step with offsetSec <= playheadSec
@@ -40,10 +46,12 @@
  *   click step i
  *        │
  *        ▼
- *   (segmentIndex, timeInSegment) = seekTargetFromOffset(step.offsetSec, durations)
- *        │
+ *   (segmentIndex, timeInSegment) = partSeekTarget(step.offsetSec, …)
+ *        │   (each part placed at its own start; a pause keeps steps aligned)
  *        ▼
- *   setSegmentIndex + video.currentTime = timeInSegment (+ play)
+ *   same segment:  video.currentTime = timeInSegment (+ play)
+ *   other segment: pending seek → setSegmentIndex → applied on its video's
+ *                  loadedmetadata (after the segment loads, if it must)
  *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
@@ -59,19 +67,24 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
-import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
-import type { FilePointer, Message, OutputSchema } from '@/lib/api';
+import type { Message, OutputSchema } from '@/lib/api';
 import { SchemaChip } from './SchemaChip';
 import {
   buildTrajectorySteps,
   findActiveStepIndex,
-  playheadFromSegments,
+  partPlayheadSec,
+  partSeekTarget,
   resolveRecordingStartMs,
-  seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
+import {
+  buildRecordingSegments,
+  type RecordingSegment,
+} from './browser-agent-chip/recordingSegments';
+import { RecordingSegmentStrip } from './browser-agent-chip/RecordingSegmentStrip';
 import { isFailedBrowserResult } from './browser-agent-chip/resultStatus';
+import { useRecordingSegmentLoads } from './browser-agent-chip/useRecordingSegmentLoads';
 import { LiveViewFrame } from './browser-status-bar/BrowserLiveViewFrame';
 
 type Tab = 'result' | 'recording';
@@ -84,21 +97,17 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const { messages, selectedAgentId } = useAgentContext();
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<Tab>('result');
-  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
-  const [recordingState, setRecordingState] = useState<'idle' | 'loading' | 'ready' | 'error'>(
-    'idle',
-  );
-  const [recordingError, setRecordingError] = useState<string | null>(null);
-  // Which Kernel replay segment (one per session/rotation) is currently playing.
-  // The segments auto-advance into one continuous recording (baseline -> each
-  // rotation), so this is the playhead, not a manual tab selection.
-  const [segmentIndex, setSegmentIndex] = useState(0);
+  // Segments load lazily, only after the Recording tab has been opened once.
+  const [recordingOpened, setRecordingOpened] = useState(false);
   // Wall-clock-aligned playhead (seconds from recording start). Driven by the
   // video element so scrubbing / playback updates the live trajectory side panel.
   const [playheadSec, setPlayheadSec] = useState(0);
-  const segmentDurationsRef = useRef<number[]>([]);
+  // Known <video> durations by segment key (they survive appended parts).
+  const segmentDurationsRef = useRef<Map<string, number>>(new Map());
   // Shared across stitched + multi-URL players so trajectory clicks can seek.
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // A trajectory click into another segment seeks once that segment's video loads.
+  const pendingSeekRef = useRef<{ key: string; timeSec: number } | null>(null);
 
   const toolCallId = message.metadata?.toolCallId as string | undefined;
 
@@ -158,89 +167,27 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     return undefined;
   }, [callMessages]);
 
-  // Prefer the LAST browser session's recording: a tool call may retry across
-  // several sessions, and earlier ones are often frozen/splash attempts. Kernel
-  // can emit more than one replay for the SAME session when an approval pauses
-  // and resumes the activity, though. In that case collect every finished replay
-  // with the latest recording's browser_url so the FE plays the pre-approval and
-  // post-approval clips continuously instead of dropping the first half.
-  const recordingSource = useMemo<
-    | { kind: 'video'; pointer: FilePointer }
-    | { kind: 'view'; urls: string[] }
-    | { kind: 'pointer'; pointer: FilePointer }
-    | null
-  >(() => {
-    for (let i = taskMessages.length - 1; i >= 0; i--) {
-      const md = taskMessages[i].metadata;
-      const fp = md?.recording_file_pointer as FilePointer | null | undefined;
-      // Preferred: rotate_ip's per-session replay segments stitched server-side into
-      // ONE continuous MP4 (a video/* pointer). The FE plays it as a single video of
-      // the exit IP changing across rotations — no playlist, no manual switching.
-      if (fp?.storage_path && (fp.mime_type ?? '').startsWith('video/')) {
-        return { kind: 'video', pointer: fp };
-      }
-      // Fallback (ffmpeg/stitch unavailable): the raw Kernel-hosted segment URLs,
-      // played back-to-back. A single URL is just a one-segment list.
-      const urls = md?.recording_view_urls as string[] | null | undefined;
-      if (Array.isArray(urls)) {
-        const clean = urls.filter((u): u is string => typeof u === 'string' && u.length > 0);
-        if (clean.length) return { kind: 'view', urls: clean };
-      }
-      const url = md?.recording_view_url as string | null | undefined;
-      if (url) {
-        const browserUrl = md?.browser_url as string | null | undefined;
-        if (!browserUrl) return { kind: 'view', urls: [url] };
-        const seen = new Set<string>();
-        const sessionUrls: string[] = [];
-        for (const taskMessage of taskMessages) {
-          const taskMetadata = taskMessage.metadata;
-          if (
-            taskMetadata?.action_type !== 'recording' ||
-            taskMetadata?.toolStatus !== 'FINISHED' ||
-            taskMetadata?.browser_url !== browserUrl
-          ) {
-            continue;
-          }
-          const sessionUrl = taskMetadata.recording_view_url;
-          if (typeof sessionUrl === 'string' && sessionUrl.length > 0 && !seen.has(sessionUrl)) {
-            seen.add(sessionUrl);
-            sessionUrls.push(sessionUrl);
-          }
-        }
-        return { kind: 'view', urls: sessionUrls.length > 0 ? sessionUrls : [url] };
-      }
-      // Legacy screenshot replay: a self-contained HTML player pointer.
-      if (fp?.storage_path) return { kind: 'pointer', pointer: fp };
-    }
-    return null;
-  }, [taskMessages]);
-
-  const hasRecording = recordingSource !== null;
-  // Stable identity of the selected recording; when a newer session's recording
-  // arrives asynchronously, reset the loader so the chip re-resolves it instead
-  // of pinning the stale URL/state.
-  const recordingKey =
-    recordingSource?.kind === 'view'
-      ? recordingSource.urls.join('|')
-      : (recordingSource?.pointer.storage_path ?? null);
-  // Monotonic generation of the selected recording. Bumping it on every source
-  // change invalidates any in-flight async load so a stale fetch can't overwrite
-  // the newly selected recording (and leak its Blob URL).
-  const recordingLoadGeneration = useRef(0);
-  useEffect(() => {
-    return () => {
-      if (recordingUrl?.startsWith('blob:')) URL.revokeObjectURL(recordingUrl);
-    };
-  }, [recordingUrl]);
-  useEffect(() => {
-    recordingLoadGeneration.current += 1;
-    setRecordingState('idle');
-    setRecordingUrl(null);
-    setRecordingError(null);
-    setSegmentIndex(0);
-    setPlayheadSec(0);
-    segmentDurationsRef.current = [];
-  }, [recordingKey]);
+  // Every recording the task saved, ordered by part start: a pause/resume
+  // splits one task into several activities, and each saves its own recording.
+  const recordingSegments = useMemo<RecordingSegment[]>(
+    () =>
+      buildRecordingSegments(
+        taskMessages.map((m) => ({
+          timestamp: m.timestamp,
+          metadata: (m.metadata as Record<string, unknown> | undefined) ?? null,
+        })),
+      ),
+    [taskMessages],
+  );
+  const hasRecording = recordingSegments.length > 0;
+  const {
+    segmentIndex,
+    setSegmentIndex,
+    currentSegment,
+    recordingState,
+    recordingUrl,
+    recordingError,
+  } = useRecordingSegmentLoads(recordingSegments, recordingOpened, selectedAgentId);
 
   const recordingStartMs = useMemo(
     () =>
@@ -274,102 +221,78 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
   const failed = isFailedBrowserResult(resultText);
 
-  function syncPlayheadFromVideo(video: HTMLVideoElement, segIdx: number) {
-    if (Number.isFinite(video.duration) && video.duration > 0) {
-      const next = segmentDurationsRef.current.slice();
-      next[segIdx] = video.duration;
-      segmentDurationsRef.current = next;
-    }
-    setPlayheadSec(playheadFromSegments(segmentDurationsRef.current, segIdx, video.currentTime));
+  function segmentDurations(): number[] {
+    return recordingSegments.map((segment) => segmentDurationsRef.current.get(segment.key) ?? 0);
   }
 
-  function handleVideoTimeSync(event: SyntheticEvent<HTMLVideoElement>, segIdx: number = 0) {
-    syncPlayheadFromVideo(event.currentTarget, segIdx);
+  function syncPlayheadFromVideo(video: HTMLVideoElement, segIdx: number) {
+    const key = recordingSegments[segIdx]?.key;
+    if (key && Number.isFinite(video.duration) && video.duration > 0) {
+      segmentDurationsRef.current.set(key, video.duration);
+    }
+    setPlayheadSec(
+      partPlayheadSec(
+        recordingSegments,
+        segmentDurations(),
+        segIdx,
+        video.currentTime,
+        recordingStartMs,
+      ),
+    );
+  }
+
+  function handleVideoTimeSync(event: SyntheticEvent<HTMLVideoElement>) {
+    syncPlayheadFromVideo(event.currentTarget, segmentIndex);
+  }
+
+  function seekVideo(video: HTMLVideoElement, timeSec: number) {
+    video.currentTime = timeSec;
+    void video.play().catch(() => {});
+    syncPlayheadFromVideo(video, segmentIndex);
+  }
+
+  function handleVideoLoadedMetadata(event: SyntheticEvent<HTMLVideoElement>) {
+    const pending = pendingSeekRef.current;
+    if (pending && pending.key === currentSegment?.key) {
+      pendingSeekRef.current = null;
+      seekVideo(event.currentTarget, pending.timeSec);
+      return;
+    }
+    handleVideoTimeSync(event);
   }
 
   /** Click a trajectory row → jump the recording to that step's wall-clock time. */
   function seekRecordingToOffset(offsetSec: number) {
-    const { segmentIndex: nextSeg, timeInSegment } = seekTargetFromOffset(
+    const { segmentIndex: nextSeg, timeInSegment } = partSeekTarget(
+      recordingSegments,
+      segmentDurations(),
       offsetSec,
-      segmentDurationsRef.current,
+      recordingStartMs,
     );
+    const target = recordingSegments[nextSeg];
+    if (!target) return;
     if (nextSeg !== segmentIndex) {
+      // The target segment's <video> mounts (and may load first) after the
+      // switch; its loadedmetadata applies the seek.
+      pendingSeekRef.current =
+        target.kind === 'html' ? null : { key: target.key, timeSec: timeInSegment };
       setSegmentIndex(nextSeg);
-      // Segment swap remounts <video> (key=url). Apply currentTime once metadata loads.
-      requestAnimationFrame(() => {
-        const v = videoRef.current;
-        if (!v) return;
-        const apply = () => {
-          v.currentTime = timeInSegment;
-          void v.play().catch(() => {});
-          syncPlayheadFromVideo(v, nextSeg);
-        };
-        if (v.readyState >= 1) apply();
-        else v.addEventListener('loadedmetadata', apply, { once: true });
-      });
       return;
     }
-    const v = videoRef.current;
-    if (!v) return;
-    v.currentTime = timeInSegment;
-    void v.play().catch(() => {});
-    syncPlayheadFromVideo(v, segmentIndex);
+    if (videoRef.current) seekVideo(videoRef.current, timeInSegment);
   }
 
-  async function openRecording() {
+  function openRecording() {
     setTab('recording');
-    if (recordingState !== 'idle' || !recordingSource) return;
-    // Kernel replay: each segment's view URL streams that session's MP4 directly.
-    // Multiple segments (one per rotation) auto-advance into one continuous video
-    // (see the <video> playlist below) — no fetch, no manual tab switching.
-    if (recordingSource.kind === 'view') {
-      setSegmentIndex(0);
-      setPlayheadSec(0);
-      segmentDurationsRef.current = [];
-      setRecordingState('ready');
-      return;
-    }
-    if (!selectedAgentId) return;
-    const { pointer } = recordingSource;
-    const isVideo = recordingSource.kind === 'video';
-    const loadGeneration = recordingLoadGeneration.current;
-    setRecordingState('loading');
-    try {
-      const url = await getAttachmentUrl(selectedAgentId, pointer.id, pointer.storage_path);
-      // Supabase serves stored files as text/plain + nosniff (XSS safety), so a
-      // direct <video>/<iframe> src won't play/render. Fetch the bytes and load them
-      // via a typed Blob URL: video/mp4 for the stitched replay, text/html for the
-      // legacy screenshot player.
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`recording fetch ${res.status}`);
-      const blob = isVideo
-        ? new Blob([await res.arrayBuffer()], { type: pointer.mime_type || 'video/mp4' })
-        : new Blob([await res.text()], { type: 'text/html' });
-      const blobUrl = URL.createObjectURL(blob);
-      // A newer recording was selected while this load was in flight — discard
-      // this result (and its Blob URL) instead of clobbering the current one.
-      if (loadGeneration !== recordingLoadGeneration.current) {
-        URL.revokeObjectURL(blobUrl);
-        return;
-      }
-      setRecordingUrl(blobUrl);
-      setPlayheadSec(0);
-      segmentDurationsRef.current = [];
-      setRecordingState('ready');
-    } catch (err) {
-      if (loadGeneration === recordingLoadGeneration.current) {
-        const message = err instanceof Error ? err.message : '';
-        // Ownership failures happen while signing the attachment URL. A later
-        // 403 on the signed recording download is usually an expired URL, not
-        // the wrong account — keep that as a generic load failure.
-        setRecordingError(
-          /Failed to get attachment URL.*\(403\)|Access denied/i.test(message)
-            ? 'Sign in as the agent owner to load this recording.'
-            : 'Failed to load recording.',
-        );
-        setRecordingState('error');
-      }
-    }
+    setRecordingOpened(true);
+  }
+
+  function selectSegment(index: number) {
+    pendingSeekRef.current = null;
+    setSegmentIndex(index);
+    setPlayheadSec(
+      partPlayheadSec(recordingSegments, segmentDurations(), index, 0, recordingStartMs),
+    );
   }
 
   return (
@@ -437,6 +360,13 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                     Recording unavailable for this run.
                   </p>
                 )}
+                {recordingSegments.length > 1 && (
+                  <RecordingSegmentStrip
+                    segments={recordingSegments}
+                    activeIndex={segmentIndex}
+                    onSelect={selectSegment}
+                  />
+                )}
                 {hasRecording && recordingState === 'loading' && (
                   <p className="text-xs text-muted-foreground">Loading recording…</p>
                 )}
@@ -445,101 +375,49 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                     {recordingError ?? 'Failed to load recording.'}
                   </p>
                 )}
-                {/* Stitched replay: rotate_ip's per-session segments were
-                    concatenated server-side into ONE continuous MP4, so the whole
-                    run (baseline -> each rotation, IP changing) plays in a single
-                    video player. Live trajectory sits beside the video and tracks
-                    the playhead as the user scrubs. */}
-                {hasRecording &&
-                  recordingState === 'ready' &&
-                  recordingSource?.kind === 'video' &&
-                  recordingUrl && (
-                    <RecordingWithLiveTrajectory
-                      steps={trajectory}
-                      activeIndex={activeStepIndex}
-                      playheadSec={playheadSec}
-                      onStepClick={seekRecordingToOffset}
-                    >
-                      <video
-                        ref={videoRef}
-                        title="Browser recording"
-                        src={recordingUrl}
-                        controls
-                        autoPlay
-                        muted
-                        playsInline
-                        onTimeUpdate={handleVideoTimeSync}
-                        onSeeked={handleVideoTimeSync}
-                        onLoadedMetadata={handleVideoTimeSync}
-                        className="aspect-[16/10] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black object-contain"
-                      />
-                    </RecordingWithLiveTrajectory>
-                  )}
-                {/* Fallback (stitch unavailable): play the raw per-rotation segment
-                    URLs back-to-back. On each segment end we advance the playhead so
-                    baseline -> rotation 1 -> ... still streams without manual
-                    switching. A slim marker strip shows where each rotation begins. */}
-                {hasRecording && recordingState === 'ready' && recordingSource?.kind === 'view' && (
+                {/* Video segments (a Kernel replay URL or the server-stitched MP4)
+                    play in one <video> that advances to the next segment when it
+                    ends, so baseline -> each rotation -> each later part streams
+                    without manual switching. Live trajectory sits beside the video
+                    and tracks the playhead as the user scrubs. */}
+                {recordingState === 'ready' && currentSegment?.kind !== 'html' && recordingUrl && (
                   <RecordingWithLiveTrajectory
                     steps={trajectory}
                     activeIndex={activeStepIndex}
                     playheadSec={playheadSec}
                     onStepClick={seekRecordingToOffset}
                   >
-                    <div>
-                      {recordingSource.urls.length > 1 && (
-                        <div data-testid="recording-segments" className="mb-2">
-                          <p className="mb-1 text-xs text-muted-foreground">
-                            Continuous replay — now showing{' '}
-                            <span className="font-medium text-foreground">
-                              {segmentIndex === 0 ? 'baseline IP' : `rotation ${segmentIndex}`}
-                            </span>{' '}
-                            ({segmentIndex + 1} of {recordingSource.urls.length} IPs)
-                          </p>
-                          <div className="flex h-1 w-full gap-0.5 overflow-hidden rounded">
-                            {recordingSource.urls.map((url, i) => (
-                              <div
-                                key={url}
-                                className={`h-full flex-1 rounded-full ${
-                                  i <= segmentIndex ? 'bg-foreground/70' : 'bg-muted'
-                                }`}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      <video
-                        ref={videoRef}
-                        key={recordingSource.urls[segmentIndex]}
-                        title="Browser recording"
-                        src={recordingSource.urls[segmentIndex]}
-                        controls
-                        autoPlay
-                        muted
-                        playsInline
-                        onTimeUpdate={(e) => handleVideoTimeSync(e, segmentIndex)}
-                        onSeeked={(e) => handleVideoTimeSync(e, segmentIndex)}
-                        onLoadedMetadata={(e) => handleVideoTimeSync(e, segmentIndex)}
-                        onEnded={() => {
-                          setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
-                        }}
-                        className="aspect-[16/10] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black object-contain"
-                      />
-                    </div>
+                    <video
+                      ref={videoRef}
+                      key={recordingUrl}
+                      title="Browser recording"
+                      src={recordingUrl}
+                      controls
+                      autoPlay
+                      muted
+                      playsInline
+                      onTimeUpdate={handleVideoTimeSync}
+                      onSeeked={handleVideoTimeSync}
+                      onLoadedMetadata={handleVideoLoadedMetadata}
+                      onEnded={() => {
+                        if (segmentIndex + 1 < recordingSegments.length) {
+                          selectSegment(segmentIndex + 1);
+                        }
+                      }}
+                      className="aspect-[16/10] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black object-contain"
+                    />
                   </RecordingWithLiveTrajectory>
                 )}
-                {hasRecording &&
-                  recordingState === 'ready' &&
-                  recordingSource?.kind === 'pointer' &&
-                  recordingUrl && (
-                    <div className="relative aspect-[1280/800] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black">
-                      <LiveViewFrame
-                        url={recordingUrl}
-                        title="Browser recording"
-                        className="absolute inset-0"
-                      />
-                    </div>
-                  )}
+                {/* Screenshot replay: a self-contained HTML player per part. */}
+                {recordingState === 'ready' && currentSegment?.kind === 'html' && recordingUrl && (
+                  <div className="relative aspect-[1280/800] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black">
+                    <LiveViewFrame
+                      url={recordingUrl}
+                      title="Browser recording"
+                      className="absolute inset-0"
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>

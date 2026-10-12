@@ -111,6 +111,25 @@ Also repaired because the mac-app structural suite was already red on main (5 vi
 
 10k-agent: nothing here scales with agent count. One submit is one queue entry, three IPC messages and one `createAgent`; both queues are bounded at 20.
 
+### 2026-10-11 follow-up (independent review of `68bbd1c98`)
+
+`68bbd1c98` merged in PR #1447 without an automated review. A later independent read found no double launch and no stuck submit, and two loss paths in the front-end consumer, both fixed in PR #1465:
+
+- A submit waiting behind a slow launch was already claimed, so it existed only in the renderer; closing or reloading the window lost it, and its 60 s check had run at delivery, not at launch. `lib/quickQuery.ts` now hands over one submit at a time and claims the next only after the previous consumer's returned work settles; the hook returns its launch instead of keeping its own queue. Pre-fix: `expected [ 'slow launch', 'waits its turn' ] to deeply equal [ 'slow launch' ]`.
+- An expired draft put in the input was overwritten and then cleared by a fresh submit drained in the same pass. A launch no longer prefills or clears the input while expired drafts occupy it. Pre-fix: `expected [ [ 'expired draft' ], …(2) ] to deeply equal [ [ 'expired draft' ] ]`.
+
+Both tests are in `front-end/src/tests/blackbox/quick-query-attachments.blackbox.ts`.
+
+Three further independent reviews changed those fixes before merge:
+
+- The hand-over re-holds a submit, still unclaimed, when its consumer has gone; it used to claim it with nobody to act on it.
+- An expired draft stays in the input until the user sends or rewrites it; a later expired submit is added to it rather than replacing it after 5 s.
+- Two additions were tried and removed because each produced its own defect: a "time until a consumer was ready" stamp (it could mark a two-minute-old submit fresh) and a 30 s cap on waiting for the launch ahead (it let launches overlap and clear each other's input). The 60 s window is the submit's age when its turn comes, so no agent launches more than 60 s after its submit; a submit whose turn comes later is kept as a draft.
+
+- A launch that does not happen (sign-in gate, failed upload or request) leaves its goal as unsent text; the next queued submit adds to it instead of prefilling over it. This loss path predated PR #1447.
+
+Known and unchanged: `createAgent` and `uploadAttachment` have no timeout, so a launch that never settles holds later submits back. They now stay unclaimed in the main process instead of claimed in the renderer, as they were in PR #1447.
+
 ## Human feedback
 
 The user asked for the behavior directly: "make sure it opens the main app then launches it in that case". None recorded beyond that.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,6 +58,11 @@ def gate_environment() -> dict[str, str]:
 
 SIGNAL_GRACE_SECONDS = 1.0
 DEFAULT_MAX_WORKERS = 8
+# run.sh, kill-services.sh and run-process-cleanup.sh resolve listener and
+# process ownership with lsof. Without it the kill-services, run-process-cleanup
+# and run-port-collision fixtures fail as "listener did not start" / "process is
+# still alive" / "PID does not own listener", which reads like a regression.
+REQUIRED_HOST_TOOLS = ("lsof",)
 
 
 @dataclass(frozen=True)
@@ -319,6 +325,17 @@ def main() -> int:
         for gate in GATES:
             print(gate.name)
         return 0
+    missing = [tool for tool in REQUIRED_HOST_TOOLS if shutil.which(tool) is None]
+    if missing:
+        print(
+            "deploy structural gates need host tools that are not installed: "
+            + ", ".join(missing)
+            + " (Linux: sudo apt-get install -y "
+            + " ".join(missing)
+            + ")",
+            file=sys.stderr,
+        )
+        return 1
     if args.max_workers is None:
         return run_gates(GATES, max_workers=DEFAULT_MAX_WORKERS)
     return run_gates(GATES, max_workers=args.max_workers)

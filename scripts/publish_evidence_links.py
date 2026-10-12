@@ -324,6 +324,24 @@ def _probe_recording_file_pointer(
     return _probe_recording_view_url(signed, timeout=timeout)
 
 
+def _recording_sources(meta: dict) -> list[tuple[str, object]]:
+    """What the FE chip plays for one saved recording message (same precedence)."""
+    pointer = meta.get("recording_file_pointer")
+    if isinstance(pointer, dict) and str(pointer.get("mime_type") or "").startswith("video/"):
+        return [("pointer", pointer)]
+    view_urls = meta.get("recording_view_urls")
+    if isinstance(view_urls, list):
+        clean = [url.strip() for url in view_urls if isinstance(url, str) and url.strip()]
+        if clean:
+            return [("view", url) for url in clean]
+    view_url = meta.get("recording_view_url")
+    if isinstance(view_url, str) and view_url.strip():
+        return [("view", view_url.strip())]
+    if isinstance(pointer, dict):
+        return [("pointer", pointer)]
+    return []
+
+
 def verified_preparation_cancelled_tasks(bundle: dict, agent_id: str) -> set[str]:
     """Bind positive pre-action phase evidence to terminal exact-provider cleanup."""
     sys.path.insert(0, str(REPO_ROOT / "agents"))
@@ -504,22 +522,17 @@ def validate_browser_agents_terminated_with_recording(
             failures.append(
                 f"browser task {task_id} has not terminated (missing action_type=task_complete)"
             )
-        recording_ok = False
-        for meta in recording_candidates.get(task_id, []):
-            view_url = meta.get("recording_view_url")
-            if (
-                isinstance(view_url, str)
-                and view_url.strip()
-                and _probe_recording_view_url(view_url.strip())
-            ):
-                recording_ok = True
-                break
-            pointer = meta.get("recording_file_pointer")
-            if isinstance(pointer, dict) and _probe_recording_file_pointer(
-                agent_id, pointer
-            ):
-                recording_ok = True
-                break
+        # A pause/resume splits one task into several saved recordings and the
+        # chip plays every part, so every attached part must be playable.
+        # A saved part without a source (its upload failed) is a missing part.
+        parts = [_recording_sources(meta) for meta in recording_candidates.get(task_id, [])]
+        sources = [source for part in parts for source in part]
+        recording_ok = bool(parts) and all(parts) and all(
+            _probe_recording_view_url(value)
+            if kind == "view"
+            else _probe_recording_file_pointer(agent_id, value)
+            for kind, value in sources
+        )
         if not recording_ok and task_id not in verified_zero and task_id not in verified_preparation:
             failures.append(
                 f"browser task {task_id} has no correctly attached recording "
