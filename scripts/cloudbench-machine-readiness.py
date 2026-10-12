@@ -55,6 +55,19 @@ def readiness(payload: dict[str, Any], machine_id: str) -> tuple[bool, str]:
     return True, "ready"
 
 
+def startup_command_overridable(config: Any) -> bool:
+    """Whether replacing ``init.cmd`` alone fully controls guest startup.
+
+    Fly runs ``init.exec`` or ``init.entrypoint`` in preference to ``init.cmd``,
+    so an inert ``sleep infinity`` command is only authoritative when neither is
+    inherited. Clone admission and original-volume capture share this predicate.
+    """
+    if not isinstance(config, dict):
+        return False
+    init = config.get("init") or {}
+    return isinstance(init, dict) and not init.get("exec") and not init.get("entrypoint")
+
+
 def _load_inventory_file(path: Path, label: str) -> list[dict[str, Any]]:
     value = json.loads(path.read_text())
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
@@ -207,9 +220,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
             )
             config = machine.get("config")
             init = config.get("init") or {} if isinstance(config, dict) else None
-            clone_cmd_overridable = (
-                isinstance(init, dict) and not init.get("exec") and not init.get("entrypoint")
-            )
+            clone_cmd_overridable = startup_command_overridable(config)
             (machine_dir / machine_id).write_text(
                 f"state={state}\n"
                 f"instance_id={instance_id}\n"

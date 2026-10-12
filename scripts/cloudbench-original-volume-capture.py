@@ -1,0 +1,1025 @@
+#!/usr/bin/env python3
+"""Capture a stopped cloudbench guest's original volume files without rerunning it.
+
+Generic post-service recovery for one failed fresh-clone or pool fleet owner
+whose guest stopped before sealing runtime evidence. Exact-owner recovery then
+reports "original-volume runtime archive required". This helper:
+
+1. checks the exact owner, run, task, Machine and volume against the durable
+   registry/audit records and the native Fly Machines API. It refuses a foreign
+   or live owner, a held recovery lock, changed or unsupported configs, running
+   or destroyed resources and any existing capture, before any provider mutation;
+2. saves the exact original Machine config privately;
+3. replaces only ``init.cmd`` with ``sleep infinity`` while the Machine is
+   stopped, then boots it. No inherited ``init.exec``/``init.entrypoint`` is
+   allowed, and the guest must show no driver process, so the original driver
+   cannot run again;
+4. copies the original ``/data`` files read-only into ``<machine-id>.tar.gz``
+   using the same file contract as ``cloudbench-startup-failure-archive.py``
+   (``original_files``), so members match what
+   ``cloudbench-build-interrupted-pool-archive.py`` consumes. Absent files are
+   recorded as missing and never created;
+5. stops the Machine, restores the exact original config without starting it,
+   proves the native stopped state and attached volume, and writes a
+   zero-credit provenance receipt.
+
+It never deletes, releases or reaps a Machine, volume, claim or receipt. If
+any step fails after the inert config was applied, the helper stops the
+Machine, restores the original config once stopped, and writes
+``<machine-id>.capture-failure.json`` instead of a capture. If that cleanup
+cannot finish, ``--restore-original-config`` with the same capture directory
+completes only the stop and restore steps.
+
+Usage (from the controller's workspace):
+  python3 scripts/cloudbench-original-volume-capture.py \\
+    --registry <git-common>/cloudbench-fleet-ownership/<owner-token> \\
+    --bench <task> --machine-id <id> --volume-id <vol_id> \\
+    --capture-dir <absolute-private-directory> [--preflight-only]
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import ctypes
+import errno
+import hashlib
+import io
+import json
+import os
+import re
+import runpy
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+SCHEMA = "cloudbench-original-volume-capture-v1"
+DRIVER_CMD = ["bash", "/cloudbench-boot.sh"]
+INERT_CMD = ["sleep", "infinity"]
+DATA_PATH = "/data"
+INVENTORY_MARKER = "CLOUDBENCH_ORIGINAL_VOLUME_INVENTORY="
+ERROR_MARKER = "CLOUDBENCH_ORIGINAL_VOLUME_ERROR="
+MAX_TOTAL_BYTES = 512 * 1024 * 1024
+# The archive builder admits regular members whose names match this pattern.
+MEMBER_NAME = re.compile(r"[A-Za-z0-9._/-]+")
+SAFE_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
+LOG_NAME = re.compile(r"[A-Za-z0-9._-]+\.log")
+CONTEXT = "repo/.context/cloudbench/"
+LOG_DIR = CONTEXT + "logs/"
+# Any live process carrying one of these markers means the guest is not inert.
+FORBIDDEN_GUEST_MARKERS = (
+    "cloudbench-boot",
+    "cloudbench-run.sh",
+    "cloudbench-status-server",
+    "cloudbench-worker",
+    "/data/repo",
+)
+EXIT_REFUSED = 3
+EXIT_FAILED = 1
+
+
+STARTUP_ARCHIVE = "cloudbench-startup-failure-archive.py"
+# Driver-written interrupt receipts and live progress beyond the shared set.
+EXTRA_ORIGINALS = (
+    "cloudbench-interrupt-cleanup-{token}.status",
+    CONTEXT + "cloudbench-interrupt-cleanup-{token}.status",
+    CONTEXT + "report-card.json",
+)
+
+
+def extra_names(token: str) -> list[str]:
+    return [name.format(token=token) for name in EXTRA_ORIGINALS]
+
+
+def sibling(name: str) -> dict:
+    return runpy.run_path(str(Path(__file__).resolve().with_name(name)))
+
+
+def original_file_contract() -> dict:
+    """The original guest file set shared with the startup-failure capture."""
+    return sibling(STARTUP_ARCHIVE)
+
+
+def expected_names(token: str) -> set[str]:
+    return original_file_contract()["original_names"](token) | set(extra_names(token))
+
+
+def allowed_name(name: str, fixed: set[str]) -> bool:
+    if name in fixed:
+        return True
+    return name.startswith(LOG_DIR) and LOG_NAME.fullmatch(name[len(LOG_DIR):]) is not None
+
+
+# ── Guest side: runs on the inert guest from an ephemeral /tmp directory ────
+
+
+class GuestRefusal(Exception):
+    pass
+
+
+def _scan_processes(proc: Path) -> tuple[int, list[dict[str, object]]]:
+    own = {os.getpid(), os.getppid()}
+    sleepers = 0
+    forbidden = []
+    for entry in os.listdir(proc):
+        if not entry.isdigit() or int(entry) in own:
+            continue
+        try:
+            raw = (proc / entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+        if argv in (INERT_CMD, ["/bin/sleep", "infinity"], ["/usr/bin/sleep", "infinity"]):
+            sleepers += 1
+        if any(marker in arg for arg in argv for marker in FORBIDDEN_GUEST_MARKERS):
+            forbidden.append({"pid": int(entry), "argv0": os.path.basename(argv[0]) if argv else ""})
+    return sleepers, forbidden
+
+
+def guest_collect(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="cloudbench-original-volume-capture guest-collect")
+    parser.add_argument("--data", required=True)
+    parser.add_argument("--run-token", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--proc", default="/proc")
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        if not SAFE_TOKEN.fullmatch(args.run_token):
+            raise GuestRefusal("unsafe run token")
+        sleepers, forbidden = _scan_processes(Path(args.proc))
+        if forbidden or sleepers < 1:
+            raise GuestRefusal(f"guest is not inert: sleepers={sleepers} forbidden={forbidden}")
+        contract = original_file_contract()
+        extra = extra_names(args.run_token)
+        # Read-only originals; absent files are reported, never created.
+        files, missing = contract["original_files"](args.data, args.run_token, extra)
+        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as raw:
+            with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+                for name in sorted(files):
+                    info = tarfile.TarInfo(name)
+                    info.size, info.mode, info.mtime = len(files[name]), 0o600, 0
+                    archive.addfile(info, io.BytesIO(files[name]))
+            raw.flush()
+            os.fsync(raw.fileno())
+        if contract["original_files"](args.data, args.run_token, extra) != (files, missing):
+            raise GuestRefusal("original files changed during capture")
+        with open(args.output, "rb") as built:
+            data = built.read()
+        inventory = {
+            "version": 1,
+            "run_token": args.run_token,
+            "files": {name: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                      for name, content in sorted(files.items())},
+            "missing": sorted(missing),
+            "archive_bytes": len(data),
+            "archive_sha256": hashlib.sha256(data).hexdigest(),
+            "inert_sleepers": sleepers,
+        }
+        print(INVENTORY_MARKER + json.dumps(inventory, sort_keys=True, separators=(",", ":")), flush=True)
+        return 0
+    except (GuestRefusal, OSError, ValueError, tarfile.TarError) as error:
+        print(ERROR_MARKER + json.dumps({"error": str(error)[:500]}), flush=True)
+        return EXIT_REFUSED
+
+
+# ── Controller side ──────────────────────────────────────────────────────────
+
+
+class Refusal(Exception):
+    """Preflight refusal: no provider mutation was attempted."""
+
+
+class CaptureFailure(Exception):
+    """A failure after the first provider mutation."""
+
+
+class NotFound(Exception):
+    pass
+
+
+def regular_bytes(path: Path, limit: int = 1048576) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise Refusal(f"missing or unsafe file: {path} ({error.strerror})") from None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise Refusal(f"unsafe or oversized file: {path}")
+        data = stream.read(info.st_size + 1)
+    if len(data) != info.st_size:
+        raise Refusal(f"file changed during read: {path}")
+    return data
+
+
+def fields(path: Path) -> dict[str, str]:
+    pairs = [line.split("=", 1) for line in regular_bytes(path, 65536).decode().splitlines()]
+    if any(len(pair) != 2 for pair in pairs) or len(dict(pairs)) != len(pairs):
+        raise Refusal(f"malformed record: {path}")
+    return dict(pairs)
+
+
+def json_file(path: Path, limit: int = 1048576):
+    try:
+        return json.loads(regular_bytes(path, limit))
+    except json.JSONDecodeError:
+        raise Refusal(f"malformed JSON: {path}") from None
+
+
+def lexists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def exact_directory(path: Path, label: str) -> Path:
+    if not path.is_absolute() or path.resolve() != path or not path.is_dir() or path.is_symlink():
+        raise Refusal(f"{label} is not an exact absolute directory: {path}")
+    return path
+
+
+def bash_lib(library: str, call: list[str], *, cwd: Path | None = None, timeout: int = 30) -> str:
+    """Call an existing scripts/lib primitive instead of reimplementing it."""
+    script = Path(__file__).resolve().parent / "lib" / library
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1" >/dev/null; shift; "$@"', "cloudbench-capture", str(script), *call],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise Refusal(f"{call[0]} failed (exit {result.returncode})")
+    return result.stdout.strip()
+
+
+def pid_birth_state(pid: str, start: str) -> str:
+    return bash_lib("cloudbench-env.sh", ["cloudbench_pid_birth_state", pid, start])
+
+
+def run_bounded(argv: list[str], seconds: float, env: dict[str, str]) -> tuple[int, bytes, bytes]:
+    """Bounded child with process-group cleanup; 142 on deadline like fly_with_timeout."""
+    process = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, start_new_session=True,
+    )
+
+    def terminate() -> None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                return
+            try:
+                process.wait(timeout=2)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+        return process.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        terminate()
+        stdout, stderr = process.communicate()
+        return 142, stdout, stderr
+    except BaseException:
+        # An interrupt must not strand a detached flyctl session.
+        terminate()
+        raise
+
+
+def flyctl_binary() -> str:
+    found = shutil.which("flyctl")
+    if not found:
+        fallback = Path.home() / ".fly/bin/flyctl"
+        if os.access(fallback, os.X_OK):
+            found = str(fallback)
+    if not found:
+        raise Refusal("flyctl not found on PATH")
+    return found
+
+
+class Fly:
+    """Raw Machines API for exact config reads/writes; flyctl for guest SSH/SFTP."""
+
+    def __init__(self, app: str, token: str) -> None:
+        import urllib.parse
+
+        self.app = app
+        self.binary = flyctl_binary()
+        self.env = {**os.environ, "FLY_API_TOKEN": token}
+        host = os.environ.get("FLY_API_HOSTNAME", "https://api.machines.dev").rstrip("/")
+        if not host.startswith(("https://", "http://")):
+            host = "https://" + host
+        endpoint = urllib.parse.urlsplit(host)
+        self.loopback = endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
+        if endpoint.scheme != "https" and not (endpoint.scheme == "http" and self.loopback):
+            raise Refusal("Machines API endpoint must use HTTPS")
+        self.base = host
+        self.authorization = self._authorization(token)
+
+    def _authorization(self, token: str) -> str:
+        # Same credential handling as cloudbench_publish_warm_deps_state: session
+        # tokens are refreshed through the selected flyctl session, never logged.
+        scheme = "Bearer"
+        for prefix in ("Bearer ", "FlyV1 "):
+            if token.startswith(prefix):
+                scheme, token = prefix.strip(), token[len(prefix):].strip()
+                break
+        if token.startswith(("fm1r_", "fm1a_", "fm2_")):
+            env = {**self.env}
+            env.pop("FLY_ACCESS_TOKEN", None)
+            rc, stdout, _ = run_bounded([self.binary, "auth", "token", "--json", "--quiet"], 60, env)
+            try:
+                refreshed = json.loads(stdout).get("token") if rc == 0 else None
+            except (ValueError, AttributeError):
+                refreshed = None
+            if not isinstance(refreshed, str) or not refreshed.strip():
+                raise Refusal("could not refresh the selected Fly session")
+            token, scheme = refreshed.strip(), "FlyV1"
+            for prefix in ("Bearer ", "FlyV1 "):
+                if token.startswith(prefix):
+                    scheme, token = prefix.strip(), token[len(prefix):].strip()
+                    break
+        if not token:
+            raise Refusal("empty Fly credential")
+        return f"{scheme} {token}"
+
+    def api(self, method: str, path: str, body: object | None = None, timeout: int = 60):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        url = self.base + "/v1/apps/" + urllib.parse.quote(self.app, safe="") + path
+        data = (b"" if method == "POST" else None) if body is None else json.dumps(body).encode()
+        request = urllib.request.Request(url, data=data, method=method, headers={
+            "Authorization": self.authorization, "Content-Type": "application/json"})
+        handlers = [urllib.request.ProxyHandler({})] if self.loopback else []
+        opener = urllib.request.build_opener(*handlers)
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                payload = response.read(256 * 1024 * 1024)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                raise NotFound(path) from None
+            detail = error.read(200).decode("utf-8", "replace")
+            raise CaptureFailure(f"Machines API {method} {path} returned HTTP {error.code}: {detail}") from None
+        except (urllib.error.URLError, OSError) as error:
+            raise CaptureFailure(f"Machines API {method} {path} failed: {error}") from None
+        return json.loads(payload) if payload.strip() else {}
+
+    def machine(self, machine_id: str) -> dict:
+        value = self.api("GET", f"/machines/{machine_id}")
+        if not isinstance(value, dict) or value.get("id") != machine_id:
+            raise CaptureFailure("native Machine read is not exact")
+        return value
+
+    def volume(self, volume_id: str) -> dict:
+        value = self.api("GET", f"/volumes/{volume_id}")
+        if not isinstance(value, dict) or value.get("id") != volume_id:
+            raise CaptureFailure("native volume read is not exact")
+        return value
+
+    def flyctl(self, seconds: int, *args: str) -> tuple[int, str, str]:
+        rc, stdout, stderr = run_bounded([self.binary, *args], seconds, self.env)
+        return rc, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
+
+def validate_original_config(config: object, ident: dict) -> None:
+    readiness = sibling("cloudbench-machine-readiness.py")
+    if not isinstance(config, dict) or not readiness["startup_command_overridable"](config):
+        raise Refusal("Machine startup cannot be made inert by replacing init.cmd alone")
+    init, env, mounts = config.get("init") or {}, config.get("env"), config.get("mounts")
+    if init.get("cmd") != DRIVER_CMD:
+        raise Refusal(f"Machine config changed: init.cmd is {init.get('cmd')!r}, not the original boot driver")
+    if not isinstance(env, dict) or env.get("CLOUDBENCH_RUN_TOKEN") != ident["token"]:
+        raise Refusal("native Machine config belongs to a different guest run token")
+    if (
+        not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict)
+        or mounts[0].get("volume") != ident["volume_id"] or mounts[0].get("path") != DATA_PATH
+    ):
+        raise Refusal("native Machine does not mount exactly the owned volume at /data")
+    if "@sha256:" not in str(config.get("image", "")):
+        raise Refusal("native Machine image is not digest-pinned")
+    for key in ("services", "containers", "processes", "standbys", "schedule"):
+        if config.get(key):
+            raise Refusal(f"unsupported Machine config: {key} is set")
+    if config.get("auto_destroy"):
+        raise Refusal("unsupported Machine config: auto_destroy is set")
+
+
+def local_identity(args: argparse.Namespace) -> dict:
+    """Exact durable owner/run/task/resource binding; read-only."""
+    registry = exact_directory(args.registry, "registry")
+    owner = registry.name
+    if not re.fullmatch(r"[0-9a-f]{32}", owner):
+        raise Refusal("registry is not an exact fleet owner token")
+    meta = fields(registry / "meta")
+    if meta.get("version") != "2" or meta.get("fleet_owner_token") != owner:
+        raise Refusal("registry belongs to a foreign owner")
+    if meta.get("cleanup_policy") != "reap":
+        raise Refusal("owner cleanup policy is not reap")
+    if meta.get("host") != socket.gethostname():
+        raise Refusal("owner belongs to another host")
+    if not re.fullmatch(r"[0-9]+", meta.get("pid", "")) or not meta.get("pid_start"):
+        raise Refusal("owner process identity is invalid")
+    if pid_birth_state(meta["pid"], meta["pid_start"]) != "absent":
+        raise Refusal("original owner controller is not proven dead")
+    if lexists(registry / "guest-cleanup-unconfirmed"):
+        raise Refusal("guest cleanup is unconfirmed; run exact-owner recovery first")
+    latch = registry / "runtime-evidence-unconfirmed"
+    if not latch.is_file() or latch.is_symlink():
+        raise Refusal("runtime evidence latch is not retained; no capture is required")
+    run_id = meta.get("run_id", "")
+    if not SAFE_TOKEN.fullmatch(run_id):
+        raise Refusal("unsafe run id")
+    run = exact_directory(Path(meta.get("runs_root", "")) / run_id, "run")
+    audit = exact_directory(Path(meta.get("audit_dir", "")), "audit")
+    workspace = exact_directory(Path(meta.get("workspace_root", "")), "workspace")
+    audit_meta = fields(audit / "meta")
+    if audit.name != owner or any(audit_meta.get(k) != meta.get(k) for k in ("fleet_owner_token", "run_id", "app")):
+        raise Refusal("audit record belongs to a foreign owner")
+    if not SAFE_TOKEN.fullmatch(meta.get("app", "")):
+        raise Refusal("unsafe Fly app")
+    lifecycle = json_file(run / "_batch/lifecycle.json")
+    if (
+        not isinstance(lifecycle, dict) or lifecycle.get("status") != "failed" or lifecycle.get("fleet_owner_token") != owner
+        or lifecycle.get("run_id") != run_id or type(lifecycle.get("controller_exit_code")) is not int
+        or lifecycle["controller_exit_code"] == 0
+    ):
+        raise Refusal("fleet run is not terminal and failed")
+    tasks = json_file(run / "_batch/benches.json")
+    names = [row.get("name") for row in tasks if isinstance(row, dict)] if isinstance(tasks, list) else []
+    if not isinstance(tasks, list) or len(names) != len(tasks):
+        raise Refusal("run task catalog is malformed")
+    if not names or len(set(names)) != len(names) or args.bench not in names or not SAFE_TOKEN.fullmatch(args.bench):
+        raise Refusal("task is not exactly one slot of this run")
+    ordinal = names.index(args.bench)
+    token = f"{owner}-{ordinal}"
+    out = exact_directory(run / args.bench, "task output")
+    cid = regular_bytes(out / ".cid", 256).decode().split()
+    if len(cid) != 2 or cid[0] not in {"clone", "pool"} or not re.fullmatch(r"[0-9a-f]{14}", cid[1]):
+        raise Refusal("task is not bound to one fresh-clone or pool Machine")
+    kind, machine = cid
+    if machine != args.machine_id:
+        raise Refusal("requested Machine is not the task's exact Machine")
+    record = {"version": 1, "machine_id": machine, "run_token": token}
+    if json_file(out / "runtime-evidence.owner.json") != record or json_file(out / "runtime-evidence.pending") != record:
+        raise Refusal("runtime evidence ownership is not exactly this guest")
+    if regular_bytes(out / "post-config-start.accepted", 256) != (machine + "\n").encode():
+        raise Refusal("guest was never admitted with its boot config; not a post-start capture")
+    if regular_bytes(out / "guest-shutdown.confirmed", 256) != (run_id + "\n").encode():
+        raise Refusal("guest shutdown is not confirmed for this run")
+    if lexists(out / "remote-logs/runtime-evidence/manifest.json"):
+        raise Refusal("sealed runtime evidence exists; original-volume capture is not required")
+    if lexists(run / "_forensic"):
+        raise Refusal("a forensic archive already exists for this run")
+    clone = None
+    if kind == "clone":
+        clone = regular_bytes(audit / "by-machine-id" / machine, 256).decode().strip()
+        if not re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", clone):
+            raise Refusal("unsafe clone index")
+        fresh = fields(audit / "fresh" / clone)
+        volume = fresh.get("volume_id", "")
+        expected = {"version": "1", "fleet_owner_token": owner, "run_id": run_id, "app": meta["app"],
+                    "source": "fresh-clone", "clone_name": clone, "machine_id": machine, "disposition": "owned"}
+        if any(fresh.get(k) != v for k, v in expected.items()):
+            raise Refusal("fresh-clone audit record is not exactly owned by this run")
+        if fields(registry / "clones" / clone) != {"name": clone, "id": machine, "volume_id": volume}:
+            raise Refusal("registry clone claim is not exact")
+    else:
+        pool = fields(audit / "pool" / machine)
+        volume = pool.get("volume_id", "")
+        expected = {"fleet_owner_token": owner, "run_id": run_id, "app": meta["app"],
+                    "source": "borrowed-pool", "disposition": "claimed"}
+        if any(pool.get(k) != v for k, v in expected.items()):
+            raise Refusal("pool audit record is not exactly claimed by this run")
+    if not re.fullmatch(r"vol_[A-Za-z0-9]+", volume) or volume != args.volume_id:
+        raise Refusal("requested volume is not the task's exact owned volume")
+    return {
+        "registry": registry, "owner": owner, "meta": meta, "run": run, "run_id": run_id, "out": out,
+        "audit": audit, "workspace": workspace, "app": meta["app"], "bench": args.bench,
+        "ordinal": ordinal, "token": token, "kind": kind, "machine_id": machine,
+        "volume_id": volume, "clone_name": clone,
+    }
+
+
+def native_preflight(fly: Fly, ident: dict) -> tuple[dict, dict]:
+    try:
+        machine = fly.machine(ident["machine_id"])
+    except NotFound:
+        raise Refusal("Machine is already destroyed") from None
+    except CaptureFailure as error:
+        raise Refusal(str(error)) from None
+    if machine.get("state") != "stopped":
+        raise Refusal(f"Machine state is {machine.get('state')!r}, not stopped")
+    if ident["clone_name"] is not None and machine.get("name") != ident["clone_name"]:
+        raise Refusal("native Machine name is not the owned clone name")
+    validate_original_config(machine.get("config"), ident)
+    try:
+        volume = fly.volume(ident["volume_id"])
+    except NotFound:
+        raise Refusal("volume is already destroyed") from None
+    except CaptureFailure as error:
+        raise Refusal(str(error)) from None
+    if volume.get("state") not in sibling("cloudbench-machine-readiness.py")["MOUNTABLE_VOLUME_STATES"]:
+        raise Refusal(f"volume state is {volume.get('state')!r}")
+    if volume.get("attached_machine_id") != ident["machine_id"]:
+        raise Refusal("volume is not attached to the exact Machine")
+    return machine, volume
+
+
+def private_capture_dir(path: Path, create: bool) -> Path:
+    if not path.is_absolute():
+        raise Refusal("capture directory must be absolute")
+    if not create and not lexists(path):
+        return path
+    if create and not lexists(path):
+        os.makedirs(path, mode=0o700)
+    info = path.lstat() if lexists(path) else None
+    if info is None or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise Refusal("capture directory must be a private (0700) directory owned by this user")
+    return path
+
+
+def rename_noreplace(source: Path, target: Path) -> None:
+    # Same exclusive publication as cloudbench-worker-evidence.py: complete
+    # bytes appear once, never replace an existing file, and never hard-link.
+    libc = ctypes.CDLL(None, use_errno=True)
+    src, dst = ctypes.c_char_p(os.fsencode(source)), ctypes.c_char_p(os.fsencode(target))
+    if sys.platform == "linux":
+        result = libc.renameat2(-100, src, -100, dst, 1)
+    elif sys.platform == "darwin":
+        result = libc.renamex_np(src, dst, 4)
+    else:
+        raise OSError(errno.ENOSYS, "exclusive publication requires Linux or Darwin")
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(target))
+
+
+def fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def publish_bytes(path: Path, data: bytes) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        rename_noreplace(Path(temporary), path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    fsync_directory(path.parent)
+
+
+class Journal:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __call__(self, event: str, **detail: object) -> None:
+        line = json.dumps({"at": int(time.time()), "event": event, **detail}, sort_keys=True) + "\n"
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a") as stream:
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+class RecoveryLock:
+    """The same <registry>/recovery-lock exact-owner recovery holds."""
+
+    def __init__(self, registry: Path) -> None:
+        self.lock = registry / "recovery-lock"
+        self.payload = b""
+
+    def acquire(self) -> None:
+        host = socket.gethostname()
+        start = bash_lib("cloudbench-env.sh", ["cloudbench_pid_start_time", str(os.getpid())])
+        if not start:
+            raise Refusal("could not record this helper's process birth")
+        for _ in range(2):
+            try:
+                os.mkdir(self.lock, 0o700)
+            except FileExistsError:
+                holder = fields(self.lock / "meta")
+                state = (pid_birth_state(holder.get("pid", ""), holder.get("pid_start", ""))
+                         if holder.get("host") == host else "unknown")
+                if state != "absent":
+                    raise Refusal(f"exact-owner recovery lock is held ({state}); retry after it exits") from None
+                (self.lock / "meta").unlink()
+                os.rmdir(self.lock)
+                continue
+            self.payload = f"host={host}\npid={os.getpid()}\npid_start={start}\n".encode()
+            temporary = self.lock / f"meta.tmp.{os.getpid()}"
+            temporary.write_bytes(self.payload)
+            os.replace(temporary, self.lock / "meta")
+            return
+        raise Refusal("could not acquire the exact-owner recovery lock")
+
+    def release(self) -> None:
+        # Remove only this helper's exact lock; never another holder's.
+        try:
+            if self.payload and regular_bytes(self.lock / "meta", 4096) == self.payload:
+                (self.lock / "meta").unlink()
+                os.rmdir(self.lock)
+        except (Refusal, OSError) as error:
+            print(f"⚠️ recovery lock was not released: {error}", file=sys.stderr)
+        self.payload = b""
+
+
+def wait_for(fly: Fly, machine_id: str, predicate, seconds: int, label: str) -> dict:
+    deadline = time.monotonic() + seconds
+    last = None
+    while True:
+        try:
+            last = fly.machine(machine_id)
+        except NotFound:
+            raise CaptureFailure(f"Machine disappeared while waiting for {label}") from None
+        if predicate(last):
+            return last
+        if time.monotonic() >= deadline:
+            raise CaptureFailure(f"Machine did not reach {label} within {seconds}s (state={last.get('state')!r})")
+        time.sleep(float(os.environ.get("CLOUDBENCH_CAPTURE_POLL_SECONDS", "2")))
+
+
+def inert_variant(original: dict) -> dict:
+    inert = copy.deepcopy(original)
+    inert["init"]["cmd"] = list(INERT_CMD)
+    return inert
+
+
+def stop_and_restore(fly: Fly, ident: dict, original: dict, journal: Journal, seconds: int) -> dict:
+    """Return this helper's inert boot to the exact original stopped config.
+
+    It only stops a Machine running the inert config and never updates a live
+    Machine; any other native state is reported untouched.
+    """
+    machine_id = ident["machine_id"]
+    current = fly.machine(machine_id)
+    # A config-only update can leave a never-started replacement "created";
+    # that state runs nothing, so only a live state needs an explicit stop.
+    idle = ("stopped", "created")
+    if current.get("config") == original:
+        if current.get("state") not in idle:
+            raise CaptureFailure("Machine is live with its original config; refusing to act on it")
+        journal("restored", instance_id=current.get("instance_id"))
+        return current
+    if current.get("config") != inert_variant(original):
+        raise CaptureFailure("Machine config is neither the original nor this helper's inert config")
+    if current.get("state") not in idle:
+        journal("stop-requested", state=current.get("state"))
+        fly.api("POST", f"/machines/{machine_id}/stop", {})
+        current = wait_for(fly, machine_id, lambda m: m.get("state") == "stopped", seconds, "stopped")
+    journal("stopped", instance_id=current.get("instance_id"))
+    if current.get("config") != original:
+        if current.get("state") not in idle:
+            raise CaptureFailure("refusing to restore the original config on a live Machine")
+        fly.api("POST", f"/machines/{machine_id}", {"config": original, "skip_launch": True})
+        journal("restore-requested")
+        current = wait_for(
+            fly, machine_id, lambda m: m.get("state") == "stopped" and m.get("config") == original,
+            seconds, "stopped with the exact original config",
+        )
+    journal("restored", instance_id=current.get("instance_id"))
+    return current
+
+
+def guest_capture(fly: Fly, ident: dict, capture_dir: Path, journal: Journal,
+                  attempts: int, ssh_seconds: int) -> tuple[Path, dict]:
+    """Mirror the startup-failure capture transport on the inert guest's rootfs /tmp."""
+    machine_id, token = ident["machine_id"], ident["token"]
+    here = Path(__file__).resolve()
+    helpers = (here, here.with_name(STARTUP_ARCHIVE))
+    base = ["-a", ident["app"], "--machine", machine_id]
+    poll = float(os.environ.get("CLOUDBENCH_CAPTURE_POLL_SECONDS", "2"))
+    last_error = "no attempt"
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            time.sleep(poll * 2.5 * attempt)
+        remote = f"/tmp/cloudbench-original-capture-{os.urandom(8).hex()}"
+        rc, _, err = fly.flyctl(ssh_seconds, "ssh", "console", *base, "-C", f"mkdir -m 700 {remote}")
+        for helper in helpers if rc == 0 else ():
+            rc, _, err = fly.flyctl(ssh_seconds, "ssh", "sftp", "put", *base, "-q", "-m", "0600",
+                                    str(helper), f"{remote}/{helper.name}")
+            if rc != 0:
+                break
+        if rc != 0:
+            last_error = f"collector upload failed (exit {rc}): {err.strip()[:200]}"
+            journal("guest-retry", attempt=attempt, reason=last_error)
+            continue
+        command = (f"python3 -I -B {remote}/{here.name} guest-collect --data {DATA_PATH} "
+                   f"--run-token {token} --output {remote}/originals.tar.gz")
+        rc, out, err = fly.flyctl(ssh_seconds, "ssh", "console", *base, "-C", command)
+        lines = [line.strip() for line in out.splitlines() if line.startswith((INVENTORY_MARKER, ERROR_MARKER))]
+        if len(lines) == 1 and lines[0].startswith(ERROR_MARKER):
+            raise CaptureFailure("guest refused capture: " + json.loads(lines[0][len(ERROR_MARKER):])["error"])
+        if rc != 0 or len(lines) != 1:
+            last_error = f"collector failed (exit {rc}): {err.strip()[:200]}"
+            journal("guest-retry", attempt=attempt, reason=last_error)
+            continue
+        inventory = json.loads(lines[0][len(INVENTORY_MARKER):])
+        local = capture_dir / f".{machine_id}.{remote.rsplit('-', 1)[-1]}.tar.gz.unverified"
+        rc, _, err = fly.flyctl(ssh_seconds, "ssh", "sftp", "get", *base, f"{remote}/originals.tar.gz", str(local))
+        if rc != 0 or not local.is_file() or local.is_symlink():
+            last_error = f"capture download failed (exit {rc}): {err.strip()[:200]}"
+            journal("guest-retry", attempt=attempt, reason=last_error)
+            continue
+        os.chmod(local, 0o600)
+        journal("downloaded", attempt=attempt, archive_sha256=inventory.get("archive_sha256"))
+        return local, inventory
+    raise CaptureFailure(f"guest capture failed after {attempts} attempts: {last_error}")
+
+
+def verify_capture(local: Path, inventory: dict, ident: dict) -> dict[str, bytes]:
+    token = ident["token"]
+    data = local.read_bytes()
+    files, missing = inventory.get("files"), inventory.get("missing")
+    if (
+        inventory.get("version") != 1 or inventory.get("run_token") != token
+        or not isinstance(files, dict) or not isinstance(missing, list)
+        or len(data) != inventory.get("archive_bytes") or sha(data) != inventory.get("archive_sha256")
+    ):
+        raise CaptureFailure("downloaded capture differs from the guest inventory")
+    fixed = expected_names(token)
+    if set(missing) - fixed or set(missing) & set(files) or len(set(missing)) != len(missing):
+        raise CaptureFailure("guest missing-file inventory is invalid")
+    originals: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        for member in archive:
+            name = member.name
+            if (
+                not member.isfile() or name in originals or not MEMBER_NAME.fullmatch(name)
+                or ".." in Path(name).parts or name.startswith("/") or not allowed_name(name, fixed)
+            ):
+                raise CaptureFailure(f"unsafe capture member: {name!r}")
+            stream = archive.extractfile(member)
+            content = stream.read(member.size + 1) if stream else b""
+            row = files.get(name) or {}
+            if len(content) != member.size or row.get("bytes") != member.size or row.get("sha256") != sha(content):
+                raise CaptureFailure(f"capture member differs from the guest inventory: {name}")
+            originals[name] = content
+    if set(originals) != set(files) or sum(map(len, originals.values())) > MAX_TOTAL_BYTES:
+        raise CaptureFailure("capture members differ from the guest inventory")
+    if not originals.get("bench.log", b"").startswith(f"RUNSTAMP-{token}\n".encode()):
+        raise CaptureFailure("original bench.log is absent or not stamped with this guest run token")
+    return originals
+
+
+def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) -> dict[str, str]:
+    """Bind the capture to the earlier exact recovery observation of the same guest."""
+    checks: dict[str, str] = {}
+    state_path = out / "guest-cleanup.state.json"
+    if lexists(state_path):
+        state = json_file(state_path)
+        if state.get("machine_id") == ident["machine_id"] and state.get("guest_run_token") == ident["token"]:
+            for key, name in (("services_manifest", CONTEXT + "services.json"), ("run_json", CONTEXT + "run.json"),
+                              ("backend_log", LOG_DIR + "backend.log")):
+                if key not in state:
+                    continue
+                observed = state.get(key) or {}
+                if observed.get("exists") is not (name in originals) or (
+                    name in originals and observed.get("bytes") != len(originals[name])
+                ):
+                    raise CaptureFailure(f"capture contradicts the recovery observation of {name}")
+            checks["guest-cleanup.state.json"] = sha(regular_bytes(state_path))
+    manifest_path = out / "guest-cleanup.provider-manifest.json"
+    if lexists(manifest_path):
+        manifest = json_file(manifest_path)
+        if manifest.get("machine_id") == ident["machine_id"] and manifest.get("guest_run_token") == ident["token"]:
+            evidence = manifest.get("evidence") or {}
+            for key, name in (("backend_log_sha256", LOG_DIR + "backend.log"), ("run_json_sha256", CONTEXT + "run.json")):
+                if evidence.get(key) and (name not in originals or sha(originals[name]) != evidence[key]):
+                    raise CaptureFailure(f"capture contradicts the recovery manifest hash of {name}")
+            checks["guest-cleanup.provider-manifest.json"] = sha(regular_bytes(manifest_path))
+    return checks
+
+
+def final_native_proof(fly: Fly, ident: dict, original: dict) -> tuple[dict, dict]:
+    machine = fly.machine(ident["machine_id"])
+    volume = fly.volume(ident["volume_id"])
+    if machine.get("state") != "stopped" or machine.get("config") != original:
+        raise CaptureFailure("final native Machine is not stopped with the exact original config")
+    if volume.get("attached_machine_id") != ident["machine_id"] or volume.get("state") != "created":
+        raise CaptureFailure("final native volume is not attached to the exact Machine")
+    return machine, volume
+
+
+def resolve_token(ident: dict) -> str:
+    token = bash_lib("cloudbench-inventory.sh", ["resolve_fly_token"], cwd=ident["workspace"])
+    if not token:
+        raise Refusal("no Fly credential is available")
+    return token
+
+
+def capture(args: argparse.Namespace) -> int:
+    ident = local_identity(args)
+    capture_dir = private_capture_dir(args.capture_dir, create=not args.preflight_only)
+    machine_id = ident["machine_id"]
+    artifacts = {name: capture_dir / f"{machine_id}.{name}" for name in (
+        "tar.gz", "provenance.json", "original-config.private.json", "capture-failure.json")}
+    if any(lexists(path) for path in artifacts.values()):
+        raise Refusal("capture directory already holds artifacts for this Machine; use a fresh directory "
+                      "or --restore-original-config")
+    fly = Fly(ident["app"], resolve_token(ident))
+    if args.preflight_only:
+        # Read-only: no recovery lock, capture directory or provider mutation.
+        native_preflight(fly, ident)
+        print(json.dumps({"preflight": "ok", "machine_id": machine_id, "volume_id": ident["volume_id"],
+                          "run_token": ident["token"], "kind": ident["kind"], "proof_credit": 0}))
+        return 0
+    lock = RecoveryLock(ident["registry"])
+    lock.acquire()
+    try:
+        # Recheck durable latches and native state under the lock before mutating.
+        if local_identity(args)["machine_id"] != machine_id:
+            raise Refusal("owner records changed during preflight")
+        machine, _ = native_preflight(fly, ident)
+        return mutate_and_capture(fly, ident, args, capture_dir, artifacts, machine, machine["config"])
+    finally:
+        lock.release()
+
+
+def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts: dict, machine: dict,
+                       original: dict) -> int:
+    machine_id = ident["machine_id"]
+    journal = Journal(capture_dir / f"{machine_id}.capture-journal.jsonl")
+    config_bytes = canonical(original)
+    try:
+        publish_bytes(artifacts["original-config.private.json"], config_bytes + b"\n")
+        journal("original-config-saved", sha256=sha(config_bytes), instance_id=machine.get("instance_id"))
+    except OSError as error:
+        raise Refusal(f"could not save the original config privately: {error}") from None
+    inert = inert_variant(original)
+    stage, mutated, local = "inert-config", False, None
+    mutations: list[str] = []
+
+    def interrupted(signum, _frame):
+        raise CaptureFailure(f"interrupted by signal {signum}")
+
+    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    try:
+        mutated = True
+        mutations.append("config-inert")
+        fly.api("POST", f"/machines/{machine_id}", {"config": inert, "skip_launch": True})
+        wait_for(fly, machine_id, lambda m: m.get("state") == "stopped" and m.get("config") == inert,
+                 args.wait_seconds, "stopped with the inert config")
+        journal("inert-config-applied")
+        stage = "inert-start"
+        mutations.append("start")
+        fly.api("POST", f"/machines/{machine_id}/start")
+        started = wait_for(fly, machine_id, lambda m: m.get("state") == "started", args.wait_seconds, "started")
+        if started.get("config") != inert:
+            raise CaptureFailure("started Machine is not running the exact inert config")
+        journal("inert-started", instance_id=started.get("instance_id"))
+        stage = "guest-capture"
+        local, inventory = guest_capture(fly, ident, capture_dir, journal, args.attempts, args.ssh_seconds)
+        originals = verify_capture(local, inventory, ident)
+        checks = cross_check_receipts(ident["out"], ident, originals)
+        journal("capture-verified", files=len(originals), missing=len(inventory["missing"]))
+        stage = "stop-and-restore"
+        mutations += ["stop", "config-restore"]
+        stop_and_restore(fly, ident, original, journal, args.wait_seconds)
+        stage = "final-native-proof"
+        final_machine, final_volume = final_native_proof(fly, ident, original)
+    except BaseException as error:
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        outcome = {"stopped": None, "restored": False}
+        if mutated:
+            try:
+                restored = stop_and_restore(fly, ident, original, journal, args.wait_seconds)
+                outcome = {"stopped": restored.get("state") == "stopped",
+                           "restored": restored.get("config") == original}
+            except BaseException as cleanup_error:  # keep the original failure visible
+                outcome["cleanup_error"] = str(cleanup_error)[:300]
+        failure = {
+            "schema": SCHEMA, "kind": "original-volume-capture-failed", "proof_credit": 0,
+            "fleet_owner_token": ident["owner"], "run_id": ident["run_id"], "bench": ident["bench"],
+            "machine_id": machine_id, "volume_id": ident["volume_id"], "guest_run_token": ident["token"],
+            "stage": stage, "error": str(error)[:500], "provider_mutations_attempted": mutations, **outcome,
+            "unverified_download": local.name if local else None,
+            "next_step": ("--restore-original-config" if not outcome.get("restored") else
+                          "investigate; rerun with a fresh capture directory"),
+        }
+        publish_bytes(artifacts["capture-failure.json"], canonical(failure) + b"\n")
+        journal("failed", stage=stage, **{k: v for k, v in outcome.items() if k != "cleanup_error"})
+        print(f"❌ original-volume capture failed at {stage}: {str(error)[:300]}", file=sys.stderr)
+        if not outcome.get("restored"):
+            print("❌ the exact original config is NOT proven restored; rerun with "
+                  "--restore-original-config and the same capture directory", file=sys.stderr)
+        return EXIT_FAILED
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    archive_bytes = local.read_bytes()
+    provenance = {
+        "schema": SCHEMA, "version": 1, "kind": "original-volume-inert-capture",
+        "direct_original_volume": True, "proof_credit": 0, "native_release_verified": False,
+        "fleet_owner_token": ident["owner"], "run_id": ident["run_id"], "app": ident["app"],
+        "bench": ident["bench"], "ordinal": ident["ordinal"], "guest_run_token": ident["token"],
+        "allocation_kind": ident["kind"], "clone_name": ident["clone_name"],
+        "machine_id": machine_id, "source_machine_id": machine_id,
+        "volume_id": ident["volume_id"], "source_volume_id": ident["volume_id"],
+        "archive_name": f"{machine_id}.tar.gz", "archive_bytes": len(archive_bytes),
+        "archive_sha256": sha(archive_bytes), "files": inventory["files"], "missing": inventory["missing"],
+        "native_original_config_sha256": sha(config_bytes),
+        "native_original_instance_id": machine.get("instance_id"),
+        "native_final_instance_id": final_machine.get("instance_id"),
+        "native_final_state": final_machine.get("state"),
+        "native_final_volume_state": final_volume.get("state"),
+        "inert_command": INERT_CMD, "guest_inert_sleepers": inventory.get("inert_sleepers"),
+        "provider_mutations": mutations, "receipt_cross_checks": checks,
+        "capture_helper_sha256": sha(Path(__file__).resolve().read_bytes()),
+        "captured_at": int(time.time()),
+    }
+    publish_bytes(artifacts["provenance.json"], canonical(provenance) + b"\n")
+    rename_noreplace(local, artifacts["tar.gz"])
+    fsync_directory(capture_dir)
+    journal("published", archive_sha256=provenance["archive_sha256"])
+    print(json.dumps({"captured": True, "machine_id": machine_id, "archive": str(artifacts["tar.gz"]),
+                      "files": len(inventory["files"]), "missing": inventory["missing"],
+                      "native_final_state": "stopped", "proof_credit": 0}, sort_keys=True))
+    return 0
+
+
+def restore_only(args: argparse.Namespace) -> int:
+    """Finish an interrupted capture's stop and exact-config restore; nothing else."""
+    ident = local_identity(args)
+    capture_dir = private_capture_dir(args.capture_dir, create=False)
+    machine_id = ident["machine_id"]
+    snapshot = capture_dir / f"{machine_id}.original-config.private.json"
+    original = json_file(snapshot, 16 * 1024 * 1024)
+    validate_original_config(original, ident)
+    lock = RecoveryLock(ident["registry"])
+    lock.acquire()
+    try:
+        fly = Fly(ident["app"], resolve_token(ident))
+        try:
+            current = fly.machine(machine_id)
+        except NotFound:
+            raise Refusal("Machine is already destroyed") from None
+        if current.get("config") not in (original, inert_variant(original)):
+            raise Refusal("native config is neither the saved original nor its inert variant")
+        journal = Journal(capture_dir / f"{machine_id}.capture-journal.jsonl")
+        try:
+            stop_and_restore(fly, ident, original, journal, args.wait_seconds)
+            final_native_proof(fly, ident, original)
+        except CaptureFailure as error:
+            print(f"❌ restore did not verify: {error}", file=sys.stderr)
+            return EXIT_FAILED
+        print(json.dumps({"restored": True, "machine_id": machine_id, "native_final_state": "stopped",
+                          "proof_credit": 0}, sort_keys=True))
+        return 0
+    finally:
+        lock.release()
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["guest-collect"]:
+        return guest_collect(argv[1:])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--bench", required=True)
+    parser.add_argument("--machine-id", required=True)
+    parser.add_argument("--volume-id", required=True)
+    parser.add_argument("--capture-dir", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--preflight-only", action="store_true")
+    mode.add_argument("--restore-original-config", action="store_true")
+    parser.add_argument("--wait-seconds", type=int, default=300)
+    parser.add_argument("--ssh-seconds", type=int, default=300)
+    parser.add_argument("--attempts", type=int, default=5)
+    args = parser.parse_args(argv)
+    try:
+        return restore_only(args) if args.restore_original_config else capture(args)
+    except Refusal as error:
+        print(f"❌ refused: {error}", file=sys.stderr)
+        return EXIT_REFUSED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

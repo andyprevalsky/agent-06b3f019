@@ -175,6 +175,36 @@ binding are not silently accepted. The quick bootstrap and existing prestack
 controls run in the ordinary deploy process. Continue monitoring through exact
 Machine/volume release.
 
+A post-service fresh or pool guest that stopped before sealing runtime evidence
+makes recovery report `original-volume runtime archive required`. Capture its
+exact stopped volume with the generic helper, then build the archive and repeat
+recovery:
+
+```bash
+python3 scripts/cloudbench-original-volume-capture.py \
+  --registry <git-common>/cloudbench-fleet-ownership/<exact-owner-token> \
+  --bench <task> --machine-id <machine> --volume-id <owned-volume> \
+  --capture-dir <absolute-private-capture-directory> [--preflight-only]
+python3 scripts/cloudbench-build-interrupted-pool-archive.py \
+  --registry <git-common>/cloudbench-fleet-ownership/<exact-owner-token> \
+  --capture-dir <absolute-private-capture-directory>
+scripts/run-bench --recover-stale-owner <exact-owner-token>
+```
+
+The helper verifies owner, run, Machine and volume against the registry, audit
+and native Machines API, and holds the owner's recovery lock. It saves the exact
+original config, changes only `init.cmd` to `sleep infinity` while stopped, and
+boots once. It refuses any inherited `init.exec`/`init.entrypoint` or live driver
+process. It copies the `original_files` set of `cloudbench-startup-failure-archive.py`
+read-only, then stops and restores the exact config without starting it. It writes
+`<machine>.tar.gz` and `<machine>.provenance.json` only after the native
+stopped state is proven. Missing files stay listed as missing. It never deletes
+or reaps, grants zero credit, and refuses foreign/live owners, changed configs,
+destroyed or running resources and existing captures. A failure leaves
+`<machine>.capture-failure.json`; if the original config is not proven restored,
+rerun with `--restore-original-config` and the same capture directory. Archive
+building and recovery still apply their own exact checks.
+
 For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
 complete originals with `native_release_verified=false` and zero proof credit.
 Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through

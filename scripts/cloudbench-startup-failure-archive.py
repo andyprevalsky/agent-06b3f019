@@ -92,15 +92,20 @@ def identity(registry, output, machine, token):
     return meta, original
 
 
-def original_files(root, token):
+def original_names(token):
+    """Fixed original guest files; logs/*.log are enumerated in addition."""
+    return {"bench.log", "cloudbench-driver.state", "cloudbench-driver.pid",
+            f"cloudbench-driver-clean-{token}.ack", f"cloudbench-shutdown-{token}.request",
+            "repo/.context/cloudbench/services.json", "repo/.context/cloudbench/stack.log",
+            "repo/.context/cloudbench/run.json", "repo/.context/cloudbench/logs/backend.log",
+            "repo/.context/cloudbench/logs/worker.log",
+            f"repo/.context/cloudbench/cloudbench-stack-cleanup-{token}.status"}
+
+
+def original_files(root, token, extra=()):
     root = Path(root)
     context = root / "repo/.context/cloudbench"
-    names = {"bench.log", "cloudbench-driver.state", "cloudbench-driver.pid",
-             f"cloudbench-driver-clean-{token}.ack", f"cloudbench-shutdown-{token}.request",
-             "repo/.context/cloudbench/services.json", "repo/.context/cloudbench/stack.log",
-             "repo/.context/cloudbench/run.json", "repo/.context/cloudbench/logs/backend.log",
-             "repo/.context/cloudbench/logs/worker.log",
-             f"repo/.context/cloudbench/cloudbench-stack-cleanup-{token}.status"}
+    names = original_names(token) | set(extra)
     if (context / "logs").exists():
         for path in (context / "logs").iterdir():
             if path.name.endswith(".log"):

@@ -1,4 +1,5 @@
 import base64
+import copy
 import gzip
 import hashlib
 import importlib.util
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -28613,6 +28615,505 @@ echo owner-closed >> "$EVENTS"
             assert observed == ["exact-reap", "native-finalize", "owner-closed"]
             assert json.loads(machines.read_text()) == [{"id": foreign_machine}]
             assert json.loads(volumes.read_text()) == [{"id": foreign_volume}]
+
+
+ORIGINAL_VOLUME_CAPTURE_SCRIPT = ROOT / "scripts" / "cloudbench-original-volume-capture.py"
+INTERRUPTED_ARCHIVE_SCRIPT = ROOT / "scripts" / "cloudbench-build-interrupted-pool-archive.py"
+_CAPTURE_DRIVER_CMD = ["bash", "/cloudbench-boot.sh"]
+_CAPTURE_INERT_CMD = ["sleep", "infinity"]
+_CAPTURE_SECRET = "fixture-secret-never-logged"
+
+_FAKE_CAPTURE_FLYCTL = r'''#!__PYTHON__
+"""Fake flyctl data plane: guest SSH/SFTP only while the fake Machine is inert."""
+import json, os, shlex, shutil, subprocess, sys
+from pathlib import Path
+argv = sys.argv[1:]
+with open(os.environ["FAKE_FLY_LOG"], "a") as log:
+    log.write(json.dumps(argv) + "\n")
+state = json.loads(Path(os.environ["FAKE_FLY_STATE"]).read_text())
+guest = Path(os.environ["FAKE_GUEST"])
+fault = os.environ.get("FAKE_FLY_FAULT", "")
+def remote(path):
+    parts = path.split("/")
+    assert path.startswith("/tmp/") and len(parts) in (3, 4) and ".." not in parts, path
+    return guest.joinpath("tmp", *parts[2:])
+if argv[:2] == ["auth", "token"]:
+    print(json.dumps({"token": "unused"}))
+    raise SystemExit(0)
+machine = state["machine"]
+if argv[:1] != ["ssh"] or machine["state"] != "started" or machine["config"]["init"].get("cmd") != ["sleep", "infinity"]:
+    with open(os.environ["FAKE_FLY_LOG"], "a") as log:
+        log.write(json.dumps(["VIOLATION", machine["state"], machine["config"]["init"].get("cmd")]) + "\n")
+    print("Error: machine is not running the inert capture command", file=sys.stderr)
+    raise SystemExit(1)
+if argv[1:3] == ["sftp", "put"]:
+    local, target = argv[-2], remote(argv[-1])
+    if target.exists():
+        raise SystemExit("remote file exists")
+    shutil.copyfile(local, target)
+    print(f"{target.stat().st_size} bytes uploaded to {argv[-1]}")
+elif argv[1:3] == ["sftp", "get"]:
+    source, local = remote(argv[-2]), Path(argv[-1])
+    data = source.read_bytes()
+    if fault == "download-corrupt":
+        data = data[:-1] + bytes([data[-1] ^ 1])
+    local.write_bytes(data)
+elif argv[1] == "console":
+    words = shlex.split(argv[argv.index("-C") + 1])
+    if words[:3] == ["mkdir", "-m", "700"] and len(words) == 4:
+        remote(words[3]).mkdir(mode=0o700)
+        raise SystemExit(0)
+    assert words[:3] == ["python3", "-I", "-B"], words
+    mapped = [sys.executable, "-I", "-B"]
+    for word in words[3:]:
+        mapped.append(str(guest / "data") if word == "/data" else str(remote(word)) if word.startswith("/tmp/") else word)
+    print("Connecting to fdaa::2...", file=sys.stderr)
+    result = subprocess.run(mapped + ["--proc", str(guest / "proc")], capture_output=True, text=True, timeout=60)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+else:
+    raise SystemExit("unsupported fake flyctl verb")
+'''
+
+
+class _FakeMachinesApi:
+    """Loopback Machines API with exact config storage and a mutation ledger."""
+
+    def __init__(self, root: Path, app: str, machine: dict, volume: dict, token: str, fault: str) -> None:
+        self.app, self.token, self.fault = app, token, fault
+        self.state = {"machine": machine, "volume": volume}
+        self.events: list[list] = []
+        self.state_path = root / "fake-fly-state.json"
+        self.lock = threading.Lock()
+        self._publish()
+        plane = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                return
+
+            def _reply(self, status: int, payload: object | None = None) -> None:
+                body = json.dumps(payload if payload is not None else {}).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _route(self, method: str) -> None:
+                if self.headers.get("Authorization") != f"Bearer {plane.token}":
+                    return self._reply(401, {"error": "unauthorized"})
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else None
+                prefix = f"/v1/apps/{plane.app}"
+                if not self.path.startswith(prefix):
+                    return self._reply(404)
+                status, payload = plane.handle(method, self.path[len(prefix):], body)
+                self._reply(status, payload)
+
+            def do_GET(self):
+                self._route("GET")
+
+            def do_POST(self):
+                self._route("POST")
+
+            def do_DELETE(self):
+                self._route("DELETE")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def _publish(self) -> None:
+        temporary = self.state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.state))
+        temporary.replace(self.state_path)
+
+    def handle(self, method: str, path: str, body: object | None) -> tuple[int, object]:
+        with self.lock:
+            machine, volume = self.state["machine"], self.state["volume"]
+            if method == "DELETE":
+                self.events.append(["DELETE", path])
+                return 405, {"error": "capture must never delete"}
+            if path == f"/machines/{machine['id']}" and method == "GET":
+                return (404, {"error": "not found"}) if self.fault == "machine-destroyed" else (200, machine)
+            if path == f"/volumes/{volume['id']}" and method == "GET":
+                return 200, volume
+            if path == f"/machines/{machine['id']}" and method == "POST":
+                config = copy.deepcopy(body["config"])
+                cmd = config["init"].get("cmd")
+                self.events.append(["update", cmd, body.get("skip_launch"), machine["state"]])
+                if machine["state"] not in ("stopped", "created") or body.get("skip_launch") is not True:
+                    self.events.append(["VIOLATION-update-live-or-launching"])
+                if self.fault == "restore-drift" and cmd == _CAPTURE_DRIVER_CMD:
+                    config.pop("metadata", None)
+                machine["config"] = config
+                machine["instance_id"] = f"v{len(self.events)}"
+                self._publish()
+                return 200, machine
+            if path == f"/machines/{machine['id']}/start" and method == "POST":
+                cmd = machine["config"]["init"].get("cmd")
+                self.events.append(["start", cmd])
+                if self.fault == "start-rejected":
+                    return 412, {"error": "insufficient CPUs available on the current host"}
+                if cmd != _CAPTURE_INERT_CMD:
+                    self.events.append(["VIOLATION-driver-started"])
+                machine["state"] = "started"
+                self._publish()
+                return 200, {"previous_state": "stopped"}
+            if path == f"/machines/{machine['id']}/stop" and method == "POST":
+                self.events.append(["stop", machine["config"]["init"].get("cmd")])
+                machine["state"] = "stopped"
+                self._publish()
+                return 200, {"ok": True}
+            return 404, {"error": "unknown route"}
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _pid_start_identity(pid: int) -> str:
+    result = subprocess.run(
+        ["bash", "-c", f'source "{ENV_HELPER_SCRIPT}"; cloudbench_pid_start_time "$1"', "_", str(pid)],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    return result.stdout.strip()
+
+
+def _tree_bytes(*roots: Path) -> dict[str, bytes]:
+    return {
+        str(path): (os.readlink(path).encode() if path.is_symlink() else path.read_bytes())
+        for root in roots for path in sorted(root.rglob("*")) if path.is_file() or path.is_symlink()
+    }
+
+
+def _capture_fixture(tmp_path: Path, fault: str) -> SimpleNamespace:
+    """A retained fresh/pool owner shaped like the LIVE50 trial-1 j0024 claim."""
+    owner, run_id, task = "c" * 32, "20261012-202210-3280999", "minted-agent-accounts-x"
+    machine, volume, clone, app = "81245db9215698", "vol_4ql7650wx9yqlqwr", "cloudbench-a87f045417be", "bench-app"
+    token = f"{owner}-0"
+    git = tmp_path / "git"
+    registry = git / "cloudbench-fleet-ownership" / owner
+    audit = git / "cloudbench-fleet-audits" / owner
+    workspace = tmp_path / "workspace"
+    run = tmp_path / "runs" / run_id
+    out = run / task
+    for directory in (registry / "clones", audit / "fresh", audit / "by-machine-id", audit / "pool",
+                      workspace, run / "_batch", out):
+        directory.mkdir(parents=True, exist_ok=True)
+    live_owner = fault == "live-owner"
+    meta_owner = "d" * 32 if fault == "foreign-owner" else owner
+    (registry / "meta").write_text(
+        f"version=2\napp={app}\nfleet_owner_token={meta_owner}\nhost={socket.gethostname()}\n"
+        f"pid={os.getpid()}\npid_start={_pid_start_identity(os.getpid()) if live_owner else 'proc-start:dead:1'}\n"
+        f"run_id={run_id}\nworkspace_root={workspace}\nruns_root={run.parent}\naudit_dir={audit}\n"
+        "cleanup_policy=reap\n"
+    )
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (audit / "meta").write_text(f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp={app}\nstatus=incomplete\n")
+    kind = "pool" if fault == "pool" else "clone"
+    if kind == "clone":
+        (registry / "clones" / clone).write_text(f"name={clone}\nid={machine}\nvolume_id={volume}\n")
+        (audit / "by-machine-id" / machine).write_text(clone + "\n")
+        (audit / "fresh" / clone).write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp={app}\nclone_name={clone}\n"
+            f"source=fresh-clone\nsource_machine_id=683e47df5094d8\nmachine_id={machine}\nvolume_id={volume}\n"
+            "disposition=owned\n"
+        )
+    else:
+        (audit / "pool" / machine).write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp={app}\nsource=borrowed-pool\n"
+            f"machine_id={machine}\nvolume_id={volume}\ndisposition=claimed\n"
+        )
+    (run / "_batch/benches.json").write_text(json.dumps([{"name": task, "mode": "REAL"}]))
+    (run / "_batch/lifecycle.json").write_text(json.dumps({
+        "version": 1, "status": "failed", "fleet_owner_token": owner, "run_id": run_id,
+        "controller_exit_code": 1, "workspace_root": str(workspace)}))
+    (run / "execution-provenance.json").write_text('{"fixture": "provenance"}\n')
+    (run / "execution-task-matrix.json").write_text('{"fixture": "matrix"}\n')
+    (out / ".cid").write_text(f"{kind} {machine}\n")
+    record = json.dumps({"machine_id": machine, "run_token": token, "version": 1})
+    (out / "runtime-evidence.owner.json").write_text(record)
+    (out / "runtime-evidence.pending").write_text(record)
+    (out / "post-config-start.accepted").write_text(machine + "\n")
+    (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
+    if fault == "sealed-evidence":
+        (out / "remote-logs/runtime-evidence").mkdir(parents=True)
+        (out / "remote-logs/runtime-evidence/manifest.json").write_text("{}")
+    guest = tmp_path / "guest"
+    data, context = guest / "data", guest / "data/repo/.context/cloudbench"
+    (context / "logs").mkdir(parents=True)
+    (guest / "tmp").mkdir()
+    originals = {
+        "bench.log": f"RUNSTAMP-{token}\nstack healthy\nguest shutdown requested\n".encode(),
+        "cloudbench-driver.state": b"exited\n",
+        f"cloudbench-shutdown-{token}.request": b"",
+        f"cloudbench-interrupt-cleanup-{token}.status": b"state=interrupted\n",
+        "repo/.context/cloudbench/services.json": json.dumps(
+            {"status": "stopped", "env": {"worker_processes": 1}}).encode(),
+        "repo/.context/cloudbench/stack.log": b"original stack log\n",
+        "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
+        "repo/.context/cloudbench/logs/worker.log": b"original worker log\n",
+        "repo/.context/cloudbench/logs/frontend.log": b"original frontend log\n",
+    }
+    for relative, content in originals.items():
+        (data / relative).write_bytes(content)
+    # Recovery uploads and barrier markers are outside the original evidence contract.
+    (data / "cloudbench-guest-recovery.py").write_text("# recovery helper copy\n")
+    (data / "cloudbench-start-barrier-1.ready").write_text("ready\n")
+    if fault == "symlink-file":
+        (context / "stack.log").unlink()
+        (context / "stack.log").symlink_to(context / "logs/worker.log")
+    for pid, argv in {"1": b"/.fly/init\0", "2": b"sleep\0infinity\0", "3": b"/.fly/hallpass\0"}.items():
+        (guest / "proc" / pid).mkdir(parents=True)
+        (guest / "proc" / pid / "cmdline").write_bytes(argv)
+    if fault == "guest-not-inert":
+        (guest / "proc/4").mkdir()
+        (guest / "proc/4/cmdline").write_bytes(b"bash\0/cloudbench-boot.sh\0")
+    backend = originals["repo/.context/cloudbench/logs/backend.log"]
+    (out / "guest-cleanup.state.json").write_text(json.dumps({
+        "machine_id": machine, "guest_run_token": token,
+        "services_manifest": {"exists": True, "bytes": len(originals["repo/.context/cloudbench/services.json"])},
+        "run_json": {"exists": fault == "receipt-contradiction", "bytes": 10 if fault == "receipt-contradiction" else None},
+        "backend_log": {"exists": True, "bytes": len(backend)},
+    }))
+    (out / "guest-cleanup.provider-manifest.json").write_text(json.dumps({
+        "machine_id": machine, "guest_run_token": token, "kind": "provider-prestart-zero-manifest",
+        "evidence": {"backend_log_sha256": hashlib.sha256(backend).hexdigest()}}))
+    config = {
+        "image": f"registry.fly.io/{app}:cloudbench-warm-fixture@sha256:" + "e" * 64,
+        "init": {"cmd": list(_CAPTURE_DRIVER_CMD)},
+        "env": {"CLOUDBENCH_RUN_TOKEN": "f" * 32 + "-0" if fault == "foreign-config-token" else token,
+                "CLOUDBENCH_START_BARRIER": "barrier-1", "FIXTURE_SECRET": _CAPTURE_SECRET},
+        "mounts": [{"volume": volume, "path": "/data", "name": "cloudbench_data", "size_gb": 20}],
+        "files": [{"guest_path": "/cloudbench-boot.sh", "raw_value": base64.b64encode(b"exec driver\n").decode()}],
+        "guest": {"cpu_kind": "performance", "cpus": 1, "memory_mb": 8192},
+        "restart": {"policy": "no"},
+        "metadata": {"fly_platform_version": "v2"},
+    }
+    if fault == "changed-config":
+        config["init"]["cmd"] = list(_CAPTURE_INERT_CMD)
+    if fault == "inherited-entrypoint":
+        config["init"]["entrypoint"] = ["/bin/sh", "-c"]
+    native_machine = {"id": machine, "name": clone if kind == "clone" else "cloudbench-pool-fixture",
+                      "state": "started" if fault == "machine-running" else "stopped",
+                      "instance_id": "v0", "region": "iad", "config": config}
+    native_volume = {"id": volume, "name": "cloudbench_data", "attached_machine_id": machine,
+                     "state": "pending_destroy" if fault == "volume-destroyed" else "created"}
+    fly_token = "fixture-bench-token-0123456789"
+    plane = _FakeMachinesApi(tmp_path, app, native_machine, native_volume, fly_token, fault)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "flyctl").write_text(_FAKE_CAPTURE_FLYCTL.replace("__PYTHON__", sys.executable))
+    (bin_dir / "flyctl").chmod(0o755)
+    if fault == "recovery-locked":
+        (registry / "recovery-lock").mkdir()
+        (registry / "recovery-lock/meta").write_text(
+            f"host={socket.gethostname()}\npid={os.getpid()}\npid_start={_pid_start_identity(os.getpid())}\n")
+    capture = tmp_path / "capture"
+    if fault == "existing-capture":
+        capture.mkdir(mode=0o700)
+        (capture / f"{machine}.tar.gz").write_bytes(b"prior capture")
+    (tmp_path / "home").mkdir()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("FLY_", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"))}
+    env.update({
+        "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}", "HOME": str(tmp_path / "home"),
+        "FLY_BENCH_API_TOKEN": fly_token, "FLY_API_HOSTNAME": plane.url,
+        "CLOUDBENCH_CAPTURE_POLL_SECONDS": "0.02", "FAKE_FLY_LOG": str(tmp_path / "flyctl.log"),
+        "FAKE_FLY_STATE": str(plane.state_path), "FAKE_GUEST": str(guest), "FAKE_FLY_FAULT": fault,
+    })
+    return SimpleNamespace(
+        owner=owner, run_id=run_id, task=task, machine=machine, volume=volume, token=token, registry=registry,
+        audit=audit, run=run, out=out, guest=guest, originals=originals, config=copy.deepcopy(config),
+        plane=plane, env=env, capture=capture, app=app, kind=kind,
+    )
+
+
+def _run_capture(fx: SimpleNamespace, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(ORIGINAL_VOLUME_CAPTURE_SCRIPT), "--registry", str(fx.registry), "--bench", fx.task,
+         "--machine-id", fx.machine, "--volume-id", fx.volume, "--capture-dir", str(fx.capture),
+         "--wait-seconds", "3", "--ssh-seconds", "60", *extra],
+        env=fx.env, capture_output=True, text=True, timeout=120, check=False,
+    )
+
+
+def _flyctl_calls(fx: SimpleNamespace) -> list[list[str]]:
+    log = Path(fx.env["FAKE_FLY_LOG"])
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+_CAPTURE_REFUSALS = (
+    "foreign-owner", "foreign-config-token", "changed-config", "inherited-entrypoint", "machine-running",
+    "machine-destroyed", "volume-destroyed", "live-owner", "recovery-locked", "sealed-evidence",
+    "existing-capture",
+)
+_CAPTURE_ROLLBACKS = (
+    "guest-not-inert", "start-rejected", "download-corrupt", "symlink-file", "receipt-contradiction",
+)
+
+
+@pytest.mark.parametrize(
+    "fault", ["none", "pool", *_CAPTURE_REFUSALS, *_CAPTURE_ROLLBACKS, "restore-drift"],
+)
+def test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_closed(
+    tmp_path: Path, fault: str
+) -> None:
+    """Capture one retained guest's original files without rerunning its driver."""
+    fx = _capture_fixture(tmp_path, fault)
+    try:
+        durable = _tree_bytes(fx.registry, fx.audit, fx.run)
+        guest_before = _tree_bytes(fx.guest / "data")
+        result = _run_capture(fx)
+    finally:
+        fx.plane.close()
+    events = fx.plane.events
+    final = fx.plane.state["machine"]
+    calls = _flyctl_calls(fx)
+    machine = fx.machine
+    # Never delete, release, reap or fabricate; never boot the original driver.
+    assert not [event for event in events if event[0].startswith(("DELETE", "VIOLATION"))], events
+    assert not [call for call in calls if call[0] == "VIOLATION"], calls
+    assert all(call[:1] == ["ssh"] for call in calls), calls
+    assert _tree_bytes(fx.guest / "data") == guest_before
+    assert (fx.registry / "runtime-evidence-unconfirmed").is_file()
+    assert not (fx.registry / "recovery-lock").exists() or fault == "recovery-locked"
+    after = _tree_bytes(fx.registry, fx.audit, fx.run)
+    assert after == durable, "capture changed durable owner, audit or run records"
+    for stream in (result.stdout, result.stderr):
+        assert _CAPTURE_SECRET not in stream
+    assert "Traceback" not in result.stderr, result.stderr
+    published = fx.capture / f"{machine}.tar.gz"
+    if fault in _CAPTURE_REFUSALS:
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "refused" in result.stderr
+        assert [event for event in events if event[0] != "GET"] == [] and calls == []
+        assert final["config"] == fx.config and final["state"] == ("started" if fault == "machine-running" else "stopped")
+        assert not (fx.capture / f"{machine}.provenance.json").exists()
+        assert not (fx.capture / f"{machine}.original-config.private.json").exists()
+        return
+    if fault in (*_CAPTURE_ROLLBACKS, "restore-drift"):
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not published.exists() and not (fx.capture / f"{machine}.provenance.json").exists()
+        failure = json.loads((fx.capture / f"{machine}.capture-failure.json").read_text())
+        assert failure["proof_credit"] == 0 and failure["machine_id"] == machine
+        assert _CAPTURE_SECRET not in json.dumps(failure)
+        assert events[0][:3] == ["update", _CAPTURE_INERT_CMD, True]
+        if fault == "restore-drift":
+            # A provider that does not round-trip the exact config is reported, not hidden.
+            assert failure["restored"] is False and final["state"] == "stopped"
+            assert final["config"] != fx.config and "--restore-original-config" in result.stderr
+            return
+        assert failure["restored"] is True and failure["stopped"] is True
+        assert final["state"] == "stopped" and final["config"] == fx.config
+        assert events[-1][:3] == ["update", _CAPTURE_DRIVER_CMD, True]
+        if fault == "download-corrupt":
+            assert list(fx.capture.glob(f".{machine}.*.tar.gz.unverified")), "unverified download was discarded"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [event[:2] for event in events] == [
+        ["update", _CAPTURE_INERT_CMD], ["start", _CAPTURE_INERT_CMD],
+        ["stop", _CAPTURE_INERT_CMD], ["update", _CAPTURE_DRIVER_CMD],
+    ]
+    assert all(event[2] is True for event in events if event[0] == "update")
+    assert final["state"] == "stopped" and final["config"] == fx.config
+    assert [call[1:3] for call in calls] == [
+        ["console", "-a"], ["sftp", "put"], ["sftp", "put"], ["console", "-a"], ["sftp", "get"]]
+    assert stat.S_IMODE(fx.capture.stat().st_mode) == 0o700
+    assert stat.S_IMODE(published.stat().st_mode) == 0o600
+    snapshot = json.loads((fx.capture / f"{machine}.original-config.private.json").read_text())
+    assert snapshot == fx.config
+    provenance = json.loads((fx.capture / f"{machine}.provenance.json").read_text())
+    assert provenance["proof_credit"] == 0 and provenance["direct_original_volume"] is True
+    assert provenance["native_release_verified"] is False and provenance["native_final_state"] == "stopped"
+    assert (provenance["machine_id"], provenance["volume_id"]) == (machine, fx.volume)
+    assert provenance["allocation_kind"] == fx.kind and provenance["guest_run_token"] == fx.token
+    assert provenance["archive_sha256"] == hashlib.sha256(published.read_bytes()).hexdigest()
+    journal = (fx.capture / f"{machine}.capture-journal.jsonl").read_text()
+    assert _CAPTURE_SECRET not in json.dumps(provenance) + journal
+    with tarfile.open(published, "r:gz") as archive:
+        members = {member.name: archive.extractfile(member).read() for member in archive}
+    # Exact original bytes only; the uploaded recovery helper is not evidence.
+    assert members == fx.originals
+    assert set(provenance["files"]) == set(fx.originals)
+    for absent in ("repo/.context/cloudbench/run.json", "cloudbench-driver.pid",
+                   f"cloudbench-driver-clean-{fx.token}.ack"):
+        assert absent in provenance["missing"] and absent not in members
+    if fault == "pool":
+        return
+    # The capture feeds the unchanged archive builder and forensic verifier.
+    built = subprocess.run(
+        [sys.executable, str(INTERRUPTED_ARCHIVE_SCRIPT), "--registry", str(fx.registry),
+         "--capture-dir", str(fx.capture)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert built.returncode == 0, built.stderr
+    manifest = json.loads((fx.run / "_forensic/manifest.json").read_text())
+    row = manifest["tasks"][0]
+    assert manifest["schema"] == "cloudbench-forensic-retirement-v1" and row["services_status"] == "stopped"
+    assert "repo/.context/cloudbench/run.json" in row["missing"]
+    machines, volumes = tmp_path / "machines.json", tmp_path / "volumes.json"
+    machines.write_text(json.dumps([final]))
+    volumes.write_text(json.dumps([fx.plane.state["volume"]]))
+    verified = subprocess.run(
+        [sys.executable, str(FORENSIC_RETIREMENT_SCRIPT), "--registry", str(fx.registry), "--run", str(fx.run),
+         "--manifest", str(fx.run / "_forensic/manifest.json"),
+         "--archive", str(fx.run / "_forensic/originals.tar.gz"),
+         "--machines", str(machines), "--volumes", str(volumes), "--archive-only"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert verified.returncode == 0, verified.stderr
+    receipt = json.loads(verified.stdout)
+    assert receipt["schema"] == "cloudbench-forensic-archive-verified-v1"
+    assert receipt["proof_credit"] == 0 and receipt["native_release_verified"] is False
+
+
+@pytest.mark.parametrize("state", ["inert-stopped", "inert-started", "original", "foreign"])
+def test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config(tmp_path: Path, state: str) -> None:
+    """An interrupted capture finishes stop and exact restore without collecting."""
+    fx = _capture_fixture(tmp_path, "none")
+    fx.capture.mkdir(mode=0o700)
+    (fx.capture / f"{fx.machine}.original-config.private.json").write_text(json.dumps(fx.config))
+    machine = fx.plane.state["machine"]
+    if state.startswith("inert"):
+        machine["config"]["init"]["cmd"] = list(_CAPTURE_INERT_CMD)
+        machine["state"] = "started" if state == "inert-started" else "stopped"
+    elif state == "foreign":
+        machine["config"]["image"] = "registry.fly.io/bench-app:foreign@sha256:" + "0" * 64
+    fx.plane._publish()
+    try:
+        result = _run_capture(fx, "--restore-original-config")
+    finally:
+        fx.plane.close()
+    events = fx.plane.events
+    assert not [event for event in events if event[0].startswith(("DELETE", "VIOLATION"))], events
+    assert _flyctl_calls(fx) == [] and not (fx.capture / f"{fx.machine}.tar.gz").exists()
+    if state == "foreign":
+        assert result.returncode == 3 and "neither the saved original" in result.stderr
+        assert events == []
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert machine["state"] == "stopped" and machine["config"] == fx.config
+    expected = {"inert-stopped": [["update", _CAPTURE_DRIVER_CMD]],
+                "inert-started": [["stop", _CAPTURE_INERT_CMD], ["update", _CAPTURE_DRIVER_CMD]],
+                "original": []}[state]
+    assert [event[:2] for event in events] == expected
+
+
+def test_failed_fleet_forensic_original_volume_preflight_is_read_only(tmp_path: Path) -> None:
+    fx = _capture_fixture(tmp_path, "none")
+    try:
+        result = _run_capture(fx, "--preflight-only")
+    finally:
+        fx.plane.close()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["preflight"] == "ok"
+    assert fx.plane.events == [] and _flyctl_calls(fx) == [] and not fx.capture.exists()
+    assert not (fx.registry / "recovery-lock").exists()
 
 
 @pytest.mark.parametrize(

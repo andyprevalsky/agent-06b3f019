@@ -2068,8 +2068,15 @@ import hashlib, json, os, re, stat, sys
 from pathlib import Path
 out = Path(sys.argv[1]).resolve()
 root = out / 'remote-logs/runtime-evidence'
+def exact(path):
+    # Report an absent original cleanly; a missing seal stays a failure.
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        raise SystemExit(f'runtime evidence file is absent: {path}') from None
+    assert resolved == path
 def read(path, ceiling=1048576):
-    assert path.resolve(strict=True) == path
+    exact(path)
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as f:
         info = os.fstat(f.fileno())
         assert stat.S_ISREG(info.st_mode) and info.st_size <= ceiling
@@ -2078,6 +2085,8 @@ def read(path, ceiling=1048576):
         os.fsync(f.fileno())
         return data
 owner = json.loads(read(out / 'runtime-evidence.owner.json'))
+if not os.path.lexists(root / 'manifest.json'):
+    raise SystemExit(f'sealed runtime evidence is absent: {root / "manifest.json"} was never collected')
 manifest = json.loads(read(root / 'manifest.json'))
 assert owner['machine_id'] == sys.argv[2] and owner['run_token'] == sys.argv[3]
 assert owner['version'] == manifest['version'] == 1
@@ -2100,7 +2109,7 @@ for name, row in manifest['files'].items():
     total += row['bytes']
     assert total <= 512 * 1024 * 1024
     path = root / name
-    assert path.resolve(strict=True) == path
+    exact(path)
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as f:
         before = os.fstat(f.fileno())
         assert stat.S_ISREG(before.st_mode) and before.st_size == row['bytes']
@@ -8644,6 +8653,7 @@ PY
             if _capture_details="$(registry_machine_details "${recovery_machine_ids[$recovery_index]}")" \
                 && [ "${_capture_details%% *}" = stopped ]; then
                 echo "🧭 [${recovery_benches[$recovery_index]}] exact guest stopped; original-volume runtime archive required"
+                echo "   capture: python3 scripts/cloudbench-original-volume-capture.py --registry $registry --bench ${recovery_benches[$recovery_index]} --machine-id ${recovery_machine_ids[$recovery_index]} --volume-id <owned-volume> --capture-dir <private-dir> (agents/benchmarks/README.md)"
                 shutdown_status=1
                 continue
             fi
