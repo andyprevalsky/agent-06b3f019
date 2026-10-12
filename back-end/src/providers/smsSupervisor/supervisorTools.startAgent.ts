@@ -5,7 +5,13 @@
 
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
-import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
+import {
+  reconcileWorkflowStart,
+  startAgentWorkflowExecution,
+  type TemporalWorkflowExecutionRef,
+} from '../temporal';
+import { recordAgentWorkflowExecution } from '../workflowGeneration';
+import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 import type { FilePointer } from '../storage';
@@ -31,6 +37,40 @@ export interface StartNewAgentArgs {
 
 export interface WebSearchArgs {
   query: string;
+}
+
+/**
+ * The agent row disappeared (or another start won) between the workflow start
+ * and recording its identity. Close the started run here: no cleanup
+ * obligation exists for a row that never carried this Workflow ID.
+ */
+async function closeRunOfRemovedAgent(
+  startedAgentId: string,
+  displayId: string,
+  execution: TemporalWorkflowExecutionRef
+) {
+  log.warn('Started workflow was superseded before its run identity was recorded', {
+    phase: 'start',
+    agentId: startedAgentId,
+    workflowId: execution.workflowId,
+    firstExecutionRunId: execution.firstExecutionRunId,
+  });
+  try {
+    await terminateStaleTemporalWorkflow(execution, startedAgentId);
+  } catch (error) {
+    log.error('Failed to close the started workflow of a removed agent', {
+      phase: 'start',
+      agentId: startedAgentId,
+      workflowId: execution.workflowId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return {
+    tool: 'start_new_agent',
+    success: false,
+    result: '',
+    error: `Agent [${displayId.substring(0, 6)}] was removed before its workflow started`,
+  };
 }
 
 export async function commitStartNewAgent(
@@ -140,10 +180,10 @@ export async function commitStartNewAgent(
         throw error;
       }
       // The row existing is not the same as the agent RUNNING. If the previous
-      // attempt committed the transaction and died before startAgentWorkflow,
+      // attempt committed the transaction and died before the workflow start,
       // the agent sits in STARTING_UP with no temporalWorkflowId forever. Fall
       // through and (re)start the workflow rather than reporting success for an
-      // agent nothing is driving; startAgentWorkflow is itself idempotent on
+      // agent nothing is driving; the workflow start is itself idempotent on
       // workflow id.
       if (
         existing.temporalWorkflowId === null ||
@@ -191,7 +231,7 @@ export async function commitStartNewAgent(
 
   // Start Temporal workflow
   try {
-    const workflowId = await startAgentWorkflow({
+    const execution = await startAgentWorkflowExecution({
       agentId: startedAgent.id,
       userId,
       goal,
@@ -206,10 +246,12 @@ export async function commitStartNewAgent(
       memoryEnabled: resolvedMemory,
     });
 
-    await prisma.agent.update({
-      where: { id: startedAgent.id },
-      data: { temporalWorkflowId: workflowId },
-    });
+    // The row has no Workflow ID until this record, so a deletion in between
+    // leaves no cleanup obligation; the started run must be closed here.
+    if (!(await recordAgentWorkflowExecution(startedAgent.id, execution))) {
+      return closeRunOfRemovedAgent(startedAgent.id, agent.id, execution);
+    }
+    const workflowId = execution.workflowId;
 
     log.info('Agent created and workflow started', {
       phase: 'start',
@@ -238,10 +280,20 @@ export async function commitStartNewAgent(
         workflowStatus: reconciled.status,
         error: errorMsg,
       });
-      await prisma.agent.update({
-        where: { id: startedAgent.id },
-        data: { temporalWorkflowId: startedAgent.id },
-      });
+      if (reconciled.firstExecutionRunId === null) {
+        await prisma.agent.update({
+          where: { id: startedAgent.id },
+          data: { temporalWorkflowId: startedAgent.id },
+        });
+      } else {
+        const adopted = {
+          workflowId: startedAgent.id,
+          firstExecutionRunId: reconciled.firstExecutionRunId,
+        };
+        if (!(await recordAgentWorkflowExecution(startedAgent.id, adopted))) {
+          return closeRunOfRemovedAgent(startedAgent.id, agent.id, adopted);
+        }
+      }
       return {
         tool: 'start_new_agent',
         success: true,

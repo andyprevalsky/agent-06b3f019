@@ -146,18 +146,26 @@ async function main(): Promise<void> {
   await test('orphan workflows with no agent row are terminated', async () => {
     let terminated: string | null = null;
     const workflowId = `orphan-${randomUUID()}`;
-    const outcome = await clearSupersededGenerationWorkflow('navi-agent-tasks@old', workflowId, {
-      findAgentByWorkflowId: async () => null,
-      restartAgent: async () => {
-        throw new Error('orphan must not be restarted');
+    // A root agent's follow-up run reuses this Workflow ID on the live queue,
+    // so only the exact run listed on the superseded queue may be terminated.
+    const listedRunId = `superseded-run-${randomUUID()}`;
+    const outcome = await clearSupersededGenerationWorkflow(
+      'navi-agent-tasks@old',
+      workflowId,
+      {
+        findAgentByWorkflowId: async () => null,
+        restartAgent: async () => {
+          throw new Error('orphan must not be restarted');
+        },
+        terminateOrphan: async (id, _reason, runId) => {
+          terminated = `${id}/${runId ?? 'latest'}`;
+          return 'cleared';
+        },
       },
-      terminateOrphan: async (id) => {
-        terminated = id;
-        return 'cleared';
-      },
-    });
+      listedRunId
+    );
     assert.strictEqual(outcome, 'cleared');
-    assert.strictEqual(terminated, workflowId);
+    assert.strictEqual(terminated, `${workflowId}/${listedRunId}`);
   });
 
   await test('agentNeedsCutoverRecovery matches the prod FAILED + sealed shape', () => {

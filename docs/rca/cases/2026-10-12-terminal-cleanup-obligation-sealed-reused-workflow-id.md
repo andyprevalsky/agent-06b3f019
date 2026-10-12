@@ -23,6 +23,9 @@ tags:
   - liveness-reconciler
 sources:
   - agent 2dd470aa-b3b9-41ab-9475-75e37986298f
+  - agent 572da2a5-4fc0-45f4-b9a7-d20b08e19a4e
+  - PR #1468
+  - PR #1470
 repro: back-end/src/tests/blackbox/agents-followup-cleanup-obligation.cases.ts
 status: fixed
 ---
@@ -57,6 +60,21 @@ Render logs at 00:12:00Z: `Stale workflow already closed before replacement`
 (first_execution_run_id `01a12d6c…`). Then `Reconciled stale workflow tool calls`
 (generation `2dd470aa…`, candidate_count 2, interrupted_count 2). Then
 `Temporal workflow cleanup completed` (discovered 1, sealed 1, terminated 1).
+
+Same night, unknown-run variant: Mac-app agent
+`572da2a5-4fc0-45f4-b9a7-d20b08e19a4e`. Its first run `01a12dbc` was started by
+`POST /:id/start-agent` ("Manual escalation to agent mode"), which then stored
+only the workflow id. The run COMPLETED at 01:32:33Z, so the obligation had no
+first-run id. A follow-up chat escalation started run `01a12dbf` under the same
+id at 01:35:14Z. At 01:38:00Z the cron logged `Temporal workflow cleanup
+completed discovered 1 sealed 1 terminated 1` and `Terminated stale workflow
+for replacement first_execution_run_id=01a12dbf`. The obligation had no run id,
+so `describe(workflowId)` returned the live follow-up, and Temporal shows run
+`01a12dbf` TERMINATED with reason `Restarting with new worker code`. Five live
+tool chips became "Tool interrupted by deployment". The liveness reconciler then
+marked the agent FAILED at 01:43:43Z. That is what "randomly died" meant: no
+deploy happened. The fix above, live since 05:31Z, covers this path (`live`
+scope, plus Start-agent recording its run id).
 
 ## Diagnosis
 
@@ -201,6 +219,36 @@ unknown run ids are never treated as proof of the same chain.
 10k agents: per obligation, one extra `SELECT … FOR UPDATE` on that agent's own
 row and three more columns in the existing per-agent locked read.
 There is no new fan-in, polling or cross-agent lock.
+
+Follow-up hardening (PR #1470, from the 572da2a5 RCA, reconciled onto this fix):
+
+- Every root start path now records its first run id through one
+  compare-and-set writer, `recordAgentWorkflowExecution` (best-effort
+  `bindStartedRunIdentity` after the start succeeded). This covers direct
+  plan/execute create, batch root, SMS `start_new_agent` and its
+  ambiguous-start adoption (`reconcileWorkflowStart` now returns the chain's
+  first run id), and the checkpoint scripts. The lossy `startAgentWorkflow`
+  helper is deleted, so new obligations almost never need `describe`. The
+  best-effort bind requires the row to still carry that workflow id, so a run
+  that finished and was reopened before the bind is never written back onto
+  the chat-mode row.
+- `force-clear-generation-queue` terminates the exact run it listed on the
+  superseded queue, never the latest run of an id a follow-up may reuse.
+
+A `between-runs` scope was prototyped and dropped: it skipped `describe` for
+an unknown-run obligation while a reopened agent had no installed workflow,
+to avoid a follow-up that Temporal started milliseconds before chat committed
+it. Review showed the cost. For pre-existing rows with no run id, it would leave
+a chain still parked at COST_LIMIT_REACHED or OUT_OF_CREDITS running, and a
+later escalation would adopt that chain and hang. The fix above terminates it.
+Now that new starts record their run ids, that millisecond window only affects
+legacy rows, so this fix's `describe` behavior stays.
+
+Still open: a terminal generation that goes terminal while the earlier
+obligation is leased merges into the leased row (COALESCE keeps the older run),
+and `finishCleanup` then deletes it. That newer generation's zombie is not
+terminated. It needs both chains to end inside one sweep's lease and has not
+been observed.
 
 ## Human feedback
 

@@ -35,7 +35,11 @@ export interface CutoverAgentRef {
 export interface ClearSupersededGenerationWorkflowDependencies {
   findAgentByWorkflowId?: (workflowId: string) => Promise<CutoverAgentRef | null>;
   restartAgent?: (agentId: string) => Promise<unknown>;
-  terminateOrphan?: (workflowId: string, reason: string) => Promise<CutoverClearOutcome>;
+  terminateOrphan?: (
+    workflowId: string,
+    reason: string,
+    runId?: string
+  ) => Promise<CutoverClearOutcome>;
 }
 
 export function isGenerationCutoverFailure(statusMessage: string | null | undefined): boolean {
@@ -75,11 +79,14 @@ async function defaultFindAgentByWorkflowId(workflowId: string): Promise<Cutover
 
 async function defaultTerminateOrphan(
   workflowId: string,
-  reason: string
+  reason: string,
+  runId?: string
 ): Promise<CutoverClearOutcome> {
   const client = await getTemporalClient();
   try {
-    await client.workflow.getHandle(workflowId).terminate(reason);
+    // A root agent's next run reuses this Workflow ID on the live queue, so
+    // only the exact run listed on the superseded queue may be terminated.
+    await client.workflow.getHandle(workflowId, runId).terminate(reason);
     return 'cleared';
   } catch (error) {
     if (error instanceof WorkflowNotFoundError) return 'skipped';
@@ -95,7 +102,8 @@ async function defaultTerminateOrphan(
 export async function clearSupersededGenerationWorkflow(
   queue: string,
   workflowId: string,
-  dependencies: ClearSupersededGenerationWorkflowDependencies = {}
+  dependencies: ClearSupersededGenerationWorkflowDependencies = {},
+  runId?: string
 ): Promise<CutoverClearOutcome> {
   const findAgent = dependencies.findAgentByWorkflowId ?? defaultFindAgentByWorkflowId;
   const replace = dependencies.restartAgent ?? defaultRestartAgent;
@@ -124,7 +132,8 @@ export async function clearSupersededGenerationWorkflow(
 
     const outcome = await terminateOrphan(
       workflowId,
-      `Generation cutover: orphan workflow on superseded queue ${queue}`
+      `Generation cutover: orphan workflow on superseded queue ${queue}`,
+      runId
     );
     return outcome;
   } catch (error) {
