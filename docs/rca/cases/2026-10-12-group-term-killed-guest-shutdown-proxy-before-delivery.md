@@ -243,6 +243,28 @@ the runner, and that the stop phase was unbounded. The final design is below.
   returns its status explicitly; the unit regression runs the native stop from
   an `exit 143` EXIT trap to keep that boundary covered.
 
+### Auxiliary-loop teardown race exposed by the group-signal regression
+
+The group-signal cases also intermittently logged `Owned process root <pid>
+was absent from the teardown snapshot` and `an owned aggregator/snapshot
+process survived local teardown`, which fails the suite's final
+teardown-survivor check. It reproduces on `a7a35124f`. The progress
+aggregator and inventory snapshot loop are background jobs that die from the
+same group signal. Inside the controller's EXIT trap, Bash 5.2.21 can leave
+such a job marked Running: `wait` returns at once (status -1) and `jobs -pr`
+keeps listing a PID that `/proc` no longer has. `cloudbench_terminate_tree_and_wait`
+then treats it as an unaccounted live job and fails closed.
+
+A standalone reproduction of that trap sequence against the real helper failed
+13 of 160 iterations. With the fix it failed 0 of 60. Controller cleanup now
+passes the helper only auxiliary roots that still exist (`kill -0`). A
+kernel-absent root is terminal, exactly like one that exits between the job
+sample and the process snapshot, which the helper already accepts. The guest
+helper in `scripts/lib/cloudbench-env.sh` is unchanged.
+
+Each group-signal case now asserts its own controller log carries neither
+message, so a focused run catches the race too.
+
 ### Scaling
 
 Each fleet controller stops only its own guests, and the campaign signals

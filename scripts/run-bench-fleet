@@ -11921,10 +11921,22 @@ cleanup() {
     # the wrapper can publish status while that owned group is still live.
     # Capture each complete tree before TERM and reap the waitable roots before
     # provider cleanup or the detached status rendezvous can complete.
-    local snapshot_teardown_pid="${SNAPSHOT_LOOP_PID:-}"
+    local snapshot_teardown_pid="${SNAPSHOT_LOOP_PID:-}" auxiliary_root
+    local -a auxiliary_roots=()
     [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ] || snapshot_teardown_pid=""
+    # A loop killed by the same process-group signal as this controller can
+    # stay marked Running in Bash's job table inside this EXIT trap: Bash 5.2
+    # never records its status and `wait` returns at once, so the tree teardown
+    # reported that kernel-absent root as an unaccounted live job. A root the
+    # kernel no longer has is terminal, like one that exits between the job
+    # sample and the process snapshot; pass only roots that still exist.
+    for auxiliary_root in "${UNIFIED_AGG_PID:-}" "$snapshot_teardown_pid"; do
+        if [ -n "$auxiliary_root" ] && kill -0 "$auxiliary_root" 2>/dev/null; then
+            auxiliary_roots+=("$auxiliary_root")
+        fi
+    done
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
-        "${UNIFIED_AGG_PID:-}" "$snapshot_teardown_pid"; then
+        "${auxiliary_roots[@]:-}"; then
         echo "❌ an owned aggregator/snapshot process survived local teardown" >&2
         ec=1
         teardown_failed=1
