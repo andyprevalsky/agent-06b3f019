@@ -26,6 +26,10 @@ TIMED_DISTRIBUTION_PROTOCOL = "rose-timed-outcome-distribution-v1"
 TIMED_DISTRIBUTION_SCHEMA = "rose.wmh_timed_outcome_distribution.v1"
 DISTRIBUTION_PROTOCOLS = frozenset({DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL})
 SCHEDULED_EVENTS_KEY = "scheduled_events"
+# The runner owns world time: as_of_utc is the pinned start and the clock keeps
+# the present, so timed outcomes cannot rewrite it (one shared field made every
+# fan-out patch conflict, serializing parallel steps).
+RUNNER_OWNED_PATHS = frozenset({"/structured/as_of_utc"})
 MAXIMUM_ELAPSED_MS = 366 * 86_400_000
 DISTRIBUTION_TEXT = """For this execution mode, replace the single-transition JSON output contract above with an outcome distribution. Infer 1 to 6 plausible, mutually exclusive possible results of this exact candidate action, conditional on the full task, delegated goal, initial context, current environment state, and visible history. Generate the possibilities yourself; do not use fixed event labels or force success or failure. When the result is genuinely certain, one outcome with probability 1 is sufficient. Retrieved demonstrations illustrate tool response format and behavior in other worlds; they do not determine this world's outcome frequencies.
 
@@ -144,6 +148,15 @@ def parse_distribution(
             type(outcome["elapsed_ms"]) is not int or not 0 <= outcome["elapsed_ms"] <= MAXIMUM_ELAPSED_MS
         ):
             raise ValueError("Each timed outcome needs an integer elapsed_ms within one year")
+        if timed and isinstance(outcome["state_patch"], list):
+            outcome = {
+                **outcome,
+                "state_patch": [
+                    op
+                    for op in outcome["state_patch"]
+                    if not (isinstance(op, dict) and op.get("path") in RUNNER_OWNED_PATHS)
+                ],
+            }
         identity, probability = outcome["id"], outcome["probability"]
         if not isinstance(identity, str) or not identity.strip() or identity in seen:
             raise ValueError("Outcome IDs must be nonempty and unique")

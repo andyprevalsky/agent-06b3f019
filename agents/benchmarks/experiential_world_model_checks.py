@@ -418,6 +418,44 @@ def test_a_scheduled_reply_is_invisible_before_its_time_and_visible_after():  # 
     asyncio.run(run())
 
 
+def test_runner_owns_the_world_date_so_parallel_record_appends_still_merge():
+    """Run 5 (2026-10-12): every outcome rewrote /structured/as_of_utc, so no fan-out step
+    could merge and 28 parallel outreach steps predicted one at a time."""
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        seen = []
+
+        async def complete(request):
+            evidence = json.loads(request.messages[1].content)
+            seen.append(evidence["environment_state"]["structured"]["as_of_utc"])
+            call = evidence["candidate_response"]["tool_calls"][0]["call_id"]
+            payload = _timed(distribution_reply(request), (60_000, 60_000))
+            for outcome in payload["outcomes"]:
+                outcome["state_patch"] = [
+                    {"op": "replace", "path": "/structured/as_of_utc", "value": "2026-09-28T00:01:00Z"},
+                    {"op": "add", "path": "/receipts/-", "value": call},
+                ]
+            if len(seen) == 2:
+                entered.set()
+            await release.wait()
+            return json.dumps(payload)
+
+        model = distribution_model(complete, policy="rose-outcome-distribution-v3", sample_uniform=lambda: 0.975)
+        seed = {"structured": {"schema": "t", "as_of_utc": "2026-09-28T00:00:00Z"}, "scratchpad": "", "receipts": []}
+        session = model.new_session("Pitch two funds", seed, "root")
+        work = [asyncio.create_task(model.step(session.id, _timed_action(n), f"inv-{n}")) for n in (1, 2)]
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*work), 2)
+        assert len(seen) == 2 and all(r["metadata"]["state_retries"] == 0 for r in results)
+        assert sorted(session.state["receipts"]) == ["call-1", "call-2"]
+        assert session.state["structured"]["as_of_utc"] == "2026-09-28T00:00:00Z"
+        assert seen == ["2026-09-28T00:00:00Z", "2026-09-28T00:00:00Z"]
+
+    asyncio.run(run())
+
+
 def test_served_world_clock_registers_waits_and_finishes_agents():
     import httpx
 
@@ -428,7 +466,7 @@ def test_served_world_clock_registers_waits_and_finishes_agents():
             return json.dumps(_timed(distribution_reply(request)))
 
         model = distribution_model(complete, policy="rose-outcome-distribution-v3", sample_uniform=lambda: 0.975)
-        session = model.new_session("Raise", {"structured": {"schema": "t", "as_of_utc": "1970-01-01T00:00:00Z"}, "scratchpad": ""}, "root")
+        model.new_session("Raise", {"structured": {"schema": "t", "as_of_utc": "1970-01-01T00:00:00Z"}, "scratchpad": ""}, "root")
         base = "/world_models/rose/scopes/root/clock"
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app("rose", model)), base_url="http://wmh") as http:
             assert (await http.post(f"{base}/agents/root/register", json={})).status_code == 200
