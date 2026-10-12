@@ -1,8 +1,10 @@
 #!/usr/bin/env tsx
 import { randomUUID } from 'node:crypto';
 import { createContext, runInContext } from 'node:vm';
+import type { Browser } from 'playwright';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { prisma } from '../../providers/database';
+import { injectUserData } from '../../providers/steel/injection';
 import { injectOriginPayload } from '../../providers/steel/injectionOriginPayload';
 import {
   injectIndexedDBState,
@@ -351,6 +353,131 @@ async function verifyDatabaseUnicodeAndAbort() {
   }
 }
 
+/**
+ * Production defaults, prod realm shape (agent 07281fc3): init for an admin.*
+ * start URL beside a sibling Drive-style cache over the restore budget, plus
+ * the stored localStorage keys the Mac reader writes. The cache reaches no
+ * browser mutation, partitioned third-party keys are never replayed as
+ * first-party storage, and an origin's Mac and harvest rows share one visit.
+ */
+async function verifyRealmRestoreBudget() {
+  const realm = `restore-budget-${randomUUID().slice(0, 8)}.test`;
+  const cache = `https://drive.${realm}`;
+  const admin = `https://admin.${realm}`;
+  const thirdParty = 'https://fp.third-party.test';
+  const userId = `origin-restore-budget-${randomUUID()}`;
+  const sessionId = `origin-restore-budget-session-${randomUUID()}`;
+  const context = await prisma.browserContext.create({ data: { userId } });
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+  await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId,
+      wsUrl: `ws://${realm}`,
+      provider: 'kernel',
+      status: 'ACTIVE',
+    },
+  });
+  try {
+    // ~27 MB of md5 records: the shape of a desktop module cache.
+    await prisma.$executeRaw`
+      INSERT INTO "IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
+      SELECT ${randomUUID()}, ${userId}, ${cache},
+        ('[{"name":"ODPMC","objectStores":[{"name":"modules","records":[' ||
+          (SELECT string_agg(jsonb_build_object('key', 'm' || i,
+              'value', md5(i::text) || md5((i * 7)::text) || md5((i * 13)::text))::text,
+              ',' ORDER BY i)
+            FROM generate_series(1, 200000) i) || ']}]}]')::jsonb,
+        'module-cache', now()`;
+    const [{ bytes }] = await prisma.$queryRaw<Array<{ bytes: number }>>`
+      SELECT octet_length(databases::text)::int AS bytes FROM "IndexedDBOrigin"
+      WHERE "userId" = ${userId} AND origin = ${cache}`;
+    assert(bytes > 8 * 1024 * 1024, `fixture cache is not over the default budget: ${bytes}`);
+    const small = [
+      { name: 'auth', objectStores: [{ name: 'kv', records: [{ key: 'k', value: 'v' }] }] },
+    ];
+    await prisma.indexedDBOrigin.create({
+      data: { userId, origin: `https://mail.${realm}`, databases: small, hash: 'small' },
+    });
+    const stored = [
+      { origin: `https://accounts.${realm}`, value: 'accounts', at: 1 },
+      { origin: admin, value: 'harvest-newer', at: 3 },
+      { origin: admin.replace('https://', 'ttps://'), value: 'mac-older', at: 2 },
+      {
+        origin: `${thirdParty}/^0https://${realm}`.replace('https://', 'ttps://'),
+        value: 'fp',
+        at: 1,
+      },
+    ];
+    for (const row of stored) {
+      await prisma.localStorageOrigin.create({
+        data: {
+          userId,
+          origin: row.origin,
+          entries: [{ key: 'shared', value: row.value }],
+          hash: row.value,
+          updatedAt: new Date(Date.UTC(2026, 9, 12, 0, 0, row.at)),
+        },
+      });
+    }
+    const delivered = new Map<string, number>();
+    const navigations: string[] = [];
+    const adminWrites: string[] = [];
+    let pageUrl = 'about:blank';
+    const browser = {
+      contexts: () => [
+        {
+          addCookies: async () => undefined,
+          addInitScript: async () => undefined,
+          newCDPSession: async () => ({ send: async () => undefined }),
+          newPage: async () => ({
+            route: async () => undefined,
+            url: () => pageUrl,
+            goto: async (url: string) => {
+              pageUrl = url;
+              navigations.push(new URL(url).origin);
+            },
+            close: async () => undefined,
+            evaluate: async (script: string) => {
+              const target = new URL(pageUrl).origin;
+              delivered.set(target, (delivered.get(target) ?? 0) + Buffer.byteLength(script));
+              if (target === admin)
+                adminWrites.push(/(mac-older|harvest-newer)/.exec(script)?.[1] ?? '');
+            },
+          }),
+        },
+      ],
+      close: async () => undefined,
+    } as unknown as Browser;
+    const result = await injectUserData(sessionId, userId, `${admin}/ac/users`, { browser });
+    assert(
+      !delivered.has(cache),
+      `over-budget origin reached the browser: ${delivered.get(cache)} bytes`
+    );
+    assert(
+      result.indexedDB.originCount === 1 && (delivered.get(`https://mail.${realm}`) ?? 0) > 0,
+      'within-budget IndexedDB sibling was not restored'
+    );
+    assert(
+      !navigations.includes(thirdParty),
+      'partitioned third-party storage was replayed first-party'
+    );
+    assert(
+      navigations.filter((o) => o === admin).length === 1 &&
+        JSON.stringify(adminWrites) === JSON.stringify(['mac-older', 'harvest-newer']),
+      `one origin's rows were not restored oldest-first in one visit: ${JSON.stringify({ navigations, adminWrites })}`
+    );
+    assert(result.localStorage.originCount === 2, 'localStorage siblings were not restored');
+    console.log(`✅ realm init skips a ${bytes}-byte cache and restores first-party siblings`);
+  } finally {
+    await prisma.indexedDBOrigin.deleteMany({ where: { userId } });
+    await prisma.localStorageOrigin.deleteMany({ where: { userId } });
+    await prisma.browserContext.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } });
+  }
+}
+
 (async () => {
   try {
     await verifyAssembly();
@@ -358,6 +485,7 @@ async function verifyDatabaseUnicodeAndAbort() {
     await verifyAbort();
     await verifyDatabaseScopeAndRevision();
     await verifyDatabaseUnicodeAndAbort();
+    await verifyRealmRestoreBudget();
   } finally {
     await prisma.$disconnect();
   }

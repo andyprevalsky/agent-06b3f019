@@ -12,6 +12,7 @@ symptoms:
   - "origin transfer exceeded 1200MB RSS: 1390.015625"
   - "Google credential preparation returned HTTP 500 after 32 seconds before an 8 GB guest OOM"
   - "Browser state injection timed out after 15000ms"
+  - "Browser state injection timed out after 18000ms"
 tags:
   - indexeddb
   - jsonb
@@ -25,6 +26,7 @@ sources:
   - fleet run 20260930-205255-27412
   - fleet run 20261001-195536-10470
   - fleet run 20261002-091933-1152
+  - agent 07281fc3-5e49-4cd2-9573-235cb19b0481
 repro: back-end/src/tests/blackbox/browser-origin-injection-memory.blackbox.ts
 status: open
 ---
@@ -342,6 +344,62 @@ are committed. The owning file remains automatically discovered in the normal
 backend `/deploy` blackbox gate. Full final-source deploy and fleet evidence are
 separate required gates. The original OOM allocation and 18-second timeout
 attribution remain open.
+
+### October 12 recurrence: the restored volume itself was unbounded
+
+Prod agent `07281fc3-5e49-4cd2-9573-235cb19b0481` (Mac app, Kernel) failed
+eight `spawn_browser_agent` inits between 20:11 and 21:28Z with `Browser
+session init failed after 5 transient-proxy retries: {"error":"Browser state
+injection timed out after 18000ms"}`. Render logs for every google.com init
+that day: localStorage 4.4–6.8 s (28–38 origins), then IndexedDB 9.7–13.5 s for
+`rawBytes=79151599` in 93–94 scripts (`cdpWaitMs` 6.5–10.3 s). Successful
+attempts finished at 15.9–17.0 s; the rest hit 18 s. The blob is
+`https://drive.google.com` → `ODPMC` `modules`/`cssModules`: 76 MB of Drive's
+cached JS/CSS code (25.9k records), 19.9 MB stored. Prod's only rows over
+2.3 MB raw are three Drive caches (79, 79, 37 MB); the next largest is mail at
+1.3 MB stored. A start URL of `admin.google.com` restored all of it because
+selection is realm-wide.
+
+Why earlier fixes did not hold: each one sped up or bounded the transport of
+this blob (codec, packet sizing, target replay, completion packet, 18 s
+headroom) without bounding how much is restored. The memory blackbox that owns
+it transfers 78.6 MB under `BROWSER_STATE_INJECTION_TIMEOUT_MS=60000`, so no
+gate measured feasibility under the production budget.
+
+Local repro, real production path: `initSession` against a real Kernel browser
+(SF residential proxy) for a local user seeded with this realm's prod shape
+(real origin keys and sizes, synthetic values, 78.6 MB synthetic Drive row).
+Unchanged main failed 3/3 with `BrowserStateInjectionTimeout: Browser state
+injection timed out after 18000ms` (localStorage 13.1–13.4 s for 39 keys from
+the dev box, about 2× Render's per-origin latency; IndexedDB reached 12–16 MB).
+With the byte bound only, the dev box still failed 3/3 because of that
+localStorage latency. Projection from Render's measured phases: 6.3 s + 1.0 s
+non-Drive IndexedDB + 0.9 s cache ≈ 8.3 s. With the localStorage key handling
+from 2026-10-12-mac-localstorage-reader-dropped-storage-key-first-byte, the
+dev box passed 3/3 at 12.4–13.5 s.
+
+Fix: restoration skips an origin whose payload exceeds 8 MiB of sent bytes
+(`BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES`). The existing staging statement
+first compares the O(1) `pg_column_size` against the budget, so an oversized
+row is never serialized, then checks the exact staged byte length. There is no
+extra round trip. Skips log table and byte counts at warn, with no origin
+because origins are browsing history; restored counts stay truthful.
+Permanent regression: `verifyRealmRestoreBudget` in
+`browser-origin-payload.blackbox.ts`. The old source failed it with
+`over-budget origin reached the browser: 27404739 bytes`. The memory blackbox
+raises both bounds explicitly to keep its large-transfer assertions.
+
+Residual, by adversarial review:
+1. The bound is per origin, so many sub-budget origins can still sum past the
+   phase, and realm-wide selection stays the next-deeper class. The next fix
+   is start-origin-first priority with a cumulative budget.
+2. Skipping a whole origin also drops any small database next to its cache.
+3. The Mac app still uploads the cache on every sync.
+4. The worker classifies every init 5xx, including this deterministic
+   timeout, as a "transient-proxy" retry.
+5. The regression asserts the mechanism with an instant fake browser; only the
+   scratch real-Kernel repro measures the 18 s outcome.
+6. The original live OOM allocation is still unattributed.
 
 ## Human feedback
 
