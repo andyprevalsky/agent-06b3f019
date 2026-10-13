@@ -444,9 +444,7 @@ it.each([
     'rose-session',
     JSON.stringify({ access_token: 'fixture-token', user: { id: 'fixture-admin' } }),
   );
-  const group = structuredClone(
-    kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra,
-  );
+  const group = structuredClone(kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra);
   if (kind === 'passed' || kind === 'failed') {
     group.tasks[1] = {
       ...group.tasks[1],
