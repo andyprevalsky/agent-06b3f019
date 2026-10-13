@@ -315,6 +315,37 @@ these gates. The passing results above belong to `c928ede47`; the synchronized
 tree still requires its applicable gates and the final exact-head review and
 production verification. The original Google session acceptance remains open.
 
+## Synchronized auth-runtime verification
+
+After merging main PR #1497, runtime `1c0b7a0da` passed the complete applicable
+Group 3 again: 196 backend domains and 266 unit files (89.56% lines), 157 frontend
+files and 2,735 passing tests with three existing intentional skips (83.33%
+lines), and 110 agents domains, 184 fast-cache checks and 134 units (82%). All
+46 structural gates and static checks passed. Five cold seeds peaked at the
+reported 164 MB under the unchanged 228 MB budget. Controller checks passed
+their 16 scenarios, 21 timing tests and 453 selected pytest cases. Live gates
+passed with one explicitly warning-only Anthropic API-credit result.
+
+Fresh Group 4 passed eight smoke tasks, eight UI scenarios, real E2B, and four
+sandbox payment tasks with verified compensation and owned-stack cleanup.
+Twenty latency samples passed; lifecycle p50/max milliseconds were direct
+803/1,335, web 1,839/2,314, plan 638/643 and execute 792/1,725.
+
+The fresh load root `9384357d-04b0-4758-bb12-dd300a5f9577` had 51 completed
+agents and zero owned admission, exhaustion, age or oversize failures. Its HTTP
+receipts included 5,279 successful 202s and two 502s followed by successful
+same-topic, same-parent INSERT retries. The root peaked at 54 writes per second;
+maximum queue delay was 127 ms. The actual subscriber received the 2,608-byte
+projected aggregate with all fifty references matching the complete local tree.
+The stored 455,542-byte payload retained its full output. Both primary and load
+evidence passed fresh-browser publication and recording checks.
+
+Main advanced again to `b12f0ef05` with admin-health and operational reporting
+changes during these gates. These results belong to `1c0b7a0da`; the next
+synchronized tree, final exact-head review and production verification remain
+pending. Google server acceptance, the original restoration timeout's cause,
+and the earlier saved-password choice remain separate open boundaries.
+
 ## Human feedback
 
 Preserve the approved router and semantic deadlines. Fix the owning boundary;

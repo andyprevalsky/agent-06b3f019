@@ -160,6 +160,25 @@ rejected treating them as proof that all three prompts share an owned cause.
 The incident stays open pending Google-acceptance/native-state evidence;
 deploy verification is recorded separately from the local reproduction.
 
+## Related failed-restoration credential context
+
+A later task on this root started at Claude and navigated to Google Admin.
+Target preparation timed out after eighteen seconds; navigation continued,
+but the prior Claude inventory and assistance identity remained active.
+The separate case `2026-10-13-realm-transition-retained-stale-auth-context`
+records that causal boundary. Main PR #1497 preserves already validated target
+inventory alongside restoration failure, invalidates unrelated realm identity,
+and binds inventory to observed destination pages. It preserves this case's
+cookie ranking, expiry and SameSite fixes. It does not establish why that
+restoration stalled or whether Google accepted the original transferred state.
+
+The earlier Remote Desktop password attempt is not proven fixed by that repair.
+Current references remain ID-bound; the inventory and input guard still use
+canonical realm and base-domain scope. Related Google services can legitimately
+share SSO, so that permissiveness alone is not a newly proven defect. Correct
+service/account selection and compliance with the task's no-guess instruction
+remain unproven. The follow-up audit read no credential values.
+
 ## Human feedback
 
 The user supplied the earlier preliminary explanation, explicitly noting that
