@@ -40,10 +40,11 @@ const MAX_SEND_ATTEMPTS = 3;
 const MAX_SHARD_RETRIES = 4;
 const MAX_INITIAL_TOPIC_MESSAGES = 64;
 const MAX_INITIAL_BATCH_BYTES = 1024 * 1024;
+const INITIAL_MESSAGE_OVERHEAD_BYTES = 128;
 
 interface InitialTopic<T> {
   topic: string;
-  queue: Array<{ value: T; bytes: number }>;
+  queue: Array<{ values: T[]; bytes: number }>;
   messages: number;
   bytes: number;
   inFlight: boolean;
@@ -63,20 +64,32 @@ export class InitialBroadcastDispatcher<
   private tail?: InitialTopic<T>;
 
   enqueue(value: T): boolean {
-    const bytes =
-      Buffer.byteLength(JSON.stringify(value.payload)) + Buffer.byteLength(value.topic) + 128;
-    const shard = this.shards[topicShardIndex(value.topic)];
-    let topic = shard.topics.get(value.topic);
+    return this.enqueueGroup([value]);
+  }
+
+  /** A committed cohort must belong to one request, including mixed batches. */
+  enqueueGroup(values: T[]): boolean {
+    const first = values[0];
+    const bytes = values.reduce(
+      (sum, value) =>
+        sum +
+        Buffer.byteLength(JSON.stringify(value.payload)) +
+        Buffer.byteLength(value.topic) +
+        INITIAL_MESSAGE_OVERHEAD_BYTES,
+      0
+    );
+    const shard = this.shards[topicShardIndex(first.topic)];
+    let topic = shard.topics.get(first.topic);
     if (
       bytes > MAX_AGENT_BYTES ||
       (topic?.bytes ?? 0) + bytes > MAX_AGENT_BYTES ||
-      (topic?.messages ?? 0) >= MAX_INITIAL_TOPIC_MESSAGES ||
+      (topic?.messages ?? 0) + values.length > MAX_INITIAL_TOPIC_MESSAGES ||
       shard.bytes + bytes > MAX_SHARD_BYTES ||
       (topic === undefined && shard.topics.size >= MAX_SHARD_LANES)
     ) {
       log.error('Initial broadcast delivery rejected', {
-        topic: value.topic,
-        message_id: value.payload.id,
+        topic: first.topic,
+        message_id: first.payload.id,
         reason: 'capacity',
         bytes,
       });
@@ -84,17 +97,17 @@ export class InitialBroadcastDispatcher<
     }
     if (topic === undefined) {
       topic = {
-        topic: value.topic,
+        topic: first.topic,
         queue: [],
         messages: 0,
         bytes: 0,
         inFlight: false,
         ready: false,
       };
-      shard.topics.set(value.topic, topic);
+      shard.topics.set(first.topic, topic);
     }
-    topic.queue.push({ value, bytes });
-    topic.messages += 1;
+    topic.queue.push({ values, bytes });
+    topic.messages += values.length;
     topic.bytes += bytes;
     shard.bytes += bytes;
     if (!topic.inFlight && !topic.ready) this.markReady(topic);
@@ -103,6 +116,18 @@ export class InitialBroadcastDispatcher<
 
   hasReady(): boolean {
     return this.head !== undefined;
+  }
+
+  admissionBudget(topicName: string): { messages: number; bytes: number } {
+    const shard = this.shards[topicShardIndex(topicName)];
+    const topic = shard.topics.get(topicName);
+    return {
+      messages:
+        topic === undefined && shard.topics.size >= MAX_SHARD_LANES
+          ? 0
+          : MAX_INITIAL_TOPIC_MESSAGES - (topic?.messages ?? 0),
+      bytes: Math.min(MAX_AGENT_BYTES - (topic?.bytes ?? 0), MAX_SHARD_BYTES - shard.bytes),
+    };
   }
 
   takeBatch(limit: number): { items: T[]; release: () => void } {
@@ -115,14 +140,16 @@ export class InitialBroadcastDispatcher<
       if (this.head === undefined) this.tail = undefined;
       topic.next = undefined;
       topic.ready = false;
-      const entries: Array<{ value: T; bytes: number }> = [];
+      const entries: Array<{ values: T[]; bytes: number }> = [];
+      let count = 0;
       while (
         topic.queue.length > 0 &&
-        entries.length < limit - items.length &&
+        count + topic.queue[0].values.length <= limit - items.length &&
         batchBytes + topic.queue[0].bytes <= MAX_INITIAL_BATCH_BYTES
       ) {
         const entry = topic.queue.shift()!;
         entries.push(entry);
+        count += entry.values.length;
         batchBytes += entry.bytes;
       }
       if (entries.length === 0) {
@@ -130,10 +157,10 @@ export class InitialBroadcastDispatcher<
         break;
       }
       topic.inFlight = true;
-      items.push(...entries.map((entry) => entry.value));
+      items.push(...entries.flatMap((entry) => entry.values));
       leased.push({
         topic,
-        count: entries.length,
+        count,
         bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
       });
     }
@@ -182,10 +209,13 @@ export class CommittedMessageDelivery<
 
   constructor(
     private readonly enqueueFirst: (
-      value: T,
+      values: T[],
+      enqueuedAt: number,
       settle: (outcome: BroadcastOutcome) => Promise<void>
     ) => void,
-    private readonly resend: (value: T) => Promise<BroadcastOutcome>
+    private readonly resend: (values: T[]) => Promise<BroadcastOutcome>,
+    private readonly batchLimit: number,
+    private readonly firstBudget: (topic: string) => { messages: number; bytes: number }
   ) {}
 
   enqueue(value: T, bytes: number): void {
@@ -218,14 +248,29 @@ export class CommittedMessageDelivery<
   }
 
   private startHead(shard: Shard<T>, lane: Lane<T>): void {
-    const pending = lane.queue[0];
-    this.enqueueFirst(pending.value, (outcome) => {
-      const task = this.settle(shard, lane, pending, outcome).finally(() =>
-        shard.settlements.delete(task)
-      );
-      shard.settlements.add(task);
-      return task;
-    });
+    // Keep the cohort immutable until all attempts settle. Later inserts stay
+    // queued behind it, and initial admission cannot split it across requests.
+    const cohort: Array<Pending<T>> = [];
+    const budget = this.firstBudget(lane.queue[0].value.topic);
+    let bytes = 0;
+    const limit = Math.max(1, Math.min(MAX_AGENT_MESSAGES, this.batchLimit, budget.messages));
+    for (const pending of lane.queue.slice(0, limit)) {
+      const nextBytes = bytes + pending.bytes + INITIAL_MESSAGE_OVERHEAD_BYTES;
+      if (cohort.length > 0 && nextBytes > budget.bytes) break;
+      cohort.push(pending);
+      bytes = nextBytes;
+    }
+    this.enqueueFirst(
+      cohort.map((pending) => pending.value),
+      cohort[0].enqueuedAt,
+      (outcome) => {
+        const task = this.settle(shard, lane, cohort, outcome).finally(() =>
+          shard.settlements.delete(task)
+        );
+        shard.settlements.add(task);
+        return task;
+      }
+    );
   }
 
   /** Test flush only; production dispatch never waits for unrelated lanes. */
@@ -236,15 +281,16 @@ export class CommittedMessageDelivery<
   private async settle(
     shard: Shard<T>,
     lane: Lane<T>,
-    pending: Pending<T>,
+    cohort: Array<Pending<T>>,
     initial: BroadcastOutcome
   ): Promise<void> {
     let attempts = 0;
+    const pending = cohort[0];
     try {
       const result = await retryWithBackoff(
         async () => {
           attempts += 1;
-          return attempts === 1 ? initial : this.resendBounded(shard, pending);
+          return attempts === 1 ? initial : this.resendBounded(shard, cohort);
         },
         {
           maxRetries: MAX_SEND_ATTEMPTS,
@@ -257,24 +303,28 @@ export class CommittedMessageDelivery<
         }
       );
       if (!result.ok) {
-        log.error('Committed INSERT delivery exhausted', {
-          topic: pending.value.topic,
-          message_id: pending.value.payload.id,
-          attempts,
-          status: result.status,
-          age_ms: Date.now() - pending.enqueuedAt,
-        });
+        for (const member of cohort) {
+          log.error('Committed INSERT delivery exhausted', {
+            topic: member.value.topic,
+            message_id: member.value.payload.id,
+            attempts,
+            status: result.status,
+            age_ms: Date.now() - member.enqueuedAt,
+          });
+        }
       }
     } catch (error) {
-      log.error('Committed INSERT delivery exhausted', {
-        topic: pending.value.topic,
-        message_id: pending.value.payload.id,
-        attempts,
-        reason: 'unexpected_error',
-        error: error instanceof Error ? error.message : String(error),
-      });
+      for (const member of cohort) {
+        log.error('Committed INSERT delivery exhausted', {
+          topic: member.value.topic,
+          message_id: member.value.payload.id,
+          attempts,
+          reason: 'unexpected_error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
-      this.removeHead(shard, lane);
+      for (let index = 0; index < cohort.length; index += 1) this.removeHead(shard, lane);
       while (
         lane.queue.length > 0 &&
         Date.now() - lane.queue[0].enqueuedAt >= MAX_COMMITTED_QUEUE_AGE_MS
@@ -298,17 +348,20 @@ export class CommittedMessageDelivery<
     shard.bytes -= removed.bytes;
   }
 
-  private async resendBounded(shard: Shard<T>, pending: Pending<T>): Promise<BroadcastOutcome> {
+  private async resendBounded(
+    shard: Shard<T>,
+    cohort: Array<Pending<T>>
+  ): Promise<BroadcastOutcome> {
     if (shard.retryActive >= MAX_SHARD_RETRIES) {
       await new Promise<void>((resolve) => shard.retryWaiters.push(resolve));
     } else {
       shard.retryActive += 1;
     }
     try {
-      if (Date.now() - pending.enqueuedAt >= MAX_COMMITTED_QUEUE_AGE_MS) {
+      if (Date.now() - cohort[0].enqueuedAt >= MAX_COMMITTED_QUEUE_AGE_MS) {
         return { ok: false, retryable: false, status: 'error' };
       }
-      return await this.resend(pending.value);
+      return await this.resend(cohort.map((pending) => pending.value));
     } finally {
       const next = shard.retryWaiters.shift();
       if (next === undefined) shard.retryActive -= 1;

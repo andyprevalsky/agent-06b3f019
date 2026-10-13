@@ -161,6 +161,51 @@ Merged-tree gates, final exact-head review and production outcome verification
 are pending. The original Google session acceptance remains outside the proof
 of this delivery repair.
 
+## Regression discovered by the canonical load
+
+The merged-tree smoke evaluators passed all eight tasks, but the canonical
+50-agent load exposed forty-six owned capacity rejection receipts on root
+`ff82250b-e0e8-4f12-8699-d6b63b425b61`. Its persisted-message burst peaked at
+fifty-nine writes per second. Broker sends remained healthy (HTTP 202, roughly
+47–133 ms), yet committed requests generally contained one notification and
+queue delay grew toward two seconds. This is a regression introduced by the
+initial repair: `startHead` serialized every initial notification instead of
+batching queued notifications, so the unchanged thirty-two-message bound
+rejected normal healthy traffic.
+
+The previous admission tests held a request indefinitely and proved finite
+retention, but did not test sustained healthy traffic at the captured cadence.
+The permanent public-publisher `committed-message-throughput` blackbox models
+sixty writes per second and successful hundred-millisecond responses with the
+production request cap. On the unrepaired `ea261931e` runtime it failed in
+4.404 seconds, rejecting twenty notifications. The command is unchanged:
+
+```bash
+cd back-end
+npx tsx src/tests/blackbox/run.ts committed-message-throughput
+```
+
+The fix freezes bounded cohorts of queued committed notifications and admits
+an entire cohort atomically to the existing dispatcher. Healthy sends regain
+batch throughput; uncertain outcomes retry the same IDs and payloads together.
+Admission accounts for the dispatcher's per-message overhead and the actual
+remaining topic and shard budgets, including ephemeral traffic. One eligibility
+clock governs each indivisible cohort, preventing a deadline crossing from
+partially sending a cohort and settling unsent notifications.
+
+The final byte-identical six-case artifact fails on `ea261931e` with twenty
+rejections (4.336 seconds) and passes on the corrected runtime (1.538 seconds).
+It covers captured healthy cadence, mixed-topic retries, byte overhead, age
+cutoffs, and same-topic ephemeral count and byte pressure. The unchanged
+original ten-case delivery artifact also passes (3.273 seconds). Independent
+adversarial review and affected lint, formatting, TypeScript and batching unit
+checks pass. Queue capacities, request timeouts and retry limits are unchanged.
+Release remains blocked on the full revised-tree gates and a fresh canonical
+load without owned delivery rejections. The old-build latency run was explicitly interrupted after the
+capacity regression was established; its three measured direct-answer samples
+do not count as a completed gate. All four sandbox payment tasks passed with
+clean compensation and stack shutdown before the shared stack was stopped.
+
 ## Human feedback
 
 Preserve the approved router and semantic deadlines. Fix the owning boundary;

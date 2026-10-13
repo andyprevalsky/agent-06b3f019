@@ -52,7 +52,10 @@ interface QueuedBroadcast {
   private: boolean;
   trace: ReturnType<typeof currentTraceContext>;
   enqueuedAt: number;
-  settleCommitted?: (outcome: BroadcastOutcome) => Promise<void>;
+  committedCohort?: {
+    enqueuedAt: number;
+    settle: (outcome: BroadcastOutcome) => Promise<void>;
+  };
 }
 
 const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>();
@@ -60,14 +63,17 @@ let flushTimer: NodeJS.Timeout | null = null;
 const inFlightBatches = new Set<Promise<void>>();
 const MAX_IN_FLIGHT_BATCHES = 64;
 const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
-  (item, settleCommitted) => {
-    if (!initialDispatcher.enqueue({ ...item, settleCommitted })) {
-      void settleCommitted({ ok: false, retryable: false, status: 'error' });
+  (items, enqueuedAt, settle) => {
+    const committedCohort = { enqueuedAt, settle };
+    if (!initialDispatcher.enqueueGroup(items.map((item) => ({ ...item, committedCohort })))) {
+      void settle({ ok: false, retryable: false, status: 'error' });
       return;
     }
     scheduleBroadcastDrain(BROADCAST_FLUSH_DELAY_MS);
   },
-  (item) => sendBroadcastBatch([item])
+  (items) => sendBroadcastBatch(items),
+  BROADCAST_BATCH_SIZE,
+  (topic) => initialDispatcher.admissionBudget(topic)
 );
 
 interface AssistantStreamOptions {
@@ -397,17 +403,22 @@ async function drainBroadcastQueue(): Promise<void> {
     const lease = initialDispatcher.takeBatch(BROADCAST_BATCH_SIZE);
     const batch = lease.items;
     // Network waits are independent. One agent's retry cannot hold the drain.
+    const eligibilityAt = Date.now();
     const active = batch.filter(
       (item) =>
-        item.settleCommitted === undefined ||
-        Date.now() - item.enqueuedAt < MAX_COMMITTED_QUEUE_AGE_MS
+        item.committedCohort === undefined ||
+        eligibilityAt - item.committedCohort.enqueuedAt < MAX_COMMITTED_QUEUE_AGE_MS
     );
     const task = sendBroadcastBatch(active)
       .then((outcome) => {
         lease.release();
         const activeItems = new Set(active);
+        const settled = new Set<QueuedBroadcast['committedCohort']>();
         for (const item of batch) {
-          void item.settleCommitted?.(
+          const cohort = item.committedCohort;
+          if (cohort === undefined || settled.has(cohort)) continue;
+          settled.add(cohort);
+          void cohort.settle(
             activeItems.has(item) ? outcome : { ok: false, retryable: false, status: 'error' }
           );
         }
