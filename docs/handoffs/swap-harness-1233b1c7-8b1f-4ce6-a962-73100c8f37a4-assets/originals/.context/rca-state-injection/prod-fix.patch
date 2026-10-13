@@ -1,0 +1,219 @@
+diff --git a/back-end/src/providers/steel/injectionOriginPayload.ts b/back-end/src/providers/steel/injectionOriginPayload.ts
+index 320dc23b0..5c21b4659 100644
+--- a/back-end/src/providers/steel/injectionOriginPayload.ts
++++ b/back-end/src/providers/steel/injectionOriginPayload.ts
+@@ -24,6 +24,27 @@ const COLUMNS = {
+ type OriginTable = keyof typeof COLUMNS;
+ const SQL_CHUNK_BYTES = 4 * 1024 * 1024;
+ export const MAX_ORIGIN_INIT_SCRIPT_BYTES = 1024 * 1024;
++// Restore cost grows with payload size while the browser-state phase has one
++// fixed budget. Prod Render→Kernel spent 10–13.5 s of the 18 s phase restoring
++// one 79 MB desktop cache (Drive's JS module store, 19.9 MB stored), so every
++// init for that realm raced its deadline. Auth state is small: the largest
++// other stored origin is 1.3 MB. Stored (TOAST) size is O(1) to read, so an
++// oversized row is skipped without serializing it.
++const DEFAULT_MAX_RESTORED_ORIGIN_STORED_BYTES = 4 * 1024 * 1024;
++
++export function maxRestoredOriginStoredBytes(): number {
++  const configured = Number(process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_STORED_BYTES);
++  return Number.isSafeInteger(configured) && configured > 0
++    ? configured
++    : DEFAULT_MAX_RESTORED_ORIGIN_STORED_BYTES;
++}
++
++/** The stored origin payload cannot be restored inside the state budget. */
++class OriginPayloadOverBudget extends Error {
++  constructor(readonly storedBytes: number) {
++    super('Origin payload exceeds the restore byte budget');
++  }
++}
+ 
+ function scriptWireBytes(script: string): number {
+   // JSON escaping happens again in the CDP envelope. Leave room for its IDs,
+@@ -58,17 +79,33 @@ async function readOriginTextParts(
+         `ALTER TABLE "${stage}" ALTER COLUMN payload SET STORAGE EXTERNAL`
+       );
+       signal?.throwIfAborted();
+-      const inserted = await tx.$executeRawUnsafe(
+-        `INSERT INTO "${stage}" SELECT convert_to((${payload})::text, 'UTF8') FROM "${table}"
+-       WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp`,
++      const budget = maxRestoredOriginStoredBytes();
++      // One snapshot reads the stored size and stages only a row within budget.
++      const [staged] = await tx.$queryRawUnsafe<
++        Array<{ storedBytes: number | null; staged: number | null }>
++      >(
++        `WITH source AS (
++         SELECT pg_column_size("${column}")::int AS stored FROM "${table}"
++         WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp
++       ), staged AS (
++         INSERT INTO "${stage}" SELECT convert_to((${payload})::text, 'UTF8') FROM "${table}"
++         WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp
++           AND pg_column_size("${column}") <= $6::bigint
++         RETURNING 1 AS staged
++       )
++       SELECT (SELECT stored FROM source) AS "storedBytes", (SELECT staged FROM staged) AS staged`,
+         row.id,
+         row.userId,
+         row.origin,
+         row.hash,
+-        row.updatedAt
++        row.updatedAt,
++        budget
+       );
+       signal?.throwIfAborted();
+-      if (inserted !== 1) throw new Error('Origin payload disappeared during injection');
++      if (staged?.storedBytes == null)
++        throw new Error('Origin payload disappeared during injection');
++      // Decided before the first byte reaches the browser.
++      if (staged.staged == null) throw new OriginPayloadOverBudget(staged.storedBytes);
+       const decoder = new TextDecoder('utf-8', { fatal: true });
+       let offset = 1;
+       let total = Infinity;
+@@ -134,7 +171,11 @@ function chunkScript(
+   })();`;
+ }
+ 
+-/** Keep blob decoding in the matching document and each CDP mutation byte-bounded. */
++/**
++ * Keep blob decoding in the matching document and each CDP mutation byte-bounded.
++ * Resolves false, without browser mutations, when the stored payload exceeds the
++ * restore byte budget.
++ */
+ export async function injectOriginPayload(
+   context: OriginPayloadContext,
+   row: OriginPayloadRef | { origin: string },
+@@ -143,7 +184,7 @@ export async function injectOriginPayload(
+   legacyValue?: unknown,
+   targetOrigin = row.origin,
+   signal?: AbortSignal
+-): Promise<void> {
++): Promise<boolean> {
+   const ownedWriter =
+     'writeOriginScript' in context ? undefined : createOriginPayloadWriter(context, signal);
+   const writer = 'writeOriginScript' in context ? context : ownedWriter!;
+@@ -223,7 +264,13 @@ export async function injectOriginPayload(
+   signal?.addEventListener('abort', onAbort, { once: true });
+   try {
+     if ('id' in row) await readOriginTextParts(table, row, consume, signal);
+-    else await consume(JSON.stringify(legacyValue) ?? 'null');
++    else {
++      const text = JSON.stringify(legacyValue) ?? 'null';
++      const bytes = Buffer.byteLength(text);
++      // A caller-supplied value has no stored form; bound its raw bytes.
++      if (bytes > maxRestoredOriginStoredBytes()) throw new OriginPayloadOverBudget(bytes);
++      await consume(text);
++    }
+     if (pending) {
+       const encodingStarted = performance.now();
+       const completed = chunkScript(targetOrigin, token, pending.index, pending.part, index, apply);
+@@ -231,7 +278,7 @@ export async function injectOriginPayload(
+       encodingMs += performance.now() - encodingStarted;
+       if (completedBytes <= MAX_ORIGIN_INIT_SCRIPT_BYTES) {
+         await send(completed, completedBytes);
+-        return;
++        return true;
+       }
+       // A longer total marker can cross the exact envelope bound. Preserve the
+       // original two-packet completion protocol in that case.
+@@ -243,6 +290,16 @@ export async function injectOriginPayload(
+       throw new Error('Origin init-script envelope exceeds its byte budget');
+     }
+     await send(finish, finishBytes);
++    return true;
++  } catch (error) {
++    if (!(error instanceof OriginPayloadOverBudget)) throw error;
++    log.warn('Skipped origin payload over the restore byte budget', {
++      table,
++      origin: targetOrigin,
++      storedBytes: error.storedBytes,
++      budgetBytes: maxRestoredOriginStoredBytes(),
++    });
++    return false;
+   } finally {
+     signal?.removeEventListener('abort', onAbort);
+     await ownedWriter?.close();
+diff --git a/back-end/src/providers/steel/injectionState.ts b/back-end/src/providers/steel/injectionState.ts
+index 7a7b7458f..ea44432b4 100644
+--- a/back-end/src/providers/steel/injectionState.ts
++++ b/back-end/src/providers/steel/injectionState.ts
+@@ -17,12 +17,9 @@ export async function injectLocalStorageState(
+   signal?: AbortSignal
+ ): Promise<{ injected: boolean; originCount: number }> {
+   log.info(`  [localStorage] Injecting for ${localStorageOrigins.length} origins...`);
++  let restored = 0;
+   for (const origin of localStorageOrigins) {
+-    let cleanOrigin = origin.origin;
+-    if (cleanOrigin.startsWith('ttps://')) cleanOrigin = 'https://' + cleanOrigin.slice(7);
+-    else if (!cleanOrigin.startsWith('http')) cleanOrigin = 'https://' + cleanOrigin;
+-    if (cleanOrigin.includes('/^0')) cleanOrigin = cleanOrigin.split('/^0')[0];
+-    await injectOriginPayload(
++    const injected = await injectOriginPayload(
+       context,
+       origin,
+       'LocalStorageOrigin',
+@@ -31,12 +28,13 @@ export async function injectLocalStorageState(
+         try { localStorage.setItem(entry.key, entry.value); } catch (e) {}
+       }`,
+       'entries' in origin ? origin.entries : undefined,
+-      cleanOrigin,
++      origin.origin,
+       signal
+     );
++    if (injected) restored++;
+   }
+   log.info(`  [localStorage] Injected (${Date.now() - startTime}ms)`);
+-  return { injected: true, originCount: localStorageOrigins.length };
++  return { injected: restored > 0, originCount: restored };
+ }
+ 
+ export async function injectIndexedDBState(
+@@ -46,8 +44,9 @@ export async function injectIndexedDBState(
+   signal?: AbortSignal
+ ): Promise<{ injected: boolean; originCount: number }> {
+   log.info(`  [indexedDB] Injecting for ${indexedDBOrigins.length} origins...`);
++  let restored = 0;
+   for (const origin of indexedDBOrigins) {
+-    await injectOriginPayload(
++    const injected = await injectOriginPayload(
+       context,
+       origin,
+       'IndexedDBOrigin',
+@@ -112,9 +111,10 @@ export async function injectIndexedDBState(
+       origin.origin,
+       signal
+     );
++    if (injected) restored++;
+   }
+   log.info(`  [indexedDB] Injected (${Date.now() - startTime}ms)`);
+-  return { injected: true, originCount: indexedDBOrigins.length };
++  return { injected: restored > 0, originCount: restored };
+ }
+ 
+ export async function injectPermissionState(
+@@ -170,12 +170,13 @@ export async function injectCacheStorageState(
+   signal?: AbortSignal
+ ): Promise<{ injected: boolean; originCount: number }> {
+   log.info(`  [cacheStorage] Injecting metadata for ${cacheStorageOrigins.length} origins...`);
++  let restored = 0;
+   for (const origin of cacheStorageOrigins) {
+     const names =
+       'caches' in origin
+         ? (origin.caches as Array<{ name: string }>).map((c) => ({ name: c.name }))
+         : undefined;
+-    await injectOriginPayload(
++    const injected = await injectOriginPayload(
+       context,
+       origin,
+       'CacheStorageOrigin',
+@@ -190,9 +191,10 @@ export async function injectCacheStorageState(
+       origin.origin,
+       signal
+     );
++    if (injected) restored++;
+   }
+   log.info(`  [cacheStorage] Injected (${Date.now() - startTime}ms)`);
+-  return { injected: true, originCount: cacheStorageOrigins.length };
++  return { injected: restored > 0, originCount: restored };
+ }
+ 
+ export async function injectScrollbarState(
