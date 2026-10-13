@@ -9,7 +9,11 @@ import { ZodError } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { prepareSessionCredentials, SessionNotFoundError } from './service';
+import {
+  prepareSessionCredentials,
+  SessionCredentialInjectionError,
+  SessionNotFoundError,
+} from './service';
 import { prepareSessionCredentialsSchema } from './types';
 
 const log = createLogger('BrowserSession');
@@ -44,6 +48,9 @@ export function registerBrowserCredentialRoutes(router: Router): void {
         });
         res.status(500).json({
           error: error instanceof Error ? error.message : 'Failed to prepare browser credentials',
+          ...(error instanceof SessionCredentialInjectionError
+            ? { code: error.code, credential_payload: error.credentialPayload }
+            : {}),
         });
       }
     })
