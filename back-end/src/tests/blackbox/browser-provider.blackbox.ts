@@ -29,6 +29,7 @@ import {
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
+import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
@@ -45,6 +46,10 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  [
+    'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
+    assertAuthPersistFailedInitCustody,
+  ],
   [
     'Kernel is the default provider',
     () =>

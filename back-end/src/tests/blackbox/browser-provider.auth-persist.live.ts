@@ -1,7 +1,11 @@
 /** Live Kernel/Steel: sign-in survives session close and a later browser-agent call. */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, rename, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
+import { benchmarkSavedBrowserAuthDisabled } from '../../providers/benchmarkBrowserAuth';
+import { CHROME_EPOCH_OFFSET_MICROSECONDS } from '../../domains/integrations/config';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import { releaseKernelRemoteSession } from '../../providers/browser/kernel';
 import { releaseSteelRemoteSession } from '../../providers/steel/session';
@@ -12,6 +16,11 @@ import {
 } from '../helpers/browser-sign-in-evidence';
 import { deleteKernelProfile } from './browser-provider-rotation.support';
 import { assert, navigateKernelPage, retryBackendFetch } from './browser-provider.helpers';
+import {
+  cleanupAuthPersistFixture,
+  readAuthPersistInitOnce,
+  type AuthPersistCleanupResult,
+} from './browser-provider.auth-persist.cleanup';
 
 const LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 
@@ -47,22 +56,133 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     );
   }
 
+  assert(
+    !benchmarkSavedBrowserAuthDisabled(),
+    'Live auth persist requires saved browser auth; do not disable it for this fixture'
+  );
   const userId = `auth-persist-live-${randomUUID()}`;
-  const headers = { 'content-type': 'application/json', 'x-api-key': apiKey, 'x-user-id': userId };
-  const allocated: Array<{ sessionId: string; provider: string; profileId?: string }> = [];
+  const headers = {
+    'content-type': 'application/json',
+    'x-api-key': apiKey,
+    'x-user-id': userId,
+  };
+  const allocated: Array<{
+    sessionId: string;
+    provider: string;
+    profileId?: string;
+  }> = [];
+  // Keep identifiers outside mutable coverage output; never store credentials or URLs.
+  const custodyRoot = resolve(__dirname, '../../../../.context/test-runs/browser-provider-custody');
+  await mkdir(custodyRoot, { recursive: true, mode: 0o700 });
+  const custodyDir = await mkdtemp(join(custodyRoot, 'auth-persist-'));
+  await chmod(custodyDir, 0o700);
+  const journalPath = join(custodyDir, 'custody.json');
+  const marker = `rose-provisioning:${createHash('sha256').update(userId).digest('hex')}`;
+  let initUnresolved = false;
+  let originalFailure: unknown;
+  let userCreated = false;
+  let passedMessage: string | undefined;
+  let guardBundleId: string | undefined;
+  let mintedIdentityObserved = false;
+  const snapshot = async () => {
+    const [identity, sessions, profiles] = await Promise.all([
+      prisma.agentIdentity.findUnique({
+        where: { userId },
+        select: {
+          phoneProvider: true,
+          phoneProviderAgentId: true,
+          phoneProviderNumberId: true,
+        },
+      }),
+      prisma.browserSession.findMany({
+        where: { context: { userId } },
+        select: {
+          sessionId: true,
+          provider: true,
+          providerProfileId: true,
+          status: true,
+        },
+      }),
+      prisma.browserProviderProfile.findMany({
+        where: { context: { userId } },
+        select: { provider: true, profileId: true },
+      }),
+    ]);
+    if (identity !== null) mintedIdentityObserved = true;
+    return { identity, sessions, profiles };
+  };
+  const saveJournal = async (
+    phase: string,
+    custody: unknown = null,
+    cleanupResults: AuthPersistCleanupResult[] = [],
+    ownerRetained = true
+  ) => {
+    const temporary = `${journalPath}.tmp`;
+    await writeFile(
+      temporary,
+      JSON.stringify(
+        {
+          userId,
+          marker,
+          phase,
+          userCreated,
+          initUnresolved,
+          ownerRetained,
+          custody,
+          allocated,
+          cleanupResults,
+          // Error messages can contain provider response bodies; keep them out of artifacts.
+          cleanupFailures: cleanupResults.filter((result) => !result.succeeded).length,
+        },
+        null,
+        2
+      ),
+      { mode: 0o600 }
+    );
+    await rename(temporary, journalPath);
+  };
+  // Must succeed before any database setup or provider-capable request.
+  await saveJournal('before-setup');
   const post = async (path: string, body: unknown): Promise<Record<string, unknown>> => {
-    const response = await retryBackendFetch(`${base}${path}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    const data = asRecord(await response.json());
+    if (path === '/api/browser-session/init') {
+      initUnresolved = true;
+      await saveJournal('before-init', await snapshot());
+    }
+    const request = { method: 'POST', headers, body: JSON.stringify(body) };
+    // Allocating POSTs are one-shot: a reset can leave the first request running.
+    const result =
+      path === '/api/browser-session/init'
+        ? await readAuthPersistInitOnce(
+            () => fetch(`${base}${path}`, request),
+            () => {
+              initUnresolved = false;
+            }
+          )
+        : await (async () => {
+            const response = await retryBackendFetch(`${base}${path}`, request);
+            return { response, data: (await response.json()) as unknown };
+          })();
+    const { response } = result;
+    const data = asRecord(result.data);
     if (!response.ok) throw new Error(`${path} HTTP ${response.status}: ${JSON.stringify(data)}`);
+    if (path === '/api/browser-session/init') {
+      const custody = await snapshot();
+      await saveJournal('after-init', custody);
+      const authOptions = asRecord(data.auth_options);
+      assert(Array.isArray(authOptions.cookie_bundles), 'init must return cookie bundles');
+      assert(
+        authOptions.cookie_bundles.some((bundle: unknown) => {
+          const row = asRecord(bundle);
+          return row.id === guardBundleId && row.disabled === false;
+        }),
+        'init did not expose the exact enabled guard-cookie bundle'
+      );
+      assert(authOptions.minted === null, 'auth-persist fixture entered unrelated minting');
+      assert(custody.identity === null, 'auth-persist fixture minted an AgentIdentity');
+    }
     return data;
   };
 
-  await prisma.user.create({ data: { userId, name: 'Auth persist live' } });
-  const context = await prisma.browserContext.create({ data: { userId } });
   const startAgent = async (goal: string) =>
     prisma.agent.create({
       data: {
@@ -75,6 +195,37 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     });
 
   try {
+    await prisma.user.create({ data: { userId, name: 'Auth persist live' } });
+    userCreated = true;
+    const context = await prisma.browserContext.create({ data: { userId } });
+    // A real independent cookie keeps phone minting outside this persistence test.
+    // It cannot satisfy either target state that the live handoff must restore.
+    const browserProfile = 'AuthPersistFixture';
+    const guardBundle = await prisma.cookieBundle.create({
+      data: {
+        userId,
+        authRealm: 'example.com',
+        browserSource: 'chrome',
+        browserProfile,
+        disabledAt: null,
+      },
+    });
+    guardBundleId = guardBundle.id;
+    await prisma.cookie.create({
+      data: {
+        userId,
+        domain: 'example.com',
+        name: 'rose_fixture_auth_guard',
+        value: 'independent-fixture',
+        path: '/',
+        browserSource: 'chrome',
+        browserProfile,
+        hasExpires: false,
+        isPersistent: false,
+        creationUtc: BigInt(Date.now()) * 1000n + CHROME_EPOCH_OFFSET_MICROSECONDS,
+      },
+    });
+    await saveJournal('setup-complete', await snapshot());
     const firstAgent = await startAgent('Sign in on Kernel');
     const initial = await post('/api/browser-session/init', {
       user_id: userId,
@@ -94,6 +245,21 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     try {
       const page = remote.contexts()[0]?.pages()[0] ?? (await remote.contexts()[0]!.newPage());
       await navigateKernelPage(page, 'https://example.com');
+      const beforeSignIn = await page.evaluate(() => ({
+        cookies: document.cookie,
+        storage: localStorage.getItem('rose_handoff'),
+      }));
+      assert(
+        beforeSignIn.cookies
+          .split(';')
+          .some((cookie) => cookie.trim() === 'rose_fixture_auth_guard=independent-fixture'),
+        'the independent fixture cookie was not actually injected'
+      );
+      assert(
+        !beforeSignIn.cookies.split(';').some((cookie) => cookie.trim() === 'session=signed-in'),
+        'target sign-in cookie was already present'
+      );
+      assert(beforeSignIn.storage === null, 'target localStorage was already present');
       await page.evaluate(() => {
         document.cookie = 'session=signed-in; path=/; max-age=600; SameSite=Lax';
         localStorage.setItem('rose_handoff', 'signed-in');
@@ -122,7 +288,11 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       where: { id: context.id },
       data: {
         preferredBrowserConfig: buildPreferredBrowserConfig(
-          { provider: 'steel', proxyMode: 'residential_country', steelProxyMode: 'managed' },
+          {
+            provider: 'steel',
+            proxyMode: 'residential_country',
+            steelProxyMode: 'managed',
+          },
           LOCATION
         ),
       },
@@ -165,7 +335,11 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       where: { id: context.id },
       data: {
         preferredBrowserConfig: buildPreferredBrowserConfig(
-          { provider: 'kernel', proxyMode: 'residential_city', kernelProxyType: 'residential' },
+          {
+            provider: 'kernel',
+            proxyMode: 'residential_city',
+            kernelProxyType: 'residential',
+          },
           LOCATION
         ),
       },
@@ -191,26 +365,42 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       session_id: String(later.session_id),
       pause: false,
     });
-    console.log(
-      `PASS live Kernel/Steel auth persist (second=${switchedProvider}, later=${String(laterMeta.provider)})`
+    assert(
+      (await prisma.agentIdentity.findUnique({ where: { userId } })) === null,
+      'auth-persist fixture created an unrelated identity before completion'
     );
+    passedMessage = `PASS live Kernel/Steel auth persist (second=${switchedProvider}, later=${String(laterMeta.provider)})`;
+  } catch (error) {
+    originalFailure = error;
+    throw error;
   } finally {
-    for (const session of allocated) {
-      if (session.provider === 'steel') {
-        await releaseSteelRemoteSession(session.sessionId).catch(() => undefined);
-      } else {
-        await releaseKernelRemoteSession(session.sessionId).catch(() => undefined);
-      }
-      if (session.provider === 'kernel' && session.profileId) {
-        await deleteKernelProfile(session.profileId).catch(() => undefined);
-      }
-    }
-    await deleteCloudBrowserSignInEvidence(userId);
-    await prisma.browserContext.deleteMany({ where: { userId } });
-    await prisma.cookie.deleteMany({ where: { userId } });
-    await prisma.cookieBundle.deleteMany({ where: { userId } });
-    await prisma.localStorageOrigin.deleteMany({ where: { userId } });
-    await prisma.agent.deleteMany({ where: { userId } });
-    await prisma.user.deleteMany({ where: { userId } });
+    await cleanupAuthPersistFixture({
+      userId,
+      userCreated,
+      initUnresolved,
+      allocated,
+      originalFailure,
+      journalPath,
+      snapshot,
+      saveJournal,
+      releaseBrowser: async (session) => {
+        if (session.provider === 'steel') await releaseSteelRemoteSession(session.sessionId);
+        else if (session.provider === 'kernel') await releaseKernelRemoteSession(session.sessionId);
+        else throw new Error('Unsupported owned browser provider');
+      },
+      deleteProfile: deleteKernelProfile,
+      cleanupLocal: async (deleteUser) => {
+        await deleteCloudBrowserSignInEvidence(userId);
+        await prisma.browserContext.deleteMany({ where: { userId } });
+        await prisma.cookie.deleteMany({ where: { userId } });
+        await prisma.cookieBundle.deleteMany({ where: { userId } });
+        await prisma.localStorageOrigin.deleteMany({ where: { userId } });
+        await prisma.agent.deleteMany({ where: { userId } });
+        // No phone deletion is authorized: retain its identity/lease and User owner.
+        if (deleteUser) await prisma.user.deleteMany({ where: { userId } });
+      },
+    });
   }
+  assert(!mintedIdentityObserved, 'auth-persist custody snapshot observed a minted identity');
+  if (passedMessage !== undefined) console.log(passedMessage);
 }
