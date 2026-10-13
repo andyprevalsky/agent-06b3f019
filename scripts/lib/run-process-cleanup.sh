@@ -61,13 +61,15 @@ run_drain_owned_agents() {
 }
 
 run_publish_stack_cleanup_status() {  # <state>
-  local state="$1" path="${RUN_STACK_CLEANUP_STATUS_FILE:-}" temporary birth
+  local state="$1" path="${RUN_STACK_CLEANUP_STATUS_FILE:-}" temporary birth native_identity
   [ -n "$path" ] || return 0
   [ -n "${RUN_STACK_CLEANUP_TOKEN:-}" ] || return 1
   temporary="${path}.tmp.$$"
   birth="$(ps -p "$$" -o lstart= | sed 's/^ *//;s/ *$//')" || return 1
   [ -n "$birth" ] || return 1
-  printf 'version=1\ntoken=%s\nstate=%s\nstack_pid=%s\nstack_birth=%s\n' "$RUN_STACK_CLEANUP_TOKEN" "$state" "$$" "$birth" > "$temporary" \
+  native_identity="$(python3 "$SCRIPT_DIR/process-identity.py" "$$")" || return 1
+  [ -n "$native_identity" ] || return 1
+  printf 'version=2\ntoken=%s\nstate=%s\nstack_pid=%s\nstack_birth=%s\nstack_native_identity=%s\n' "$RUN_STACK_CLEANUP_TOKEN" "$state" "$$" "$birth" "$native_identity" > "$temporary" \
     && mv -f "$temporary" "$path"
 }
 # pgrep -f matches its regex anywhere in argv, so every service token must stop
