@@ -1,0 +1,75 @@
+{
+  "at": "2026-10-12T23:39:59.316Z",
+  "sessions": [
+    {
+      "id": "bd40skybfhvai0p3980w56yx",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "cn345s21dkjreh0phf0bqeyo",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "dis2a006n6b806ptxs1nfwm0",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "fteuf9n1nwrngjcmreuvtcg2",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "heohvazm57cl4kanr89rkmrg",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "kc71kczmvfpl1yfg71vxyeac",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "kj8qni0kwze0mk0fmtbvx86b",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "n2gudx9gh9zodhaki1nk0zl4",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "ng9hi0zkrivgksnvk9ika1kr",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "t6y4yzf3t8yv9rbbxxwioalp",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "uz0mrqclmuo4r1ogo833bqb9",
+      "status": "deleted-or-absent"
+    },
+    {
+      "id": "zbk6gmpauhzfx2k7s2yjkx1f",
+      "status": "deleted-or-absent"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "c0a1nrma0rta5igh9nntapgx",
+      "status": "already-absent",
+      "http_status": 404
+    },
+    {
+      "id": "gid2m3vnkaodlmi2bq4zv54v",
+      "status": "already-absent",
+      "http_status": 404
+    },
+    {
+      "id": "laabxv4jgyi1dfcb1d21uh7z",
+      "status": "already-absent",
+      "http_status": 404
+    },
+    {
+      "id": "oha9553bmngqnc3grpedbw4l",
+      "status": "already-absent",
+      "http_status": 404
+    }
+  ]
+}
