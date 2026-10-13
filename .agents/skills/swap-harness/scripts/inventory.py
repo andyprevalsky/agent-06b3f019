@@ -54,7 +54,7 @@ def collect(targets: dict[str, str] | None = None) -> dict:
         "schemaVersion": 1,
         "capturedAt": datetime.now(timezone.utc).isoformat(),
         "scope": "project", "complete": True,
-        "note": "Previews may be shortened; null devboxId needs supported routing resolution. Determine main-task ownership and exclude active Codex main work before dispatch. No quota classification was inferred.",
+        "note": "Previews may be shortened; null devboxId needs supported routing resolution. Determine main-task ownership and exclude preexisting Codex main work before dispatch. No quota classification was inferred.",
         "threads": records,
     }
 

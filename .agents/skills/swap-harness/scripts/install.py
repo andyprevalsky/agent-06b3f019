@@ -12,7 +12,11 @@ def install(source: Path, home: Path) -> list[Path]:
     if not (source / "SKILL.md").is_file():
         raise ValueError("Source has no SKILL.md")
     canonical = home / ".local/share/boxes-skills/swap-harness"
-    links = [home / ".agents/skills/swap-harness", home / ".claude/skills/swap-harness"]
+    links = [
+        home / ".agents/skills/swap-harness",
+        home / ".codex/skills/swap-harness",
+        home / ".claude/skills/swap-harness",
+    ]
     for link in links:
         if link.is_symlink():
             if link.resolve() != canonical.resolve():

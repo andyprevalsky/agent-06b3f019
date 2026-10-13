@@ -125,7 +125,9 @@ The repo's canonical skill lives in `.agents/skills/swap-harness`, with Claude
 discovery through `.claude/skills/swap-harness`. Run
 `python3 <skill-dir>/scripts/install.py` for standalone home installs on both
 harnesses. This touches only this skill. New boxes inherit the project's saved
-reusable source, not the old live filesystem. Push the skill commit; fetch and
+reusable source, not the old live filesystem. The installer uses the canonical
+Codex `.agents/skills` path plus a `.codex/skills` alias for managed catalogs,
+and Claude's `.claude/skills` path. Push the skill commit; fetch and
 extract only its folder where task branches predate it, then install before
 starting workers. Specify the exact skill revision in replacement prompts.
 A current-box installation does not update siblings or the Template snapshot.

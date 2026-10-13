@@ -91,8 +91,10 @@ print(json.dumps(result))
             for _ in range(2):
                 subprocess.run(command, check=True, capture_output=True)
             codex = home / ".agents/skills/swap-harness"
+            managed_codex = home / ".codex/skills/swap-harness"
             claude = home / ".claude/skills/swap-harness"
             self.assertEqual(codex.resolve(), claude.resolve())
+            self.assertEqual(managed_codex.resolve(), codex.resolve())
             self.assertEqual((codex / "SKILL.md").read_bytes(), (SKILL / "SKILL.md").read_bytes())
             subprocess.run([sys.executable, str(claude / "scripts/inventory.py"), "--help"], check=True, capture_output=True)
             self.assertEqual((ROOT / ".claude/skills/swap-harness").resolve(), SKILL.resolve())
@@ -109,6 +111,7 @@ print(json.dumps(result))
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual((original / "SKILL.md").read_text(), "existing local skill")
             self.assertFalse((home / ".agents/skills/swap-harness").exists())
+            self.assertFalse((home / ".codex/skills/swap-harness").exists())
             self.assertFalse((home / ".local/share/boxes-skills/swap-harness").exists())
 
 
