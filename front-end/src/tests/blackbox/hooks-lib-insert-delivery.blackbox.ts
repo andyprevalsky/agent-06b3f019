@@ -136,6 +136,28 @@ describe('committed INSERT delivery', () => {
     hook.unmount();
   });
 
+  it('the first delayed plan acknowledgement preserves a newer unrelated plan stream', async () => {
+    let handlers: Handlers = {};
+    vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
+      handlers = next;
+      return fakeChannel();
+    });
+    let plan = { stream_id: 'new-plan-stream', tool_call_id: 'new-plan-call', title: 'New plan' };
+    const deps = makeDeps({
+      setStreamingPlan: (action) => {
+        const next = typeof action === 'function' ? action(plan) : action;
+        if (next !== null) plan = next;
+        else plan = { stream_id: '', tool_call_id: '', title: '' };
+      },
+    });
+    const hook = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
+    act(() => handlers.onInsert?.(insert));
+    expect(plan.tool_call_id).toBe('new-plan-call');
+    expect(deps.dispatchMessage).toHaveBeenCalledOnce();
+    hook.unmount();
+  });
+
   it('a late browser start cannot resurrect a finished task', async () => {
     let handlers: Handlers = {};
     vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {

@@ -89,6 +89,15 @@ messages do not seed these claims: their first notification must still settle
 the matching live stream. Late browser-start notifications retain the existing
 terminal lifecycle precedence.
 
+An additional unchanged reproduction failed before fixing delayed first plan
+acknowledgements: old completed plan X cleared a newer plan Y when X's first
+successful notification arrived after its retry. Plan settlement now matches
+`toolCallId`, as attention settlement already does. The owning INSERT handler
+and its existing tests were extracted into smaller modules to satisfy their
+existing lint limits; assertions remain intact and the matching-plan fixture
+now includes its real tool-call identity. All 32 focused handler/delivery checks
+pass after this correction.
+
 The frontend permanent reproduction is
 `front-end/src/tests/blackbox/hooks-lib-insert-delivery.blackbox.ts`; the same
 notification scenarios fail on the baseline and pass after deduplication.
