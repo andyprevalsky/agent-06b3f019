@@ -42,7 +42,9 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
         foundry    = gpt-6-sol (when configured)
         waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
 
-    rose-1-browser-use:  (same rose-fast hop as flash)
+    rose-1-browser-use:  (same rose-fast hop as flash; browser agents normally
+                          run on their spawning agent's pool, this one serves
+                          non-Rose agent models)
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         foundry    = gpt-5.6-luna (when configured; after Cerebras)

@@ -11,6 +11,19 @@ Use the repository entrypoint for benchmark and eval runs, from the repository r
 scripts/run-bench $ARGUMENTS
 ```
 
+Every launch prints the mandatory parent-agent format and maintenance contract.
+Read it before communicating or scheduling the next slice; retrieve it again
+without a launch with `scripts/run-bench report-format`. Its single source is
+`.claude/shared/benchmark-report-format.txt`. Send only its exact fenced `text`
+scorecard for benchmark updates, with the /deploy frame, progress bars, clocks,
+PASS/FAIL and infra percentages/counts, cost/cache/latency, cleanup and active
+sub-agents. Keep continuously progressing. Hold a new slice iff infra failures
+are >10% of terminal attempts; at ≥3 hours since the last original trigger give
+a concrete reason, owner/action and resume condition. Delegate issues with `/RCA`
+and `/deploy` with an isolated immutable checkpoint that excludes later edits.
+Required approval requests follow `.claude/shared/approval-format.md` instead,
+using the same styling and its complete evidence/diff/Links requirements.
+
 For the current user-requested five consecutive LIVE DAILY runs of fifty,
 follow CLAUDE.md's **Current width-fifty LIVE acceptance** subsection. Each run
 uses fifty distinct randomly selected eligible names through the normal CLI

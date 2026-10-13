@@ -113,10 +113,11 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
     adjust_iteration_after_action,
+    browser_pool_for_agent_model,
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
 )
-from .credential_runtime import build_realm_credential_state
+from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
@@ -269,9 +270,10 @@ async def prepare_optional_realm_credentials(
     if (
         not target_realm
         or auth_realm_matches_url(current_auth_realm, target_url)
-        or target_realm in failed_realms
     ):
         return None
+    if target_realm in failed_realms:
+        return {"auth_realm": target_realm, "credential_preparation_error": failed_realms[target_realm]}
     try:
         return await prepare_credentials(target_url)
     except Exception as prep_error:
@@ -285,7 +287,7 @@ async def prepare_optional_realm_credentials(
             target_url=target_url,
             error=error_signature,
         )
-        return None
+        return {"auth_realm": target_realm, "credential_preparation_error": error_signature}
 
 
 def _normalize_payment_card_last4(value: Any) -> Optional[str]:
@@ -2420,6 +2422,7 @@ async def _call_browser_use_with_rotation(
     extra_user_messages: Optional[List[Dict[str, str]]] = None,
     call_site: Optional[str] = None,
     skip_cache_write: bool = False,
+    pool: str = BROWSER_USE_PRICING_POOL,
     dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
@@ -2447,6 +2450,7 @@ async def _call_browser_use_with_rotation(
         cache_namespace=_browser_prompt_cache_namespace(browser_task_id, effective_call_site),
         skip_cache_write=skip_cache_write,
         dump_extra=dump_extra,
+        pool=pool,
     )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -2564,6 +2568,7 @@ def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -
             "success": result.get("success", True),
             "message": result.get("message", ""),
             "formatted_state": result["formatted_state"],
+            **({"auth_context": result["auth_context"]} if "auth_context" in result else {}),
         }
     clean: Dict[str, Any] = {}
     for key, value in (result or {}).items():
@@ -3813,6 +3818,7 @@ async def _generate_write_lock_notification(
     write_lock_result: Dict[str, Any],
     system_name: str,
     fallback_question: str,
+    pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Fork browser-use context to generate write-lock approval metadata."""
     from browser_tools.schemas import GenerateWriteLockNotificationTool
@@ -3853,6 +3859,7 @@ async def _generate_write_lock_notification(
                 call_site=f"write_lock_notification_fork_{iteration}"
                 + (f"_retry{attempt}" if attempt else ""),
                 skip_cache_write=True,
+                pool=pool,
                 dump_extra={
                     "write_lock_notification_fork": True,
                     "approval_type": approval_type,
@@ -4638,7 +4645,10 @@ async def spawn_browser_agent_activity_v3(
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     world_model_mode: Optional[str] = None,
+    agent_model: Optional[str] = None,
 ) -> Dict[str, Any]:
+    # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
+    browser_pool = browser_pool_for_agent_model(agent_model)
     # A browser is its own stateful environment. Do not inherit either the
     # benchmark runner's explicit session or the parent agent's module-cached
     # session. The latter uses ``agent_id`` as its cache key and can be created
@@ -4674,6 +4684,7 @@ async def spawn_browser_agent_activity_v3(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             world_model=world_model,
+            browser_pool=browser_pool,
         )
     return await _spawn_browser_agent_activity_v3_real(
         user_id=user_id,
@@ -4696,6 +4707,7 @@ async def spawn_browser_agent_activity_v3(
         gpt_token_source=gpt_token_source,
         gpt_token_pool_id=gpt_token_pool_id,
         fast_mode_cache_enabled=fast_mode_cache_enabled,
+        browser_pool=browser_pool,
     )
 
 
@@ -5405,6 +5417,8 @@ def _simulated_browser_usage_items(
     total_output_tokens: int,
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+    *,
+    pricing_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> List[Dict[str, Any]]:
     """Simulated twin of `build_usage_items`: same per-actual-model llm rows,
     a free World-Model-Harness service row instead of a paid browser row."""
@@ -5413,6 +5427,7 @@ def _simulated_browser_usage_items(
         total_output_tokens,
         model_pricing,
         usage_by_model,
+        pricing_pool=pricing_pool,
     )
     items.append({"type": "service", "cost_cents": 0, "provider": "World Model Harness"})
     return items
@@ -5440,6 +5455,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
     world_model: WorldModelToolExecutionAdapter,
+    browser_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Run the real browser-use policy against WMH state without creating a browser."""
 
@@ -5495,7 +5511,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
         else:
             browser_use_mode = None
 
-    model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
+    model_pricing = await get_model_pricing_with_fallback(browser_pool)
     task_prompt = build_browser_task_prompt(goal)
     dynamic_system_context = build_browser_dynamic_system_context(
         "# Simulated Browser Runtime\n"
@@ -5713,6 +5729,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     browser_use_mode=browser_use_mode,
                     call_site=f"browser_use_simulated_step_{iteration}",
                     dump_extra={"browser_session_metadata": {"provider": "wmh", "simulated": True}},
+                    pool=browser_pool,
                 )
             finally:
                 rose_client.set_thinking_stream(None)
@@ -5890,6 +5907,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                             total_output_tokens,
                             model_pricing,
                             usage_by_model,
+                            pricing_pool=browser_pool,
                         ),
                     }
                 rejection = {"success": False, "score": score, "reasoning": reasoning}
@@ -6124,6 +6142,7 @@ async def _spawn_browser_agent_activity_v3_real(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
+    browser_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -6178,6 +6197,7 @@ async def _spawn_browser_agent_activity_v3_real(
             {"input_cents_per_1k": 0, "output_cents_per_1k": 0},
             0.0,
             usage_by_model,
+            pricing_pool=browser_pool,
             fast_mode_cache_enabled=True,
         )
         return {
@@ -7003,8 +7023,8 @@ async def _spawn_browser_agent_activity_v3_real(
             _user_context_section = (
                 "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
-            _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
-            _model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
+            _base_custom_instructions = _user_context_section
+            _model_pricing = await get_model_pricing_with_fallback(browser_pool)
             _record_timing("parallel.data.instructions", t)
 
             return (
@@ -7444,18 +7464,24 @@ async def _spawn_browser_agent_activity_v3_real(
             ):
                 raise RuntimeError("Approved payment card has no pending browser tool result to complete")
         failed_credential_prep_realms: Dict[str, str] = {}
+        credential_preparation_error: Optional[str] = None
+        pending_credential_reload_realm: Optional[str] = None
+        action_redaction_refs: Optional[List[Dict[str, str]]] = None
 
-        async def _prepare_credentials_for_url_unquarantined(
-            target_url: str,
-        ) -> Optional[Dict[str, Any]]:
-            """Atomically activate every saved credential type for a new realm."""
+        def _credential_binding() -> tuple:
+            ref = session_credential_ref or {}
+            return (session_id, ref.get("kind"), ref.get("id"))
+
+        active_credential_binding = _credential_binding()
+
+        def _activate_realm_credentials(realm_state: Any, payload: Dict[str, Any]) -> None:
+            nonlocal active_credential_binding
             nonlocal auth_realm
             nonlocal auth_options
             nonlocal auth_options_section
             nonlocal auth_runtime_state
-            nonlocal base_custom_instructions
             nonlocal credential_refs_by_secret_ref
-            nonlocal dynamic_system_context
+            nonlocal credential_preparation_error
             nonlocal minted_account_label
             nonlocal minted_account_labels
             nonlocal minted_credential_ref
@@ -7468,15 +7494,60 @@ async def _spawn_browser_agent_activity_v3_real(
             nonlocal session_passwords
             nonlocal session_credential_ref
 
+            retained_non_password_refs = {
+                key: value
+                for key, value in credential_refs_by_secret_ref.items()
+                if value.get("kind") not in {"password", "minted", "minted_account"}
+            }
+            auth_realm = realm_state.auth_realm
+            auth_options = realm_state.auth_options
+            auth_options_section = realm_state.auth_options_section
+            auth_runtime_state = realm_state.auth_runtime_state
+            credential_refs_by_secret_ref = {
+                **retained_non_password_refs,
+                **realm_state.credential_refs_by_secret_ref,
+            }
+            password_origins = realm_state.password_origins
+            secret_refs = {**card_refs, **realm_state.password_secret_refs}
+            if action_redaction_refs is not None:
+                action_redaction_refs.append(dict(secret_refs))
+            session_passwords = list(payload.get("passwords") or [])
+            session_passkeys = list(payload.get("passkeys") or [])
+            session_credential_ref = realm_state.auth_credential_ref
+            credential_preparation_error = payload.get("credential_preparation_error")
+            active_credential_binding = _credential_binding()
+
+            minted_option = auth_options.get("minted") or {}
+            minted_account_label = (
+                minted_option.get("email")
+                or minted_option.get("agentEmail")
+                or minted_option.get("agent_email")
+                or minted_option.get("accountLabel")
+                or minted_option.get("account_label")
+            )
+            minted_phone_label = (
+                minted_option.get("phone") or minted_option.get("agentPhone") or minted_option.get("agent_phone")
+            )
+            minted_account_labels = {
+                str(label).strip().lower() for label in (minted_account_label, minted_phone_label) if label
+            }
+            minted_primary_label = minted_account_label or minted_phone_label
+            minted_credential_ref = (
+                {
+                    "kind": "minted_account",
+                    "id": str(minted_option.get("id") or minted_primary_label),
+                }
+                if minted_option and minted_primary_label
+                else None
+            )
+
+
+        async def _prepare_credentials_for_url_unquarantined(
+            target_url: str,
+        ) -> Optional[Dict[str, Any]]:
+            """Atomically activate every saved credential type for a new realm."""
             target_realm = auth_realm_from_url(target_url)
-            if not target_realm or auth_realm_matches_url(auth_realm, target_url):
-                return None
-            if target_realm in failed_credential_prep_realms:
-                logger.info(
-                    "Skipping a previously failed optional realm credential preparation",
-                    auth_realm=target_realm,
-                    error=failed_credential_prep_realms[target_realm],
-                )
+            if not target_realm:
                 return None
             if not session_id:
                 raise RuntimeError(f"Cannot prepare credentials for {target_realm} without a browser session")
@@ -7509,54 +7580,7 @@ async def _spawn_browser_agent_activity_v3_real(
             )
             passkey_ref_by_credential_id.update(realm_state.passkey_ref_by_credential_id)
 
-            retained_non_password_refs = {
-                key: value
-                for key, value in credential_refs_by_secret_ref.items()
-                if value.get("kind") not in {"password", "minted", "minted_account"}
-            }
-            auth_realm = realm_state.auth_realm
-            auth_options = realm_state.auth_options
-            auth_options_section = realm_state.auth_options_section
-            auth_runtime_state = realm_state.auth_runtime_state
-            credential_refs_by_secret_ref = {
-                **retained_non_password_refs,
-                **realm_state.credential_refs_by_secret_ref,
-            }
-            password_origins = realm_state.password_origins
-            secret_refs = {**card_refs, **realm_state.password_secret_refs}
-            session_passwords = list(payload.get("passwords") or [])
-            session_passkeys = list(payload.get("passkeys") or [])
-            session_credential_ref = realm_state.auth_credential_ref
-            base_custom_instructions = user_context_section + "\n\n" + auth_options_section
-            dynamic_system_context = build_browser_dynamic_system_context(
-                base_custom_instructions,
-                available_files=(list(available_file_paths.keys()) if available_file_paths else None),
-                response_schema=response_schema,
-            )
-
-            minted_option = auth_options.get("minted") or {}
-            minted_account_label = (
-                minted_option.get("email")
-                or minted_option.get("agentEmail")
-                or minted_option.get("agent_email")
-                or minted_option.get("accountLabel")
-                or minted_option.get("account_label")
-            )
-            minted_phone_label = (
-                minted_option.get("phone") or minted_option.get("agentPhone") or minted_option.get("agent_phone")
-            )
-            minted_account_labels = {
-                str(label).strip().lower() for label in (minted_account_label, minted_phone_label) if label
-            }
-            minted_primary_label = minted_account_label or minted_phone_label
-            minted_credential_ref = (
-                {
-                    "kind": "minted_account",
-                    "id": str(minted_option.get("id") or minted_primary_label),
-                }
-                if minted_option and minted_primary_label
-                else None
-            )
+            _activate_realm_credentials(realm_state, payload)
 
             if realm_state.auth_credential_ref and task_id:
                 await save_browser_credential_ref_message(
@@ -7579,21 +7603,79 @@ async def _spawn_browser_agent_activity_v3_real(
                 cookie_source=payload.get("auth_source"),
                 cookies_injected=payload.get("cookies_injected"),
             )
-            return {
+            summary = {
                 "auth_realm": auth_realm,
-                "cookies_injected": int(payload.get("cookies_injected") or 0),
+                "cookies_injected": payload.get("cookies_injected"),
                 "password_count": len(realm_state.password_secret_refs),
                 "passkey_count": len(realm_state.decrypted_passkeys),
                 "passkeys_newly_injected": injected_passkey_count,
             }
+            if payload.get("credential_preparation_error"):
+                summary["credential_preparation_error"] = payload["credential_preparation_error"]
+                logger.warning(
+                    "Activated realm credentials after browser-state restoration failed",
+                    auth_realm=auth_realm,
+                    error=payload["credential_preparation_error"],
+                )
+            return summary
 
         async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+            previous_auth_realm = auth_realm
+            if _credential_binding() != active_credential_binding:
+                # A replaced browser or selected credential invalidates both
+                # inventory reuse and the previous session's quarantine.
+                previous_auth_realm = ""
+                failed_credential_prep_realms.clear()
+            target_realm = auth_realm_from_url(target_url)
+            if target_realm != previous_auth_realm and not auth_realm_matches_url(previous_auth_realm, target_url):
+                # Invalidate unrelated context before discovery, including a
+                # return to a quarantined realm. Missing inventory is unknown.
+                _activate_realm_credentials(unknown_realm_credential_state(target_realm), {})
             return await prepare_optional_realm_credentials(
                 target_url=target_url,
-                current_auth_realm=auth_realm,
+                current_auth_realm=previous_auth_realm,
                 failed_realms=failed_credential_prep_realms,
                 prepare_credentials=_prepare_credentials_for_url_unquarantined,
             )
+
+        async def _auth_context_for_url(observed_url: str) -> Dict[str, Any]:
+            """Publish only safe inventory for an actual browser tool observation."""
+            nonlocal pending_credential_reload_realm
+            realm = auth_realm_from_url(observed_url)
+            realm_changed = bool(realm and not auth_realm_matches_url(auth_realm, observed_url))
+            prepared = await _prepare_credentials_for_url(observed_url)
+            if realm_changed and prepared is not None and not prepared.get("credential_preparation_error"):
+                pending_credential_reload_realm = auth_realm
+            if not realm:
+                # Non-web pages have no authentication inventory. In particular,
+                # about:blank must not inherit another tab's realm.
+                return {"auth_realm": "", "inventory_status": "not_applicable"}
+            context: Dict[str, Any] = {
+                "auth_realm": auth_realm if auth_options_section else realm,
+                "inventory_status": "available" if auth_options_section else "unknown",
+            }
+            if auth_options_section:
+                context["auth_options"] = auth_options_section
+            error = credential_preparation_error or failed_credential_prep_realms.get(realm)
+            if error:
+                context["credential_preparation_error"] = error
+            return context
+
+        async def _execute_action(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+            """Observe every real action and retain its secrets through redaction."""
+            nonlocal action_redaction_refs
+            redaction_refs = [dict(secret_refs)]
+            action_redaction_refs = redaction_refs
+            kwargs["auth_context_for_url"] = _auth_context_for_url
+            try:
+                result = await execute_action(*args, **kwargs)
+                # Ref names can collide across realms. Keep each binding's
+                # values until this result is safe to log, persist, and submit.
+                for refs in redaction_refs:
+                    result = mask_secret_values(result, refs)
+                return result
+            finally:
+                action_redaction_refs = None
 
         async def _recover_browser_step(reason: str, *, reload_page: bool) -> bool:
             nonlocal supervisor_recovery_count
@@ -7702,6 +7784,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 model_pricing,
                                 (safe_time() - start_time) * 1000,
                                 usage_by_model,
+                                pricing_pool=browser_pool,
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             ),
                             **drain_continuity,
@@ -7757,7 +7840,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     with contextlib.suppress(Exception):
                         browser_network_recorder = network_recorder_task.result()
 
-                result = await execute_action(
+                result = await _execute_action(
                     dom_service,
                     action_history,
                     unified_action,
@@ -7777,6 +7860,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_network_recorder=browser_network_recorder,
                     current_auth_realm=auth_realm,
                     prepare_credentials_for_url=_prepare_credentials_for_url,
+                    auth_context_for_url=_auth_context_for_url,
                 )
 
                 if result.get("status") == "needs_write_approval":
@@ -7895,23 +7979,35 @@ async def _spawn_browser_agent_activity_v3_real(
             # injected cookies and origin state participate in the first page
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
-            if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
+            observed_realm_changed = (
+                observed_auth_realm != auth_realm and not auth_realm_matches_url(auth_realm, current_url)
+            )
+            reload_prepared_realm = bool(
+                pending_credential_reload_realm
+                and auth_realm_matches_url(pending_credential_reload_realm, current_url)
+            )
+            pending_credential_reload_realm = None
+            if _credential_binding() != active_credential_binding or observed_realm_changed:
                 prepared_realm = await _prepare_credentials_for_url(current_url)
-                if prepared_realm is not None:
-                    from browser_use.browser.events import NavigateToUrlEvent
+                reload_prepared_realm = bool(
+                    observed_realm_changed and prepared_realm is not None
+                    and not prepared_realm.get("credential_preparation_error")
+                )
+            if reload_prepared_realm:
+                from browser_use.browser.events import NavigateToUrlEvent
 
-                    reload_event = dom_service.session.event_bus.dispatch(
-                        NavigateToUrlEvent(url=current_url, wait_until="commit")
-                    )
-                    await reload_event
-                    await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                    await wait_for_navigation_ready(dom_service, url=current_url)
-                    logger.info(
-                        "Reloaded page after redirected realm credential preparation",
-                        auth_realm=auth_realm,
-                        current_url=current_url,
-                    )
-                    continue
+                reload_event = dom_service.session.event_bus.dispatch(
+                    NavigateToUrlEvent(url=current_url, wait_until="commit")
+                )
+                await reload_event
+                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                await wait_for_navigation_ready(dom_service, url=current_url)
+                logger.info(
+                    "Reloaded page after redirected realm credential preparation",
+                    auth_realm=auth_realm,
+                    current_url=current_url,
+                )
+                continue
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -8005,7 +8101,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             )
                             try:
                                 auto_fill_result = await asyncio.wait_for(
-                                    execute_action(
+                                    _execute_action(
                                         dom_service,
                                         action_history,
                                         {
@@ -8054,6 +8150,26 @@ async def _spawn_browser_agent_activity_v3_real(
                             # read_browser_state in this iteration re-fetches.
                             observe_page_state = {}
                             filled_refs = auto_fill_result.get("payment_refs_filled") or []
+                            auto_fill_url = str(auto_fill_result.get("current_url") or "")
+                            if auto_fill_url and auto_fill_url != current_url:
+                                current_url = auto_fill_url
+                                handoff_payment_fill_succeeded = bool(auto_fill_result.get("success") and filled_refs)
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title="Page changed after payment auto-fill",
+                                    task_id=task_id,
+                                    message=str(auto_fill_result.get("message") or ""),
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                # Observe/reload the new surface before another
+                                # model turn. No model-issued tool call exists
+                                # for this automatic action, so do not invent one.
+                                continue
                             if auto_fill_result.get("success") and filled_refs:
                                 handoff_payment_fill_succeeded = True
                                 await save_browser_action_message(
@@ -8217,6 +8333,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             if browser_recorder
                             else {"iteration": iteration_snapshot}
                         ),
+                        pool=browser_pool,
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
@@ -8706,6 +8823,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     model_pricing,
                     execution_time_ms,
                     usage_by_model,
+                    pricing_pool=browser_pool,
                     fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                     provider=browser_session_metadata.get("provider"),
                 )
@@ -9495,6 +9613,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             model_pricing,
                             execution_time_ms,
                             usage_by_model,
+                            pricing_pool=browser_pool,
                             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             provider=browser_session_metadata.get("provider"),
                         )
@@ -9696,7 +9815,7 @@ Based on this feedback, I need to continue working on the task and address the i
             browser_activity_checkpoint(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
-                    execute_action(
+                    _execute_action(
                         dom_service,
                         action_history,
                         unified_action,
@@ -9717,6 +9836,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
                         prefetched_browser_state=prefetched_browser_state,
+                        auth_context_for_url=_auth_context_for_url,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -9955,6 +10075,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             write_lock_result=result,
                             system_name=system_name,
                             fallback_question=question,
+                            pool=browser_pool,
                         ),
                         timeout=_notification_timeout_s,
                     )
@@ -10128,6 +10249,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_result=result,
                         system_name=system_name,
                         fallback_question=f"{system_name} wants to make a purchase. Approve?",
+                        pool=browser_pool,
                     )
                     payment_write_lock_notification = payment_notification_result.get("notification")
                     payment_write_lock_notification_usage = {
@@ -10457,6 +10579,7 @@ Based on this feedback, I need to continue working on the task and address the i
             model_pricing,
             execution_time_ms,
             usage_by_model,
+            pricing_pool=browser_pool,
             fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
             provider=browser_session_metadata.get("provider"),
         )
@@ -10991,8 +11114,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
                     ]
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                    if world_model_mode != "real":
-                        activity_args.append(world_model_mode)
+                    activity_args.append(world_model_mode if world_model_mode != "real" else None)
+                    activity_args.append(getattr(workflow_instance, "model", None))
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

@@ -6,6 +6,7 @@ Constants, defaults, and environment reads.
 import os
 from typing import Any, Mapping, Optional
 
+from providers.rose.legacy_adapter import pool_for_model
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from utils.oai_demo import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
@@ -137,9 +138,6 @@ EXTRACT_LLM_MODEL = "openai/gpt-4.1-mini"
 EXTRACT_LLM_MAX_TOKENS = 4096
 EXTRACT_LLM_TEMPERATURE = 0.1
 
-# Rose API model name
-ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
-
 # Pricing-lookup KEY for the browser-use pool. This is a POOL name, never the
 # model that actually ran inference — the pool races several underlying models
 # at different prices, and claudeAuth/gptAuth steps run on the user's own
@@ -150,6 +148,15 @@ ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 # all, so the workflow prices those orphan tokens at the browser pool instead
 # of falling back to the ROOT agent's cheaper pool.
 BROWSER_USE_PRICING_POOL = "rose-1-browser-use"
+
+
+def browser_pool_for_agent_model(agent_model: Optional[str]) -> str:
+    """The Rose pool a browser agent's steps run on: its spawning agent's pool.
+
+    Non-Rose agent models and activities scheduled without a model keep the
+    dedicated browser pool.
+    """
+    return pool_for_model(agent_model or "") or BROWSER_USE_PRICING_POOL
 
 # Verifier settings
 # `check_progress` (helpers/llm.py) forces rose-1-ultra + claude_token

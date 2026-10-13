@@ -356,6 +356,7 @@ class _BrowserServices:
     def __init__(self, on_deploy_step: Callable[[], Awaitable[None]]) -> None:
         self.on_deploy_step = on_deploy_step
         self.llm_turns: list[str] = []
+        self.llm_pools: list[str] = []
         self.steps: list[str] = []
         self.session_inits: list[str] = []
         self.session_lookups: list[tuple[str, str]] = []
@@ -386,6 +387,7 @@ class _BrowserServices:
 
     async def llm_step(self, *args, **kwargs):
         self.llm_turns.append(_WORKER_LABEL.get())
+        self.llm_pools.append(kwargs.get("pool"))
         usage = {"prompt_tokens": STEP_PROMPT_TOKENS, "completion_tokens": 60, "actual_model": "rose-1-browser-use"}
         if len(self.llm_turns) >= BROWSER_STEPS:
             action = {
@@ -514,6 +516,8 @@ def _assert_browser_task_resumed(agent_id: str, browser: _BrowserServices, old: 
     assert browser.llm_turns == [old] * DEPLOY_AT_STEP + [new] * (BROWSER_STEPS - DEPLOY_AT_STEP), (
         f"each browser-use turn must run once, none repeated after the deploy; got {browser.llm_turns}"
     )
+    # The flash root's browser agent runs every step on the root's pool.
+    assert browser.llm_pools == ["rose-1-flash"] * BROWSER_STEPS, browser.llm_pools
     assert browser.verifications == [new], browser.verifications
     assert browser.session_inits == [old], f"the task must keep its Steel session; inits={browser.session_inits}"
     task_ids = {task_id for _, task_id in browser.session_lookups}
@@ -531,7 +535,8 @@ def _assert_browser_task_resumed(agent_id: str, browser: _BrowserServices, old: 
         item.get("tokens_in")
         for record in wf.CUTOVER_USAGE[agent_id]
         for item in record["usage_items"]
-        if item.get("type") == "llm" and item.get("model") == "rose-1-browser-use"
+        # The fake steps report no transport model, so they bill at the inherited pool.
+        if item.get("type") == "llm" and item.get("model") == "rose-1-flash"
     ]
     assert billed_prompt_tokens == [
         DEPLOY_AT_STEP * STEP_PROMPT_TOKENS,

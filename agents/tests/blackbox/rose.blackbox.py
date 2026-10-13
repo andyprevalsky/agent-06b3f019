@@ -343,6 +343,27 @@ def test_every_waterfall_model_is_vision_capable():
     assert missing == [], f"waterfall models absent from VISION_MODELS: {missing}"
 
 
+def test_every_browser_route_model_sees_images():
+    """Browser agents run on their spawning agent's pool, so every route that can
+    serve a screenshot must see it. Foundry alone may be text-only: the client
+    skips it for image requests (test_text_only_foundry_skipped_for_image_requests).
+    """
+    from providers.rose.pools import foundry_model
+    from providers.rose.transforms import route_model_accepts_images
+
+    blind = []
+    for name, spec in POOL_REGISTRY.items():
+        routes = [*spec.waterfall, *([spec.cerebras_model] if spec.cerebras_model else [])]
+        if spec.direct_auth_enabled:
+            routes += [spec.claude_auth_model, spec.gpt_auth_model]
+        blind += [(name, model) for model in routes if not route_model_accepts_images(model)]
+    assert blind == [], f"image-serving routes without vision: {blind}"
+    # Bare direct-route ids resolve onto their OpenRouter vision entries.
+    assert route_model_accepts_images("claude-opus-5-5")
+    assert route_model_accepts_images("gpt-6-sol")
+    assert not route_model_accepts_images(foundry_model(POOL_REGISTRY["rose-1-oss"]))
+
+
 def test_all_pool_names_matches_registry():
     names = set(all_pool_names())
     assert names == set(POOL_REGISTRY.keys())
@@ -4055,7 +4076,7 @@ async def test_waterfall_raw_tls_failure_on_all_models_preserves_exact_step_erro
 
 
 async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
-    """Browser Qwen prefers a cache-capable endpoint and retains fallback."""
+    """Browser Qwen prefers a cache-capable endpoint on any pool and retains fallback."""
     bodies = []
     sse_ok = "\n".join(
         _openai_sse(
@@ -4071,7 +4092,9 @@ async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
         return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
-    for pool_name in ("rose-1-browser-use", "rose-1-flash"):
+    # A flash-root browser agent runs on rose-1-flash; the browser flag, not the
+    # pool, selects the cache-capable endpoint.
+    for pool_name, browser_use in (("rose-1-browser-use", True), ("rose-1-flash", True), ("rose-1-flash", False)):
         await _drain(
             waterfall_complete(
                 pool_spec=get_pool(pool_name),
@@ -4079,14 +4102,15 @@ async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
                 openrouter_key="ork-test",
                 request_id=f"r-{pool_name}",
                 cache_namespace="browser-task:task-1:browser_use",
+                browser_use=browser_use,
             )
         )
 
-    assert bodies[0]["model"] == "qwen/qwen3.8-27b"
-    assert bodies[0]["provider"] == {"order": ["novita"], "allow_fallbacks": True}
-    assert bodies[0]["session_id"] == "browser-task:task-1:browser_use"
-    assert bodies[1]["model"] == "qwen/qwen3.8-27b"
-    assert "provider" not in bodies[1]
+    assert [body["model"] for body in bodies] == ["qwen/qwen3.8-27b"] * 3
+    for body in bodies[:2]:
+        assert body["provider"] == {"order": ["novita"], "allow_fallbacks": True}
+        assert body["session_id"] == "browser-task:task-1:browser_use"
+    assert "provider" not in bodies[2]
 
 
 async def test_waterfall_skips_anthropic_for_response_format():
@@ -6342,6 +6366,78 @@ async def test_client_foundry_luna_backs_mini_and_speed_pools():
     assert get_pool("rose-1-ultra").foundry_enabled
 
 
+async def test_text_only_foundry_skipped_for_image_requests():
+    """rose-1-oss's DeepSeek cannot see screenshots: an image request skips it for
+    the vision waterfall, text keeps it, and a vision Foundry model still serves."""
+    foundry_sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"foundry ok"}',
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+            "data: [DONE]",
+            "",
+        ]
+    )
+    openrouter_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "kimi ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted: list[str] = []
+    openrouter_bodies: list[dict] = []
+
+    def handler(req):
+        if req.url.host == "a-4989-resource.openai.azure.com":
+            attempted.append(f"foundry:{json.loads(req.content)['model']}")
+            return httpx.Response(200, text=foundry_sse, headers={"Content-Type": "text/event-stream"})
+        if req.url.host == "openrouter.ai":
+            body = json.loads(req.content)
+            openrouter_bodies.append(body)
+            attempted.append(f"openrouter:{body['model']}")
+            return httpx.Response(200, text=openrouter_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    image_message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is on screen?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+        ],
+    }
+
+    async def run(pool: str, message: dict) -> list:
+        return await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool=pool, messages=[message], _exclude_anthropic_family=True, call_site="test-foundry-vision"
+            )
+        )
+
+    set_mock_handler(handler)
+    env = {
+        "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+        "AZURE_FOUNDRY_API_KEY": "test-key",
+        "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        "GPT_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+    with patch.dict(os.environ, env):
+        chunks = await run("rose-1-oss", image_message)
+        assert attempted == ["openrouter:moonshotai/kimi-k3"], attempted
+        assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "moonshotai/kimi-k3"
+        sent = openrouter_bodies[0]["messages"][-1]["content"]
+        assert any(part.get("type") == "image_url" for part in sent), "the screenshot reaches kimi-k3"
+
+        attempted.clear()
+        await run("rose-1-oss", {"role": "user", "content": "hi"})
+        assert attempted == ["foundry:DeepSeek-V3.2"], attempted
+
+        attempted.clear()
+        await run("rose-1-ultra", image_message)
+        assert attempted == ["foundry:gpt-6-sol"], attempted
+
+
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
 
@@ -8333,6 +8429,7 @@ async def run_all_tests():
         "every_waterfall_model_is_vision_capable",
         test_every_waterfall_model_is_vision_capable,
     )
+    r.record("every_browser_route_model_sees_images", test_every_browser_route_model_sees_images)
 
     r.record("is_anthropic_model", test_is_anthropic_model_substring)
     r.record("transform_block_passthrough", test_transform_content_block_passthrough_for_text)
@@ -8714,6 +8811,10 @@ async def run_all_tests():
     await r.record_async(
         "client_foundry_luna_backs_mini_and_speed_pools",
         test_client_foundry_luna_backs_mini_and_speed_pools,
+    )
+    await r.record_async(
+        "text_only_foundry_skipped_for_image_requests",
+        test_text_only_foundry_skipped_for_image_requests,
     )
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",

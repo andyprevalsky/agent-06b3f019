@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { ChatLlmTransientMissError } from './chatStructuredRetry';
-import { extractCompleteTopLevelStringFields, extractPartialStringField } from './routerJsonStream';
+import { extractCompleteTopLevelFields, extractPartialStringField } from './routerJsonStream';
 
 export const RouterDecisionSchema = z.discriminatedUnion('action', [
   z.object({
@@ -11,7 +11,8 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('web_search'),
     reasoning: z.string(),
-    query: z.string().min(1),
+    /** Run in parallel; each becomes its own web_search tool result. */
+    queries: z.array(z.string().trim().min(1)).min(1),
   }),
   z.object({
     action: z.literal('start_superintelligence'),
@@ -22,6 +23,15 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
+
+/**
+ * Chat routes each turn, then routes it again after every round of web
+ * searches with their results in context: answer, search again, or escalate.
+ * After MAX_CHAT_SEARCH_ROUNDS rounds the Router can only answer or escalate.
+ */
+export type RouterStage = 'initial' | 'after_search' | 'search_budget_spent';
+
+export const MAX_CHAT_SEARCH_ROUNDS = 3;
 
 const DEADLINE_REASONING = 'Route selected before the provider stream finished.';
 const ACTION_SYNTAX_REASONING = 'Route selected from a provider action response.';
@@ -49,10 +59,16 @@ function parseProviderActionSyntax(value: string): RouterDecision | null {
   }
 }
 
-/** Provider JSON always includes unused fields as "". Legacy cache may omit mode. */
+/**
+ * Provider JSON always includes unused fields as "" or []. Legacy cache rows
+ * may omit mode or carry one `query` string instead of `queries`.
+ */
 function normalizeRouterDecisionInput(value: unknown): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
   const raw = value as Record<string, unknown>;
+  if (raw.action === 'web_search' && raw.queries === undefined && typeof raw.query === 'string') {
+    return { ...raw, queries: [raw.query] };
+  }
   if (raw.action !== 'start_superintelligence' || raw.mode !== undefined) return value;
   return { ...raw, mode: 'plan' };
 }
@@ -86,11 +102,13 @@ export function parseRouterDecisionJson(json: string): RouterDecision {
  * This deliberately never guesses a query, goal, or mode from truncated JSON.
  */
 export function parsePartialRouterDecisionJson(json: string): RouterDecision | null {
-  const fields = extractCompleteTopLevelStringFields(json);
+  const fields = extractCompleteTopLevelFields(json);
   if (!fields) return null;
-  const action = fields.action;
+  const text = (name: string): string | undefined =>
+    typeof fields[name] === 'string' ? fields[name] : undefined;
+  const action = text('action');
   const reasoning =
-    fields.reasoning ?? extractPartialStringField(json, 'reasoning') ?? DEADLINE_REASONING;
+    text('reasoning') ?? extractPartialStringField(json, 'reasoning') ?? DEADLINE_REASONING;
 
   if (action === 'direct_answer') {
     try {
@@ -101,24 +119,30 @@ export function parsePartialRouterDecisionJson(json: string): RouterDecision | n
   }
 
   if (action === 'web_search') {
-    const query = fields.query?.trim();
-    if (!query) return null;
+    // Only a closed queries array is actionable; never guess from a cut-off list.
+    const queries = Array.isArray(fields.queries) ? fields.queries : undefined;
+    const query = text('query');
+    if (!queries && !query) return null;
     try {
-      return parseRouterDecisionObject({ action, reasoning, query });
+      return parseRouterDecisionObject({
+        action,
+        reasoning,
+        ...(queries ? { queries } : { query }),
+      });
     } catch {
       return null;
     }
   }
 
   if (action === 'start_superintelligence') {
-    const goal = fields.goal?.trim();
+    const goal = text('goal')?.trim();
     if (!goal) return null;
     try {
       return parseRouterDecisionObject({
         action,
         reasoning,
         goal,
-        ...(fields.mode !== undefined ? { mode: fields.mode } : {}),
+        ...(text('mode') !== undefined ? { mode: text('mode') } : {}),
       });
     } catch {
       return null;
@@ -192,8 +216,14 @@ export function finalizeRouterDecisionFromStream(params: {
 export function requireRouterDecision(params: {
   finalized: { decision: RouterDecision | null; fullJson: string };
   deadlineExpired: boolean;
+  stage?: RouterStage;
 }): RouterDecision {
-  if (params.finalized.decision) return params.finalized.decision;
+  const decision = params.finalized.decision;
+  if (decision && params.stage === 'search_budget_spent' && decision.action === 'web_search') {
+    // The spent-budget schema has no web_search action; a provider that ignores it missed.
+    throw new ChatLlmTransientMissError('parse', 'Router chose web_search after the search budget');
+  }
+  if (decision) return decision;
   if (params.deadlineExpired) {
     throw new ChatLlmTransientMissError('deadline', 'Chat router completion expired');
   }

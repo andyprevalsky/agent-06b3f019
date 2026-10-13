@@ -103,7 +103,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     'web_search stream title stays null until query is complete',
     () => {
       const partial =
-        '{"reasoning":"needs live data","action":"web_search","query":"best cities to live';
+        '{"reasoning":"needs live data","action":"web_search","queries":["best cities to live';
 
       assertEqual(getWebSearchStreamTitleFromPartialRouterJson(partial), null, 'partial query');
     },
@@ -111,21 +111,28 @@ const tests: Array<[string, () => Promise<void> | void]> = [
   [
     'web_search stream title includes the completed query',
     () => {
-      const complete =
+      const firstOfMany =
+        '{"reasoning":"needs live data","action":"web_search","queries":["best cities to live in your 20s","cost of living';
+      const legacy =
         '{"reasoning":"needs live data","action":"web_search","query":"best cities to live in your 20s","goal":"","mode":"plan"}';
 
-      assertEqual(
-        getWebSearchStreamTitleFromPartialRouterJson(complete),
-        '🔍 Searching the web for best cities to live in your 20s',
-        'complete query title'
-      );
+      for (const [json, label] of [
+        [firstOfMany, 'first complete query of several'],
+        [legacy, 'legacy cached single query'],
+      ]) {
+        assertEqual(
+          getWebSearchStreamTitleFromPartialRouterJson(json),
+          '🔍 Searching the web for best cities to live in your 20s',
+          label
+        );
+      }
     },
   ],
   [
     'non-web-search router actions do not produce web-search tool titles',
     () => {
       const direct =
-        '{"reasoning":"answer directly","action":"direct_answer","query":"","goal":"","mode":"plan"}';
+        '{"reasoning":"answer directly","action":"direct_answer","queries":[],"goal":"","mode":"plan"}';
 
       assertEqual(getWebSearchStreamTitleFromPartialRouterJson(direct), null, 'direct answer');
     },

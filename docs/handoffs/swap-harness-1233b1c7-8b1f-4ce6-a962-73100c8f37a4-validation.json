@@ -1,0 +1,440 @@
+{
+  "schema_version": 1,
+  "utc": "2026-10-13T01:28:42.549196+00:00",
+  "harness": "codex",
+  "old_box_id": "1233b1c7-8b1f-4ce6-a962-73100c8f37a4",
+  "new_box_id": "b81310e1-dbb0-45cc-b7b8-e109ec47fa43",
+  "new_thread_id": "thr_d9204167e68b42ad90dc6c9acfcf1956",
+  "thread_url": "https://boxes.dev/thread/thr_d9204167e68b42ad90dc6c9acfcf1956",
+  "checkpoint_sha": "8a2c8981701511d4ee8b933ffd1b48af5b18d39f",
+  "runtime_candidate_sha": "dd2e520fc8c25d0a7adce9982acc0e2dedf9efec",
+  "runtime_file_sha256": {
+    "back-end/src/providers/steel/injectionOriginPayload.ts": "83803ffb0a56420681db748f80f9df68a29babed6c0ce6cf43a9efd2bb212080",
+    "back-end/src/providers/steel/injectionState.ts": "6d229793a7fd8058a92a9ff0c473eb5f7d23e7b356baaa8a9d8536add5b3385b"
+  },
+  "preservation": {
+    "archived_source_originals_reverified": 22,
+    "private_archive_verification_receipt": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-resumed.json"
+  },
+  "admission_red_green": {
+    "runner": "back-end/scripts/run-blackbox-tests.sh browser-origin-payload",
+    "database": "local isolated victoria_cloud-452e0019, system PostgreSQL localhost:5432",
+    "red_exit_code": 1,
+    "red_failures": [
+      "configured limit exceeds PostgreSQL int range",
+      "large CacheStorage content suppresses fitting names projection"
+    ],
+    "green_exit_code": 0,
+    "green_duration_ms": 7365,
+    "compressed_oversized_browser_mutations": 0
+  },
+  "sql_probe": {
+    "fixture": "synthetic compressed string",
+    "serialized_bytes": 79200029,
+    "stored_bytes": 906623,
+    "admission_ms": 662.574,
+    "oversized_staged_rows": 0,
+    "statement_timeout_ms": 18000,
+    "rolled_back": true
+  },
+  "proof_qualifications": [
+    "Exact UTF-8 admission occurs before bytea staging and browser mutations, but still serializes rejected JSONB inside PostgreSQL.",
+    "Preserved Kernel receipts exercised the source at 279576174; admission correction has fresh local regression and SQL proof. No duplicate paid Kernel RCA reproduction was run.",
+    "Controller qualification ran all ten unchanged default commands locally on Linux with zero Fly allocations.",
+    "September original OOM attribution and fleet acceptance remain open; production rollout is pending."
+  ],
+  "stages": {
+    "eslint": {
+      "started_at": "2026-10-13T00:41:04Z",
+      "finished_at": "2026-10-13T00:41:14Z",
+      "duration_seconds": 9.8,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/eslint-20261013-004104-3528592.log"
+    },
+    "typescript": {
+      "started_at": "2026-10-13T00:41:14Z",
+      "finished_at": "2026-10-13T00:41:27Z",
+      "duration_seconds": 12.9,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/typescript-20261013-004114-3530461.log"
+    },
+    "backend-structural": {
+      "started_at": "2026-10-13T00:41:27Z",
+      "finished_at": "2026-10-13T00:41:40Z",
+      "duration_seconds": 12.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/backend-structural-20261013-004127-3532931.log"
+    },
+    "deploy-command-structural": {
+      "started_at": "2026-10-13T00:41:40Z",
+      "finished_at": "2026-10-13T00:47:16Z",
+      "duration_seconds": 335.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/deploy-command-structural-20261013-004140-3536156.log"
+    },
+    "seed-cache-decision": {
+      "started_at": "2026-10-13T00:47:16Z",
+      "finished_at": "2026-10-13T00:47:18Z",
+      "duration_seconds": 2.2,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/seed-cache-decision-20261013-004716-3743256.log"
+    },
+    "canonical-seed-whatsapp-content": {
+      "started_at": "2026-10-13T00:47:18Z",
+      "finished_at": "2026-10-13T00:47:18Z",
+      "duration_seconds": 0.1,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/canonical-seed-whatsapp-content-20261013-004718-3744837.log"
+    },
+    "prompt-approval": {
+      "started_at": "2026-10-13T00:42:04Z",
+      "finished_at": "2026-10-13T00:42:05Z",
+      "duration_seconds": 1.0,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/prompt-approval-20261013-004204-3559500.log"
+    },
+    "agent-behavior-approval": {
+      "started_at": "2026-10-13T00:42:18Z",
+      "finished_at": "2026-10-13T00:42:18Z",
+      "duration_seconds": 0.2,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/agent-behavior-approval-20261013-004218-3569907.log"
+    },
+    "llm-trajectory-injection-approval": {
+      "started_at": "2026-10-13T00:42:18Z",
+      "finished_at": "2026-10-13T00:42:19Z",
+      "duration_seconds": 0.3,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/llm-trajectory-injection-approval-20261013-004218-3569902.log"
+    },
+    "backend-coverage": {
+      "started_at": "2026-10-13T00:41:43Z",
+      "finished_at": "2026-10-13T00:51:52Z",
+      "duration_seconds": 608.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/backend-coverage-20261013-004143-3541829.log"
+    },
+    "frontend-coverage": {
+      "started_at": "2026-10-13T00:41:44Z",
+      "finished_at": "2026-10-13T00:45:36Z",
+      "duration_seconds": 232.1,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/frontend-coverage-20261013-004144-3543872.log"
+    },
+    "agents-coverage": {
+      "started_at": "2026-10-13T00:41:45Z",
+      "finished_at": "2026-10-13T00:46:50Z",
+      "duration_seconds": 304.2,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/agents-coverage-20261013-004145-3545676.log"
+    },
+    "credential-health": {
+      "started_at": "2026-10-13T00:46:31Z",
+      "finished_at": "2026-10-13T00:46:32Z",
+      "duration_seconds": 1.1,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/credential-health-20261013-004631-3720210.log"
+    },
+    "amplitude-live": {
+      "started_at": "2026-10-13T00:46:31Z",
+      "finished_at": "2026-10-13T00:46:57Z",
+      "duration_seconds": 26.4,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/amplitude-live-20261013-004631-3720211.log"
+    },
+    "chat-router-failover-live": {
+      "started_at": "2026-10-13T00:46:58Z",
+      "finished_at": "2026-10-13T00:47:11Z",
+      "duration_seconds": 13.8,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/chat-router-failover-live-20261013-004658-3733346.log"
+    },
+    "seed-memory-ratchet": {
+      "started_at": "2026-10-13T00:46:48Z",
+      "finished_at": "2026-10-13T00:48:15Z",
+      "duration_seconds": 86.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/seed-memory-ratchet-20261013-004648-3726924.log"
+    },
+    "cloudbench-controller-native-linux": {
+      "started_at": "2026-10-13T00:46:30Z",
+      "finished_at": "2026-10-13T01:07:20Z",
+      "duration_seconds": 1249.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/cloudbench-controller-native-linux-20261013-004630-3719725.log"
+    },
+    "semantic-ui": {
+      "started_at": "2026-10-13T00:51:03Z",
+      "finished_at": "2026-10-13T00:51:31Z",
+      "duration_seconds": 28.1,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/semantic-ui-20261013-005103-3831859.log"
+    },
+    "semantic-latency": {
+      "started_at": "2026-10-13T00:51:31Z",
+      "finished_at": "2026-10-13T01:01:41Z",
+      "duration_seconds": 609.8,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/semantic-latency-20261013-005131-3843572.log"
+    },
+    "claude-code-e2b-smoke": {
+      "started_at": "2026-10-13T00:53:00Z",
+      "finished_at": "2026-10-13T00:53:24Z",
+      "duration_seconds": 24.3,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/claude-code-e2b-smoke-20261013-005300-3878326.log"
+    },
+    "smoke": {
+      "started_at": "2026-10-13T01:04:00Z",
+      "finished_at": "2026-10-13T01:20:19Z",
+      "duration_seconds": 979.7,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/smoke-20261013-010400-4142657.log"
+    },
+    "agentcard-lifecycle": {
+      "started_at": "2026-10-13T01:04:01Z",
+      "finished_at": "2026-10-13T01:22:49Z",
+      "duration_seconds": 1128.6,
+      "exit_code": 0,
+      "status": "passed",
+      "log": "logs/agentcard-lifecycle-20261013-010401-4143059.log"
+    }
+  },
+  "test_totals": {
+    "backend_domains": 192,
+    "backend_unit_files": 266,
+    "frontend_files": 152,
+    "frontend_passed": 2711,
+    "frontend_builtin_skips": 3,
+    "agents_domains": 110,
+    "deploy_structural_gates": 45,
+    "rca_cases_validated": 848,
+    "e2b_cases": 56,
+    "semantic_ui_cases": 8,
+    "semantic_latency_cases": 5,
+    "semantic_measured_samples": 20,
+    "smoke_tasks": 8,
+    "agentcard_sandbox_tasks": 4
+  },
+  "latency_ms": {
+    "direct_answer": {
+      "p50": 1787,
+      "max": 1814
+    },
+    "web_search": {
+      "p50": 4875,
+      "max": 6851
+    },
+    "agent_plan": {
+      "p50": 2047,
+      "max": 3143
+    },
+    "agent_execute": {
+      "p50": 1581,
+      "max": 2052
+    }
+  },
+  "warnings": [
+    "Existing warn-only Anthropic credit-health failure.",
+    "One web-search sample exceeded the six-second reporting target; every functional sample completed."
+  ],
+  "retired_owned_benchmark_runtime": [
+    {
+      "run_id": "1791853441-4142860-58425",
+      "status": "stopped",
+      "queue": "navi-agent-tasks-cloud-452e0019-bench-1791853441-4142860-58425",
+      "ports": {
+        "backend": 3201,
+        "frontend": 3202,
+        "health": 3203,
+        "local_db": 3206,
+        "mac_app": 3204,
+        "ngrok_api": 3210,
+        "sdk_metrics": 3205,
+        "wmh": 0
+      },
+      "database_name": "victoria_bench_1791853441_4142860_58425"
+    },
+    {
+      "run_id": "1791854066-166317-83527",
+      "status": "stopped",
+      "queue": "navi-agent-tasks-cloud-452e0019-bench-1791854066-166317-83527",
+      "ports": {
+        "backend": 3201,
+        "frontend": 3202,
+        "health": 3203,
+        "local_db": 3206,
+        "mac_app": 3204,
+        "ngrok_api": 3210,
+        "sdk_metrics": 3205,
+        "wmh": 0
+      },
+      "database_name": "victoria_bench_1791854066_166317_83527"
+    },
+    {
+      "run_id": "1791853441-4143105-27875",
+      "status": "stopped",
+      "queue": "navi-agent-tasks-cloud-452e0019-bench-1791853441-4143105-27875",
+      "ports": {
+        "backend": 24520,
+        "frontend": 24521,
+        "health": 24522,
+        "local_db": 24525,
+        "mac_app": 24523,
+        "ngrok_api": 24529,
+        "sdk_metrics": 24524,
+        "wmh": 0
+      },
+      "database_name": "victoria_bench_1791853441_4143105_27875"
+    }
+  ],
+  "durable_evidence": [
+    {
+      "task": "browser-biometrics-webdecoy",
+      "agent_id": "6ed09e4e-499a-45e3-b419-0e373ac388a7",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=6ed09e4e-499a-45e3-b419-0e373ac388a7#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446591.831382da9afda70d9ab2832ffff7cd6a7a096b1d0a27bba7db1efe0af870633b",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 77,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/6ed09e4e-499a-45e3-b419-0e373ac388a7/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012312Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=4d7c7f23cf09916008c9169c66945d9dc50bbecd669281644d88162be446ecd2"
+    },
+    {
+      "task": "spawn-sub-agents",
+      "agent_id": "0fc6616f-8f37-4053-a49b-79b19fe617d7",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=0fc6616f-8f37-4053-a49b-79b19fe617d7#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446602.5d60048a8d3851377c1dd2303f5e6199fbd9372d07da8849ea192d2acf641368",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 48,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/0fc6616f-8f37-4053-a49b-79b19fe617d7/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012323Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=8f97218394076a896f2cf113b23712d283b9268c58d220d434af2e5185485839"
+    },
+    {
+      "task": "agent-payment-new-user-journey",
+      "agent_id": "9ae37132-48dd-4e34-961f-bdcec04c6257",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=9ae37132-48dd-4e34-961f-bdcec04c6257#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446612.db83372fa9e8e565e45d7a03b8bc7d78e01078ab18e17767934d41e16f7acfa4",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 75,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/9ae37132-48dd-4e34-961f-bdcec04c6257/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012333Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=c5dd1abb6c1288557b7cb7605b9fd0fa5363098e0127a20539dd67a101c1bb16"
+    },
+    {
+      "task": "parallel-tool-calls",
+      "agent_id": "50c32701-f5da-4826-94c4-15a0949107bb",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=50c32701-f5da-4826-94c4-15a0949107bb#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446623.d1bc5390cc3679b87b7904211653327ab4206735f12501e152697f17865d27ee",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 70,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/50c32701-f5da-4826-94c4-15a0949107bb/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012344Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=5a2abc6630d14d6427f23cfa24773f340c267becc148dad2a2e57d39c46fdcee"
+    },
+    {
+      "task": "claude-code-agent",
+      "agent_id": "9b2b0074-f43c-4c0e-b755-1af81fe69a61",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=9b2b0074-f43c-4c0e-b755-1af81fe69a61#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446632.e2136bdf361a9afdf8426268dfc75203b90e111c76a598821741d56b131e9be3",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 20,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/9b2b0074-f43c-4c0e-b755-1af81fe69a61/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012353Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=ec0825118c6ff7ec31a63eb94066b84b61053c41457df2cc8de37456fe4c8151"
+    },
+    {
+      "task": "chat-mode",
+      "agent_id": "59d7bd49-7764-4dee-898b-2b64b6f4d910",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=59d7bd49-7764-4dee-898b-2b64b6f4d910#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446641.43da661e8da83d7b50463130d7f6935f3a9ddaebcfa2e4d7a18762bf65d22230",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 8,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/59d7bd49-7764-4dee-898b-2b64b6f4d910/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012402Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=99ae6766f7c39c818d27712ee24f5f4fc5d21adebc9f8c912fd6992207686d28"
+    },
+    {
+      "task": "browser-smoke",
+      "agent_id": "27550a0d-1e60-44fa-b302-8a688047e1b8",
+      "run_id": "336c078c-7017-4773-a6b8-e5adbbb3cf0d",
+      "fe_url": "https://www.roselabs.ai/?agent-id=27550a0d-1e60-44fa-b302-8a688047e1b8#benchmark-share=336c078c-7017-4773-a6b8-e5adbbb3cf0d.1794446649.58c23feda1d9106a0763e8ef88bbdb741548e2d42515fda946b935d13f182a5d",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 55,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/27550a0d-1e60-44fa-b302-8a688047e1b8/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012410Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=a47fea2502d0d95a4fe80a997f6a907e25f3182e9ab7b99a117ed5e0c1068157"
+    },
+    {
+      "task": "test-mass-agent-run-0",
+      "agent_id": "96855b66-aa75-4a4c-9155-5681358a9325",
+      "run_id": "cc0563e6-7445-469c-95e1-09acbeef272b",
+      "fe_url": "https://www.roselabs.ai/?agent-id=96855b66-aa75-4a4c-9155-5681358a9325#benchmark-share=cc0563e6-7445-469c-95e1-09acbeef272b.1794446742.35b42de4ea768c0f6ec2e20350b115b326b64837d1bdf387b17f14ee9cbcf3f7",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 263,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/96855b66-aa75-4a4c-9155-5681358a9325/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012543Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=e2d518351a08d51945da92ee9605aac01f8740ca5dc566454a15f378ecb42e08"
+    },
+    {
+      "task": "agent-payment-setup-resume",
+      "agent_id": "2c4e40e1-6dea-427f-acca-ca1f5f568e14",
+      "run_id": "17af9222-f4ee-457b-b914-9c3100bef65a",
+      "fe_url": "https://www.roselabs.ai/?agent-id=2c4e40e1-6dea-427f-acca-ca1f5f568e14#benchmark-share=17af9222-f4ee-457b-b914-9c3100bef65a.1794446755.66c85a9634d4590c0a47b42472f962676e36efe0cd864417e5c1901e1edb6dd1",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 77,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/2c4e40e1-6dea-427f-acca-ca1f5f568e14/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012556Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=593428f509a731b32f915e389e124adfe7007a0c48f053b147680ce6c1bace23"
+    },
+    {
+      "task": "agent-payment-test-shop",
+      "agent_id": "4697205a-225c-42e2-955a-3d74e8bd0c61",
+      "run_id": "17af9222-f4ee-457b-b914-9c3100bef65a",
+      "fe_url": "https://www.roselabs.ai/?agent-id=4697205a-225c-42e2-955a-3d74e8bd0c61#benchmark-share=17af9222-f4ee-457b-b914-9c3100bef65a.1794446768.b21a49311360339e76640d9875c341e544cbf45f3e4c7e9657b7f92269ec561e",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 138,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/4697205a-225c-42e2-955a-3d74e8bd0c61/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012609Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=f27f6f98a544c4eb8ef8cd8cf78a7213d7f4823adf408b79a760918d574073a6"
+    },
+    {
+      "task": "agent-payment-idempotent-abandonment",
+      "agent_id": "2e40395b-3321-41cd-9660-153020a707dd",
+      "run_id": "17af9222-f4ee-457b-b914-9c3100bef65a",
+      "fe_url": "https://www.roselabs.ai/?agent-id=2e40395b-3321-41cd-9660-153020a707dd#benchmark-share=17af9222-f4ee-457b-b914-9c3100bef65a.1794446779.1e20876bbc480eced2d480a5aab2351dc819533133509bc9be21802d071b93d0",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 99,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/2e40395b-3321-41cd-9660-153020a707dd/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012619Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=789dd76ee7a7e4c1a30617a3d113953ddbd6b2494e5d8863463bad489111401a"
+    },
+    {
+      "task": "agent-payment-abandonment",
+      "agent_id": "31b5c0b3-391e-40ba-b7b8-e12e9ccb82d1",
+      "run_id": "17af9222-f4ee-457b-b914-9c3100bef65a",
+      "fe_url": "https://www.roselabs.ai/?agent-id=31b5c0b3-391e-40ba-b7b8-e12e9ccb82d1#benchmark-share=17af9222-f4ee-457b-b914-9c3100bef65a.1794446790.bc68a25a36d8804d71edb47f07b363bf1b8181c1f0f8d5edae53347a68d58942",
+      "fe_verified": "verified in fresh browser",
+      "message_count": 52,
+      "llm_dump_https_url": "https://b240d0a20f27c2dee8402ef9574f56f0.r2.cloudflarestorage.com/trace-archive/evidence/llm-dumps/31b5c0b3-391e-40ba-b7b8-e12e9ccb82d1/last_llm_call.standalone.html?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=2fc7a1036b6c3a19df2b516c1c672dd2%2F20261013%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261013T012631Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=07905b3a967a164f716d3f573133eae6b58950109b40d1a9bf978c672d35d9b7"
+    }
+  ],
+  "history": {
+    "task_attempts_appended": 12,
+    "all_passed": true,
+    "all_excluded_from_deploy_eligibility": true,
+    "existing_history_prefix_preserved": true
+  },
+  "setup_recovery": [
+    "Loaded publisher signing and R2 configuration from authoritative back-end/.env without exposing values.",
+    "Created and assigned the exact /opt/cursor/artifacts evidence directory to the workspace user.",
+    "Two incorrect local command paths returned 127, were corrected, and the canonical guards/seed gate subsequently passed."
+  ],
+  "thread_title_receipt": {
+    "title": "why are we getting errors w state injection in our browser\u2026",
+    "permission_request_id": "0096151c-0637-47a9-847f-bf5d419c6b18",
+    "permission_result": "granted",
+    "set_request_id": "c3f427c1-2df6-4ffe-a975-ef981314acc7",
+    "get_request_id": "18d2e410-b041-4fb0-939b-17ace8b1b5f0"
+  }
+}

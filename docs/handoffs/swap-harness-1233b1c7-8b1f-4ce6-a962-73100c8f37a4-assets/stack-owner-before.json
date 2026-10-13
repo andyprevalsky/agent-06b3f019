@@ -1,0 +1,24 @@
+{
+  "pid": 3416570,
+  "identity": "linux:6af9c450-c2c8-4647-a911-8ab19a296bbf:1766258",
+  "services": [
+    {
+      "name": "ngrok",
+      "pid": 3432038
+    },
+    {
+      "name": "back-end",
+      "pid": 3438662
+    },
+    {
+      "name": "front-end",
+      "pid": 3438663
+    },
+    {
+      "name": "agents",
+      "pid": 3438665
+    }
+  ],
+  "task_queue": "navi-agent-tasks-cloud-96a7ea80-deploy-20261012224253-3416542",
+  "cleanup": "requested canonical run.sh EXIT trap via exact TERM"
+}

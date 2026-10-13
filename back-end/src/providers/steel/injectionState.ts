@@ -10,33 +10,63 @@ type LocalStorageOriginState = OriginPayloadRef | { origin: string; entries: unk
 type IndexedDBOriginState = OriginPayloadRef | { origin: string; databases: unknown };
 type CacheStorageOriginState = OriginPayloadRef | { origin: string; caches: unknown };
 
+/**
+ * The first-party origin a stored localStorage key restores into, or null.
+ * The Mac reader drops the storage key's first byte (`ttps://host`); repair only
+ * that loss. Partitioned third-party keys (`<origin>/^0<top-level-site>`) and
+ * extension/internal schemes have no first-party document to restore into.
+ */
+function restorableLocalStorageOrigin(storageKey: string): string | null {
+  const candidate = /^ttps?:\/\//.test(storageKey) ? `h${storageKey}` : storageKey;
+  try {
+    const url = new URL(candidate);
+    const web = url.protocol === 'https:' || url.protocol === 'http:';
+    return web && url.origin === candidate ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function injectLocalStorageState(
   context: OriginPayloadContext,
   localStorageOrigins: LocalStorageOriginState[],
   startTime: number,
   signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
-  log.info(`  [localStorage] Injecting for ${localStorageOrigins.length} origins...`);
-  for (const origin of localStorageOrigins) {
-    let cleanOrigin = origin.origin;
-    if (cleanOrigin.startsWith('ttps://')) cleanOrigin = 'https://' + cleanOrigin.slice(7);
-    else if (!cleanOrigin.startsWith('http')) cleanOrigin = 'https://' + cleanOrigin;
-    if (cleanOrigin.includes('/^0')) cleanOrigin = cleanOrigin.split('/^0')[0];
-    await injectOriginPayload(
+  // One origin can have a Mac row and a cloud-harvest row. Restore them in one
+  // visit, oldest first, so the newer value of a shared key wins.
+  const restorable = localStorageOrigins
+    .flatMap((row) => {
+      const origin = restorableLocalStorageOrigin(row.origin);
+      return origin === null ? [] : [{ row, origin }];
+    })
+    .sort(
+      (a, b) =>
+        a.origin.localeCompare(b.origin) ||
+        ('updatedAt' in a.row ? a.row.updatedAt.getTime() : 0) -
+          ('updatedAt' in b.row ? b.row.updatedAt.getTime() : 0)
+    );
+  log.info(
+    `  [localStorage] Injecting for ${restorable.length} of ${localStorageOrigins.length} stored keys...`
+  );
+  const restored = new Set<string>();
+  for (const { row, origin } of restorable) {
+    const injected = await injectOriginPayload(
       context,
-      origin,
+      row,
       'LocalStorageOrigin',
       `
       for (const entry of data) {
         try { localStorage.setItem(entry.key, entry.value); } catch (e) {}
       }`,
-      'entries' in origin ? origin.entries : undefined,
-      cleanOrigin,
+      'entries' in row ? row.entries : undefined,
+      origin,
       signal
     );
+    if (injected) restored.add(origin);
   }
   log.info(`  [localStorage] Injected (${Date.now() - startTime}ms)`);
-  return { injected: true, originCount: localStorageOrigins.length };
+  return { injected: restored.size > 0, originCount: restored.size };
 }
 
 export async function injectIndexedDBState(
@@ -46,8 +76,9 @@ export async function injectIndexedDBState(
   signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
   log.info(`  [indexedDB] Injecting for ${indexedDBOrigins.length} origins...`);
+  let restored = 0;
   for (const origin of indexedDBOrigins) {
-    await injectOriginPayload(
+    const injected = await injectOriginPayload(
       context,
       origin,
       'IndexedDBOrigin',
@@ -112,9 +143,10 @@ export async function injectIndexedDBState(
       origin.origin,
       signal
     );
+    if (injected) restored++;
   }
   log.info(`  [indexedDB] Injected (${Date.now() - startTime}ms)`);
-  return { injected: true, originCount: indexedDBOrigins.length };
+  return { injected: restored > 0, originCount: restored };
 }
 
 export async function injectPermissionState(
@@ -170,12 +202,13 @@ export async function injectCacheStorageState(
   signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
   log.info(`  [cacheStorage] Injecting metadata for ${cacheStorageOrigins.length} origins...`);
+  let restored = 0;
   for (const origin of cacheStorageOrigins) {
     const names =
       'caches' in origin
         ? (origin.caches as Array<{ name: string }>).map((c) => ({ name: c.name }))
         : undefined;
-    await injectOriginPayload(
+    const injected = await injectOriginPayload(
       context,
       origin,
       'CacheStorageOrigin',
@@ -190,9 +223,10 @@ export async function injectCacheStorageState(
       origin.origin,
       signal
     );
+    if (injected) restored++;
   }
   log.info(`  [cacheStorage] Injected (${Date.now() - startTime}ms)`);
-  return { injected: true, originCount: cacheStorageOrigins.length };
+  return { injected: restored > 0, originCount: restored };
 }
 
 export async function injectScrollbarState(

@@ -12,6 +12,7 @@ symptoms:
   - "origin transfer exceeded 1200MB RSS: 1390.015625"
   - "Google credential preparation returned HTTP 500 after 32 seconds before an 8 GB guest OOM"
   - "Browser state injection timed out after 15000ms"
+  - "Browser state injection timed out after 18000ms"
 tags:
   - indexeddb
   - jsonb
@@ -25,6 +26,7 @@ sources:
   - fleet run 20260930-205255-27412
   - fleet run 20261001-195536-10470
   - fleet run 20261002-091933-1152
+  - agent 07281fc3-5e49-4cd2-9573-235cb19b0481
 repro: back-end/src/tests/blackbox/browser-origin-injection-memory.blackbox.ts
 status: open
 ---
@@ -342,6 +344,154 @@ are committed. The owning file remains automatically discovered in the normal
 backend `/deploy` blackbox gate. Full final-source deploy and fleet evidence are
 separate required gates. The original OOM allocation and 18-second timeout
 attribution remain open.
+
+### October 12 recurrence: the restored volume itself was unbounded
+
+Prod agent `07281fc3-5e49-4cd2-9573-235cb19b0481` (Mac app, Kernel) failed
+eight `spawn_browser_agent` inits between 20:11 and 21:28Z with `Browser
+session init failed after 5 transient-proxy retries: {"error":"Browser state
+injection timed out after 18000ms"}`. Render logs for every google.com init
+that day: localStorage 4.4–6.8 s (28–38 origins), then IndexedDB 9.7–13.5 s for
+`rawBytes=79151599` in 93–94 scripts (`cdpWaitMs` 6.5–10.3 s). Successful
+attempts finished at 15.9–17.0 s; the rest hit 18 s. The blob is
+`https://drive.google.com` → `ODPMC` `modules`/`cssModules`: 76 MB of Drive's
+cached JS/CSS code (25.9k records), 19.9 MB stored. Prod's only rows over
+2.3 MB raw are three Drive caches (79, 79, 37 MB); the next largest is mail at
+1.3 MB stored. A start URL of `admin.google.com` restored all of it because
+selection is realm-wide.
+
+Why earlier fixes did not hold: each one sped up or bounded the transport of
+this blob (codec, packet sizing, target replay, completion packet, 18 s
+headroom) without bounding how much is restored. The memory blackbox that owns
+it transfers 78.6 MB under `BROWSER_STATE_INJECTION_TIMEOUT_MS=60000`, so no
+gate measured feasibility under the production budget.
+
+Local repro, real production path: `initSession` against a real Kernel browser
+(SF residential proxy) for a local user seeded with this realm's prod shape
+(real origin keys and sizes, synthetic values, 78.6 MB synthetic Drive row).
+Unchanged main failed 3/3 with `BrowserStateInjectionTimeout: Browser state
+injection timed out after 18000ms` (localStorage 13.1–13.4 s for 39 keys from
+the dev box, about 2× Render's per-origin latency; IndexedDB reached 12–16 MB).
+With the byte bound only, the dev box still failed 3/3 because of that
+localStorage latency. Projection from Render's measured phases: 6.3 s + 1.0 s
+non-Drive IndexedDB + 0.9 s cache ≈ 8.3 s. With the localStorage key handling
+from 2026-10-12-mac-localstorage-reader-dropped-storage-key-first-byte, the
+dev box passed 3/3 at 12.4–13.5 s.
+
+Fix: restoration uses an 8 MiB serialized-payload ceiling
+(`BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES`). This is not an escaped CDP
+wire-byte ceiling. The October 13 review correction serializes the restore
+projection once in a materialized SQL CTE and measures its exact UTF-8 length
+before bytea staging. Oversized payloads reach neither staging nor the browser.
+This still serializes rejected rows inside PostgreSQL; it does not provide an
+O(1) early serialization-work bound. Stored JSONB bytes are compressed and
+binary JSONB size can exceed fitting serialized text, so neither is a valid
+exact admission rule. CacheStorage is measured after its names-only projection.
+Configured limits outside PostgreSQL's positive signed-integer range fall back
+to the default. There is no extra round trip. Skips log table and byte counts at warn, with no origin
+because origins are browsing history; restored counts stay truthful.
+Permanent regression: `verifyRealmRestoreBudget` in
+`browser-origin-payload.blackbox.ts`. The old source failed it with
+`over-budget origin reached the browser: 27404739 bytes`. The memory blackbox
+raises both bounds explicitly to keep its large-transfer assertions.
+
+Residual, by adversarial review:
+1. The bound is per origin, so many sub-budget origins can still sum past the
+   phase, and realm-wide selection stays the next-deeper class. The next fix
+   is start-origin-first priority with a cumulative budget.
+2. Skipping a whole origin also drops any small database next to its cache.
+3. The Mac app still uploads the cache on every sync.
+4. The worker classifies every init 5xx, including this deterministic
+   timeout, as a "transient-proxy" retry.
+5. The regression asserts the mechanism with an instant fake browser; only the
+   scratch real-Kernel repro measures the 18 s outcome.
+6. The original live OOM allocation is still unattributed.
+
+### October 12 Codex continuation verification
+
+The preservation checkpoint is `8a2c8981701511d4ee8b933ffd1b48af5b18d39f`;
+the durable resume receipt is committed in `3f5eac4db`. All 22 archived source
+originals and all five private artifacts matched their recorded SHA256 hashes.
+The two owning domains passed again through separate canonical
+`bash scripts/run-blackbox-tests.sh <domain>` invocations against the explicitly
+local isolated `victoria_cloud-452e0019` database.
+
+Read-only adversarial review reconciled the preserved final `+fix-v2` variant
+against its `a040520d5` baseline. Its two production files are byte-identical to
+the continuation's owning code at `279576174` before the review correction: `injectionOriginPayload.ts` SHA256
+`f5773e5def892645835d4057cc4e5afff10e2f6291a4fc04ee635165b6f9fff0` and
+`injectionState.ts` SHA256
+`6d229793a7fd8058a92a9ff0c473eb5f7d23e7b356baaa8a9d8536add5b3385b`.
+The existing RED/GREEN Kernel receipts therefore exercise that checkpoint
+implementation. The October 13 admission correction additionally has fresh local
+RED/GREEN owning regressions, and does not claim identical paid Kernel inputs. They reproduce the init boundary with representative adverse
+origin shapes and synthetic values, not byte-exact production credential inputs
+or completion of the original user's task. No additional paid Kernel run was
+needed merely to establish this source correspondence. Production resolution
+still requires rollout verification; September's original OOM attribution and
+fleet acceptance remain open.
+
+The October 13 owning regression first failed both the out-of-range configuration
+and enriched-cache projection cases, then passed with the admission correction.
+It also verifies that a compressed 12 MiB payload produces zero browser mutations.
+The conservative full-column prefilter has been removed. Many sub-budget origins
+can still exhaust the phase, and fewer bounded transfers are an improvement at
+10,000 agents, not a measured capacity guarantee.
+
+### Golden-reference comparison for the October 12 fix
+
+Searched all four available reference trees for browser storage-state APIs,
+LocalStorage/IndexedDB, retained init scripts, profile snapshots/persistence,
+opaque JSONB/chunk transfer and duplicate-origin reconciliation.
+`hermes-agent/hermes_cli/browser_connect.py:355` excludes large cache and
+replay-prone IndexedDB state from profile snapshots; its copy operation applies
+that policy at line 691. Rose converges on reducing restore volume while
+retaining smaller IndexedDB origins, rather than excluding the storage class.
+`openclaw/extensions/browser/src/browser/chrome.ts:716` chooses persistent
+per-profile storage, and `pw-tools-core.storage.ts:151` mutates individual keys
+through the targeted page. That matches document-scoped mutation but avoids
+Rose's SQL-to-CDP transfer boundary.
+
+`claude-code-src/src/utils/claudeInChrome/mcpServer.ts:253` delegates browser
+implementation to the external Chrome MCP server.
+`codex/codex-rs/config/src/browser_use.rs:9` defines origin-access policy rather
+than restoration. No complete opaque-origin transport, byte-budget or
+oldest-first duplicate reconciliation analog was found in these trees; Rose's
+owning regression tests supply that proof. Reference files were read only.
+
+### October 13 production verification and frontend follow-up
+
+PR #1477 merged as `d2632c7c53cefa3d8421a1aa1701e8448179a1c8` and
+Render deployed that exact commit. Production endpoint/CORS probes passed
+14/14, health was HTTP 200, and the post-deploy log window contained no error
+patterns. The actual $1 production AgentCard abandonment lifecycle passed,
+including card closure, live organization reclaim and Stripe refund.
+
+The mandatory production semantic workflow
+[38333858624](https://github.com/Rose-Ai-Labs/rose/actions/runs/38333858624)
+failed two independent gates. Browser task completion left a stale status chip
+when a terminal INSERT was missed after chat reconciliation had stopped; the
+connected channel suppressed the disconnected fallback. A frontend follow-up
+restarts one bounded, scoped reconciliation owner on new browser lifecycles and
+continues until authoritative terminal messages arrive or the existing finite
+lease expires. Its owning hook
+regression failed before the change and passed after it, including expired-lease
+and transient-read cases. Duplicate/progress events do not renew leases, and
+agent selection fences old responses.
+
+The web-search latency gate encountered HTTP 402 on its primary Cerebras route.
+The existing Together waterfall produced unusable structured output and invoked
+bounded regeneration; one backend answer completed after 16.239 seconds, beyond
+the unchanged 15-second milestone. Another sample exhausted router retries.
+Logs do not prove that the parser rejected valid JSON. No deadline, schema,
+prompt, credit setting or paid fallback was changed to pass this gate. Production
+verification remains incomplete pending a green rerun. The subsequent local
+semantic qualification observed 39 successful direct Cerebras calls, no direct
+route errors and no chat-cache hits, so the earlier primary-route restriction
+is not established as current. No billing change was performed.
+The original September OOM attribution and the Mac producer work remain open.
+Sanitized deployment receipts are in the adjacent handoff production JSON;
+raw provider output and browsing-origin evidence remain private.
 
 ## Human feedback
 

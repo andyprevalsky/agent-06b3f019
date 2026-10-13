@@ -1,0 +1,13 @@
+{
+  "status": "stopped",
+  "owner_pid": 3416570,
+  "owner_present": false,
+  "service_pids_present": {
+    "3432038": false,
+    "3438662": false,
+    "3438663": false,
+    "3438665": false
+  },
+  "system_postgres": "retained; not owned by run.sh",
+  "task_queue": "navi-agent-tasks-cloud-96a7ea80-deploy-20261012224253-3416542"
+}

@@ -1,0 +1,31 @@
+{
+  "original_box_id": "1233b1c7-8b1f-4ce6-a962-73100c8f37a4",
+  "source_inventory": "source-inventory.json",
+  "private_artifacts": [
+    {
+      "path": "/project/swap-harness/1233b1c7-8b1f-4ce6-a962-73100c8f37a4/evidence-files.json",
+      "bytes": 540519,
+      "sha256": "67681539cc4163c5281b38493932cb043204138df1b510426ae6c6294af6d283"
+    },
+    {
+      "path": "/project/swap-harness/1233b1c7-8b1f-4ce6-a962-73100c8f37a4/inherited-local-refs.txt",
+      "bytes": 52549,
+      "sha256": "aa6d5491e40821093127a41277d47223471e19ec81f04473c14890bd588b2500"
+    },
+    {
+      "path": "/project/swap-harness/1233b1c7-8b1f-4ce6-a962-73100c8f37a4/inherited-stash.bundle",
+      "bytes": 35172,
+      "sha256": "cde6058535add83822724033d50f23a0495a82d2d7ff9e23fd6680e711d18ce3"
+    },
+    {
+      "path": "/project/swap-harness/1233b1c7-8b1f-4ce6-a962-73100c8f37a4/native-session.tar.gz",
+      "bytes": 1505337,
+      "sha256": "26f9c7cbb4058edd3c6ec314f48ae9f26c89d75b4fe9879f104f7ced90926e29"
+    },
+    {
+      "path": "/project/swap-harness/1233b1c7-8b1f-4ce6-a962-73100c8f37a4/task-evidence.tar.gz",
+      "bytes": 91022254,
+      "sha256": "a710b7c8e0e8f05fdb03e9daa80f31b786081fe4a9c8d1c400a29cd06c6b8596"
+    }
+  ]
+}

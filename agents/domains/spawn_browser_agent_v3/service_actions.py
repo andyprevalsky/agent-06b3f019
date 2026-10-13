@@ -917,20 +917,13 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
     }
 
 
-async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
+def _browser_state_action_result(state: Dict[str, Any]) -> Dict[str, Any]:
     from providers.rose.browser_use import format_browser_state_for_tool
 
-    # Reuse the loop's just-fetched observe_page_state when it carries a DOM —
-    # no browser action ran between that fetch and this tool, so a second full
-    # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
-    state = context.prefetched_browser_state
-    if not isinstance(state, dict) or "dom_tree" not in state:
-        state = await context.dom_service.get_browser_state(include_screenshot=False)
-    formatted_state = format_browser_state_for_tool(state)
-    result = {
+    return {
         "success": True,
         "message": "Browser state captured.",
-        "formatted_state": formatted_state,
+        "formatted_state": format_browser_state_for_tool(state),
         "url": state.get("url", ""),
         "title": state.get("title", ""),
         "viewport": state.get("viewport"),
@@ -939,6 +932,16 @@ async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]
         "tabs": state.get("tabs"),
         "dom_tree": state.get("dom_tree", ""),
     }
+
+
+async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
+    # Reuse the loop's just-fetched observe_page_state when it carries a DOM —
+    # no browser action ran between that fetch and this tool, so a second full
+    # DOM walk is pure duplicate cost. URL/title-only observes have no dom_tree.
+    state = context.prefetched_browser_state
+    if not isinstance(state, dict) or "dom_tree" not in state:
+        state = await context.dom_service.get_browser_state(include_screenshot=False)
+    result = _browser_state_action_result(state)
     await context.action_history.record_action(
         dom_service=context.dom_service,
         action="read_browser_state",
@@ -1561,7 +1564,9 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             # runs instead of burning the full action budget on a wedged CDP.
             raise
         eval_ms = round((time_module.monotonic() - eval_started) * 1000)
-        value = result.get("result", {}).get("value")
+        from .service_crypto import mask_secret_values
+
+        value = mask_secret_values(result.get("result", {}).get("value"), context.secret_refs)
         # CDP returns exceptionDetails when the expression throws; surface that
         # instead of a silent null/empty value (async fetch failures used to look
         # like successful empty objects).
@@ -1570,6 +1575,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             error_text = (
                 exception.get("text") or (exception.get("exception") or {}).get("description") or "evaluate raised"
             )
+            error_text = mask_secret_values(error_text, context.secret_refs)
             logger.warning(
                 "Browser evaluate raised",
                 session_id=context.session_id,
@@ -1672,6 +1678,7 @@ async def execute_action(
     current_auth_realm: str = "",
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
+    auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1748,14 +1755,16 @@ async def execute_action(
             prefetched_browser_state=prefetched_browser_state,
         )
         if action_name in _INTERACTION_ACTIONS:
-            return await _execute_interaction_action(context)
-        if action_name in _NAVIGATION_ACTIONS:
-            return await _execute_navigation_action(context)
-        if action_name in _INSPECTION_ACTIONS:
-            return await _execute_inspection_action(context)
-        if action_name in _TERMINAL_ACTIONS:
+            result = await _execute_interaction_action(context)
+        elif action_name in _NAVIGATION_ACTIONS:
+            result = await _execute_navigation_action(context)
+        elif action_name in _INSPECTION_ACTIONS:
+            result = await _execute_inspection_action(context)
+        elif action_name in _TERMINAL_ACTIONS:
             return await _execute_terminal_action(context)
-        return {"success": False, "error": f"Unknown action: {action_name}"}
+        else:
+            return {"success": False, "error": f"Unknown action: {action_name}"}
+
     except asyncio.TimeoutError:
         # Propagate so the browser supervisor can classify CDP stall and
         # hard-recover a frozen renderer instead of treating this as a soft
@@ -1772,7 +1781,77 @@ async def execute_action(
             params=params,
             result={"success": False, "error": str(error)},
         )
-        return {"success": False, "error": str(error)}
+        result = {"success": False, "error": str(error)}
+
+    if auth_context_for_url is not None and (
+        action_name in _INTERACTION_ACTIONS
+        or action_name in _NAVIGATION_ACTIONS
+        or action_name in {"read_browser_state", "evaluate"}
+    ) and not result.get("status"):
+        result = await _attach_observed_auth_context(
+            dom_service, action_name, result, auth_context_for_url, previous_url=current_url,
+        )
+    return result
+
+
+async def _attach_observed_auth_context(
+    dom_service: DOMService,
+    action_name: str,
+    result: Dict[str, Any],
+    auth_context_for_url: Callable[[str], Awaitable[Dict[str, Any]]],
+    *,
+    previous_url: str = "",
+) -> Dict[str, Any]:
+    """Bind a genuine action result to the surviving foreground page."""
+    result = dict(result)
+    result.pop("auth_realm", None)
+    result.pop("credentials_prepared", None)
+    try:
+        # Page-state already captured its URL with its DOM; other actions must
+        # observe the destination rather than echoing their requested URL.
+        destination_url = (
+            str(result.get("url") or "") if action_name == "read_browser_state"
+            else str((await dom_service.get_page_identity()).get("url") or "")
+        )
+        if (
+            action_name not in _NAVIGATION_ACTIONS
+            and action_name != "read_browser_state"
+            and destination_url == previous_url
+        ):
+            # Unchanged interactions reuse the last observed inventory in
+            # history instead of appending the entire list after every keystroke.
+            return result
+        for _ in range(2):
+            auth_context = await auth_context_for_url(destination_url)
+            live_url = str((await dom_service.get_page_identity()).get("url") or "")
+            if live_url == destination_url:
+                result["current_url"] = destination_url
+                result["auth_context"] = auth_context
+                return result
+            # Restoration can await I/O while a redirect changes the page. A
+            # captured DOM must be refreshed together with its realm binding.
+            if action_name == "read_browser_state":
+                state = await dom_service.get_browser_state(include_screenshot=False)
+                result = _browser_state_action_result(state)
+                destination_url = str(state.get("url") or "")
+            else:
+                destination_url = live_url
+        error = "Page changed during credential preparation"
+    except asyncio.TimeoutError:
+        raise
+    except Exception as observation_error:
+        destination_url = ""
+        error = extract_error_message(observation_error)
+    if action_name == "read_browser_state":
+        # No current, coherent DOM/inventory snapshot was obtained.
+        result = {"success": False, "error": error}
+    result["current_url"] = destination_url
+    result["auth_context"] = {
+        "auth_realm": auth_realm_from_url(destination_url),
+        "inventory_status": "unknown",
+        "observation_error": error,
+    }
+    return result
 
 
 # ========================================
@@ -3871,7 +3950,10 @@ async def _execute_goto(
                 target_url=url,
                 error=f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
             )
-            prepared = None
+            prepared = {
+                "auth_realm": target_auth_realm,
+                "credential_preparation_error": extract_error_message(prep_error),
+            }
         if prepared is not None:
             credential_summary = {
                 key: prepared[key]
@@ -3882,6 +3964,7 @@ async def _execute_goto(
                     "password_count",
                     "passkey_count",
                     "passkeys_newly_injected",
+                    "credential_preparation_error",
                 )
                 if key in prepared
             }

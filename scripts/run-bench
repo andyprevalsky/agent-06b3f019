@@ -3,6 +3,18 @@ set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CALLER_DIR="$PWD"
+# CLI -> canonical contract -> parent chat card. Approval workflows use the
+# shared approval format with the same frame; monitor retains machine JSON.
+benchmark_agent_instructions() {
+    cat "$ROOT_DIR/.claude/shared/benchmark-report-format.txt"
+}
+
+# Read-only and dependency-free, including from a scripts-only checkout.
+if [[ "${1:-}" == "report-format" ]]; then
+    [ "$#" -eq 1 ] || { echo "Usage: scripts/run-bench report-format" >&2; exit 2; }
+    benchmark_agent_instructions
+    exit 0
+fi
 # Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
 # sandboxes are scripts-only, and a failed cd would exit under `set -e` without
 # the parallel-safety message the guard exists to print.
@@ -108,6 +120,7 @@ fi
 
 if [[ "${1:-}" == "stability-proof" ]]; then
     shift
+    benchmark_agent_instructions
     exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
         --capability "$@"
 fi
@@ -146,6 +159,7 @@ fi
 
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
+    benchmark_agent_instructions
     exec "$PY" -u benchmarks/local.py --eval-suite "$@"
 fi
 
@@ -161,6 +175,7 @@ if [[ "${1:-}" == "--local" ]]; then
                 ;;
         esac
     done
+    benchmark_agent_instructions
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
@@ -183,6 +198,7 @@ fi
 usage() {
     cat <<'EOF'
 Usage: scripts/run-bench <slice-or-task...> [options]
+       scripts/run-bench report-format
        scripts/run-bench monitor <exact-run-directory>
        scripts/run-bench image-build [--no-cache] [--builder native|depot]
        scripts/run-bench image-activate <exact-benchmark-image> [--ref <sha>] [--out-dir <private-directory>]
@@ -231,6 +247,8 @@ Startup reuse:
   --wait             Wait for the detached fleet and return its exit status.
 
 Monitoring:
+  Launches print the mandatory parent-agent card format and maintenance policy.
+  report-format retrieves that same contract without starting services or tasks.
   Every launch prints its exact monitoring handle. Poll every 30 seconds,
   checking terminal lifecycle on every observation, including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
@@ -398,6 +416,10 @@ if [ "$DEMO_CACHE_PROBE" -eq 1 ]; then
     export BENCHMARK_DEMO_CACHE_READ_ONLY=1
     echo "🧊 DEMO replay probe: read-only task cache, unchanged evaluation, zero LIVE proof credit"
 fi
+
+# Every task-launch route below receives the same parent instructions once.
+# Keep list/help/monitor/maintenance output unchanged for their consumers.
+benchmark_agent_instructions
 
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
     if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ]; }; then

@@ -14,7 +14,11 @@ import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
-import { ROUTER_SYSTEM_PROMPT } from './chatPrompts';
+import {
+  ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
+  ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
+  ROUTER_SYSTEM_PROMPT,
+} from './chatPrompts';
 import {
   broadcastAssistantStream,
   broadcastToolEvent,
@@ -35,7 +39,10 @@ import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import type { ChatCompletionParams } from './completionOptions';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
-import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
+import {
+  ROUTER_JSON_SCHEMA,
+  ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
+} from './routerDecisionJsonSchema';
 import {
   chatRouterCompletionTimeoutMs,
   createRouterCompletionDeadline,
@@ -51,12 +58,37 @@ import {
   finalizeRouterDecisionFromStream,
   requireRouterDecision,
   type RouterDecision,
+  type RouterStage,
 } from './routerDecision';
 
 export { RouterDecisionSchema } from './routerDecision';
 export type { RouterDecision } from './routerDecision';
 
 const log = createLogger('RouterLLM');
+
+/**
+ * What differs between the turn's first route and the routes after its web
+ * searches. A separate call site keeps after-search routes out of the first
+ * route's Fast Mode cache rows (including the opening-turn drift replay) and
+ * apart in LLM dumps. Once the search rounds are spent, web_search is gone.
+ */
+const ROUTER_STAGES = {
+  initial: {
+    callSite: 'chat_router',
+    systemPrompt: ROUTER_SYSTEM_PROMPT,
+    schema: ROUTER_JSON_SCHEMA,
+  },
+  after_search: {
+    callSite: 'chat_router_after_search',
+    systemPrompt: ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
+    schema: ROUTER_JSON_SCHEMA,
+  },
+  search_budget_spent: {
+    callSite: 'chat_router_after_search',
+    systemPrompt: ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
+    schema: ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
+  },
+} as const;
 const ROUTER_CACHE_HANG_MS = 5_000;
 // Routing is a classification step; sampling can escalate a one-search chat request to agent mode.
 const ROUTER_TEMPERATURE = 0;
@@ -148,7 +180,9 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
-export function buildRouterCompletionOptions(params: ChatCompletionParams): CompletionOptions {
+export function buildRouterCompletionOptions(
+  params: ChatCompletionParams & { stage?: RouterStage }
+): CompletionOptions {
   return {
     model: params.model,
     messages: params.messages,
@@ -166,10 +200,13 @@ export function buildRouterCompletionOptions(params: ChatCompletionParams): Comp
       json_schema: {
         name: 'router_decision',
         strict: true,
-        schema: ROUTER_JSON_SCHEMA,
+        schema: ROUTER_STAGES[params.stage ?? 'initial'].schema,
       },
     },
-    dump_context: { agent_id: params.agentId, call_site: 'chat_router' },
+    dump_context: {
+      agent_id: params.agentId,
+      call_site: ROUTER_STAGES[params.stage ?? 'initial'].callSite,
+    },
     provider_fast_mode: params.providerFastMode,
     ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
@@ -181,10 +218,13 @@ export async function callRouterLlm(params: {
   messages: ChatMessage[];
   model: string;
   providerRoute?: ChatProviderRoute;
+  stage?: RouterStage;
   onRouterStarted?: () => void;
   onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
+  const stage = params.stage ?? 'initial';
+  const routerStage = ROUTER_STAGES[stage];
 
   // Convert messages to OpenAI format (with multimodal support).
   // The system prompt is wrapped in `markCacheable` so the static prefix is
@@ -193,7 +233,7 @@ export async function callRouterLlm(params: {
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(ROUTER_SYSTEM_PROMPT)];
+  }> = [markCacheable(routerStage.systemPrompt)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -257,7 +297,7 @@ export async function callRouterLlm(params: {
   let fcCacheWon = false;
   const driftGoal = fastModeRead && isOpeningRouterTurn(openaiMessages) ? fastMode.goal : null;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
-    fcKey = contentKey(fastMode.goal, 'chat_router', {
+    fcKey = contentKey(fastMode.goal, routerStage.callSite, {
       model: params.model,
       temperature: ROUTER_TEMPERATURE,
       effort: 'minimal',
@@ -265,7 +305,7 @@ export async function callRouterLlm(params: {
         type: 'json_schema',
         name: 'router_decision',
         strict: true,
-        schema: ROUTER_JSON_SCHEMA,
+        schema: routerStage.schema,
       },
       provider_fast_mode: providerFastMode,
       provider_route: params.providerRoute,
@@ -326,6 +366,7 @@ export async function callRouterLlm(params: {
               model: params.model,
               messages: openaiMessages,
               providerRoute: params.providerRoute,
+              stage,
               providerFastMode,
               abortSignal: abortSignal
                 ? AbortSignal.any([abortSignal, completionDeadline.signal])
@@ -451,7 +492,7 @@ export async function callRouterLlm(params: {
           }
 
           // Detect web_search once the streamed JSON includes the complete query.
-          if (!webSearchDetected) {
+          if (stage !== 'search_budget_spent' && !webSearchDetected) {
             const webSearchStreamTitle =
               getWebSearchStreamTitleFromPartialRouterJson(accumulatedJson);
             if (webSearchStreamTitle) {
@@ -534,7 +575,7 @@ export async function callRouterLlm(params: {
             { clearOnDone: true }
           );
         }
-        const decision = requireRouterDecision({ finalized, deadlineExpired });
+        const decision = requireRouterDecision({ finalized, deadlineExpired, stage });
         if (deadlineExpired) {
           log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
             agentId: params.agentId,

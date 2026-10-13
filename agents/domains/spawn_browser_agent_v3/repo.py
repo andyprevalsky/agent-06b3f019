@@ -751,8 +751,19 @@ async def prepare_browser_auth(
         if not isinstance(data, dict):
             raise RuntimeError("Browser credential preparation returned a non-object payload")
         return data
+    if response.status_code == 500:
+        data = response.json()
+        if isinstance(data, dict) and data.get("code") == "BROWSER_CREDENTIAL_INJECTION_FAILED":
+            payload = data.get("credential_payload")
+            if not isinstance(payload, dict) or not isinstance(data.get("error"), str):
+                raise RuntimeError("Browser credential injection failure returned an invalid payload")
+            return {
+                **payload,
+                "credential_preparation_error": data["error"],
+                "auth_credential_ref": None,
+            }
     raise RuntimeError(
-        f"Failed to prepare browser credentials for {target_url}: HTTP {response.status_code} {response.text[:300]}"
+        f"Failed to prepare browser credentials: HTTP {response.status_code}"
     )
 
 

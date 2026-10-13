@@ -152,6 +152,18 @@
     "1cd26ad76c1fa34c92a8fe5aff8b926de31d9fc8084c34ee06795e3e7bc8e23e": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "9cef403be81636cdd2c4e897dab32e611097b9ad9e4a33ae1cc3f2060cf897af": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "b0ac4b8faf5865c8903752cfd747d7ff785906080bdecfb8e90871a245ccd378": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "a30c6be7c7cb74394aad01d21197f2f025d0f8d0e7994fc102e4403f4b6f5b16": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   }
 }

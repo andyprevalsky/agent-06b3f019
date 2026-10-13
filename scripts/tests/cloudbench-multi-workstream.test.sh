@@ -58,9 +58,101 @@ SCRIPT_SNAPSHOT_TMP="$TMP_ROOT/script-snapshots"
 mkdir -p "$SCRIPT_SNAPSHOT_TMP"
 PIDS=()
 HUB_PIDS=()
+# Session-leader controllers (exact PID and birth). A controller started in
+# its own session is not a descendant of any PID in PIDS, so cleanup reaps it
+# explicitly, including after a failed or timed-out case.
+SESSION_CONTROLLERS=()
 HUB_LAUNCH_DEFERRED_SIGNAL=""
 TEST_FAILED=0
 PORT_CLAIM_DIR=""
+
+# PIDs of fixture processes started by this run: real controllers and runners
+# from its private sandbox, and the fake provider's guests and proxies. Only
+# this run's unique TMP_ROOT is matched, never another session's processes.
+fixture_process_pids() {
+    python3 - "$TMP_ROOT/" "$$" <<'PY'
+import os
+import sys
+
+root, shell = sys.argv[1], sys.argv[2]
+own = {shell, str(os.getpid()), str(os.getppid())}
+for name in os.listdir("/proc"):
+    if not name.isdigit() or name in own:
+        continue
+    try:
+        with open(f"/proc/{name}/cmdline", "rb") as handle:
+            argv = handle.read().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:
+        continue
+    if root in argv and any(
+        marker in argv for marker in ("run-bench-fleet", "run-bench-cloud", "flyctl.py", "/fake-bin/")
+    ):
+        print(name)
+PY
+}
+
+reap_fixture_processes() {  # TERM, then KILL, this run's own fixture processes
+    local entry pid birth attempt
+    local -a survivors=()
+    for entry in "${SESSION_CONTROLLERS[@]:-}"; do
+        [ -n "$entry" ] || continue
+        pid="${entry%% *}"
+        birth="${entry#* }"
+        if cloudbench_pid_matches_start "$pid" "$birth"; then
+            kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+    for attempt in 1 2; do
+        mapfile -t survivors < <(fixture_process_pids)
+        [ "${#survivors[@]}" -gt 0 ] || break
+        for pid in "${survivors[@]}"; do
+            if [ "$attempt" -lt 2 ]; then
+                kill -TERM "$pid" 2>/dev/null || true
+            else
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+        for _ in $(seq 1 25); do
+            mapfile -t survivors < <(fixture_process_pids)
+            [ "${#survivors[@]}" -gt 0 ] || break
+            sleep 0.2
+        done
+    done
+    for entry in "${SESSION_CONTROLLERS[@]:-}"; do
+        [ -n "$entry" ] || continue
+        pid="${entry%% *}"
+        birth="${entry#* }"
+        if cloudbench_pid_matches_start "$pid" "$birth"; then
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    SESSION_CONTROLLERS=()
+}
+
+# Wait briefly for this run's fixture processes to exit; report survivors.
+assert_no_fixture_processes() {  # <label>
+    local -a survivors=()
+    for _ in $(seq 1 75); do
+        mapfile -t survivors < <(fixture_process_pids)
+        [ "${#survivors[@]}" -gt 0 ] || return 0
+        sleep 0.2
+    done
+    ps -o pid=,pgid=,etime=,args= -p "$(IFS=,; echo "${survivors[*]}")" >&2 2>/dev/null || true
+    fail "$1: fixture process(es) survived the case: ${survivors[*]}"
+}
+
+track_session_controller() {  # <pid-file>; records the exact session leader
+    local file="$1" pid="" birth=""
+    for _ in $(seq 1 100); do
+        pid="$(cat "$file" 2>/dev/null || true)"
+        [ -n "$pid" ] && break
+        sleep 0.1
+    done
+    case "$pid" in ''|*[!0-9]*) fail "a session controller never published its PID" ;; esac
+    birth="$(cloudbench_pid_start_time "$pid")"
+    [ -n "$birth" ] || return 0
+    SESSION_CONTROLLERS+=("$pid $birth")
+}
 
 cleanup() {
     local trapped_status=$? original_status pid ws hub_cleanup_failed=0
@@ -69,6 +161,9 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
+    # Controllers in their own sessions and the fake guests they started are
+    # not descendants of PIDS; a failed case must not leave them running.
+    reap_fixture_processes
     for pid in "${PIDS[@]:-}"; do
         wait "$pid" 2>/dev/null || true
     done
@@ -616,6 +711,9 @@ cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
   {"name":"bench-detached-wait"},
   {"name":"bench-invalid-recovery"},
   {"name":"bench-detached-cancel"},
+  {"name":"bench-group-term"},
+  {"name":"bench-group-term-undeliverable"},
+  {"name":"bench-group-term-slowdrain"},
   {"name":"private-ip-proxy"},
   {"name":"autoscaler-must-start"},
   {"name":"autoscaler-waits-for-boot-release"},
@@ -984,6 +1082,70 @@ def run_fake_driver(mdir):
             log(f"synchronized start barrier released: {barrier}")
     benchmark_started = exit_code == 0
     result_stamped = False
+    if exit_code == 0 and bench.startswith("bench-group-term"):
+        # A long admitted benchmark keeps executing on its isolated guest, and
+        # holding its shared production connections, until the guest receives
+        # the authenticated /shutdown or its exact Machine is stopped natively.
+        # The bounded deadline stands in for the 7,200 s execution backstop.
+        machine_id = os.path.basename(mdir)
+        executing_since = time.time()
+        Path(MARKERS, "benchmark-executing-" + machine_id).write_text(
+            json.dumps({"pid": os.getpid(), "run_token": token, "bench": bench}))
+        stop_reason = "execution-backstop"
+        while time.time() - executing_since < 240:
+            if os.path.exists(os.path.join(mdir, "guest-cleanup.ack")):
+                stop_reason = "guest-shutdown"
+                break
+            if bench == "bench-group-term-slowdrain" and os.path.exists(
+                os.path.join(mdir, "shutdown-requested")
+            ):
+                # The authenticated stop was delivered. Browser close,
+                # recording/archive finalization and the delete-seal wait run
+                # here, for longer than every bounded acknowledgement window;
+                # a native stop would power the Machine off mid-drain.
+                try:
+                    drain_seconds = float(Path(FAKE_DIR, "slow-drain-seconds").read_text())
+                except (OSError, ValueError):
+                    drain_seconds = 60.0
+                requested_at = float(Path(mdir, "shutdown-requested").read_text())
+                stop_reason = "drain-backstop"
+                while time.time() - executing_since < 240:
+                    if time.time() - requested_at >= drain_seconds:
+                        open(os.path.join(mdir, "guest-cleanup.ack"), "w").close()
+                        stop_reason = "drain-completed"
+                        break
+                    try:
+                        with open(STATE) as fh:
+                            native = find_machine(json.load(fh), machine_id)
+                    except (OSError, ValueError):
+                        native = {"state": "started"}
+                    if native is None or native.get("state") != "started":
+                        stop_reason = "drain-interrupted-by-native-stop"
+                        break
+                    time.sleep(0.2)
+                break
+            try:
+                with open(STATE) as fh:
+                    native = find_machine(json.load(fh), machine_id)
+            except (OSError, ValueError):
+                native = {"state": "started"}
+            if native is None or native.get("state") != "started":
+                stop_reason = "native-stop" if native is not None else "machine-removed"
+                break
+            time.sleep(0.2)
+        Path(mdir, "benchmark.stopped").write_text(json.dumps({
+            "reason": stop_reason, "pid": os.getpid(),
+            "executing_seconds": round(time.time() - executing_since, 3),
+            "stopped_epoch": time.time(),
+        }))
+        if stop_reason != "guest-shutdown":
+            # A natively stopped Machine powers off: no DONE line, no seal. A
+            # slow drain that outlived its runner's acknowledgement window ends
+            # without a terminal record for that runner to collect.
+            return
+        # Graceful cancellation drains the benchmark before any terminal result.
+        exit_code = 143
+        benchmark_started = False
     def current_task_output():
         # Shared workstream ledgers retain earlier runs. Bind every barrier to
         # this staged driver's exact token, never a previous task's marker.
@@ -1574,6 +1736,18 @@ elif args[:2] == ["machine", "start"]:
             start_new_session=True,
         )
 elif args[:2] == ["machine", "stop"]:
+    throttled = os.path.join(MARKERS, f"stop-throttled-{args[2]}")
+    if (
+        os.path.exists(os.path.join(FAKE_DIR, "throttle-first-machine-stop"))
+        and not os.path.exists(throttled)
+    ):
+        open(throttled, "w").close()
+        print(
+            f"Error: failed to stop machine {args[2]}: request returned non-2xx "
+            "status, 429: rate limit exceeded (Request ID: fixture)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     with locked_state() as state:
         found = find_machine(state, args[2])
         if found and not found.get("ignore_stop"):
@@ -1916,6 +2090,30 @@ elif args[:1] == ["proxy"]:
 
         def do_POST(self):
             if self.path == "/shutdown":
+                staged_bench = base64.b64decode(
+                    rb_export(rb_text, "BENCH_TASKS_B64") or ""
+                ).decode().split(",")[0].strip()
+                if staged_bench == "bench-group-term-undeliverable":
+                    # The guest rejects its authenticated stop. Its runner sees
+                    # this 503 first, fails fast and retires the proxy, so the
+                    # controller's own request then observes HTTP 000: neither
+                    # party ever delivered the stop.
+                    with open(os.path.join(mdir, "shutdown-rejected"), "a") as fh:
+                        fh.write("503\n")
+                    self.send_error(503, "guest shutdown endpoint unavailable")
+                    return
+                if staged_bench == "bench-group-term-slowdrain":
+                    # Delivered: persist the request for the guest driver and
+                    # answer 202. The driver drains on the guest itself, so
+                    # retiring this local proxy cannot end or shorten it.
+                    requested = os.path.join(mdir, "shutdown-requested")
+                    if not os.path.exists(requested):
+                        with open(requested + ".tmp", "w") as fh:
+                            fh.write(str(time.time()))
+                        os.replace(requested + ".tmp", requested)
+                    self.send_response(202)
+                    self.end_headers()
+                    return
                 # Model the guest's durable completion boundary. Fleet teardown
                 # may not reap this fake Machine until this exact ack is visible.
                 open(os.path.join(mdir, "guest-cleanup.ack"), "w").close()
@@ -2103,7 +2301,7 @@ journal_must_be_read_only() {  # journal_must_be_read_only <phase>
 
 run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-args...>
     local ws="$1" port="$2" log="$3"
-    local launch_args=()
+    local launch_args=() session_leader=()
     shift 3
     launch_args=("$@")
     # Most scenarios need direct exit-status control. The default-detach
@@ -2111,6 +2309,24 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     # disappear while the fleet continues in its own session.
     [ "${CLOUDBENCH_TEST_DEFAULT_DETACH:-0}" = "1" ] ||
         launch_args+=(--foreground)
+    # run-bench-campaign.py starts each foreground fleet as its own session
+    # leader (start_new_session=True) and cancels it with os.killpg. Reproduce
+    # that exact process-group boundary when a scenario signals the group.
+    # A terminal Ctrl-C reaches a foreground fleet whose SIGINT is not ignored;
+    # this script's asynchronous launch would otherwise inherit SIG_IGN.
+    # The exec'd controller keeps this PID; publish it so the harness can reap
+    # the exact session even when a case fails before the owner record exists.
+    if [ "${CLOUDBENCH_TEST_NEW_SESSION:-0}" = "1" ]; then
+        session_leader=(python3 -c 'import os, signal, sys
+path = os.environ.get("CLOUDBENCH_TEST_SESSION_PID_FILE", "")
+if path:
+    with open(path + ".tmp", "w") as handle:
+        handle.write(str(os.getpid()))
+    os.replace(path + ".tmp", path)
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])')
+    fi
     # Cloud/agent hosts often inject CLOUDBENCH_SNAPSHOT_ID for live fleets.
     # That pin must not leak into this hermetic fixture: the fake inventory only
     # has snap_0001, and a foreign pin marks warm-deps stale → --refresh-deps
@@ -2147,7 +2363,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
-        bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
+        "${session_leader[@]}" bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
@@ -2378,7 +2594,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ]; then
+    && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -3409,7 +3626,8 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
     exit 0
 fi
 
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ]; then
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
 hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
     "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
     || fail "workstream A test Hub failed its pending-owner launch handshake"
@@ -3943,10 +4161,401 @@ assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
 fi
 
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ]; then
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ] \
+    || [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
     hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
         "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
         || fail "focused exact-recovery test Hub failed its pending-owner launch handshake"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 2-group-term — cancelling a fleet's whole process group must stop
+# its executing guest
+# ═════════════════════════════════════════════════════════════════════════════
+# run-bench-campaign.py cancels each fleet with os.killpg(SIGTERM). A terminal
+# Ctrl-C (INT) and the detached --wait forwarder signal the whole controller
+# group the same way, so every per-bench supervisor receives the signal
+# alongside the controller. The runner itself starts with SIGINT ignored, so
+# its supervisor must deliver every cancellation as TERM for the runner's own
+# EXIT cleanup to deliver the stop. Each guest below is mid-benchmark and stops
+# only after its authenticated /shutdown arrives over a live data-plane proxy,
+# or after its exact Machine is stopped natively when that stop was never
+# delivered (here through a throttled first stop request). The owner, the
+# original volume and the evidence latches must be retained, and nothing may be
+# destroyed on the unconfirmed path.
+group_term_cancellation_contract() {  # <bench> <expected-stop-reason> [TERM|INT]
+    local bench="$1" expected_reason="$2" signal_name="${3:-TERM}" log launcher_pid registry="" candidate
+    local machine="" volume="" marker="" deadline fleet_pid fleet_pid_start fleet_pgid
+    local term_epoch stop_file driver_pid launcher_status=0 output pid machine_state
+    local budget=$(( ${CLOUDBENCH_CHILD_TERM_SECONDS:-30} + 15 ))
+    local -a remaining_pids=()
+    log="$TMP_ROOT/controller-$bench-$signal_name.log"
+    reset_fake_state
+    rm -f "$POOL_A" "$POOL_B"
+    rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+    rm -f "$FAKE_DIR/throttle-first-machine-stop"
+    mkdir -p "$FAKE_DIR/markers"
+    : > "$FAKE_DIR/journal.log"
+    # A rate-limited or failing control plane rejects the first stop request;
+    # the bounded native stop must retry it while the guest still executes.
+    [ "$expected_reason" != native-stop ] || : > "$FAKE_DIR/throttle-first-machine-stop"
+    rm -f "$TMP_ROOT/session-$bench-$signal_name.pid"
+    CLOUDBENCH_TEST_NEW_SESSION=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+        CLOUDBENCH_TEST_SESSION_PID_FILE="$TMP_ROOT/session-$bench-$signal_name.pid" \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$log" "$bench" --timeout 240 &
+    launcher_pid=$!
+    PIDS+=("$launcher_pid")
+    track_session_controller "$TMP_ROOT/session-$bench-$signal_name.pid"
+    deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        marker="$(find "$FAKE_DIR/markers" -maxdepth 1 -name 'benchmark-executing-*' \
+            -type f -print -quit 2>/dev/null)"
+        [ -z "$marker" ] || break
+        kill -0 "$launcher_pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$marker" ] || fail "$bench: the guest never started executing its benchmark"
+    machine="${marker##*/benchmark-executing-}"
+    driver_pid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$marker")"
+    for candidate in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+        [ -f "$candidate/meta" ] || continue
+        if grep -rqx "id=$machine" "$candidate/clones" 2>/dev/null; then
+            registry="$candidate"
+            volume="$(grep -rh '^volume_id=' "$candidate/clones" | head -1)"
+            volume="${volume#volume_id=}"
+        fi
+    done
+    [ -n "$registry" ] && [ -n "$volume" ] ||
+        fail "$bench: the executing guest has no exact durable owner record"
+    fleet_pid="$(sed -n 's/^pid=//p' "$registry/meta" | head -1)"
+    fleet_pid_start="$(sed -n 's/^pid_start=//p' "$registry/meta" | head -1)"
+    fleet_pgid="$(ps -o pgid= -p "$fleet_pid" 2>/dev/null | tr -d ' ')"
+    cloudbench_pid_matches_start "$fleet_pid" "$fleet_pid_start" \
+        && [ "$fleet_pgid" = "$fleet_pid" ] ||
+        fail "$bench: the exact controller is not the leader of its own session"
+    # Exactly run-bench-campaign.py terminate_owned_children: os.killpg(SIGTERM),
+    # or a terminal Ctrl-C to the foreground fleet's process group.
+    term_epoch="$(date +%s)"
+    kill -s "$signal_name" -- "-$fleet_pgid"
+    stop_file="$FAKE_DIR/machines/$machine/benchmark.stopped"
+    deadline=$((term_epoch + budget))
+    while [ ! -s "$stop_file" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 0.5
+    done
+    if [ ! -s "$stop_file" ]; then
+        # Stop only the test-owned fake benchmark before reporting the defect.
+        kill "$driver_pid" 2>/dev/null || true
+        grep -E 'guest cleanup|controller received|retaining|status proxy' "$log" >&2 || true
+        fail "$bench: the guest kept executing its benchmark ${budget}s after the controller group received $signal_name"
+    fi
+    deadline=$((SECONDS + 300))
+    while kill -0 "$launcher_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 1
+    done
+    ! kill -0 "$launcher_pid" 2>/dev/null ||
+        fail "$bench: the cancelled controller did not finish its bounded cleanup"
+    wait "$launcher_pid" || launcher_status=$?
+    for pid in "${PIDS[@]}"; do
+        [ "$pid" = "$launcher_pid" ] || remaining_pids+=("$pid")
+    done
+    PIDS=("${remaining_pids[@]}")
+    [ "$launcher_status" -ne 0 ] ||
+        fail "$bench: a cancelled controller reported success"
+    grep -qF "controller received $signal_name" "$log" ||
+        fail "$bench: the controller did not observe the group $signal_name"
+    # Auxiliary loops die from the same group signal; their teardown must
+    # still account for every owned local process.
+    if grep -E 'survived local teardown|Could not capture the process table' "$log" >&2; then
+        fail "$bench: controller teardown left owned local processes unaccounted after the group $signal_name"
+    fi
+    python3 - "$stop_file" "$expected_reason" "$term_epoch" "$budget" <<'PY' ||
+import json
+import sys
+
+stop = json.load(open(sys.argv[1]))
+expected, term_epoch, budget = sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+assert stop["reason"] == expected, (stop["reason"], expected)
+assert stop["stopped_epoch"] - term_epoch <= budget, stop
+PY
+        fail "$bench: the guest did not stop through $expected_reason within ${budget}s ($(cat "$stop_file"))"
+    deadline=$((SECONDS + 10))
+    while kill -0 "$driver_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 0.2
+    done
+    ! kill -0 "$driver_pid" 2>/dev/null ||
+        fail "$bench: the guest benchmark process survived its stop"
+    [ -f "$registry/meta" ] && [ -e "$registry/runtime-evidence-unconfirmed" ] ||
+        fail "$bench: cancellation released the exact owner before its evidence was preserved"
+    fake_machine_exists "$machine" ||
+        fail "$bench: cancellation destroyed the unconfirmed guest Machine"
+    FAKE_STATE="$FAKE_DIR/state.json" VOLUME="$volume" python3 - <<'PY' ||
+import json
+import os
+
+volumes = json.load(open(os.environ["FAKE_STATE"]))["volumes"]
+raise SystemExit(0 if any(item.get("id") == os.environ["VOLUME"] for item in volumes) else 1)
+PY
+        fail "$bench: cancellation destroyed the original evidence volume"
+    if grep -qE "^machine destroy |^volumes destroy " "$FAKE_DIR/journal.log"; then
+        fail "$bench: provider deletion ran on an unconfirmed cancellation path"
+    fi
+    machine_state="$(FAKE_STATE="$FAKE_DIR/state.json" MACHINE="$machine" python3 -c '
+import json, os
+machines = json.load(open(os.environ["FAKE_STATE"]))["machines"]
+print(next(m["state"] for m in machines if m["id"] == os.environ["MACHINE"]))
+')"
+    output="$(sed -n 's/^runs_root=//p' "$registry/meta" | head -1)/$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)/$bench"
+    [ -d "$output" ] || fail "$bench: the retained owner does not name its run output"
+    if [ "$expected_reason" = native-stop ]; then
+        # The guest itself answered the authenticated stop with HTTP 503 and
+        # the runner then retired its proxy, so no party delivered the stop and
+        # no delivery receipt exists.
+        if [ ! -s "$FAKE_DIR/machines/$machine/shutdown-rejected" ]; then
+            grep -nE "guest cleanup|status proxy|Original exit code" \
+                "$output/fleet-child.log" >&2 || true
+            fail "$bench: the guest never rejected an authenticated stop"
+        fi
+        [ ! -e "$output/guest-shutdown.requested" ] ||
+            fail "$bench: a rejected stop published a delivery receipt"
+        JOURNAL="$FAKE_DIR/journal.log" MACHINE="$machine" python3 - <<'PY' ||
+import os
+import shlex
+
+stops = [shlex.split(line)[2] for line in open(os.environ["JOURNAL"]) if line.startswith("machine stop ")]
+# One throttled request plus exactly one bounded retry of the same Machine.
+assert stops == [os.environ["MACHINE"]] * 2, stops
+PY
+            fail "$bench: the throttled native stop was not retried exactly once on the owned guest Machine"
+        [ "$machine_state" = stopped ] ||
+            fail "$bench: the undeliverable guest was not left natively stopped (state=$machine_state)"
+        python3 - "$output/guest-native-stop.json" "$machine" "$volume" <<'PY' ||
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1]))
+assert receipt["machine_id"] == sys.argv[2], receipt
+assert receipt["volume_id"] == sys.argv[3], receipt
+assert receipt["verified_state"] == "stopped", receipt
+assert receipt["verified"] is True, receipt
+assert receipt["stop_requests"] == 2, receipt
+assert receipt["delivery_receipt"] == "absent", receipt
+assert receipt["destroyed"] is False, receipt
+PY
+            fail "$bench: the native guest stop has no exact durable receipt"
+        [ -e "$registry/guest-cleanup-unconfirmed" ] ||
+            fail "$bench: a natively stopped guest must keep its unconfirmed-cleanup quarantine"
+    else
+        [ -s "$output/guest-shutdown.confirmed" ] ||
+            fail "$bench: the delivered guest shutdown was not acknowledged"
+        if grep -qE "^machine stop " "$FAKE_DIR/journal.log"; then
+            fail "$bench: a guest that acknowledged its delivered shutdown was also stopped natively"
+        fi
+        # The runner's own EXIT cleanup delivered the stop: its run-scoped
+        # delivery receipt exists. A runner that ignored the forwarded signal
+        # leaves delivery entirely to the controller and never writes one.
+        python3 - "$output/guest-shutdown.requested" "$machine" "$bench" \
+            "$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)" "${registry##*/}" <<'PY' ||
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1]))
+machine, bench, run_id, owner = sys.argv[2:]
+assert receipt["kind"] == "guest-shutdown-requested", receipt
+assert receipt["machine_id"] == machine and receipt["bench"] == bench, receipt
+assert receipt["run_id"] == run_id, receipt
+assert receipt["run_token"].startswith(owner + "-"), receipt
+assert receipt["http_status"] in (202, 204, 409), receipt
+PY
+            fail "$bench: the runner did not deliver the guest stop itself after the group $signal_name"
+    fi
+    grep -E "guest cleanup|guest shutdown|natively" "$log" || true
+    assert_and_reset_retained_fake_owner "$registry" ||
+        fail "$bench: retained group-$signal_name owner could not be safely reset"
+    rm -f "$FAKE_DIR/throttle-first-machine-stop"
+    assert_no_fixture_processes "$bench ($signal_name)"
+    SESSION_CONTROLLERS=()
+    echo "PASS: scenario 2-group-term ($bench, $signal_name) — guest stopped via $expected_reason $(python3 -c 'import json, sys; print(round(json.load(open(sys.argv[1]))["stopped_epoch"] - int(sys.argv[2]), 1))' "$stop_file" "$term_epoch")s after process-group $signal_name (budget ${budget}s); exact owner, volume and evidence retained"
+}
+
+# A guest whose stop WAS delivered must drain undisturbed even when every
+# local party has already given up waiting for its acknowledgement. Its
+# execution window expires; the runner delivers /shutdown (202), waits its
+# bounded acknowledgement window, exits and retires the proxy; then the
+# controller's group is cancelled. The controller's own request now fails with
+# HTTP 000, but the runner's run-scoped delivery receipt proves the stop
+# arrived: no native stop may cut off browser cleanup and evidence sealing.
+group_term_delivered_slow_drain_contract() {
+    local bench=bench-group-term-slowdrain log launcher_pid launcher_status=0 deadline
+    local marker="" machine="" registry="" candidate output="" fleet_pid fleet_pgid
+    local requested_at stop_file driver_pid drained=0 pid runner_exited_at cleanup_seconds
+    local -a remaining_pids=()
+    log="$TMP_ROOT/controller-$bench.log"
+    reset_fake_state
+    rm -f "$POOL_A" "$POOL_B" "$FAKE_DIR/throttle-first-machine-stop"
+    rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+    mkdir -p "$FAKE_DIR/markers"
+    : > "$FAKE_DIR/journal.log"
+    printf '90\n' > "$FAKE_DIR/slow-drain-seconds"
+    # A 12 s execution window after a 20 s per-box barrier allowance.
+    rm -f "$TMP_ROOT/session-$bench.pid"
+    CLOUDBENCH_TEST_NEW_SESSION=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+        CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=20 \
+        CLOUDBENCH_TEST_SESSION_PID_FILE="$TMP_ROOT/session-$bench.pid" \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$log" "$bench" --timeout 12 &
+    launcher_pid=$!
+    PIDS+=("$launcher_pid")
+    track_session_controller "$TMP_ROOT/session-$bench.pid"
+    deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        marker="$(find "$FAKE_DIR/markers" -maxdepth 1 -name 'benchmark-executing-*' \
+            -type f -print -quit 2>/dev/null)"
+        [ -z "$marker" ] || break
+        kill -0 "$launcher_pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$marker" ] || fail "$bench: the guest never started executing its benchmark"
+    machine="${marker##*/benchmark-executing-}"
+    driver_pid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$marker")"
+    for candidate in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+        [ -f "$candidate/meta" ] || continue
+        if grep -rqx "id=$machine" "$candidate/clones" 2>/dev/null; then
+            registry="$candidate"
+        fi
+    done
+    [ -n "$registry" ] || fail "$bench: the executing guest has no exact durable owner record"
+    output="$(sed -n 's/^runs_root=//p' "$registry/meta" | head -1)/$(sed -n 's/^run_id=//p' "$registry/meta" | head -1)/$bench"
+    fleet_pid="$(sed -n 's/^pid=//p' "$registry/meta" | head -1)"
+    fleet_pgid="$(ps -o pgid= -p "$fleet_pid" 2>/dev/null | tr -d ' ')"
+    [ "$fleet_pgid" = "$fleet_pid" ] ||
+        fail "$bench: the exact controller is not the leader of its own session"
+    # Wait until the runner has delivered the stop, given up on its bounded
+    # acknowledgement and exited with its proxy retired.
+    deadline=$((SECONDS + 120))
+    while [ ! -s "$output/benchmark-child.finished" ] && [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$launcher_pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    runner_exited_at="$(date +%s.%N)"
+    [ -s "$FAKE_DIR/machines/$machine/shutdown-requested" ] ||
+        fail "$bench: the runner never delivered the authenticated stop"
+    grep -qF "timed-out guest shutdown unconfirmed" "$output/fleet-child.log" ||
+        fail "$bench: the runner did not exhaust its bounded acknowledgement window"
+    # Cancel the controller group exactly as the campaign does. Controller
+    # cleanup may already be running; it ignores the duplicate signal.
+    kill -TERM -- "-$fleet_pgid" 2>/dev/null || true
+    deadline=$((SECONDS + 180))
+    while kill -0 "$launcher_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 1
+    done
+    ! kill -0 "$launcher_pid" 2>/dev/null ||
+        fail "$bench: the cancelled controller did not finish its bounded cleanup"
+    # The runner already retired the delivered guest's proxy: nothing can
+    # acknowledge it any more, so controller cleanup must hand it to retention
+    # promptly (main took about 6 s) instead of polling a dead port until the
+    # 30 s confirmation deadline, which a campaign's 30 s SIGKILL would cut.
+    cleanup_seconds="$(python3 -c 'import sys, time; print(f"{time.time() - float(sys.argv[1]):.1f}")' "$runner_exited_at")"
+    python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 20 else 1)' "$cleanup_seconds" ||
+        fail "$bench: controller cleanup took ${cleanup_seconds}s after the runner exited (limit 20s)"
+    wait "$launcher_pid" || launcher_status=$?
+    for pid in "${PIDS[@]}"; do
+        [ "$pid" = "$launcher_pid" ] || remaining_pids+=("$pid")
+    done
+    PIDS=("${remaining_pids[@]}")
+    [ "$launcher_status" -ne 0 ] ||
+        fail "$bench: an unacknowledged guest cleanup reported success"
+    if grep -E 'survived local teardown|Could not capture the process table' "$log" >&2; then
+        fail "$bench: controller teardown left owned local processes unaccounted after the group TERM"
+    fi
+    requested_at="$(cat "$FAKE_DIR/machines/$machine/shutdown-requested")"
+    stop_file="$FAKE_DIR/machines/$machine/benchmark.stopped"
+    # The controller finished while the delivered drain was still running.
+    python3 - "$requested_at" <<'PY' ||
+import sys
+import time
+
+assert time.time() - float(sys.argv[1]) < 90, "controller cleanup outlived the drain"
+PY
+        fail "$bench: the fixture drain did not outlast controller cleanup"
+    if grep -qE "^machine stop " "$FAKE_DIR/journal.log"; then
+        grep -E "guest cleanup|guest shutdown|natively|delivered" "$log" >&2 || true
+        fail "$bench: a guest whose stop was delivered and still draining was stopped natively"
+    fi
+    [ ! -e "$output/guest-native-stop.json" ] ||
+        fail "$bench: a delivered draining guest received a native-stop receipt"
+    grep -qF "after its runner delivered the authenticated shutdown" "$log" ||
+        fail "$bench: controller cleanup did not recognize the runner's delivery receipt"
+    grep -qF "status proxy is retired" "$log" ||
+        fail "$bench: controller cleanup kept polling a delivered guest's retired proxy"
+    deadline=$((SECONDS + 120))
+    while [ ! -s "$stop_file" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.5; done
+    if python3 - "$stop_file" <<'PY'
+import json
+import sys
+
+assert json.load(open(sys.argv[1]))["reason"] == "drain-completed"
+PY
+    then
+        drained=1
+    fi
+    if [ "$drained" != 1 ]; then
+        kill "$driver_pid" 2>/dev/null || true
+        fail "$bench: the delivered guest did not drain to completion ($(cat "$stop_file" 2>/dev/null || echo absent))"
+    fi
+    [ -f "$registry/meta" ] && [ -e "$registry/guest-cleanup-unconfirmed" ] ||
+        fail "$bench: an unacknowledged drain must retain its exact owner and quarantine"
+    fake_machine_exists "$machine" ||
+        fail "$bench: the draining guest Machine was destroyed"
+    if grep -qE "^machine destroy |^volumes destroy " "$FAKE_DIR/journal.log"; then
+        fail "$bench: provider deletion ran on an unconfirmed cancellation path"
+    fi
+    assert_and_reset_retained_fake_owner "$registry" ||
+        fail "$bench: retained slow-drain owner could not be safely reset"
+    rm -f "$FAKE_DIR/slow-drain-seconds"
+    assert_no_fixture_processes "$bench"
+    SESSION_CONTROLLERS=()
+    echo "PASS: scenario 2-group-term ($bench) — delivered stop drained to completion with no native stop; controller cleanup ${cleanup_seconds}s after the runner exited; exact owner retained for recovery"
+}
+# The fixture reaper must find and stop a leaked session-leader controller, so
+# a failed or timed-out case can never leave one running after TMP_ROOT is gone.
+leak_pid_file="$TMP_ROOT/session-leak.pid"
+python3 -c 'import os, sys, time
+with open(sys.argv[1] + ".tmp", "w") as handle:
+    handle.write(str(os.getpid()))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+os.setsid()
+os.execvp("bash", ["bash", "-c", "trap \"\" HUP INT TERM; while :; do sleep 1; done", sys.argv[2]])' \
+    "$leak_pid_file" "$TMP_ROOT/ws-a/scripts/run-bench-fleet" &
+leak_launcher=$!
+track_session_controller "$leak_pid_file"
+mapfile -t leaked < <(fixture_process_pids)
+[ "${#leaked[@]}" -ge 1 ] ||
+    fail "fixture survivor scan did not see a leaked session-leader controller"
+reap_fixture_processes
+mapfile -t leaked < <(fixture_process_pids)
+[ "${#leaked[@]}" -eq 0 ] ||
+    fail "fixture reaper left a leaked session-leader controller running: ${leaked[*]}"
+wait "$leak_launcher" 2>/dev/null || true
+echo "PASS: fixture reaper stops a leaked TERM-ignoring session-leader controller"
+
+# CLOUDBENCH_TEST_GROUP_TERM_CASES selects a subset for a focused rerun.
+group_term_case_selected() {
+    case " ${CLOUDBENCH_TEST_GROUP_TERM_CASES:-term int undeliverable slowdrain} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+! group_term_case_selected term ||
+    group_term_cancellation_contract bench-group-term guest-shutdown TERM
+! group_term_case_selected int ||
+    group_term_cancellation_contract bench-group-term guest-shutdown INT
+! group_term_case_selected undeliverable ||
+    group_term_cancellation_contract bench-group-term-undeliverable native-stop TERM
+! group_term_case_selected slowdrain ||
+    group_term_delivered_slow_drain_contract
+assert_no_controller_script_snapshots "process-group TERM cancellation"
+if [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
+    echo "All process-group TERM cancellation checks passed."
+    exit 0
 fi
 
 # Cooperative predeploy cancellation walks only the poller/waiter descendant

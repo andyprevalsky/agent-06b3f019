@@ -72,6 +72,7 @@ from providers.rose.schema import (
 )
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.transforms import messages_contain_images, route_model_accepts_images
 from providers.rose.truncation import model_key, recover_truncated
 from providers.rose.types import (
     ChunkKind,
@@ -529,10 +530,10 @@ def _browser_use_dump_config(
             "stream": True,
         }
     return {
-        "pool": "rose-1-browser-use",
+        "pool": pool_spec.name,
         "actual_model": effective_model,
         "actual_model_raw": actual_model,
-        "pool_name": response.pool_name or "rose-1-browser-use",
+        "pool_name": response.pool_name or pool_spec.name,
         "mode": mode,
         "call_site": call_site,
         "effective_params": effective_params,
@@ -656,10 +657,13 @@ class RoseClient:
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
-        if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
+        # Browser steps run on their spawning agent's pool, so the explicit
+        # flag (set by complete_browser_use) identifies them on any pool.
+        browser_use = bool(kwargs.pop("browser_use", False))
+        if browser_use or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             if probe_read_only:
                 raise FastCacheLookupError("DEMO replay probe forbids live browser LLM calls")
-            async with aclosing(self._complete_impl(**kwargs)) as live_stream:
+            async with aclosing(self._complete_impl(**kwargs, browser_use=True)) as live_stream:
                 async for chunk in live_stream:
                     yield chunk
             return
@@ -932,6 +936,7 @@ class RoseClient:
         cache_namespace: Optional[str] = None,
         prefer_azure: bool = False,
         json_mode: bool = False,
+        browser_use: bool = False,
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
     ) -> AsyncIterator[StreamChunk]:
@@ -1895,7 +1900,27 @@ class RoseClient:
                 # Ordinary visible partial replies remain errors.
                 # A model that was cut off at its output limit is excluded from every
                 # route that serves it, funded ones included (see truncation.py).
-                if route == "foundry" and foundry_configured(pool_spec) and model_key(foundry_model(pool_spec)) not in _skip_models:
+                if route != "foundry":
+                    continue
+                # A text-only Foundry model cannot see an image request, so
+                # screenshots retain main's direct vision-waterfall routing.
+                foundry_blind = messages_contain_images(messages) and not route_model_accepts_images(
+                    foundry_model(pool_spec)
+                )
+                if foundry_blind and foundry_configured(pool_spec):
+                    logger.info(
+                        "rose.complete.foundry.skipped",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        model=foundry_model(pool_spec),
+                        reason="images_need_vision",
+                    )
+                if (
+                    foundry_configured(pool_spec)
+                    and not foundry_blind
+                    and model_key(foundry_model(pool_spec)) not in _skip_models
+                ):
                     active_route = "foundry"
                     foundry_yielded_any = False
                     try:
@@ -1977,6 +2002,7 @@ class RoseClient:
                 cache_namespace=cache_namespace,
                 skip_cache_write=skip_cache_write,
                 skip_models=_skip_models,
+                browser_use=browser_use,
                 stream_guard=_guarded,
             ):
                 chunk = _with_timing_if_done(chunk)
@@ -2043,8 +2069,9 @@ class RoseClient:
         skip_cache_write: bool = False,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
+        pool: PoolName = "rose-1-browser-use",
     ) -> Dict[str, Any]:
-        """Run one browser-use step through the rose-1-browser-use pool.
+        """Run one browser-use step through ``pool`` (the spawning agent's pool).
 
         Builds the browser-use messages and native browser-action tools, runs
         the standard claudeAuth -> waterfall pipeline, parses the first tool
@@ -2053,7 +2080,7 @@ class RoseClient:
             {
                 "action":        UnifiedAction,
                 "actual_model":  "anthropic/claude-opus-4.8" | ...,
-                "pool_name":     "rose-1-browser-use",
+                "pool_name":     pool,
                 "request_id":    str,
                 "usage": {
                     "prompt_tokens": int,
@@ -2069,7 +2096,7 @@ class RoseClient:
         Raises `RoseError` on transport / pool failure and `ValueError` if
         the model does not return a parseable browser action.
         """
-        pool_spec = get_pool("rose-1-browser-use")
+        pool_spec = get_pool(pool)
         # A browser step needs one action. A 16k cap let a malformed Qwen
         # response stream for 215s without a tool call (WebDecoy bench),
         # consuming half the task deadline before the caller could retry.
@@ -2097,7 +2124,7 @@ class RoseClient:
         request_id = request_id or uuid.uuid4().hex[:12]
         try:
             response = await self.collect(
-                pool="rose-1-browser-use",
+                pool=pool,
                 messages=messages,
                 tools=tools,
                 tool_choice=tool_choice,
@@ -2112,6 +2139,7 @@ class RoseClient:
                 skip_cache_write=skip_cache_write,
                 dump_context=False,
                 cache_namespace=cache_namespace,
+                browser_use=True,
             )
         except Exception as exc:
             try:
@@ -2121,9 +2149,9 @@ class RoseClient:
                     call_site=call_site,
                     messages=_messages_without_internal_system_boundaries(messages),
                     agent_id=agent_id,
-                    model="rose-1-browser-use",
+                    model=pool,
                     config={
-                        "pool": "rose-1-browser-use",
+                        "pool": pool,
                         "actual_model": None,
                         "mode": None,
                         "capture_boundary": "complete_browser_use.collect",
@@ -2230,7 +2258,7 @@ class RoseClient:
         return {
             "action": action,
             "actual_model": actual_model,
-            "pool_name": response.pool_name or "rose-1-browser-use",
+            "pool_name": response.pool_name or pool,
             "request_id": response.request_id,
             "usage": response.usage,
             "claude_token_error": response.claude_token_error,
@@ -2264,6 +2292,7 @@ class RoseClient:
         prefer_azure: bool = False,
         retry_partial_errors: bool = False,
         json_mode: bool = False,
+        browser_use: bool = False,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks.
@@ -2292,6 +2321,7 @@ class RoseClient:
             dump_context=dump_context,
             dump_extra=dump_extra,
             cache_namespace=cache_namespace,
+            browser_use=browser_use,
             recover_truncation=True,
             result_required=result_required,
             **({"prefer_azure": True} if prefer_azure else {}),

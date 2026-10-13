@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
+from providers.rose.truncation import model_key
+
 logger = structlog.get_logger()
 
 
@@ -708,6 +710,30 @@ def reconstruct_agent_response(
 def is_vision_capable(model: str) -> bool:
     """True iff the model is in VISION_MODELS (mirrors isVisionCapable)."""
     return model in VISION_MODELS
+
+
+_VISION_MODEL_KEYS: frozenset[str] = frozenset(model_key(model) for model in VISION_MODELS)
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image"})
+
+
+def route_model_accepts_images(model: str) -> bool:
+    """True when a route's model can see images.
+
+    Direct routes name bare provider ids (``gpt-6-sol``, ``claude-opus-5-5``);
+    ``model_key`` maps each onto its ``VISION_MODELS`` entry.
+    """
+    return model_key(model) in _VISION_MODEL_KEYS
+
+
+def messages_contain_images(messages: List[Dict[str, Any]]) -> bool:
+    """True iff any message carries an image content block."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES for block in content
+        ):
+            return True
+    return False
 
 
 def has_screenshot_markers(messages: List[Dict[str, Any]]) -> bool:

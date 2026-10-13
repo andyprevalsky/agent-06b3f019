@@ -554,6 +554,42 @@ async def test_browser_activity_preserves_requested_start_url():
     assert real_browser.await_args.kwargs["goal"] == "Open the selected cafe"
 
 
+async def test_browser_activity_runs_on_spawning_agents_pool():
+    """Browser steps, real or simulated, run on the spawning agent's Rose pool."""
+    from domains.spawn_browser_agent_v3.config import browser_pool_for_agent_model
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    assert browser_pool_for_agent_model("rose-labs/rose-1-ultra") == "rose-1-ultra"
+    assert browser_pool_for_agent_model("rose-labs/rose-1-flash") == "rose-1-flash"
+    assert browser_pool_for_agent_model("rose-labs/rose-1-oss") == "rose-1-oss"
+    # Non-Rose models and activities scheduled without a model keep the browser pool.
+    assert browser_pool_for_agent_model("anthropic/claude-sonnet-4.6") == "rose-1-browser-use"
+    assert browser_pool_for_agent_model(None) == "rose-1-browser-use"
+
+    for simulate, path in (
+        (False, "_spawn_browser_agent_activity_v3_real"),
+        (True, "_spawn_browser_agent_activity_v3_simulated"),
+    ):
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.WorldModelToolExecutionAdapter.from_env",
+                return_value=SimpleNamespace(should_simulate=lambda _action, simulate=simulate: simulate),
+            ),
+            patch(f"domains.spawn_browser_agent_v3.handler.{path}", new_callable=AsyncMock) as browser,
+        ):
+            browser.return_value = {"status": "completed"}
+            await spawn_browser_agent_activity_v3(
+                user_id="user", agent_id="agent", goal="Buy socks", tool_call_id="tool",
+                agent_model="rose-labs/rose-1-ultra",
+            )
+        assert browser.await_args.kwargs["browser_pool"] == "rose-1-ultra", path
+
+    # Unattributed tokens price at the pool the steps ran on.
+    items = build_usage_items(10, 20, {}, 1.0, pricing_pool="rose-1-ultra")
+    assert next(item for item in items if item["type"] == "llm")["model"] == "rose-1-ultra"
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -9253,9 +9289,11 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
         gpt_token_pool_id="pool-gpt",
         browser_use_mode="gpt",
         extra_user_messages=[{"role": "user", "content": "resume from current live state"}],
+        pool="rose-1-ultra",
     )
 
     assert result == {"actions": [{"type": "wait"}]}
+    assert client.calls[0]["pool"] == "rose-1-ultra"
     assert client.calls[0]["claude_auth"] is None
     assert client.calls[0]["gpt_auth"].token == "gpt-token"
     assert client.calls[0]["gpt_auth"].account_id == "acct-1"
@@ -14030,7 +14068,8 @@ async def test_evaluate_awaits_promises():
     """Runtime.evaluate must set awaitPromise so async fetch results are returned."""
     from domains.spawn_browser_agent_v3.service_actions import _execute_inspection_action
 
-    evaluate = AsyncMock(return_value={"result": {"value": {"ok": True, "size": 3}}})
+    synthetic_secret = "synthetic-inspection-password"
+    evaluate = AsyncMock(return_value={"result": {"value": {"ok": True, "size": 3, "secret": synthetic_secret}}})
     cdp_session = SimpleNamespace(
         session_id="cdp",
         cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
@@ -14047,6 +14086,7 @@ async def test_evaluate_awaits_promises():
         config=None,
         session_id="s",
         humanizer=None,
+        secret_refs={"pwd:fixture": synthetic_secret},
         browser_network_recorder=None,
         current_url="https://tinypng.com/",
         current_auth_realm="",
@@ -14055,6 +14095,10 @@ async def test_evaluate_awaits_promises():
     result = await _execute_inspection_action(ctx)
     assert result["success"] is True
     assert result["value"]["size"] == 3
+    assert result["value"]["secret"] == "pwd:fixture", "evaluate result exposes synthetic password"
+    recorded = history.record_action.await_args.kwargs["result"]
+    assert recorded["value"]["secret"] == "pwd:fixture", "raw ActionHistory exposes synthetic password"
+    assert synthetic_secret not in str(recorded)
     assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
 
 
@@ -20674,6 +20718,10 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             "playwright_driver_pid": None,
         }
     )
+    preparation = AsyncMock(return_value={
+        "auth_realm": "example.com", "auth_options": {"realm": "example.com"},
+        "passwords": [], "passkeys": [], "auth_credential_ref": {"kind": "cookie_bundle", "id": "bundle-1"},
+    })
     auth_boundary_calls = []
 
     async def restart(*args, **kwargs):
@@ -20690,6 +20738,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             return_value=_fake_config(),
         ),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", preparation),
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
             AsyncMock(return_value=session_info),
@@ -20819,6 +20868,484 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     assert _FakeHumanizer.last_instance is not None
     assert callable(_FakeHumanizer.last_instance.cursor_observer)
     assert _FakeHumanizer.last_instance.idle_started is True
+
+
+    preparation.assert_awaited_once()
+    assert preparation.await_args.kwargs["session_id"] == "session-cookie", "same-realm browser replacement reused prior credential binding"
+
+@_in_browser_activity_context
+async def test_failed_realm_discovery_invalidates_previous_auth_context():
+    """Replay the Google observation after a Claude-spawned session loses preparation."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    fake_playwright = _FakePlaywright(fake_browser)
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
+        "passwords": [], "auth_options": {"realm": "claude.ai"},
+        "browser_session_metadata": {"provider": "kernel"},
+        "credential_ref": {"kind": "cookie_bundle", "id": "claude-bundle"},
+        "same_session_available": True,
+    }
+    create_auth = AsyncMock(return_value={"id": "request-1"})
+    model_contexts = []
+
+    async def model_step(**kwargs):
+        model_contexts.append(kwargs)
+        return {"action": {"action": "request_user_assistance_for_authentication", "thinking": "Google sign-in blocks admin access", "params": {}},
+                "usage": {}, "mode": "waterfall"}
+
+    handler = "domains.spawn_browser_agent_v3.handler."
+    targets = [
+        patch(handler + "load_config", return_value=_fake_config()),
+        patch(handler + "activity.heartbeat"),
+        patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+        patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+        patch(handler + "fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(handler + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+        patch(handler + "_call_browser_use_with_rotation", model_step),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you"})),
+        patch(handler + "prepare_browser_auth", AsyncMock(side_effect=RuntimeError("credential inventory read failed"))),
+        patch(handler + "create_user_auth_assistance_request", create_auth),
+        patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+        patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(handler + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(handler + "close_browser_session", AsyncMock()),
+        patch(handler + "save_browser_action_message", AsyncMock()),
+        patch(handler + "save_browser_assistant_message", AsyncMock()),
+        patch(handler + "save_browser_credential_ref_message", AsyncMock()),
+        patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+        patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal="Manage a Google Workspace user",
+            tool_call_id="tool-1", task_id="task-1", is_resume=True,
+            start_url="https://claude.ai", output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+    assert result["status"] == "awaiting_auth_assistance"
+    assert result["auth_realm"] == "admin.google.com", "failed Google discovery retained Claude assistance realm"
+    assert create_auth.await_args.kwargs["auth_realm"] == "admin.google.com"
+    assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), "stale Claude auth inventory reached Google model turn"
+
+@_in_browser_activity_context
+async def test_initial_auth_inventory_is_delivered_by_page_state_result():
+    """Initial/resumed inventory belongs to genuine state results, never system."""
+    from contextlib import ExitStack
+    import copy
+    import json
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    class ReloadEvent:
+        def __await__(self):
+            async def done():
+                return None
+            return done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    fake_playwright = _FakePlaywright(fake_browser)
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
+        "passwords": [], "auth_options": {"realm": "claude.ai"},
+        "browser_session_metadata": {"provider": "kernel"},
+        "credential_ref": {"kind": "cookie_bundle", "id": "claude-bundle"},
+        "same_session_available": True,
+    }
+    create_auth = AsyncMock(return_value={"id": "request-1"})
+    model_contexts = []
+
+    async def model_step(**kwargs):
+        model_contexts.append(copy.deepcopy(kwargs))
+        action = "read_browser_state" if len(model_contexts) == 1 else "request_user_assistance_for_authentication"
+        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": {}},
+                "usage": {}, "mode": "waterfall"}
+
+    handler = "domains.spawn_browser_agent_v3.handler."
+    targets = [
+        patch(handler + "load_config", return_value=_fake_config()),
+        patch(handler + "activity.heartbeat"),
+        patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+        patch.object(_FakeDomSession, "event_bus", SimpleNamespace(dispatch=lambda _event: ReloadEvent()), create=True),
+        patch(handler + "wait_for_navigation_ready", AsyncMock()),
+        patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+        patch(handler + "fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(handler + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+        patch(handler + "_call_browser_use_with_rotation", model_step),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you", "dom_tree": "Google sign-in"})),
+        patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture"})),
+        patch(handler + "prepare_browser_auth", AsyncMock(return_value={
+            "auth_realm": "admin.google.com", "auth_options": {
+                "realm": "admin.google.com", "email_otp": {"available": True, "connected_emails": ["fixture@workspace.example"]},
+            }, "passwords": [], "passkeys": [],
+            "credential_preparation_error": "Browser state injection timed out after 18000ms",
+        })),
+        patch(handler + "create_user_auth_assistance_request", create_auth),
+        patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+        patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(handler + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(handler + "close_browser_session", AsyncMock()),
+        patch(handler + "save_browser_action_message", AsyncMock()),
+        patch(handler + "save_browser_assistant_message", AsyncMock()),
+        patch(handler + "save_browser_credential_ref_message", AsyncMock()),
+        patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+        patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal="Manage a Google Workspace user",
+            tool_call_id="tool-1", task_id="task-1", is_resume=True,
+            start_url="https://claude.ai", output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+    assert result["status"] == "awaiting_auth_assistance"
+    assert result["auth_realm"] == "admin.google.com", "failed Google discovery retained Claude assistance realm"
+    assert create_auth.await_args.kwargs["auth_realm"] == "admin.google.com"
+    assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), "stale Claude auth inventory reached Google model turn"
+
+    assert len(model_contexts) == 2
+    assert all("# Auth Options for" not in context["dynamic_system_context"] for context in model_contexts)
+    assert model_contexts[0]["dynamic_system_context"] == model_contexts[1]["dynamic_system_context"]
+    tools = [message for message in model_contexts[1]["turn_messages"] if message["role"] == "tool"]
+    assert len(tools) == 1
+    context = json.loads(tools[0]["content"])["auth_context"]
+    assert context["auth_realm"] == "admin.google.com" and context["inventory_status"] == "available"
+    assert "fixture@workspace.example" in context["auth_options"]
+    assert "18000ms" in context["credential_preparation_error"]
+    assert "cookies_injected" not in context and "encryptedPassword" not in str(context)
+
+@_in_browser_activity_context
+async def test_return_to_quarantined_realm_invalidates_other_auth_context():
+    """Replay the Google observation after a Claude-spawned session loses preparation."""
+    from contextlib import ExitStack
+    import copy
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    fake_playwright = _FakePlaywright(fake_browser)
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
+        "passwords": [], "auth_options": {"realm": "claude.ai"},
+        "browser_session_metadata": {"provider": "kernel"},
+        "credential_ref": {"kind": "cookie_bundle", "id": "claude-bundle"},
+        "same_session_available": True,
+    }
+    create_auth = AsyncMock(return_value={"id": "request-1"})
+    preparation = AsyncMock(side_effect=RuntimeError("credential inventory read failed"))
+    model_contexts = []
+    active_page = {}
+    pages = iter([
+        {"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you", "dom_tree": "Google sign-in"},
+        {"url": "https://claude.ai/login", "title": "Sign in", "dom_tree": "Claude sign-in"},
+        {"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you", "dom_tree": "Google sign-in"},
+    ])
+
+    async def observe(*_args, **_kwargs):
+        active_page.clear()
+        active_page.update(next(pages))
+        return dict(active_page)
+
+    async def identity(*_args, **_kwargs):
+        return {"url": active_page["url"]}
+
+    async def model_step(**kwargs):
+        model_contexts.append(copy.deepcopy(kwargs))
+        action = "read_browser_state" if len(model_contexts) < 3 else "request_user_assistance_for_authentication"
+        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": {}},
+                "usage": {}, "mode": "waterfall"}
+
+    handler = "domains.spawn_browser_agent_v3.handler."
+    targets = [
+        patch(handler + "load_config", return_value=_fake_config()),
+        patch(handler + "activity.heartbeat"),
+        patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+        patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+        patch(handler + "fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(handler + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+        patch(handler + "_call_browser_use_with_rotation", model_step),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(handler + "_observe_step_page", observe),
+        patch.object(_FakeDomService, "get_page_identity", identity),
+        patch(handler + "prepare_browser_auth", preparation),
+        patch(handler + "create_user_auth_assistance_request", create_auth),
+        patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+        patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(handler + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(handler + "close_browser_session", AsyncMock()),
+        patch(handler + "save_browser_action_message", AsyncMock()),
+        patch(handler + "save_browser_assistant_message", AsyncMock()),
+        patch(handler + "save_browser_credential_ref_message", AsyncMock()),
+        patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+        patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal="Manage a Google Workspace user",
+            tool_call_id="tool-1", task_id="task-1", is_resume=True,
+            start_url="https://claude.ai", output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+    assert result["status"] == "awaiting_auth_assistance"
+    assert result["auth_realm"] == "admin.google.com", "failed Google discovery retained Claude assistance realm"
+    assert create_auth.await_args.kwargs["auth_realm"] == "admin.google.com"
+    assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), "stale Claude auth inventory reached Google model turn"
+
+    assert preparation.await_count == 2, "returning to a quarantined realm repeated its failed preparation"
+    assert len(model_contexts) == 3
+
+    assert len({context["dynamic_system_context"] for context in model_contexts}) == 1, "realm changes rewrote cached system prefix"
+    assert "# Auth Options for" not in model_contexts[0]["dynamic_system_context"], "startup inventory remains in system"
+    first_history = model_contexts[1]["turn_messages"]
+    assert first_history == model_contexts[2]["turn_messages"][:len(first_history)], "new inventory rewrote submitted history"
+    tool_results = [message for message in model_contexts[2]["turn_messages"] if message["role"] == "tool"]
+    assert len(tool_results) == 2
+    import json
+    contexts = [json.loads(message["content"])["auth_context"] for message in tool_results]
+    assert [context["auth_realm"] for context in contexts] == ["admin.google.com", "claude.ai"]
+    assert all(context["inventory_status"] == "unknown" and context["credential_preparation_error"] for context in contexts)
+    assert all("auth_options" not in context for context in contexts), "failed discovery was presented as an empty known inventory"
+
+
+
+async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False):
+    """Drive real activity/action/history with synthetic CDP and private hydration."""
+    from contextlib import ExitStack
+    import copy
+    from urllib.parse import urlparse
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    from domains.spawn_browser_agent_v3.service import AuthRuntimeState
+
+    old_url = "https://old.example/login"
+    final_url = "https://new.example/login"
+    requested_url = old_url if redirect else final_url
+    autofill = action_name == "autofill"
+    assistance_url = "https://auth.example/login"
+    old_secret = "synthetic-prior-realm-password"
+    new_secret = "synthetic-current-realm-password"
+    shared_ref = "pwd:fixture"
+    active_page = {"url": final_url if autofill else old_url, "title": "Sign in", "dom_tree": "Sign in"}
+    events = []
+    model_contexts = []
+    saved = AsyncMock()
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
+        "passwords": [], "auth_options": {"realm": "old.example"},
+        "browser_session_metadata": {"provider": "kernel"}, "same_session_available": True,
+    }
+
+    async def hydrate(payload, **_kwargs):
+        realm = payload["auth_realm"]
+        state = await build_realm_credential_state(
+            {"auth_realm": realm, "auth_options": {"realm": realm}}, decryption_key=None,
+        )
+        state.password_secret_refs = {shared_ref: old_secret if realm == "old.example" else new_secret}
+        state.password_origins = {shared_ref: "https://" + realm}
+        state.credential_refs_by_secret_ref = {shared_ref: {"kind": "password", "id": realm + "-password"}}
+        state.auth_options = {"realm": realm, "passwords": [{"id": realm + "-password", "ref": shared_ref}]}
+        state.auth_options_section = "# Auth Options for " + realm + "\nPassword ref: " + shared_ref
+        state.auth_runtime_state = AuthRuntimeState.from_auth_options(state.auth_options)
+        return state
+
+    async def prepare(_config, **kwargs):
+        realm = urlparse(kwargs["target_url"]).hostname
+        events.append(("prepare", realm))
+        payload = {"auth_realm": realm, "auth_options": {"realm": realm}, "passwords": [], "passkeys": []}
+        if restoration_error or (autofill and realm == "new.example"):
+            payload["credential_preparation_error"] = "Browser state injection timed out after 18000ms"
+        return payload
+
+    class NavigationEvent:
+        def __await__(self):
+            async def done():
+                return None
+            return done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    def dispatch(event):
+        if action_name == "goto" and not any(item[0] == "navigate" for item in events):
+            events.append(("navigate", event.url))
+            active_page["url"] = final_url
+        else:
+            events.append(("reload", event.url))
+            active_page["url"] = event.url
+        return NavigationEvent()
+
+    async def evaluate(**_kwargs):
+        events.append(("evaluate", old_url))
+        active_page["url"] = final_url
+        return {"result": {"value": {"prior": old_secret, "active": new_secret}}}
+
+    cdp = SimpleNamespace(
+        session_id="cdp-fixture",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+
+    async def identity(*_args, **_kwargs):
+        return {"url": active_page["url"], "title": active_page["title"]}
+
+    async def observe(*_args, **_kwargs):
+        return dict(active_page)
+
+    async def autofill_action(_context):
+        events.append(("autofill", active_page["url"]))
+        active_page["url"] = assistance_url
+        return {"success": True, "payment_refs_filled": ["card_number"], "message": "Fields filled"}
+
+    async def model_step(**kwargs):
+        model_contexts.append(copy.deepcopy(kwargs))
+        events.append(("model", len(model_contexts)))
+        action = action_name if len(model_contexts) == 1 and not autofill else "request_user_assistance_for_authentication"
+        params = {"code": "(() => window.fixtureReadbackAndNavigate())()"} if action == "evaluate" else (
+            {"url": requested_url} if action == "goto" else {}
+        )
+        return {"action": {"action": action, "thinking": "Inspect the surviving sign-in page", "params": params},
+                "usage": {}, "mode": "waterfall"}
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    fake_playwright = _FakePlaywright(fake_browser)
+    prefix = "domains.spawn_browser_agent_v3.handler."
+    targets = [
+        patch(prefix + "load_config", return_value=_fake_config()),
+        patch(prefix + "activity.heartbeat"),
+        patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+        patch(prefix + "fetch_session_info", AsyncMock(return_value=session_info)),
+        patch(prefix + "fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+        patch(prefix + "build_realm_credential_state", hydrate),
+        patch(prefix + "prepare_browser_auth", prepare),
+        patch(prefix + "_call_browser_use_with_rotation", model_step),
+        patch(prefix + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(prefix + "_observe_step_page", observe),
+        patch.object(_FakeDomService, "get_page_identity", identity),
+        patch.object(_FakeDomService, "get_browser_state", observe),
+        patch.object(_FakeDomSession, "event_bus", SimpleNamespace(dispatch=dispatch), create=True),
+        patch.object(_FakeDomSession, "get_or_create_cdp_session", AsyncMock(return_value=cdp), create=True),
+        patch(prefix + "wait_for_navigation_ready", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.service_actions.wait_for_navigation_ready", AsyncMock()),
+        patch(prefix + "create_user_auth_assistance_request", AsyncMock(return_value={"id": "request-1"})),
+        patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
+        patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(prefix + "close_browser_session", AsyncMock()),
+        patch(prefix + "save_browser_action_message", saved),
+        patch(prefix + "save_browser_assistant_message", AsyncMock()),
+        patch(prefix + "save_browser_credential_ref_message", AsyncMock()),
+        patch(prefix + "persist_resume_context", AsyncMock(return_value={})),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+        patch(prefix + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    if autofill:
+        targets.extend([
+            patch("domains.spawn_browser_agent_v3.service_actions.wait_for_payment_ref_fields", AsyncMock(return_value=True)),
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", autofill_action),
+        ])
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
+        result = await handler.spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal="Inspect realm-bound authentication",
+            tool_call_id="tool-1", task_id="task-1", is_resume=True, start_url=old_url,
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            write_lock_resume_state={
+                "approval_type": "manual_pause", "task_id": "task-1",
+                **({"payment_card_refs": {
+                    "card_number": "4242424242424242", "card_name": "Synthetic Fixture",
+                    "card_expiry": "12/30", "card_cvv": "123",
+                }} if autofill else {}),
+            },
+        )
+    assert result["status"] == "awaiting_auth_assistance"
+    assert len(model_contexts) == (1 if autofill else 2), "redirect reload added a model call"
+    if autofill:
+        assert result["auth_realm"] == "auth.example", "autofill retained prior authentication assistance realm"
+    return model_contexts, saved, events, old_secret, new_secret
+
+
+@_in_browser_activity_context
+async def test_activity_cross_realm_action_redacts_reused_ref_values():
+    """Activation reusing a ref must not erase prior-secret masking coverage."""
+    import json
+    contexts, saved, events, prior, active = await _run_realm_transition_action_fixture("evaluate")
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    assert len(tools) == 1 and tools[0]["name"] == "evaluate"
+    result = json.loads(tools[0]["content"])
+    assert result["auth_context"]["auth_realm"] == "new.example"
+    assert result["value"]["prior"] != prior, "cross-realm activation leaked the prior password into model history"
+    assert result["value"]["active"] != active, "cross-realm activation leaked the newly activated password"
+    assert prior not in tools[0]["content"] and active not in tools[0]["content"]
+    persisted = [call.kwargs for call in saved.await_args_list if call.kwargs.get("action_type") == "evaluate"]
+    assert persisted and any("Executed JS" in call.get("message", "") for call in persisted)
+    assert all(prior not in str(call) and active not in str(call) for call in persisted), "persisted action result leaked a realm password"
+    assert ("prepare", "new.example") in events, "test did not activate a different private credential realm"
+
+
+@_in_browser_activity_context
+async def test_activity_redirected_goto_reloads_prepared_realm_once():
+    """Successful post-navigation restoration participates before the next model turn."""
+    import json
+    for redirect, restoration_error in ((True, False), (False, False), (True, True)):
+        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+            "goto", redirect=redirect, restoration_error=restoration_error,
+        )
+        reloads = [event for event in events if event[0] == "reload"]
+        expected = 1 if redirect and not restoration_error else 0
+        assert len(reloads) == expected, "redirect restoration did not reload exactly once before the next model call"
+        if expected:
+            assert reloads[0][1] == "https://new.example/login"
+            assert events.index(("prepare", "new.example")) < events.index(reloads[0]) < events.index(("model", 2))
+        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+        context = json.loads(tools[0]["content"])["auth_context"]
+        assert context["auth_realm"] == "new.example"
+        if not redirect:
+            assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
+        if restoration_error:
+            assert "18000ms" in context["credential_preparation_error"]
+
+@_in_browser_activity_context
+async def test_activity_autofill_redirect_rebinds_before_model():
+    """An automatic action must reobserve a redirect before assistance selection."""
+    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture("autofill")
+    assert ("autofill", "https://new.example/login") in events
+    assert events.index(("autofill", "https://new.example/login")) < events.index(("prepare", "auth.example")) < events.index(("model", 1))
+    assert ("reload", "https://auth.example/login") in events
+    assert events.index(("reload", "https://auth.example/login")) < events.index(("model", 1))
+    assert not contexts[0]["turn_messages"], "automatic action fabricated a model-issued tool result or old-page nudge"
+
 
 
 def _completion_messages(save_mock):
@@ -21377,7 +21904,7 @@ def test_realm_transition_refreshes_active_session_credential_ref():
     from domains.spawn_browser_agent_v3 import handler
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    helper_start = source.index("async def _prepare_credentials_for_url_unquarantined")
+    helper_start = source.index("def _activate_realm_credentials")
     helper_end = source.index("async def _prepare_credentials_for_url(", helper_start)
     helper_source = source[helper_start:helper_end]
 
@@ -21905,6 +22432,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
         write_lock_enabled=True,
         system_name="Rose",
         fast_mode_cache_enabled=True,
+        model="rose-labs/rose-1-ultra",
     )
     manager = SpawnBrowserAgentManagerV3()
     start_calls = []
@@ -21928,8 +22456,16 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
             events.append(event)
 
     assert events[-1].status.name == "FINISHED"
-    activity_args = start_calls[0][1]["args"]
-    assert activity_args[-1] is True
+    # Positional args must bind to the activity's own parameters.
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    bound = inspect.signature(spawn_browser_agent_activity_v3).bind(*start_calls[0][1]["args"]).arguments
+    assert bound["fast_mode_cache_enabled"] is True
+    assert bound["world_model_mode"] is None
+    # The browser agent inherits its spawning agent's model pool.
+    assert bound["agent_model"] == "rose-labs/rose-1-ultra"
     # Live Fast Mode (Buy socks) keeps the 30m Kernel checkout budget.
     from datetime import timedelta
 
@@ -25085,6 +25621,10 @@ async def run_all_tests():
         "browser_activity_preserves_requested_start_url",
         test_browser_activity_preserves_requested_start_url,
     )
+    await r.record_async(
+        "browser_activity_runs_on_spawning_agents_pool",
+        test_browser_activity_runs_on_spawning_agents_pool,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -26941,6 +27481,30 @@ async def run_all_tests():
     await r.record_async(
         "browser_supervisor_snapshot",
         test_browser_supervisor_snapshot_reads_lightweight_page_state,
+    )
+    await r.record_async(
+        "activity_autofill_redirect_rebinds_before_model",
+        test_activity_autofill_redirect_rebinds_before_model,
+    )
+    await r.record_async(
+        "activity_cross_realm_action_redacts_reused_ref_values",
+        test_activity_cross_realm_action_redacts_reused_ref_values,
+    )
+    await r.record_async(
+        "activity_redirected_goto_reloads_prepared_realm_once",
+        test_activity_redirected_goto_reloads_prepared_realm_once,
+    )
+    await r.record_async(
+        "return_to_quarantined_realm_invalidates_other_auth_context",
+        test_return_to_quarantined_realm_invalidates_other_auth_context,
+    )
+    await r.record_async(
+        "initial_auth_inventory_is_delivered_by_page_state_result",
+        test_initial_auth_inventory_is_delivered_by_page_state_result,
+    )
+    await r.record_async(
+        "failed_realm_discovery_invalidates_previous_auth_context",
+        test_failed_realm_discovery_invalidates_previous_auth_context,
     )
     await r.record_async(
         "activity_failed_steel_auth_recovers_same_run",
