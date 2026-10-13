@@ -18,6 +18,7 @@ tags:
 sources:
   - agent 9a268261-9e28-4ca5-8141-b233db14f8ce
   - PR #1490
+  - PR #1495
 repro: back-end/src/tests/blackbox/committed-message-broadcast.blackbox.ts
 status: open
 ---
@@ -135,11 +136,30 @@ the initial HTTP outcome, before the per-agent retry lifecycle finishes.
 Linked ready-topic queues avoid scans across agents. The UI retains identities
 for only its selected conversation, alongside that conversation's transcript.
 
-Full deployment gates, immutable-head review and production outcome verification
-remain pending. A funded unchanged production rerun passed the browser-chip
-test but failed a different realtime channel-join test; that failure is being
-investigated independently. The original Google session acceptance remains
-outside the proof of this delivery repair.
+On exact runtime head `e797ebb3b`, full backend and frontend coverage, static
+verification, all 46 deploy structural gates, five cold seeds, live probes,
+eight smoke tasks including the 50-agent load, eight browser flows, real Claude
+E2B smoke, and all twenty unchanged latency samples passed. Web-search median
+was 2,346 ms and maximum 2,829 ms. Browser and load evidence was published and
+verified in fresh browsers with recording checks. Automated PR review was
+skipped under the repository exhaustion exception: CodeRabbit spending cap;
+one Claude fallback returned an error after one turn, 2,195 ms and zero cost.
+Independent adversarial review passed; no substantive automated PR review ran.
+
+Funded production workflow `38335115929` passed all twenty latency samples, but
+its two UI attempts failed different realtime outcomes. The first connection
+received no application replies despite HTTP 101; a fresh read-only connection
+with the same captured join succeeded. The second attempt joined successfully
+and acknowledged heartbeats, but received no broadcasts for two accepted
+browser-start rows. FIFO timing and batch cardinality place their notifications
+in the mixed four-item batch that timed out after 2,001 ms. Per-item send spans
+were absent, so that membership is a reconstruction. Enabled database triggers
+remain a separate delivery gap; the HTTP publisher is not the sole path.
+
+Main advanced with benchmark infrastructure and cleanup tests during validation.
+Merged-tree gates, final exact-head review and production outcome verification
+are pending. The original Google session acceptance remains outside the proof
+of this delivery repair.
 
 ## Human feedback
 
