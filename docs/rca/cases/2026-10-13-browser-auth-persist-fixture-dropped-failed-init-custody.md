@@ -89,8 +89,16 @@ and absence of both target states before writing them. The guard cannot satisfy
 the original sign-in cookie or local-storage assertions. Saved-auth suppression
 fails preflight instead of changing environment policy.
 
-The focused controls and TypeScript check passed on the initial custody draft. Full exact-source
-deploy validation is still pending, so this case remains open. Production auth
+Allocating init requests now run once. A complete HTTP response settles that
+request; transport or body loss retains every native allocation and local
+ownership binding for explicit reconciliation. Independent review found this
+necessary because retrying a lost POST can overlap a still-running allocation.
+The regression also covers definitive error responses and normal successful
+cleanup. Its support file keeps the registered suite within its lint limit.
+
+The initial custody tree passed all192 backend blackboxes,266 unit files and
+coverage thresholds. The revised unknown-init controls passed privately. Final
+exact-source deploy validation remains pending, so this case stays open. Production auth
 failure semantics and provisioning caps are unchanged. The correction scales
 per fixture's owned resources and does not scan or mutate a shared provider
 account from the test cleanup path.

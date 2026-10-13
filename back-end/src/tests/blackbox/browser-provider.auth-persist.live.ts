@@ -18,6 +18,7 @@ import { deleteKernelProfile } from './browser-provider-rotation.support';
 import { assert, navigateKernelPage, retryBackendFetch } from './browser-provider.helpers';
 import {
   cleanupAuthPersistFixture,
+  readAuthPersistInitOnce,
   type AuthPersistCleanupResult,
 } from './browser-provider.auth-persist.cleanup';
 
@@ -60,8 +61,16 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     'Live auth persist requires saved browser auth; do not disable it for this fixture'
   );
   const userId = `auth-persist-live-${randomUUID()}`;
-  const headers = { 'content-type': 'application/json', 'x-api-key': apiKey, 'x-user-id': userId };
-  const allocated: Array<{ sessionId: string; provider: string; profileId?: string }> = [];
+  const headers = {
+    'content-type': 'application/json',
+    'x-api-key': apiKey,
+    'x-user-id': userId,
+  };
+  const allocated: Array<{
+    sessionId: string;
+    provider: string;
+    profileId?: string;
+  }> = [];
   // Keep identifiers outside mutable coverage output; never store credentials or URLs.
   const custodyRoot = resolve(__dirname, '../../../../.context/test-runs/browser-provider-custody');
   await mkdir(custodyRoot, { recursive: true, mode: 0o700 });
@@ -79,11 +88,20 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
     const [identity, sessions, profiles] = await Promise.all([
       prisma.agentIdentity.findUnique({
         where: { userId },
-        select: { phoneProvider: true, phoneProviderAgentId: true, phoneProviderNumberId: true },
+        select: {
+          phoneProvider: true,
+          phoneProviderAgentId: true,
+          phoneProviderNumberId: true,
+        },
       }),
       prisma.browserSession.findMany({
         where: { context: { userId } },
-        select: { sessionId: true, provider: true, providerProfileId: true, status: true },
+        select: {
+          sessionId: true,
+          provider: true,
+          providerProfileId: true,
+          status: true,
+        },
       }),
       prisma.browserProviderProfile.findMany({
         where: { context: { userId } },
@@ -130,15 +148,24 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       initUnresolved = true;
       await saveJournal('before-init', await snapshot());
     }
-    const response = await retryBackendFetch(`${base}${path}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    const data = asRecord(await response.json());
+    const request = { method: 'POST', headers, body: JSON.stringify(body) };
+    // Allocating POSTs are one-shot: a reset can leave the first request running.
+    const result =
+      path === '/api/browser-session/init'
+        ? await readAuthPersistInitOnce(
+            () => fetch(`${base}${path}`, request),
+            () => {
+              initUnresolved = false;
+            }
+          )
+        : await (async () => {
+            const response = await retryBackendFetch(`${base}${path}`, request);
+            return { response, data: (await response.json()) as unknown };
+          })();
+    const { response } = result;
+    const data = asRecord(result.data);
     if (!response.ok) throw new Error(`${path} HTTP ${response.status}: ${JSON.stringify(data)}`);
     if (path === '/api/browser-session/init') {
-      initUnresolved = false;
       const custody = await snapshot();
       await saveJournal('after-init', custody);
       const authOptions = asRecord(data.auth_options);
@@ -261,7 +288,11 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       where: { id: context.id },
       data: {
         preferredBrowserConfig: buildPreferredBrowserConfig(
-          { provider: 'steel', proxyMode: 'residential_country', steelProxyMode: 'managed' },
+          {
+            provider: 'steel',
+            proxyMode: 'residential_country',
+            steelProxyMode: 'managed',
+          },
           LOCATION
         ),
       },
@@ -304,7 +335,11 @@ export async function runLiveKernelSteelAuthPersist(): Promise<void> {
       where: { id: context.id },
       data: {
         preferredBrowserConfig: buildPreferredBrowserConfig(
-          { provider: 'kernel', proxyMode: 'residential_city', kernelProxyType: 'residential' },
+          {
+            provider: 'kernel',
+            proxyMode: 'residential_city',
+            kernelProxyType: 'residential',
+          },
           LOCATION
         ),
       },

@@ -29,7 +29,7 @@ import {
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
 import { runLiveKernelSteelAuthPersist } from './browser-provider.auth-persist.live';
-import { cleanupAuthPersistFixture } from './browser-provider.auth-persist.cleanup';
+import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import {
@@ -48,107 +48,7 @@ process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 const tests: Array<[string, () => void | Promise<void>]> = [
   [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
-    async () => {
-      const makeFixture = (failure?: string, userCreated = true) => {
-        const calls: string[] = [];
-        const originalFailure = new Error('original init failure');
-        const options = {
-          userId: 'fixture-user',
-          userCreated,
-          initUnresolved: true,
-          allocated: [],
-          originalFailure,
-          journalPath: 'private-custody.json',
-          snapshot: async () => {
-            calls.push('snapshot');
-            if (failure === 'snapshot') throw new Error('unavailable');
-            return {
-              identity: {
-                phoneProvider: 'agentphone:recovery:fixture',
-                phoneProviderAgentId: null,
-                phoneProviderNumberId: null,
-              },
-              sessions: [
-                {
-                  sessionId: 'closed-browser',
-                  provider: 'kernel',
-                  providerProfileId: 'new-profile',
-                  status: 'CLOSED',
-                },
-              ],
-              profiles: [{ provider: 'kernel', profileId: 'new-profile' }],
-            };
-          },
-          saveJournal: async (
-            phase: string,
-            _custody: unknown,
-            results: Array<{ succeeded: boolean }>,
-            ownerRetained: boolean
-          ) => {
-            calls.push(`journal:${phase}`);
-            nodeAssert.equal(ownerRetained, true);
-            nodeAssert.ok(results.every((result) => typeof result.succeeded === 'boolean'));
-            if (failure === `journal:${phase}`) throw new Error('disk unavailable');
-          },
-          releaseBrowser: async (session: { sessionId: string }) => {
-            calls.push(`release:${session.sessionId}`);
-            if (failure === 'release') throw new Error('provider unavailable');
-          },
-          deleteProfile: async (id: string) => {
-            calls.push(`profile:${id}`);
-          },
-          cleanupLocal: async (deleteUser: boolean) => {
-            calls.push(`local:delete-user=${deleteUser}`);
-            nodeAssert.equal(deleteUser, false, 'uncertain phone identity must not cascade');
-          },
-        };
-        return { options, calls, originalFailure };
-      };
-      const successful = makeFixture();
-      await cleanupAuthPersistFixture(successful.options);
-      nodeAssert.deepEqual(successful.calls, [
-        'snapshot',
-        'journal:before-cleanup',
-        'release:closed-browser',
-        'journal:releasing-browsers',
-        'profile:new-profile',
-        'journal:releasing-profiles',
-        'local:delete-user=false',
-        'journal:phone-custody-retained',
-      ]);
-      // No successful User.create receipt means no ownership, even if matching rows exist.
-      const unowned = makeFixture(undefined, false);
-      await cleanupAuthPersistFixture(unowned.options);
-      nodeAssert.deepEqual(unowned.calls, ['journal:setup-ownership-unconfirmed']);
-      for (const failure of [
-        'snapshot',
-        'journal:before-cleanup',
-        'release',
-        'journal:releasing-browsers',
-        'journal:releasing-profiles',
-      ]) {
-        const fixture = makeFixture(failure);
-        await nodeAssert.rejects(cleanupAuthPersistFixture(fixture.options), (error: unknown) => {
-          nodeAssert.ok(error instanceof AggregateError);
-          nodeAssert.equal(error.errors[0], fixture.originalFailure);
-          return true;
-        });
-        nodeAssert.ok(
-          !fixture.calls.some((call) => call.startsWith('local:')),
-          `${failure} must preserve local ownership`
-        );
-        if (failure === 'snapshot' || failure === 'journal:before-cleanup') {
-          nodeAssert.ok(
-            !fixture.calls.some(
-              (call) => call.startsWith('release:') || call.startsWith('profile:')
-            )
-          );
-        }
-        if (failure === 'release' || failure === 'journal:releasing-browsers') {
-          nodeAssert.ok(!fixture.calls.some((call) => call.startsWith('profile:')));
-        }
-      }
-    },
+    assertAuthPersistFailedInitCustody,
   ],
   [
     'Kernel is the default provider',

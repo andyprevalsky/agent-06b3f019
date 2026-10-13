@@ -1,3 +1,15 @@
+/** Complete HTTP body, including an error body, settles this ONE backend request.
+ * Transport/body loss remains unknown; never retry an allocating POST here. */
+export async function readAuthPersistInitOnce<T extends { text: () => Promise<string> }>(
+  fetchOnce: () => Promise<T>,
+  markSettled: () => void
+): Promise<{ response: T; data: unknown }> {
+  const response = await fetchOnce();
+  const body = await response.text();
+  markSettled();
+  return { response, data: JSON.parse(body) as unknown };
+}
+
 /** Fixture accounting only: every side effect is injected for native-free regression tests. */
 export interface AuthPersistAllocation {
   sessionId: string;
@@ -11,7 +23,11 @@ export interface AuthPersistCustody {
     phoneProviderAgentId: string | null;
     phoneProviderNumberId: string | null;
   } | null;
-  sessions: Array<{ sessionId: string; provider: string; providerProfileId: string | null }>;
+  sessions: Array<{
+    sessionId: string;
+    provider: string;
+    providerProfileId: string | null;
+  }>;
   profiles: Array<{ provider: string; profileId: string }>;
 }
 
@@ -62,49 +78,54 @@ export async function cleanupAuthPersistFixture(options: {
     custody = await options.snapshot();
     // This durable checkpoint must precede any native or local destructive operation.
     await save('before-cleanup');
-    const sessions = new Map(options.allocated.map((session) => [session.sessionId, session]));
-    for (const session of custody.sessions) sessions.set(session.sessionId, session);
-    for (const session of sessions.values()) {
-      await attempt('browser', session.sessionId, () => options.releaseBrowser(session));
-      await save('releasing-browsers');
-    }
-    const profiles = new Set(
-      custody.profiles.filter((p) => p.provider === 'kernel').map((p) => p.profileId)
-    );
-    for (const session of options.allocated) {
-      if (session.provider === 'kernel' && session.profileId) profiles.add(session.profileId);
-    }
-    for (const session of custody.sessions) {
-      if (session.provider === 'kernel' && session.providerProfileId)
-        profiles.add(session.providerProfileId);
-    }
-    // A browser-release failure retains profiles and local ownership bindings.
-    if (errors.length === 0) {
-      for (const profileId of profiles) {
-        await attempt('kernel-profile', profileId, () => options.deleteProfile(profileId));
-        await save('releasing-profiles');
+    if (options.initUnresolved) {
+      await save('init-unknown-retained');
+      errors.push(new Error('Auth persist init outcome unknown; all ownership retained'));
+    } else {
+      const sessions = new Map(options.allocated.map((session) => [session.sessionId, session]));
+      for (const session of custody.sessions) sessions.set(session.sessionId, session);
+      for (const session of sessions.values()) {
+        await attempt('browser', session.sessionId, () => options.releaseBrowser(session));
+        await save('releasing-browsers');
       }
+      const profiles = new Set(
+        custody.profiles.filter((p) => p.provider === 'kernel').map((p) => p.profileId)
+      );
+      for (const session of options.allocated) {
+        if (session.provider === 'kernel' && session.profileId) profiles.add(session.profileId);
+      }
+      for (const session of custody.sessions) {
+        if (session.provider === 'kernel' && session.providerProfileId)
+          profiles.add(session.providerProfileId);
+      }
+      // A browser-release failure retains profiles and local ownership bindings.
+      if (errors.length === 0) {
+        for (const profileId of profiles) {
+          await attempt('kernel-profile', profileId, () => options.deleteProfile(profileId));
+          await save('releasing-profiles');
+        }
+      }
+      if (errors.length === 0) {
+        const identity = custody.identity;
+        const hasPhoneCustody =
+          identity !== null &&
+          (identity.phoneProvider !== null ||
+            identity.phoneProviderAgentId !== null ||
+            identity.phoneProviderNumberId !== null);
+        const deleteUser = !options.initUnresolved && !hasPhoneCustody;
+        await attempt('local-browser-fixture', options.userId, async () => {
+          await options.cleanupLocal(deleteUser);
+          ownerRetained = !deleteUser;
+        });
+      }
+      await save(
+        errors.length
+          ? 'cleanup-failed-retained'
+          : ownerRetained
+            ? 'phone-custody-retained'
+            : 'cleanup-complete'
+      );
     }
-    if (errors.length === 0) {
-      const identity = custody.identity;
-      const hasPhoneCustody =
-        identity !== null &&
-        (identity.phoneProvider !== null ||
-          identity.phoneProviderAgentId !== null ||
-          identity.phoneProviderNumberId !== null);
-      const deleteUser = !options.initUnresolved && !hasPhoneCustody;
-      await attempt('local-browser-fixture', options.userId, async () => {
-        await options.cleanupLocal(deleteUser);
-        ownerRetained = !deleteUser;
-      });
-    }
-    await save(
-      errors.length
-        ? 'cleanup-failed-retained'
-        : ownerRetained
-          ? 'phone-custody-retained'
-          : 'cleanup-complete'
-    );
   } catch {
     // Journal/discovery errors stop further mutations; the preceding durable record remains.
     errors.push(
