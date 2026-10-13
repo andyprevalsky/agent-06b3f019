@@ -22,6 +22,9 @@ import {
   randomUUID,
 } from './agents-blackbox-harness';
 import { DEFAULT_TASK_PRICE_LIMIT_CENTS } from '../../providers/priceLimitDefaults';
+import { schemaDescriptionCases } from './agents-response-schema-descriptions.cases';
+
+for (const { name, fn } of schemaDescriptionCases) test(name, fn);
 
 test('POST / — with context_gates parameter', async () => {
   const session = await createAnonymousSession('ctx-gates');

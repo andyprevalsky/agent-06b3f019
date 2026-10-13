@@ -24,7 +24,7 @@ sources:
   - commit a389797bb65c46796a22ad9690bd57af65f53a0e
   - agent 882b536f-5210-4c83-bf10-f2b4ce034228
   - benchmark run f0a05573-f50e-49c2-b3c9-43b3b90dfbf9
-repro: none-recorded
+repro: back-end/src/tests/blackbox/agents-response-schema-descriptions.cases.ts
 status: open
 ---
 
@@ -40,8 +40,8 @@ score or fundraising outcome is **not** proven.
 
 The private canonical schema was compared against `tasks.json` at the paid run's
 source commit; they are equal. The actual runner, API route, lifecycle service,
-persistence adapter, catalog and validators have identical bytes at that run
-source and the current checkpoint. The raw original HTTP create body was not
+persistence adapter, catalog and validators had identical bytes at that run
+source and the initial RCA checkpoint, before the approved validator repair. The raw original HTTP create body was not
 retained, so the historical source-to-HTTP hop is source-derived rather than a
 captured wire assertion. The captured verifier input independently demonstrates
 that its four final descriptions are empty.
@@ -124,7 +124,7 @@ files 0600). No private message history, env file or credential is included here
 
 ## Solution
 
-Prepared privately, **not applied**: add `description: z.string().optional()` to
+User approved on 2026-10-13; **applied**: add `description: z.string().optional()` to
 both field shapes. This preserves caller text exactly without adding a prompt,
 rewriting fields, deriving schema from keywords, relaxing bounds or enabling
 `.passthrough()`. Wrong-typed descriptions become validation errors rather than
@@ -151,20 +151,23 @@ Golden references opened before choosing the candidate:
   converges on that pattern. The three gitignored clones were read from the
   existing `/home/boxes/rose` checkout without cloning or editing them.
 
-Prepared permanent regression: a compact
+Registered permanent regression: a compact
 `agents-response-schema-descriptions.cases.ts` module registered by the existing
 `agents-configuration.cases.ts`. The normal `agents.blackbox.ts` runner already
 imports that configuration module, and `/deploy` backend coverage runs the
-backend blackboxes. The proposed cases were executed with the real validator
-through a private driver; the full API/DB suite has **not** been executed.
-No claim of checked-in/deployed regression coverage is made yet (`repro:
-none-recorded`).
+backend blackboxes. The unchanged seven cases now execute through the normal backend agents
+blackbox. The existing response-schema API case additionally asserts exact
+POST/PATCH persistence and GET readback, including nested Unicode descriptions.
+The full agents API domain passed in 29.156 seconds using the supported isolated
+blackbox runner, local owned database, fake Temporal and outbound replay.
+Prettier, ESLint and TypeScript checks passed. No paid model call or deployment
+was performed; exact fundraising outcome proof remains open.
 
 The candidate affects **ordinary real runs as well as WHM runs** because this API
 contract is shared. That is a separately reviewable scope beyond the user's
 instruction to isolate WHM timeout/provider changes. CLAUDE rule 5 and `/RCA`
-require approval before applying Zod edits. The parent owns the approval request,
-index refresh, archive validation and independent adversarial review.
+require approval before applying Zod edits. The parent recorded the explicit approval, applied the exact production diff
+and tested its normal API persistence path. Source remains on draft PR #1453.
 
 10,000-agent behavior: validation remains per-request O(schema size), with one
 optional string check per supplied field. No provider calls, DB queries, shared
@@ -172,10 +175,10 @@ locks, retries, polling, fan-in or cross-agent state are added. Preserved text
 increases each request/row/model schema only by its existing caller annotation
 bytes. No prompt text, benchmark criteria, runtime identity or ownership changes.
 
-Independent adversarial review completed with PASS; the raw review receipt is
-preserved privately. Remaining gates: explicit typed-schema approval; permanent
-suite application/execution and API persistence verification; exact unchanged
-benchmark pre/post outcome proof before calling the fundraising issue fixed.
+Independent adversarial review completed with PASS; its original receipt is
+preserved privately. The user approval, registered suite and full API persistence
+gates have now passed. Remaining gate: exact unchanged benchmark pre/post outcome
+proof before calling the fundraising issue fixed.
 No additional paid trial, merge or deploy was authorized or performed.
 
 ## Human feedback
@@ -185,7 +188,11 @@ non-WHM harness runs remain unaffected by WHM reliability changes, and required
 progress toward a realistic round closure rather than equating progress to cash
 alone. The current work therefore prepares this shared API correction privately
 and discloses its ordinary-run scope instead of applying it under WMH migration
-or run authority. No further schema approval has been recorded.
+or run authority. The user subsequently said “Approve schema descriptions” and “Demo cache
+reporting approved”, rejected unmentioned proposals, required the static full
+network in the WHM startup prefix, and directed inspection of Rose completion
+recovery for validation failures. The WHM USER-context proposal was not approved;
+its source remains unchanged. No paid-run or deployment approval was added.
 
 ## Reusable lesson
 

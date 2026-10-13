@@ -185,6 +185,10 @@ They later asked to tackle each issue with a sub-agent and `/rca`. Existing
 instructions prohibit a new paid trial without approval and prohibit merging,
 deploying or changing unrelated harness behavior.
 
+The user explicitly approved DEMO cache reporting on 2026-10-13. The
+acknowledgement correction and its registered regressions remain applied; no
+cache-key or global frozen-policy relaxation is included.
+
 ## Reusable lesson
 
 Report replay persistence from the accepted write acknowledgment and preserve exact behavior-bound keys when recording an isolated DEMO trajectory.

@@ -165,7 +165,7 @@ edit is proposed.
 
 ## Solution
 
-**Pending WHM context approval; task source is unchanged.** The final proposed
+**Not approved; task source is unchanged.** The final proposed
 production patch retains genuine USER requests only when the existing explicit
 `world_model_mode` is `simulate` or `shadow`. It propagates that per-agent mode
 through the GP phase wrapper, agent loop, normal completion verifier, final cap
@@ -277,6 +277,14 @@ original task boundaries forbid changing prompts, benchmark definitions,
 fixtures, step budgets or terminal/recovery semantics without the relevant
 approval, and forbid another paid run under this diagnostic authorization.
 No deployment or WHM verifier-context approval has been given.
+
+The user subsequently rejected all unmentioned proposals and asked for an
+explanation of goal filtering; no approval for WHM-context-20261013 was given,
+so it remains unapplied. They asked why the goal was
+dropped: phase filtering slices away the messages before the first EXECUTE
+boundary and also removes PLAN/RESEARCH messages. The original USER request is
+earlier than that boundary; the executing agent retained it but its completion
+judge did not. No alternate correction has been silently applied.
 
 ## Reusable lesson
 

@@ -134,6 +134,13 @@ supports treating aggregate row counts as relationship evidence.
 
 ## Solution
 
+**2026-10-13 user steering:** the source-query proposal below is superseded and
+rejected. The user requires the full network to be static and loaded in the WHM
+prefix at the start of the run. Exact startup-network preparation and token/
+prefix proofs are being evaluated under `grounding/static-prefix-user-review/`;
+no query reader or invented relationship graph has been implemented.
+
+
 No production/runtime repair is claimed. The original native artifact, frozen
 fixture, policy identity, prompts, task, soft examples, shared state, sampling
 and replay keys are unchanged. No new paid call or full benchmark ran.
