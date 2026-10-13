@@ -139,10 +139,45 @@
     "Observed limiting stage and concrete next test; separate observations from causal proof",
     "WMH total/cached/write input, output, DEMO hits/lookups/stores; separate task-agent cache",
     "Total metered inference estimate, Azure WMH expense, Azure task-agent expense, other providers, rate/tier assumptions and missing-cost coverage",
-    "Verified FE replay and exact final joined resource cleanup"
+    "Verified FE replay and exact final joined resource cleanup",
+    "Scorecard must separately show DEMO response replay hit rate, task-agent prompt-cache hit rate and WHM provider prompt-cache hit rate, with numerators/denominators and scope."
   ],
   "benchmarkPromptPolicyEvaluatorChanged": false,
   "newPaidCalls": 0,
   "merged": false,
-  "deployed": false
+  "deployed": false,
+  "cacheScorecard": {
+    "DEMOResponseReplay": {
+      "hitPct": 0,
+      "hits": 0,
+      "lookups": 116,
+      "stores": 107,
+      "denominator": "response-cache lookups"
+    },
+    "agentPromptCacheFinalAllInput": {
+      "hitPct": 77.27509770830487,
+      "cacheReadInputTokens": 1606268,
+      "totalInclusiveInputTokens": 2078636,
+      "meteredCalls": 125,
+      "denominator": "all input tokens of125 final owned worker llm.cache entries; same normalization as WHM provider token hit rate",
+      "source": "original final owned worker log"
+    },
+    "agentPromptCacheRecordedBenchmarkSnapshot": {
+      "reportedHitPct": 79.2,
+      "cacheReadInputTokens": 1570471,
+      "cacheWriteInputTokens": 412508,
+      "totalInclusiveInputTokens": 1996296,
+      "meteredCalls": 122,
+      "denominator": "read/(read+write) in saved benchmark snapshot; snapshot captures fewer final calls",
+      "allInputComparableHitPct": 78.66924544255961
+    },
+    "WMHPromptCache": {
+      "hitPct": 95.82638,
+      "cacheReadInputTokens": 17673634,
+      "totalInclusiveInputTokens": 18443391,
+      "meteredCalls": 108,
+      "denominator": "all input tokens of108 final metered WMH rows"
+    },
+    "distinction": "DEMO measures replayed complete responses; agent and WHM cache rates measure provider prompt-token reuse. They are separate populations. Use final all-input denominators for comparisons, while retaining the original79.2% benchmark-reported metric."
+  }
 }
