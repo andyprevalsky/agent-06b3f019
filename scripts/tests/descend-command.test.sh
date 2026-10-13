@@ -149,7 +149,22 @@ grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || f
 grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
 grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"  # pragma: allowlist secret
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use ~~~ code blocks (approvals use the canonical text block)"
-grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"
+RESPONSE_PROSE=$(python3 - "$RESPONSE_CONTRACT" <<'PY'
+import sys
+outside = []
+in_text = False
+for line in sys.argv[1].splitlines():
+    if not in_text and line.strip() == "```text":
+        in_text = True
+    elif in_text and line.strip() == "```":
+        in_text = False
+    elif not in_text:
+        outside.append(line)
+assert not in_text, "response text examples must have balanced fences"
+print("\n".join(outside))
+PY
+)
+grep -Fq '━' <<<"$RESPONSE_PROSE" && fail "response header must not use an ASCII banner outside approved text blocks"
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
@@ -309,6 +324,8 @@ root = temporary / "production-routing"
 (root / "agents/venv/bin").mkdir(parents=True)
 for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+(root / ".claude/shared").mkdir(parents=True)
+shutil.copyfile(source / ".claude/shared/benchmark-report-format.txt", root / ".claude/shared/benchmark-report-format.txt")
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
     {"name": "production-route", "status": "ready", "production_only": True}
 ]))
