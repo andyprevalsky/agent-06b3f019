@@ -145,8 +145,11 @@ esac
     for args in (["spawn-sub-agents", "--wait"], ["spawn-sub-agents", "-k", "2"],
                  ["--local", "spawn-sub-agents"], ["eval", "--list"],
                  ["stability-proof", "-k", "2"]):
-        result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, (args, result.stderr)
+        # Preserve actual stdout/stderr ordering: launch instructions may use stderr
+        # so machine-readable stability sampling keeps JSON stdout intact.
+        result = subprocess.run(cli + args, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, timeout=10)
+        assert result.returncode == 0, (args, result.stdout)
         assert result.stdout.count(expected) == 1, (args, "launch must emit one complete contract")
         assert result.stdout.index(expected) < result.stdout.index("RUNNER"), args
     result = subprocess.run(cli + ["spawn-sub-agents"], env={**env, "REPORT_TEST_PROD_ONLY": "1"},
