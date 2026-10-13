@@ -129,6 +129,27 @@
       "successOnly": {"count": 108, "avgSeconds": 128.40225925925927, "p95Seconds": 203, "p99Seconds": 265}
     },
     "coverageLimit": "Calls without terminal timing are excluded, rather than assigning a fabricated finish time. These are observed-terminal-call latency distributions, not a complete distribution for all started calls.",
+    "latencyBreakdown": {
+      "agentAll125CompletedCallsUsedAzure": true,
+      "agentActualModel": "gpt-6-sol-foundry",
+      "WMHAzureSuccessfulCalls": 102,
+      "WMHOpenRouterSuccessfulCalls": 6,
+      "WMHActualModels": ["gpt-6.1-sol-foundry", "openai/gpt-6.1-sol"],
+      "WMHAzureOnlySuccessfulMeanSeconds": 124.7843137254902,
+      "WMHFallbackSuccessfulMeanSeconds": 189.90733333333333,
+      "WMHMeanFirstProductiveChunkSeconds112TerminalCalls": 20.910116071428572,
+      "WMHMeanRemainingTimeAfterFirstProductiveChunkSeconds112TerminalCalls": 110.76113392857143,
+      "WMHFirstProductiveKinds": {"codex_reasoning_item": 93, "reasoning": 17, "content": 2},
+      "firstProductiveChunkLimit": "Mostly reasoning signals, not first visible answer token; remaining time includes subsequent reasoning/generation, delivery and failed-call idle time, not a measured pure decode duration",
+      "agentMeanInputTokens125FinalMeteredCalls": 16629.088,
+      "agentMeanOutputTokens125FinalMeteredCalls": 775.024,
+      "WMHMeanInputTokens108FinalMeteredCalls": 170772.13888888888,
+      "WMHMeanOutputTokens108FinalMeteredCalls": 6482.805555555556,
+      "WMHPoolFromAll116StartLogs": "rose-wmh-gpt61",
+      "WMHConfiguredFoundryAndFallbackReasoningEffort": "xhigh",
+      "WMHActualResponseOutcomeBranchRange": [2, 6],
+      "causalInterpretation": "Both sets used Azure. WHM's much larger input/output workload, different model and high-effort distribution generation are plausible latency drivers. The four logged failures add about3.27s to the observed mean versus successful calls; fallback calls are slower but only6 of108 successes. These observations do not isolate model, effort, context length, generation length, deployment load or transport as a proven causal root; no controlled same-input comparison was run."
+    },
     "widerNativePredictionOperationDiagnostic": {
       "scope": "Separate116 original prediction-attempt intervals, including all9 errors/cancellations and work outside the RoseClient LLM request",
       "count": 116,
