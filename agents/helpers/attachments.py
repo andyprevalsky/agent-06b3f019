@@ -503,9 +503,11 @@ async def fetch_parent_attachments_activity(parent_agent_id: str) -> Dict[str, D
 
             logger.info(
                 "Extracted parent attachments",
-                parent_agent_id=parent_agent_id,
-                attachment_count=len(file_pointers),
-                filenames=list(filename_to_pointer.keys()),
+                extra={
+                    "parent_agent_id": parent_agent_id,
+                    "attachment_count": len(file_pointers),
+                    "filenames": list(filename_to_pointer.keys()),
+                },
             )
     except Exception as e:
         logger.warning(f"Failed to fetch parent attachments: {e}")
