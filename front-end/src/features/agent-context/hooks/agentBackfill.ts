@@ -1,5 +1,6 @@
 import type React from 'react';
 import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
+import type { InsertMessagePayload } from '@/lib/realtime';
 
 import { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 
@@ -198,4 +199,40 @@ export async function runPostSubscribeBackfill({
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (isCancelled()) return;
   }
+}
+
+/** Subscription and browser lifecycle events share one scoped read owner. */
+export function createCompletionBackfillOwner(
+  deps: Omit<PostSubscribeBackfillDeps, 'observedMessages'>,
+) {
+  let recovering = false;
+  const observedBrowserMessages = new Map<string, Message>();
+  const reconcile = async () => {
+    if (recovering || deps.isCancelled() || !deps.isCurrentAgent()) return;
+    recovering = true;
+    try {
+      await runPostSubscribeBackfill({
+        ...deps,
+        observedMessages: () => [...observedBrowserMessages.values()],
+      });
+    } finally {
+      recovering = false;
+    }
+  };
+  const observeBrowserInsert = (data: InsertMessagePayload) => {
+    const message: Message = {
+      message_id: data.id,
+      timestamp: data.timestamp,
+      text: data.text,
+      role: data.role,
+      metadata: data.metadata ?? undefined,
+    };
+    observedBrowserMessages.set(message.message_id, message);
+    const task = computeActiveBrowserPanels([message])[0];
+    // Only a new init grants a window; duplicates/progress cannot renew it.
+    if (task && registerBrowserBackfillTask(deps.leaseRef, deps.selectedAgentId, task.taskId)) {
+      void reconcile();
+    }
+  };
+  return { reconcile, observeBrowserInsert };
 }

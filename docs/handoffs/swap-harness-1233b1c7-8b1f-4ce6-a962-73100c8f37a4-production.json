@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "utc": "2026-10-13T02:20:29.395806+00:00",
+  "original_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1477",
+  "merged_sha": "d2632c7c53cefa3d8421a1aa1701e8448179a1c8",
+  "backend_deployment": {
+    "utc": "2026-10-13T01:45:30.137006+00:00",
+    "merged_sha": "d2632c7c53cefa3d8421a1aa1701e8448179a1c8",
+    "deploy_id": "dep-db6on0ss728c7395grs0",
+    "status": "live",
+    "finished_at": "2026-10-13T01:45:24.690755Z"
+  },
+  "backend_verification": {
+    "sha": "d2632c7c53cefa3d8421a1aa1701e8448179a1c8",
+    "deploy_finished_at": "2026-10-13T01:45:24.690755Z",
+    "utc": "2026-10-13T01:46:42.582889+00:00",
+    "health": {
+      "code": 200,
+      "ms": 253
+    },
+    "agents": [
+      {
+        "code": 200,
+        "ms": 328
+      }
+    ],
+    "smoke": {
+      "exit": 0,
+      "checks": [
+        "14/14"
+      ],
+      "http_codes": [
+        "200",
+        "200",
+        "200",
+        "200",
+        "200",
+        "200",
+        "404",
+        "200",
+        "200",
+        "401",
+        "204",
+        "204",
+        "204",
+        "204"
+      ]
+    },
+    "logs": {
+      "http_code": 200,
+      "fetched": 100,
+      "after_finished": 100,
+      "error_count": 0,
+      "ms": 171
+    },
+    "elapsed_ms": 2291
+  },
+  "production_payment": {
+    "run_id": "21b751c4-8bcc-40f7-b2ae-612a541b7aaa",
+    "agent_id": "8c2d6493-6dea-4c70-b49e-06a42296dfae",
+    "passed": true,
+    "status": "COMPLETED",
+    "duration_seconds": 347.4,
+    "cleanup_verified": true,
+    "amount_cents": 100,
+    "assertions": [
+      "purchase VOIDED",
+      "wallet funding RECLAIMED",
+      "live organization transfer reclaimed",
+      "issued card CLOSED",
+      "Stripe capture succeeded",
+      "Stripe refund succeeded",
+      "no open payment attention"
+    ],
+    "llm_dump_available": false,
+    "llm_dump_limitation": "Production disables full LLM dumps; no dump fabricated."
+  },
+  "production_semantic": {
+    "run_id": 38333858624,
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/38333858624",
+    "conclusion": "failure",
+    "ui": {
+      "passed": 5,
+      "intentional_production_skips": 2,
+      "failed": 1,
+      "failed_invariant": "Task A terminal persisted with HTTP200 but browser chip count remained2 instead of1; page probes responsive. Connected chat reconciliation had stopped before browser lifecycle and disconnected recovery suppressed connected reads."
+    },
+    "latency": {
+      "passed_paths": 4,
+      "failed_paths": 1,
+      "failed_path": "web_search",
+      "cause": "Primary Cerebras route HTTP402, existing Together waterfall emitted unusable structured output; retries completed too late or exhausted. No proven valid-JSON parser defect.",
+      "sample2_backend_completion_seconds": 16.239,
+      "unchanged_milestone_deadline_seconds": 15,
+      "sample4_router_attempts_exhausted": true
+    }
+  },
+  "followup": {
+    "branch": "fix/browser-state-restore-volume-and-ls-origins-2",
+    "status": "local deploy checks running; browser recovery fix ready, funding answer pending",
+    "browser_recovery_regression": {
+      "red": {
+        "command": "cd front-end && bash scripts/run-blackbox-tests.sh hooks-lib-connected-backfill",
+        "exit_code": 1,
+        "failure": "expected no active browser panels after API terminal, received1"
+      },
+      "green": {
+        "command": "cd front-end && bash scripts/run-blackbox-tests.sh hooks-lib-connected-backfill",
+        "exit_code": 0,
+        "tests_passed": 10
+      },
+      "ownership": {
+        "command": "cd front-end && bash scripts/run-blackbox-tests.sh hooks-lib-browser-backfill",
+        "exit_code": 0,
+        "tests_passed": 3
+      }
+    },
+    "preserved_protections": [
+      "original archived source remains unchanged",
+      "no duplicate paid Kernel RCA reproduction",
+      "no timeout or assertion weakening",
+      "no new paid provider fallback",
+      "Freedom preserved"
+    ]
+  },
+  "overall_deployment_complete": false
+}

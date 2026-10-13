@@ -459,6 +459,36 @@ than restoration. No complete opaque-origin transport, byte-budget or
 oldest-first duplicate reconciliation analog was found in these trees; Rose's
 owning regression tests supply that proof. Reference files were read only.
 
+### October 13 production verification and frontend follow-up
+
+PR #1477 merged as `d2632c7c53cefa3d8421a1aa1701e8448179a1c8` and
+Render deployed that exact commit. Production endpoint/CORS probes passed
+14/14, health was HTTP 200, and the post-deploy log window contained no error
+patterns. The actual $1 production AgentCard abandonment lifecycle passed,
+including card closure, live organization reclaim and Stripe refund.
+
+The mandatory production semantic workflow
+[38333858624](https://github.com/Rose-Ai-Labs/rose/actions/runs/38333858624)
+failed two independent gates. Browser task completion left a stale status chip
+when a terminal INSERT was missed after chat reconciliation had stopped; the
+connected channel suppressed the disconnected fallback. A frontend follow-up
+restarts one bounded, scoped reconciliation owner on new browser lifecycles and
+continues until authoritative terminal messages arrive. Its owning hook
+regression failed before the change and passed after it, including expired-lease
+and transient-read cases. Duplicate/progress events do not renew leases, and
+agent selection fences old responses.
+
+The web-search latency gate encountered HTTP 402 on its primary Cerebras route.
+The existing Together waterfall produced unusable structured output and invoked
+bounded regeneration; one backend answer completed after 16.239 seconds, beyond
+the unchanged 15-second milestone. Another sample exhausted router retries.
+Logs do not prove that the parser rejected valid JSON. No deadline, schema,
+prompt, credit setting or paid fallback was changed to pass this gate. Production
+verification remains incomplete pending billing recovery and a green rerun.
+The original September OOM attribution and the Mac producer work remain open.
+Sanitized deployment receipts are in the adjacent handoff production JSON;
+raw provider output and browsing-origin evidence remain private.
+
 ## Human feedback
 
 The user required completing the infrastructure repair and ten consecutive

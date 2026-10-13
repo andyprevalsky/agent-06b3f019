@@ -11,16 +11,11 @@ import {
   type ToolStreamPayload,
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
-import { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { MAX_RECONNECT_DELAY_MS } from '../config';
-import {
-  runPostSubscribeBackfill,
-  registerBrowserBackfillTask,
-  type CompletionBackfillLease,
-} from './agentBackfill';
+import { createCompletionBackfillOwner, type CompletionBackfillLease } from './agentBackfill';
 import {
   handleInsertMessage,
   handleUpdateAgent,
@@ -169,47 +164,17 @@ async function connectRealtime(
   scheduleReconnect: () => void,
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
 ): Promise<void> {
-  // Subscription and lifecycle INSERTs share one read owner. A browser can
-  // start after the initial chat recovery has already finished.
-  let recovering = false;
-  const observedBrowserMessages = new Map<string, Message>();
-  const reconcile = async () => {
-    if (recovering || !isScopeActive(deps, scope)) return;
-    recovering = true;
-    try {
-      await runPostSubscribeBackfill({
-        selectedAgentId: scope.agentId,
-        observedMessages: () => [...observedBrowserMessages.values()],
-        isCancelled: () => !isScopeActive(deps, scope),
-        isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
-        leaseRef,
-        initialLoadDoneRef: deps.initialLoadDoneRef,
-        setMessages: deps.setMessages,
-        setAgent: deps.setAgent,
-        setIsChatMode: deps.setIsChatMode,
-      });
-    } finally {
-      recovering = false;
-    }
-  };
+  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner({
+    ...deps,
+    selectedAgentId: scope.agentId,
+    isCancelled: () => !isScopeActive(deps, scope),
+    isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+    leaseRef,
+  });
   try {
     const channel = await subscribeToAgent(
       scope.agentId,
-      createRealtimeHandlers(deps, scope, scheduleReconnect, (data) => {
-        observedBrowserMessages.set(data.id, {
-          message_id: data.id,
-          timestamp: data.timestamp,
-          text: data.text,
-          role: data.role,
-          metadata: data.metadata ?? undefined,
-        });
-        const task = computeActiveBrowserPanels([observedBrowserMessages.get(data.id)!])[0];
-        // Progress, duplicate INSERTs and terminal events cannot renew or restart
-        // a spent lifecycle lease. Only a genuinely new browser init can wake it.
-        if (task && registerBrowserBackfillTask(leaseRef, scope.agentId, task.taskId)) {
-          void reconcile();
-        }
-      }),
+      createRealtimeHandlers(deps, scope, scheduleReconnect, observeBrowserInsert),
     );
     if (!isScopeActive(deps, scope)) {
       unsubscribe(channel);
