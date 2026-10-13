@@ -47,6 +47,13 @@ retaining results and resource receipts. Do not kill other tasks, broad process
 patterns, PID 1, group 0, or Freedom. Keep the old box if ownership, preservation
 or cleanup cannot be proved.
 
+Process arguments can contain credentials such as `BACKEND_API_KEY`. Inspect
+arguments privately for ownership checks and report sanitized process IDs,
+birth/host checks and results. Keep raw command lines, environment dumps and
+credential fragments out of tool output, handoffs and PRs. Record any accidental
+exposure without repeating its value; stop the leaking diagnostic and preserve
+the user's credential-change authority.
+
 Reuse the task's open PR/branch; from main, detached HEAD or a closed/merged PR,
 create `swap-harness/<old-box-id>-<task>` from current HEAD. Never reset,
 force-push, discard commits or merge main as a migration shortcut. Draft PRs
