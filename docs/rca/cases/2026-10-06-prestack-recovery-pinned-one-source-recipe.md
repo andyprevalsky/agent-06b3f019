@@ -257,3 +257,29 @@ forged-review, direct-input, and ref-mismatch controls also pass. Private
 immutable recipe comparison and independent-review proof remain under the
 Google RCA sandbox-policy-check context. This is source qualification, with
 no provider calls, benchmark credit, original-owner release, or widened phase.
+
+### October 13 native receipt consumer and helper registration
+
+The cloud guest acknowledgement repair changes the stack receipt writer and
+driver and stages the existing process identity helper in both native launch
+paths. Its packed payload admits exactly one additional known basename,
+`process-identity.py`; the native recipe still validates those bytes against
+`git show` of the immutable source. This is a disclosed input-closure update,
+not a claim that the validator is unchanged. The canonical synthetic bootstrap
+configuration adds that same real packed input without changing any assertion.
+
+Independent review of immutable candidate `7d5d507dae1b30b451eff0a64401ebc5947bc3d4`
+derives source fingerprint
+`380314261909483d2225acf49918d5e3d0e5b58a05a292581d6a0667793dc06d`
+from 40 inputs: 21 checkout, 16 injected and three boot controls. Relative to
+reviewed `638c7680cd7253b354be4876456e04ac330857f79ca6423875721728eff08afb`,
+34 input entries are unchanged, five changed and the helper is newly included.
+The independent finite-source audit certifies only `before-stack-launch` and
+`agent-network-index-bootstrap`. Its explicit policy candidate retains every
+prior entry and phase; capture-local review markers still cannot authorize an
+unregistered or mutated executable source.
+
+Private source-bound functional proof is retained separately from recipe
+approval. Registration and final committed-source recovery qualification
+remain root-owned and pending; no provider call or benchmark credit is supplied
+by this review.

@@ -859,7 +859,7 @@ def test_native_stack_cleanup_writer_binds_stable_identity_despite_wall_birth_dr
         """
         result = subprocess.run(["bash", "-c", command], env=env, text=True, capture_output=True, check=True)
         fields = dict(line.split("=", 1) for line in receipt.read_text().splitlines())
-        assert fields["version"] == "1" and fields["token"] == "fixture-token" and fields["state"] == "clean"
+        assert fields["version"] == "2" and fields["token"] == "fixture-token" and fields["state"] == "clean"
         assert fields["stack_native_identity"] == result.stdout.strip()
         assert fields["stack_birth"] == "synthetic-shifted-wall-birth"
         old = receipt.read_bytes()
@@ -874,6 +874,57 @@ def test_native_stack_cleanup_writer_binds_stable_identity_despite_wall_birth_dr
         """
         subprocess.run(["bash", "-c", failure], env=env, check=True, capture_output=True)
         assert receipt.read_bytes() == old, "unreadable identity overwrote the verified receipt"
+
+
+def test_stack_native_schema_requires_identity_and_keeps_interrupt_schema_strict():
+    """A v2 stack cannot use legacy fallback, including after verified termination."""
+    from unittest.mock import patch
+    local = load_local()
+    owner = {"pid": 12345, "native_identity": "fixture-native", "birth": "same-birth"}
+    for version, native, expected in [("2", None, False), ("2", "", False), ("2", "foreign", False),
+                                      ("2", "fixture-native", True), ("1", None, True), ("9", "fixture-native", False)]:
+        receipt = {"version": version, "stack_pid": "12345", "stack_birth": "same-birth"}
+        if native is not None:
+            receipt["stack_native_identity"] = native
+        try:
+            local._validate_stack_cleanup_receipt(receipt, owner, verified_native_identity="fixture-native")
+        except RuntimeError:
+            accepted = False
+        else:
+            accepted = True
+        assert accepted == expected, (version, native)
+    with tempfile.TemporaryDirectory(prefix="native-schema-read-") as temporary:
+        receipt = Path(temporary) / "receipt"
+        receipt.write_text("version=2\ntoken=fixture\nstate=clean\nstack_native_identity=fixture-native\n")
+        try:
+            local._read_cleanup_receipt(receipt, "fixture")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("stack schema2 must not authorize benchmark interrupt cleanup")
+        assert local._read_cleanup_receipt(receipt, "fixture", allowed_versions=("1", "2"))["version"] == "2"
+
+
+def test_local_stack_cleanup_accepts_only_complete_native_schema_two_receipts():
+    """The public stack boundary accepts matching v2 owners, never missing/foreign native fields."""
+    from unittest.mock import patch
+    local = load_local()
+    with tempfile.TemporaryDirectory(prefix="native-v2-public-") as temporary:
+        folder=Path(temporary);stack=local.ServiceStack("fixture",folder,folder/"services.json",folder/"log",True)
+        owner={"version":1,"run_id":"fixture","pid":12345,"token":"fixture-token","native_identity":"fixture-native","birth":"old-wall"}
+        atomic(folder/"local-stack-owner.json",owner)
+        for native,birth,expected in [("fixture-native","shifted-wall",True),("fixture-native","old-wall",True),
+                                       (None,"old-wall",False),("","old-wall",False),("foreign","old-wall",False)]:
+            text=f"version=2\ntoken=fixture-token\nstate=clean\nstack_pid=12345\nstack_birth={birth}\n"
+            if native is not None:text+=f"stack_native_identity={native}\n"
+            (folder/"local-stack-cleanup.status").write_text(text)
+            def absent(_pid):raise ProcessLookupError()
+            with patch.object(local,"_process_identity_tools",return_value={"current_identity":absent}), \
+                 patch.object(local,"_pid_is_alive",return_value=False):
+                try:local.stop_services(None,stack=stack)
+                except RuntimeError:accepted=False
+                else:accepted=True
+            assert accepted==expected,(native,birth)
 
 
 if __name__ == "__main__":

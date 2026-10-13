@@ -247,3 +247,57 @@ or NTP step moves that clock.
 
 A shell helper that teardown can reach from a trap must not end in a bare
 `return`. Make the command whose status matters the last command.
+
+### Recurrence: cloud driver ignored the native stack receipt
+
+The next review of source `4f332c0c8b` found the same producer/consumer
+boundary in `cloudbench-run.sh`. Its `publish_cleanup_ack` still compared
+`stack_birth` and ignored `stack_native_identity`. The actual acknowledgement
+function rejected a matching native owner when the wall-birth rendering
+shifted, and accepted a foreign or empty native field when the old birth
+matched. This is a local source reproduction, not evidence that this defect
+caused another production retirement failure.
+
+The stack publisher now writes schema version 2 with mandatory native identity.
+The trusted guest driver captures the original identity immediately after
+launch and requires exactly one version field and one nonempty matching native
+field for v2, plus the existing PID, unique token and clean-state guards.
+Version 1 without native identity retains its exact original birth check; v1
+with native identity requires an exact match and treats wall birth as cosmetic.
+Receipt lines must be key=value with unique keys and complete values.
+Unknown or duplicate versions and missing, empty, duplicate or foreign v2
+native fields fail closed. Stack version/state/token/PID are required; native
+wall birth remains optional. Root interrupt state/token are required, with
+declared version1 only and absent-version legacy compatibility. Unknown unique
+optional fields remain supported. Valid pending/failed diagnostic copies and
+original invalid source files remain retained. The local stack reader accepts v1/v2 explicitly;
+benchmark interrupt receipts retain their v1-only default. A verified owner
+signal cannot forgive a missing v2 native field. Termination signaling is
+unchanged because no separate local signaling defect was demonstrated.
+
+The identity helper travels in both existing boot and legacy control bundles
+and is resolved beside the immutable driver, never from the target checkout.
+Only the exact filename `process-identity.py` is added to payload admission;
+its bytes still must match the immutable bound source. No arbitrary filename,
+source or phase exception is introduced.
+
+Initial schema/staging proof failed10 of38 checks on the previous source,
+then all38 passed. Two controls then caught truncated native/version values
+in that candidate: the same40 suite failed2 before and all40 passed afterward.
+Whole-stack-field controls failed9 of56 before structural key checks and
+complete values, then all56 passed. Finally, root evidence controls caught
+that same false acknowledgement in root state/token and schema parsing:
+the unchanged70 suite failed9 before and all70 passed after the final repair. They include the unchanged seven legacy receipt and three
+root evidence checks, native schema/capture controls, payload transport and
+corruption checks, and the real boot-to-driver-to-runner interruption flow.
+All 13 assertions in that existing boot flow remain unchanged and it needs no
+fixture copy with the staged helper path. The same 12 local lifecycle controls
+fail three new-protocol checks before the fix and all pass afterward; the
+writer's version assertion follows the explicit v2 contract, while all old
+v1 behavior controls remain intact. Private Git/source-bound logs retain the
+original failures and corrected outcomes. New full qualification and rollout
+remain pending; the original failed benchmark and native receipt are unchanged.
+
+At 10,000 agents this adds one process-identity read per isolated stack launch
+and constant-size receipt checks, with no global scan, new provider request or
+financial allocation. Models, prompts, task criteria and deadlines are unchanged.
