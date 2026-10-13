@@ -281,6 +281,40 @@ capacity` and `forEachAggregate duplicate child results`; their generic matches
 did not establish a prior instance of this projection boundary. Fresh canonical
 load and full final-tree verification remain required.
 
+## Final corrected-runtime outcome before the next main synchronization
+
+Runtime `c928ede47` passed the complete local gates: 196 backend blackbox
+domains and 266 unit files, 157 frontend files with 2,735 passing tests and
+three existing intentional skips, 110 agents blackbox domains, 184 fast-cache
+checks and 134 units. Coverage was 89.55% backend lines, 83.29% frontend lines
+and 82% agents. All 46 deploy structural gates passed; five cold seeds peaked
+at 173 MiB under the unchanged 228 MiB bound. Live credential, Amplitude and
+router-failover checks passed. The direct Linux controller lane passed its
+16 scenarios, 21 wall-clock tests and 453 selected pytest cases.
+
+Fresh Group 4 passed all eight smoke tasks, eight UI scenarios, the real E2B
+sandbox check and four sandbox payment lifecycle tasks with verified owned
+stack cleanup. Twenty unchanged latency samples passed: lifecycle p50/max
+milliseconds were direct 886/932, web search 1,866/2,370, plan 635/793 and
+execute 640/793. The shared semantic stack was stopped after every lane ended.
+
+The fresh canonical fifty-agent load, root
+`3970d936-93fc-4830-9458-275f9ee5bf39`, had zero owned admission rejections,
+retry exhaustion, queue-age errors or oversized drops. Its 5,112 owned HTTP
+spans all returned 202; the root peaked at 61 persisted writes per second
+with batches up to fifteen messages. The completed aggregate retained the
+same 455,542-byte stored payload while its projected notification was 2,608
+bytes. The benchmark application's actual incoming INSERT recorded that
+projected payload and all fifty child references. This proves subscriber
+delivery; desktop rendering is covered separately and was not observed in
+that load receipt. Terminal primary and load evidence was published with
+fresh-browser and recording checks.
+
+Main advanced to `9fcea8b67` with PR #1497's browser auth-context repair during
+these gates. The passing results above belong to `c928ede47`; the synchronized
+tree still requires its applicable gates and the final exact-head review and
+production verification. The original Google session acceptance remains open.
+
 ## Human feedback
 
 Preserve the approved router and semantic deadlines. Fix the owning boundary;
