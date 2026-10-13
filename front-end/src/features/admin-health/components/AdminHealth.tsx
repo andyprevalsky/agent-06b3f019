@@ -9,6 +9,7 @@
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
  *         -> Stripe charges + Prisma waitlist/task/user/GMV metrics + Linear/GitHub velocity
+ *         -> customer product completion excludes benchmarks, tests, simulations, and operators
  *         -> real root-loop runs (live + archived telemetry), excluding child agents
  *         -> current model/cache pricing -> three cost-per-run scenarios + sample size
 
@@ -440,7 +441,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       <MetricPanel
         title="Task Completion Rate"
         value={formatPercent(data.summary.taskCompletionRate)}
-        detail="Completed root tasks / all root tasks issued in the selected period."
+        detail="Completed customer product root tasks / all customer product root tasks issued in the selected period. Excludes benchmarks, tests, simulations, and operator accounts."
         icon={<CircleCheckBig className="h-5 w-5" />}
         change={
           <MetricChange
