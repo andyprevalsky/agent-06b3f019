@@ -2,7 +2,8 @@
 
 This is the old-filesystem checkpoint for draft PR #1453. Source preservation
 is complete for the two WHM worktrees and the inspected local helpers/variants.
-Private evidence capture, run12 completion, replacement and archival are pending.
+Private evidence capture, replacement and archival are pending. Run12 finished
+with a task timeout failure and clean benchmark/stack/WMH shutdown.
 Do not interpret this intermediate checkpoint as a completed migration.
 
 ## Goal, authority and boundaries
@@ -24,8 +25,8 @@ world-clock V1–V12 contract and the whole-history messaging fixture.
 Migration does not authorize another paid run or changed acceptance rules.
 Skip Browser Mode P2 entirely. Boxes whose main work already belongs to Codex
 are excluded; this old box's main task is stalled Claude work, and its current
-Codex thread is only the preservation helper. Source remains frozen while
-run12 executes; this checkpoint is written in a separate worktree.
+Codex thread is only the preservation helper. The original task source was frozen through run12 execution; this checkpoint
+is written in a separate worktree.
 
 ## Identities and prior context
 
@@ -89,7 +90,7 @@ measurement, not run12's result.
 
 ## Run12 and owned runtime
 
-The original authorized run remains active at this intermediate checkpoint:
+The original authorized run is terminal; exact original identities were:
 
 - Run directory: `rose-wmh-resume/.context/wmh-resume-20261009/fundraiser/run12-messaging60m`.
 - Run ID: `wmh-raise-5m-rose-labs-brex-1791845194`; Hub UUID
@@ -111,9 +112,26 @@ The original authorized run remains active at this intermediate checkpoint:
 - At23:44:57 UTC: revision98, six in-flight operations, six ACTIVE/five
   COMPLETED agents, 424 messages. This is progress, not acceptance or cleanup.
 
-Allow the same run to finish. Preserve its original final result, histories,
-native prediction/retirement records, exact benchmark/stack cleanup receipts and
-database snapshot before replacement work. No duplicate run is permitted.
+Run12 naturally finished at23:49:23 UTC with a3600-second execution-window
+timeout,0/1 passed and3665.3 seconds measured duration. Its benchmark and stack
+cleanup receipts both report clean; the WMH scope retired and all exact owners
+are absent. The native session joined at revision105 with105 world steps.
+The final simulation had79 research attempts,3 outreach attempts,6 submission
+attempts and1 intake attempt, with0 commitments, signed instruments or settled
+proceeds. This is an incomplete fundraiser outcome, not a repaired goal.
+
+`whm-b07d9037-preservation/run12-summary.json` records metered WMH usage:
+18,443,391 total input,17,673,634 cached input(95.82638%),700,143 output;
+DEMO0/116 hits and107 stores.108 metered calls cannot certify final usage for
+every116 lookup attempt. The separate task-agent cache statistic is79.2%.
+The existing publisher verified the durable FE replay in a fresh browser
+with55 messages at https://www.roselabs.ai/?agent-id=65889659-9f08-4488-917e-9611223be811.
+
+Normal original launcher cleanup removed its benchmark database before the
+migration snapshot. No missing database bytes were fabricated: original final
+transcript/native state and seeded fixture data remain available. The two
+source fixtures and prior owned workspace DB were consistently dumped for
+private preservation. No duplicate paid run is permitted.
 
 ## Private state and setup
 
@@ -146,9 +164,23 @@ cache Git bundle verification passed, exact helper checksums retained. Historica
 replacement offline checks reported189 passes; they remain separate from this
 checkpoint's original run. Broader task acceptance and merge/deploy remain held.
 
-Pending: authenticate private archive readbacks; let run12 reach terminal and
-verify exact cleanup; dump required local DBs; finish full preservation receipt;
+Pending: authenticate private archive readbacks; finish full preservation receipt;
 push/verify checkpoint remotely; start one new Codex replacement, verify correct
 checkout/handoff reading plus meaningful continuation receipt; then record and
 request old-box archival only when every important original file and resource
 is preserved or transferred. The old box remains retained until these steps pass.
+
+The bare upstream mirror at `/home/boxes/mirror-work/world-model-harness.git`
+contains no unpublished refs: its main and cli-help feature tip match native
+upstream reads exactly. A full verified Git bundle is preserved privately,
+with the exact CLI-help commit patch included in the PR for accounting. It is
+an upstream reference, not task-owned changes requiring a separate PR.
+
+Archive validation reproduced R2 InvalidPart on the original32MB four-frame
+mirror capture: only the first part included the22-byte format header. R2
+requires equal non-trailing part lengths. The migration helper now buffers the
+ciphertext stream into fixed8MiB physical parts, independent of encryption
+frames. The same original archive now uploads, authenticates, restores all5
+files, and passes streaming per-member SHA256 checks. Large captures use this
+fixed implementation. Only this helper's owned multipart uploads were aborted;
+original task files and resource controllers were untouched.

@@ -51,6 +51,7 @@ class Writer:
         self.upload = client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
         self.buffer = bytearray()
         self.parts = []
+        self.wire_buffer = bytearray()
         self.plain_hash, self.cipher_hash = hashlib.sha256(), hashlib.sha256()
         self.stored_bytes = 0
         self.frames = 0
@@ -71,11 +72,18 @@ class Writer:
         packet = (MAGIC if self.frames == 0 else b"") + struct.pack(">I", len(body)) + nonce + body
         self.cipher_hash.update(packet)
         self.stored_bytes += len(packet)
-        number = self.frames + 1
+        self.wire_buffer.extend(packet)
+        while len(self.wire_buffer) >= BLOCK:
+            part = bytes(self.wire_buffer[:BLOCK])
+            del self.wire_buffer[:BLOCK]
+            self.upload_part(part)
+        self.frames += 1
+
+    def upload_part(self, packet):
+        number = len(self.parts) + 1
         etag = self.client.upload_part(Bucket=self.bucket, Key=self.key, UploadId=self.upload,
                                        PartNumber=number, Body=packet)["ETag"]
         self.parts.append({"PartNumber": number, "ETag": etag})
-        self.frames += 1
         if number % 32 == 0:
             print(json.dumps({"phase": "upload", "stored_bytes": self.stored_bytes}), flush=True)
 
@@ -83,6 +91,9 @@ class Writer:
         if self.buffer:
             self.emit(bytes(self.buffer))
             self.buffer.clear()
+        if self.wire_buffer:
+            self.upload_part(bytes(self.wire_buffer))
+            self.wire_buffer.clear()
         self.client.complete_multipart_upload(Bucket=self.bucket, Key=self.key, UploadId=self.upload,
                                               MultipartUpload={"Parts": self.parts})
 
@@ -176,8 +187,29 @@ def frames(client, aes, receipt):
 
 
 def verify(client, aes, receipt):
-    for _ in frames(client, aes, receipt):
-        pass
+    observed = {}
+    manifest_bytes = None
+    with io.BufferedReader(FrameReader(frames(client, aes, receipt))) as stream:
+        with tarfile.open(fileobj=stream, mode="r|gz") as archive:
+            for info in archive:
+                if not info.isfile():
+                    raise RuntimeError("Unexpected non-file archive member")
+                source = archive.extractfile(info)
+                if info.name == "MIGRATION_MANIFEST.json":
+                    manifest_bytes = source.read()
+                    continue
+                digest = hashlib.sha256()
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                observed[info.name] = {"size": info.size, "sha256": digest.hexdigest()}
+        while stream.read(1024 * 1024):
+            pass
+    if manifest_bytes is None or hashlib.sha256(manifest_bytes).hexdigest() != receipt["manifest_sha256"]:
+        raise RuntimeError("Remote manifest mismatch")
+    expected = {item["path"]: {"size": item["size"], "sha256": item["sha256"]}
+                for item in json.loads(manifest_bytes)}
+    if observed != expected or len(observed) != receipt["files"]:
+        raise RuntimeError("Remote archive file digest mismatch")
 
 
 class FrameReader(io.RawIOBase):
@@ -243,8 +275,16 @@ def main():
     pull = commands.add_parser("restore")
     pull.add_argument("--receipt", required=True)
     pull.add_argument("--destination", required=True)
+    check = commands.add_parser("verify")
+    check.add_argument("--receipt", required=True)
     args = parser.parse_args()
-    (upload if args.command == "upload" else restore)(args)
+    if args.command == "verify":
+        client, _, aes, _ = connection()
+        receipt = json.loads(Path(args.receipt).read_text())
+        verify(client, aes, receipt)
+        print(json.dumps({"authenticated_original_files": receipt["files"], "key": receipt["key"]}))
+    else:
+        (upload if args.command == "upload" else restore)(args)
 
 
 if __name__ == "__main__":
