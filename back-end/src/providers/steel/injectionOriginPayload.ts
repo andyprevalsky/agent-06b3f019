@@ -24,6 +24,25 @@ const COLUMNS = {
 type OriginTable = keyof typeof COLUMNS;
 const SQL_CHUNK_BYTES = 4 * 1024 * 1024;
 export const MAX_ORIGIN_INIT_SCRIPT_BYTES = 1024 * 1024;
+// Restore time grows with the bytes sent while the browser-state phase has one
+// fixed budget. Prod Render→Kernel spent 10–13.5 s of the 18 s phase sending
+// one 79 MB desktop cache (Drive's JS module store), so every init for that
+// realm raced its deadline. The largest other stored origin is 2.2 MB.
+const DEFAULT_MAX_RESTORED_ORIGIN_BYTES = 8 * 1024 * 1024;
+
+function maxRestoredOriginBytes(): number {
+  const configured = Number(process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0 && configured <= 2_147_483_647
+    ? configured
+    : DEFAULT_MAX_RESTORED_ORIGIN_BYTES;
+}
+
+/** The stored origin payload cannot be restored inside the state budget. */
+class OriginPayloadOverBudget extends Error {
+  constructor(readonly bytes: number) {
+    super('Origin payload exceeds the restore byte budget');
+  }
+}
 
 function scriptWireBytes(script: string): number {
   // JSON escaping happens again in the CDP envelope. Leave room for its IDs,
@@ -58,17 +77,34 @@ async function readOriginTextParts(
         `ALTER TABLE "${stage}" ALTER COLUMN payload SET STORAGE EXTERNAL`
       );
       signal?.throwIfAborted();
-      const inserted = await tx.$executeRawUnsafe(
-        `INSERT INTO "${stage}" SELECT convert_to((${payload})::text, 'UTF8') FROM "${table}"
-       WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp`,
+      const budget = maxRestoredOriginBytes();
+      // Serialize the restore projection once, then admit its exact UTF-8 size
+      // before staging or browser mutations. Stored/detoasted JSONB sizes are
+      // not wire-size bounds: compression and binary overhead go both ways.
+      // Exact sizing still requires SQL serialization, including rejected rows.
+      const [staged] = await tx.$queryRawUnsafe<Array<{ rawBytes: number | null }>>(
+        `WITH serialized AS MATERIALIZED (
+         SELECT (${payload})::text AS text FROM "${table}"
+         WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp
+       ), measured AS MATERIALIZED (
+         SELECT text, octet_length(convert_to(text, 'UTF8'))::int AS raw FROM serialized
+       ), staged AS (
+         INSERT INTO "${stage}" SELECT convert_to(text, 'UTF8') FROM measured
+         WHERE raw <= $6::int
+       )
+       SELECT (SELECT raw FROM measured) AS "rawBytes"`,
         row.id,
         row.userId,
         row.origin,
         row.hash,
-        row.updatedAt
+        row.updatedAt,
+        budget
       );
       signal?.throwIfAborted();
-      if (inserted !== 1) throw new Error('Origin payload disappeared during injection');
+      if (staged === undefined || staged.rawBytes === null)
+        throw new Error('Origin payload disappeared during injection');
+      // Decided before staging and before the first byte reaches the browser.
+      if (staged.rawBytes > budget) throw new OriginPayloadOverBudget(staged.rawBytes);
       const decoder = new TextDecoder('utf-8', { fatal: true });
       let offset = 1;
       let total = Infinity;
@@ -134,7 +170,11 @@ function chunkScript(
   })();`;
 }
 
-/** Keep blob decoding in the matching document and each CDP mutation byte-bounded. */
+/**
+ * Keep blob decoding in the matching document and each CDP mutation byte-bounded.
+ * Resolves false, without browser mutations, when the stored payload exceeds the
+ * restore byte budget.
+ */
 export async function injectOriginPayload(
   context: OriginPayloadContext,
   row: OriginPayloadRef | { origin: string },
@@ -143,7 +183,7 @@ export async function injectOriginPayload(
   legacyValue?: unknown,
   targetOrigin = row.origin,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<boolean> {
   const ownedWriter =
     'writeOriginScript' in context ? undefined : createOriginPayloadWriter(context, signal);
   const writer = 'writeOriginScript' in context ? context : ownedWriter!;
@@ -223,7 +263,12 @@ export async function injectOriginPayload(
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
     if ('id' in row) await readOriginTextParts(table, row, consume, signal);
-    else await consume(JSON.stringify(legacyValue) ?? 'null');
+    else {
+      const text = JSON.stringify(legacyValue) ?? 'null';
+      const bytes = Buffer.byteLength(text);
+      if (bytes > maxRestoredOriginBytes()) throw new OriginPayloadOverBudget(bytes);
+      await consume(text);
+    }
     if (pending) {
       const encodingStarted = performance.now();
       const completed = chunkScript(targetOrigin, token, pending.index, pending.part, index, apply);
@@ -231,7 +276,7 @@ export async function injectOriginPayload(
       encodingMs += performance.now() - encodingStarted;
       if (completedBytes <= MAX_ORIGIN_INIT_SCRIPT_BYTES) {
         await send(completed, completedBytes);
-        return;
+        return true;
       }
       // A longer total marker can cross the exact envelope bound. Preserve the
       // original two-packet completion protocol in that case.
@@ -243,6 +288,16 @@ export async function injectOriginPayload(
       throw new Error('Origin init-script envelope exceeds its byte budget');
     }
     await send(finish, finishBytes);
+    return true;
+  } catch (error) {
+    if (!(error instanceof OriginPayloadOverBudget)) throw error;
+    // Byte counts only, like the timing report: origins are browsing history.
+    log.warn('Skipped origin payload over the restore byte budget', {
+      table,
+      bytes: error.bytes,
+      budgetBytes: maxRestoredOriginBytes(),
+    });
+    return false;
   } finally {
     signal?.removeEventListener('abort', onAbort);
     await ownedWriter?.close();

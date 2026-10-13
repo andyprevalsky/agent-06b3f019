@@ -1,0 +1,78 @@
+{
+  "utc_time": "2026-10-12T23:54:55.238282+00:00",
+  "preserved_deploy_source": "c199c928721f7dce289cdbd5250833629a3a145e",
+  "integrated_head": "d16360bc4e015e2e27166fd06372f2ab1ad2b3f2",
+  "owning_production_files": [
+    {
+      "path": "back-end/src/providers/steel/injectionOriginPayload.ts",
+      "sha256": "f5773e5def892645835d4057cc4e5afff10e2f6291a4fc04ee635165b6f9fff0",
+      "matches_preserved_final_variant_read_only_review": true
+    },
+    {
+      "path": "back-end/src/providers/steel/injectionState.ts",
+      "sha256": "6d229793a7fd8058a92a9ff0c473eb5f7d23e7b356baaa8a9d8536add5b3385b",
+      "matches_preserved_final_variant_read_only_review": true
+    }
+  ],
+  "kernel_proof_scope": "Representative adverse origin shape with synthetic values through real initSession; not exact production credential inputs or task/login outcome. Preserved baseline 3/3 timeout; payload-only 3/3 timeout; final +fix-v2 3/3 successful init.",
+  "cloudbench_inputs": [
+    {
+      "path": "scripts/run-cloudbench-controller-gate",
+      "sha256": "0750f1649219c89e35fd76bc8931148ceb96b2144cf75b7579322624fadda8be",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/run-bench",
+      "sha256": "b39a495447f791a426a5d73263f9e0ac087948b2504b42e7418712f3688251ea",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/run-bench-cloud",
+      "sha256": "e57d3a885868f302d82d562d88f8542371fcdb82c0da020b77bad55e9e81ced3",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/run-bench-fleet",
+      "sha256": "8fca2dba5b529eb8af61a5cdcddd18b3f5805f27e8dbc63cfbcdef5b2111a680",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/run.sh",
+      "sha256": "dc24bbb33bd7913e7f206ae2a148f09f387399cc3e9fbd7bfbaf97c7ebc676cc",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/setup-db.sh",
+      "sha256": "ae24f1d159506ca023fdc708e54d6dd07703e8aeb29debfdb86d6593dcc8b1f5",
+      "unchanged": true
+    },
+    {
+      "path": "agents/requirements.txt",
+      "sha256": "886dbd6d413ea431de27cb29178127523c4d7889fa60cfa27c822e6640aae441",
+      "unchanged": true
+    },
+    {
+      "path": "agents/benchmarks/run_benchmark.py",
+      "sha256": "12a17d6d9fcd3ae7eae4cc7288d684c6e82e13026a794b3561e3f31184c48a8a",
+      "unchanged": true
+    },
+    {
+      "path": "package.json",
+      "sha256": "fd89d0959d0217634caa3ea4757ff1bd5a040d602fd86b727574621663a2a219",
+      "unchanged": true
+    },
+    {
+      "path": "back-end/package-lock.json",
+      "sha256": "3da89c35b843e7d33064b1830779f29317303aa106ce5d772a864b709e2594ce",
+      "unchanged": true
+    },
+    {
+      "path": "front-end/package-lock.json",
+      "sha256": "db34d73b0a0e36b40f23cb141bdee06e0912d60996f69ceedf5c1f4a4019c3ef",
+      "unchanged": true
+    }
+  ],
+  "cloudbench_result": "Original GATE_RESULT=0 retained as historical unchanged-controller-source evidence. No automatic HEAD/environment cache hit claimed.",
+  "integration_delta_owning_checks": "Full agents coverage; full backend coverage including cookie/injection domains; full deploy structural gates including kill-services. These are running on integrated HEAD.",
+  "git_hooks": "Restored normal Husky discovery to .husky/_ with installed CLI after finding inherited macOS hooksPath; no hook disabled."
+}

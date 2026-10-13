@@ -315,8 +315,10 @@ export async function runTests(): Promise<boolean> {
         await finalize(s.otherPrivateRootId);
         await waitEmbedded(s.privateRootId);
         await waitEmbedded(s.otherPrivateRootId);
+        // Isolate requested visibility scopes from semantic recall; paraphrase
+        // retrieval and the similarity floor have dedicated cases below.
         const own = await search({
-          goal: `Book a table for two at Nopa on Friday ${RUN_ID}`,
+          goal: GOAL_PRIVATE,
           user_id: s.userId,
         });
         assert(
@@ -324,7 +326,7 @@ export async function runTests(): Promise<boolean> {
           'own private run must be retrievable'
         );
         const foreign = await search({
-          goal: `Renew my passport downtown ${RUN_ID}`,
+          goal: GOAL_OTHER,
           user_id: s.userId,
         });
         assert(
@@ -332,7 +334,7 @@ export async function runTests(): Promise<boolean> {
           "another user's private run must never surface"
         );
         const shared = await search({
-          goal: `Blue Bottle shakerato pickup Ferry Building ${RUN_ID}`,
+          goal: GOAL_BENCH,
           user_id: s.otherUserId,
         });
         assert(

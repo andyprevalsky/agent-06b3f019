@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type Socket } from 'node:net';
 import { config } from 'dotenv';
+import { registerCookieTransferCases } from './steel-injection.cookies.cases';
 import { prisma } from '../../providers/database';
 import {
   injectUserData,
@@ -76,7 +77,8 @@ async function createCookieBundle(params: {
         browserSource: 'chrome',
         browserProfile: params.browserProfile,
         creationUtc: params.creationUtc,
-        expiresUtc: 999999999999999n,
+        expiresUtc: 0n,
+        hasExpires: false,
         isSecure: true,
         isHttpOnly: true,
       },
@@ -337,6 +339,8 @@ test('Steel cookie summary is realm scoped and expiry aware without exposing val
   assert(summary.cookieCount === 2, 'expected only live same-realm cookies');
   assert(!('value' in summary), 'expected no cookie values in summary');
 });
+
+registerCookieTransferCases(test, { createUser, cleanup, createCookieBundle });
 
 test('browser-state injection is serial and bounded after CDP connects', async () => {
   const userId = await createUser();

@@ -1,0 +1,57 @@
+diff --git a/back-end/src/domains/integrations/uploadService.browser.ts b/back-end/src/domains/integrations/uploadService.browser.ts
+index c80f69244..163eea9f6 100644
+--- a/back-end/src/domains/integrations/uploadService.browser.ts
++++ b/back-end/src/domains/integrations/uploadService.browser.ts
+@@ -389,6 +389,24 @@ async function upsertCookieBatches(
+   });
+ }
+ 
++/**
++ * The first-party web origin a stored localStorage row restores into, or null.
++ * Mac clients before the storage-key framing fix dropped the key's first byte
++ * (`ttps://host`); repair only that exact loss. Partitioned third-party keys
++ * (`<origin>/^0<top-level-site>`) and extension/internal schemes have no
++ * first-party document to restore through.
++ */
++function restorableLocalStorageOrigin(storageKey: string): string | null {
++  const candidate = /^ttps?:\/\//.test(storageKey) ? `h${storageKey}` : storageKey;
++  try {
++    const url = new URL(candidate);
++    const web = url.protocol === 'https:' || url.protocol === 'http:';
++    return web && url.origin === candidate ? candidate : null;
++  } catch {
++    return null;
++  }
++}
++
+ /**
+  * Process localStorage upload.
+  */
+@@ -401,8 +419,11 @@ export async function processLocalStorageUpload(
+   const sanitizedByOrigin: Record<string, { key: string; value: string }[]> = {};
+   let batchEntryCount = 0;
+ 
+-  for (const [origin, entries] of Object.entries(localStorageData.byOrigin)) {
+-    const sanitizedOrigin = sanitizeStringFull(origin);
++  const hashes: Record<string, string> = {};
++  for (const [storageKey, entries] of Object.entries(localStorageData.byOrigin)) {
++    const sanitizedOrigin = restorableLocalStorageOrigin(sanitizeStringFull(storageKey));
++    if (sanitizedOrigin === null) continue;
++    hashes[sanitizedOrigin] = localStorageData.hashes[storageKey] ?? '';
+     sanitizedByOrigin[sanitizedOrigin] = entries
+       .map((entry: { key: string; value: string }) => ({
+         key: sanitizeStringFull(entry.key),
+@@ -433,12 +454,7 @@ export async function processLocalStorageUpload(
+ 
+     const params: (string | object)[] = [];
+     for (const origin of origins) {
+-      params.push(
+-        userId,
+-        origin,
+-        JSON.stringify(sanitizedByOrigin[origin]),
+-        localStorageData.hashes[origin] ?? ''
+-      );
++      params.push(userId, origin, JSON.stringify(sanitizedByOrigin[origin]), hashes[origin]);
+     }
+ 
+     await repo.bulkUpsertLocalStorage(values, params);
