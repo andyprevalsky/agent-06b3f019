@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/lib/api';
@@ -21,6 +21,7 @@ import {
   CONNECTED_COMPLETION_BACKFILL_POLL_MS,
   CONNECTED_COMPLETION_BACKFILL_WINDOW_MS,
 } from '@/features/agent-context/config';
+import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
 import * as RealtimeMod from '@/lib/realtime';
 
 describe('connected completion backfill', () => {
@@ -34,6 +35,114 @@ describe('connected completion backfill', () => {
       ),
     );
   });
+
+  it.each([
+    { startDelayMs: 1_000, failFirstRead: false },
+    { startDelayMs: CONNECTED_COMPLETION_BACKFILL_WINDOW_MS + 1_000, failFirstRead: false },
+    { startDelayMs: CONNECTED_COMPLETION_BACKFILL_WINDOW_MS + 1_000, failFirstRead: true },
+  ])(
+    'recovers a missed browser terminal after completed chat: $startDelayMs ms, transient failure=$failFirstRead',
+    async ({ startDelayMs, failFirstRead }) => {
+      const user = {
+        message_id: 'user',
+        timestamp: '2026-10-13T00:00:00Z',
+        text: 'hello',
+        role: 'USER',
+      };
+      const answer = {
+        message_id: 'answer',
+        timestamp: '2026-10-13T00:00:01Z',
+        text: 'done',
+        role: 'ASSISTANT',
+        metadata: { isUserAttentionMessage: true },
+      };
+      const start: Message = {
+        message_id: 'browser-start',
+        timestamp: '2026-10-13T00:00:02Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          toolName: 'spawn_browser_agent',
+          toolCallId: 'browser-call',
+          toolStatus: 'IN_PROGRESS',
+          action_type: 'browser',
+          task_id: 'browser-task',
+          browser_url: 'https://example.com/live',
+        },
+      };
+      const terminal: Message = {
+        ...start,
+        message_id: 'browser-terminal',
+        timestamp: '2026-10-13T00:00:03Z',
+        metadata: { ...start.metadata, toolStatus: 'FINISHED', action_type: 'task_complete' },
+      };
+      let phase: 'chat' | 'browser' | 'terminal' = 'chat';
+      let calls = 0;
+      let browserReads = 0;
+      server.use(
+        http.get(`${API_BASE}/agents/agent-1`, () => {
+          calls += 1;
+          if (phase !== 'chat') {
+            browserReads += 1;
+            if (failFirstRead && browserReads === 1) return new HttpResponse(null, { status: 500 });
+          }
+          return HttpResponse.json(
+            agentDetailJson([
+              user,
+              answer,
+              // The init broadcast can precede API snapshot visibility.
+              ...(phase === 'chat' || browserReads === 1 ? [] : [start]),
+              ...(phase === 'terminal' ? [terminal] : []),
+            ]),
+          );
+        }),
+      );
+      let handlers: Parameters<typeof RealtimeMod.subscribeToAgent>[1] = {};
+      vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, incoming) => {
+        handlers = incoming;
+        return fakeChannel();
+      });
+      mockSession();
+      const deps = makeDeps();
+      let messages: Message[] = [];
+      vi.mocked(deps.setMessages).mockImplementation((update) => {
+        messages = typeof update === 'function' ? update(messages) : update;
+      });
+      vi.useFakeTimers();
+      try {
+        const hook = renderHook(() => useRealtimeSubscription(deps));
+        await vi.advanceTimersByTimeAsync(startDelayMs);
+        const completedChatCalls = calls;
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(calls).toBe(completedChatCalls);
+        phase = 'browser';
+        act(() =>
+          handlers.onInsert?.({
+            agentId: 'agent-1',
+            id: start.message_id,
+            timestamp: start.timestamp,
+            text: start.text,
+            role: start.role,
+            metadata: start.metadata,
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(computeActiveBrowserPanels(messages)).toHaveLength(1);
+        // Persist the terminal without delivering its broadcast.
+        phase = 'terminal';
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(computeActiveBrowserPanels(messages)).toHaveLength(0);
+        expect(messages.some((message) => message.message_id === terminal.message_id)).toBe(true);
+        const recoveredCalls = calls;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(calls).toBe(recoveredCalls);
+        expect(RealtimeMod.subscribeToAgent).toHaveBeenCalledTimes(1);
+        hook.unmount();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   // Regression (production semantic run 29807459093): the first authoritative
   // snapshot succeeded after the router/tool messages but before the canonical
