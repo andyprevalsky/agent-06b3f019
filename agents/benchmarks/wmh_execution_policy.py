@@ -19,6 +19,30 @@ BASE_PROTOCOL_VERSION = "text-world-model-v3"
 BASE_PROTOCOL_SHA256 = "97f84f61fefa7665c18d9fd46253a4f710f5b64f186c19b18a957bd7b8a88122"
 BASE_SYSTEM_SHA256 = "acae5f4de354cbd8e0e4753bbbf913a1100b8eeeb7af9ba84ed47f513d1b75ce"
 DEFAULT_EXECUTION_POLICY = "upstream"
+WMH_COMPLETION_RETRY_POLICY = {
+    "version": "rose-wmh-completion-retry-v1",
+    "max_attempts": 3,
+    "total_seconds": 590.0,
+    "attempt_seconds": 360.0,
+    "ttft_seconds": 90.0,
+    "idle_seconds": 120.0,
+    "initial_delay_seconds": 0.5,
+    "max_delay_seconds": 8.0,
+    "minimum_retry_seconds": 30.0,
+}
+
+
+def retry_runtime_config(config):
+    """Canonical inference-only metadata; policy text/artifact identity unchanged."""
+    if not isinstance(config, dict) or config.get("validation_recovery") is not True:
+        return config
+    config = json.loads(json.dumps(config))
+    config.setdefault("completion_retry_policy", dict(WMH_COMPLETION_RETRY_POLICY))
+    if config["completion_retry_policy"] != WMH_COMPLETION_RETRY_POLICY:
+        raise ValueError("WHM completion retry policy differs from its immutable version")
+    return config
+
+
 PUBLIC_AFFORDANCES_POLICY = "rose-virtual-public-affordances-v1"
 PUBLIC_AFFORDANCES_VERSION = "1"
 PUBLIC_AFFORDANCES_SHA256 = "49d9d1f0430a5d8ee6aaaff9dd8783075a857b9c171e76ebe620a22e9ec7ba79"
@@ -54,7 +78,9 @@ OUTCOME_DISTRIBUTION_V2_VERSION = "2"
 OUTCOME_DISTRIBUTION_V2_SHA256 = "23feae1291f883f0a2280d6f7295e7391dbc7bd82dc1a9c1ca7caea52354fbb0"
 OUTCOME_DISTRIBUTION_V2_EFFECTIVE_SYSTEM_SHA256 = "d76abcd5f096d65ea92e5f1e1aa538b5bae3643b4ea8618ba7e3a54eed24b470"
 OUTCOME_DISTRIBUTION_V2_TEXT = (
-    DISTRIBUTION_TEXT.replace('"description":"possible result"', '"description":"probability justification, not an event description"')
+    DISTRIBUTION_TEXT.replace(
+        '"description":"possible result"', '"description":"probability justification, not an event description"'
+    )
     + "\n\nJustify each probability briefly from evidence and uncertainty, relative to the other outcomes."
     + "\n\nIn this simulation, all approvals needed by the candidate tool are granted during its execution."
     + "\nExplain probabilities against goal-implied alternatives; justify omitting plausible ones."
@@ -233,16 +259,24 @@ def execution_identity(
         **execution_policy(policy_name).metadata(),
     }
     if runtime_config is not None:
+        runtime_config = retry_runtime_config(runtime_config)
         required = {"inference_pool", "inference_pool_sha256", "azure_first", "exclude_failed_tool_examples"}
-        if (not isinstance(runtime_config, dict) or set(runtime_config) not in (required, required | {"json_mode"})
-            or not isinstance(runtime_config["inference_pool"], str) or not runtime_config["inference_pool"]
+        if (
+            not isinstance(runtime_config, dict)
+            or not required <= set(runtime_config)
+            or not set(runtime_config) <= required | {"json_mode", "validation_recovery", "completion_retry_policy"}
+            or not isinstance(runtime_config["inference_pool"], str)
+            or not runtime_config["inference_pool"]
             or not isinstance(runtime_config["inference_pool_sha256"], str)
             or len(runtime_config["inference_pool_sha256"]) != 64
             or any(c not in "0123456789abcdef" for c in runtime_config["inference_pool_sha256"])
-            or any(type(runtime_config[k]) is not bool for k in ("azure_first", "exclude_failed_tool_examples"))):
+            or any(type(runtime_config[k]) is not bool for k in ("azure_first", "exclude_failed_tool_examples"))
+        ):
             raise ValueError("Invalid WMH runtime inference configuration")
         if "json_mode" in runtime_config and type(runtime_config["json_mode"]) is not bool:
             raise ValueError("Invalid WMH JSON format configuration")
+        if "validation_recovery" in runtime_config and type(runtime_config["validation_recovery"]) is not bool:
+            raise ValueError("Invalid WMH validation recovery configuration")
         identity["runtime_config"] = dict(runtime_config)
     material = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {**identity, "execution_sha256": text_sha256(material)}
@@ -252,7 +286,9 @@ def validate_execution_identity(identity: dict, policy_name: str, *, system: str
     if not isinstance(identity, dict):
         raise ValueError("Missing WMH execution identity")
     expected = execution_identity(
-        policy_name, identity.get("base_world_model_id"), identity.get("base_world_model_manifest_sha256"),
+        policy_name,
+        identity.get("base_world_model_id"),
+        identity.get("base_world_model_manifest_sha256"),
         runtime_config=identity.get("runtime_config"),
     )
     if identity != expected:
@@ -262,7 +298,9 @@ def validate_execution_identity(identity: dict, policy_name: str, *, system: str
     return expected
 
 
-def bind_execution_suite(source: str | Path, output: str | Path, policy_name: str, *, runtime_config: dict | None = None) -> dict:
+def bind_execution_suite(
+    source: str | Path, output: str | Path, policy_name: str, *, runtime_config: dict | None = None
+) -> dict:
     source, output = Path(source), Path(output)
     if source.resolve() == output.resolve():
         raise ValueError("Execution binding must preserve the original corpus suite")
@@ -277,7 +315,9 @@ def bind_execution_suite(source: str | Path, output: str | Path, policy_name: st
     ):
         raise ValueError("Execution binding requires a complete native conformance suite")
     suite["native_execution_identity"] = execution_identity(
-        policy_name, suite.get("native_world_model_id"), suite.get("native_world_model_manifest_sha256"),
+        policy_name,
+        suite.get("native_world_model_id"),
+        suite.get("native_world_model_manifest_sha256"),
         runtime_config=runtime_config,
     )
     suite["native_execution_binding"] = {"source_suite_sha256": hashlib.sha256(raw).hexdigest()}

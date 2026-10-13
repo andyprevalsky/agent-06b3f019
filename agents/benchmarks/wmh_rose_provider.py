@@ -32,18 +32,25 @@ import json
 import os
 import re
 import threading
+from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import structlog
 
+from benchmarks.wmh_completion_retry import (
+    CompletionRetryBudget,
+    NonRecoverableCompletion,
+    scheduled_attempt,
+)
 from benchmarks.wmh_outcomes import (
     DISTRIBUTION_PROTOCOL,
     DISTRIBUTION_PROTOCOLS,
     TIMED_DISTRIBUTION_PROTOCOL,
     parse_distribution,
 )
+from benchmarks.wmh_provider_capture import REJECTION_RECORDER
 from benchmarks.wmh_wire_stream import STREAM_GUIDE, StreamBook, completed_batch_ends, fold_stream
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
@@ -51,7 +58,9 @@ from providers.rose import (
     GptAuthContext,
     RoseClient,
 )
+from providers.rose.errors import RoseError
 from providers.rose.pricing import get_model_pricing
+from providers.rose.truncation import USAGE_COUNTERS, recover_truncated
 from providers.rose.types import StreamChunk
 from utils.world_model_observation import effective_world_model_content
 
@@ -186,12 +195,17 @@ def _fold_system_evidence(messages: list) -> list:
     except ValueError:
         task_part = evidence = None
     if (
-        isinstance(task_part, dict) and list(task_part) == ["task"] and isinstance(task_part["task"], dict)
-        and isinstance(evidence, dict) and isinstance(evidence.get("task", {}), dict)
+        isinstance(task_part, dict)
+        and list(task_part) == ["task"]
+        and isinstance(task_part["task"], dict)
+        and isinstance(evidence, dict)
+        and isinstance(evidence.get("task", {}), dict)
         and not set(task_part["task"]) & set(evidence.get("task", {}))
     ):
-        evidence = {"task": {**task_part["task"], **evidence.get("task", {})},
-                    **{key: value for key, value in evidence.items() if key != "task"}}
+        evidence = {
+            "task": {**task_part["task"], **evidence.get("task", {})},
+            **{key: value for key, value in evidence.items() if key != "task"},
+        }
         text = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
     else:
         # Not this layout's parts: keep every byte for the readers to reject.
@@ -203,9 +217,13 @@ def _prompt_text(content: object) -> str:
     """Read pure text provider blocks without dropping any native evidence."""
     if isinstance(content, str):
         return content
-    if isinstance(content, list) and content and all(
-        isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
-        for block in content
+    if (
+        isinstance(content, list)
+        and content
+        and all(
+            isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            for block in content
+        )
     ):
         return "".join(block["text"] for block in content)
     raise TypeError("Native WMH evidence must contain only text")
@@ -224,10 +242,7 @@ def _wmh_cache_key_material(request: object) -> object:
         return request
     messages = []
     for message in _fold_system_evidence(request["messages"]):
-        if (
-            not isinstance(message, dict)
-            or message.get("role") != "user"
-        ):
+        if not isinstance(message, dict) or message.get("role") != "user":
             messages.append(message)
             continue
         try:
@@ -277,7 +292,8 @@ class _WMHFastCacheContext(FastCacheContext):
         if call_site in _WMH_CALL_SITES.values():
             messages = _wmh_cache_key_material(messages)
         if (
-            call_site in {"wmh_world_model_v3", "wmh_world_model_distribution_v1", "wmh_world_model_timed_distribution_v1"}
+            call_site
+            in {"wmh_world_model_v3", "wmh_world_model_distribution_v1", "wmh_world_model_timed_distribution_v1"}
             and isinstance(messages, dict)
             and isinstance(messages.get("messages"), list)
         ):
@@ -298,13 +314,36 @@ class _WMHInvalidPrediction(ValueError):
     """An unusable completion, retaining metering without retaining credentials."""
 
     def __init__(
-        self, reason: str, usage: dict, actual_model: str, content: str | None = None,
+        self,
+        reason: str,
+        usage: dict,
+        actual_model: str,
+        content: str | None = None,
         request: dict | None = None,
     ) -> None:
         super().__init__(f"WMH prediction rejected: {reason}")
         self.usage = {
-            key: usage[key] for key in ("prompt_tokens", "completion_tokens", "finish_reason") if key in usage
+            key: usage[key] for key in USAGE_COUNTERS if key in usage and type(usage[key]) is int and usage[key] >= 0
         }
+        if type(usage.get("usage_complete")) is bool:
+            self.usage["usage_complete"] = usage["usage_complete"]
+        if usage.get("finish_reason") in ("stop", "length", "tool_calls"):
+            self.usage["finish_reason"] = usage["finish_reason"]
+        abandoned = usage.get("abandoned_attempts")
+        if isinstance(abandoned, list):
+            self.usage["abandoned_attempts"] = [
+                {
+                    "model": row["model"],
+                    **{
+                        key: row[key]
+                        for key in USAGE_COUNTERS
+                        if key in row and type(row[key]) is int and row[key] >= 0
+                    },
+                    **({"usage_complete": row["usage_complete"]} if type(row.get("usage_complete")) is bool else {}),
+                }
+                for row in abandoned
+                if isinstance(row, dict) and isinstance(row.get("model"), str)
+            ]
         self.actual_model = actual_model
         self.rejected_response = {"content": content, "actual_model": actual_model, "usage": self.usage}
         if request is not None:
@@ -312,13 +351,9 @@ class _WMHInvalidPrediction(ValueError):
 
 
 def _wmh_prediction_request(kwargs: dict) -> dict:
-    """Private replay input; auth objects and credentials never enter the capture."""
-    fields = (
-        "pool", "messages", "max_tokens", "call_site", "dump_context", "cache_namespace",
-        "result_required", "prefer_azure", "retry_partial_errors", "json_mode", "model",
-        "tools", "tool_choice", "temperature", "reasoning_effort", "reasoning_max_tokens", "skip_models",
-    )
-    return deepcopy({key: kwargs[key] for key in fields if key in kwargs})
+    from benchmarks.wmh_provider_capture import prediction_request
+
+    return prediction_request(kwargs)
 
 
 def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
@@ -451,10 +486,115 @@ def _require_wmh_prediction(
         raise _WMHInvalidPrediction(reason, usage, actual_model, content, request)
 
 
+class RetryablePrediction(_WMHInvalidPrediction, RoseError):
+    """WHM validation admitted to the existing Rose whole-result retry policy."""
+
+
 class _WMHCacheSafeRoseClient(RoseClient):
     """Keep leased credentials out of WMH's persisted DEMO response stream."""
 
     async def _complete_impl(self, **kwargs):
+        if REJECTION_RECORDER.get() is None:
+            async for chunk in self._complete_without_validation_recovery(**kwargs):
+                yield chunk
+            return
+        call_site = kwargs.get("call_site")
+        if call_site not in _WMH_CALL_SITES.values():
+            async for chunk in super()._complete_impl(**kwargs):
+                yield chunk
+            return
+        protocol = next(key for key, value in _WMH_CALL_SITES.items() if value == call_site)
+        rejected = []
+        budget = CompletionRetryBudget(total_seconds=min(590.0, float(kwargs.get("deadline_s", 590.0))))
+
+        async def validated_attempt(**attempt_kwargs):
+            parts, usage, model = [], {}, ""
+            async with aclosing(
+                scheduled_attempt(
+                    lambda **args: RoseClient._complete_once(self, **args),
+                    attempt_kwargs,
+                    budget,
+                    REJECTION_RECORDER.get(),
+                )
+            ) as stream:
+                async for chunk in stream:
+                    if chunk.kind == "restart":
+                        parts, usage, model = [], {}, ""
+                    elif chunk.kind == "content":
+                        parts.append(chunk.data.get("text", ""))
+                    elif chunk.kind == "metadata":
+                        model = chunk.data.get("actual_model", "")
+                    elif chunk.kind == "usage":
+                        usage = dict(chunk.data)
+                    elif chunk.kind == "done":
+                        try:
+                            _require_wmh_prediction(
+                                "".join(parts),
+                                usage,
+                                model,
+                                protocol=protocol,
+                                expected_call_ids=_prediction_call_ids(attempt_kwargs.get("messages", []), protocol),
+                                base_state=_native_environment_state(attempt_kwargs.get("messages", []))
+                                if protocol in DISTRIBUTION_PROTOCOLS
+                                else None,
+                                request=budget.latest_request,
+                            )
+                        except _WMHInvalidPrediction as error:
+                            budget.last_error = error
+                            capture = deepcopy(error.rejected_response)
+                            metering = {key: usage[key] for key in USAGE_COUNTERS if key in usage}
+                            capture["metering"] = metering
+                            capture["attempt_ordinal"] = budget.attempts
+                            # Must durably finish through the native owner's existing
+                            # redacted private writer before Rose can start a retry.
+                            # A failed capture propagates; it never becomes a retry.
+                            await REJECTION_RECORDER.get()(capture)
+                            rejected.append(capture)
+                            retryable = RetryablePrediction(
+                                str(error).removeprefix("WMH prediction rejected: "),
+                                usage,
+                                model,
+                                "".join(parts),
+                                attempt_kwargs,
+                            )
+                            raise retryable from error
+                    if chunk.kind == "usage" and isinstance(chunk.data.get("compute_token_used"), dict):
+                        token = chunk.data["compute_token_used"]
+                        chunk = StreamChunk(
+                            kind="usage",
+                            data={
+                                **chunk.data,
+                                "compute_token_used": {key: token[key] for key in ("type", "source") if key in token},
+                            },
+                        )
+                    yield chunk
+
+        recovery = kwargs.pop("recover_truncation", False)
+        try:
+            if recovery:
+                async with aclosing(recover_truncated(validated_attempt, kwargs)) as stream:
+                    async for chunk in stream:
+                        if chunk.kind == "usage":
+                            chunk = StreamChunk(kind="usage", data={**chunk.data, **budget.usage()})
+                        yield chunk
+            else:
+                kwargs.pop("result_required", None)
+                kwargs.pop("retry_partial_errors", None)
+                async with aclosing(validated_attempt(**kwargs)) as stream:
+                    async for chunk in stream:
+                        yield chunk
+        except NonRecoverableCompletion as error:
+            error.original.usage = budget.usage()
+            error.original.wmh_retry_usage = error.original.usage
+            error.original.actual_model = budget.observed_attempts[-1]["model"] if budget.observed_attempts else ""
+            raise error.original from error
+        except Exception as error:
+            error.usage = budget.usage()
+            error.wmh_retry_usage = error.usage
+            error.actual_model = budget.observed_attempts[-1]["model"] if budget.observed_attempts else ""
+            raise
+
+    async def _complete_without_validation_recovery(self, **kwargs):
         call_site = kwargs.get("call_site")
         is_wmh = call_site in _WMH_CALL_SITES.values()
         protocol = next((name for name, site in _WMH_CALL_SITES.items() if site == call_site), "legacy")
@@ -886,8 +1026,9 @@ class RoseWMHProvider:
                 # The whole reply is one JSON transition: a cut-off gets Rose's
                 # shared recovery (larger output limit, then the next model).
             )
-        except _WMHInvalidPrediction as exc:
-            self._record_usage(exc.usage, exc.actual_model)
+        except Exception as exc:
+            if isinstance(exc, _WMHInvalidPrediction) or hasattr(exc, "wmh_retry_usage"):
+                self._record_usage(exc.usage, exc.actual_model)
             raise
         finally:
             if cache_token is not None:
@@ -967,7 +1108,14 @@ class RoseWMHProvider:
         # Rose returns no cost field, so derive it from tokens × the actual model's
         # pricing (claudeAuth/gptAuth direct = $0; waterfall = real pool price). This is
         # the only place WMH grounding cost is measured — surfaced via /rose_usage.
-        cost_usd = _cost_usd_for_call(actual_model, input_tokens, output_tokens)
+        abandoned = usage.get("abandoned_attempts") or []
+        abandoned_input = sum(int(row.get("prompt_tokens", 0)) for row in abandoned)
+        abandoned_output = sum(int(row.get("completion_tokens", 0)) for row in abandoned)
+        cost_usd = sum(
+            _cost_usd_for_call(row["model"], int(row.get("prompt_tokens", 0)), int(row.get("completion_tokens", 0)))
+            for row in abandoned
+        )
+        cost_usd += _cost_usd_for_call(actual_model, input_tokens - abandoned_input, output_tokens - abandoned_output)
         self._usage.record(cost_usd=cost_usd, input_tokens=input_tokens, output_tokens=output_tokens)
         logger.info(
             "wmh.rose.complete",
@@ -1032,11 +1180,7 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                 native = json.loads(content)
             except ValueError:
                 native = None
-            if (
-                isinstance(native, dict)
-                and "candidate_response" in native
-                and isinstance(native.get("task"), dict)
-            ):
+            if isinstance(native, dict) and "candidate_response" in native and isinstance(native.get("task"), dict):
                 # The upstream sorted JSON puts the changing action first.
                 # Keep all values, but place shared task context before it so
                 # provider prompt caching can reuse more than the system alone.
@@ -1065,10 +1209,13 @@ def _to_rose_messages(system: str, messages: List["Message"]) -> List[dict]:
                         content = fragments[-1]
                 elif next(iter(native)) != "task":
                     ordered = {key: native[key] for key in order if key in native}
-                    ordered.update({
-                        key: value for key, value in native.items()
-                        if key not in ordered and key != "candidate_response"
-                    })
+                    ordered.update(
+                        {
+                            key: value
+                            for key, value in native.items()
+                            if key not in ordered and key != "candidate_response"
+                        }
+                    )
                     ordered["candidate_response"] = native["candidate_response"]
                     content = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"))
         rose.append({"role": m.role, "content": content})
@@ -1087,6 +1234,7 @@ def _native_prompt_fragments(native: dict) -> List[str]:
     (the candidate's tools, retrieval, world state and candidate). An agent's
     next request repeats each completed batch exactly and appends new ones.
     """
+
     def encode(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -1115,8 +1263,14 @@ def _native_prompt_fragments(native: dict) -> List[str]:
         text += "]"
     if remainder:
         field("task", remainder)
-    for key in ("visible_conversation", "grounding_schema_version", "grounding_contexts", "grounded_examples",
-                "environment_state", *native):
+    for key in (
+        "visible_conversation",
+        "grounding_schema_version",
+        "grounding_contexts",
+        "grounded_examples",
+        "environment_state",
+        *native,
+    ):
         if key in native and key not in emitted:
             field(key, native[key])
     if "candidate_response" in native:

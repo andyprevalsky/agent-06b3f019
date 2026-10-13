@@ -76,13 +76,17 @@ def build_native(source_root, root, name, pool="rose-1-ultra", *, bind_only=Fals
     )
 
 
-def build_provider_bridge(provider, token, *, execution_policy=None, runtime_config=None):
+def build_provider_bridge(
+    provider, token, *, execution_policy=None, runtime_config=None, capture_root=None, capture_python=None
+):
     from fastapi import FastAPI, Header, HTTPException
     from wmh.providers.base import Message
 
-    from benchmarks.wmh_execution_policy import validate_execution_identity
+    from benchmarks.wmh_execution_policy import retry_runtime_config, validate_execution_identity
+    from benchmarks.wmh_provider_capture import REJECTION_RECORDER, PrivateRejectionRecorder
     from benchmarks.wmh_rose_provider import _WMHInvalidPrediction
 
+    runtime_config = retry_runtime_config(runtime_config)
     app = FastAPI()
 
     def authorize(value):
@@ -114,7 +118,11 @@ def build_provider_bridge(provider, token, *, execution_policy=None, runtime_con
             for value in (session_id, prediction_id)
         ):
             raise HTTPException(422, "Native completion requires exact session/prediction identity")
+        capture_token = None
         try:
+            if capture_root is not None:
+                recorder = PrivateRejectionRecorder(capture_root, capture_python, payload)
+                capture_token = REJECTION_RECORDER.set(recorder)
             if execution_policy is not None:
                 validate_execution_identity(
                     payload.get("execution_identity"), execution_policy, system=messages[0]["content"]
@@ -131,10 +139,14 @@ def build_provider_bridge(provider, token, *, execution_policy=None, runtime_con
         except _WMHInvalidPrediction as exc:
             # Loopback-only evidence for the native private, redacted record.
             # Do not include the rejected reply in ordinary logs or tool errors.
-            raise HTTPException(422, {"kind": "invalid_prediction", "reason": str(exc),
-                                      "rejected_response": exc.rejected_response}) from exc
+            raise HTTPException(
+                422, {"kind": "invalid_prediction", "reason": str(exc), "rejected_response": exc.rejected_response}
+            ) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        finally:
+            if capture_token is not None:
+                REJECTION_RECORDER.reset(capture_token)
         return {
             "content": result.text,
             "actual_model": getattr(result, "actual_model", None),
@@ -158,7 +170,7 @@ def build_provider_bridge(provider, token, *, execution_policy=None, runtime_con
 def serve_native(name, root, pool, port):
     import uvicorn
 
-    from benchmarks.wmh_execution_policy import DEFAULT_EXECUTION_POLICY, execution_policy
+    from benchmarks.wmh_execution_policy import DEFAULT_EXECUTION_POLICY, execution_policy, retry_runtime_config
     from benchmarks.wmh_rose_provider import RoseWMHProvider
 
     policy = execution_policy(os.environ.get("WMH_EXECUTION_POLICY", DEFAULT_EXECUTION_POLICY))
@@ -168,23 +180,34 @@ def serve_native(name, root, pool, port):
     azure_first = os.environ.get("WMH_AZURE_FIRST", "0") == "1"
     exclude_failed = os.environ.get("WMH_EXCLUDE_FAILED_TOOL_EXAMPLES", "0") == "1"
     json_mode = os.environ.get("WMH_JSON_MODE", "0") == "1"
+    validation_recovery = os.environ.get("WMH_VALIDATION_RECOVERY", "0") == "1"
     runtime_config = None
-    if inference_pool != pool or azure_first or exclude_failed or json_mode:
+    if inference_pool != pool or azure_first or exclude_failed or json_mode or validation_recovery:
         runtime_config = {
             "inference_pool": inference_pool,
             "inference_pool_sha256": pool_sha256(inference_pool),
             "azure_first": azure_first,
             "exclude_failed_tool_examples": exclude_failed,
             **({"json_mode": True} if json_mode else {}),
+            **({"validation_recovery": True} if validation_recovery else {}),
         }
-    provider = RoseWMHProvider(pool=inference_pool, protocol=policy.response_protocol, prefer_azure=azure_first,
-                               json_mode=json_mode)
+    provider = RoseWMHProvider(
+        pool=inference_pool, protocol=policy.response_protocol, prefer_azure=azure_first, json_mode=json_mode
+    )
+    runtime_config = retry_runtime_config(runtime_config)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)
     bridge_port = listener.getsockname()[1]
     config = uvicorn.Config(
-        build_provider_bridge(provider, token, execution_policy=policy.name, runtime_config=runtime_config),
+        build_provider_bridge(
+            provider,
+            token,
+            execution_policy=policy.name,
+            runtime_config=runtime_config,
+            capture_root=root if validation_recovery else None,
+            capture_python=python,
+        ),
         host="127.0.0.1",
         log_level="warning",
         timeout_graceful_shutdown=10,

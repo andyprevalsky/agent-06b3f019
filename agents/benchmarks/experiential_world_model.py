@@ -440,9 +440,14 @@ class ParallelWorldModel:
             if (self.execution_identity or {}).get("runtime_config", {}).get("exclude_failed_tool_examples"):
                 from benchmarks.wmh_grounding_filter import failed_tool_result
 
-                demos = tuple(match for match in demos
-                              if not (match.transition.observation.kind == "tool_result"
-                                      and failed_tool_result(match.transition.observation.model_dump(mode="json"))))
+                demos = tuple(
+                    match
+                    for match in demos
+                    if not (
+                        match.transition.observation.kind == "tool_result"
+                        and failed_tool_result(match.transition.observation.model_dump(mode="json"))
+                    )
+                )
             request = build_world_model_request(
                 task,
                 visible_messages=messages,
@@ -478,6 +483,25 @@ class ParallelWorldModel:
                     prediction_id = uuid.uuid4().hex
                     response = None
                     failure = None
+                    capture_token = None
+                    if (self.execution_identity or {}).get("runtime_config", {}).get("validation_recovery"):
+                        from benchmarks.wmh_provider_capture import NATIVE_CAPTURE_TEMPLATE
+
+                        capture_token = NATIVE_CAPTURE_TEMPLATE.set(
+                            {
+                                "schema": "rose.wmh_native_prediction.v1",
+                                "session_id": session.id,
+                                "call_id": call.call_id,
+                                "started_at_ms": started,
+                                "snapshot_revision": revision,
+                                "request_sha256": request_sha256,
+                                "state_retries": attempt,
+                                "protocol_repair": repair,
+                                "prediction_id": prediction_id,
+                                "request": request_payload,
+                                "execution_identity": deepcopy(self.execution_identity),
+                            }
+                        )
                     try:
                         if self.complete_scoped:
                             response = await self.complete_scoped(session.id, prediction_id, request)
@@ -487,6 +511,8 @@ class ParallelWorldModel:
                         failure = exc
                         raise
                     finally:
+                        if capture_token is not None:
+                            NATIVE_CAPTURE_TEMPLATE.reset(capture_token)
                         interval = {
                             "started_at_ms": started,
                             "finished_at_ms": time.time_ns() // 1_000_000,

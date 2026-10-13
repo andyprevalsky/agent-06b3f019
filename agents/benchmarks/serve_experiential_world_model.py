@@ -6,7 +6,6 @@ import argparse
 import gc
 import json
 import os
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -24,7 +23,6 @@ from benchmarks.build_experiential_world_model import (
     atomic_json,
     model_capabilities,
     model_snapshot,
-    redact_archive,
 )
 from benchmarks.experiential_bridge import PROVIDER_CLIENT_KEEPALIVE_SECONDS
 from benchmarks.experiential_world_model import ParallelWorldModel, RetiredWorldModelScope, RoseNativeRetriever
@@ -251,6 +249,62 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
     return app
 
 
+async def native_provider_complete(
+    client, root, effective_identity, capture_enabled, session_id, prediction_id, request
+):
+    from exp.common.core.artifacts import sha256_json
+
+    from benchmarks.wmh_provider_capture import close_owner, open_owner
+
+    request_sha256 = sha256_json(request.model_dump(mode="json"))
+    if capture_enabled:
+        open_owner(
+            root,
+            session_id,
+            prediction_id,
+            request_sha256,
+            effective_identity,
+            wire={
+                "messages": [m.model_dump(mode="json", exclude_none=True) for m in request.messages],
+                "maximum_output_tokens": request.maximum_output_tokens,
+            },
+        )
+    try:
+        return await _native_provider_post(
+            client, effective_identity, capture_enabled, session_id, prediction_id, request, request_sha256
+        )
+    finally:
+        if capture_enabled:
+            close_owner(root, session_id, prediction_id)
+
+
+async def _native_provider_post(
+    client, effective_identity, capture_enabled, session_id, prediction_id, request, request_sha256
+):
+    response = await client.post(
+        "/complete",
+        json={
+            "messages": [m.model_dump(mode="json", exclude_none=True) for m in request.messages],
+            "maximum_output_tokens": request.maximum_output_tokens,
+            "session_id": session_id,
+            "prediction_id": prediction_id,
+            "execution_identity": effective_identity,
+            **({"request_sha256": request_sha256} if capture_enabled else {}),
+        },
+    )
+    if response.status_code == 422:
+        detail = response.json().get("detail")
+        if isinstance(detail, dict) and detail.get("kind") == "invalid_prediction":
+            error = TextWorldModelProtocolError(detail["reason"])
+            error.rejected_response = detail.get("rejected_response")
+            raise error
+    response.raise_for_status()
+    result = response.json()
+    if result.get("execution_identity") != effective_identity:
+        raise ValueError("Provider bridge returned a different execution identity")
+    return result
+
+
 def main():
     import uvicorn
 
@@ -280,28 +334,12 @@ def main():
         trust_env=False,
     )
 
+    capture_enabled = bool((effective_identity.get("runtime_config") or {}).get("validation_recovery"))
+
     async def complete_scoped(session_id, prediction_id, request):
-        response = await client.post(
-            "/complete",
-            json={
-                "messages": [m.model_dump(mode="json", exclude_none=True) for m in request.messages],
-                "maximum_output_tokens": request.maximum_output_tokens,
-                "session_id": session_id,
-                "prediction_id": prediction_id,
-                "execution_identity": effective_identity,
-            },
+        return await native_provider_complete(
+            client, args.root, effective_identity, capture_enabled, session_id, prediction_id, request
         )
-        if response.status_code == 422:
-            detail = response.json().get("detail")
-            if isinstance(detail, dict) and detail.get("kind") == "invalid_prediction":
-                error = TextWorldModelProtocolError(detail["reason"])
-                error.rejected_response = detail.get("rejected_response")
-                raise error
-        response.raise_for_status()
-        result = response.json()
-        if result.get("execution_identity") != effective_identity:
-            raise ValueError("Provider bridge returned a different execution identity")
-        return result
 
     async def retire_provider(session_id):
         response = await client.post(f"/sessions/{session_id}/retire")
@@ -313,12 +351,9 @@ def main():
         response.raise_for_status()
         return response.json()
 
-    def record_prediction(record):
-        safe, redactions = redact_archive(record)
-        safe.update(
-            world_model_id=artifact.world_model_id, prompt_sha256=artifact.prompt_sha256, redaction_count=redactions
-        )
-        atomic_json(Path(args.root) / "native-predictions" / record["session_id"] / (uuid.uuid4().hex + ".json"), safe)
+    from benchmarks.wmh_native_prediction_writer import NativePredictionWriter
+
+    record_prediction = NativePredictionWriter(args.root, artifact.world_model_id, artifact.prompt_sha256)
 
     def record_retirement(receipt):
         path = Path(args.root) / "native-retirements" / (receipt["session_id"] + ".json")

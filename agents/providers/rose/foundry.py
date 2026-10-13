@@ -131,6 +131,9 @@ async def foundry_complete(
                 async with client.stream("POST", url, headers={"api-key": key}, json=body) as response:
                     if response.status_code != 200:
                         status = response.status_code
+                        from providers.rose.whm_retry_observation import observe_http_failure
+
+                        await observe_http_failure(foundry_model(pool_spec), response)
                         # Consume the error for connection reuse; never log its body or key.
                         await response.aread()
                         if status == 429:

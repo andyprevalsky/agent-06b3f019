@@ -260,6 +260,109 @@ receipts are `run13-validation-recovery-hold.json` and
 `docs/handoffs/whm-b07d9037-preservation/`. Original task records and all previously
 preserved checkpoint artifacts remain intact.
 
+## User-directed grounded recovery follow-up, 2026-10-13
+
+The user explicitly requested scheduled WHM retries when Rose completion fails
+and delegated timeout selection to golden examples. This authorizes the
+WHM-only recovery implementation; it does not authorize another paid run,
+merge, deployment, prompt edit, goal filtering or benchmark modification.
+The earlier held proposal and its encrypted archive remain immutable evidence.
+
+The applied follow-up reuses Rose's existing semantic recovery owner and adds
+bounded transient scheduling around its raw `_complete_once` attempts. One
+Rose completion admits at most three raw calls across semantic repair and
+transient retries. This is not a three-HTTP-request limit: each raw call retains
+Rose's existing provider waterfall. Native's two protocol-repair attempts are
+unchanged and have separate completion owners. Failed partial text is cleared;
+strict syntax, probability, call identity and state validation still precede
+DEMO cache completion and world-history commitment. Auth, invalid request,
+payment, refusal, explicit permanent quota and mixed permanent aggregates stop
+without repetition. Caller cancellation is not retried.
+
+`WMH_VALIDATION_RECOVERY=1` is the single opt-in activation flag. The default
+no-recorder WHM method is AST-equivalent to the original method; other call
+sites retain the superclass path. Actual Foundry/Cerebras HTTP hooks are
+passive: without this completion's ContextVar observer they return before
+reading response headers or bodies. Runtime identity binds the exact versioned
+retry settings; native policy text, recovered artifact, sample/replay keys,
+parallel prediction and shared world state remain unchanged.
+
+Golden grounding is recorded with hashes for 27 source files. Installed OpenAI
+SDK2.26.0 `_constants.py:9–14` and `_base_client.py:720–806` establish two retries
+and 0.5-second exponential backoff with negative 25% jitter. The chosen waits
+are 0.375–0.5 then 0.75–1 seconds. OpenClaw's
+`src/agents/embedded-agent-runner/run/failover-retry-controller.ts:25–56`
+establishes a bounded retry owner that honors a provider Retry-After floor and
+refuses a retry that cannot fit. This follow-up preserves that floor, including
+headers longer than sixty seconds, rather than shortening it to fit.
+
+Claude Code `src/services/api/claude.ts:795–810` uses a 300-second ordinary
+nonstream fallback ceiling. That is prior art, not proof that a WHM request
+finishes in 300 seconds. Original Run12 has 107 validated native predictions,
+max349.598 seconds, p95 272.093 and p99 296.460. A360-second raw-attempt ceiling
+preserves that observed successful maximum plus Rose's existing ten-second
+heartbeat interval, rounded up. The shared completion budget remains590
+seconds, TTFT90, idle120 and minimum remaining retry budget30, as in existing
+Rose. Run13's completed fallback first productive chunk took75.587 seconds;
+a30/60-second TTFT limit would cut it. These are provisional bounds for the
+recorded contexts, not a service guarantee for the proposed larger static prefix.
+
+A positive incremental maximum of monotonic and wall-clock deltas charges the
+budget. Forward wall gaps are never refunded by subsequent correction, and
+monotonic progress still charges. Four original Run12 failures had978–993-second
+wall spans but215–231-second Rose elapsed values, a roughly762-second difference.
+Its cause remains unknown. The new owning clock controls prove conservative
+admission, not execution while the OS is suspended or bounded synchronous I/O.
+
+Private one-store proof replaces the earlier held second-store candidate.
+NativePredictionWriter begins a truthful pending native record, appends rejected
+provider attempts under a per-prediction lock and finalizes that same file using
+the actual native response/error and interval. Repeated cancellation joins the
+same pinned native capture owner before continuing. Failed attempts never
+enter committed world history or DEMO replay. Actual per-attempt request fields
+include the admitted deadline and model exclusions; they are redacted through
+the existing native capture primitives. Original capture/proposal copies are
+preserved, not rewritten.
+
+The actual original owner was preimported and its source hash logged for the
+schedule causal controls:12 FAIL /1 PASS in2.04 seconds, then the same13 controls
+PASS on the candidate. The broader affected family passes218 cases in22.40
+seconds. The69-case reliability suite also exercises actual Rose completion
+with HTTP MockTransport responses, both provider headers, permanent quota,
+no-observer isolation, timeouts, cancellation, no-refund clock changes and
+runtime-identity binding. This makes zero funded calls.
+
+Fresh real pinned native/bridge proof shows a transient→semantic→valid chain:
+three raw attempts, two captured rejections, one committed world step,30 known
+input and9 output tokens, without duplicate usage. A terminal incomplete chain
+has three captured attempts, zero commits,15 known input and5 output tokens,
+and `usage_complete=false`. Synthetic price arithmetic is a counter test, not
+an invoice. All five captured requests match the actual admitted deadline and
+fallback exclusions. The unchanged request-fidelity assertion fails on the
+saved pre-correction capture and passes on the corrected capture. Seventeen
+offline fixture archive members authenticate, decrypt and restore through the
+actual archive helper; the original native reader-prefix and adapter replay
+preserve response/error/sample identity. This fixture test uses an explicit
+test key and does not replace verification of the six original private archives.
+
+Pending native captures are admission records, not finished predictions.
+Historical records without the pending field remain compatible. The private
+attempt ledger distinguishes unknown usage, while `/rose_usage` still reports
+known metered estimates without an invoice-completeness flag. Cancellation can
+leave current partial usage unknown. Native writer I/O/subprocess joins remain
+unbounded; no crash/disk-full or large-concurrency qualification is claimed.
+Original malformed-generation cause and exact unchanged fundraising outcome
+remain open. No paid provider replay or benchmark outcome proof was run.
+
+The final applied-source registered `world-model-harness fast-cache-client` gate
+passes both domains in 31.6 seconds, including 59 native and 241 provider-family
+cases (23.02 seconds for the latter). Applied-path Ruff check passes all 18 files;
+format check passes the 17 implementation/fixture files. Independent review
+verifies every applied source hash, default-owner AST equivalence and the final
+import-only normalization. Protected instruction and original native/helper
+records remain intact. The durable follow-up receipt is
+`docs/handoffs/whm-b07d9037-preservation/run13-grounded-whm-recovery.json`.
+
 ## Reusable lesson
 
 Retain every rejected structured response privately at its validation boundary before protocol repair, and distinguish syntax, semantic and task-outcome proof.
