@@ -37,7 +37,13 @@ import {
   SessionNoUserError,
   SessionNotFoundError,
 } from './service.local-storage';
-import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
+import { toUserSettings } from './service.serializers';
+import {
+  buildSessionCredentialPayload,
+  preserveSessionCredentialPayload,
+} from './service.credential-error';
+export { SessionCredentialInjectionError } from './service.credential-error';
+export type { SessionCredentialPayload } from './service.credential-error';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
 export {
   BrowserControlUnavailableError,
@@ -129,39 +135,24 @@ export async function prepareSessionCredentials(
     repo.reservePasskeysForRealm(userId, authRealm),
   ]);
 
-  const enabledPasswordIds = new Set(
-    authOptions.passwords.filter((password) => !password.disabled).map((password) => password.id)
+  const credentialPayload = buildSessionCredentialPayload(
+    authRealm,
+    authOptions,
+    storedPasswords,
+    passkeys
   );
-  const passwords = storedPasswords.filter((password) => enabledPasswordIds.has(password.id));
-  const returnedPasswordIds = new Set(passwords.map((password) => password.id));
-  const missingPasswordIds = [...enabledPasswordIds].filter((id) => !returnedPasswordIds.has(id));
-
-  const enabledPasskeyIds = new Set(
-    authOptions.passkeys.filter((passkey) => !passkey.disabled).map((passkey) => passkey.id)
+  const injectionResult = await preserveSessionCredentialPayload(
+    () => injectUserData(sessionId, userId, targetUrl, options),
+    credentialPayload
   );
-  const returnedPasskeyIds = new Set(passkeys.map((passkey) => passkey.id));
-  const missingPasskeyIds = [...enabledPasskeyIds].filter((id) => !returnedPasskeyIds.has(id));
-
-  if (missingPasswordIds.length > 0 || missingPasskeyIds.length > 0) {
-    throw new Error(
-      `Credential payload incomplete for ${authRealm}: ` +
-        `missing passwords [${missingPasswordIds.join(', ')}], ` +
-        `missing passkeys [${missingPasskeyIds.join(', ')}]`
-    );
-  }
-
-  const injectionResult = await injectUserData(sessionId, userId, targetUrl, options);
 
   return {
-    auth_realm: authRealm,
-    auth_options: authOptions,
+    ...credentialPayload,
     auth_credential_ref: injectionResult.cookies.credentialRef,
     cookies_injected: injectionResult.cookies.injected,
     cookies_count: injectionResult.cookies.cookieCount,
     auth_source: injectionResult.cookies.authSource,
     browser_state_injection: injectionResult,
-    passwords: serializePasswords(passwords),
-    passkeys: serializePasskeys(passkeys),
   };
 }
 

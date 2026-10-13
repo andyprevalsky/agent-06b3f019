@@ -261,8 +261,131 @@ async def test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fa
         "success": True,
         "message": "",
         "current_url": "https://www.google.com/search?q=movie+genre",
+        "auth_realm": "google.com",
+        "credentials_prepared": {
+            "auth_realm": "google.com",
+            "credential_preparation_error": "realm state decode failed",
+        },
     }
     action_history.record_action.assert_awaited_once()
+
+
+async def test_navigation_and_state_results_bind_auth_to_observed_destination() -> None:
+    from unittest.mock import patch
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
+
+    # A requested URL is not evidence of the destination: redirects, links,
+    # form submissions, and tab switches all use the active page identity.
+    for action in ("goto", "navback", "switch_tab", "open_new_tab", "close_tab", "click", "press_key", "input_text", "evaluate", "wait", "read_browser_state"):
+        read = action == "read_browser_state"
+        destination = "https://accounts.google.com/challenge"
+        dom = SimpleNamespace(
+            session=SimpleNamespace(), selector_map={},
+            ensure_browser_overlays_suppressed=AsyncMock(),
+            get_page_identity=AsyncMock(return_value={"url": destination}),
+        )
+        auth_context = {"auth_realm": "accounts.google.com", "inventory_status": "available",
+                        "auth_options": "# Auth Options for accounts.google.com\nPassword ref: pwd:fixture"}
+        auth = AsyncMock(return_value=auth_context)
+        action_result = {"success": True, "current_url": "https://claude.ai",
+                         "auth_realm": "claude.ai", "credentials_prepared": {"auth_realm": "claude.ai"}}
+        if read:
+            action_result = {"success": True, "url": destination, "formatted_state": "Google sign-in"}
+        with (
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value=action_result)),
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", AsyncMock(return_value=action_result)),
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=action_result)),
+        ):
+            result = await execute_action(
+                dom, SimpleNamespace(record_action=AsyncMock()), {"action": action, "params": {}},
+                auth_context_for_url=auth,
+            )
+        auth.assert_awaited_once_with(destination)
+        assert result["current_url"] == destination, result
+        assert result["auth_context"] == auth_context
+        assert "claude.ai" not in str(result), "requested-realm inventory survived redirect"
+        history = _browser_tool_result_for_history(action, result)
+        assert history["auth_context"] == auth_context, "history stripped current auth inventory"
+        assert "encryptedPassword" not in str(history) and "privateKey" not in str(history)
+        if read:
+            dom.get_page_identity.assert_awaited_once()
+
+
+async def test_unchanged_interactions_reuse_observed_inventory() -> None:
+    from unittest.mock import patch
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    url = "https://accounts.google.com/challenge"
+    dom = SimpleNamespace(session=SimpleNamespace(), selector_map={},
+                          ensure_browser_overlays_suppressed=AsyncMock(),
+                          get_page_identity=AsyncMock(return_value={"url": url}))
+    auth = AsyncMock()
+    with patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", AsyncMock(return_value={"success": True})):
+        result = await execute_action(dom, SimpleNamespace(), {"action": "input_text", "params": {}},
+                                      current_url=url, auth_context_for_url=auth)
+    auth.assert_not_awaited()
+    assert result == {"success": True}, "unchanged interactions duplicated the whole auth inventory"
+    dom.get_page_identity.assert_awaited_once()
+
+
+async def test_auth_binding_reobserves_redirects_and_preserves_action_failures() -> None:
+    from unittest.mock import patch
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+    from domains.spawn_browser_agent_v3.service_crypto import auth_realm_from_url
+
+    first = "https://claude.ai/login"
+    final = "https://accounts.google.com/challenge"
+    for read in (False, True):
+        dom = SimpleNamespace(
+            session=SimpleNamespace(), selector_map={},
+            ensure_browser_overlays_suppressed=AsyncMock(),
+            get_page_identity=AsyncMock(side_effect=([{"url": final}, {"url": final}] if read else [{"url": first}, {"url": final}, {"url": final}])),
+            get_browser_state=AsyncMock(return_value={"url": final, "title": "Google sign-in", "dom_tree": "Google"}),
+        )
+        async def auth_for_url(url):
+            return {"auth_realm": auth_realm_from_url(url), "inventory_status": "available", "auth_options": url}
+        auth = AsyncMock(side_effect=auth_for_url)
+        original = {"success": True, "url": first, "formatted_state": "Claude sign-in"} if read else {"success": True}
+        with (
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value=original)),
+            patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value=original)),
+        ):
+            result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()),
+                                          {"action": "read_browser_state" if read else "goto", "params": {}},
+                                          auth_context_for_url=auth)
+        assert [call.args[0] for call in auth.await_args_list] == [first, final]
+        assert result["current_url"] == final and result["auth_context"]["auth_realm"] == "accounts.google.com"
+        assert "auth_context" not in original, "result enrichment mutated a prior snapshot"
+        if read:
+            assert original["url"] == first
+        if read:
+            assert "Google sign-in" in result["formatted_state"] and "Claude" not in result["formatted_state"]
+            dom.get_browser_state.assert_awaited_once()
+
+    dom = SimpleNamespace(session=SimpleNamespace(), selector_map={}, ensure_browser_overlays_suppressed=AsyncMock(),
+                          get_page_identity=AsyncMock(return_value={"url": final}))
+    auth = AsyncMock(return_value={"auth_realm": "accounts.google.com", "inventory_status": "unknown"})
+    with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(side_effect=RuntimeError("navigation partially failed"))):
+        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+    assert result["success"] is False and result["error"] == "navigation partially failed"
+    assert result["current_url"] == final and result["auth_context"]["auth_realm"] == "accounts.google.com"
+
+    dom.get_page_identity = AsyncMock(side_effect=[{"url": first}, {"url": final}, {"url": "https://example.org"}])
+    with patch("domains.spawn_browser_agent_v3.service_actions._execute_navigation_action", AsyncMock(return_value={"success": True})):
+        result = await execute_action(dom, SimpleNamespace(record_action=AsyncMock()), {"action": "goto", "params": {}}, auth_context_for_url=auth)
+    assert result["current_url"] == "https://example.org"
+    assert result["auth_context"]["auth_realm"] == "example.org" and result["auth_context"]["inventory_status"] == "unknown"
+    assert "auth_options" not in result["auth_context"] and result["auth_context"]["observation_error"]
+
+
+def test_unknown_realm_state_clears_all_active_credentials() -> None:
+    from domains.spawn_browser_agent_v3.credential_runtime import unknown_realm_credential_state
+    for realm in ("google.com", ""):
+        state = unknown_realm_credential_state(realm)
+        assert state.auth_realm == realm and not state.auth_options_section
+        assert not state.password_secret_refs and not state.password_origins
+        assert not state.credential_refs_by_secret_ref and not state.decrypted_passkeys
+        assert state.auth_credential_ref is None
 
 
 async def test_redirected_realm_failure_is_quarantined_after_any_prep_stage() -> None:
@@ -282,7 +405,10 @@ async def test_redirected_realm_failure_is_quarantined_after_any_prep_stage() ->
             failed_realms=failed_realms,
             prepare_credentials=fail_after_prepare_auth,
         )
-        assert prepared is None
+        assert prepared == {
+            "auth_realm": "google.com",
+            "credential_preparation_error": "ValueError:credential realm mismatch after payload decode",
+        }
 
     assert calls == ["https://www.google.com/search?q=movie+genre"]
     assert failed_realms == {
@@ -482,6 +608,52 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
         header_present="x-user-id",
     )
     assert call["requestHeaders"]["x-user-id"] == "user-1"
+
+
+async def test_failed_restoration_preserves_target_credential_inventory() -> None:
+    from domains.spawn_browser_agent_v3.repo import prepare_browser_auth
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+
+    restoration_error = "Browser state injection timed out after 18000ms"
+    setup_mock({"/api/browser-session/session-1/prepare-auth": {
+        "status": 500,
+        "json": {
+            "error": restoration_error,
+            "code": "BROWSER_CREDENTIAL_INJECTION_FAILED",
+            "credential_payload": {
+                "auth_realm": "google.com",
+                "auth_options": {"realm": "google.com", "passwords": [], "passkeys": []},
+                "passwords": [], "passkeys": [],
+            },
+        },
+    }})
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://backend.example.com", api_key="internal-key"))
+    payload = await prepare_browser_auth(config, user_id="user-1", session_id="session-1",
+                                         target_url="https://admin.google.com/ac/users/fixture")
+    state = await build_realm_credential_state(payload, decryption_key=None)
+    assert state.auth_realm == "google.com"
+    assert "# Auth Options for google.com" in state.auth_options_section
+    assert "claude.ai" not in state.auth_options_section
+    assert payload["credential_preparation_error"] == restoration_error
+    assert payload.get("cookies_injected") is not True
+    assert state.auth_credential_ref is None
+
+
+async def test_failed_discovery_reports_target_realm_instead_of_silent_absence() -> None:
+    from domains.spawn_browser_agent_v3.handler import prepare_optional_realm_credentials
+
+    async def fail_discovery(_url):
+        raise RuntimeError("credential inventory read failed")
+
+    failed_realms: dict[str, str] = {}
+    result = await prepare_optional_realm_credentials(
+        target_url="https://admin.google.com/ac/users/fixture",
+        current_auth_realm="claude.ai", failed_realms=failed_realms,
+        prepare_credentials=fail_discovery,
+    )
+    assert result is not None, "preparation failure disappeared from the actual tool result"
+    assert result["auth_realm"] == "admin.google.com"
+    assert "credential inventory read failed" in result["credential_preparation_error"]
 
 
 def _fake_webauthn_session(send, target_id: str = "target-a"):
@@ -1257,6 +1429,19 @@ async def run_all_tests():
         test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fails,
     )
     await runner.record_async(
+        "unchanged_interactions_reuse_observed_inventory",
+        test_unchanged_interactions_reuse_observed_inventory,
+    )
+    await runner.record_async(
+        "auth_binding_reobserves_redirects_and_preserves_action_failures",
+        test_auth_binding_reobserves_redirects_and_preserves_action_failures,
+    )
+    runner.record("unknown_realm_state_clears_all_active_credentials", test_unknown_realm_state_clears_all_active_credentials)
+    await runner.record_async(
+        "navigation_and_state_results_bind_auth_to_observed_destination",
+        test_navigation_and_state_results_bind_auth_to_observed_destination,
+    )
+    await runner.record_async(
         "redirected_realm_failure_is_quarantined_after_any_prep_stage",
         test_redirected_realm_failure_is_quarantined_after_any_prep_stage,
     )
@@ -1271,6 +1456,14 @@ async def run_all_tests():
     await runner.record_async(
         "initial_and_resume_hydration_fail_closed_on_unusable_secrets",
         test_initial_and_resume_hydration_fail_closed_on_unusable_secrets,
+    )
+    await runner.record_async(
+        "failed_restoration_preserves_target_credential_inventory",
+        test_failed_restoration_preserves_target_credential_inventory,
+    )
+    await runner.record_async(
+        "failed_discovery_reports_target_realm_instead_of_silent_absence",
+        test_failed_discovery_reports_target_realm_instead_of_silent_absence,
     )
     await runner.record_async(
         "prepare_browser_auth_uses_unified_realm_endpoint",
