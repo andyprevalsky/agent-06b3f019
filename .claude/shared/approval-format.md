@@ -90,6 +90,9 @@ Detail:
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
 ────────────────────────────────────────────────────────────────
 Downstream:
+  Severity: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <effect>
+  Future prod trajectories affected: <estimated % or range> — <basis>
+  Risk: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <reason>
   <users, agents, services, data, cost, security, rollback, 10k-agent impact>
 ────────────────────────────────────────────────────────────────
 Approve: <approval-id> approve
@@ -281,6 +284,30 @@ substitute for the diff.
 
 ## Downstream Implications
 
+Start with these three labeled lines, in this order:
+
+- `Severity:` an emoji and level describing the consequence for an affected
+  production trajectory: 🟢 LOW (minor/reversible effect), 🟡 MODERATE (meaningful
+  degradation or recovery), 🟠 HIGH (task failure or major service/data impact),
+  🔴 CRITICAL (broad outage, irreversible loss or severe security/privacy impact).
+  Give a brief concrete effect; severity is distinct from the scope of exposure.
+- `Future prod trajectories affected:` the estimated percentage or range of
+  future real product trajectories whose behavior this change would affect,
+  whether positively or negatively. State the affected path/cohort and basis
+  (production usage sample and window, or source/route coverage). Use all future
+  product trajectories as the denominator; exclude benchmarks, tests and synthetic runs.
+  Label projections as estimates; this is exposure, not a predicted failure rate.
+  Do not invent a percentage or infer it from benchmark pass rates. If evidence
+  cannot support a numeric estimate, write `— unknown: <reason and measurement
+  needed>`. Use 0% only when the unchanged production boundary is demonstrated.
+- `Risk:` an emoji and level (🟢 LOW, 🟡 MODERATE, 🟠 HIGH, 🔴 CRITICAL)
+  describing the likelihood and consequence of regression from this specific
+  change, with its evidence, uncertainty and mitigation/rollback. Do not equate
+  a large affected percentage with high risk or a passing test with zero risk.
+
+When severity or risk cannot be assessed, use `⚪ UNKNOWN — <reason>` instead
+of guessing. Keep all three labels even when their values are unknown.
+
 Describe affected users, agents, services, data, costs, security/privacy,
 retries, compatibility, and operational rollback or recovery. Explicitly state
 when an area has no known impact. For hot agent paths, include the 10k-agent
@@ -293,7 +320,9 @@ End the block with unambiguous response syntax, one line each:
 - `Edit:    <approval-id> edit: <instruction>` when the owning workflow
   supports edits
 
-An approval is invalid if it is not one code block followed by the Links list,
+An approval is invalid if downstream severity, the estimated future production
+trajectory percentage/basis (or explicit unknown reason), or emoji risk level is
+missing. An approval is invalid if it is not one code block followed by the Links list,
 if Before: and After: are not its first two items, or if any required section,
 Evidence field, in-scope file
 link, **What failed:** task-framed sentence, concrete FE agent link, last-call
