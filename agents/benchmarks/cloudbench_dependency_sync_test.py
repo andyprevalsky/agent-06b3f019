@@ -19502,6 +19502,68 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path
         server_thread.join(timeout=5)
 
 
+def test_boot_payload_fleet_snapshot_stages_native_identity_helper(tmp_path: Path) -> None:
+    """The public launcher must freeze the helper consumed by guest staging."""
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    owner = subprocess.Popen(
+        ["bash", str(FLEET_SCRIPT), "--help"],
+        env={
+            **os.environ,
+            "CLOUDBENCH_SCRIPT_SNAPSHOT": "",
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY": str(ready),
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE": str(release),
+            "TMPDIR": str(snapshot_root),
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            if owner.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert ready.exists(), "launcher never entered its immutable snapshot"
+        snapshots = list(snapshot_root.glob("cloudbench-scripts.*"))
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
+        helper = snapshot / "process-identity.py"
+        assert helper.is_file(), "required guest identity helper absent from sealed snapshot"
+        assert helper.read_bytes() == (ROOT / "scripts/process-identity.py").read_bytes()
+        manifest = json.loads((snapshot / "cloudbench-controller-snapshot-manifest.json").read_text())
+        entry = next(row for row in manifest["files"] if row["path"] == helper.name)
+        assert entry["sha256"] == hashlib.sha256(helper.read_bytes()).hexdigest()
+        payload, guest = tmp_path / "payload.gz", tmp_path / "guest"
+        guest.mkdir()
+        encoder = snapshot / "cloudbench-boot-payload.py"
+        packed = subprocess.run(
+            [sys.executable, str(encoder), "pack", str(payload),
+             "--file-local", f"/process-identity.py={helper}"],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        assert packed.returncode == 0, packed.stderr
+        unpacked = subprocess.run(
+            [sys.executable, str(encoder), "unpack", str(payload), packed.stdout.strip(), str(guest)],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        assert unpacked.returncode == 0, unpacked.stderr
+        assert (guest / helper.name).read_bytes() == helper.read_bytes()
+        identity = subprocess.run(
+            [sys.executable, str(guest / helper.name), str(os.getpid())],
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+        assert identity.returncode == 0, identity.stderr
+        assert identity.stdout.strip(), "transported helper cannot capture native identity"
+    finally:
+        release.touch(exist_ok=True)
+        stdout, stderr = owner.communicate(timeout=15)
+    assert owner.returncode == 0, (stdout, stderr)
+    assert not list(snapshot_root.glob("cloudbench-scripts.*")), "launcher leaked its exact snapshot"
+
+
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the

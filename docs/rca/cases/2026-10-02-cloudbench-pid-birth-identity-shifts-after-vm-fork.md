@@ -301,3 +301,43 @@ remain pending; the original failed benchmark and native receipt are unchanged.
 At 10,000 agents this adds one process-identity read per isolated stack launch
 and constant-size receipt checks, with no global scan, new provider request or
 financial allocation. Models, prompts, task criteria and deadlines are unchanged.
+
+### Recurrence: sealed controller snapshot omitted the native identity helper
+
+Fresh canonical Group 3 on frozen `71b5adb6d267a0fdfeb489eafdea6f042de3a5c0`
+failed its controller lane at 20:27:20 UTC after 117.6 seconds. The first failed
+assertion was `workstream A's benchmark run must FINISH WITH SUCCESS alongside
+a concurrent run (exit=1)`. Both exact child logs rejected the packed boot
+payload before boot-ready. The earlier `missing_startup_visibility_dependency`
+traceback belongs to an intentional negative control that passed; it did not
+cause the concurrent-run failure. The failed native stage and all preceding
+negative-control results remain preserved.
+
+The guest consumer now stages `process-identity.py` from the immutable controller
+bundle, but `run-bench-fleet` omitted that required file from its explicit
+snapshot copy list. Direct guest/boot controls had the helper available and
+passed, while the normal public fleet producer did not supply it. The first
+bad boundary is that producer-to-consumer dependency closure, not receipt
+parsing or native process identity. Adding the existing helper to that sealed
+copy list is the only runtime correction.
+
+The unchanged `CLOUDBENCH_TEST_CONCURRENT_RUN_SELF_TEST=1` public fixture fails
+with exit 1 before the addition and passes with exit 0 afterward, including
+both successful distinct-code workstreams, exact resource teardown and
+read-only shared-app assertions. The new permanent
+`test_boot_payload_fleet_snapshot_stages_native_identity_helper` also fails
+before and passes after: it invokes the actual public launcher, checks frozen
+helper bytes and the manifest digest, packs and unpacks the helper through the
+real checksum-bound transport, executes it to capture a native identity, and
+verifies exact snapshot cleanup. Its assertions are identical in both runs.
+The private full-tree candidate is
+`c5705b1e02cdc84115b50ed52460dc97e9a67dbc`; source-bound logs and
+`phase2-snapshot-proof.json` remain under the Google RCA sandbox-policy-check
+directory. No existing test body or task criterion was relaxed.
+
+The failed 71b Group 3 lifecycle was closed and launched no new Group 4. Earlier
+4f benchmark and latency receipts remain historical. Private red/green proof
+does not convert that failed canonical stage to PASS; final complete-source
+qualification and rollout remain pending. At 10,000 agents, this copies one
+existing small helper per isolated controller snapshot, with no added provider
+request, allocation, global coordination or timing allowance.

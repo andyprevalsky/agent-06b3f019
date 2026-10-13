@@ -283,3 +283,27 @@ Private source-bound functional proof is retained separately from recipe
 approval. Registration and final committed-source recovery qualification
 remain root-owned and pending; no provider call or benchmark credit is supplied
 by this review.
+
+### October 13 sealed snapshot dependency closure recurrence
+
+The next frozen canonical controller run on `71b5adb6d267a0fdfeb489eafdea6f042de3a5c0`
+failed before either concurrent workstream became boot-ready. The new native
+identity consumer required `process-identity.py` from its trusted control
+bundle, but the fleet's explicit immutable snapshot copy set omitted it. The
+unchanged real two-workstream self-test fails with exit 1 before the one-line
+producer repair and passes with exit 0 afterward. A new executable public
+launcher snapshot/manifest/packed-transport/helper control likewise fails
+before and passes after. This recurrence is recorded in the existing PID
+identity case; it adds no new receipt, phase or payload admission exception.
+
+Independent review of immutable candidate
+`c5705b1e02cdc84115b50ed52460dc97e9a67dbc` derives the exact new fingerprint
+`c1606f37698d1cfe48f7beaa6c02fa78e65aaaaf8c1f0fd5c9a439c33b6cebef`.
+The recipe still has 40 inputs: 39 are identical to reviewed `38031426`, and
+only the checkout entry `scripts/run-bench-fleet` changes. The additional
+finite policy entry must retain every historical entry and the same two
+phases, `before-stack-launch` and `agent-network-index-bootstrap`; capture-local
+markers remain insufficient authority. Private proof is retained in
+`phase2-snapshot-proof.json` and the independent finite audit beside it.
+The failed 71b Group 3 lifecycle is closed with no new Group 4; prior 4f
+qualification remains historical, and final canonical qualification is pending.
