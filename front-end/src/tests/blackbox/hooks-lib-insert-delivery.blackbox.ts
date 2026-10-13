@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import type { Message } from '@/lib/api';
 import type { StreamingBubble } from '@/features/agent-context/types';
-import type { InsertMessagePayload } from '@/lib/realtime';
+import type { InsertMessagePayload, ToolStatus } from '@/lib/realtime';
 import { useRealtimeSubscription } from '@/features/agent-context/hooks/useRealtimeSubscription';
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { server } from './msw/server';
@@ -46,7 +46,7 @@ describe('committed INSERT delivery', () => {
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
     act(() => handlers.onInsert?.(insert));
-    deps.setStreamingPlan.mockClear();
+    vi.mocked(deps.setStreamingPlan).mockClear();
     act(() => handlers.onInsert?.(insert));
     expect(deps.dispatchMessage).toHaveBeenCalledOnce();
     expect(deps.setStreamingPlan).not.toHaveBeenCalled();
@@ -211,7 +211,7 @@ describe('committed INSERT delivery', () => {
     });
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
-    const browser = (id: string, toolStatus: string): InsertMessagePayload => ({
+    const browser = (id: string, toolStatus: ToolStatus): InsertMessagePayload => ({
       ...insert,
       id,
       metadata: { toolName: 'spawn_browser_agent', toolCallId: 'browser-a', toolStatus },
