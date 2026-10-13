@@ -1,5 +1,5 @@
 {
-  "recorded_at_utc": "2026-10-13T08:12:16.142540+00:00",
+  "recorded_at_utc": "2026-10-13T08:20:33.006941+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
   "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
@@ -10,9 +10,20 @@
   "current_integrated_gates": {
     "backend_coverage": {
       "status": "running",
-      "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
-      "applied_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
-      "prior_failure_retained": true,
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "prior_transport_fix_complete_validation": {
+        "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
+        "status": "pass",
+        "domains_passed": 193,
+        "domains_failed": 0,
+        "unit_files_passed": 266,
+        "lines_percent": 89.54,
+        "branches_percent": 80.96,
+        "functions_percent": 92.58,
+        "normal_and_sigterm_teardown_gate": "pass",
+        "all_eight_recorded_owned_processes_absent": true,
+        "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
+      },
       "coverage_threshold_result": "pending"
     },
     "cloud_controller": {
@@ -74,9 +85,20 @@
     },
     "backend_coverage_latest": {
       "status": "running",
-      "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
-      "applied_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
-      "prior_failure_retained": true,
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "prior_transport_fix_complete_validation": {
+        "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
+        "status": "pass",
+        "domains_passed": 193,
+        "domains_failed": 0,
+        "unit_files_passed": 266,
+        "lines_percent": 89.54,
+        "branches_percent": 80.96,
+        "functions_percent": 92.58,
+        "normal_and_sigterm_teardown_gate": "pass",
+        "all_eight_recorded_owned_processes_absent": true,
+        "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
+      },
       "coverage_threshold_result": "pending"
     },
     "recovery_recipe_requalification": {
@@ -186,7 +208,7 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Complete fresh full backend coverage and integrate latest main",
+    "Complete fresh backend/frontend coverage on final integrated source",
     "Exact decoder decision and focused SMS real pass",
     "Fresh applicable integrated smoke/semantic checks",
     "Bounded immutable-head review",
@@ -276,7 +298,7 @@
     "subsequent_terminal_extraction": "Fresh frontend coverage/build passed after equivalent pure-formatter move; semantic source remains explicitly bound to its earlier commit."
   },
   "incoming_main_integration": "normal merge complete at56e1e7133; all ledgers retained; RCA index canonical count refreshed to852.",
-  "latest_integrated_source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
+  "latest_integrated_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
   "production_payment_fixture": {
     "status": "ready",
     "read_only_prior_run_correlation": "three latest successful production agents match same dedicated107 payer and authoritative DB root",
@@ -333,8 +355,21 @@
     "p2_overlap": [],
     "schema_model_catalog_prompt_timeout_changes": false,
     "generic_decoder_applied": false,
-    "ten_thousand_agents": "One existing per-request connection is retained through bounded setup and closed by that request owner; no shared state, fan-in, polling or additional per-agent allocation."
+    "ten_thousand_agents": "One existing per-request connection is retained through bounded setup and closed by that request owner; no shared state, fan-in, polling or additional per-agent allocation.",
+    "full_backend_coverage": {
+      "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
+      "status": "pass",
+      "domains_passed": 193,
+      "domains_failed": 0,
+      "unit_files_passed": 266,
+      "lines_percent": 89.54,
+      "branches_percent": 80.96,
+      "functions_percent": 92.58,
+      "normal_and_sigterm_teardown_gate": "pass",
+      "all_eight_recorded_owned_processes_absent": true,
+      "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
+    }
   },
   "incoming_main_latest_fetched": "b12f0ef0521766d65d1199f143fb5de54a7ac885",
-  "incoming_main_latest_integration": "pending current source-bound coverage completion"
+  "incoming_main_latest_integration": "Normal merge complete; exact c8/244 ancestry preserved; fresh backend/frontend coverage running."
 }
