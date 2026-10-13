@@ -201,3 +201,16 @@ The exact failed receipts and complete nonsecret replacement prompt are in
 the coordinator is arranging one supported root-owned start. Original files
 and all six private captures remain saved, and the old box remains retained
 until independent replacement member verification and meaningful continuation.
+
+The coordinator's ONE supported root-owned start has now been accepted:
+new devbox `e9afcffd-7ba9-4bfd-8703-d770952fe1c3`, internal thread
+`ph7cc73xma14jdg6chxpnhbgth8g7c1a`, native
+`01a132a3-ea1f-7b22-abfb-70608400d02e`,
+[replacement thread](https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa).
+The actual start key is `swap-harness-whm-20261012-full-checkpoint-coordinator-generation1`,
+request `407eed10-adb1-4d76-b4f3-36aa96b29cd0`; the earlier keys failed terminally
+before any execution attachment. The accepted prompt retains complete
+checkpoint `677068533e050195c62afc8118f3d35a8511f5ea` and all six archive
+verification requirements. Launch receipt is in `whm-b07d9037-preservation/`.
+This is acceptance, not proof of independent restoration or meaningful
+continuation; old-box archival remains pending those receipts.
