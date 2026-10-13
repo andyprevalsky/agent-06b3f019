@@ -206,6 +206,35 @@ capacity regression was established; its three measured direct-answer samples
 do not count as a completed gate. All four sandbox payment tasks passed with
 clean compensation and stack shutdown before the shared stack was stopped.
 
+## Browser recovery across reconnects after main synchronization
+
+Main `1120a6b8f` brought PR #1494's finite browser-terminal reconciliation.
+Merging that owner with notification deduplication exposed another missing
+ownership invariant. The selected conversation retained its notification IDs
+and recovery lease across reconnects, but each new completion owner allocated
+an empty browser-observation map. If its first authoritative snapshot still
+omitted an already received browser start and the chat answer was complete, it
+stopped recovery. A duplicate start could not recreate demand because its ID
+had already been claimed. A missed terminal update then left one active panel.
+
+The real-hook/MSW replay failed on merged head `9efd7bb7b`: the cold reconnect
+read occurred, the existing 150-second lease was still live, but five seconds
+later there was no additional read and the browser panel remained active.
+The unchanged replay passes when browser observations share the selected-agent
+scope with notification claims. A fresh completion owner receives that same
+map; selection changes reset both. The lease expiry and single-reader lifecycle
+are unchanged, and duplicate notifications remain free of side effects.
+The permanent test is `hooks-lib-browser-reconnect.blackbox.ts`, discovered by
+ordinary frontend coverage. All twenty-two focused browser/backfill/delivery
+checks pass. Pending old-source Group 3 lanes were explicitly cancelled and
+joined before editing; those interrupted stages do not count as passing gates.
+
+Archive searches were `reconnect browser FINISHED active panel backfill` and
+`observedBrowserMessages stale snapshot lease duplicate INIT`. The July
+cold-start reconciliation case is a relative, not proof of this boundary:
+every subscribe already did a cold read here; the retained lifecycle demand
+was missing after that read.
+
 ## Human feedback
 
 Preserve the approved router and semantic deadlines. Fix the owning boundary;

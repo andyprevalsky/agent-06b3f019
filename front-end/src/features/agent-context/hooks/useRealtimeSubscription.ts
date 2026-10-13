@@ -151,13 +151,16 @@ async function connectRealtime(
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
   receivedRef: React.MutableRefObject<ReceivedInserts>,
 ): Promise<void> {
-  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner({
-    ...deps,
-    selectedAgentId: scope.agentId,
-    isCancelled: () => !isScopeActive(deps, scope),
-    isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
-    leaseRef,
-  });
+  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner(
+    {
+      ...deps,
+      selectedAgentId: scope.agentId,
+      isCancelled: () => !isScopeActive(deps, scope),
+      isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+      leaseRef,
+    },
+    receivedRef.current.browserMessages,
+  );
   try {
     const channel = await subscribeToAgent(
       scope.agentId,
