@@ -20,6 +20,8 @@ tags:
 sources:
   - agent b5167c46-ef7f-4903-8d72-f1d87c8d9af7
   - benchmark run 20260928_173854_raise-5m-rose-labs-brex.json
+  - agent 65889659-9f08-4488-917e-9611223be811
+  - benchmark run wmh-raise-5m-rose-labs-brex-1791845194
 repro: agents/tests/blackbox/world_model_harness.blackbox.py::test_served_wmh_parallelizes_same_session_llm_calls_and_keeps_both_steps
 status: open
 ---
@@ -49,6 +51,50 @@ The `world-model-harness` pin cannot supply either contract by itself: the last 
 
 Archive searches: `activity StartToClose timeout send_email_activity message_transport_send` and `WMH shared session lock parallel agents tool step timeout serialization`. The September 6 email-channel stub case is related but not a recurrence: this run reached the simulated delivery activity. The September 27 unseeded-WMH-session case concerns different state and is not this boundary.
 
+### October 12 Run12 follow-up: original caller deadlines still expire
+
+Read-only analysis of the authenticated original Run12 checkpoint found two
+`message_person` email attempts with exact call identities matching later native
+send receipts. The first UI `Sending Email` marker at23:37:30.440Z became
+`activity StartToClose timeout` at23:38:30.821Z; its native prediction ran
+23:37:30.739Z–23:39:41.484Z (130.745s). The retry marker at23:42:06.222Z became
+the same timeout at23:43:06.606Z; its native prediction ran
+23:42:06.580Z–23:45:07.623Z (181.043s). Both later native observations say
+simulated `provider_accepted`; both agent-facing delivery activities failed.
+These are ambiguous late native commits, not two confirmed completed agent sends.
+
+The unchanged delivery handler schedules `send_email_activity` with60s
+StartToClose and maximum_attempts1 in simulate mode too. Calling that actual
+scheduling boundary offline captured those parameters and the explicit
+simulate/scope/approval arguments. A budget audit against the two original
+prediction intervals exits1. This is supporting scheduling evidence, **not** a
+live Temporal cancellation reproduction, green repair or benchmark outcome pass.
+The old head-of-line explanation is not automatically adopted: each native
+prediction started within0.36s of its UI sending marker, and model inference is
+already longer than the caller's entire60s budget. No timeout was increased.
+
+The user also reported failing explores. Exact original message cards separate
+14 explore failures into8 model-generated sampled retrieval errors (5Gmail503,
+2read timeouts,1reference miss),3 real WMH HTTP500/provider failures, and3 cutoff
+cancellations. Replaying all8 recorded model distributions through production
+`parse_distribution`, the original draw, `select_outcome`, and the runtime adapter
+reproduces their error outputs byte-for-byte without calling any real service.
+The simulated503s are not evidence of an actual Gmail outage. Why the model
+assigned these probabilities and why the real provider streams went idle remain
+open; do not force successful outcomes or substitute correlation for a repro.
+
+Commands: from `agents/`, activate the pinned venv, then run
+`PYTHONPATH=. python /home/boxes/rose-wmh-resumed/.context/whm-migration/replay-run12-failures.py`
+(exit0,8 exact recorded-error replays and0 real service/model calls). Adding
+`--require-delivery-budget` exits1 with the60s/130.745s/181.043s budget assertion.
+Derived aggregate evidence is in
+`docs/handoffs/whm-b07d9037-preservation/run12-message-and-explore-failure-trace.json`.
+No runtime, policy, prompt, fixture, sample key or benchmark changes were made.
+The original user's no-paid-trial/no-merge/no-deploy boundaries remain in force.
+No new review agent was launched under the user's no-new-agent instruction.
+This case remains open; no adversarial review, live repair or exact benchmark
+outcome qualification is claimed for these new findings.
+
 ## Solution
 
 The Rose WMH serving adapter now snapshots each shared session under a short lock, builds its prompt and calls the provider outside that lock, then appends the observation and state note under the lock. Concurrent actions each see the state at request start; commit order follows completion order. Logs correlate action name, agent ID, session ID, and step ID with snapshot-lock wait, prediction, and commit-lock wait. The Rose provider bridge now submits all served calls to one process-wide async loop, keeping Fast Cache's futures on their owning loop while model calls overlap. The world-model-harness blackbox domain and provider/serve unit suites pass.
@@ -58,6 +104,11 @@ The unchanged 600-second fundraiser was rerun with `BENCHMARK_SKIP_WMH_DELTA=1 b
 ## Human feedback
 
 The user asked whether `message_person` was mocked through WHM, requested analysis of why approved email delivery was slow, and made overlapping same-session LLM calls a mandatory assertion. They asked whether updating the original GitHub dependency would fix it.
+
+On October13 the user pointed to Run12's `Failed to send Email` /
+`activity StartToClose timeout` and failing explores after the scorecard had
+counted late native accepted-send records as completed outreach. The derived
+scorecard now separates0 completed agent email sends from2 late native receipts.
 
 ## Reusable lesson
 
