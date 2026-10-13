@@ -165,6 +165,9 @@ def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry
     (tmp_path / 'agents').mkdir()
     shutil.copyfile(ROOT / 'scripts/run-bench', scripts / 'run-bench')
     shutil.copyfile(ROOT / 'scripts/cloudbench_catalog.py', scripts / 'cloudbench_catalog.py')
+    report_contract = tmp_path / '.claude/shared/benchmark-report-format.txt'
+    report_contract.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)
     receipt = tmp_path / 'dispatch.json'
     (scripts / 'run-bench-campaign.py').write_text(
         'import json, os, sys\n'

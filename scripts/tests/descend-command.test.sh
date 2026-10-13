@@ -149,7 +149,8 @@ grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || f
 grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
 grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"  # pragma: allowlist secret
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use ~~~ code blocks (approvals use the canonical text block)"
-grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"
+grep -Fq '━' <<<"$RESPONSE_CONTRACT" || fail "response approvals must use the canonical Unicode frame"
+grep -Fq '🔐 APPROVAL' <<<"$RESPONSE_CONTRACT" || fail "response approvals must retain the canonical approval header"
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"

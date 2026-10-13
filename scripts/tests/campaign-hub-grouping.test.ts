@@ -308,6 +308,14 @@ async function request(
 function fixtureRoot(name: string) {
   const root = path.join(workRoot, name);
   mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
+  mkdirSync(path.join(root, ".claude/shared"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  writeFileSync(
+    path.join(root, ".claude/shared/benchmark-report-format.txt"),
+    readFileSync(path.join(project, ".claude/shared/benchmark-report-format.txt")),
+  );
   mkdirSync(path.join(root, "agents/benchmarks"), {
     recursive: true,
     mode: 0o700,
