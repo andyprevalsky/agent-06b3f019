@@ -1518,7 +1518,7 @@ cloudbench_terminate_tree_and_wait() {
 
   local pid job_pid start deadline live i actual_start state unresolved
   local observation process_stat expected_start process_table target_snapshot
-  local captured_root still_job kill_verify_seconds
+  local captured_root kill_verify_seconds root_state
   local roots=() active_roots=() active_jobs=() targets=() target_starts=()
   local target_states=() remaining_roots=()
   for pid in "$@"; do
@@ -1624,31 +1624,36 @@ for pid, start in ordered:
       continue
     fi
 
-    # Force bash to process any pending SIGCHLD for this exact child before we
-    # decide whether the job table and kernel still disagree.
-    wait "$job_pid" 2>/dev/null || true
-
-    actual_start="$(cloudbench_pid_start_time "$job_pid")"
-    if [ -n "$actual_start" ]; then
-      echo "Owned process root $job_pid was absent from the teardown snapshot" >&2
-      return 1
-    fi
-
-    active_jobs=()
-    while read -r pid; do
-      [ -n "$pid" ] && active_jobs+=("$pid")
-    done < <(jobs -pr)
-    still_job=0
-    for pid in "${active_jobs[@]:-}"; do
-      if [ "$pid" = "$job_pid" ]; then
-        still_job=1
-        break
+    # Never `wait` here without positive evidence that it returns at once: a
+    # live root would block this bounded teardown until it exits, and Bash 5.2
+    # can keep listing a child that died from the same group signal as Running
+    # after the kernel reaped it. Classify the root from the kernel instead.
+    # An absent root is terminal, exactly like one that exited between the job
+    # sample and the snapshot; a zombie is reaped at once. A live root that the
+    # one snapshot cannot account for fails closed without being signalled.
+    if [ -r /proc/self/stat ]; then
+      if [ ! -e "/proc/$job_pid" ]; then
+        root_state=absent
+      else
+        observation="$(cloudbench_proc_pid_observation "$job_pid")" || observation=""
+        root_state="${observation##*$'\t'}"
+        [ -n "$observation" ] || root_state=unknown
       fi
-    done
-    if [ "$still_job" = "1" ]; then
-      echo "Owned process root $job_pid was absent from the teardown snapshot" >&2
-      return 1
+    else
+      root_state="$(ps -o stat= -p "$job_pid" 2>/dev/null | tr -d ' ')" || root_state=""
+      if [ -z "$root_state" ] && ! kill -0 "$job_pid" 2>/dev/null; then
+        root_state=absent
+      fi
     fi
+    case "$root_state" in
+      absent) continue ;;
+      Z*)
+        wait "$job_pid" 2>/dev/null || true
+        continue
+        ;;
+    esac
+    echo "Owned process root $job_pid was absent from the teardown snapshot" >&2
+    return 1
   done
   active_roots=()
   if [ "${#remaining_roots[@]}" -gt 0 ]; then

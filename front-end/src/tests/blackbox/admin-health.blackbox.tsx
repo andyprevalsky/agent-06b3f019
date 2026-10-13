@@ -86,6 +86,11 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(
+        'Completed customer product root tasks / all customer product root tasks issued in the selected period. Excludes benchmarks, tests, simulations, and operator accounts.',
+      ),
+    ).toBeInTheDocument();
     // Cost labels/values appear in both the summary strip and chart legend.
     expect(screen.getAllByText('LLM at $0').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$0.0384').length).toBeGreaterThan(0);

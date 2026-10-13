@@ -1,8 +1,14 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from 'node:crypto';
+import { inspect } from 'node:util';
 import type { Browser, BrowserContext, Page } from 'playwright';
-import { prepareSessionCredentials } from '../../domains/browser-session/service';
+import {
+  prepareSessionCredentials,
+  SessionCredentialInjectionError,
+  SessionNotFoundError,
+} from '../../domains/browser-session/service';
+import { buildSessionCredentialPayload } from '../../domains/browser-session/service.credential-error';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { resetKernelSessionTabs } from '../../providers/browser/kernel';
 import { prisma } from '../../providers/database';
@@ -209,6 +215,100 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       'injected state still uses substring origin matching'
     );
 
+    const previousTimeout = process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
+    let releasePendingScript: (() => void) | undefined;
+    let pendingScriptCalls = 0;
+    const pendingScript = new Promise<void>((resolve) => {
+      releasePendingScript = resolve;
+    });
+    const timeoutBrowser = {
+      contexts: () => [
+        {
+          ...fakeBrowser.contexts()[0],
+          newPage: async () => {
+            throw new Error('synthetic origin restoration unavailable');
+          },
+          addInitScript: async () => {
+            pendingScriptCalls += 1;
+            await pendingScript;
+          },
+        },
+      ],
+      close: async () => {
+        callerBrowserCloseCount += 1;
+      },
+    } as unknown as Browser;
+    process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = '25';
+    try {
+      let injectionError: unknown;
+      try {
+        await prepareSessionCredentials(sessionId, userId, 'https://shop.example.co.uk/login', {
+          browser: timeoutBrowser,
+        });
+      } catch (error) {
+        injectionError = error;
+      }
+      assert(injectionError instanceof Error, 'state timeout did not reject preparation');
+      assert(
+        injectionError.message === 'Browser state injection timed out after 25ms',
+        'preparation did not preserve the exact state timeout'
+      );
+      assert(pendingScriptCalls === 1, 'timeout did not exercise the pending addInitScript');
+      assert(
+        'credentialPayload' in injectionError,
+        'state timeout discarded the validated target credential payload'
+      );
+      assert(
+        'code' in injectionError && injectionError.code === 'BROWSER_CREDENTIAL_INJECTION_FAILED',
+        'state timeout did not carry the precise injection failure tag'
+      );
+      assert(
+        injectionError instanceof SessionCredentialInjectionError &&
+          injectionError.cause instanceof Error &&
+          injectionError.cause.message === injectionError.message,
+        'injection wrapper did not preserve the typed error and original cause'
+      );
+      assert(
+        !inspect(injectionError).includes('encrypted-password-fixture') &&
+          !inspect(injectionError).includes('encrypted-private-key-fixture'),
+        'ordinary error inspection exposes credential material'
+      );
+      const payload = injectionError.credentialPayload as Pick<
+        typeof result,
+        'auth_realm' | 'auth_options' | 'passwords' | 'passkeys'
+      >;
+      assert(payload.auth_realm === 'example.co.uk', 'timeout payload has the wrong target realm');
+      assert(
+        payload.auth_options.realm === 'example.co.uk',
+        'timeout auth options have wrong realm'
+      );
+      assert(
+        payload.passwords.length === 1 && payload.passwords[0]?.id === password.id,
+        'timeout payload lost the target password reference'
+      );
+      assert(
+        payload.passkeys.length === 1 && payload.passkeys[0]?.id === passkey.id,
+        'timeout payload lost the target passkey reference'
+      );
+      assert(
+        payload.auth_options.passwords.some((item) => item.id === password.id && !item.disabled) &&
+          payload.auth_options.passkeys.some((item) => item.id === passkey.id && !item.disabled),
+        'timeout payload lost complete enabled credential options'
+      );
+      assert(
+        Object.keys(payload).sort().join(',') === 'auth_options,auth_realm,passkeys,passwords',
+        'timeout payload includes applied-cookie or restoration claims'
+      );
+      assert(callerBrowserCloseCount === 0, 'timeout closed the caller-owned browser');
+      console.log('PASS state timeout rejects and preserves complete target credential inventory');
+    } finally {
+      if (previousTimeout === undefined) delete process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
+      else process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = previousTimeout;
+      releasePendingScript?.();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert(pendingScriptCalls === 1, 'timeout allowed later browser-state mutations');
+
     const bestEffortBrowser = {
       contexts: () => [
         {
@@ -234,8 +334,12 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     );
 
     const serviceSource = prepareSessionCredentials.toString();
-    const completenessCheck = serviceSource.indexOf('missingPasswordIds.length');
+    const completenessCheck = serviceSource.indexOf('buildSessionCredentialPayload');
     const browserInjection = serviceSource.indexOf('injectUserData', completenessCheck);
+    assert(
+      buildSessionCredentialPayload.toString().includes('missingPasswordIds.length'),
+      'credential payload completeness validation is missing'
+    );
     assert(completenessCheck > 0, 'credential completeness check is missing');
     assert(
       browserInjection > completenessCheck,
@@ -281,7 +385,9 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     let rejectedWrongOwner = false;
     try {
       await prepareSessionCredentials(sessionId, otherUserId, 'https://www.example.co.uk');
-    } catch {
+    } catch (error) {
+      assert(error instanceof SessionNotFoundError, 'wrong owner lost its not-found error');
+      assert(!('credentialPayload' in error), 'wrong owner received a credential payload');
       rejectedWrongOwner = true;
     }
     assert(rejectedWrongOwner, 'credential boundary accepted a session owned by another user');

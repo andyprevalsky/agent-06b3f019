@@ -28,7 +28,17 @@ terminal; it does not render Markdown, so write every field as a plain label
 (`What failed:`, not bold) and never put headings, tables, or Markdown links
 inside it. The sections below show field labels in bold only to define them.
 
-Inside the block, `Before:` and `After:` are always the first two items,
+Use the same visual styling as `/deploy` Step 15 and the benchmark scorecard:
+64-column `━` outer borders, `─` section separators, a `🔐 APPROVAL` header,
+the approval ID/subject, and `⏳ AWAITING DECISION`. Keep the six required labels
+and their order exactly; the frame is decoration, not another content section.
+Apply this styling to every approval from `/RCA`, `/deploy`, `/descend`, or other
+skills that reference this file. Use one approval block per snapshot decision.
+Show actual start/block timestamps and elapsed ages when reporting a pending
+approval in the parent benchmark card. Continue independent authorized work;
+presentation does not create additional approval gates.
+
+Inside the frame, `Before:` and `After:` are always the first two content items,
 followed by `TL;DR:`, `Evidence:`, `Detail:`, `Downstream:`, and the response
 syntax. The whole message for one approval has exactly this shape (the outer
 four-backtick fence only delimits the example):
@@ -37,17 +47,19 @@ four-backtick fence only delimits the example):
 ### <approval-id> · <one-line subject>
 
 ```text
-APPROVAL <approval-id> — <one-line subject>
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔐 APPROVAL <approval-id> · ⏳ AWAITING DECISION
+ <one-line subject>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Before:
   <observable behavior before the change or action>
-
+────────────────────────────────────────────────────────────────
 After:
   <the same trigger and ordering after the change or action>
-
+────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence>
-
+────────────────────────────────────────────────────────────────
 Evidence:
   What failed: When <the agent doing the task goal>, <it reached this step or
     site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
@@ -70,19 +82,23 @@ Evidence:
       `<live_fixtures or none>`
     Task prompt:
       <full exact task.prompt with every line and character preserved>
-
+────────────────────────────────────────────────────────────────
 Detail:
   <why the change is needed, first-bad boundary, unchanged test before/after>
   Snapshot: <approval snapshot ID or Git SHA>
   Scope: <path:line> — <hunk summary>   (one line per in-scope hunk)
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
-
+────────────────────────────────────────────────────────────────
 Downstream:
+  Severity: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <effect>
+  Future prod trajectories affected: <estimated % or range> — <basis>
+  Risk: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <reason>
   <users, agents, services, data, cost, security, rollback, 10k-agent impact>
-
+────────────────────────────────────────────────────────────────
 Approve: <approval-id> approve
 Reject:  <approval-id> reject: <reason>
 Edit:    <approval-id> edit: <instruction>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 - **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
@@ -268,6 +284,30 @@ substitute for the diff.
 
 ## Downstream Implications
 
+Start with these three labeled lines, in this order:
+
+- `Severity:` an emoji and level describing the consequence for an affected
+  production trajectory: 🟢 LOW (minor/reversible effect), 🟡 MODERATE (meaningful
+  degradation or recovery), 🟠 HIGH (task failure or major service/data impact),
+  🔴 CRITICAL (broad outage, irreversible loss or severe security/privacy impact).
+  Give a brief concrete effect; severity is distinct from the scope of exposure.
+- `Future prod trajectories affected:` the estimated percentage or range of
+  future real product trajectories whose behavior this change would affect,
+  whether positively or negatively. State the affected path/cohort and basis
+  (production usage sample and window, or source/route coverage). Use all future
+  product trajectories as the denominator; exclude benchmarks, tests and synthetic runs.
+  Label projections as estimates; this is exposure, not a predicted failure rate.
+  Do not invent a percentage or infer it from benchmark pass rates. If evidence
+  cannot support a numeric estimate, write `— unknown: <reason and measurement
+  needed>`. Use 0% only when the unchanged production boundary is demonstrated.
+- `Risk:` an emoji and level (🟢 LOW, 🟡 MODERATE, 🟠 HIGH, 🔴 CRITICAL)
+  describing the likelihood and consequence of regression from this specific
+  change, with its evidence, uncertainty and mitigation/rollback. Do not equate
+  a large affected percentage with high risk or a passing test with zero risk.
+
+When severity or risk cannot be assessed, use `⚪ UNKNOWN — <reason>` instead
+of guessing. Keep all three labels even when their values are unknown.
+
 Describe affected users, agents, services, data, costs, security/privacy,
 retries, compatibility, and operational rollback or recovery. Explicitly state
 when an area has no known impact. For hot agent paths, include the 10k-agent
@@ -280,7 +320,9 @@ End the block with unambiguous response syntax, one line each:
 - `Edit:    <approval-id> edit: <instruction>` when the owning workflow
   supports edits
 
-An approval is invalid if it is not one code block followed by the Links list,
+An approval is invalid if downstream severity, the estimated future production
+trajectory percentage/basis (or explicit unknown reason), or emoji risk level is
+missing. An approval is invalid if it is not one code block followed by the Links list,
 if Before: and After: are not its first two items, or if any required section,
 Evidence field, in-scope file
 link, **What failed:** task-framed sentence, concrete FE agent link, last-call

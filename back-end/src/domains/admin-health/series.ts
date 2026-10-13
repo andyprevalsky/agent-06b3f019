@@ -2,6 +2,7 @@ import { dedupeInternalRepeatTasks } from './benchmarkDedup';
 import { calculateTaskCostPerTask } from './costs';
 import { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 import type * as repo from './repo';
+import type { ProductRootTaskRecord } from './repoProductUsage';
 import type { SubscriberSeriesPoint } from './subscriberMetrics';
 import { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskStats';
 import { findPeriodIndex } from './time';
@@ -23,17 +24,23 @@ export function buildSeries(
     githubCommits: number | null;
     tamaraLinearPoints: number | null;
   }>,
+  productTasks: ProductRootTaskRecord[],
   gmvRecords: repo.GmvRecord[] = [],
   rootAgentRuns: RootAgentRunRecord[] = [],
   rootAgentRunUsage: RootAgentRunUsageRecord[] = []
 ): AdminHealthSeriesPoint[] {
   const tasksByPeriod = periods.map(() => [] as repo.RootTaskRecord[]);
+  const productTasksByPeriod = periods.map(() => [] as ProductRootTaskRecord[]);
   const rootAgentRunsByPeriod = periods.map(() => [] as RootAgentRunRecord[]);
   const waitlistSignupsByPeriod = periods.map(() => 0);
   const gmvByPeriod = periods.map(() => [] as repo.GmvRecord[]);
   for (const task of tasks) {
     const index = findPeriodIndex(periods, task.createdAt);
     if (index >= 0) tasksByPeriod[index].push(task);
+  }
+  for (const task of productTasks) {
+    const index = findPeriodIndex(periods, task.createdAt);
+    if (index >= 0) productTasksByPeriod[index].push(task);
   }
   for (const run of rootAgentRuns) {
     const index = findPeriodIndex(periods, run.createdAt);
@@ -69,7 +76,7 @@ export function buildSeries(
       tasksIssuedPerUser: tasksIssuedPerUser(periodTasks, subscriberPoint.userCount),
       outputTokensPerTask: averageOutputTokens(periodTasks),
       gmvPerTask: gmvPerTaskCents(gmvCents, periodTasks.length),
-      taskCompletionRate: taskCompletionRate(periodTasks),
+      taskCompletionRate: taskCompletionRate(productTasksByPeriod[index]),
       costPerTask: calculateTaskCostPerTask(rootAgentRunsByPeriod[index], rootAgentRunUsage),
     };
   });

@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "utc": "2026-10-13T04:13:08.282075+00:00",
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1494",
+  "qualified_source_sha": "8bef6949a416c197f1c06f5deb506862a9064f06",
+  "runtime_file_sha256": {
+    "front-end/src/features/agent-context/hooks/agentBackfill.ts": "e3335fe78f133e47c043f24b1015dc6bd0f29f8c4cf2311d611137ea0f568fc2",
+    "front-end/src/features/agent-context/hooks/useRealtimeSubscription.ts": "1ede90b8e189d1bb9d847ac340f5ae2ec241295b5427178a20e3e95835b5fca8",
+    "front-end/src/lib/browserPanelLifecycle.ts": "f0b24b8b32ae7112af67fba3fdbe2c80bd8a88dd9b06d76c784ab4c094da097f",
+    "front-end/src/features/terminal/hooks/derivations.ts": "fb4466b2795c9d4558ec7aa381253a65e676b50d57ad7dcfdf75f32f85442fb4",
+    "front-end/src/features/terminal/types.ts": "c5bb67b9ea27af86234b8d064303923d6f19e4105fbdd264df2617c460a58ba1"
+  },
+  "group3_stages": [
+    {
+      "stage": "prompt-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "started_at": "2026-10-13T03:36:59Z",
+      "finished_at": "2026-10-13T03:36:59Z"
+    },
+    {
+      "stage": "agent-behavior-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.0,
+      "started_at": "2026-10-13T03:36:59Z",
+      "finished_at": "2026-10-13T03:36:59Z"
+    },
+    {
+      "stage": "llm-trajectory-injection-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.0,
+      "started_at": "2026-10-13T03:36:59Z",
+      "finished_at": "2026-10-13T03:36:59Z"
+    },
+    {
+      "stage": "eslint",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 2.3,
+      "started_at": "2026-10-13T03:38:58Z",
+      "finished_at": "2026-10-13T03:39:01Z"
+    },
+    {
+      "stage": "typescript",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 19.6,
+      "started_at": "2026-10-13T03:39:01Z",
+      "finished_at": "2026-10-13T03:39:20Z"
+    },
+    {
+      "stage": "backend-structural",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 21.8,
+      "started_at": "2026-10-13T03:39:20Z",
+      "finished_at": "2026-10-13T03:39:42Z"
+    },
+    {
+      "stage": "frontend-typescript",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.3,
+      "started_at": "2026-10-13T03:42:50Z",
+      "finished_at": "2026-10-13T03:42:51Z"
+    },
+    {
+      "stage": "frontend-coverage-blackbox",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 232.3,
+      "started_at": "2026-10-13T03:38:58Z",
+      "finished_at": "2026-10-13T03:42:51Z"
+    },
+    {
+      "stage": "frontend-format",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.5,
+      "started_at": "2026-10-13T03:42:51Z",
+      "finished_at": "2026-10-13T03:42:51Z"
+    },
+    {
+      "stage": "frontend-lint",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 6.5,
+      "started_at": "2026-10-13T03:42:51Z",
+      "finished_at": "2026-10-13T03:42:58Z"
+    },
+    {
+      "stage": "frontend-build",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 22.5,
+      "started_at": "2026-10-13T03:42:58Z",
+      "finished_at": "2026-10-13T03:43:20Z"
+    },
+    {
+      "stage": "agents-coverage-blackbox",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 315.8,
+      "started_at": "2026-10-13T03:38:58Z",
+      "finished_at": "2026-10-13T03:44:14Z"
+    },
+    {
+      "stage": "deploy-command-structural",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 355.3,
+      "started_at": "2026-10-13T03:39:42Z",
+      "finished_at": "2026-10-13T03:45:38Z"
+    },
+    {
+      "stage": "seed-memory-ratchet",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 79.5,
+      "started_at": "2026-10-13T03:47:30Z",
+      "finished_at": "2026-10-13T03:48:49Z"
+    },
+    {
+      "stage": "backend-coverage-blackbox",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 637.8,
+      "started_at": "2026-10-13T03:38:58Z",
+      "finished_at": "2026-10-13T03:49:36Z"
+    },
+    {
+      "stage": "seed-cache-decision",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 2.2,
+      "started_at": "2026-10-13T03:49:59Z",
+      "finished_at": "2026-10-13T03:50:01Z"
+    },
+    {
+      "stage": "canonical-seed-whatsapp-content",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "started_at": "2026-10-13T03:50:01Z",
+      "finished_at": "2026-10-13T03:50:01Z"
+    },
+    {
+      "stage": "cloudbench-controller",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1387.4,
+      "started_at": "2026-10-13T03:44:24Z",
+      "finished_at": "2026-10-13T04:07:31Z"
+    },
+    {
+      "stage": "credential-health",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.6,
+      "started_at": "2026-10-13T04:12:33Z",
+      "finished_at": "2026-10-13T04:12:33Z"
+    },
+    {
+      "stage": "amplitude-live",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 8.9,
+      "started_at": "2026-10-13T04:12:33Z",
+      "finished_at": "2026-10-13T04:12:42Z"
+    },
+    {
+      "stage": "chat-router-failover-live",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 10.3,
+      "started_at": "2026-10-13T04:12:42Z",
+      "finished_at": "2026-10-13T04:12:52Z"
+    }
+  ],
+  "scope": "Frontend browser lifecycle reconciliation; existing finite lease and timeout preserved",
+  "owning_regressions": {
+    "observed_red_before_fix": true,
+    "passing_tests": 14,
+    "covered_by_current_full_frontend_suite": true
+  },
+  "full_frontend": {
+    "files": 154,
+    "passed": 2724,
+    "existing_skips": 3,
+    "line_coverage_percent": 83.28
+  },
+  "full_backend": {
+    "domains": 192,
+    "unit_files": 266,
+    "line_coverage_percent": 89.52
+  },
+  "full_agents": {
+    "domains": 110,
+    "unit_tests": 184
+  },
+  "cold_seed": {
+    "samples": 5,
+    "fidelity_verified": true,
+    "max_rss_mb": 156,
+    "unchanged_budget_mb": 228
+  },
+  "new_paid_kernel_reproduction": false,
+  "archived_originals_modified": false,
+  "controller": {
+    "utc": "2026-10-13T04:12:21.282214+00:00",
+    "checkout_sha": "8bef6949a416c197f1c06f5deb506862a9064f06",
+    "expected_source_sha": "8bef6949a416c197f1c06f5deb506862a9064f06",
+    "checkout_matches": true,
+    "agents_success_required_and_observed": true,
+    "canonical_stage": "bash scripts/run-deploy-stage cloudbench-controller -- bash .context/resume/sync-controller-native.sh",
+    "canonical_stage_exit": 0,
+    "native_steps": [
+      {
+        "step": 1,
+        "command": "bash scripts/tests/cloudbench-env.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-1.log",
+        "log_sha256": "a0ed657ac5ce29c912123ae0ac4e992d8a7a2ccd0b799b933091464d21e2604f"
+      },
+      {
+        "step": 2,
+        "command": "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-2.log",
+        "log_sha256": "121f29b82ed6607a9280267354fefc6b01a90d117963d920720de0375b17cdef"
+      },
+      {
+        "step": 3,
+        "command": "bash scripts/tests/fleet-infra-canary.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-3.log",
+        "log_sha256": "44a75b7b9a2cc3b4d86328012a812de873667fabf2ebbc447e4a5ae618811a5e"
+      },
+      {
+        "step": 4,
+        "command": "bash scripts/tests/fleet-infra-stability-proof.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-4.log",
+        "log_sha256": "1dd50ae4b938598da289d3aa1dc4d652b53497bbef31f5fc8e0610735e339e8c"
+      },
+      {
+        "step": 5,
+        "command": "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-5.log",
+        "log_sha256": "3a315533b81287472852b81ae89b89d0f42abf74b1503c45c2c62712388d3eb1"
+      },
+      {
+        "step": 6,
+        "command": "bash scripts/tests/cloudbench-multi-workstream.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-6.log",
+        "log_sha256": "6fde213112c51d9409feaf1d57d55b71c56bd291b9740677d843ec036ea11f56"
+      },
+      {
+        "step": 7,
+        "command": "bash scripts/tests/cloudbench-github-token.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-7.log",
+        "log_sha256": "e27068c6e88e6d5f85db3902ca539915fb03905289c1340ac838030971473a6f"
+      },
+      {
+        "step": 8,
+        "command": "bash scripts/tests/seed-dump-toolchain.test.sh",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-8.log",
+        "log_sha256": "9b396a0f0865d8822131c40684988df892fbf30e0708392a00ce78f584c2cb15"
+      },
+      {
+        "step": 9,
+        "command": "agents/venv/bin/python -m pytest -q agents/benchmarks/wall_clock_backstop_test.py",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-9.log",
+        "log_sha256": "bfa23c3c2b5379c534e461787eb8621f4f880b18f972071d8569e3a499b8ccdd"
+      },
+      {
+        "step": 10,
+        "command": "python3 scripts/tests/run-cloudbench-controller-linux.py --fixture status-service-shutdown",
+        "exit": 0,
+        "log_path": "/home/boxes/rose/.context/resume/sync-controller-step-10.log",
+        "log_sha256": "ef5a9f228e3a6496d66b56ea4ec908b94cec110f17413a13b9eae9ac277ebda4"
+      }
+    ],
+    "focused": {
+      "command": "agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py    agents/benchmarks/cloudbench_worker_snapshot_test.py    agents/benchmarks/cloudbench_recovery_review_test.py    agents/benchmarks/cloudbench_codex_auth_test.py    agents/benchmarks/cloud_batch_cleanup_test.py    -k 'fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary or cloudbench_codex_auth or autoscaler_runtime_handoff or prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or boot_payload or boot_launch_compresses_complete_payload or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or refresh_deps_applies_exact_workspace_before_rebuild or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or fresh_controller_reuses_only_proven_donor_dependencies or verified_legacy_snapshot or dependency_proof_publication or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers or pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper or exact_recovery_seals_actual_retained_owner_remote_evidence_paths or hub_transport or guest_shutdown_child_confirmation or exact_guest_recovery_archives_bound_child_token or exact_recovery_consumes_runtime_receipt_completed_absent_primary or exact_recovery_consumes_runtime_receipt_publishes_audited_release or fleet_lifecycle_receipt_requires_final_registry_retirement or watchdog_collects_cancelled_artifact_after_bounded_shutdown or terminal_projection_preserves_benchmark_outcome or boot_driver_state_write_failure or driver_cleanup_persists_evidence_in_fresh_data_directory or driver_cleanup_requires_current_stack_receipt_on_normal_completion or autoscaled_worker_uses_authenticated_fetch_ref_helper or terminal_projection_empty_tasks or terminal_projection_rejection_removes_all_artifacts or status_recovery_read_closes_descriptor or cloudbench_recovery_review or migration or migrated_registry or owned_worker_volume or composite_result_finalizes_each_exact_root or minted_dispatch_preserves_live_root_observer or evaluated_wrapper_completion_publishes_once or data_plane_mirror_reads_current_owner_port or fleet_publishes_evaluation_before_teardown or boot_terminal_runtime_evidence_collects_complete_logs or cloudbench_worker_snapshot or quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt'",
+      "exit": 0,
+      "summary": "453 passed, 593 deselected in 245.81s (0:04:05)"
+    },
+    "controller_linux": {
+      "command": "python3 scripts/tests/cloudbench-controller-linux.test.py",
+      "exit": 0,
+      "tests": 17
+    },
+    "cleanup": {
+      "previously_observed_owned_pids_absent": true,
+      "native_fixture_directory_absent": true,
+      "multi_workstream_terminal_isolation_assertion_passed": true,
+      "launcher_completed": true
+    },
+    "fly_allocations_started": false,
+    "new_paid_calls_started": false
+  },
+  "production_complete": false,
+  "group4_current_source": "pending",
+  "prior_production_semantic_run": 38333858624,
+  "prior_production_semantic_result": "failure; frontend correction requires fresh rollout verification",
+  "latest_local_primary_provider": {
+    "log_path": ".context/logs/backend.log",
+    "time_window": "2026-10-13T03:02Z..03:12Z",
+    "events": {
+      "cerebras_chat.hedge_branch_failed": 0,
+      "cerebras_chat.fallback_race_done": 1,
+      "cerebras_chat.pre_content_failover_to_waterfall": 0,
+      "cerebras.done": 39,
+      "direct_cerebras.done": 39,
+      "fast_cache.chat_router_hit": 0,
+      "fast_cache.chat_generator_hit": 0,
+      "fast_cache.chat_router_miss": 0,
+      "openrouter_fast_chat.end": 5,
+      "Streaming complete": 40,
+      "Response complete": 11
+    },
+    "models": {
+      "model:rose-labs/rose-1-flash": 40
+    },
+    "statuses": {},
+    "http402_mentions": 0,
+    "model_value_counts": {
+      "rose-labs/rose-1-flash": 40
+    },
+    "provider_value_counts": {},
+    "status_value_counts": {}
+  },
+  "sensitive_production_payment_evidence": "private; no raw transcripts or recordings published"
+}

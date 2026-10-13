@@ -111,6 +111,13 @@ const series = buildSeries(
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
   ],
   [
+    task('may-1', '2026-05-03T00:00:00.000Z'),
+    { ...task('may-2', '2026-05-20T00:00:00.000Z'), status: 'FAILED' },
+    task('may-outside-cohort', '2026-05-21T00:00:00.000Z', 'outside-user'),
+    task('jun-1', '2026-06-03T00:00:00.000Z'),
+    { ...task('jun-2', '2026-06-10T00:00:00.000Z'), status: 'FAILED' },
+  ],
+  [
     gmvRecord(1000, '2026-05-04T00:00:00.000Z'),
     gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'order_confirmation'),
     gmvRecord(3000, '2026-06-05T00:00:00.000Z'),
@@ -142,6 +149,11 @@ assert.deepStrictEqual(
   series.map((point) => point.taskCount),
   [2, 3],
   'Task metrics must exclude users outside the counted user cohort'
+);
+assert.deepStrictEqual(
+  series.map((point) => point.taskCompletionRate),
+  [0.6667, 0.5],
+  'Completion uses every real product task in its period even if the customer is no longer subscribed'
 );
 assert.deepStrictEqual(
   series.map((point) => point.gmvCents),
@@ -444,12 +456,24 @@ const benchmarkSeries = buildSeries(
   [
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
+  ],
+  [
+    task('cust-1', '2026-05-10T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
+    {
+      ...task('cust-2', '2026-05-11T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
+      status: 'FAILED',
+    },
   ]
 );
 assert.strictEqual(
   benchmarkSeries[0]?.taskCount,
   4,
   'Repeated internal benchmark goals collapse to one; distinct internal + all customer tasks count'
+);
+assert.deepStrictEqual(
+  benchmarkSeries.map((point) => point.taskCompletionRate),
+  [0.5, 0],
+  'Customer completions are never diluted by internal runs or deduped by goal text; empty usage is zero'
 );
 
 const retention = buildRetentionCohorts(
