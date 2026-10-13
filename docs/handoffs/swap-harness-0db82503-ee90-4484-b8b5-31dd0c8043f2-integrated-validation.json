@@ -1,5 +1,5 @@
 {
-  "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
+  "recorded_at_utc": "2026-10-13T07:36:43.898169+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
   "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
@@ -47,14 +47,14 @@
     },
     "agents_coverage": {
       "status": "pass",
-      "source": "e5184333cf23929968cc0bb46c66e09862f56c0c",
+      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
       "domains": 110,
       "fast_cache_tests": 184,
       "unit_tests": 134,
       "coverage_percent": 82,
-      "duration_seconds": 522,
+      "duration_seconds": 377.9,
       "exit_code": 0,
-      "exact_owner_absent": true
+      "source_changes_after_this_pass": "Only RCA count and independently reviewed source fingerprint registration; agents executable bytes unchanged."
     },
     "agentcard_sandbox": {
       "status": "pass",
@@ -73,6 +73,40 @@
       "owned_stage_controller_stack_absent": true,
       "approved_narrow_skip_flag_was_scoped_to_sandbox": true,
       "skip_was_not_needed": true
+    },
+    "backend_coverage_latest": {
+      "status": "fail",
+      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+      "domains_passed": 192,
+      "domains_failed": 1,
+      "unit_files_passed": 266,
+      "failed_domain": "browser-provider",
+      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
+      "coverage_threshold_result": "not reported because actual blackbox failed",
+      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
+      "root_cause": "open; no source fix or fresh GREEN yet"
+    },
+    "recovery_recipe_requalification": {
+      "status": "pass",
+      "source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
+      "independent_review_source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+      "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+      "checkout_inputs": 21,
+      "injected_controls": 15,
+      "boot_controls": 3,
+      "only_changed_recipe_input": "frontend existing coverage command prefixes actual application typecheck",
+      "reviewed_phases": [
+        "before-stack-launch",
+        "agent-network-index-bootstrap"
+      ],
+      "quiesced_tests_passed": 15,
+      "bootstrap_tests_passed": 27,
+      "benchmark_live_results_tests_passed": 572,
+      "existing_canonical_skips": 4,
+      "new_skips_or_selectors": false,
+      "all_exact_stage_owners_absent": true,
+      "earlier_RED_preserved": true,
+      "helpers_phase_authority_and_original_receipts_unchanged": true
     }
   },
   "focused_sms": {
@@ -95,8 +129,7 @@
     "provider_internal_parser_mechanism": "unproved"
   },
   "pending_required_inputs": [
-    "Exact proposed existing-schema native-field JSON decoder approval; object-string acceptance extends Python behavior.",
-    "Human-hosted Stripe saved-card fixture setup."
+    "Explicit approval of exact new native-field decoder; existing Rose.complete has no object decoder, so copy-only condition is unmet."
   ],
   "incoming_main": "9fcea8b67ee1f6cb1f35325ad5ee50755f8f8803",
   "incoming_frontend_verification": "pending normal integration then fresh frontend and semantic checks",
@@ -160,12 +193,12 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Latest main integration and affected source gates",
-    "Explicit native object-string decoder approval and focused SMS real pass",
-    "Human-hosted saved live card setup and strict production AgentCard",
+    "Live provider CDP repair and fresh full backend coverage",
+    "Exact decoder decision and focused SMS real pass",
+    "Fresh applicable integrated smoke/semantic checks",
     "Bounded immutable-head review",
     "Merge",
-    "Applicable production deployment lanes and full time scorecard"
+    "Applicable production deployment lanes, strict actual AgentCard benchmark and full time scorecard"
   ],
   "frontend_suppression_cleanup": {
     "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
@@ -249,5 +282,20 @@
     "exact_owned_root_and_services_teardown": "pass",
     "subsequent_terminal_extraction": "Fresh frontend coverage/build passed after equivalent pure-formatter move; semantic source remains explicitly bound to its earlier commit."
   },
-  "incoming_main_integration": "pending normal merge; browser-auth backend/agents changed; earlier backend/agents gates are not fresh proof of this incoming source."
+  "incoming_main_integration": "normal merge complete at56e1e7133; all ledgers retained; RCA index canonical count refreshed to852.",
+  "latest_integrated_source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
+  "production_payment_fixture": {
+    "status": "ready",
+    "read_only_prior_run_correlation": "three latest successful production agents match same dedicated107 payer and authoritative DB root",
+    "repair": "Restored only the dedicated fixture subscription pointer to its verified latest successful existing customer using compare-and-set and read-back.",
+    "saved_default_card_and_customer_membership": "verified",
+    "new_customers_during_repair": 0,
+    "new_Checkout_during_repair": 0,
+    "charges_during_repair": 0,
+    "human_card_entry_required": false,
+    "historical_deployed_Stripe_mode": "test",
+    "canonical_AgentCard_transfer_mode": "live required; unchanged",
+    "production_lane_after_merge": "still required; not yet run",
+    "prior_wrong_account_hosted_setup_request": "withdrawn; forced alternate live account did not match prior actual successful runs."
+  }
 }
