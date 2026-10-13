@@ -1,30 +1,26 @@
 {
-  "recorded_at_utc": "2026-10-13T08:20:33.006941+00:00",
+  "recorded_at_utc": "2026-10-13T09:04:15.364457+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
-  "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
-  "runtime_source": "508042952891e040a3b78c16b7ab63c26ec8d055",
+  "source_head": "1484e8b4e6dbce152354b519d26fc96293d32665",
+  "runtime_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
   "preserved_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
   "preserved_original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
   "production_deploy_complete": false,
   "current_integrated_gates": {
     "backend_coverage": {
-      "status": "running",
+      "status": "pass",
       "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "prior_transport_fix_complete_validation": {
-        "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
-        "status": "pass",
-        "domains_passed": 193,
-        "domains_failed": 0,
-        "unit_files_passed": 266,
-        "lines_percent": 89.54,
-        "branches_percent": 80.96,
-        "functions_percent": 92.58,
-        "normal_and_sigterm_teardown_gate": "pass",
-        "all_eight_recorded_owned_processes_absent": true,
-        "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
-      },
-      "coverage_threshold_result": "pending"
+      "domains_passed": 193,
+      "domains_failed": 0,
+      "unit_files_passed": 266,
+      "lines_percent": 89.55,
+      "statements_percent": 89.55,
+      "branches_percent": 80.97,
+      "functions_percent": 92.58,
+      "all_configured_thresholds_met": true,
+      "normal_and_sigterm_teardown_gate": "pass",
+      "all_eighteen_recorded_process_identities_absent_or_reused": true
     },
     "cloud_controller": {
       "status": "pass",
@@ -84,22 +80,18 @@
       "skip_was_not_needed": true
     },
     "backend_coverage_latest": {
-      "status": "running",
+      "status": "pass",
       "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "prior_transport_fix_complete_validation": {
-        "source": "34dd3573d8bf354ada45bc0bc4ce23febae8bf04",
-        "status": "pass",
-        "domains_passed": 193,
-        "domains_failed": 0,
-        "unit_files_passed": 266,
-        "lines_percent": 89.54,
-        "branches_percent": 80.96,
-        "functions_percent": 92.58,
-        "normal_and_sigterm_teardown_gate": "pass",
-        "all_eight_recorded_owned_processes_absent": true,
-        "later_main_integrated": "Fresh subsequent-source coverage running; earlier result retained with its exact source."
-      },
-      "coverage_threshold_result": "pending"
+      "domains_passed": 193,
+      "domains_failed": 0,
+      "unit_files_passed": 266,
+      "lines_percent": 89.55,
+      "statements_percent": 89.55,
+      "branches_percent": 80.97,
+      "functions_percent": 92.58,
+      "all_configured_thresholds_met": true,
+      "normal_and_sigterm_teardown_gate": "pass",
+      "all_eighteen_recorded_process_identities_absent_or_reused": true
     },
     "recovery_recipe_requalification": {
       "status": "pass",
@@ -122,6 +114,80 @@
       "all_exact_stage_owners_absent": true,
       "earlier_RED_preserved": true,
       "helpers_phase_authority_and_original_receipts_unchanged": true
+    },
+    "frontend_coverage_latest": {
+      "status": "pass",
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "files_passed": 157,
+      "tests_passed": 2725,
+      "existing_skips": 3,
+      "statements_percent": 81.03,
+      "branches_percent": 73.14,
+      "functions_percent": 81.36,
+      "lines_percent": 83.36,
+      "all_configured_thresholds_met": true,
+      "all_seven_recorded_process_identities_absent_or_reused": true
+    },
+    "static_final_integration": {
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "typescript_exit": 0,
+      "backend_structural_exit": 0,
+      "affected_importer_eslint_exit": 0,
+      "changed_backend_prettier_exit": 0,
+      "affected_lint_seeds": 48,
+      "approval_format_owning_exit": 0,
+      "agent_behavior_guard_exit": 0,
+      "trajectory_guard_exit": 0,
+      "prompt_guard": "pass; exact original approved bytes and code-only transport; classification proof private"
+    },
+    "recovery_recipe_continuity": {
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+      "checkout_inputs_unchanged": 21,
+      "injected_inputs_unchanged": 15,
+      "boot_inputs_unchanged": 3,
+      "independent_actual_native_helper_readback": "pass",
+      "committed_trusted_policy_covers_existing_two_phases": true,
+      "new_registration_required": false
+    },
+    "predeploy_smoke_latest": {
+      "status": "pass",
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "tasks_passed": 10,
+      "tasks_failed": 0,
+      "transient": 0,
+      "normal_batches": 2,
+      "duration_seconds": 1394.6,
+      "reported_benchmark_llm_cost_usd": 0.13,
+      "all_four_benchmark_and_stack_receipts": "token and birth verified clean",
+      "all_recorded_controllers_and_services_absent": true,
+      "kernel_allocations_reconciled": 5,
+      "native_kernel_closed": 5,
+      "e2b_allocations": 1,
+      "e2b_release": "Successful authenticated connect followed by same-instance awaited kill; SDK treats 2xx or 404 as terminal.",
+      "e2b_independent_current_get": "not performed; runtime credential hash not captured, no account guessed",
+      "e2b_raw_delete_status": "not captured; killed versus already absent not distinguished"
+    },
+    "agentcard_sandbox_latest": {
+      "status": "pass",
+      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "tasks_passed": 4,
+      "tasks_failed": 0,
+      "warnings": 0,
+      "skips": 0,
+      "stage_duration_seconds": 1040.9,
+      "reported_benchmark_llm_cost_usd": 0.05,
+      "provider_priced_usage_estimate_usd": 0.067195,
+      "cost_note": "Reported cents truncate/round differently; provider estimate is not a billed invoice. Infrastructure unmetered.",
+      "all_four_roots_deleted_and_tree_sealed": true,
+      "provider_cleanup_errors": 0,
+      "provider_cleanup_warnings": 0,
+      "provider_sessions_verified_absent": 5,
+      "benchmark_and_stack_receipts": "token-bound clean",
+      "all_recorded_controllers_absent": true,
+      "abandonment_transfer": "genuinely reclaimed, card closed; livemode false; refund succeeded",
+      "narrow_sandbox_warning_flag_scoped": true,
+      "approved_skip_was_not_needed": true
     }
   },
   "focused_sms": {
@@ -141,13 +207,14 @@
       }
     ],
     "observed_failure": "Native calls contain scalar and object strings despite correctly typed schemas; actual validation feedback did not repair encoding.",
-    "provider_internal_parser_mechanism": "unproved"
+    "provider_internal_parser_mechanism": "unproved",
+    "pending_decoder": "Exact snapshot0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad remains unapplied; needs explicit new decision."
   },
   "pending_required_inputs": [
     "Explicit approval of exact new native-field decoder; existing Rose.complete has no object decoder, so copy-only condition is unmet."
   ],
   "incoming_main": "9fcea8b67ee1f6cb1f35325ad5ee50755f8f8803",
-  "incoming_frontend_verification": "pending normal integration then fresh frontend and semantic checks",
+  "incoming_frontend_verification": "Fresh full application typecheck and all157coverage files pass on1484; fresh local semantic UI8pass and latency lane running.",
   "historic_semantic_and_e2b_source": "7cf5cbefd5d2480921af7cc1d46d4ba2d1bcfe4f",
   "historic_proof_is_not_current_changed_frontend_proof": true,
   "task_boundaries_preserved": [
@@ -208,12 +275,11 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Complete fresh backend/frontend coverage on final integrated source",
-    "Exact decoder decision and focused SMS real pass",
-    "Fresh applicable integrated smoke/semantic checks",
-    "Bounded immutable-head review",
+    "Explicit approval of new decoder; copy-only condition is unmet because Rose.complete rejects encoded object fields",
+    "Actual unchanged focused SMS3-task pass (current two0/3 failures retained)",
+    "Bounded current-head review",
     "Merge",
-    "Applicable production deployment lanes, strict actual AgentCard benchmark and full time scorecard"
+    "Applicable production lanes and final full time scorecard"
   ],
   "frontend_suppression_cleanup": {
     "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
@@ -371,5 +437,39 @@
     }
   },
   "incoming_main_latest_fetched": "b12f0ef0521766d65d1199f143fb5de54a7ac885",
-  "incoming_main_latest_integration": "Normal merge complete; exact c8/244 ancestry preserved; fresh backend/frontend coverage running."
+  "incoming_main_latest_integration": "Normal merge complete; exact c8/244 ancestry preserved; fresh backend/frontend coverage running.",
+  "fresh_semantics_latest": {
+    "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+    "ui_passed": 8,
+    "latency_passed": 5,
+    "skips": 0,
+    "ui_seconds": 40.6,
+    "latency_stage_seconds": 1541.5,
+    "latency_stage_includes_existing_isolated_benchmark_wait": true,
+    "playwright_duration_minutes": 9.6,
+    "paths": {
+      "direct_answer": {
+        "p50_ms": 813,
+        "max_ms": 859
+      },
+      "web_search": {
+        "p50_ms": 1844,
+        "max_ms": 2321
+      },
+      "agent_plan": {
+        "p50_ms": 649,
+        "max_ms": 802
+      },
+      "agent_execute": {
+        "p50_ms": 643,
+        "max_ms": 963
+      }
+    },
+    "all_smoothness": 1.0,
+    "root_teardown": "pass; exact root and all four recorded services absent; owned queue workers and required listeners zero; system PG and root database preserved"
+  },
+  "all_fresh_independent_continuation_gates_complete": true,
+  "all_current_continuation_owned_stacks_stopped": true,
+  "reported_benchmark_llm_cost_so_far_usd": 1.48,
+  "cost_coverage": "Reported benchmark cost_cents, including original attempts. Some direct API and infrastructure costs remain unmetered; provider estimates differ from rounded cents."
 }
