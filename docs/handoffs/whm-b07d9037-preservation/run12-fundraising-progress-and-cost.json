@@ -68,6 +68,34 @@
     ],
     "limitation": "Band placement is judgment based on original records, not an empirically calibrated fraction of work. Stage presence alone is insufficient for later bands; outreach volume, conversion, authorization and outstanding blockers must be reported. Scores may regress when evidence invalidates a milestone."
   },
+  "stallAndFixtureVerification": {
+    "scope": "Additional read-only inspection of original prediction records/final joined history and the replacement isolated restored fixture; no new trial",
+    "longFailedNativePredictions": 4,
+    "nativeElapsedSecondsRange": [979.678, 994.712],
+    "providerFailureObservation": "Four Foundry partial-output attempts ended with RoseDeadlineError: idle for120s; native HTTP500 records finish in the same terminal interval. Exact provider-to-native mapping and causal root remain unproven.",
+    "longFailedPredictionIntervalUtc": ["2026-10-12T23:17:36.315Z", "2026-10-12T23:34:11.027Z"],
+    "successfulPredictionsFinishedInThatIntervalAndPresentInFinalHistory": 7,
+    "successfulPredictionsFinishedAfterThoseFailuresAndPresentInFinalHistory": 32,
+    "wholeRunPermanentDeadlockObserved": false,
+    "progressLimitations": [
+      "37 of79 research attempts were partial, incomplete or unresolved",
+      "No attributable warm-introduction paths returned; this does not prove the fixture contains none",
+      "One intake blocked by required unknown company country",
+      "Current pitch-material authorization unresolved; no email follow-up cadence demonstrated"
+    ],
+    "run12SeedSourceDatabase": "wmh_fixture_source_20261012",
+    "run12SeedMessageLimit": 100000,
+    "originalRunSeedLogConfirms42910Messages": true,
+    "replacementRestoredDatabase": "whm_gen1_e9afcffd_fixture_20261012",
+    "replacementReadOnlyDatabaseCountsRechecked": {
+      "IMESSAGE": 23130,
+      "EMAIL": 10593,
+      "WHATSAPP": 9187,
+      "contacts": 2225,
+      "connectedIntegrations": 9
+    },
+    "fixtureState": "Correct frozen Tamy October12 full-history fixture was used by original Run12 and restored here; no new production refresh or duplicate paid run was performed"
+  },
   "providerSpendEstimate": {
     "azure_wmh": {
       "calls": 102,
