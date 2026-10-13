@@ -50,11 +50,14 @@ export const BACKFILL_RETRY_BASE_MS = 500;
 
 /**
  * A connected realtime channel can still lose an individual broadcast. After a
- * successful subscribe, keep reconciling an unfinished latest chat turn for a
- * short, bounded window so a missed canonical final-message INSERT is recovered
- * before the five-second user-visible lifecycle budget expires.
+ * successful subscribe, use a short burst of frequent snapshots, then reconcile
+ * pending turns at the regular fallback cadence until they complete. The burst
+ * is a latency optimization, not a limit on authoritative state recovery.
  */
-export const CONNECTED_COMPLETION_BACKFILL_MAX_ATTEMPTS = 9;
+export const CONNECTED_COMPLETION_BACKFILL_FAST_ATTEMPTS = 9;
 
-/** Cadence for the bounded connected-channel completion reconcile (ms). */
+/** Cadence for the initial connected-channel completion reconcile burst (ms). */
 export const CONNECTED_COMPLETION_BACKFILL_POLL_MS = 600;
+
+/** Finite resource budget for recovering a selected chat turn's missed broadcasts. */
+export const CONNECTED_COMPLETION_BACKFILL_WINDOW_MS = 150000;
