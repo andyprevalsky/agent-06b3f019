@@ -28,7 +28,17 @@ terminal; it does not render Markdown, so write every field as a plain label
 (`What failed:`, not bold) and never put headings, tables, or Markdown links
 inside it. The sections below show field labels in bold only to define them.
 
-Inside the block, `Before:` and `After:` are always the first two items,
+Use the same visual styling as `/deploy` Step 15 and the benchmark scorecard:
+64-column `━` outer borders, `─` section separators, a `🔐 APPROVAL` header,
+the approval ID/subject, and `⏳ AWAITING DECISION`. Keep the six required labels
+and their order exactly; the frame is decoration, not another content section.
+Apply this styling to every approval from `/RCA`, `/deploy`, `/descend`, or other
+skills that reference this file. Use one approval block per snapshot decision.
+Show actual start/block timestamps and elapsed ages when reporting a pending
+approval in the parent benchmark card. Continue independent authorized work;
+presentation does not create additional approval gates.
+
+Inside the frame, `Before:` and `After:` are always the first two content items,
 followed by `TL;DR:`, `Evidence:`, `Detail:`, `Downstream:`, and the response
 syntax. The whole message for one approval has exactly this shape (the outer
 four-backtick fence only delimits the example):
@@ -37,17 +47,19 @@ four-backtick fence only delimits the example):
 ### <approval-id> · <one-line subject>
 
 ```text
-APPROVAL <approval-id> — <one-line subject>
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔐 APPROVAL <approval-id> · ⏳ AWAITING DECISION
+ <one-line subject>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Before:
   <observable behavior before the change or action>
-
+────────────────────────────────────────────────────────────────
 After:
   <the same trigger and ordering after the change or action>
-
+────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence>
-
+────────────────────────────────────────────────────────────────
 Evidence:
   What failed: When <the agent doing the task goal>, <it reached this step or
     site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
@@ -70,19 +82,20 @@ Evidence:
       `<live_fixtures or none>`
     Task prompt:
       <full exact task.prompt with every line and character preserved>
-
+────────────────────────────────────────────────────────────────
 Detail:
   <why the change is needed, first-bad boundary, unchanged test before/after>
   Snapshot: <approval snapshot ID or Git SHA>
   Scope: <path:line> — <hunk summary>   (one line per in-scope hunk)
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
-
+────────────────────────────────────────────────────────────────
 Downstream:
   <users, agents, services, data, cost, security, rollback, 10k-agent impact>
-
+────────────────────────────────────────────────────────────────
 Approve: <approval-id> approve
 Reject:  <approval-id> reject: <reason>
 Edit:    <approval-id> edit: <instruction>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 - **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
