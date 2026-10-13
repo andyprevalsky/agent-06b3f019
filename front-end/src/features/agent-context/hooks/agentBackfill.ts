@@ -1,5 +1,8 @@
 import type React from 'react';
 import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
+import type { InsertMessagePayload } from '@/lib/realtime';
+
+import { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 
 import { fetchAgentDetail } from '../api';
 import { isChatCapableAgent } from './realtimeHandlers';
@@ -61,6 +64,28 @@ export interface CompletionBackfillLease {
   agentId: string;
   turnId: string | null;
   expiresAt: number;
+  browserTaskIds?: Set<string>;
+}
+
+/** Grant one finite recovery window per newly observed browser lifecycle. */
+export function registerBrowserBackfillTask(
+  leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
+  agentId: string,
+  taskId: string,
+): boolean {
+  if (leaseRef.current?.agentId !== agentId) {
+    leaseRef.current = {
+      agentId,
+      turnId: null,
+      expiresAt: Date.now() + CONNECTED_COMPLETION_BACKFILL_WINDOW_MS,
+    };
+  }
+  const lease = leaseRef.current;
+  lease.browserTaskIds ??= new Set();
+  if (lease.browserTaskIds.has(taskId)) return false;
+  lease.browserTaskIds.add(taskId);
+  lease.expiresAt = Date.now() + CONNECTED_COMPLETION_BACKFILL_WINDOW_MS;
+  return true;
 }
 
 /** A stalled read must release its owner even if the transport ignores abort. */
@@ -81,6 +106,7 @@ async function fetchCompletionSnapshot(agentId: string, timeoutMs: number) {
 }
 
 interface PostSubscribeBackfillDeps {
+  observedMessages?: () => Message[];
   selectedAgentId: string;
   isCancelled: () => boolean;
   isCurrentAgent: () => boolean;
@@ -97,6 +123,7 @@ interface PostSubscribeBackfillDeps {
  */
 export async function runPostSubscribeBackfill({
   selectedAgentId,
+  observedMessages = () => [],
   isCancelled,
   isCurrentAgent,
   leaseRef,
@@ -142,7 +169,18 @@ export async function runPostSubscribeBackfill({
         lease.expiresAt = Date.now() + CONNECTED_COMPLETION_BACKFILL_WINDOW_MS;
         lease.turnId = turnId;
       }
-      if (!latestChatTurnNeedsCompletionBackfill(data)) break;
+      // An INSERT can arrive before its snapshot is visible. Preserve those
+      // observations when deciding whether recovery has finished, just as the
+      // message setter preserves realtime-only messages during hydration.
+      const messagesById = new Map(
+        observedMessages().map((message) => [message.message_id, message]),
+      );
+      data.messages.forEach((message) => messagesById.set(message.message_id, message));
+      const activeBrowsers = computeActiveBrowserPanels([...messagesById.values()]);
+      for (const { taskId } of activeBrowsers) {
+        registerBrowserBackfillTask(leaseRef, selectedAgentId, taskId);
+      }
+      if (!latestChatTurnNeedsCompletionBackfill(data) && activeBrowsers.length === 0) break;
     } catch (error) {
       if (isCancelled()) return;
       consecutiveFailures += 1;
@@ -161,4 +199,47 @@ export async function runPostSubscribeBackfill({
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     if (isCancelled()) return;
   }
+}
+
+/** Subscription and browser lifecycle events share one scoped read owner. */
+export function createCompletionBackfillOwner(
+  deps: Omit<PostSubscribeBackfillDeps, 'observedMessages'>,
+) {
+  let recovering = false;
+  let requested = false;
+  const observedBrowserMessages = new Map<string, Message>();
+  const reconcile = async () => {
+    requested = true;
+    if (recovering || deps.isCancelled() || !deps.isCurrentAgent()) return;
+    recovering = true;
+    try {
+      // A new init can arrive as the previous loop is returning. Retain its
+      // demand across that await boundary without creating a second reader.
+      do {
+        requested = false;
+        await runPostSubscribeBackfill({
+          ...deps,
+          observedMessages: () => [...observedBrowserMessages.values()],
+        });
+      } while (requested && !deps.isCancelled() && deps.isCurrentAgent());
+    } finally {
+      recovering = false;
+    }
+  };
+  const observeBrowserInsert = (data: InsertMessagePayload) => {
+    const message: Message = {
+      message_id: data.id,
+      timestamp: data.timestamp,
+      text: data.text,
+      role: data.role,
+      metadata: data.metadata ?? undefined,
+    };
+    observedBrowserMessages.set(message.message_id, message);
+    const task = computeActiveBrowserPanels([message])[0];
+    // Only a new init grants a window; duplicates/progress cannot renew it.
+    if (task && registerBrowserBackfillTask(deps.leaseRef, deps.selectedAgentId, task.taskId)) {
+      void reconcile();
+    }
+  };
+  return { reconcile, observeBrowserInsert };
 }
