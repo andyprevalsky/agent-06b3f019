@@ -120,7 +120,7 @@ fi
 
 if [[ "${1:-}" == "stability-proof" ]]; then
     shift
-    benchmark_agent_instructions
+    benchmark_agent_instructions >&2
     exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
         --capability "$@"
 fi
