@@ -115,6 +115,14 @@ box/active agent survives, or a previous replacement is explicitly unavailable,
 record that disposition and use one deliberate new generation key. Never
 target a Template box using an archived child's rebound execution identity.
 
+If confirmed failures persist on the old box's managed start route, freeze its
+starts and publish the exact nonsecret continuation prompt plus failed-child
+receipts in the PR. The coordinator may own one supported new-box start from
+that complete checkpoint with a deliberate coordinator key. Record the change
+of launch owner; only that owner supervises the child. The old worker still
+owns preservation and old-box closeout. Do not start concurrently from both
+boxes or claim to know an underlying cause hidden by a generic startup error.
+
 Observe through managed list/read/wait/result and the PR until the receipt
 proves correct checkout, handoff reading and meaningful continuation. Avoid
 unnecessary queued messages. If setup fails, user input is required, or the
@@ -124,7 +132,14 @@ report the precise blocker. Do not recurse into another swap.
 ## Archive old box
 
 Verify no unsaved task source remains and owned resources are retired or
-transferred. Append replacement links and verified receipt to the handoff;
+transferred through a usable supported control path. A custody acknowledgement
+does not clear an original-host dependency: if canonical capture/recovery only
+admits the old host, finish that narrow action there after its task's required
+review/gates, preserve its late output, and obtain replacement readback before
+archival. Never transplant old `.git`, host/PID/birth identity or live runtime
+configuration into the new box to bypass a foreign-host refusal.
+
+Append replacement links and verified receipt to the handoff;
 record intended archival before issuing it. If the coordinator created this
 old box, it should request `box destroy --devbox <returned-old-devbox-id>`.
 Otherwise the worker on the old box may request its own `box destroy --json`
