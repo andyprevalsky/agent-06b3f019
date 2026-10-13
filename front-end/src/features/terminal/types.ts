@@ -64,10 +64,7 @@ export interface DripControls {
 
 // ── Browser panel ─────────────────────────────────────────────────────────
 
-export interface BrowserPanelData {
-  taskId: string;
-  browserUrl: string;
-}
+export type { BrowserPanelData } from '@/lib/browserPanelLifecycle';
 
 // ── Approval state ────────────────────────────────────────────────────────
 

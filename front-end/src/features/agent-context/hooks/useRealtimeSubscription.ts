@@ -15,7 +15,7 @@ import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { MAX_RECONNECT_DELAY_MS } from '../config';
-import { runPostSubscribeBackfill, type CompletionBackfillLease } from './agentBackfill';
+import { createCompletionBackfillOwner, type CompletionBackfillLease } from './agentBackfill';
 import {
   handleInsertMessage,
   handleUpdateAgent,
@@ -68,6 +68,7 @@ function createRealtimeHandlers(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
   scheduleReconnect: () => void,
+  onBrowserMessage: (message: InsertMessagePayload) => void,
 ): AgentHandlers {
   const active = () => isScopeActive(deps, scope);
   const current = () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope);
@@ -94,6 +95,9 @@ function createRealtimeHandlers(
           if (active()) deps.dispatchMessage(message);
         },
       });
+      if (data.agentId === scope.agentId && data.metadata?.toolName === 'spawn_browser_agent') {
+        onBrowserMessage(data);
+      }
     },
     onUpdate: (updated: UpdateAgentPayload) => {
       if (!active()) return;
@@ -160,10 +164,17 @@ async function connectRealtime(
   scheduleReconnect: () => void,
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
 ): Promise<void> {
+  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner({
+    ...deps,
+    selectedAgentId: scope.agentId,
+    isCancelled: () => !isScopeActive(deps, scope),
+    isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+    leaseRef,
+  });
   try {
     const channel = await subscribeToAgent(
       scope.agentId,
-      createRealtimeHandlers(deps, scope, scheduleReconnect),
+      createRealtimeHandlers(deps, scope, scheduleReconnect, observeBrowserInsert),
     );
     if (!isScopeActive(deps, scope)) {
       unsubscribe(channel);
@@ -172,16 +183,7 @@ async function connectRealtime(
     deps.channelRef.current = channel;
     deps.reconnectAttemptRef.current = 0;
     deps.isReconnectingRef.current = false;
-    await runPostSubscribeBackfill({
-      selectedAgentId: scope.agentId,
-      isCancelled: () => !isScopeActive(deps, scope),
-      isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
-      leaseRef,
-      initialLoadDoneRef: deps.initialLoadDoneRef,
-      setMessages: deps.setMessages,
-      setAgent: deps.setAgent,
-      setIsChatMode: deps.setIsChatMode,
-    });
+    await reconcile();
   } catch (error) {
     if (!isScopeActive(deps, scope)) return;
     console.error('Failed to subscribe:', error);
