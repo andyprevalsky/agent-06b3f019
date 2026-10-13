@@ -17,6 +17,7 @@ import {
 } from './metrics';
 import * as costRepo from './costRepo';
 import * as repo from './repo';
+import { findProductRootTasksBetween } from './repoProductUsage';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
 import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
 import type { AdminHealthPeriod, AdminHealthResponse, AdminHealthTimeSlice } from './types';
@@ -102,6 +103,7 @@ async function fetchInputs(
     );
   const [
     tasks,
+    productTasks,
     rootAgentRuns,
     rootAgentRunUsage,
     firstTasks,
@@ -116,6 +118,7 @@ async function fetchInputs(
     gmvRecords,
   ] = await Promise.all([
     repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
+    findProductRootTasksBetween(historyStart, historyEnd),
     costRepo.findRootAgentRunsBetween(historyStart, historyEnd),
     costRepo.findRootAgentRunUsageBetween(historyStart, historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
@@ -135,6 +138,7 @@ async function fetchInputs(
   ]);
   return {
     tasks,
+    productTasks,
     rootAgentRuns,
     rootAgentRunUsage,
     firstTasks,
@@ -166,6 +170,7 @@ async function loadAdminHealth(
     input.subscribers,
     input.revenue,
     input.velocity.buckets,
+    input.productTasks,
     input.gmvRecords,
     input.rootAgentRuns,
     input.rootAgentRunUsage
