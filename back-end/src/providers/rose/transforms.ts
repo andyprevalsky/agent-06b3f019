@@ -363,7 +363,8 @@ function discriminatorName(toolField: JsonSchema | undefined): string | null {
  * dropped from the input schema. Returns null when the schema doesn't fit.
  */
 export function extractToolsFromResponseFormat(
-  responseFormat?: ResponseFormat | null
+  responseFormat?: ResponseFormat | null,
+  anthropic = true
 ): ExtractedTools | null {
   if (!responseFormat) return null;
   const jsonSchema = responseFormat.json_schema;
@@ -410,7 +411,12 @@ export function extractToolsFromResponseFormat(
     tools.push({
       name: toolName,
       description,
-      input_schema: relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema)),
+      input_schema: anthropic
+        ? relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema))
+        : inputSchema,
+      ...(!anthropic && typeof jsonSchema.strict === 'boolean'
+        ? { strict: jsonSchema.strict }
+        : {}),
     });
   }
 
@@ -426,11 +432,12 @@ export function extractToolsFromResponseFormat(
  */
 export function withNativeToolContract(options: CompletionOptions): CompletionOptions {
   if (!options.response_model || options.tools !== undefined) return options;
-  const extracted = extractToolsFromResponseFormat(options.response_format);
+  const extracted = extractToolsFromResponseFormat(options.response_format, false);
   if (!extracted) return options;
   return {
     ...options,
     tools: extracted.tools,
+    anthropic_tools: extractToolsFromResponseFormat(options.response_format)?.tools,
     tool_choice: options.tool_choice ?? 'any',
     response_format: undefined,
   };

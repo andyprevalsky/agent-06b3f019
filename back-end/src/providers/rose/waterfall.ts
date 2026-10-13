@@ -37,6 +37,7 @@ interface WaterfallOptions {
   providerFastMode?: boolean;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
+  anthropicTools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }
 
@@ -49,6 +50,7 @@ export function buildOpenRouterBody(opts: {
   providerFastMode?: boolean;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
+  anthropicTools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
@@ -74,7 +76,9 @@ export function buildOpenRouterBody(opts: {
   if (opts.providerFastMode === true) body.speed = 'fast';
   // OpenAI chat function shape, whichever shape the caller supplied; tool_choice
   // only accompanies declared tools (mirrors build_openrouter_body).
-  const tools = openAiChatTools(opts.tools);
+  const modelTools =
+    opts.model.startsWith('anthropic/') && opts.anthropicTools ? opts.anthropicTools : opts.tools;
+  const tools = openAiChatTools(modelTools);
   if (tools) {
     body.tools = tools;
     if (opts.toolChoice !== undefined) {
@@ -113,6 +117,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       providerFastMode: opts.providerFastMode,
       reasoningEffort,
       tools: opts.tools,
+      anthropicTools: opts.anthropicTools,
       toolChoice: opts.toolChoice,
     });
 

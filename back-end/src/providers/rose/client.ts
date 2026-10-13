@@ -672,6 +672,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             poolSpec,
             messages: opts.options.messages,
             ...openAiToolFields,
+            anthropicTools: toolOptions.anthropic_tools,
             temperature: opts.options.temperature,
             maxTokens: opts.options.max_tokens,
             reasoningEffort: opts.options.effort,

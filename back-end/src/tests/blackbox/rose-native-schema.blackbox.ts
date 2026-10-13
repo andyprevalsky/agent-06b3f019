@@ -114,11 +114,12 @@ async function verifyResponsesWire(): Promise<void> {
   let requests = 0;
   globalThis.fetch = async (input, init) => {
     const body = record(JSON.parse(String(init?.body)));
-    if (requests === 1) {
+    if (requests >= 1) {
       assert.equal(String(input), 'https://openrouter.ai/api/v1/chat/completions');
       const anthropicTools = extractToolsFromResponseFormat(SUPERVISOR_RESPONSE_SCHEMA)!.tools;
       assert.deepEqual(body.tools, openAiChatTools(anthropicTools));
       assert.equal(Object.hasOwn(body, 'anthropicTools'), false);
+      assert.equal(Object.hasOwn(body, 'anthropic_tools'), false);
       assert.equal(body.response_format, undefined);
       assert.equal(body.tool_choice, 'required');
       requests++;
@@ -134,6 +135,7 @@ async function verifyResponsesWire(): Promise<void> {
     }
     assert.equal(String(input), 'https://a-4989-resource.openai.azure.com/openai/v1/responses');
     verifySchemas(body.tools, true);
+    assert.equal(Object.hasOwn(body, 'anthropic_tools'), false);
     assert.equal(body.tool_choice, 'required');
     assert.equal(body.text, undefined);
     requests++;
@@ -162,16 +164,20 @@ async function verifyResponsesWire(): Promise<void> {
     delete process.env.AZURE_FOUNDRY_API_KEY;
     process.env.OPENROUTER_API_KEY = 'test-key';
     calls.length = 0;
-    for await (const chunk of await createStreamingCompletion({
-      ...options,
-      model: 'rose-labs/rose-1-mini',
-      response_format: undefined,
-    })) {
-      calls.push(...(chunk.choices[0]?.delta.tool_calls ?? []));
+    for (const provider_route of [undefined, 'openrouter-waterfall'] as const) {
+      calls.length = 0;
+      for await (const chunk of await createStreamingCompletion({
+        ...options,
+        model: 'rose-labs/rose-1-mini',
+        response_format: undefined,
+        provider_route,
+      })) {
+        calls.push(...(chunk.choices[0]?.delta.tool_calls ?? []));
+      }
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].function.name, 'attempt_completion');
     }
-    assert.equal(requests, 2);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].function.name, 'attempt_completion');
+    assert.equal(requests, 3);
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(originalEnv)) {

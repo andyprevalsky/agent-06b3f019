@@ -195,3 +195,38 @@ None recorded.
 Never let a decision-making orchestrator inherit a shared speed pool's model without a gate that
 replays its captured decisions, because pool retargets justified by chat latency silently change
 whether it retrieves, delegates, or asks the user.
+
+
+## Native schema review follow-up (2026-10-13)
+
+The resumed deploy's owning regression exposed a second projection defect:
+Anthropic nullable-schema cleanup ran before OpenAI dialect selection, dropping
+required nullable fields, and native projection lost the caller's strict flag.
+`rose-native-schema` failed on the preserved runtime: `reply_to_agent` lost the
+null alternatives and required entries for `attention_request_id` and `reject`.
+The exact same assertions passed after separating raw native extraction from
+Anthropic cleanup. These are offline request-construction results, not live
+provider or benchmark outcome proof.
+
+Native tools, forced tool choice, explicit tools (including `[]`), plain response
+models, and direct Anthropic behavior remain preserved. The user approved the
+wire correction conditional on retaining the behavior derived in Python
+`Rose.complete`; Python provider source is unchanged. The caller's existing
+OpenAI strictness and parameter schemas now survive TS native extraction; this
+is not byte parity with Python's separate per-tool strict policy.
+
+Adversarial review caught the exclusive OpenRouter entry point bypassing the
+Anthropic compatibility schemas. An added wire assertion failed on that path;
+internal options now carry the unchanged Anthropic schemas through normal,
+exclusive, and nested Cerebras waterfall calls. Both wire assertions then pass.
+The compatibility metadata is never serialized into provider request bodies.
+Explicit caller tools do not acquire a derived override.
+
+The compact regression is automatically discovered by the backend coverage
+blackbox gate. It checks all nine real supervisor argument schemas and their
+descriptions, strict true/false/absent, explicit tool precedence, caller
+immutability, Responses wire construction, and normal/exclusive Anthropic
+waterfall compatibility. At 10,000 agents the change remains bounded by each
+request's tool count, with no shared state, new network request, polling loop,
+or persistent resource. Applicable integrated deploy gates and live production
+verification remain required.
