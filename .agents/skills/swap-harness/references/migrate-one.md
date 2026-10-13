@@ -166,6 +166,13 @@ machine deletion started; a null `devboxId` only confirms no attached routing
 identity. Verify terminal shutdown/deletion using a supported authoritative
 lifecycle/provider read or an authenticated UI that explicitly reports it.
 Save the old devbox ID, observed terminal state, UTC time and evidence source.
+The signed-in owner's normal application client can read
+`threadForkDestroyCold:listForkDestroyOperationsForPrimaryViewer`. Match each
+exact `sourceExecutionInstanceId`; require `status: completed`, `stage: done`,
+a completion timestamp and no last error. Confirm the old IDs are absent from
+`instances:getByIdsForViewer`. This is a verified terminal route when the
+managed CLI lacks another-box status. Use the authorized account session,
+not arbitrary daemon-token endpoints; do not extract or print browser tokens.
 If those tools do not expose terminal state, report preservation and
 continuation as verified but keep teardown verification pending. Do not wake
 or start a thread on the old box as a status probe, or infer shutdown from an
@@ -177,6 +184,12 @@ box messages cancel pending destruction; continue conversations on the new box.
 For an explicit cleanup-label request, label accessible stale threads before
 archival. Current-thread title commands cannot edit other or archived threads;
 those require an authenticated UI or another supported title-edit capability.
+The normal signed-in owner client uses
+`desktopAgentState:setThreadTitleOverride` with the thread record's primary
+`instanceId`, `clientThreadId` and exact requested `title`. Verify owner/project
+identity first and read the canonical title back; check storage and execution
+identity remain unchanged. This updates metadata without restoring a machine.
+An archived thread's primary project anchor is not its old devbox routing ID.
 Do not wake or restore an archived box to label it. Preserve the intended
 `NEDS cleanup` label and original title in the coordinator record and report
 unapplied labels separately from verified replacement-title changes.

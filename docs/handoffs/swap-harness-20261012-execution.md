@@ -1,6 +1,6 @@
 # /swap-harness execution, October 12–13, 2026
 
-Preservation and continuation verified 2026-10-13T00:56:25.120718+00:00. All six original task threads and migration helpers are archived. Each has one surviving fresh Codex continuation with a remotely verified meaningful resume receipt. Archival proves history saved and machine deletion started. Terminal devbox shutdown/deletion remains unverified; teardown verification is pending.
+Preservation and continuation verified 2026-10-13T00:56:25.120718+00:00. All six original task threads and migration helpers are archived. Each has one surviving fresh Codex continuation with a remotely verified meaningful resume receipt. Authenticated account lifecycle verification now confirms all six original destruction operations completed with stage done, exact original IDs, completion timestamps and no errors. All six original instances are absent from the owner instance lookup. See [terminal shutdown and title receipts](swap-harness-20261012-teardown.json).
 
 ## Preservation and continuation
 
@@ -8,12 +8,12 @@ Original nonsecret task source is saved in the task PR checkpoints, including di
 
 | Task | Source PRs | Fresh Codex thread | Old box |
 | --- | --- | --- | --- |
-| Tamy Whatsapp Bug | [#1473](https://github.com/Rose-Ai-Labs/rose/pull/1473) | [Open](https://boxes.dev/thread/thr_87085cb874ce4cbca5c4ceac73cb6e90) | Threads archived; shutdown unverified |
-| State injection RCA | [#1477](https://github.com/Rose-Ai-Labs/rose/pull/1477) | [Open](https://boxes.dev/thread/thr_d9204167e68b42ad90dc6c9acfcf1956) | Threads archived; shutdown unverified |
-| Benchmark Infra | [#1483](https://github.com/Rose-Ai-Labs/rose/pull/1483), [#1479](https://github.com/Rose-Ai-Labs/rose/pull/1479), [#1480](https://github.com/Rose-Ai-Labs/rose/pull/1480), [#1481](https://github.com/Rose-Ai-Labs/rose/pull/1481), [#1482](https://github.com/Rose-Ai-Labs/rose/pull/1482), [#1478](https://github.com/Rose-Ai-Labs/rose/pull/1478) | [Open](https://boxes.dev/thread/thr_0bcbcf7b53c84ee79ab4d3d902c6a0df) | Threads archived; shutdown unverified |
-| Polar | [#1484](https://github.com/Rose-Ai-Labs/rose/pull/1484), [#1485](https://github.com/Rose-Ai-Labs/rose/pull/1485), [#1444](https://github.com/Rose-Ai-Labs/rose/pull/1444) | [Open](https://boxes.dev/thread/thr_9d7c57222ef64bd18517755add85dfa0) | Threads archived; shutdown unverified |
-| WHM | [#1453](https://github.com/Rose-Ai-Labs/rose/pull/1453) | [Open](https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa) | Threads archived; shutdown unverified |
-| Browser root model pool | [#1486](https://github.com/Rose-Ai-Labs/rose/pull/1486) | [Open](https://boxes.dev/thread/thr_b0023bc5be834a46a65055ea2f6314b1) | Threads archived; shutdown unverified |
+| Tamy Whatsapp Bug | [#1473](https://github.com/Rose-Ai-Labs/rose/pull/1473) | [Open](https://boxes.dev/thread/thr_87085cb874ce4cbca5c4ceac73cb6e90) | Destroyed; NEDS cleanup label |
+| State injection RCA | [#1477](https://github.com/Rose-Ai-Labs/rose/pull/1477) | [Open](https://boxes.dev/thread/thr_d9204167e68b42ad90dc6c9acfcf1956) | Destroyed; NEDS cleanup label |
+| Benchmark Infra | [#1483](https://github.com/Rose-Ai-Labs/rose/pull/1483), [#1479](https://github.com/Rose-Ai-Labs/rose/pull/1479), [#1480](https://github.com/Rose-Ai-Labs/rose/pull/1480), [#1481](https://github.com/Rose-Ai-Labs/rose/pull/1481), [#1482](https://github.com/Rose-Ai-Labs/rose/pull/1482), [#1478](https://github.com/Rose-Ai-Labs/rose/pull/1478) | [Open](https://boxes.dev/thread/thr_0bcbcf7b53c84ee79ab4d3d902c6a0df) | Destroyed; NEDS cleanup label |
+| Polar | [#1484](https://github.com/Rose-Ai-Labs/rose/pull/1484), [#1485](https://github.com/Rose-Ai-Labs/rose/pull/1485), [#1444](https://github.com/Rose-Ai-Labs/rose/pull/1444) | [Open](https://boxes.dev/thread/thr_9d7c57222ef64bd18517755add85dfa0) | Destroyed; NEDS cleanup label |
+| WHM | [#1453](https://github.com/Rose-Ai-Labs/rose/pull/1453) | [Open](https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa) | Destroyed; NEDS cleanup label |
+| Browser root model pool | [#1486](https://github.com/Rose-Ai-Labs/rose/pull/1486) | [Open](https://boxes.dev/thread/thr_b0023bc5be834a46a65055ea2f6314b1) | Destroyed; NEDS cleanup label |
 
 ## Immutable handoffs and receipts
 
@@ -42,9 +42,13 @@ Preserve full worktrees/stashes/ignored source before continuation. Verify decry
 
 The platform has now exposed `devboxId` in managed project-scoped listings. A fresh complete listing returned the six replacements' exact saved IDs, while all six originals and their helpers are archived with `devboxId: null`. The previously requested routing-discovery capability is now available, and the skill's existing helper already consumes that field. This execution used original-filesystem Codex helpers independently started by the user before the field became available.
 
-## Terminal devbox shutdown verification pending
+## Terminal shutdown and thread titles verified
 
-The user explicitly requires confirmation that the original devboxes were spun down. At 2026-10-13T01:15:24.651526+00:00, a fresh complete supported project listing confirms all original threads/helpers archived and detached from devbox routing; it does not expose provider state or a completed destruction timestamp. All six replacement IDs still match their saved launch receipts. Installed documentation explicitly states archival only proves history saved and machine deletion started. `box status` reports only the current box kind; `box status --devbox <old-id>` is rejected as an unknown command. The shared Browser pane is still at sign-in, so no authenticated UI lifecycle observation is available. No originals were messaged or woken, and no replacement was destroyed. Complete preservation and meaningful continuation remain verified; final physical shutdown is not claimed until an authoritative lifecycle/provider result is available.
+After the user signed into boxes.dev in the shared Browser pane, the official authenticated application client exposed the completed destruction operations. Each exact `sourceExecutionInstanceId` matches an original devbox; all six operations are `status: completed`, `stage: done`, have a completion timestamp and no last error. The exact original instance lookup is empty. This confirms shutdown completed; archival alone was not used as proof.
+
+The six replacements now have their original canonical titles. Six archived source threads, six archived migration helpers, the obsolete partial WHM replacement and three unplaced failed-start records received `NEDS cleanup - ...` labels through the normal owner title-metadata update. Canonical readback confirmed each title and unchanged archival/execution identity. Subsequently the three failed-start records became unavailable and absent from the project listing; they were not recreated. All 19 remaining titles match both canonical owner reads and the complete managed project listing. No old machine was woken or restored, no replacement was destroyed, and excluded tasks were untouched. There is one surviving live WHM replacement; its two extra startup rows never received a devbox.
+
+[Exact lifecycle operations, timestamps and title receipts](swap-harness-20261012-teardown.json).
 
 ## Credential diagnostic incident
 
