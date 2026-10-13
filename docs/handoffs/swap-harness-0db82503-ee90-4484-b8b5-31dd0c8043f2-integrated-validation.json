@@ -208,11 +208,9 @@
     ],
     "observed_failure": "Native calls contain scalar and object strings despite correctly typed schemas; actual validation feedback did not repair encoding.",
     "provider_internal_parser_mechanism": "unproved",
-    "pending_decoder": "Exact snapshot0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad remains unapplied; needs explicit new decision."
+    "pending_decoder": "SET_ASIDE_NOT_APPLIED. Exact snapshot0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad is preserved privately. User's copy-only Rose.complete condition remains; no broader decoder approval is being pursued."
   },
-  "pending_required_inputs": [
-    "Explicit approval of exact new native-field decoder; existing Rose.complete has no object decoder, so copy-only condition is unmet."
-  ],
+  "pending_required_inputs": [],
   "incoming_main": "9fcea8b67ee1f6cb1f35325ad5ee50755f8f8803",
   "incoming_frontend_verification": "Fresh full application typecheck and all157coverage files pass on1484; fresh local semantic UI8pass and latency lane running.",
   "historic_semantic_and_e2b_source": "7cf5cbefd5d2480921af7cc1d46d4ba2d1bcfe4f",
@@ -275,7 +273,7 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Explicit approval of new decoder; copy-only condition is unmet because Rose.complete rejects encoded object fields",
+    "Repair the native SMS failure within the existing Rose.complete behavior and the user's exact-diff boundaries; broader decoder proposal has been set aside",
     "Actual unchanged focused SMS3-task pass (current two0/3 failures retained)",
     "Bounded current-head review",
     "Merge",
@@ -471,5 +469,23 @@
   "all_fresh_independent_continuation_gates_complete": true,
   "all_current_continuation_owned_stacks_stopped": true,
   "reported_benchmark_llm_cost_so_far_usd": 1.48,
-  "cost_coverage": "Reported benchmark cost_cents, including original attempts. Some direct API and infrastructure costs remain unmetered; provider estimates differ from rounded cents."
+  "cost_coverage": "Reported benchmark cost_cents, including original attempts. Some direct API and infrastructure costs remain unmetered; provider estimates differ from rounded cents.",
+  "copy_only_native_validation_audit": {
+    "recorded_at_utc": "2026-10-13T17:53:20.316149+00:00",
+    "audited_head": "da363393dd68cb4dbf0b9276ea6cc8e1e09a1aa0",
+    "source_edits": false,
+    "paid_calls": false,
+    "same_raw_argument_cases": 9,
+    "existing_python_behavior": "Actual Python Grep model accepts/coerces numeric and boolean strings; rejects encoded dictionary strings and string null. Outer JSON parsing and original native ID replay already exist on both paths.",
+    "current_ts_behavior": "Native arguments remain strings; Zod dispatch rejects supplied wrong types and replays validation errors under original native IDs. Content-path malformed entries are discarded.",
+    "no_universal_decoder_to_copy": true,
+    "provider_wire_causality": "No cause established by strict-policy, optional/required or integer/number differences. Both actual native schemas flatten arguments and retain nullable anyOf.",
+    "fresh_offline_owning_check": {
+      "command": "node --import tsx back-end/src/tests/blackbox/rose-native-schema.blackbox.ts",
+      "exit_code": 0,
+      "result": "PASS native schema projection, provider compatibility, explicit tools and Responses wire contract",
+      "network": "mocked; no paid calls"
+    },
+    "task_complete": false
+  }
 }
