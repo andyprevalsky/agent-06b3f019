@@ -96,6 +96,54 @@
     },
     "fixtureState": "Correct frozen Tamy October12 full-history fixture was used by original Run12 and restored here; no new production refresh or duplicate paid run was performed"
   },
+  "llmEndToEndLatencyScorecard": {
+    "units": "seconds",
+    "definition": "RoseClient request start through terminal stream completion or logged failure, including provider fallback within that client request; not time to first token or whole tool/world-operation latency",
+    "percentileMethod": "Nearest rank, using existing agents/benchmarks/span_history.py:_percentile",
+    "agent": {
+      "scope": "All task-agent LLM calls in the original owned Run12 worker, including root and children",
+      "completedTimedCalls": 125,
+      "avgSeconds": 7.508571696,
+      "p95Seconds": 25.90513,
+      "p99Seconds": 32.183899,
+      "minSeconds": 2.383048,
+      "maxSeconds": 35.277204,
+      "loggedFailuresIncluded": 0,
+      "startedCallsWithoutTerminalTiming": 5,
+      "timingSource": "Exact request_id plus span_id matching between rose.complete.start and rose.complete.foundry.done timestamps",
+      "meteredPopulationCheck": "All125 final usage rows match125 timing rows by span_id and call_site; the wait_for usage row has agent_id string None while the completion log has null"
+    },
+    "WHM": {
+      "scope": "Native WMH RoseClient LLM requests;108 successes plus4 logged terminal failures",
+      "terminalTimedCalls": 112,
+      "successfulCalls": 108,
+      "loggedFailuresIncluded": 4,
+      "avgSeconds": 131.67125,
+      "p95Seconds": 216.03,
+      "p99Seconds": 265,
+      "minSeconds": 47,
+      "maxSeconds": 349,
+      "startedCallsWithoutTerminalTiming": 4,
+      "timingSource": "Exact request_id matching in original WMH final serve log; elapsed_s where available, otherwise start/done timestamps recorded to whole-second precision",
+      "precision": "Approximate:102 Foundry success durations use second-resolution timestamps;6 OpenRouter success and4 failure logs supply elapsed_s",
+      "successOnly": {"count": 108, "avgSeconds": 128.40225925925927, "p95Seconds": 203, "p99Seconds": 265}
+    },
+    "coverageLimit": "Calls without terminal timing are excluded, rather than assigning a fabricated finish time. These are observed-terminal-call latency distributions, not a complete distribution for all started calls.",
+    "widerNativePredictionOperationDiagnostic": {
+      "scope": "Separate116 original prediction-attempt intervals, including all9 errors/cancellations and work outside the RoseClient LLM request",
+      "count": 116,
+      "avgSeconds": 163.2173275862069,
+      "p95Seconds": 296.46,
+      "p99Seconds": 981.19,
+      "maxSeconds": 994.712,
+      "distinction": "Do not substitute these whole prediction-attempt durations for LLM-call latency; this is the scope of the previously reported16-minute stalls"
+    },
+    "originalEvidenceSha256": {
+      "ownedFinalWorkerLog": "b3a449ec0c4b2a0d8c4c77d78ecf1ed86f0873dde390fcb2b0cca18b21f89f77",
+      "WMHFinalServeLog": "921c9781a68d3538329f329ed220221157a78a616a27d02b47023e7fa3350f57",
+      "privateDerivedLatencyRows": "02807681195a5f30491cbd09165aedc11376a84eaca76ebfbd4bef54d4eda130"
+    }
+  },
   "providerSpendEstimate": {
     "azure_wmh": {
       "calls": 102,
@@ -178,6 +226,7 @@
   },
   "futureIterationReportRequiredByUser": [
     "First scorecard number: approximate progress of the fundraising trajectory on the fixed reporting rubric, with previous-iteration delta; report financial completion separately",
+    "One agent LLM e2e latency row and one WHM LLM e2e latency row, each showing average, p95, p99 in seconds; state scope, sample count, percentile method, failed-call inclusion and missing terminal timings",
     "Execution duration, reported duration and simulated time progressed",
     "What changed since previous iteration, with its exact source/state identity",
     "Progress through actual fundraising funnel: verified warm paths, unique targeted investors, sent/scheduled emails, replies, held meetings, diligence, commitments, signed instruments and settled cash",
