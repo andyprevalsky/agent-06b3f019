@@ -1,5 +1,5 @@
 {
-  "recorded_at_utc": "2026-10-13T07:36:43.898169+00:00",
+  "recorded_at_utc": "2026-10-13T08:12:16.142540+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
   "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
@@ -9,16 +9,11 @@
   "production_deploy_complete": false,
   "current_integrated_gates": {
     "backend_coverage": {
-      "status": "fail",
-      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
-      "domains_passed": 192,
-      "domains_failed": 1,
-      "unit_files_passed": 266,
-      "failed_domain": "browser-provider",
-      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
-      "coverage_threshold_result": "not reported because actual blackbox failed",
-      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
-      "root_cause": "open; no source fix or fresh GREEN yet"
+      "status": "running",
+      "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
+      "applied_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
+      "prior_failure_retained": true,
+      "coverage_threshold_result": "pending"
     },
     "cloud_controller": {
       "status": "pass",
@@ -78,16 +73,11 @@
       "skip_was_not_needed": true
     },
     "backend_coverage_latest": {
-      "status": "fail",
-      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
-      "domains_passed": 192,
-      "domains_failed": 1,
-      "unit_files_passed": 266,
-      "failed_domain": "browser-provider",
-      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
-      "coverage_threshold_result": "not reported because actual blackbox failed",
-      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
-      "root_cause": "open; no source fix or fresh GREEN yet"
+      "status": "running",
+      "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
+      "applied_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
+      "prior_failure_retained": true,
+      "coverage_threshold_result": "pending"
     },
     "recovery_recipe_requalification": {
       "status": "pass",
@@ -196,7 +186,7 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Live provider CDP repair and fresh full backend coverage",
+    "Complete fresh full backend coverage and integrate latest main",
     "Exact decoder decision and focused SMS real pass",
     "Fresh applicable integrated smoke/semantic checks",
     "Bounded immutable-head review",
@@ -311,5 +301,40 @@
       "functions_percent": 92.59,
       "normal_and_signal_teardown": "pass"
     }
-  }
+  },
+  "historical_backend_failures": [
+    {
+      "status": "fail",
+      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+      "domains_passed": 192,
+      "domains_failed": 1,
+      "unit_files_passed": 266,
+      "failed_domain": "browser-provider",
+      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
+      "coverage_threshold_result": "not reported because actual blackbox failed",
+      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
+      "root_cause": "open; no source fix or fresh GREEN yet"
+    }
+  ],
+  "provider_transport_fix": {
+    "status": "owning and unchanged live reproduction pass; full coverage running",
+    "source_parent": "4f92c94ba3bca42b5565deb8b3be9e5eb6c168c9",
+    "exact_patch_sha256": "47945b316378754923f83148877d1862351f5106f17e86d9fe81958df28577fb",
+    "owning_cases_passed": 13,
+    "typescript_exit": 0,
+    "eslint_exit": 0,
+    "prettier_exit": 0,
+    "unchanged_live_domain_before": "FAIL",
+    "unchanged_live_domain_after": "PASS",
+    "live_domain_duration_ms": 122168,
+    "validated_transports_reused": 10,
+    "credential_reconnect_timeout_count": 0,
+    "independent_review": "clean",
+    "p2_overlap": [],
+    "schema_model_catalog_prompt_timeout_changes": false,
+    "generic_decoder_applied": false,
+    "ten_thousand_agents": "One existing per-request connection is retained through bounded setup and closed by that request owner; no shared state, fan-in, polling or additional per-agent allocation."
+  },
+  "incoming_main_latest_fetched": "b12f0ef0521766d65d1199f143fb5de54a7ac885",
+  "incoming_main_latest_integration": "pending current source-bound coverage completion"
 }

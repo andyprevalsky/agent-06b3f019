@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+
 /**
  * Black-box tests for Steel fingerprint injection script generation.
  *
@@ -16,9 +17,10 @@ import {
   isInvalidSteelProxyConfiguration,
 } from '../../providers/steel/session';
 import { STEEL_CDP_TIMEOUT_MESSAGE } from '../../providers/steel/sessionConnection';
-import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
+import { recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
 import {
+  testSavedUrlNavigationAlwaysClosesBrowser,
   testConnectionErrorRetriesOnReplacement,
   testRawCdpFailureClassification,
 } from './steel-fingerprint.connection-retry.behavior';
@@ -179,7 +181,9 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     delete process.env.STEEL_PROXY_SERVER;
     process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = 'true';
     (
-      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+      prisma.browserSession as unknown as {
+        findUnique: typeof prisma.browserSession.findUnique;
+      }
     ).findUnique = (async () => ({
       id: 'replacement-city-retry-task',
       sessionId: 'kernel-old',
@@ -191,8 +195,12 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       context: { userId: 'replacement-city-retry-user' },
     })) as typeof prisma.browserSession.findUnique;
     (
-      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
-    ).updateMany = (async () => ({ count: 1 })) as typeof prisma.browserSession.updateMany;
+      prisma.browserSession as unknown as {
+        updateMany: typeof prisma.browserSession.updateMany;
+      }
+    ).updateMany = (async () => ({
+      count: 1,
+    })) as typeof prisma.browserSession.updateMany;
     (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
       (async () => ({
         proxyCountry: 'US',
@@ -200,7 +208,9 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         proxyCity: 'RCA TEST CITY',
       })) as typeof prisma.agent.findUnique;
     (
-      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
+      prisma.integration as unknown as {
+        findUnique: typeof prisma.integration.findUnique;
+      }
     ).findUnique = (async () => null) as typeof prisma.integration.findUnique;
     (
       prisma.browserProviderProfile as unknown as {
@@ -208,8 +218,12 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       }
     ).findUnique = (async () => null) as typeof prisma.browserProviderProfile.findUnique;
     (
-      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
-    ).findUnique = (async () => ({ contextId: null })) as typeof prisma.browserContext.findUnique;
+      prisma.browserContext as unknown as {
+        findUnique: typeof prisma.browserContext.findUnique;
+      }
+    ).findUnique = (async () => ({
+      contextId: null,
+    })) as typeof prisma.browserContext.findUnique;
 
     // A resume keeps the user's city (a rotation deliberately moves state and
     // drops it), so the rejected-city retry is exercised on the resume path.
@@ -253,7 +267,9 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     assert(secondGeo?.country === 'US', 'replacement retry dropped country with city');
 
     (
-      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+      prisma.browserSession as unknown as {
+        findUnique: typeof prisma.browserSession.findUnique;
+      }
     ).findUnique = (async () => ({
       id: 'replacement-city-retry-task',
       sessionId: 'steel-read-only-old',
@@ -269,7 +285,9 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     })) as typeof prisma.browserSession.findUnique;
     const replacementWrites: Array<Record<string, unknown>> = [];
     (
-      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+      prisma.browserSession as unknown as {
+        updateMany: typeof prisma.browserSession.updateMany;
+      }
     ).updateMany = (async (args: { data: Record<string, unknown> }) => {
       replacementWrites.push(args.data);
       return { count: 1 };
@@ -398,7 +416,11 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
           createSession: async () => {
             const id = `steel-cdp-unreachable-${createdDuringOutage.length + 1}`;
             createdDuringOutage.push(id);
-            return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
+            return {
+              id,
+              debugUrl: 'https://steel.example/debug',
+              profileId: 'steel-auth-profile',
+            };
           },
           validateConnection: async () => {
             throw new Error('Steel CDP connection timeout');
@@ -436,7 +458,11 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         createSession: async () => {
           const id = `steel-cdp-timeout-reported-${reportedOutageSessions.length + 1}`;
           reportedOutageSessions.push(id);
-          return { id, debugUrl: 'https://steel.example/debug', profileId: 'steel-auth-profile' };
+          return {
+            id,
+            debugUrl: 'https://steel.example/debug',
+            profileId: 'steel-auth-profile',
+          };
         },
         validateConnection: async () => STEEL_CDP_TIMEOUT_MESSAGE,
         releaseSession: async () => {},
@@ -481,15 +507,21 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     );
   } finally {
     (
-      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+      prisma.browserSession as unknown as {
+        findUnique: typeof prisma.browserSession.findUnique;
+      }
     ).findUnique = browserSessionFindUnique;
     (
-      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+      prisma.browserSession as unknown as {
+        updateMany: typeof prisma.browserSession.updateMany;
+      }
     ).updateMany = browserSessionUpdateMany;
     (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
       agentFindUnique;
     (
-      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
+      prisma.integration as unknown as {
+        findUnique: typeof prisma.integration.findUnique;
+      }
     ).findUnique = integrationFindUnique;
     (
       prisma.browserProviderProfile as unknown as {
@@ -497,43 +529,15 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       }
     ).findUnique = profileFindUnique;
     (
-      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
+      prisma.browserContext as unknown as {
+        findUnique: typeof prisma.browserContext.findUnique;
+      }
     ).findUnique = contextFindUnique;
     if (previousProxyServer === undefined) delete process.env.STEEL_PROXY_SERVER;
     else process.env.STEEL_PROXY_SERVER = previousProxyServer;
     if (previousProxyEnabled === undefined) delete process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
     else process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = previousProxyEnabled;
   }
-}
-
-async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
-  let closeCount = 0;
-  const browser = {
-    contexts: () => [
-      {
-        pages: () => [
-          {
-            goto: async () => {
-              throw new Error('navigation timeout');
-            },
-          },
-        ],
-        newPage: async () => {
-          throw new Error('unexpected new page');
-        },
-      },
-    ],
-    close: async () => {
-      closeCount += 1;
-    },
-  };
-
-  await navigateToSavedUrl(
-    'wss://connect.steel.dev?sessionId=session-1',
-    'https://example.com/saved',
-    async () => browser as unknown as import('playwright').Browser
-  );
-  assert(closeCount === 1, `failed saved-URL navigation closed browser ${closeCount} times`);
 }
 
 async function main(): Promise<void> {

@@ -99,7 +99,13 @@ async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLo
 
 async function fingerprintUserAgent(userId: string): Promise<string | undefined> {
   const fingerprint = await prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
+    where: {
+      userId_name_accountId: {
+        userId,
+        name: 'browser_fingerprint',
+        accountId: '',
+      },
+    },
   });
   const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
   return hasValue(fp?.navigator?.userAgent) ? fp.navigator.userAgent : undefined;
@@ -113,28 +119,33 @@ async function connectSteelBrowser(wsUrl: string): Promise<Browser> {
 export async function navigateToSavedUrl(
   wsUrl: string,
   savedUrl: string | undefined,
-  connectBrowser: (url: string) => Promise<Browser> = connectSteelBrowser
+  connectBrowser: (url: string) => Promise<Browser> = connectSteelBrowser,
+  borrowedBrowser?: Browser
 ): Promise<void> {
   if (!hasValue(savedUrl)) return;
 
   log.info(`  Navigating session to saved URL: ${savedUrl}`);
   let browser: Browser | undefined;
   try {
-    browser = await connectBrowser(wsUrl);
+    browser = borrowedBrowser ?? (await connectBrowser(wsUrl));
     const context = browser.contexts()[0];
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+    await page.goto(savedUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 10_000,
+    });
     log.info('  Navigation complete');
   } catch (navError) {
     log.error('Failed to navigate to saved URL', {
       error: navError instanceof Error ? navError.message : String(navError),
     });
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser && !borrowedBrowser) await browser.close().catch(() => {});
   }
 }
 
 export interface RecreatedSteelSession {
+  validationBrowser?: Browser;
   debugUrl: string;
   sessionId: string;
   wsUrl: string;
@@ -155,7 +166,10 @@ export interface SteelSessionReplacementDependencies {
     proxySource?: string | null;
   }>;
   /** Resolves null when the session accepts CDP, otherwise the failure reason. */
-  validateConnection: (wsUrl: string, sessionId: string) => Promise<string | null>;
+  validateConnection: (
+    wsUrl: string,
+    sessionId: string
+  ) => Promise<string | null | { browser: Browser | null; failure: string | null }>;
   releaseSession?: (sessionId: string) => Promise<void>;
 }
 
@@ -165,14 +179,17 @@ const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
     const validation = await validateBrowserConnection(wsUrl, {
       startupProbe: steelStartupProbe(sessionId, (id) => steel.sessions.retrieve(id)),
     });
-    await validation.browser?.close().catch(() => {});
-    return validation.failure;
+    return validation;
   },
 };
 
 export async function recreateSession(
   taskId: string,
-  options: { forceManagedRotation: boolean; forceFreshProfile?: boolean },
+  options: {
+    forceManagedRotation: boolean;
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+  },
   dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
 ): Promise<RecreatedSteelSession> {
   const operation = options.forceManagedRotation ? 'Rotating' : 'Resuming';
@@ -229,6 +246,7 @@ export async function recreateSession(
     let createdSessionId: string | null = null;
     let committed = false;
     let attemptCdpTimedOut = false;
+    let validationBrowser: Browser | undefined;
     try {
       const proxySettings = buildSteelProxySettings(
         proxyGeo,
@@ -252,7 +270,10 @@ export async function recreateSession(
         useProxy: proxySettings.config,
         solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
         debugConfig: { systemCursor: false },
-        stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+        stealthConfig: {
+          humanizeInteractions: false,
+          skipFingerprintInjection: true,
+        },
         timeout: steelSessionTimeoutMs(),
         dimensions: { width: 1288, height: 891 },
       });
@@ -272,13 +293,23 @@ export async function recreateSession(
       const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
-      const validationFailure = await dependencies.validateConnection(wsUrl, session.id);
+      const validation = await dependencies.validateConnection(wsUrl, session.id);
+      const validationFailure =
+        typeof validation === 'object' && validation !== null ? validation.failure : validation;
+      validationBrowser =
+        typeof validation === 'object' && validation !== null
+          ? (validation.browser ?? undefined)
+          : undefined;
+      if (!options.keepValidationConnection) {
+        await validationBrowser?.close().catch(() => {});
+        validationBrowser = undefined;
+      }
       if (validationFailure !== null) {
         attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
         throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
       }
 
-      await navigateToSavedUrl(wsUrl, savedUrl);
+      await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
       const replaced = await prisma.browserSession.updateMany({
         where: { id: taskId, sessionId: oldSession.sessionId },
         data: {
@@ -318,6 +349,7 @@ export async function recreateSession(
 
       log.info(`Task moved to Steel session ${session.id}`);
       return {
+        ...(validationBrowser ? { validationBrowser } : {}),
         debugUrl,
         sessionId: session.id,
         wsUrl,
@@ -331,6 +363,7 @@ export async function recreateSession(
         previousProvider,
       };
     } catch (error) {
+      await validationBrowser?.close().catch(() => {});
       if (!committed && createdSessionId !== null) {
         const uncommittedSessionId = createdSessionId;
         try {
@@ -378,14 +411,21 @@ export async function recreateSession(
 
 export async function resumeSession(
   taskId: string,
-  options: { forceFreshProfile?: boolean } = {}
+  options: {
+    forceFreshProfile?: boolean;
+    keepValidationConnection?: boolean;
+  } = {}
 ): Promise<RecreatedSteelSession> {
   return recreateSession(taskId, {
     forceManagedRotation: false,
     forceFreshProfile: options.forceFreshProfile,
+    keepValidationConnection: options.keepValidationConnection,
   });
 }
 
-export async function rotateSession(taskId: string): Promise<RecreatedSteelSession> {
-  return recreateSession(taskId, { forceManagedRotation: true });
+export async function rotateSession(
+  taskId: string,
+  options: { keepValidationConnection?: boolean } = {}
+): Promise<RecreatedSteelSession> {
+  return recreateSession(taskId, { ...options, forceManagedRotation: true });
 }
