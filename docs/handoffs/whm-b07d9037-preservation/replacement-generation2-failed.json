@@ -12,7 +12,7 @@
     "message": "The delegated thread could not be started."
   },
   "failed_child": "ph7dbznbkvm4j1sn121tjagca58g76qk",
-  "failed_child_url": null,
+  "failed_child_url": "https://boxes.dev/thread/thr_d3a9d4452074499a9056aeaa6e162604",
   "supported_child_inventory": {
     "status": "failed",
     "archived": false,

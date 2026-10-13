@@ -44,7 +44,7 @@
   "durable_fe_url": "https://www.roselabs.ai/?agent-id=65889659-9f08-4488-917e-9611223be811",
   "fresh_browser_verified": true,
   "verified_messages": 55,
-  "private_archive_status": "in progress; do not archive old box yet",
+  "private_archive_status": "complete old-host source/private capture and per-member verification; independent replacement verification/continuation and archival pending",
   "native_retirement": {
     "joined": true,
     "revision": 105,
