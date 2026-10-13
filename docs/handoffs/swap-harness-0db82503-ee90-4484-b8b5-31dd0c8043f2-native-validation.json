@@ -23,5 +23,12 @@
     ".context/tamy-resumed/tamy-native-validation-rca/wire.log",
     ".context/tamy-resumed/tamy-native-validation-rca/schema-summary.json"
   ],
-  "original_source_preserved": true
+  "original_source_preserved": true,
+  "compatibility_followup": {
+    "original_coverage_attempt": "failed two owning unit files; owning stage interrupted exit143 after preserving failures",
+    "correction": "Reject supplied non-null wrong types using existing Zod issues; preserve omitted/null defaults and existing enum/value diagnostics",
+    "owning_checks": "sms-supervisor-stream16 cases, phase3 cases, budget2 cases and lint PASS",
+    "full_coverage": "pending rerun",
+    "validation_only_no_exported_schema_change": true
+  }
 }

@@ -143,11 +143,18 @@ export async function dispatchToolCall(
   log.info('Dispatching tool', { tool, args: JSON.stringify(args), userId });
 
   try {
-    if (SmsSupervisorToolCallSchema.options.some((schema) => schema.shape.tool.value === tool)) {
-      const parsed = SmsSupervisorToolCallSchema.safeParse(toolCall);
-      if (!parsed.success) {
-        return { tool, success: false, result: '', error: parsed.error.message };
-      }
+    const parsed = SmsSupervisorToolCallSchema.safeParse(toolCall);
+    // Existing executors own omitted/null defaults and value-level validation.
+    if (
+      !parsed.success &&
+      parsed.error.issues.some(
+        (issue) =>
+          issue.code === 'invalid_type' &&
+          issue.received !== 'undefined' &&
+          issue.received !== 'null'
+      )
+    ) {
+      return { tool, success: false, result: '', error: parsed.error.message };
     }
 
     let result: ToolResult;
