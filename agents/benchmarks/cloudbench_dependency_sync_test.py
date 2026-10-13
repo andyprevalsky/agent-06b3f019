@@ -22726,6 +22726,8 @@ def test_capacity_admission_retries_live_reservation_and_refreshes_inventory() -
     wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
     script = f"""set -u
 APP=fixture-bench-app
+FLEET_DIR=fixture-local-only
+source {shlex.quote(str(FLEET_SCRIPT.parent / "lib/cloudbench-inventory.sh"))}
 warm_json=old-inventory
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
@@ -22774,7 +22776,7 @@ admit_app_capacity_with_wait
 def test_capacity_admission_follows_nested_canary_and_precedes_provisioning() -> None:
     fleet = fleet_source_text()
     canary = fleet.index("fleet_infra_canary_preflight || exit $?")
-    refresh = fleet.index('warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)"', canary)
+    refresh = fleet.index('warm_json="$(fleet_machines_json)"', canary)
     admission = fleet.index("admit_app_capacity_with_wait || exit 1", canary)
     provision = fleet.index("# ── Phase 1: provision every bench", canary)
     assert canary < refresh < admission < provision

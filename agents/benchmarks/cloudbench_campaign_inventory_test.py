@@ -254,7 +254,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -298,6 +298,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "import json, os, sys\n"
         "from pathlib import Path\n"
         "kind=sys.argv[1]\n"
+        "if os.environ.get('FIXTURE_POST_CANARY') == '1' and os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') and os.environ.get('CLOUDBENCH_CAMPAIGN_INVENTORY_DIR'): sys.exit(1)\n"
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH'], 'wrong selected credential'\n"
         "payload=Path(os.environ['FIXTURE_'+kind.upper()]).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
@@ -305,6 +306,26 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "sys.stdout.buffer.write(payload)\n"
     )
     fly.chmod(0o700)
+    boundary = ""
+    if post_canary:
+        fleet = (ROOT / "scripts/run-bench-fleet").read_text()
+        boundary = fleet.split("fleet_infra_canary_preflight || exit $?\n", 1)[1].split(
+            "# ── Clone one machine per bench", 1)[0]
+        admission = 'admit_app_capacity_with_wait() { test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"; }\n'
+        if admission_wait:
+            start = fleet.index("admit_app_capacity_with_wait() {")
+            admission = fleet[start:fleet.index("\n}\n", start) + 3]
+            admission += (
+                'CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1\n'
+                'fixture_capacity_calls=0\n'
+                'enforce_app_capacity_guard() {\n'
+                ' fixture_capacity_calls=$((fixture_capacity_calls + 1))\n'
+                ' CAPACITY_ADMISSION_RETRYABLE=1\n'
+                ' [ "$fixture_capacity_calls" -gt 1 ] || return 1\n'
+                ' test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"\n'
+                '}\n'
+            )
+        boundary = admission + boundary
     cli = scripts / "run-bench"
     cli.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -316,7 +337,9 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'FLY_API_TOKEN="$(resolve_fly_token)"\nexport FLY_API_TOKEN\n'
         'FLY() { flyctl "$@"; }\n'
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
-        "trap finish EXIT\ntrap 'exit 143' TERM\nstart_machines_snapshot_loop\n"
+        "trap finish EXIT\ntrap 'exit 143' TERM\n"
+        + boundary
+        + "start_machines_snapshot_loop\n"
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
         '  while [ "$(python3 -c \'import json,os;print(sum(json.loads(s)["kind"]=="machines" for s in open(os.environ["FIXTURE_CALLS"])))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
@@ -354,6 +377,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         FIXTURE_TARGET=target,
         FIXTURE_DEATH=str(int(death)),
         FIXTURE_REFRESH=str(int(refresh)),
+        FIXTURE_POST_CANARY=str(int(post_canary)),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=str(int(shared)),
         CLOUDBENCH_SNAPSHOT_POLL_SECONDS="60",
     )
@@ -1412,3 +1436,72 @@ def test_campaign_inventory_cancellation_reconciles_with_its_existing_hub_publis
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+@pytest.mark.parametrize("shared", (True, False))
+def test_campaign_inventory_post_canary_admission_uses_parent_feed_without_native_fanout(tmp_path, shared):
+    # Run the actual post-canary caller, not a replacement fixture caller. Only
+    # the downstream admission sink is controlled; it requires native payload.
+    # Parent reads succeed; a redundant child-wide read fails like original j0044.
+    result, calls, summary, _ = run_consumers(tmp_path, shared=shared, post_canary=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+    assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 6)
+
+
+@pytest.mark.parametrize("fault", (
+    "missing-health", "expired-health", "wrong-token", "publisher-birth",
+    "parent-birth", "wrong-app", "missing-owner", "missing-snapshot", "invalid-credentials",
+))
+def test_campaign_inventory_post_canary_unknown_or_invalid_feed_withholds_admission(tmp_path, fault):
+    fleet = (ROOT / "scripts/run-bench-fleet").read_text()
+    boundary = fleet.split("fleet_infra_canary_preflight || exit $?\n", 1)[1].split(
+        "# ── Clone one machine per bench", 1)[0]
+    script = tmp_path / "boundary.sh"
+    script.write_text(
+        'set -euo pipefail\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n'
+        'FLEET_DIR="$1"; APP=fixture-app; FLEET_OWNER_HOST="$(hostname)"\n'
+        'export CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$FLEET_DIR"\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}\n'
+        'mkdir -p "$INVENTORY_INDEX/current"\n'
+        'birth="$(inventory_pid_start_time $$)"\n'
+        'printf "app=%s\\npid=%s\\npid_start=%s\\ntoken=fixture-token\\nparent_pid=%s\\nparent_start=%s\\n" '
+        '"$APP" "$$" "$birth" "$$" "$birth" > "$INVENTORY_HOME/owner"\n'
+        'printf "publisher_token=fixture-token\\nvalid_until=%s\\n" "$((INVENTORY_CLOCK_EPOCH + 120))" > "$INVENTORY_INDEX/current/health"\n'
+        'printf "[]" > "$MACHINES_SNAPSHOT"\n'
+        'replace_line() { local path=$1 key=$2 value=$3; '
+        'awk -F= -v key="$key" -v value="$value" \'$1 == key {$0=key "=" value} {print}\' '
+        '"$path" > "$path.tmp"; mv "$path.tmp" "$path"; }\n'
+        'case "$2" in\n'
+        ' missing-health) rm "$INVENTORY_INDEX/current/health";;\n'
+        ' expired-health) replace_line "$INVENTORY_INDEX/current/health" valid_until 1;;\n'
+        ' wrong-token) replace_line "$INVENTORY_INDEX/current/health" publisher_token foreign;;\n'
+        ' publisher-birth) replace_line "$INVENTORY_HOME/owner" pid_start invalid;;\n'
+        ' parent-birth) replace_line "$INVENTORY_HOME/owner" parent_start invalid;;\n'
+        ' wrong-app) replace_line "$INVENTORY_HOME/owner" app foreign;;\n'
+        ' missing-owner) rm "$INVENTORY_HOME/owner";;\n'
+        ' missing-snapshot) rm "$MACHINES_SNAPSHOT";;\n'
+        ' invalid-credentials) unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR; SNAPSHOT_LOOP_PID="";;\n'
+        'esac\n'
+        'FLY() { touch "$FLEET_DIR/native-read"; return 1; }\n'
+        'admit_app_capacity_with_wait() { touch "$FLEET_DIR/admitted"; }\n'
+        + boundary
+    )
+    result = subprocess.run(
+        ["bash", str(script), str(tmp_path), fault], capture_output=True, text=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (tmp_path / "admitted").exists(), "unknown native inventory admitted mutation"
+    assert (tmp_path / "native-read").exists() == (fault == "invalid-credentials"), (
+        "unavailable shared feed fanned out into a native provider request", result.stderr)
+
+
+@pytest.mark.parametrize("shared", (True, False))
+def test_campaign_inventory_post_canary_admission_wait_keeps_feed_and_standalone_reads(tmp_path, shared):
+    result, calls, summary, _ = run_consumers(
+        tmp_path, shared=shared, post_canary=True, admission_wait=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+    assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 8)

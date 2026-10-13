@@ -12623,7 +12623,7 @@ admit_app_capacity_with_wait() {
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
         echo "⏳ capacity is reserved by live work; retrying provider admission in ${interval}s" >&2
         sleep "$interval"
-        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+        warm_json="$(fleet_machines_json)" || {
             echo "❌ App capacity guard could not refresh machine state during admission wait." >&2
             return 1
         }
@@ -14201,7 +14201,12 @@ fleet_infra_canary_preflight || exit $?
 # The preflight starts a nested fleet with its own capacity reservation. Reserve
 # this fleet only after it exits, or its canary counts our pending slots twice
 # and can deadlock against the app Machine ceiling before either fleet starts.
-warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+# Campaign parent → birth/token-fenced native feed → unchanged capacity guard.
+# Borrow before this read; unavailable shared inventory must not fan out to Fly.
+if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+    start_machines_snapshot_loop || exit $?
+fi
+warm_json="$(fleet_machines_json)" || {
     echo "❌ App capacity guard could not refresh machine state after infra canary." >&2
     exit 1
 }
