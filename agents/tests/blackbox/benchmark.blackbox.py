@@ -3309,6 +3309,263 @@ async def test_payment_cleanup_polls_with_reads_after_one_abandonment_post():
     assert lifecycle_reads == 1
 
 
+async def _exercise_owned_payment_reconciliation_caller(
+    caller: str,
+    outcome: str,
+    *,
+    card_ready_at_seconds: float = 0,
+    wall_clock_disabled: bool = False,
+):
+    """Replay a released card whose local funding only advances on scoped abandonment."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    import httpx
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = deepcopy(get_task_by_name("agent-payment-production-abandonment"))
+    assert task.timeout_seconds == 900
+    assert task.expected_payment_receipt["totalCents"] == 100
+    if wall_clock_disabled:
+        task._resolved_timeout_seconds = None
+    base_url = "http://benchmark.invalid"
+    agent_id = "5200169a-bf31-46ca-855c-78c2b47252b0"
+    purchase_id = "local-owned-purchase"
+    card_id = "local-owned-card"
+    transfer_id = "local-owned-transfer"
+    terminal = deepcopy(task.expected_payment_lifecycle)
+    terminal["agentId"] = agent_id
+    terminal["purchase"]["id"] = purchase_id
+    terminal["agentCard"].update({"id": card_id, "status": "CLOSED"})
+    terminal["orgTransfer"].update({"id": transfer_id, "cardId": card_id})
+    pending = deepcopy(terminal)
+    pending["purchase"]["status"] = "HELD"
+    pending["walletFunding"]["status"] = "RECLAIMING"
+    pending["stripeRefund"] = None
+    clock = 0.0
+    requests = []
+    posts = 0
+    reads = 0
+    recovery_started = []
+    actual_client = httpx.AsyncClient
+
+    async def transport(request):
+        nonlocal clock, posts, reads
+        assert request.url.host == "benchmark.invalid", "fixture must never reach a live backend"
+        assert request.headers["X-User-Id"] == "00000000-0000-4000-8000-000000000107"
+        requests.append((request.method, request.url.path, clock))
+        if request.method == "POST" and request.url.path == "/api/test-payment/lifecycle/abandon":
+            assert json.loads(request.content) == {"agentId": agent_id}
+            posts += 1
+            if outcome == "cancel":
+                raise asyncio.CancelledError()
+            if posts == 1:
+                return httpx.Response(200, json=deepcopy(pending))
+            recovery_started.append(clock)
+            assert clock >= 120, "a fresh reclaim owner must not be immediately reposted"
+            if outcome == "error":
+                return httpx.Response(503, json={"error": "owned recovery unavailable"})
+            if outcome == "pending":
+                return httpx.Response(200, json=deepcopy(pending))
+            if outcome == "late-terminal":
+                clock += 421
+            return httpx.Response(200, json=deepcopy(terminal))
+        if request.method == "GET" and request.url.path == "/api/test-payment/lifecycle":
+            assert request.url.params["agentId"] == agent_id
+            reads += 1
+            clock += 70
+            # Provider release is already visible; GET cannot run Rose's compensator.
+            return httpx.Response(200, json=deepcopy(pending))
+        raise AssertionError("reconciliation must not create, fund, or issue another payment")
+
+    def client(*args, **kwargs):
+        assert not args
+        return actual_client(transport=httpx.MockTransport(transport), **kwargs)
+
+    async def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+        await actual_sleep(0)
+
+    actual_sleep = asyncio.sleep
+
+    class LocalAsyncio:
+        def __getattr__(self, name):
+            return sleep if name == "sleep" else getattr(asyncio, name)
+
+    ready = {
+        "agent": {"id": agent_id, "status": "COMPLETED"},
+        "messages": [{"id": "local-card-ready", "metadata": {"title": "Payment card ready"}}],
+    }
+
+    async def get_agent(_base_url, _agent_id):
+        nonlocal clock
+        assert (_base_url, _agent_id) == (base_url, agent_id)
+        clock = max(clock, card_ready_at_seconds)
+        return deepcopy(ready)
+
+    with (
+        patch.object(bench, "time", SimpleNamespace(time=lambda: clock, monotonic=lambda: clock)),
+        patch.object(bench, "asyncio", LocalAsyncio()),
+        patch.object(bench.httpx, "AsyncClient", client),
+        patch.object(
+            bench,
+            "_api_headers",
+            AsyncMock(return_value={"X-User-Id": "00000000-0000-4000-8000-000000000107"}),
+        ),
+        patch.object(bench, "get_agent", AsyncMock(side_effect=get_agent)),
+        patch.object(bench, "get_attention_requests", AsyncMock(return_value=[])),
+    ):
+        result = None
+        error = None
+        try:
+            if caller == "cleanup":
+                result = await bench.ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            else:
+                data, _triggered, _resolved, failure = await bench._poll_agent(base_url, agent_id, task)
+                assert failure is None
+                result = data["_benchmark"]["payment_lifecycle"]
+        except (RuntimeError, TimeoutError, asyncio.CancelledError) as caught:
+            error = caught
+
+    assert all(
+        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"}
+        for _, path, _ in requests
+    )
+    assert terminal["integrity"]["cardCount"] == 1
+    assert terminal["integrity"]["purchaseCount"] == 1
+    assert terminal["purchase"]["id"] == purchase_id
+    assert terminal["agentCard"]["id"] == card_id
+    assert terminal["orgTransfer"]["id"] == transfer_id
+    return SimpleNamespace(
+        result=result,
+        error=error,
+        terminal=terminal,
+        posts=posts,
+        reads=reads,
+        recovery_started=recovery_started,
+        elapsed=clock,
+        requests=requests,
+    )
+
+
+async def test_payment_cleanup_recovers_its_owned_pending_lifecycle():
+    observed = await _exercise_owned_payment_reconciliation_caller("cleanup", "terminal")
+    assert observed.result == observed.terminal, (
+        "cleanup caller must finish its existing issued payment through scoped recovery; "
+        f"posts={observed.posts}, reads={observed.reads}, elapsed={observed.elapsed}, error={observed.error}"
+    )
+    assert observed.posts == 2
+    assert observed.reads >= 1
+    assert observed.recovery_started[0] >= 120
+    assert observed.elapsed < 420
+
+
+async def test_payment_card_ready_poll_recovers_its_owned_pending_lifecycle():
+    observed = await _exercise_owned_payment_reconciliation_caller("poll", "terminal")
+    assert observed.result == observed.terminal, (
+        "card-ready caller must reconcile its existing issued payment before returning; "
+        f"posts={observed.posts}, reads={observed.reads}, elapsed={observed.elapsed}, error={observed.error}"
+    )
+    assert observed.posts == 2
+    assert observed.reads >= 1
+    assert observed.recovery_started[0] >= 120
+    assert observed.elapsed < 420
+
+
+async def test_owned_payment_recovery_preserves_pending_and_error_deadlines():
+    for caller in ("cleanup", "poll"):
+        for outcome in ("pending", "error"):
+            observed = await _exercise_owned_payment_reconciliation_caller(caller, outcome)
+            assert observed.result is None, f"{caller}/{outcome} must not become successful compensation"
+            assert observed.elapsed >= 420
+            if caller == "poll":
+                assert isinstance(observed.error, RuntimeError)
+                assert "deadline" in str(observed.error) or "timeout" in str(observed.error)
+
+
+async def test_owned_payment_recovery_rejects_a_late_terminal_callback():
+    for caller in ("cleanup", "poll"):
+        observed = await _exercise_owned_payment_reconciliation_caller(caller, "late-terminal")
+        assert observed.result is None, "a callback finishing outside420s cannot satisfy bounded cleanup"
+        assert observed.elapsed >= 420
+        if caller == "poll":
+            assert isinstance(observed.error, RuntimeError)
+
+
+async def test_payment_card_ready_recovery_preserves_the_outer_task_deadline():
+    observed = await _exercise_owned_payment_reconciliation_caller(
+        "poll", "terminal", card_ready_at_seconds=800
+    )
+    assert observed.result is None, (
+        "card-ready settlement must not report success after the unchanged900s task deadline; "
+        f"posts={observed.posts}, elapsed={observed.elapsed}"
+    )
+    assert isinstance(observed.error, (RuntimeError, TimeoutError))
+    assert observed.posts == 1, "expired task must not start another recovery POST"
+    assert all(start < 900 for method, _path, start in observed.requests if method == "POST")
+
+
+async def test_payment_card_ready_recovery_keeps_explicitly_disabled_wall_clock():
+    observed = await _exercise_owned_payment_reconciliation_caller(
+        "poll", "terminal", card_ready_at_seconds=800, wall_clock_disabled=True
+    )
+    assert observed.result == observed.terminal
+    assert observed.error is None
+    assert observed.posts == 2
+    assert 900 <= observed.elapsed < 800 + 420
+
+
+async def test_owned_payment_recovery_propagates_cancellation_without_new_payment():
+    for caller in ("cleanup", "poll"):
+        observed = await _exercise_owned_payment_reconciliation_caller(caller, "cancel")
+        assert isinstance(observed.error, asyncio.CancelledError)
+        assert observed.result is None
+        assert observed.posts == 1
+        assert observed.reads == 0
+
+
+async def test_owned_payment_recovery_cancels_a_callback_at_its_deadline():
+    """A hung provider operation cannot extend the existing bounded wait."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-production-abandonment")
+    assert task.timeout_seconds == 900
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def recover_lifecycle(_base_url, agent_id):
+        assert _base_url == "http://benchmark.invalid"
+        assert agent_id == "local-issued-agent"
+        started.set()
+        try:
+            await never_finishes.wait()
+        finally:
+            stopped.set()
+
+    with pytest.raises(RuntimeError, match="deadline|timeout"):
+        await asyncio.wait_for(
+            _wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid",
+                "local-issued-agent",
+                task,
+                {"purchase": {"status": "HELD"}, "walletFunding": {"status": "RECLAIMING"}},
+                timeout_seconds=0.03,
+                poll_interval_seconds=0,
+                recover_lifecycle=recover_lifecycle,
+            ),
+            timeout=0.5,
+        )
+    assert started.is_set()
+    assert stopped.is_set(), "timed-out owned recovery must relinquish its operation"
+
+
 async def test_abandonment_waits_for_cron_reconciliation():
     """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -21941,6 +22198,38 @@ async def run_all_tests():
     await r.record_async(
         "payment_cleanup_reads_after_one_abandonment",
         test_payment_cleanup_polls_with_reads_after_one_abandonment_post,
+    )
+    await r.record_async(
+        "payment_cleanup_recovers_owned_pending_lifecycle",
+        test_payment_cleanup_recovers_its_owned_pending_lifecycle,
+    )
+    await r.record_async(
+        "payment_card_ready_poll_recovers_owned_pending_lifecycle",
+        test_payment_card_ready_poll_recovers_its_owned_pending_lifecycle,
+    )
+    await r.record_async(
+        "owned_payment_recovery_preserves_pending_error_deadlines",
+        test_owned_payment_recovery_preserves_pending_and_error_deadlines,
+    )
+    await r.record_async(
+        "owned_payment_recovery_rejects_late_terminal_callback",
+        test_owned_payment_recovery_rejects_a_late_terminal_callback,
+    )
+    await r.record_async(
+        "payment_card_ready_recovery_preserves_outer_task_deadline",
+        test_payment_card_ready_recovery_preserves_the_outer_task_deadline,
+    )
+    await r.record_async(
+        "payment_card_ready_recovery_keeps_disabled_wall_clock",
+        test_payment_card_ready_recovery_keeps_explicitly_disabled_wall_clock,
+    )
+    await r.record_async(
+        "owned_payment_recovery_propagates_cancellation_without_new_payment",
+        test_owned_payment_recovery_propagates_cancellation_without_new_payment,
+    )
+    await r.record_async(
+        "owned_payment_recovery_cancels_callback_at_deadline",
+        test_owned_payment_recovery_cancels_a_callback_at_its_deadline,
     )
     await r.record_async(
         "abandonment_waits_for_cron_reconciliation",
