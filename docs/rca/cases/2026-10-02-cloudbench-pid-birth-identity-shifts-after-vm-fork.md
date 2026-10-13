@@ -341,3 +341,17 @@ does not convert that failed canonical stage to PASS; final complete-source
 qualification and rollout remain pending. At 10,000 agents, this copies one
 existing small helper per isolated controller snapshot, with no added provider
 request, allocation, global coordination or timing allowance.
+
+The subsequent complete-source coverage run on
+`de189146623c5955251259e609386b111b73513a` failed one of 110 domains because
+the permanent boot-payload wrapper still asserted `26 passed`. Its unchanged
+pytest selection successfully ran all 27 tests, including the new sealed
+snapshot control. Replaying the exact public wrapper preserves that original
+FAIL; updating only its expected registered count to 27 makes the wrapper PASS.
+Both underlying native selections return exit 0 with 27 passed; their test
+bytes and assertions are unchanged. This is test registration maintenance,
+not a runtime, provider or task acceptance failure. The source recipe remains
+`c1606f37698d1cfe48f7beaa6c02fa78e65aaaaf8c1f0fd5c9a439c33b6cebef`.
+The failed coverage receipt remains FAILED, its controller successor was never
+launched, and fresh canonical qualification remains pending. Source-bound
+private receipts are retained in `phase3-count-proof.json`.
