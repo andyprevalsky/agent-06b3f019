@@ -10,8 +10,10 @@ reports "original-volume runtime archive required". This helper:
    or live owner, a held recovery lock, changed or unsupported configs, running
    or destroyed resources and any existing capture, before any provider mutation;
 2. saves the exact original Machine config privately;
-3. replaces only ``init.cmd`` with ``sleep infinity`` while the Machine is
-   stopped, then boots it. No inherited ``init.exec``/``init.entrypoint`` is
+3. replaces ``init.cmd`` with ``sleep infinity`` while the Machine is
+   stopped, then boots it. Explicit ``--isolate-services`` also removes network
+   services for this inert boot; default admission still refuses services.
+   No inherited ``init.exec``/``init.entrypoint`` is
    allowed, and the guest must show no driver process, so the original driver
    cannot run again;
 4. copies the original ``/data`` files read-only into ``<machine-id>.tar.gz``
@@ -420,6 +422,12 @@ def validate_original_config(config: object, ident: dict) -> None:
         raise Refusal("native Machine image is not digest-pinned")
     for key in ("services", "containers", "processes", "standbys", "schedule"):
         if config.get(key):
+            if key == "services" and ident.get("isolate_services"):
+                # Only network listeners are isolated. Other startup mechanisms
+                # remain unsupported under this explicit capture option.
+                services = config[key]
+                if isinstance(services, list) and all(isinstance(s, dict) for s in services):
+                    continue
             raise Refusal(f"unsupported Machine config: {key} is set")
     if config.get("auto_destroy"):
         raise Refusal("unsupported Machine config: auto_destroy is set")
@@ -518,6 +526,7 @@ def local_identity(args: argparse.Namespace) -> dict:
         "audit": audit, "workspace": workspace, "app": meta["app"], "bench": args.bench,
         "ordinal": ordinal, "token": token, "kind": kind, "machine_id": machine,
         "volume_id": volume, "clone_name": clone,
+        "isolate_services": getattr(args, "isolate_services", False),
     }
 
 
@@ -669,6 +678,10 @@ def wait_for(fly: Fly, machine_id: str, predicate, seconds: int, label: str) -> 
 def inert_variant(original: dict) -> dict:
     inert = copy.deepcopy(original)
     inert["init"]["cmd"] = list(INERT_CMD)
+    # Accepted service isolation prevents proxy traffic from waking or exposing
+    # the temporary capture guest. The saved original remains byte-for-byte intact.
+    if original.get("services"):
+        inert.pop("services")
     return inert
 
 
@@ -952,6 +965,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         "native_final_state": final_machine.get("state"),
         "native_final_volume_state": final_volume.get("state"),
         "inert_command": INERT_CMD, "guest_inert_sleepers": inventory.get("inert_sleepers"),
+        "services_isolated": bool(ident.get("isolate_services") and original.get("services")),
         "provider_mutations": mutations, "receipt_cross_checks": checks,
         "capture_helper_sha256": sha(Path(__file__).resolve().read_bytes()),
         "captured_at": int(time.time()),
@@ -1007,6 +1021,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--machine-id", required=True)
     parser.add_argument("--volume-id", required=True)
     parser.add_argument("--capture-dir", type=Path, required=True)
+    parser.add_argument("--isolate-services", action="store_true",
+                        help="explicitly remove network services during inert capture and restore them exactly")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--restore-original-config", action="store_true")

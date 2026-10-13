@@ -1,3 +1,4 @@
+import ast
 import base64
 import copy
 import gzip
@@ -28625,7 +28626,7 @@ _CAPTURE_SECRET = "fixture-secret-never-logged"
 
 _FAKE_CAPTURE_FLYCTL = r'''#!__PYTHON__
 """Fake flyctl data plane: guest SSH/SFTP only while the fake Machine is inert."""
-import json, os, shlex, shutil, subprocess, sys
+import json, os, shlex, shutil, signal, subprocess, sys
 from pathlib import Path
 argv = sys.argv[1:]
 with open(os.environ["FAKE_FLY_LOG"], "a") as log:
@@ -28645,6 +28646,9 @@ if argv[:1] != ["ssh"] or machine["state"] != "started" or machine["config"]["in
     with open(os.environ["FAKE_FLY_LOG"], "a") as log:
         log.write(json.dumps(["VIOLATION", machine["state"], machine["config"]["init"].get("cmd")]) + "\n")
     print("Error: machine is not running the inert capture command", file=sys.stderr)
+    raise SystemExit(1)
+if fault == "capture-interrupted":
+    os.kill(os.getppid(), signal.SIGTERM)
     raise SystemExit(1)
 if argv[1:3] == ["sftp", "put"]:
     local, target = argv[-2], remote(argv[-1])
@@ -28684,6 +28688,7 @@ class _FakeMachinesApi:
         self.app, self.token, self.fault = app, token, fault
         self.state = {"machine": machine, "volume": volume}
         self.events: list[list] = []
+        self.config_updates: list[dict] = []
         self.state_path = root / "fake-fly-state.json"
         self.lock = threading.Lock()
         self._publish()
@@ -28743,6 +28748,7 @@ class _FakeMachinesApi:
                 return 200, volume
             if path == f"/machines/{machine['id']}" and method == "POST":
                 config = copy.deepcopy(body["config"])
+                self.config_updates.append(copy.deepcopy(config))
                 cmd = config["init"].get("cmd")
                 self.events.append(["update", cmd, body.get("skip_launch"), machine["state"]])
                 if machine["state"] not in ("stopped", "created") or body.get("skip_launch") is not True:
@@ -29072,21 +29078,31 @@ def test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_c
     assert receipt["proof_credit"] == 0 and receipt["native_release_verified"] is False
 
 
+@pytest.mark.parametrize("isolate_services", [False, True])
 @pytest.mark.parametrize("state", ["inert-stopped", "inert-started", "original", "foreign"])
-def test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config(tmp_path: Path, state: str) -> None:
+def test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config(
+    tmp_path: Path, state: str, isolate_services: bool
+) -> None:
     """An interrupted capture finishes stop and exact restore without collecting."""
     fx = _capture_fixture(tmp_path, "none")
+    if isolate_services:
+        fx.config["services"] = [{"protocol": "tcp", "internal_port": 8011,
+                                  "ports": [{"port": 443, "handlers": ["http", "tls"]}],
+                                  "force_instance_key": None}]
+        fx.plane.state["machine"]["config"] = copy.deepcopy(fx.config)
     fx.capture.mkdir(mode=0o700)
     (fx.capture / f"{fx.machine}.original-config.private.json").write_text(json.dumps(fx.config))
     machine = fx.plane.state["machine"]
     if state.startswith("inert"):
         machine["config"]["init"]["cmd"] = list(_CAPTURE_INERT_CMD)
+        machine["config"].pop("services", None)
         machine["state"] = "started" if state == "inert-started" else "stopped"
     elif state == "foreign":
         machine["config"]["image"] = "registry.fly.io/bench-app:foreign@sha256:" + "0" * 64
     fx.plane._publish()
     try:
-        result = _run_capture(fx, "--restore-original-config")
+        extra = ["--isolate-services"] if isolate_services else []
+        result = _run_capture(fx, "--restore-original-config", *extra)
     finally:
         fx.plane.close()
     events = fx.plane.events
@@ -29104,16 +29120,122 @@ def test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config
     assert [event[:2] for event in events] == expected
 
 
-def test_failed_fleet_forensic_original_volume_preflight_is_read_only(tmp_path: Path) -> None:
-    fx = _capture_fixture(tmp_path, "none")
+@pytest.mark.parametrize("fault,isolate_services", [
+    ("none", False), ("services", False), ("services", True),
+    ("foreign-host", False), ("foreign-host", True), ("containers", True),
+    ("malformed-services", True), ("changed-config", True),
+    ("foreign-config-token", True), ("inherited-entrypoint", True),
+])
+def test_failed_fleet_forensic_original_volume_preflight_is_read_only(
+    tmp_path: Path, fault: str, isolate_services: bool
+) -> None:
+    fx = _capture_fixture(tmp_path, fault if fault in (
+        "changed-config", "foreign-config-token", "inherited-entrypoint") else "none")
+    if fault == "services":
+        fx.plane.state["machine"]["config"]["services"] = [{
+            "protocol": "tcp", "internal_port": 8080,
+            "autostart": True, "autostop": "stop",
+        }]
+        fx.plane._publish()
+    elif fault == "foreign-host":
+        meta = fx.registry / "meta"
+        meta.write_text(meta.read_text().replace(
+            f"host={socket.gethostname()}\n", "host=original-controller-host\n"))
+    elif fault in ("containers", "malformed-services"):
+        key, value = ("containers", [{"image": "foreign"}]) if fault == "containers" else ("services", ["invalid"])
+        fx.plane.state["machine"]["config"][key] = value
+        fx.plane._publish()
+    durable = _tree_bytes(fx.registry, fx.audit, fx.run)
+    original_machine = copy.deepcopy(fx.plane.state["machine"])
     try:
-        result = _run_capture(fx, "--preflight-only")
+        extra = ["--isolate-services"] if isolate_services else []
+        result = _run_capture(fx, "--preflight-only", *extra)
     finally:
         fx.plane.close()
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout)["preflight"] == "ok"
+    admitted = fault == "none" or (fault == "services" and isolate_services)
+    assert result.returncode == (0 if admitted else 3), result.stdout + result.stderr
+    if admitted:
+        assert json.loads(result.stdout)["preflight"] == "ok"
+    else:
+        reason = {
+            "services": "unsupported Machine config: services is set",
+            "foreign-host": "owner belongs to another host",
+            "containers": "unsupported Machine config: containers is set",
+            "malformed-services": "unsupported Machine config: services is set",
+            "changed-config": "Machine config changed: init.cmd",
+            "foreign-config-token": "native Machine config belongs to a different guest run token",
+            "inherited-entrypoint": "Machine startup cannot be made inert",
+        }[fault]
+        assert reason in result.stderr
+    assert _CAPTURE_SECRET not in result.stdout + result.stderr
+    assert _tree_bytes(fx.registry, fx.audit, fx.run) == durable
+    assert fx.plane.state["machine"] == original_machine
     assert fx.plane.events == [] and _flyctl_calls(fx) == [] and not fx.capture.exists()
     assert not (fx.registry / "recovery-lock").exists()
+
+
+def test_failed_fleet_forensic_original_volume_controls_are_in_permanent_gate() -> None:
+    """The normal terminal-evidence gate must actually schedule capture controls."""
+    path = ROOT / "agents/tests/blackbox/benchmark.blackbox.py"
+    tree = ast.parse(path.read_text())
+    gate = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                and node.name == "test_boot_terminal_runtime_evidence_is_in_permanent_gate")
+    commands = []
+    namespace = {
+        "__file__": str(path), "Path": Path, "sys": sys,
+        "_run_owned_benchmark_commands": lambda emitted, **kwargs: commands.extend(emitted),
+    }
+    exec(compile(ast.Module(body=[gate], type_ignores=[]), str(path), "exec"), namespace)
+    namespace[gate.name]()
+    targets = {target for command in commands for target in command[4:]}
+    suite = str(ORIGINAL_VOLUME_CAPTURE_SCRIPT.parents[1]
+                / "agents/benchmarks/cloudbench_dependency_sync_test.py")
+    required = {
+        suite + "::" + name for name in (
+            "test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_closed",
+            "test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config",
+            "test_failed_fleet_forensic_original_volume_preflight_is_read_only",
+            "test_failed_fleet_forensic_original_volume_service_isolation",
+        )
+    }
+    assert required <= targets, f"original-volume controls missing from permanent gate: {required - targets}"
+
+
+@pytest.mark.parametrize("fault", ["none", "guest-not-inert", "start-rejected", "restore-drift", "capture-interrupted"])
+def test_failed_fleet_forensic_original_volume_service_isolation(tmp_path: Path, fault: str) -> None:
+    fx = _capture_fixture(tmp_path, fault)
+    original = copy.deepcopy(fx.config)
+    original["services"] = [{"protocol": "tcp", "internal_port": 8011,
+                             "ports": [{"port": 443, "handlers": ["http", "tls"]}],
+                             "force_instance_key": None}]
+    fx.plane.state["machine"]["config"] = copy.deepcopy(original)
+    fx.plane._publish()
+    before = _tree_bytes(fx.registry, fx.audit, fx.run)
+    guest_before = _tree_bytes(fx.guest / "data")
+    try:
+        result = _run_capture(fx, "--isolate-services")
+    finally:
+        fx.plane.close()
+    assert result.returncode == (0 if fault == "none" else 1), result.stdout + result.stderr
+    inert = copy.deepcopy(original)
+    inert["init"]["cmd"] = list(_CAPTURE_INERT_CMD)
+    inert.pop("services")
+    assert fx.plane.config_updates[0] == inert
+    assert fx.plane.config_updates[-1] == original
+    assert fx.plane.state["machine"]["state"] == "stopped"
+    assert _tree_bytes(fx.registry, fx.audit, fx.run) == before
+    assert _tree_bytes(fx.guest / "data") == guest_before
+    assert _CAPTURE_SECRET not in result.stdout + result.stderr
+    if fault == "none":
+        assert fx.plane.state["machine"]["config"] == original
+        provenance = json.loads((fx.capture / f"{fx.machine}.provenance.json").read_bytes())
+        assert provenance["native_release_verified"] is False and provenance["proof_credit"] == 0
+        assert provenance["native_original_config_sha256"] == hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    else:
+        failure = json.loads((fx.capture / f"{fx.machine}.capture-failure.json").read_bytes())
+        assert failure["restored"] is (fault != "restore-drift")
+        assert not (fx.capture / f"{fx.machine}.provenance.json").exists()
 
 
 @pytest.mark.parametrize(
