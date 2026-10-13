@@ -522,6 +522,43 @@ capacity. The RCA stays open: independent source review, normal full deploy
 qualification, rollout and the unchanged exact benchmark/LIVE50 outcome gates
 remain pending under the user's no-paid-test/no-deploy instruction.
 
+
+#### Parent source review follow-up
+
+The existing parent thread independently reviewed the composed candidate
+`42436f4f59e324583f63e4b536ef555d62889116`. It accepted the original batching,
+lock and partial-failure design with the existing catalog/read-detail fences,
+but found that verified-live reconciliation still called a predicate that
+omitted the immutable identity added to the final matcher. That predicate also
+used Python tuple equality, which equates numeric `passed=1` with boolean `True`.
+This is a recurrence of incomplete ACK equivalence, not a new storage design.
+
+The **same** permanent ACK blackbox was extended before the follow-up fix. On
+`42436f4f5`, RED lists seven verified-live foreign identity variants and numeric
+`passed=1` accepted by both ambiguous GET reconciliation and a successful POST
+response. The follow-up shares `_run_record_identity_matches` across final and
+verified-live matchers and compares live task identities as serialized JSON.
+Normal visibility-only registration, supported Hub response fields and every
+transport/campaign budget stay unchanged. No backend projection architecture,
+new outcome field or provider action was introduced. The unchanged extended
+control passes, with one POST per case and the same body in every case; all
+seven selected offline owning Hub blackboxes remain green.
+
+The existing native HTTP outcome/guest-ACK fixture initially failed its positive
+publication assertion because it returned only `run_id`, `live` and `tasks`,
+while the real Hub summary also carries timestamp, suite, source and campaign
+membership. Its loopback response now preserves that already-received identity.
+The fleet early-publication fixture also returned that incomplete summary;
+its unchanged no-spam assertion reproduced two POSTs instead of one. The same
+response-shape correction makes the unchanged focused test pass, retaining
+early outcomes and teardown assertions. Both corrected responses echo the
+received immutable metadata; neither weakens the client's required ACK.
+Every existing ownership, integer-version, terminal fence, guest ACK and cleanup
+assertion remains unchanged. The focused two-family pytest command records the
+original failure (36 passed/1 failed), then passes all 37 tests after the fixture
+shape correction. Parent review and check logs are retained privately with the
+source receipt; production and benchmark outcome qualification remain pending.
+
 ## Human feedback
 
 The user asked for the full `/deploy` after the messaging-mock change. That

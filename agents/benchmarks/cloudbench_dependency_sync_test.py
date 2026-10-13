@@ -29345,7 +29345,8 @@ def test_fleet_publishes_evaluation_before_teardown(tmp_path: Path) -> None:
             bundle = json.loads(raw)
             received.append((self.path, bundle))
             response = json.dumps(
-                {"run": {"run_id": bundle["run_id"], "live": True, "tasks": bundle.get("tasks", [])}}
+                # Real Hub summaries retain timestamp/suite/source and campaign identity.
+                {"run": {**bundle, "live": True, "tasks": bundle.get("tasks", [])}}
             ).encode()
             self.send_response(201)
             self.send_header("Content-Length", str(len(response)))

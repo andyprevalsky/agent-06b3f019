@@ -400,15 +400,18 @@ def test_hub_reconciliation_preserves_required_ack_identity():
     exact = {**bundle, "live": False,
              "tasks": [{**bundle["tasks"][0], "status": "passed"}]}
     current_view = exact
+    post_status = 503
     posts = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             posts.append(json.loads(gzip.decompress(raw)))
-            self.send_response(503)
-            self.send_header("Content-Length", "0")
+            payload = json.dumps({"run": current_view}).encode() if post_status == 201 else b""
+            self.send_response(post_status)
+            self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
+            self.wfile.write(payload)
 
         def do_GET(self):
             raw = json.dumps({"run": current_view}).encode()
@@ -429,17 +432,22 @@ def test_hub_reconciliation_preserves_required_ack_identity():
                                      f"http://127.0.0.1:{server.server_address[1]}",
                                      "BENCHMARK_HUB_API_KEY": "fixture-key"}),
               patch("benchmarks.hub_upload.time.sleep", lambda _delay: None)):
-            for field, wrong in (("timestamp", "2026-10-13T00:00:00Z"),
-                                 ("suite", "foreign-suite"), ("source", "foreign-source"),
-                                 ("group_run_id", "campaign-foreign"),
-                                 ("group_member_id", "r001-j0001"), ("group_attempt", 2),
-                                 ("group_attempt", True)):
-                current_view = {**exact, field: wrong}
-                try:
-                    upload_run_bundle(bundle, required=True, max_attempts=1)
-                    wrongly_acknowledged.append(field + ":" + str(wrong))
-                except HubVisibilityError:
-                    pass
+            for verified_live in (False, True):
+                for field, wrong in (("run_id", "foreign-run"),
+                                     ("timestamp", "2026-10-13T00:00:00Z"),
+                                     ("suite", "foreign-suite"), ("source", "foreign-source"),
+                                     ("group_run_id", "campaign-foreign"),
+                                     ("group_member_id", "r001-j0001"), ("group_run_number", 2),
+                                     ("group_timestamp", "2026-10-13T00:00:00Z"),
+                                     ("group_total", 49), ("group_attempt", 2),
+                                     ("group_attempt", True)):
+                    current_view = {**exact, "live": verified_live, field: wrong}
+                    try:
+                        upload_run_bundle(bundle, live=verified_live, required=True,
+                                          verify_live_response=verified_live, max_attempts=1)
+                        wrongly_acknowledged.append(str(verified_live) + ":" + field + ":" + str(wrong))
+                    except HubVisibilityError:
+                        pass
             for live in (True, False):
                 current_view = {**exact, "live": live,
                                 "tasks": [{**exact["tasks"][0], "passed": False, "status": "failed"}]}
@@ -449,13 +457,26 @@ def test_hub_reconciliation_preserves_required_ack_identity():
                     wrongly_acknowledged.append("verified-live:" + str(live))
                 except HubVisibilityError:
                     pass
+            current_view = {**exact, "live": True,
+                            "tasks": [{**exact["tasks"][0], "passed": 1}]}
+            try:
+                upload_run_bundle(bundle, live=True, required=True,
+                                  verify_live_response=True, max_attempts=1)
+                wrongly_acknowledged.append("numeric passed reconciled as boolean")
+            except HubVisibilityError:
+                pass
+            post_status = 201
+            if upload_run_bundle(bundle, live=True, required=True,
+                                 verify_live_response=True, max_attempts=1):
+                wrongly_acknowledged.append("numeric passed in successful POST ACK")
+            post_status = 503
             # Matching outcomes can reconcile on the final attempt, from this same Hub.
             current_view = exact
             assert upload_run_bundle(bundle, required=True, max_attempts=1)
             current_view = {**exact, "live": True}
             assert upload_run_bundle(bundle, live=True, required=True,
                                      verify_live_response=True, max_attempts=1)
-            assert len(posts) == 11, "one POST per case; reconciliation must not add retries"
+            assert len(posts) == 28, "one POST per case; reconciliation must not add retries"
             expected_body = {**bundle, "tasks": [{**bundle["tasks"][0], "logs": {}}]}
             assert all(post == expected_body for post in posts), "reconciliation must preserve packet bytes"
             assert not wrongly_acknowledged, f"foreign ACK accepted: {wrongly_acknowledged}"

@@ -465,24 +465,33 @@ def upload_run_bundle(
     )
 
 
+def _run_record_identity_matches(bundle: dict, stored: dict) -> bool:
+    """Compare published run/campaign identity with JSON type distinctions."""
+    fields = (
+        "run_id", "timestamp", "suite", "source", "group_run_id", "group_member_id",
+        "group_run_number", "group_timestamp", "group_total", "group_attempt",
+    )
+    return all(
+        json.dumps(stored.get(key), sort_keys=True) == json.dumps(bundle.get(key), sort_keys=True)
+        for key in fields
+    )
+
+
 def live_response_matches(bundle: dict, stored: dict) -> bool:
     """A terminal-to-live fenced no-op cannot acknowledge a new outcome."""
 
     def identity(task):
         passed = task.get("passed")
         status = "passed" if passed is True else "failed" if passed is False else task.get("status")
-        return (
-            task.get("name"),
-            status,
-            passed,
-            task.get("agent_id"),
-            task.get("lifecycle_stage"),
-            task.get("startup_label"),
-        )
+        # Tuple equality in Python would accept numeric 1 as boolean True.
+        return json.dumps((
+            task.get("name"), status, passed, task.get("agent_id"),
+            task.get("lifecycle_stage"), task.get("startup_label"),
+        ), sort_keys=True)
 
     return (
         stored.get("live") is True
-        and stored.get("run_id") == bundle.get("run_id")
+        and _run_record_identity_matches(bundle, stored)
         and [identity(t) for t in stored.get("tasks") or []] == [identity(t) for t in bundle["tasks"]]
     )
 
@@ -508,17 +517,11 @@ def final_record_matches(bundle: dict, stored: dict) -> bool:
 
     expected = [projected(task) for task in bundle.get("tasks") or [] if isinstance(task, dict)]
     actual = [projected(task) for task in stored.get("tasks") or [] if isinstance(task, dict)]
-    identity_fields = (
-        "run_id", "timestamp", "suite", "source", "group_run_id", "group_member_id",
-        "group_run_number", "group_timestamp", "group_total", "group_attempt",
+    return (
+        stored.get("live") is False
+        and _run_record_identity_matches(bundle, stored)
+        and actual == expected
     )
-    # Python equates True with 1. Membership numbers require JSON number
-    # identity, so a boolean cannot stand in for an attempt acknowledgement.
-    identity_matches = all(
-        json.dumps(stored.get(key), sort_keys=True) == json.dumps(bundle.get(key), sort_keys=True)
-        for key in identity_fields
-    )
-    return stored.get("live") is False and identity_matches and actual == expected
 
 
 def _upload_committed(
