@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -2835,7 +2836,13 @@ cloudbench_env_value() { return 0; }
         assert "state=clean" in cleanup_status
         assert (data_dir / f"cloudbench-driver-clean-{run_token}.ack").read_text() == f"{run_token}\n"
         assert (data_dir / "cloudbench-driver.state").read_text() == "exited\n"
-        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index(
+        # The driver logs its exact target immediately before `kill -INT` and the
+        # dispatch status immediately after it. The interrupted runner can log
+        # its verified cleanup before that second line, so only the pre-signal
+        # record orders causally against the runner's cleanup.
+        assert "benchmark cancellation signal dispatched: pid=" in log_text
+        assert "signal=INT status=0" in log_text
+        assert log_text.index("benchmark signal target evidence") < log_text.index(
             "Verified cloud root provider cleanup"
         )
         assert log_text.index("Verified cloud root provider cleanup") < log_text.index(
@@ -6397,14 +6404,24 @@ def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     assert causal_completion.returncode == 0, causal_completion.stderr
 
 
-def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
+@pytest.mark.parametrize(("signal_name", "expected_rc"), [("TERM", 143), ("INT", 130), ("HUP", 129)])
+def test_guest_shutdown_child_confirmation_supervisor_forwards_termination_and_awaits_cleanup(
     tmp_path: Path,
+    signal_name: str,
+    expected_rc: int,
 ) -> None:
     """Fleet cleanup must not orphan run-bench-cloud under PID 1.
 
     The tracked background PID is a Bash function/subshell, not the runner it
-    starts.  A controller TERM therefore has to be forwarded explicitly and
-    the runner must be reaped before the durable child-finished marker appears.
+    starts.  A controller TERM, a terminal Ctrl-C (INT) or a hangup therefore
+    has to be forwarded explicitly and the runner must be reaped before the
+    durable child-finished marker appears. The runner's EXIT cleanup delivers
+    the guest shutdown through a data-plane proxy in its own process group, so
+    that proxy must still be alive while the runner handles the forwarded
+    signal; residual members are reaped after it. The runner is launched from
+    an asynchronous subshell, so it inherits SIGINT ignored exactly as in
+    production: only TERM reaches its cleanup trap, whatever the original
+    signal was, and the supervisor still reports the original signal.
     """
     supervisor = _extract_fleet_function(fleet_source_text(), "run_fleet_child_supervised() {")
     terminator = _extract_fleet_function(fleet_source_text(), "terminate_fleet_runner_group() {")
@@ -6418,8 +6435,20 @@ def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
     ready = tmp_path / "child.ready"
     cleaned = tmp_path / "child.cleaned"
     child_pid = tmp_path / "child.pid"
+    proxy_pid = tmp_path / "proxy.pid"
+    proxy_terminated = tmp_path / "proxy.terminated"
+    proxy = (
+        f"trap 'printf terminated > {shlex.quote(str(proxy_terminated))}; exit 143' TERM; "
+        "while :; do sleep 0.1; done"
+    )
     child = (
-        f"trap 'printf cleaned > {shlex.quote(str(cleaned))}; exit 143' TERM; "
+        f"bash -c {shlex.quote(proxy)} & "
+        f"printf '%s\\n' \"$!\" > {shlex.quote(str(proxy_pid))}; "
+        f"trap 'sleep 0.5; if [ -e {shlex.quote(str(proxy_terminated))} ]; then "
+        f"printf proxy-killed-before-runner-cleanup > {shlex.quote(str(cleaned))}; "
+        f"else printf cleaned > {shlex.quote(str(cleaned))}; fi; exit 143' TERM; "
+        f"trap 'printf runner-received-INT > {shlex.quote(str(cleaned))}; exit 130' INT; "
+        f"trap 'printf runner-received-HUP > {shlex.quote(str(cleaned))}; exit 129' HUP; "
         f"printf '%s\\n' \"$$\" > {shlex.quote(str(child_pid))}; "
         f": > {shlex.quote(str(ready))}; "
         "while :; do sleep 1; done"
@@ -6427,20 +6456,24 @@ def test_fleet_child_supervisor_forwards_termination_and_awaits_cleanup(
     script = f"""set +e
 {terminator}
 {supervisor}
-run_fleet_child_supervised {shlex.quote(str(marker))} bash -c {shlex.quote(child)} &
+CLOUDBENCH_RUNNER_TERM_SECONDS=4 run_fleet_child_supervised {shlex.quote(str(marker))} bash -c {shlex.quote(child)} &
 supervisor_pid=$!
 deadline=$((SECONDS + 5))
 while [ ! -e {shlex.quote(str(ready))} ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.05; done
 [ -e {shlex.quote(str(ready))} ] || exit 90
-kill -TERM "$supervisor_pid" || exit 91
+kill -s {signal_name} "$supervisor_pid" || exit 91
 wait "$supervisor_pid"
 supervisor_rc=$?
-[ "$supervisor_rc" -eq 143 ] || exit 92
+[ "$supervisor_rc" -eq {expected_rc} ] || exit 92
 [ -e {shlex.quote(str(cleaned))} ] || exit 93
+[ "$(cat {shlex.quote(str(cleaned))})" = cleaned ] || exit 97
 [ -e {shlex.quote(str(marker))} ] || exit 94
-[ "$(cat {shlex.quote(str(marker))})" = 143 ] || exit 95
+[ "$(cat {shlex.quote(str(marker))})" = {expected_rc} ] || exit 95
 runner_pid="$(cat {shlex.quote(str(child_pid))})"
 ! kill -0 "$runner_pid" 2>/dev/null || exit 96
+proxy="$(cat {shlex.quote(str(proxy_pid))})"
+! kill -0 "$proxy" 2>/dev/null || exit 98
+[ -e {shlex.quote(str(proxy_terminated))} ] || exit 99
 """
 
     result = subprocess.run(
@@ -6448,13 +6481,13 @@ runner_pid="$(cat {shlex.quote(str(child_pid))})"
         text=True,
         capture_output=True,
         check=False,
-        timeout=10,
+        timeout=20,
     )
 
     assert result.returncode == 0, result.stderr
 
 
-def test_fleet_child_supervisor_bounds_escalation_and_reaps_process_group(
+def test_guest_shutdown_child_confirmation_supervisor_bounds_escalation_and_reaps_process_group(
     tmp_path: Path,
 ) -> None:
     """A wedged runner cleanup must not survive the fleet's supervisor.
@@ -6509,6 +6542,591 @@ while {{ kill -0 "$runner_pid" 2>/dev/null || kill -0 "$grandchild" 2>/dev/null;
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_guest_shutdown_child_confirmation_runner_exit_cleanup_survives_a_second_signal(
+    tmp_path: Path,
+) -> None:
+    """A later cancellation signal must not abort the runner's EXIT cleanup.
+
+    After the runner-first TERM, the supervisor's residual group TERM or the
+    controller's process-tree teardown can reach the runner while its EXIT
+    trap is still delivering the guest stop. Running the `exit` TERM trap
+    inside the EXIT trap used to skip proxy retirement, port-lease release,
+    viewer teardown and the exit status line.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_BOOT_LAUNCH=0
+FLEET_MACHINE_ID=deadbeef000001
+mid=deadbeef000001
+STOP_DONE=0
+LOCK_ACQUIRED=0
+release_boot_config_update_slot() {{ :; }}
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+confirm_guest_shutdown() {{
+  # The second cancellation arrives while the stop is being delivered.
+  kill -TERM "$$"
+  sleep 0.2
+  printf 'confirm\\n' >> "$CALLS"
+}}
+stop_proxy() {{ printf 'stop_proxy\\n' >> "$CALLS"; }}
+release_local_port_leases() {{ printf 'release_leases\\n' >> "$CALLS"; }}
+stop_live_archive_frontend() {{ printf 'stop_live_frontend\\n' >> "$CALLS"; }}
+stop_all_local_viewers() {{ printf 'stop_viewers\\n' >> "$CALLS"; }}
+{_extract_fleet_function(cloud, "stop_on_exit() {")}
+trap stop_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+kill -TERM "$$"
+sleep 5
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 143, result.stdout + result.stderr
+    assert calls.read_text().splitlines() == [
+        "confirm",
+        "stop_proxy",
+        "release_leases",
+        "stop_live_frontend",
+        "stop_viewers",
+    ]
+    assert "Original exit code: 143" in result.stdout
+
+
+_NATIVE_STOP_OWNER = "6e24d19a05a94cc39402dd06db3b454e"
+_NATIVE_STOP_MACHINE = "deadbeef000001"
+_NATIVE_STOP_CLONE = "cloudbench-owned-native-stop"
+_NATIVE_STOP_VOLUME = "vol_owned_native_stop"
+
+
+def _write_delivery_receipt(path: Path, **overrides: object) -> None:
+    receipt = {
+        "version": 1,
+        "kind": "guest-shutdown-requested",
+        "run_id": "20261012-041236-2223459",
+        "run_token": _NATIVE_STOP_OWNER + "-3",
+        "machine_id": _NATIVE_STOP_MACHINE,
+        "bench": "bench-owned",
+        "http_status": 202,
+        "requested_epoch": 1791778394,
+    }
+    receipt.update(overrides)
+    path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+@pytest.mark.parametrize("case", ["delivered", "accepted-204", "rejected", "conflict-409", "foreign-existing"])
+def test_guest_shutdown_child_confirmation_runner_publishes_exact_delivery_receipt(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """A runner that delivered /shutdown leaves a run-scoped, exact receipt.
+
+    The guest can still be draining when the runner's bounded acknowledgement
+    window ends and it retires the proxy. Controller cleanup must then know the
+    stop was delivered, so the runner records the accepted request before it
+    starts waiting for the guest's cleanup acknowledgement. Only HTTP 202/204
+    is delivery: the guest status server answers 409 when it recorded nothing
+    or could not signal the executing benchmark.
+    """
+    source = CLOUD_SCRIPT.read_text()
+    functions = [_extract_fleet_function(source, "confirm_guest_shutdown() {")]
+    if "publish_guest_shutdown_delivery_receipt() {" in source:
+        functions.append(_extract_fleet_function(source, "publish_guest_shutdown_delivery_receipt() {"))
+    receipt_path = tmp_path / "guest-shutdown.requested"
+    original = None
+    if case == "foreign-existing":
+        _write_delivery_receipt(receipt_path, run_id="foreign-run")
+        original = receipt_path.read_bytes()
+    post_status = {"rejected": "503", "conflict-409": "409", "accepted-204": "204"}.get(case, "202")
+    script = f"""set -uo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
+RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
+CLOUDBENCH_FLEET_RUN_ID=20261012-041236-2223459
+TASKS_CSV=bench-owned
+CLOUDBENCH_INFRA_PROBE=0
+FINISHED=0
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=1
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+curl() {{
+  case " $* " in
+    *" POST "*) printf {post_status} ;;
+    *) printf 202 ;;
+  esac
+}}
+{chr(10).join(functions)}
+confirm_guest_shutdown
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    # The guest is still draining, so no party may claim its acknowledgement.
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (tmp_path / "guest-shutdown.confirmed").exists()
+    if case in {"rejected", "conflict-409"}:
+        assert not receipt_path.exists(), f"HTTP {post_status} must not be recorded as delivered"
+        return
+    if case == "foreign-existing":
+        assert receipt_path.read_bytes() == original, "a foreign delivery receipt was replaced"
+        return
+    assert not receipt_path.is_symlink()
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["version"] == 1 and receipt["kind"] == "guest-shutdown-requested"
+    assert receipt["run_id"] == "20261012-041236-2223459"
+    assert receipt["run_token"] == _NATIVE_STOP_OWNER + "-3"
+    assert receipt["machine_id"] == _NATIVE_STOP_MACHINE
+    assert receipt["bench"] == "bench-owned"
+    assert receipt["http_status"] == int(post_status)
+    assert isinstance(receipt["requested_epoch"], int)
+    assert not list(tmp_path.glob("*.tmp*")), "a temporary receipt leaked"
+
+
+@pytest.mark.parametrize("phase", ["during-post", "during-health-poll"])
+def test_guest_shutdown_child_confirmation_receipt_survives_term_during_delivery(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    """A cancellation that lands while the accepted POST is in flight keeps its receipt.
+
+    On the execution-window path the runner sets GUEST_SHUTDOWN_RESULT=1 before
+    confirm_guest_shutdown, so its EXIT trap never re-posts. A TERM pending
+    while curl waits used to run `exit 143` as soon as curl returned, after the
+    guest had answered 202 but before the receipt was written; controller
+    cleanup then natively stopped the delivered, draining guest. The signal
+    must still end the runner, after the accepted delivery is recorded.
+    """
+    source = CLOUD_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in ("publish_guest_shutdown_delivery_receipt() {", "confirm_guest_shutdown() {")
+    )
+    script = f"""set -uo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+FLEET_MACHINE_ID={_NATIVE_STOP_MACHINE}
+RUN_LOG_TOKEN={_NATIVE_STOP_OWNER}-3
+CLOUDBENCH_FLEET_RUN_ID=20261012-041236-2223459
+TASKS_CSV=bench-owned
+CLOUDBENCH_INFRA_PROBE=0
+FINISHED=0
+LOCAL_STATUS_PORT=61001
+STATUS_PROXY_PID=$$
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=3
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+curl() {{
+  case " $* " in
+    *" POST "*) [ {phase} != during-post ] || kill -TERM $$; sleep 0.3; printf 202 ;;
+    *) [ {phase} != during-health-poll ] || kill -TERM $$; sleep 0.1; printf 202 ;;
+  esac
+}}
+{functions}
+on_exit() {{ ec=$?; trap - EXIT; printf 'exit-trap ec=%s\\n' "$ec"; exit "$ec"; }}
+trap on_exit EXIT
+trap 'exit 143' TERM
+# The execution-window path of run-bench-cloud's main body.
+GUEST_SHUTDOWN_RESULT=1
+if confirm_guest_shutdown; then GUEST_SHUTDOWN_RESULT=0; fi
+echo "confirm returned without the pending TERM"
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 143, result.stdout + result.stderr
+    assert "confirm returned without the pending TERM" not in result.stdout
+    receipt = tmp_path / "guest-shutdown.requested"
+    assert receipt.is_file(), "an accepted delivery lost its receipt to a pending TERM"
+    assert json.loads(receipt.read_text())["http_status"] == 202
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        "absent",
+        "delivered",
+        "delivered-no-port",
+        "foreign-run",
+        "foreign-machine",
+        "foreign-owner",
+        "foreign-bench",
+        "rejected-status",
+        "conflict-409-status",
+        "controller-409",
+        "symlink",
+        "malformed",
+    ],
+)
+def test_guest_shutdown_child_confirmation_native_stops_only_undelivered_guests(
+    tmp_path: Path,
+    receipt: str,
+) -> None:
+    """Controller cleanup natively stops only a guest no party delivered a stop to.
+
+    The controller's own POST can fail with HTTP 000 merely because the runner
+    already delivered the stop and retired its proxy. A matching run-scoped
+    delivery receipt keeps that draining guest on the existing acknowledgement
+    and retention path; an absent, foreign or unreadable receipt is treated
+    as undelivered, so the original incident's guest is still stopped. HTTP
+    409 is never delivery, from the runner or from the controller itself: the
+    guest answers it when nothing was recorded or the executing benchmark was
+    not signalled. A delivered guest whose proxy the runner already retired
+    (connection refused) is left to retention at once, not polled until the
+    cleanup deadline, and acknowledgement polls name the exact guest.
+    """
+    import time
+    fleet = fleet_source_text()
+    functions = [
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "cloudbench_publish_guest_shutdown_confirmation() {",
+            "fleet_guest_shutdown_delivery_state() {",
+            "fleet_guest_shutdown_delivered_by_runner() {",
+            "cloudbench_confirm_guest_shutdowns() {",
+        )
+        if signature in fleet
+    ]
+    output = tmp_path / "bench-owned"
+    output.mkdir()
+    if receipt != "delivered-no-port":
+        (output / "status-proxy.port").write_text("61001\n")
+    path = output / "guest-shutdown.requested"
+    if receipt in {"delivered", "delivered-no-port"}:
+        _write_delivery_receipt(path)
+    elif receipt == "foreign-run":
+        _write_delivery_receipt(path, run_id="20261011-000000-1")
+    elif receipt == "foreign-machine":
+        _write_delivery_receipt(path, machine_id="deadbeef000002")
+    elif receipt == "foreign-owner":
+        _write_delivery_receipt(path, run_token="a" * 32 + "-3")
+    elif receipt == "foreign-bench":
+        _write_delivery_receipt(path, bench="bench-other")
+    elif receipt == "rejected-status":
+        _write_delivery_receipt(path, http_status=503)
+    elif receipt == "conflict-409-status":
+        _write_delivery_receipt(path, http_status=409)
+    elif receipt == "symlink":
+        target = tmp_path / "elsewhere.json"
+        _write_delivery_receipt(target)
+        path.symlink_to(target)
+    elif receipt == "malformed":
+        path.write_text('{"kind": "guest-shutdown-requested",')
+    calls = tmp_path / "native-stop-calls"
+    curl_calls = tmp_path / "curl-calls"
+    post_status = "409" if receipt == "controller-409" else "000"
+    script = f"""set -uo pipefail
+RUN_ID=20261012-041236-2223459
+FLEET_OWNER_TOKEN={_NATIVE_STOP_OWNER}
+CLOUDBENCH_BARRIER_TOKEN=fixture-barrier
+CLOUDBENCH_CHILD_TERM_SECONDS=30
+CHILD_OUT=({shlex.quote(str(output))})
+CHILD_BENCH=(bench-owned)
+CHILD_MACHINE=({_NATIVE_STOP_MACHINE})
+CHILD_RUN_TOKEN=({_NATIVE_STOP_OWNER}-3)
+curl() {{
+  printf '%s\\n' "$*" >> {shlex.quote(str(curl_calls))}
+  case " $* " in
+    *" POST "*) printf {post_status}; [ {post_status} != 000 ] || return 7 ;;
+    *) printf 000; return 7 ;;
+  esac
+}}
+fleet_native_stop_undelivered_guests() {{
+  printf '%s\\n' "$@" >> {shlex.quote(str(calls))}
+  return 0
+}}
+{chr(10).join(functions)}
+cleanup() {{
+  cloudbench_confirm_guest_shutdowns --native-stop-undelivered
+  status=$?
+  trap - EXIT
+  exit "$status"
+}}
+trap cleanup EXIT
+exit 143
+"""
+    started = time.monotonic()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    elapsed = time.monotonic() - started
+    # Neither path acknowledges cleanup: ownership stays retained either way.
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (output / "guest-shutdown.confirmed").exists()
+    if receipt in {"delivered", "delivered-no-port"}:
+        assert not calls.exists(), "a delivered, still-draining guest was natively stopped"
+        assert "after its runner delivered the authenticated shutdown" in result.stderr
+        assert "status proxy is retired" in result.stderr
+        # A retired proxy is final: no polling until the 30 s cleanup deadline.
+        assert elapsed < 10, f"a retired delivered guest was polled for {elapsed:.1f}s"
+        recorded = curl_calls.read_text().splitlines() if curl_calls.exists() else []
+        polls = [line for line in recorded if "/shutdown-health" in line]
+        if receipt == "delivered":
+            assert polls, "a delivered guest with a published port was never checked"
+            for line in polls:
+                assert f"X-Cloudbench-Run-Token: {_NATIVE_STOP_OWNER}-3" in line, line
+                assert f"X-Cloudbench-Machine-Id: {_NATIVE_STOP_MACHINE}" in line, line
+        else:
+            assert not polls, "a guest without a status proxy was polled"
+    else:
+        assert calls.read_text().splitlines() == ["0"], result.stderr
+
+
+_NATIVE_STOP_FAKE_FLY = r"""
+FLY() {
+  printf '%s\n' "$*" >> "$FAKE/calls"
+  local id="${3:-}" detail=0 arg failures
+  for arg in "$@"; do [ "$arg" != -d ] || detail=1; done
+  case "$1 $2" in
+    "machine status")
+      if [ -e "$FAKE/hang" ]; then sleep 30; fi
+      [ "$id" = "$(cat "$FAKE/id")" ] || { echo "failed to get VM $id: machine not found" >&2; return 1; }
+      if [ "$detail" = 1 ]; then
+        printf '{"mounts": [{"volume": "%s"}]}\n' "$(cat "$FAKE/volume")"
+      else
+        printf 'Machine ID: %s\nState: %s\n\nVM\n  ID = %s\n  State = %s\n  Name = %s\n' \
+          "$id" "$(cat "$FAKE/state")" "$id" "$(cat "$FAKE/state")" "$(cat "$FAKE/name")"
+      fi
+      ;;
+    "machine stop")
+      failures="$(cat "$FAKE/stop-failures")"
+      if [ "$failures" -gt 0 ]; then
+        printf '%s\n' "$((failures - 1))" > "$FAKE/stop-failures"
+        echo "Error: failed to stop machine $id: request returned non-2xx status, 429" >&2
+        return 1
+      fi
+      [ ! -e "$FAKE/stop-to" ] || cp "$FAKE/stop-to" "$FAKE/state"
+      ;;
+    *) echo "unexpected fake flyctl call: $*" >&2; return 2 ;;
+  esac
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "started",
+        "throttled",
+        "stop-always-fails",
+        "created",
+        "suspended",
+        "volume-mismatch",
+        "foreign-name",
+        "hung-read",
+        "late-delivery-receipt",
+    ],
+)
+def test_guest_shutdown_child_confirmation_native_stop_is_bounded_exact_and_verified(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """The native backstop stops only the exact owned guest, within a deadline.
+
+    Every provider call is individually bounded and the whole phase has one
+    deadline inside the controller's cleanup ceiling. A throttled or failing
+    stop request is retried a bounded number of times while the guest still
+    reads started; only a Machine that verifies `stopped` is reported stopped.
+    `created` and `suspended` stay unresolved for exact-owner recovery, which
+    accepts only started or stopped guests. A Machine whose live name or
+    mounted volume differs from this controller's audit is never stopped, and
+    neither is a guest whose runner published its exact delivery receipt after
+    the controller's own request failed.
+    """
+    fleet = fleet_source_text()
+    signatures = (
+        "fly_with_timeout() {",
+        "registry_meta_value() {",
+        "machine_status_exact_read() {",
+        "machine_config_exact_read() {",
+        "registry_machine_details() {",
+        "machine_volume_id() {",
+        "fleet_native_stop_call_budget() {",
+        "fleet_native_stop_send() {",
+        "fleet_native_stop_publish_receipt() {",
+        "fleet_guest_shutdown_delivery_state() {",
+        "fleet_native_stop_request_guest() {",
+        "fleet_native_stop_verify_guest() {",
+        "fleet_native_stop_run_window() {",
+        "fleet_native_stop_undelivered_guests() {",
+    )
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature) for signature in signatures if signature in fleet
+    )
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    initial = {"created": "created", "suspended": "suspended"}.get(case, "started")
+    (fake / "id").write_text(_NATIVE_STOP_MACHINE)
+    (fake / "state").write_text(initial)
+    (fake / "name").write_text("cloudbench-foreign" if case == "foreign-name" else _NATIVE_STOP_CLONE)
+    (fake / "volume").write_text("vol_foreign" if case == "volume-mismatch" else _NATIVE_STOP_VOLUME)
+    (fake / "stop-failures").write_text({"throttled": "1", "stop-always-fails": "99"}.get(case, "0"))
+    if case not in {"created", "suspended"}:
+        (fake / "stop-to").write_text("stopped")
+    if case == "hung-read":
+        (fake / "hang").touch()
+    audit = tmp_path / "audit"
+    (audit / "by-machine-id").mkdir(parents=True)
+    (audit / "fresh").mkdir()
+    (audit / "by-machine-id" / _NATIVE_STOP_MACHINE).write_text(_NATIVE_STOP_CLONE + "\n")
+    (audit / "fresh" / _NATIVE_STOP_CLONE).write_text(
+        f"clone_name={_NATIVE_STOP_CLONE}\nmachine_id={_NATIVE_STOP_MACHINE}\n"
+        f"volume_id={_NATIVE_STOP_VOLUME}\ndisposition=owned\n"
+    )
+    output = tmp_path / "bench-owned"
+    output.mkdir()
+    if case == "late-delivery-receipt":
+        _write_delivery_receipt(output / "guest-shutdown.requested")
+    script = f"""set -uo pipefail
+FAKE={shlex.quote(str(fake))}
+APP=bench-app
+RUN_ID=20261012-041236-2223459
+FLEET_OWNER_TOKEN={_NATIVE_STOP_OWNER}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+CLAIMED_POOL_FILE={shlex.quote(str(tmp_path / "claimed-pool"))}
+CHILD_OUT=({shlex.quote(str(output))})
+CHILD_BENCH=(bench-owned)
+CHILD_MACHINE=({_NATIVE_STOP_MACHINE})
+CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS=6
+CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT=2
+{_NATIVE_STOP_FAKE_FLY}
+{functions}
+# Controller cleanup runs as the EXIT trap of a signalled controller, where a
+# bare `return` reports the status from before the trap (here 143).
+cleanup() {{
+  fleet_native_stop_undelivered_guests 0
+  status=$?
+  trap - EXIT
+  exit "$status"
+}}
+trap cleanup EXIT
+exit 143
+"""
+    started = time.monotonic()
+    try:
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(f"native stop was not bounded by its deadline: {error.stderr!r}") from None
+    elapsed = time.monotonic() - started
+    stops = [line for line in (fake / "calls").read_text().splitlines() if line.startswith("machine stop ")]
+    assert all(line == f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app" for line in stops), stops
+    assert "destroy" not in (fake / "calls").read_text()
+    receipt_path = output / "guest-native-stop.json"
+    # Phase deadline (6 s) plus one bounded call and its kill grace.
+    assert elapsed < 14, elapsed
+    if case in {"started", "throttled"}:
+        assert result.returncode == 0, result.stderr
+        assert len(stops) == (2 if case == "throttled" else 1)
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt
+        assert receipt["stop_requests"] == len(stops), receipt
+        assert receipt["machine_id"] == _NATIVE_STOP_MACHINE and receipt["volume_id"] == _NATIVE_STOP_VOLUME
+        assert receipt["delivery_receipt"] == "absent" and receipt["destroyed"] is False
+        assert receipt["run_id"] == "20261012-041236-2223459"
+        assert receipt["fleet_owner_token"] == _NATIVE_STOP_OWNER
+        return
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert _NATIVE_STOP_MACHINE in result.stderr, "fail-closed output must name the exact Machine"
+    assert "retaining ownership" in result.stderr
+    assert "natively stopped" not in result.stderr
+    if case == "late-delivery-receipt":
+        assert stops == [], "a guest with an exact delivery receipt was stopped natively"
+        assert "delivery receipt" in result.stderr
+        assert not receipt_path.exists()
+        return
+    if case in {"volume-mismatch", "foreign-name", "hung-read"}:
+        assert stops == [], "an unverified Machine identity was stopped"
+        assert not receipt_path.exists()
+        return
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["verified"] is False, receipt
+    assert receipt["verified_state"] == initial, receipt
+    assert 1 <= len(stops) <= 3 and receipt["stop_requests"] == len(stops), (stops, receipt)
+    if case == "stop-always-fails":
+        assert len(stops) == 3, stops
+
+
+def test_guest_shutdown_child_confirmation_native_stop_counts_only_sent_requests(tmp_path: Path) -> None:
+    """A spent native-stop budget sends nothing and must say so.
+
+    The receipt's stop_requests and stop_requested fields record requests that
+    actually reached the provider client; a skipped call is distinct.
+    """
+    fleet = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in ("fleet_native_stop_call_budget() {", "fleet_native_stop_send() {")
+    )
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+APP=bench-app
+fly_with_timeout() {{ printf '%s\\n' "$*" >> {shlex.quote(str(calls))}; return 0; }}
+{functions}
+fleet_native_stop_send {_NATIVE_STOP_MACHINE} "$((SECONDS - 1))"
+printf 'spent=%s\\n' "$?"
+fleet_native_stop_send {_NATIVE_STOP_MACHINE} "$((SECONDS + 30))"
+printf 'sent=%s\\n' "$?"
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+    assert "spent=2" in result.stdout, result.stdout + result.stderr
+    assert "sent=0" in result.stdout, result.stdout + result.stderr
+    assert calls.read_text().splitlines() == [f"8 machine stop {_NATIVE_STOP_MACHINE} -a bench-app"]
+
+
+@pytest.mark.parametrize("case", ["lost-job", "live-uncaptured-root"])
+def test_guest_shutdown_child_confirmation_tree_teardown_never_waits_on_lost_jobs(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """Process-tree teardown must not wait on a root Bash has lost track of.
+
+    Inside a controller's EXIT trap, Bash 5.2 can keep listing a background job
+    that died from the same group signal as Running after the kernel reaped it;
+    `jobs -pr` then names a PID that /proc no longer has. Such a root is
+    terminal. A root that is still alive but missing from the captured process
+    snapshot cannot be identified, so teardown fails closed at once instead of
+    calling `wait` on it, which blocks until that process exits.
+    """
+    import time
+
+    child_pid = tmp_path / "child.pid"
+    if case == "lost-job":
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        jobs_stub = f'jobs() {{ printf "%s\\n" {gone.pid}; }}'
+        roots = str(gone.pid)
+        table_stub = ""
+    else:
+        jobs_stub = ""
+        roots = '"$root"'
+        # The captured snapshot omits the live root.
+        table_stub = 'cloudbench_process_birth_table() { printf "1 0 proc-start:fixture:1\\n"; }'
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{jobs_stub}
+{table_stub}
+sleep 20 &
+root=$!
+printf '%s\\n' "$root" > {shlex.quote(str(child_pid))}
+if cloudbench_terminate_tree_and_wait 5 {roots}; then status=0; else status=$?; fi
+printf 'status=%s\\n' "$status"
+kill "$root" 2>/dev/null
+wait "$root" 2>/dev/null
+exit 0
+"""
+    started = time.monotonic()
+    try:
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=12)
+    except subprocess.TimeoutExpired:
+        if child_pid.exists():
+            subprocess.run(["kill", child_pid.read_text().strip()], check=False)
+        raise AssertionError("tree teardown blocked waiting on a root it could not account for") from None
+    elapsed = time.monotonic() - started
+    assert elapsed < 8, elapsed
+    if case == "lost-job":
+        assert "status=0" in result.stdout, result.stdout + result.stderr
+    else:
+        assert "status=0" not in result.stdout, result.stdout + result.stderr
+        assert "absent from the teardown snapshot" in result.stderr
 
 
 def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
