@@ -210,6 +210,56 @@ tackled by a sub-agent using `/RCA`. The completed paid run is not authority for
 another paid trial, merge or deploy. Preserve the native policy, shared world,
 parallelism, sample-once/replay identities, original fixture and goal.
 
+2026-10-13: the user approved schema descriptions and DEMO reporting, required
+the full static network in the startup prefix, and rejected unmentioned
+proposals. They asked whether WHM errors belong to schema validation or the
+existing Rose completion retry owner. The two validation boundaries differ:
+the approved Zod annotation repair preserves response field descriptions;
+WHM syntax/probability/call-identity/state validation remains strict.
+
+The private retry experiment positively reproduces a separate recovery gap:
+WHM validation occurs after `RoseClient._complete_impl` has left
+`recover_truncated`, and its ValueError does not enter the existing RoseError
+recovery path. A private candidate validates raw attempts inside that same Rose
+owner, records rejected attempts before its existing next-model retry, and
+preserves numeric usage/cache counters and per-model cost attribution. It does
+not add a retry loop, weaken validation, or raise the existing timeouts.
+
+Native-to-bridge mock-inference checks exercise caller cancellation/rejoin,
+retirement, capture admission and unrelated parallel requests. An initially
+failing retirement test exposed a candidate capture-admission race; the same
+assertion passes after correcting that private proposal. Caller disconnect
+preserves admitted work under the native shield/rejoin contract; retirement
+cancels and joins it without a new world-history commit.
+
+**Whole retry proposal held and unapplied:** its current helper uses the
+existing redaction/atomic-write primitives but introduces a separate
+`native-provider-rejections` directory and schema. That is not the existing
+native prediction writer. One-store ownership and existing archive/export/
+replay schema compatibility must be proven before application. Mocked local
+mechanism tests neither recover the lost original replies nor establish the
+exact fundraising outcome; those RCA gates remain open.
+
+The final frozen patch has SHA256
+`1b489f5e1d162f43cf64f54ee82c48b94039fcfacfe9bd2014109090e9c73f4e`
+and remains outside task source. The identical six permanent owning assertions
+produce five FAIL/one PASS on the baseline (0.55s), then six PASS plus a seventh
+real native mock-inference integration PASS on the candidate (16.43s). The
+complete affected local family passes 192 cases in 21.36s. The scratch fixture's
+initial missing setup-script failure was corrected by pointing to the exact
+authoritative script and already verified native interpreter; no replacement
+artifact or dependency environment was built. Independent review HOLD confirms
+the second-store integration gap and unproved mixed terminal usage, repeated
+cancellation, crash recovery and capture-process scale behavior. No application
+approval is requested from these mechanism controls.
+
+All 173 regular private proposal/test/review/proof files are authenticated by
+per-file manifest SHA256 and full encrypted archive readback. Nonsecret durable
+receipts are `run13-validation-recovery-hold.json` and
+`run13-retry-proposal-private-receipt.json` under
+`docs/handoffs/whm-b07d9037-preservation/`. Original task records and all previously
+preserved checkpoint artifacts remain intact.
+
 ## Reusable lesson
 
 Retain every rejected structured response privately at its validation boundary before protocol repair, and distinguish syntax, semantic and task-outcome proof.
