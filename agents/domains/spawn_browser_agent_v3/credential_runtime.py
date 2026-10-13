@@ -2,7 +2,7 @@
 
 The backend owns selection/injection of browser state. This module owns the
 worker-only half: decrypting password/passkey material, creating secret refs,
-and producing the auth state placed in the browser model's dynamic context.
+and producing safe auth inventory for genuine browser tool results.
 """
 
 from __future__ import annotations
@@ -32,6 +32,17 @@ class RealmCredentialState:
     decrypted_passkeys: list[Dict[str, Any]]
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]]
     auth_credential_ref: Optional[Dict[str, str]]
+
+
+def unknown_realm_credential_state(auth_realm: str) -> RealmCredentialState:
+    """Invalidate active secrets without claiming discovery found no options."""
+    options = {"realm": auth_realm}
+    return RealmCredentialState(
+        auth_realm=auth_realm, auth_options=options, auth_options_section="",
+        password_secret_refs={}, password_origins={}, credential_refs_by_secret_ref={},
+        auth_runtime_state=AuthRuntimeState.from_auth_options(options),
+        decrypted_passkeys=[], passkey_ref_by_credential_id={}, auth_credential_ref=None,
+    )
 
 
 def _enabled_ids(items: list[Dict[str, Any]]) -> set[str]:
