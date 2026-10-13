@@ -58,7 +58,7 @@ labels = ["Before:", "After:", "TL;DR:", "Evidence:", "Detail:", "Downstream:", 
 
 def check(path, expected_blocks):
     text = Path(path).read_text()
-    blocks = re.findall(r"^```text\nAPPROVAL .*?\n```$", text, flags=re.M | re.S)
+    blocks = re.findall(r"^```text\n━{64}\n 🔐 APPROVAL .*?\n```$", text, flags=re.M | re.S)
     if len(blocks) != expected_blocks:
         raise SystemExit(
             f"FAIL: {path} must hold {expected_blocks} approval code block(s), found {len(blocks)}"
@@ -67,7 +67,7 @@ def check(path, expected_blocks):
         items = [
             line.split(" ", 1)[0]
             for line in block.splitlines()[2:]
-            if line and not line.startswith((" ", "`", "Reject:", "Edit:"))
+            if line and not line.startswith((" ", "`", "Reject:", "Edit:", "━", "─"))
         ]
         if items != labels:
             raise SystemExit(f"FAIL: {path} approval block items {items} must be {labels}")
@@ -75,6 +75,17 @@ def check(path, expected_blocks):
             raise SystemExit(
                 f"FAIL: {path} approval block must not contain Markdown links, bold or headings"
             )
+        if block.splitlines()[-2] != "━" * 64 or "⏳ AWAITING DECISION" not in block:
+            raise SystemExit(f"FAIL: {path} approval block must use the scorecard frame and status")
+        downstream = block.split("\nDownstream:\n", 1)[1].split("\n" + "─" * 64, 1)[0]
+        fields = ["Severity:", "Future prod trajectories affected:", "Risk:"]
+        positions = [downstream.find(field) for field in fields]
+        if -1 in positions or positions != sorted(positions):
+            raise SystemExit(f"FAIL: {path} downstream must show severity, affected share and risk in order")
+        for field in ("Severity:", "Risk:"):
+            row = next(line for line in downstream.splitlines() if field in line)
+            if not any(mark in row for mark in ("🟢", "🟡", "🟠", "🔴", "⚪")):
+                raise SystemExit(f"FAIL: {path} {field} needs an emoji and level")
         after = text[text.index(block) + len(block):].lstrip("\n")
         if not after.startswith("- **FE link:** [Open agent]("):
             raise SystemExit(f"FAIL: {path} approval block must be followed by its Links list")
@@ -82,6 +93,84 @@ def check(path, expected_blocks):
 
 check(sys.argv[1], 1)
 check(sys.argv[2], 2)
+PY
+
+require_text "$FORMAT" "Do not invent a percentage" \
+  "future production trajectory estimates must disclose their evidence or uncertainty"
+require_text "$FORMAT" "exclude benchmarks, tests and synthetic runs" \
+  "downstream production impact must use actual product trajectories"
+
+# Exercise the real CLI dispatch without credentials, databases or providers.
+# The scripts-only fixture deliberately has no usable application interpreter.
+python3 - "$ROOT_DIR" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+contract = root / ".claude/shared/benchmark-report-format.txt"
+expected = contract.read_text()
+with tempfile.TemporaryDirectory(prefix="benchmark-report-cli-") as directory:
+    fixture = Path(directory)
+    (fixture / "scripts").mkdir()
+    (fixture / ".claude/shared").mkdir(parents=True)
+    shutil.copy2(root / "scripts/run-bench", fixture / "scripts/run-bench")
+    target = fixture / ".claude/shared/benchmark-report-format.txt"
+    shutil.copy2(contract, target)
+    cli = ["bash", str(fixture / "scripts/run-bench")]
+    result = subprocess.run(cli + ["report-format"], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected, "report-format must print the canonical contract verbatim"
+    invalid = subprocess.run(cli + ["report-format", "extra"], capture_output=True, text=True, timeout=10)
+    assert invalid.returncode == 2, "report-format must reject unused arguments"
+
+    (fixture / "agents/venv/bin").mkdir(parents=True)
+    interpreter = fixture / "agents/venv/bin/python"
+    interpreter.write_text('''#!/usr/bin/env bash
+case "$*" in
+  *cloudbench_catalog.py*) echo spawn-sub-agents ;;
+  *cloudbench-production-only-tasks.py*)
+    if [ "${REPORT_TEST_PROD_ONLY:-0}" = 1 ]; then echo spawn-sub-agents; else exit 1; fi ;;
+  *) echo "RUNNER $*" ;;
+esac
+''')
+    interpreter.chmod(0o755)
+    fleet = fixture / "scripts/fake-fleet"
+    fleet.write_text('#!/usr/bin/env bash\necho "RUNNER $*"\n')
+    shutil.copy2(fleet, fixture / "scripts/run-fleet-infra-stability-proof")
+    env = {**os.environ, "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet)}
+    for args in (["spawn-sub-agents", "--wait"], ["spawn-sub-agents", "-k", "2"],
+                 ["--local", "spawn-sub-agents"], ["eval", "--list"],
+                 ["stability-proof", "-k", "2"]):
+        result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (args, result.stderr)
+        assert result.stdout.count(expected) == 1, (args, "launch must emit one complete contract")
+        assert result.stdout.index(expected) < result.stdout.index("RUNNER"), args
+    result = subprocess.run(cli + ["spawn-sub-agents"], env={**env, "REPORT_TEST_PROD_ONLY": "1"},
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count(expected) == 1 and "--prod" in result.stdout, "production route needs the contract"
+    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"]):
+        result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (args, result.stderr)
+        assert expected not in result.stdout, (args, "non-launch output must keep its format")
+    target.unlink()
+    result = subprocess.run(cli + ["spawn-sub-agents"], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0 and "RUNNER" not in result.stdout, "missing contract must stop before launch"
+
+for field in ("BENCHMARK SCORECARD", "LAST SLICE TRIGGERED", "WHY NO NEW SLICE?",
+              "BENCHMARK PROGRESS", "ACTIVE RUN · PASS / FAILURE", "TIMING / LIFECYCLE",
+              "COST / CACHE / LLM LATENCY", "ACTIVE SUB-AGENTS", "NEXT ACTION"):
+    assert field in expected, field
+for rule in ("10 * infra_failed > terminal_attempts", "10800", "Continuously",
+             "/RCA", "/deploy", "immutable", "No prose before or after", "30 seconds"):
+    assert rule in expected, rule
+assert "scripts/run-bench report-format" in (root / "CLAUDE.md").read_text()
+assert "scripts/run-bench report-format" in (root / ".claude/commands/benchmark.md").read_text()
+print("PASS: benchmark parent-agent contract on every CLI launch route")
 PY
 
 require_text "$FORMAT" "name the exact unchanged test or" \

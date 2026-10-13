@@ -28,6 +28,8 @@ import {
   type AdminHealthResponse,
 } from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
+import { findProductRootTasksBetween } from '../../domains/admin-health/repoProductUsage';
+import { testProductCompletionCohort } from './admin-health-product-usage.cases';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
@@ -359,6 +361,21 @@ async function testAdminHappyWeekly() {
   if (body.summary.taskCompletionRate !== latest.taskCompletionRate) {
     throw new Error('Task completion rate must match the current weekly period');
   }
+  const productTasks = await findProductRootTasksBetween(
+    new Date(body.range.start),
+    new Date(body.range.end)
+  );
+  const expectedCompletionRate =
+    productTasks.length === 0
+      ? 0
+      : Number(
+          (
+            productTasks.filter((task) => task.status === 'COMPLETED').length / productTasks.length
+          ).toFixed(4)
+        );
+  if (body.summary.taskCompletionRate !== expectedCompletionRate) {
+    throw new Error('Completion summary and chart must use the real customer product cohort');
+  }
   if (
     body.velocity.dev.linearPointsCompleted.status === 'ready' &&
     body.velocity.dev.linearPointsCompleted.value !== latest.andyLinearPoints
@@ -543,6 +560,10 @@ async function main() {
     { name: 'GET /api/admin-health weekly admin -> metrics', fn: testAdminHappyWeekly },
   ];
   const remainingTests = [
+    {
+      name: 'completion rate counts only real customer product usage',
+      fn: testProductCompletionCohort,
+    },
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },

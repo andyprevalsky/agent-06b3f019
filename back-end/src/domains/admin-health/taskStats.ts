@@ -10,7 +10,7 @@ export function tasksIssuedPerUser(tasks: RootTaskRecord[], userCount: number): 
   return Number((tasks.length / userCount).toFixed(4));
 }
 
-export function taskCompletionRate(tasks: RootTaskRecord[]): number {
+export function taskCompletionRate(tasks: Array<Pick<RootTaskRecord, 'status'>>): number {
   if (tasks.length === 0) return 0;
   const completed = tasks.filter((task) => task.status === 'COMPLETED').length;
   return Number((completed / tasks.length).toFixed(4));
