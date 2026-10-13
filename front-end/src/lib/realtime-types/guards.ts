@@ -20,7 +20,11 @@ import type { AgentStateChangedPayload } from './bus-channel';
  * NOTE: Only call on validated InsertMessagePayload from extractInsertPayload().
  * TOOL messages are guaranteed to have metadata with toolName/toolCallId/toolStatus.
  */
-export function isToolMessage(msg: InsertMessagePayload): msg is ToolMessagePayload {
+export function isToolMessage(
+  msg: Omit<InsertMessagePayload, 'metadata'> & {
+    metadata?: { toolName?: unknown } | null;
+  },
+): msg is ToolMessagePayload {
   if (msg.role !== 'TOOL') return false;
   if (!msg.metadata || typeof msg.metadata.toolName !== 'string') {
     console.error(
