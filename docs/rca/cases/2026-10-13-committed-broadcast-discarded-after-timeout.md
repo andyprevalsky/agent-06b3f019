@@ -235,6 +235,52 @@ cold-start reconciliation case is a relative, not proof of this boundary:
 every subscribe already did a cold read here; the retained lifecycle demand
 was missing after that read.
 
+## Oversized reference-driven aggregate notifications
+
+The completed load log contained a forty-seventh rejection, separate from the
+forty-six small-message burst drops. Message
+`f7555316-7d74-45d7-b46d-88cbf33afe5f` was a completed fifty-child for-each
+aggregate, not the root's final-completion card. Its encoded payload was
+455,542 bytes; admission counted 455,584 including the topic. Metadata occupied
+455,258 bytes, including 452,911 bytes of `structured_response.items`.
+The original unbounded sender attempted such payloads; actual broker acceptance
+on that old path was not observed. The new finite queue rejected this record
+before sending because it exceeded the 256 KiB per-agent admission budget.
+The benchmark's durable API/tree evaluator did not observe this loss.
+
+The deeper owned mismatch was the realtime representation: reference-driven
+fan-out rows duplicated every child's output although the existing UI renders
+`SubAgentTree` from `busId` and `subAgentIds` and hydrates node outputs through
+its existing tree API/bus. Browser and Claude completion output are different
+contracts and still need their structured metadata. Server model context and
+API responses read the full persisted Message metadata.
+
+A public-publisher fixture with fifty generic child outputs reproduced the
+pre-send rejection (zero notifications versus one expected). The correction
+projects only terminal TOOL for-each aggregate metadata with valid tree
+references onto the existing realtime wire. It preserves message identity,
+text, file pointer and every reference/status field, while omitting the
+redundant child-output copy. Stored metadata is not mutated. No queue bound,
+model context, channel, API query or recovery window is changed. Permanent
+projection and preservation controls are in
+`aggregate-message-broadcast.blackbox.ts`. The final byte-identical artifact
+fails on `d7dce7b13` (zero frames versus one expected, 229 ms) and passes on the
+corrected runtime (153 ms), through the same public blackbox command:
+
+```bash
+cd back-end
+npx tsx src/tests/blackbox/run.ts aggregate-message-broadcast
+```
+
+The original ten-case delivery and six-case throughput artifacts remain
+unchanged and pass again, as do format, affected lint and backend types. An
+actual MessageBubble/SubAgentTree rendering replay confirms the child result
+label comes from the existing authoritative child tree with aggregate output
+absent from the wire. Archive searches were `structured_response broadcast
+capacity` and `forEachAggregate duplicate child results`; their generic matches
+did not establish a prior instance of this projection boundary. Fresh canonical
+load and full final-tree verification remain required.
+
 ## Human feedback
 
 Preserve the approved router and semantic deadlines. Fix the owning boundary;

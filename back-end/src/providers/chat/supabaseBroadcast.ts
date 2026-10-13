@@ -15,6 +15,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
 import { currentTraceContext } from '../tracing';
+import { projectMessageBroadcastMetadata } from './messageBroadcastProjection';
 import {
   CommittedMessageDelivery,
   InitialBroadcastDispatcher,
@@ -337,7 +338,7 @@ export async function broadcastMessageInsert(
       timestamp: message.timestamp.toISOString(),
       text: message.text,
       role: message.role,
-      metadata: message.metadata || null,
+      metadata: projectMessageBroadcastMetadata(message.role, message.metadata) || null,
       filePointer: message.filePointer || null,
     },
   });
