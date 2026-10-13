@@ -98,6 +98,14 @@ existing lint limits; assertions remain intact and the matching-plan fixture
 now includes its real tool-call identity. All 32 focused handler/delivery checks
 pass after this correction.
 
+The same first-delivery case also affected assistant rows that lack a stream
+ID: fallback cleanup removed newer bubbles for the same subagent. A permanent
+regression first failed with an empty bubble map. Fallback cleanup now preserves
+streams whose producer start time is newer than the persisted message, while
+the explicit stream-ID path keeps exact matching. The unchanged regression
+passes after that correction. Legacy rows without usable timing retain their
+previous cleanup behavior.
+
 The frontend permanent reproduction is
 `front-end/src/tests/blackbox/hooks-lib-insert-delivery.blackbox.ts`; the same
 notification scenarios fail on the baseline and pass after deduplication.

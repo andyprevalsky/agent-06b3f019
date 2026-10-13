@@ -158,6 +158,45 @@ describe('committed INSERT delivery', () => {
     hook.unmount();
   });
 
+  it('a delayed assistant INSERT without streamId preserves streams that started later', async () => {
+    let handlers: Handlers = {};
+    vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {
+      handlers = next;
+      return fakeChannel();
+    });
+    let bubbles = new Map<string, StreamingBubble>([
+      [
+        'old-stream',
+        {
+          text: 'old',
+          sequence: 1,
+          done: false,
+          llmStartedAtMs: Date.parse('2026-10-13T01:34:14Z'),
+        },
+      ],
+      [
+        'new-stream',
+        {
+          text: 'new',
+          sequence: 1,
+          done: false,
+          llmStartedAtMs: Date.parse('2026-10-13T01:34:20Z'),
+        },
+      ],
+    ]);
+    const deps = makeDeps({
+      setStreamingBubbles: (action) => {
+        bubbles = typeof action === 'function' ? action(bubbles) : action;
+      },
+    });
+    const hook = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
+    act(() => handlers.onInsert?.({ ...insert, role: 'ASSISTANT', metadata: null }));
+    expect([...bubbles.keys()]).toEqual(['new-stream']);
+    expect(deps.dispatchMessage).toHaveBeenCalledOnce();
+    hook.unmount();
+  });
+
   it('a late browser start cannot resurrect a finished task', async () => {
     let handlers: Handlers = {};
     vi.mocked(realtime.subscribeToAgent).mockImplementation(async (_, next) => {

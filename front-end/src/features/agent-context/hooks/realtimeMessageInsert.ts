@@ -30,6 +30,7 @@ export function handleInsertMessage(
     const subAgentId = message.metadata?.subAgentId ?? null;
     const streamId =
       typeof message.metadata?.streamId === 'string' ? message.metadata.streamId : null;
+    const persistedAtMs = Date.parse(message.timestamp);
     setters.setStreamingBubbles((prev) => {
       const newMap = new Map(prev);
       if (streamId) {
@@ -39,7 +40,11 @@ export function handleInsertMessage(
         return newMap;
       }
       for (const [streamId, bubble] of newMap) {
-        if ((bubble.subAgentId ?? null) === subAgentId) {
+        // A legacy message has no stream identity. Its delayed first delivery
+        // must not settle a later request's bubble; prefer the producer clock.
+        const startedAtMs = bubble.llmStartedAtMs ?? bubble.startedAtMs;
+        const newerStream = startedAtMs !== undefined && startedAtMs > persistedAtMs;
+        if (!newerStream && (bubble.subAgentId ?? null) === subAgentId) {
           if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
           newMap.delete(streamId);
         }
