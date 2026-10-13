@@ -1,0 +1,3 @@
+interface:
+  display_name: "/swap-harness"
+  short_description: "Resume quota-limited boxes on the other harness"
