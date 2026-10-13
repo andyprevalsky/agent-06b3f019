@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 import {
   subscribeToAgent,
@@ -15,7 +15,7 @@ import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { MAX_RECONNECT_DELAY_MS } from '../config';
-import { runPostSubscribeBackfill } from './agentBackfill';
+import { runPostSubscribeBackfill, type CompletionBackfillLease } from './agentBackfill';
 import {
   handleInsertMessage,
   handleUpdateAgent,
@@ -158,6 +158,7 @@ async function connectRealtime(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
   scheduleReconnect: () => void,
+  leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
 ): Promise<void> {
   try {
     const channel = await subscribeToAgent(
@@ -175,6 +176,7 @@ async function connectRealtime(
       selectedAgentId: scope.agentId,
       isCancelled: () => !isScopeActive(deps, scope),
       isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+      leaseRef,
       initialLoadDoneRef: deps.initialLoadDoneRef,
       setMessages: deps.setMessages,
       setAgent: deps.setAgent,
@@ -188,7 +190,10 @@ async function connectRealtime(
   }
 }
 
-function startAgentSubscription(deps: RealtimeSubscriptionDeps): () => void {
+function startAgentSubscription(
+  deps: RealtimeSubscriptionDeps,
+  leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
+): () => void {
   const scope: AgentScope = {
     agentId: deps.selectedAgentId ?? '',
     cancelled: false,
@@ -218,11 +223,12 @@ function startAgentSubscription(deps: RealtimeSubscriptionDeps): () => void {
   if (deps.reconnectTimeoutRef.current) clearTimeout(deps.reconnectTimeoutRef.current);
   deps.reconnectTimeoutRef.current = null;
   const scheduleReconnect = createReconnectScheduler(deps, scope);
-  void connectRealtime(deps, scope, scheduleReconnect);
+  void connectRealtime(deps, scope, scheduleReconnect, leaseRef);
   return cleanup;
 }
 
 export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
+  const leaseRef = useRef<CompletionBackfillLease | null>(null);
   const {
     selectedAgentId,
     selectedAgentIdRef,
@@ -248,29 +254,32 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
   } = deps;
   useEffect(
     () =>
-      startAgentSubscription({
-        selectedAgentId,
-        selectedAgentIdRef,
-        canSubscribe,
-        forceResubscribeCounter,
-        channelRef,
-        reconnectAttemptRef,
-        reconnectTimeoutRef,
-        isReconnectingRef,
-        initialLoadDoneRef,
-        streamedTextsRef,
-        completedStreamIdsRef,
-        setStreamingBubbles,
-        setStreamingPlan,
-        setStreamingAttention,
-        setStreamingTools,
-        setMessages,
-        setAgent,
-        setIsChatMode,
-        setForceResubscribeCounter,
-        dispatchMessage,
-        onLoadAgents,
-      }),
+      startAgentSubscription(
+        {
+          selectedAgentId,
+          selectedAgentIdRef,
+          canSubscribe,
+          forceResubscribeCounter,
+          channelRef,
+          reconnectAttemptRef,
+          reconnectTimeoutRef,
+          isReconnectingRef,
+          initialLoadDoneRef,
+          streamedTextsRef,
+          completedStreamIdsRef,
+          setStreamingBubbles,
+          setStreamingPlan,
+          setStreamingAttention,
+          setStreamingTools,
+          setMessages,
+          setAgent,
+          setIsChatMode,
+          setForceResubscribeCounter,
+          dispatchMessage,
+          onLoadAgents,
+        },
+        leaseRef,
+      ),
     [
       selectedAgentId,
       canSubscribe,

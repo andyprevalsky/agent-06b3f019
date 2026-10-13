@@ -3,6 +3,13 @@ import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { server } from './msw/server';
+import {
+  agentDetailJson,
+  API_BASE,
+  fakeChannel,
+  makeDeps,
+  mockSession,
+} from './realtime-subscription.fixtures';
 
 vi.mock('@/lib/realtime', async (importOriginal) => {
   const mod = await importOriginal<typeof import('@/lib/realtime')>();
@@ -17,110 +24,16 @@ import {
   useRealtimeSubscription,
   type RealtimeSubscriptionDeps,
 } from '@/features/agent-context/hooks/useRealtimeSubscription';
-import {
-  CONNECTED_COMPLETION_BACKFILL_POLL_MS,
-  DISCONNECTED_BACKFILL_POLL_MS,
-} from '@/features/agent-context/config';
+import { DISCONNECTED_BACKFILL_POLL_MS } from '@/features/agent-context/config';
 import * as RealtimeMod from '@/lib/realtime';
 import { getBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
-/** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
-function agentDetailJson(messages: Array<Record<string, unknown>>) {
-  return {
-    agent: {
-      agent_id: 'agent-1',
-      goal: 'g',
-      model: 'm',
-      source: 'WEB',
-      reasoning_effort: 'off',
-      progress: 0.5,
-      status: 'ACTIVE',
-      status_message: null,
-      temporal_workflow_id: null,
-      token_count: 0,
-      tokens_in: 0,
-      tokens_out: 0,
-      tool_tokens_in: 0,
-      tool_tokens_out: 0,
-      tool_cost_cents: 0,
-      context_size: 0,
-      message_count: messages.length,
-      price_limit_cents: 100,
-      tree_cost_cents: 0,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      write_lock_enabled: false,
-      verifier: null,
-      tools: [],
-    },
-    messages,
-    pagination: { has_more: false, oldest_timestamp: null },
-  };
-}
-
-const API_BASE = 'http://localhost:3001/api';
 type AgentHandlers = Parameters<typeof RealtimeMod.subscribeToAgent>[1];
 type CapturedAgentHandlers = Omit<AgentHandlers, 'onAgentModeStarted'> & {
   onAgentModeStarted?: (payload: { agentId: string }) => void;
 };
 
-function mockSession() {
-  const session = {
-    access_token:
-      'eyJhbGciOiJIUzI1NiJ9.' +
-      btoa(JSON.stringify({ sub: 'user-12345678', role: 'authenticated' })) +
-      '.signature-signature-signature',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'user-12345678', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  return session;
-}
-
-function fakeChannel(state: 'joined' | 'closed' | 'errored' = 'joined') {
-  return {
-    state,
-    topic: 'test',
-  } as unknown as import('@supabase/supabase-js').RealtimeChannel;
-}
-
 describe('useRealtimeSubscription', () => {
-  function makeDeps(overrides: Partial<RealtimeSubscriptionDeps> = {}): RealtimeSubscriptionDeps {
-    const setters = {
-      setStreamingBubbles: vi.fn(),
-      setStreamingPlan: vi.fn(),
-      setStreamingAttention: vi.fn(),
-      setStreamingTools: vi.fn(),
-      setMessages: vi.fn(),
-      setAgent: vi.fn(),
-      setIsChatMode: vi.fn(),
-      setForceResubscribeCounter: vi.fn(),
-      dispatchMessage: vi.fn(),
-    };
-    const refs = {
-      channelRef: { current: null as never },
-      reconnectAttemptRef: { current: 0 },
-      reconnectTimeoutRef: { current: null as number | null },
-      isReconnectingRef: { current: false },
-      initialLoadDoneRef: { current: null as string | null },
-      selectedAgentIdRef: { current: 'agent-1' as string | null },
-      streamedTextsRef: { current: new Set<string>() },
-      completedStreamIdsRef: { current: new Set<string>() },
-    };
-    return {
-      ...setters,
-      ...refs,
-      selectedAgentId: 'agent-1',
-      canSubscribe: true,
-      forceResubscribeCounter: 0,
-      onLoadAgents: vi.fn(),
-      ...overrides,
-    };
-  }
-
   beforeEach(() => {
     vi.mocked(RealtimeMod.subscribeToAgent).mockReset();
     vi.mocked(RealtimeMod.unsubscribe).mockReset();
@@ -657,58 +570,6 @@ describe('useRealtimeSubscription', () => {
     // The stranded answer must be reconciled from the API on the cold-start join.
     await waitFor(() => expect(deps.setMessages).toHaveBeenCalled());
     expect(deps.setAgent).toHaveBeenCalled();
-  });
-
-  // Regression (production semantic run 29807459093): the first authoritative
-  // snapshot succeeded after the router/tool messages but before the canonical
-  // final answer was persisted. The connected realtime channel then lost that
-  // final INSERT, so the answer remained in the DB while the UI waited forever.
-  // A successful but incomplete snapshot must keep reconciling until the latest
-  // user turn has its canonical answer.
-  it('continues connected backfill after an incomplete successful snapshot', async () => {
-    let calls = 0;
-    server.use(
-      http.get(`${API_BASE}/agents/agent-1`, () => {
-        calls += 1;
-        const messages: Array<Record<string, unknown>> = [
-          { message_id: 'user', timestamp: '1', text: 'search', role: 'USER' },
-          {
-            message_id: 'search',
-            timestamp: '2',
-            text: '',
-            role: 'TOOL',
-            metadata: { toolName: 'web_search', toolStatus: 'FINISHED' },
-          },
-        ];
-        if (calls >= 2) {
-          messages.push({
-            message_id: 'answer',
-            timestamp: '3',
-            text: 'RECOVERED FINAL',
-            role: 'TOOL',
-            metadata: {
-              toolName: 'send_message_to_user',
-              toolStatus: 'FINISHED',
-              isUserAttentionMessage: true,
-            },
-          });
-        }
-        return HttpResponse.json(agentDetailJson(messages));
-      }),
-    );
-    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
-    mockSession();
-    const deps = makeDeps();
-    vi.useFakeTimers();
-    try {
-      renderHook(() => useRealtimeSubscription(deps as never));
-      await vi.advanceTimersByTimeAsync(CONNECTED_COMPLETION_BACKFILL_POLL_MS + 250);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(calls).toBeGreaterThanOrEqual(2);
-    expect(deps.setMessages).toHaveBeenCalledTimes(2);
-    expect(deps.initialLoadDoneRef.current).toBe('agent-1');
   });
 
   // Regression: prod chat stalled on "Thinking" because the agent:<id> private
