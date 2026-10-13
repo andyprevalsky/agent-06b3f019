@@ -6,12 +6,14 @@
  *   useMessageAnimationBuffer  — single-slot animation queue
  *   useThinkingVisibility      — debounced show, immediate terminal/blocking hide
  *   useStreamingAutoScroll     — sub-agent-panel auto-scroll to latest
- *   useMessageListState        — composite aggregating all of the above
+ *   useMessageListState        — composite aggregating all of the above, plus
+ *                                the main list's per-turn web-search grouping
  */
 import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type MutableRefObject,
@@ -27,6 +29,11 @@ import {
   type FilteredStreamingState,
 } from './useMessageFiltering';
 import { useThinkingVisibility } from './useThinkingVisibility';
+import {
+  EMPTY_WEB_SEARCH_GROUPING,
+  groupWebSearchTurns,
+  type WebSearchTurnGrouping,
+} from './webSearchTurnGroups';
 
 // ─── Animation buffer ────────────────────────────────────────────────────
 
@@ -183,6 +190,7 @@ export interface MessageListState {
   animation: MessageAnimationState;
   animatedTokenCount: number;
   thinkingVisible: boolean;
+  webSearchGrouping: WebSearchTurnGrouping;
   handleSendMessage: (text: string) => void;
 }
 
@@ -242,6 +250,15 @@ export function useMessageListState({
 
   useStreamingAutoScroll(subAgentId, scrollEndRef, streaming.bubbles.size, filteredMessages.length);
 
+  // Sub-agent panels keep one row per search; the main list groups each turn.
+  const webSearchGrouping = useMemo(
+    () =>
+      subAgentId === undefined
+        ? groupWebSearchTurns(filteredMessages, [...streaming.tools.values()])
+        : EMPTY_WEB_SEARCH_GROUPING,
+    [subAgentId, filteredMessages, streaming.tools],
+  );
+
   const handleSendMessage = useCallback(
     (text: string): void => {
       ctx.sendMessage(text).catch((error: unknown) => {
@@ -258,6 +275,7 @@ export function useMessageListState({
     animation,
     animatedTokenCount,
     thinkingVisible,
+    webSearchGrouping,
     handleSendMessage,
   };
 }

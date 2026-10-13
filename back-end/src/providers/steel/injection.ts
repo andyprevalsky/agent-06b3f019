@@ -5,7 +5,8 @@
 import { prisma } from '../database';
 import { isAuthCredentialCookieName } from '../authCookies';
 import { canonicalAuthRealm, cookieDomainForStartUrl } from '../authRealm';
-import { cookieSelectionWhere } from '../browserCookies';
+import { cookieSelectionWhere, domainVariants } from '../browserCookies';
+import { playwrightCookiesFromRows, storedCookieIsLive } from './injectionCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
@@ -64,11 +65,9 @@ interface SteelRealmCookieSummary {
  * always gets SSO cookies. Boundary-aware variants (`www.` → parent, `.domain`,
  * subdomains) live in `cookieSelectionWhere`; the earlier inline copy is gone.
  *
- * INJECTION attribute-mapping below is intentionally NOT migrated yet: this path
- * sources cookies from CookieBundle (which lacks the sameSite/profile fields the
- * shared normaliser needs), and blindly applying profile-coherence could drop
- * the target realm's own cookie. That is a deliberate follow-up, not a blind
- * change to battle-tested behaviour.
+ * Rank bundles using only their own realm; carry SSO cookies from the selected
+ * profile afterward. Attribute mapping uses the same canonical normalisation
+ * as the compute connectors, without reselecting or mixing profiles.
  */
 function cookieDomainWhere(authRealm: string): { OR: Array<Record<string, unknown>> } {
   return cookieSelectionWhere(authRealm);
@@ -138,11 +137,13 @@ async function cookieSummaryForBundle(params: {
       userId: params.userId,
       browserSource: params.browserSource,
       browserProfile: params.browserProfile,
-      ...cookieDomainWhere(params.cookieDomain),
+      OR: domainVariants(params.cookieDomain),
     },
-    select: { name: true, creationUtc: true },
+    select: { name: true, creationUtc: true, expiresUtc: true, hasExpires: true },
   });
-  const authCookies = cookies.filter((cookie) => isAuthCredentialCookieName(cookie.name));
+  const authCookies = cookies.filter(
+    (cookie) => storedCookieIsLive(cookie) && isAuthCredentialCookieName(cookie.name)
+  );
   let freshestCookieUtc: bigint | null = null;
   for (const cookie of authCookies) {
     if (cookie.creationUtc === null || cookie.creationUtc === undefined) continue;
@@ -507,28 +508,7 @@ export async function injectUserData(
     if (hasCookies) {
       try {
         log.info(`  [cookies] Transforming ${cookies.length} cookies...`);
-        const CHROME_EPOCH_OFFSET = 11644473600;
-        const playwrightCookies = cookies.map((cookie) => {
-          let expires: number | undefined;
-
-          if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
-            expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
-            if (expires < Date.now() / 1000) {
-              expires = undefined;
-            }
-          }
-
-          return {
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path || '/',
-            expires,
-            secure: cookie.isSecure,
-            httpOnly: cookie.isHttpOnly,
-            sameSite: 'Lax' as const,
-          };
-        });
+        const playwrightCookies = playwrightCookiesFromRows(cookies);
 
         const invalidCookies = playwrightCookies.filter((cookie) => cookie.name === '');
         if (invalidCookies.length > 0) {

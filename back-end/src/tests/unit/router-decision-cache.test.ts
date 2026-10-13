@@ -69,6 +69,21 @@ function main(): void {
     /failed schema/i,
     'empty web_search query is not a healthy decision'
   );
+  assert.throws(
+    () =>
+      parseRouterDecisionJson(
+        JSON.stringify({ action: 'web_search', reasoning: 'search', queries: [] })
+      ),
+    /failed schema/i,
+    'web_search without any query is not a healthy decision'
+  );
+  assert.deepEqual(
+    parseRouterDecisionJson(
+      JSON.stringify({ action: 'web_search', reasoning: 'search', query: 'weather' })
+    ),
+    { action: 'web_search', reasoning: 'search', queries: ['weather'] },
+    'legacy cached single-query decisions replay as one query'
+  );
 
   // INVARIANT: the cache validator, the live parser, and `RouterDecisionSchema` must never disagree.
   // `RouterDecisionSchema` requires `mode` while the parser tolerates a legacy cache entry that
@@ -78,6 +93,7 @@ function main(): void {
   const decisions = [
     { action: 'direct_answer', reasoning: 'answer directly' },
     { action: 'web_search', reasoning: 'search', query: 'weather' },
+    { action: 'web_search', reasoning: 'search', queries: ['weather paris', 'weather tokyo'] },
     { action: 'start_superintelligence', reasoning: 'delegate', goal: 'finish' },
     { action: 'start_superintelligence', reasoning: 'delegate', goal: 'finish', mode: 'execute' },
   ];

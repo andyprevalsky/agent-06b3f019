@@ -831,6 +831,8 @@ def build_browser_llm_usage_items(
     total_output_tokens: int,
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+    *,
+    pricing_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> List[Dict[str, Any]]:
     """Build one llm usage row per model that ACTUALLY ran inference.
 
@@ -842,8 +844,8 @@ def build_browser_llm_usage_items(
     compute-token steps as paid waterfall usage.
 
     Callers that genuinely have no per-model breakdown pass `usage_by_model`
-    empty/None and get the historical single aggregate row, priced at the
-    browser pool so the workflow does not fall back to the ROOT agent's pool.
+    empty/None and get the historical single aggregate row, priced at
+    ``pricing_pool`` (the pool the browser steps ran on).
 
     Token conservation: with a populated ledger the emitted rows sum exactly to
     the ledger; the `total_*` args are only the single-row fallback's totals.
@@ -872,9 +874,8 @@ def build_browser_llm_usage_items(
         items.append(
             {
                 "type": "llm",
-                # Unattributed tokens still price at the browser pool rather
-                # than falling through to the parent agent's cheaper pool.
-                "model": model or BROWSER_USE_PRICING_POOL,
+                # Unattributed tokens price at the pool the steps ran on.
+                "model": model or pricing_pool,
                 "cost_cents": round(
                     (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
                     + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
@@ -908,6 +909,7 @@ def build_usage_items(
     *,
     fast_mode_cache_enabled: bool = False,
     provider: Optional[str] = None,
+    pricing_pool: str = BROWSER_USE_PRICING_POOL,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -938,6 +940,7 @@ def build_usage_items(
         total_output_tokens,
         model_pricing,
         usage_by_model,
+        pricing_pool=pricing_pool,
     )
     # Zero Kernel/Steel under Fast Mode or when there is no live LLM decision
     # (all replay/soft-complete, or empty ledger after soft-done). Warm OAi
