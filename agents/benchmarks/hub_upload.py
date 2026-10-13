@@ -421,7 +421,10 @@ def _post_run_bundle(
                 # up. Reconcile the exact read identity before replaying the
                 # mutation or declaring it failed.
                 time.sleep(delay)
-                if run_id and _upload_committed(base, body, live=live, timeout=min(timeout, 5.0)):
+                if run_id and _upload_committed(
+                    base, body, live=live, timeout=min(timeout, 5.0),
+                    verify_live_response=verify_live_response,
+                ):
                     record = "visibility" if live else "final record"
                     print(
                         f"✅ benchmark Hub upload attempt {attempt} committed before "
@@ -505,14 +508,28 @@ def final_record_matches(bundle: dict, stored: dict) -> bool:
 
     expected = [projected(task) for task in bundle.get("tasks") or [] if isinstance(task, dict)]
     actual = [projected(task) for task in stored.get("tasks") or [] if isinstance(task, dict)]
-    return stored.get("live") is False and stored.get("run_id") == bundle.get("run_id") and actual == expected
+    identity_fields = (
+        "run_id", "timestamp", "suite", "source", "group_run_id", "group_member_id",
+        "group_run_number", "group_timestamp", "group_total", "group_attempt",
+    )
+    # Python equates True with 1. Membership numbers require JSON number
+    # identity, so a boolean cannot stand in for an attempt acknowledgement.
+    identity_matches = all(
+        json.dumps(stored.get(key), sort_keys=True) == json.dumps(bundle.get(key), sort_keys=True)
+        for key in identity_fields
+    )
+    return stored.get("live") is False and identity_matches and actual == expected
 
 
-def _upload_committed(base: str, body: dict, *, live: bool, timeout: float) -> bool:
+def _upload_committed(
+    base: str, body: dict, *, live: bool, timeout: float, verify_live_response: bool = False,
+) -> bool:
     """Read back an ambiguously failed upload from the Hub it was sent to."""
     run_id = str(body.get("run_id") or "")
     try:
         if live:
+            if verify_live_response:
+                return live_response_matches(body, _read_hub_run(run_id, timeout=timeout, base=base))
             verify_run_visible(run_id, timeout=timeout, base=base)
             return True
         return final_record_matches(body, _read_hub_run(run_id, timeout=timeout, base=base))

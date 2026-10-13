@@ -20,12 +20,12 @@ function deferred() {
  * behind one writer must commit together in one catalog read-modify-write; one
  * invalid upload in that cycle rejects only itself.
  */
-export async function concurrentFinalBurst(): Promise<void> {
+export async function concurrentFinalBurst(count = 40): Promise<void> {
   const sender = S3Client.prototype as unknown as {
     send: (command: unknown) => Promise<unknown>;
   };
   const originalSend = sender.send;
-  const prefix = `burst-${process.pid}`;
+  const prefix = `burst-${process.pid}-${count}`;
   const objects = new Map<string, string>([
     [
       'benchmark-hub/index.json',
@@ -50,6 +50,10 @@ export async function concurrentFinalBurst(): Promise<void> {
   const releaseHolder = deferred();
   let catalogReads = 0;
   let catalogWrites = 0;
+  let activeBundleWrites = 0;
+  let peakBundleWrites = 0;
+  const cycleSizes: number[] = [];
+  let publishedRunIds = new Set([`${prefix}-group`]);
   sender.send = async (command) => {
     const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
     assert.equal(input.Bucket, 'offline');
@@ -61,7 +65,18 @@ export async function concurrentFinalBurst(): Promise<void> {
       return { Body: Buffer.from(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    if (input.Key === 'benchmark-hub/index.json') catalogWrites += 1;
+    if (input.Key === 'benchmark-hub/index.json') {
+      catalogWrites += 1;
+      const entries = JSON.parse(input.Body!) as Array<{ run_id: string }>;
+      cycleSizes.push(entries.filter((run) => !publishedRunIds.has(run.run_id)).length);
+      publishedRunIds = new Set(entries.map((run) => run.run_id));
+    }
+    if (input.Key.startsWith('benchmark-hub/runs/')) {
+      activeBundleWrites += 1;
+      peakBundleWrites = Math.max(peakBundleWrites, activeBundleWrites);
+      await new Promise((resolve) => setImmediate(resolve));
+      activeBundleWrites -= 1;
+    }
     if (input.Key === `benchmark-hub/runs/${prefix}-holder.json`) {
       holderWriting.resolve();
       await releaseHolder.promise;
@@ -83,6 +98,17 @@ export async function concurrentFinalBurst(): Promise<void> {
         status: 'INFRA_ERROR',
         failure_reason: 'no current run artifact produced',
         lifecycle_stage: 'released',
+        logs: {
+          messages: [
+            { role: 'assistant', message: `complete transcript ${i}: ` + 'λ\n'.repeat(2000) },
+          ],
+          tree: {
+            [`child-${i}`]: {
+              parent_agent_id: `root-${i}`,
+              messages: [{ role: 'assistant', message: `complete child transcript ${i}` }],
+            },
+          },
+        },
         ...(i % 2 === 0
           ? { agent_id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }
           : {}),
@@ -96,7 +122,7 @@ export async function concurrentFinalBurst(): Promise<void> {
       { live: true }
     );
     await holderWriting.promise;
-    const finals = Array.from({ length: 40 }, (_, i) => putRun(final(i), { live: false }));
+    const finals = Array.from({ length: count }, (_, i) => putRun(final(i), { live: false }));
     const collision = putRun({ run_id: `${prefix}-group`, tasks: [] }, { live: false }).then(
       () => 'stored',
       (error: unknown) => String(error)
@@ -112,18 +138,24 @@ export async function concurrentFinalBurst(): Promise<void> {
     );
     assert.equal(
       catalogWrites,
-      2,
-      `40 queued finals must share one catalog cycle after the holder; saw ${catalogWrites} catalog writes`
+      1 + Math.ceil((count + 1) / 64),
+      `${count} queued finals must share bounded catalog cycles after the holder; saw ${catalogWrites} catalog writes`
     );
-    assert.equal(catalogReads, 2, 'each catalog cycle reads the catalog once');
+    assert.equal(catalogReads, catalogWrites, 'each catalog cycle reads the catalog once');
+    assert.ok(
+      cycleSizes.every((size) => size <= 64),
+      'a publication may store at most 64 uploads'
+    );
+    assert.ok(peakBundleWrites <= 8, 'bundle publication must use at most eight lanes');
+    assert.equal(activeBundleWrites, 0, 'all write lanes settle before acknowledgement');
     assert.ok(results.every((summary) => summary.live === false));
     const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
       run_id: string;
       live: boolean;
       tasks: Array<{ status: string }>;
     }>;
-    assert.equal(index.length, 42, 'group record, holder and forty finals');
-    for (let i = 0; i < 40; i += 1) {
+    assert.equal(index.length, count + 2, 'group record, holder and every final');
+    for (let i = 0; i < count; i += 1) {
       const run = index.find((entry) => entry.run_id === `${prefix}-final-${i}`);
       assert.equal(run?.live, false);
       assert.equal(run?.tasks[0]?.status, 'INFRA_ERROR');
@@ -136,8 +168,8 @@ export async function concurrentFinalBurst(): Promise<void> {
     assert.equal(index.find((entry) => entry.run_id === `${prefix}-group`)?.live, true);
     const agentIndex = await loadHubAgentRunIndex();
     assert.ok(agentIndex !== null);
-    assert.equal(agentIndex.revision, 42, 'one revision per committed upload');
-    for (let i = 0; i < 40; i += 2) {
+    assert.equal(agentIndex.revision, count + 2, 'one revision per committed upload');
+    for (let i = 0; i < count; i += 2) {
       assert.equal(
         agentIndex.agents.get(`00000000-0000-4000-8000-${String(i).padStart(12, '0')}`),
         `${prefix}-final-${i}`

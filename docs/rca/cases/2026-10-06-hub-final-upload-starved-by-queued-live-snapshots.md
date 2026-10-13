@@ -398,6 +398,130 @@ in flight, then flush once.
 This case stays open until production runs the repaired store and a fresh
 LIVE50 terminal burst publishes without response timeouts.
 
+
+### 2026-10-13 isolated continuation: source-bound batching and ACK controls
+
+The continuation starts from PR #1480's exact checkpoint
+`718ab9a1eed72ca17c8a768baa592330da38e3f1` in
+`/home/boxes/rose-hub-original-reconciliation`, branch
+`fix/benchmark-hub-original-reconciliation`. The original comparison file remains
+byte-for-byte unchanged (SHA256
+`a4a6089d5a26d8b2379ca96b4d51b387507ad333d233e27d429335313495efe5`).
+The primary preservation branch and the other worker tree were not changed.
+
+Original trial 2's summary and grouped record both remain failed: 48 passed jobs,
+2 failed jobs, 50 original members, zero campaign credit. j0044's retained log
+first rejects startup with `App capacity guard could not refresh machine state
+after infra canary`, then reports four terminal Hub upload timeouts and
+`terminal Hub publication failed after resource release`. It never supplies an
+executed benchmark outcome. j0038's second attempt reports `primary runtime
+evidence remains incomplete`; its exact external custody belongs to the parent,
+not this continuation. No owner recovery, new trial or provider mutation was run.
+The grouped original preserves both failed controller outcomes and all attempts.
+
+Verified local copies of 284 original evidence members are retained privately
+under `.context/original-evidence/`, with archive-member SHA256s in
+`read-receipt.json`. This includes original burst server/client logs,
+`blackbox-before-fix.log`, `blackbox-after-fix.log`, the actual captured bundle
+and GET projection, and the six original backend domain receipts. Original test
+passes are historical evidence, not qualification of the continuation. The
+checkpoint handoff records interrupted development and pending review; this
+continuation does not infer a clean source review from those old green tests.
+
+The original causal owning regression was rerun with identical checked-in test
+bytes against a private source fixture using `benchmarkHubStore.base.ts`, then
+against the checkpoint store, on the new localhost database
+`victoria_hub_original_reconciliation`. No source reset or extra worktree was
+used. Commands (both `DATABASE_URL` and `DIRECT_URL` name that database):
+
+```sh
+node --import tsx .context/hub-validation/baseline-backend/src/tests/blackbox/benchmark-hub-index-read.blackbox.ts
+node --import tsx back-end/src/tests/blackbox/benchmark-hub-index-read.blackbox.ts
+```
+
+The expanded permanent burst control runs 40 and 129 finals. RED observed 41
+and 130 catalog writes. GREEN passes all 16 owning controls, publishes at most
+64 uploads per cycle, uses at most eight bundle lanes, joins every lane before
+ACK, and round-trips complete Unicode root and child transcripts. The 129-case
+control exercises three queued cycles after the held writer. Existing delayed
+registration, absorption, failed-publication, revision-floor repair and native
+peer controls retain their assertions. The store's admission comment now states
+the actual bounded-cycle behavior; it no longer claims an unlimited backlog
+fits in one cycle or that every final waits only for the current holder.
+
+A review of the original client repair found an incomplete ACK boundary.
+`_upload_committed` accepted any visible row for a caller that requested
+`verify_live_response`; `final_record_matches` compared outcome fields but
+omitted immutable run/campaign identity. The new permanent agents blackbox
+`hub_reconciliation_preserves_required_ack_identity` drives an actual loopback
+HTTP POST failure and GET reconciliation. On the checkpoint it fails with
+`foreign ACK accepted`, listing foreign timestamp, suite, source, campaign,
+member and attempt, a boolean attempt, and stale/final live outcomes. After the
+repair the same control passes. The existing ordinary registration retains its
+visibility-only contract; verified-live callers use the same outcome predicate
+as their successful POST response. Final reconciliation also compares the
+published run/campaign identity with JSON type distinctions. POST bytes,
+backoff, four-attempt policy, per-request limits and campaign clocks are unchanged.
+
+The original terminal-reconciliation blackbox was also rerun against the
+checkpoint's parent client (`a040520d51bdd3cf543ba8c1b7c157b7c64404c0`), loaded
+explicitly from a private source fixture. RED reports `benchmark Hub upload
+failed: timed out`; the same owning function is GREEN on this continuation.
+The fixture logs the actual imported source path so a cached current module
+cannot masquerade as a baseline. An initial fixture-loader attempt selected a
+cached current module and was rejected as invalid baseline evidence; it supplies
+no causal credit.
+
+The normal structural gate initially reported 1511 passing checks and one
+failure: the checkpoint preserved `benchmarkHubStore.base.ts` but did not
+register its historical transaction fingerprint. The comparison file was left
+untouched. Its exact `withIndexLock` fingerprint now has a separate exception,
+and the existing layer-deps gate pins the complete original file SHA256. The
+unchanged structural command then passes all 1512 checks. The active store's
+exception remains distinct; editing the comparison cannot hide beneath it.
+Original review-cycle receipts name `718ca050` and `89b132d1`, not the PR1480
+candidate; they are not a source-review qualification of this composition.
+
+The focused command is retained privately as
+`.context/hub-validation/run-hub-blackbox.py`; it invokes the checked-in owning
+functions using the existing BlackboxResult runner. New test registration is in
+`benchmark.blackbox.py::run_tests`, so the full ordinary agents blackbox/coverage
+path discovers it. Seven selected offline Hub blackboxes pass; the uploader's
+35 pytest controls pass. This focused selection deliberately avoids the full
+benchmark domain's paid LLM-judge replays and does not replace full deploy
+coverage. Six affected backend domains pass via the normal
+`back-end/scripts/run-blackbox-tests.sh` with the isolated DB, backend port
+19531 and task queue `navi-agent-tasks-hub-original-reconciliation`.
+
+The existing compact `benchmark-live-results.test.py` control passes 535 tests
+with 4 declared platform/privilege skips and 851 deselected by its committed
+selector; no selector or assertion was changed. The skips are one Darwin physical
+allocation control and three Linux root-only runtime-cache permission controls
+on this UID-1002 host. Campaign grouping passes all
+24 tests, and the deploy registry control passes all 20 tests. These are normal
+offline controls, not a full deploy or LIVE execution. Typecheck, changed-file
+ESLint/Prettier, blackbox-registration structural checks, RCA validation and
+Python dependency/compile checks pass. All original archive bytes and the
+comparison provenance remain retained.
+
+Searches for `HubVisibilityError read operation timed out` and
+`whole catalog queued terminal publication` identify this recurrence and the
+ambiguous-commit case. The original golden-reference batching comparison was
+read again at `claude-code-src/src/utils/sessionStorage.ts:606-680`: it groups
+pending entries and resolves callers after each bounded append. The existing
+Hub ACK predicate is the closer owned reference for reconciliation; reuse it
+instead of treating presence as a stronger publication proof.
+
+The client repair is constant work per identity field plus the bounded task
+projection; it introduces no new queue, registry, SQL call or polling loop.
+Batch catalog work remains O(archive) per bounded cycle, and pending requests
+remain subject to the original server/transport limits. These causal tests do
+not attribute every original startup problem to Hub batching, prove an exact
+benchmark outcome, certify production/R2 timings, or establish 10,000-agent
+capacity. The RCA stays open: independent source review, normal full deploy
+qualification, rollout and the unchanged exact benchmark/LIVE50 outcome gates
+remain pending under the user's no-paid-test/no-deploy instruction.
+
 ## Human feedback
 
 The user asked for the full `/deploy` after the messaging-mock change. That

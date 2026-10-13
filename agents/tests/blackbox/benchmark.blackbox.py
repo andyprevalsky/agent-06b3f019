@@ -378,6 +378,94 @@ def test_hub_terminal_upload_reconciles_committed_final_before_replay():
         assert not thread.is_alive()
 
 
+
+def test_hub_reconciliation_preserves_required_ack_identity():
+    """An ambiguous POST must not borrow another outcome or campaign's ACK."""
+    from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
+
+    bundle = {
+        "run_id": "ack-identity",
+        "timestamp": "2026-10-12T22:26:28+00:00",
+        "suite": "cloud-fleet",
+        "source": "direct-cloud-fleet",
+        "group_run_id": "campaign-original",
+        "group_member_id": "r001-j0044",
+        "group_run_number": 1,
+        "group_timestamp": "2026-10-12T22:26:13+00:00",
+        "group_total": 50,
+        "group_attempt": 1,
+        "tasks": [{"name": "browser-opentable-reservation", "passed": True,
+                   "status": "ACTIVE", "agent_id": "root-original", "lifecycle_stage": "released"}],
+    }
+    exact = {**bundle, "live": False,
+             "tasks": [{**bundle["tasks"][0], "status": "passed"}]}
+    current_view = exact
+    posts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            posts.append(json.loads(gzip.decompress(raw)))
+            self.send_response(503)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            raw = json.dumps({"run": current_view}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    wrongly_acknowledged = []
+    try:
+        with (patch.dict(os.environ, {"BENCHMARK_HUB_UPLOAD_URL":
+                                     f"http://127.0.0.1:{server.server_address[1]}",
+                                     "BENCHMARK_HUB_API_KEY": "fixture-key"}),
+              patch("benchmarks.hub_upload.time.sleep", lambda _delay: None)):
+            for field, wrong in (("timestamp", "2026-10-13T00:00:00Z"),
+                                 ("suite", "foreign-suite"), ("source", "foreign-source"),
+                                 ("group_run_id", "campaign-foreign"),
+                                 ("group_member_id", "r001-j0001"), ("group_attempt", 2),
+                                 ("group_attempt", True)):
+                current_view = {**exact, field: wrong}
+                try:
+                    upload_run_bundle(bundle, required=True, max_attempts=1)
+                    wrongly_acknowledged.append(field + ":" + str(wrong))
+                except HubVisibilityError:
+                    pass
+            for live in (True, False):
+                current_view = {**exact, "live": live,
+                                "tasks": [{**exact["tasks"][0], "passed": False, "status": "failed"}]}
+                try:
+                    upload_run_bundle(bundle, live=True, required=True,
+                                      verify_live_response=True, max_attempts=1)
+                    wrongly_acknowledged.append("verified-live:" + str(live))
+                except HubVisibilityError:
+                    pass
+            # Matching outcomes can reconcile on the final attempt, from this same Hub.
+            current_view = exact
+            assert upload_run_bundle(bundle, required=True, max_attempts=1)
+            current_view = {**exact, "live": True}
+            assert upload_run_bundle(bundle, live=True, required=True,
+                                     verify_live_response=True, max_attempts=1)
+            assert len(posts) == 11, "one POST per case; reconciliation must not add retries"
+            expected_body = {**bundle, "tasks": [{**bundle["tasks"][0], "logs": {}}]}
+            assert all(post == expected_body for post in posts), "reconciliation must preserve packet bytes"
+            assert not wrongly_acknowledged, f"foreign ACK accepted: {wrongly_acknowledged}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
 def test_hub_requests_preserve_external_proxy_routing():
     from pytest import MonkeyPatch
 
@@ -21243,6 +21331,10 @@ async def run_all_tests():
     r.record(
         "hub_terminal_upload_reconciles_committed_final_before_replay",
         test_hub_terminal_upload_reconciles_committed_final_before_replay,
+    )
+    r.record(
+        "hub_reconciliation_preserves_required_ack_identity",
+        test_hub_reconciliation_preserves_required_ack_identity,
     )
     r.record(
         "hub_upload_rejection_retains_safe_response_identity_without_retry",

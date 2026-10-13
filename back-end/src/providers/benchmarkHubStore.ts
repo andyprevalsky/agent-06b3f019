@@ -253,9 +253,9 @@ let indexAdmissionHeld = false;
  * when an R2 operation throws.
  *
  * Each process admits its work in FIFO order. Uploads never queue here one by
- * one: a single pending catalog cycle carries every queued upload, so a final
- * or registration waits for at most the current holder, never a snapshot
- * backlog. The shared SQL lock orders other processes' admitted writes.
+ * one: each catalog cycle claims at most 64 queued uploads. A larger backlog
+ * uses subsequent bounded cycles, sharing the catalog round trip per batch.
+ * The shared SQL lock orders other processes' admitted writes.
  */
 async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
   // Wait before borrowing a connection. Otherwise concurrent uploads occupy

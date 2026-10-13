@@ -454,12 +454,16 @@ async function main(): Promise<void> {
         console.error(`FAIL: ${failures.at(-1)}`);
       }
     }
-    try {
-      await concurrentFinalBurst();
-      console.log('PASS: concurrent final uploads share one catalog cycle');
-    } catch (error: unknown) {
-      failures.push(`concurrent final burst: ${String(error)}`);
-      console.error(`FAIL: ${failures.at(-1)}`);
+    for (const count of [40, 129]) {
+      try {
+        await concurrentFinalBurst(count);
+        console.log(
+          `PASS: ${count} concurrent finals preserve transcripts in bounded catalog cycles`
+        );
+      } catch (error: unknown) {
+        failures.push(`concurrent final burst (${count}): ${String(error)}`);
+        console.error(`FAIL: ${failures.at(-1)}`);
+      }
     }
     try {
       await queuedUploadAdmission();
