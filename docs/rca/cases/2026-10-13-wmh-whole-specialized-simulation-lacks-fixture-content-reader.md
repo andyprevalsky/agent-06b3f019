@@ -1,12 +1,12 @@
 ---
 id: 2026-10-13-wmh-whole-specialized-simulation-lacks-fixture-content-reader
 date: 2026-10-13
-title: Whole specialized WHM simulation lacks a fixture-content reader
+title: WHM startup prefix omits the full frozen network
 surface: harness
 component: specialized-simulation-fixture-grounding
 classification: unresolved
-problem_class: new-tool-or-capability-required
-first_bad_boundary: Candidate access boundary SpawnAgentManager._spawn_explore returns into whole-call simulation before source reads; this is deliberate design and its causal contribution to fundraiser failure is unproven
+problem_class: fixture-environment-data-mismatch
+first_bad_boundary: The original initial-state network contains aggregate counts rather than the complete frozen Person source; its causal contribution to fundraiser failure remains unproven
 symptoms:
   - pipeline_audit_with_warm_leads
   - No fully verified actionable warm lead
@@ -22,7 +22,7 @@ sources:
   - commit badbbc2b31dc1c09ff84c20101e085cd8875b313
   - agent 882b536f-5210-4c83-bf10-f2b4ce034228
   - fleet run f0a05573-f50e-49c2-b3c9-43b3b90dfbf9
-repro: none-recorded
+repro: .context/whm-migration/rca-20261013/grounding/static-prefix-user-review/full_prefix_owning_assertion.py
 status: open
 ---
 
@@ -136,9 +136,12 @@ supports treating aggregate row counts as relationship evidence.
 
 **2026-10-13 user steering:** the source-query proposal below is superseded and
 rejected. The user requires the full network to be static and loaded in the WHM
-prefix at the start of the run. Exact startup-network preparation and token/
-prefix proofs are being evaluated under `grounding/static-prefix-user-review/`;
-no query reader or invented relationship graph has been implemented.
+prefix at the start of the run. A complete data-only startup override is prepared
+under `grounding/static-prefix-user-review/` and proven at the native and wire
+prefix boundaries. Use the existing `--wmh-initial-state-file` selector for a
+future explicitly authorized run. No query reader or invented relationship
+graph has been implemented. The historical query design below is retained as
+rejected investigation history, not a pending implementation.
 
 
 No production/runtime repair is claimed. The original native artifact, frozen
@@ -180,6 +183,29 @@ progress toward realistic complete fundraising, and one subagent plus `/RCA`
 per issue. Earlier task instructions preserve original sources and forbid new
 paid trials without authorization, benchmark/prompt changes solely to pass,
 model substitution, fabricated warm relationships, merge or deployment.
+
+2026-10-13 static-startup preparation now retains all 2,225 original Person
+rows and all 33 columns. A lossless shared-value/columnar packet decodes to the
+exact source rows, preserving nulls and source ownership with no inferred warm
+edges. Expanded rows, packet and per-run initial-state override remain private.
+Only `structured.network.static_full_network` is added; other original seed
+values and policy are identical. The 42,910 raw message bodies remain in their
+separate preserved source export and were not silently appended as network.
+
+The same unchanged native/wire owning assertions fail on the original seed
+(0.764s) and pass on the prepared static override (1.020s). The immutable cached
+task prefix remains identical after replacing dynamic world state and loading
+822 actual recorded history messages. Every row/column is reachable in that
+prefix. Provider generation, world commits and model rebuilds are all zero.
+Independent review PASS is preserved with the private preparation.
+
+Local token estimates put startup at 367,788 input tokens and the largest of
+five preserved large canonical probes at 694,843. These fit the documented
+Azure primary input limit, but actual deployment admission and future history
+growth are unproven; the smaller Cerebras shared fallback cannot fit this
+prepared input. No context truncation, weaker packer or route change is proposed.
+This proves static network startup inclusion, not a realistic warm introduction
+or completed round. Another paid run remains unauthorized.
 
 ## Reusable lesson
 
