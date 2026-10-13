@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TextIO
+from urllib.parse import urlsplit
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -44,6 +45,54 @@ from benchmarks.benchmark_tasks import (
     selected_tasks_require_gate_type,
 )
 from benchmarks.polar_catalog import is_polar_bench_task
+
+
+def apply_owned_wmh_recording(
+    env: dict[str, str],
+    *,
+    isolated: bool,
+    simulate: bool,
+    tasks: Sequence[object],
+    workspace: str | None,
+    fixture_database: str,
+) -> bool:
+    """Admit explicitly selected recording only into its retained owned cache."""
+    recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", "").strip().lower()
+    if not (isolated and simulate and recording in {"1", "true", "yes", "on"}):
+        return False
+    if not tasks or not all(getattr(task, "fast_cache", None) == "on" for task in tasks):
+        return False
+    manifest_path = env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST", "")
+    retained_url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
+    if not manifest_path and not retained_url:
+        return False
+    if not manifest_path:
+        raise ValueError("Selected isolated WMH recording requires a retained owned cache manifest")
+    manifest_file = Path(manifest_path)
+    if manifest_file.is_symlink() or not manifest_file.is_file():
+        raise ValueError("Owned recording manifest must be a regular private file")
+    manifest = json.loads(manifest_file.read_text())
+    url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
+    parsed = urlsplit(url)
+    database = parsed.path.removeprefix("/")
+    owned = (
+        parsed.scheme in {"postgres", "postgresql"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and database.startswith("victoria_wmh_recording_")
+        and database != fixture_database
+        and manifest.get("checkout") == str(REPO_ROOT.resolve())
+        and manifest.get("owner_workspace") == workspace
+        and manifest.get("database") == database
+        and manifest.get("host") == parsed.hostname
+        and manifest.get("url_sha256") == hashlib.sha256(url.encode()).hexdigest()
+        and manifest.get("retained_across_iterations") is True
+    )
+    if not owned:
+        raise ValueError("WMH recording cache must be a retained loopback owner separate from the fixture")
+    env["FAST_MODE_CACHE_DATABASE_URL"] = url
+    env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
+    env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "0"
+    return True
 
 
 def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
@@ -1755,7 +1804,21 @@ def start_services(
         # fast_cache:on tasks read the shared July cache. Ordinary agent
         # write-through stays disabled; recognized DEMO WHM completions are
         # allowed to populate their scoped keys via _WMHFastCacheContext.
-        if selected_tasks_need_shared_fast_cache(tasks):
+        owned_recording = apply_owned_wmh_recording(
+            env,
+            isolated=stack.isolated,
+            simulate=resolve_simulate_mode(simulate, tasks),
+            tasks=[get_task_by_name(name) for name in tasks],
+            workspace=stack.workspace_name,
+            fixture_database=(
+                f"victoria_bench_{re.sub(r'[^a-zA-Z0-9]', '_', stack.run_id)}"
+                if stack.use_system_postgres
+                else f"victoria_{stack.workspace_name}"
+            ),
+        )
+        if owned_recording:
+            pass
+        elif selected_tasks_need_shared_fast_cache(tasks):
             shared_url = (
                 env.get("FAST_MODE_CACHE_DATABASE_URL") or ""
             ).strip() or _dotenv_fast_mode_cache_database_url()

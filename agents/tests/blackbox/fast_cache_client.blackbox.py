@@ -242,7 +242,7 @@ async def _native_demo_recording_case(*, compatibility: bool, recording: bool, s
             assert url == "http://cache.test/api/fast-cache/set", url
             if status == 200:
                 rows[json["key"]] = json["value"]
-            return type("Response", (), {"status_code": status})()
+            return type("Response", (), {"status_code": status, "json": lambda self: {"ok": status == 200, "stored": status == 200}})()
 
     async def read_first(keys):
         return next(((rows[key], key) for key in keys if key in rows), (None, None))
@@ -324,6 +324,20 @@ async def test_compatibility_native_recording_replays_exact_key_with_provider_fa
     await _native_demo_recording_case(compatibility=True, recording=True, status=200)
 
 
+async def test_http_200_skipped_persistence_never_reports_store():
+    import providers.fast_cache.client as client
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"ok": True, "stored": False}
+    backend = AsyncMock()
+    backend.post.return_value = Response()
+    with patch.object(client, "_shared_client", return_value=backend), patch.object(
+        client, "_backend", return_value=("http://cache.test", "offline")
+    ), patch.object(client, "_archive_cache_write", new=AsyncMock()):
+        assert await client.cache_set("ack-control", "llm", "ack-control", {}) is False
+
+
 async def run_all_tests():
     print("fast-cache-client blackbox tests:")
     r = BlackboxResult()
@@ -358,6 +372,7 @@ async def run_all_tests():
         "compatibility_native_recording_replays_exact_key_with_provider_fast_button_off",
         test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off,
     )
+    await r.record_async("http_200_skipped_persistence_never_reports_store", test_http_200_skipped_persistence_never_reports_store)
     teardown_mock()
     return r.all_passed
 

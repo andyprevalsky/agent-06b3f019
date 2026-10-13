@@ -5598,6 +5598,7 @@ def test_native_rose_provider_regressions():
             str(root / "agents/benchmarks/wmh_rose_provider_test.py"),
             str(root / "agents/benchmarks/wmh_reliability_test.py"),
             str(root / "agents/benchmarks/wmh_validation_recovery_test.py"),
+            str(root / "agents/benchmarks/wmh_recording_test.py"),
             str(root / "agents/benchmarks/run_benchmark_wmh_initial_state_test.py"),
             str(root / "agents/benchmarks/wmh_world_clock_test.py"),
             str(root / "agents/benchmarks/wmh_wire_stream_test.py"),

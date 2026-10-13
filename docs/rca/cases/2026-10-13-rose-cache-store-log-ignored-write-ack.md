@@ -192,3 +192,57 @@ cache-key or global frozen-policy relaxation is included.
 ## Reusable lesson
 
 Report replay persistence from the accepted write acknowledgment and preserve exact behavior-bound keys when recording an isolated DEMO trajectory.
+
+## Run14 recurrence at the backend acknowledgement (2026-10-13)
+
+Run14 source `c3a575907c3f8f3969307c9165c56ffb999fba13`, root
+`f1f436c9-8c1e-43a9-bf25-d4613c94e441`, finished naturally after 3691.4s
+with the unchanged fundraiser failing its 3600s execution window. DEMO was
+enabled with explicit recording, but all 153 native `llm.cache.stored` keys
+exactly matched all 153 backend `fast_cache.write_skipped_read_only` keys,
+with no unmatched keys. The owned precutoff DB dump contains zero cache rows.
+There were zero replay hits in 226 lookups (155 native and 71 agent).
+
+The prior Rose consumer correction was present. A deeper acknowledgement
+boundary remained wrong: backend `cacheSet` skipped read-only writes and
+returned void; the route returned HTTP200 `{ok:true}`; Python treated HTTP200
+as successful persistence. Original response bodies were not captured. The
+body shown here comes from an executed immutable-source causal control, not
+a reconstruction of original Run14 HTTP bytes. The local benchmark also
+forced the explicitly selected recording cache read-only and tied its data
+to a resettable fixture. Shared read-only policy itself remains correct.
+
+Identical real Express/auth/store → HTTP → Python owning assertions fail
+original source and pass the candidate. See
+private `run14-grounded-retry60m/rca-cache/result.private.json` for each
+measured command and source hash; its own original reporting control is
+1.330s FAIL and candidate 1.246s PASS. The correction adds authoritative
+`stored` acknowledgement while preserving the void wrapper for other proxy
+callers. Python requires explicit `stored:true`. This reports successful
+persistence only after the actual Prisma operation, without an extra query.
+
+The recording integration opts in only through explicit owned-store selectors
+on isolated simulated fast-cache tasks with RECORD_DEMO. A private owner
+receipt binds the retained loopback `victoria_wmh_recording_*` database to the
+actual checkout and iteration workspace, separately from the fixture DB.
+No selectors preserve existing behavior; partial or wrong selectors fail
+closed. Shared/ordinary/non-simulated runs preserve their existing policy.
+Correlated call IDs, native request fingerprints, state/policy identity,
+validation, sample-once/replay keys and prompts remain unchanged.
+
+The actual registered backend fast-cache domain passes (5.882s). Registered
+agent fast-cache-client and world-model-harness domains pass (33.9s), with
+13 new owner admission/isolation cases separately passing (0.14s), registered
+in the native provider suite. Root owns final integration verification and
+exact unchanged next-trial outcome; no benchmark pass is claimed here.
+At 10,000 agents acknowledgement adds a boolean and constant-time check,
+not a second persistence ledger. The owner receipt is read once per stack.
+
+The user explicitly approved cache reporting and now requests a repeating
+60-minute DEMO-on trial, per-cluster subagent RCA, then scorecard/approval
+cycle. This authorizes owned recording and the next trial; it does not
+authorize key masking, prompt changes, fixture alteration, merge or deploy.
+Run14's private original results and 71 LLM dumps are authenticated in the
+nonsecret receipt `docs/handoffs/whm-b07d9037-preservation/run14-grounded-retry60m.json`.
+The cache/fundraiser case remains open until actual new-run replay coverage
+and task outcome are observed.

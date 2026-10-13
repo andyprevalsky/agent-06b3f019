@@ -217,3 +217,38 @@ facts. No new trial was authorized during this offline investigation.
 ## Reusable lesson
 
 Audit the source-backed fundraising funnel and channel-specific authority separately from generated observations, verifier field scores and cash completion, and keep the outcome RCA open until an unchanged causal and benchmark replay proves the repair.
+
+## Run14 milestone audit (2026-10-13)
+
+Root `f1f436c9-8c1e-43a9-bf25-d4613c94e441` failed its 60-minute window
+after 3691.4s, with 151 committed world boundaries. Those are 113 explore,
+33 browser, two message-transport sends and three notifications. Eighty-four
+boundaries (55.63%) are deliberate no-reply wait_for polls spanning 7.03
+virtual days; they are not 84 distinct research successes. Three children
+completed; the prior child 25-step-cap failure did not recur.
+
+The stage proof finds three emails across two recipients and one generic
+firm form inquiry. Two emails went to an investor named Grant; this is a
+person and must not be misreported as government grant funding. The later
+browser email has no literal stable sent-message ID in the original
+observation. Sixty-three targeted historical message matches support the
+warm-introduction and scheduling paths. There are no new substantive replies,
+held investor meetings, commitments, signatures, incoming wires or proceeds.
+One historical accepted meeting predates this run and is not a new milestone.
+
+The scorecard's approximate 22% is an initial-outreach milestone estimate
+within the same 20–25% stage band, not a calibrated unique number or money
+percentage. Outreach was more concrete than Run13's zero emails, while
+there is no proved advancement into a later fundraising stage. The literal
+USER goal still drops at the execute-verifier evidence slice, but approved
+response-schema descriptions carry the >=US$5m success criteria. Actual
+verifier zero correctly rejects zero proceeds, so no false-success recurrence
+is proved. The previously unapproved goal-filter patch stays unapplied.
+
+No causal new trajectory fix is proved by this audit. Do not force positive
+outcomes, substitute softer criteria or rewrite research examples. Full
+static Tamy network packets (2225 people ×33fields) in the actual first paid
+native request match the approved packet byte-for-byte; the frozen and seeded
+fixtures each retain all 42910 Tamy message records. Private diagnostics,
+eight owning controls, original message matches and source hashes are under
+`.context/wmh-resume-generation1/run14-grounded-retry60m/rca-progress`.

@@ -366,3 +366,39 @@ records remain intact. The durable follow-up receipt is
 ## Reusable lesson
 
 Retain every rejected structured response privately at its validation boundary before protocol repair, and distinguish syntax, semantic and task-outcome proof.
+
+## Run14 original-response verification (2026-10-13)
+
+The unchanged fundraiser was rerun with the user-approved grounded retry
+policy and native capture on source `c3a575907c3f8f3969307c9165c56ffb999fba13`.
+Every terminal native capture now remains available: 155 request hashes
+verify, all 252 branch records and 153 selection receipts validate, and
+151 revisions committed. Twelve rejected raw replies across 11 predictions
+all ended with finish_reason=stop; none was a JSON syntax failure. Rejections
+are four observation/correlated-call defects, two outcome-key defects, three
+envelope defects, one missing state-patch parent, one missing target, and
+one probability-sum defect. Exact captures reject reproducibly on both
+pinned Python3.11 agents and Python3.12 native environments.
+
+Nine Rose semantic recoveries and one native protocol recovery succeeded;
+one repair was interrupted by the normal 60-minute execution cutoff. Strict
+validation is doing its job. No causal producer, validation or recovery code
+defect is proved by these original records; generation quality remains open.
+Do not classify finish_reason=stop as truncation or remove validation to
+pass. Root task failed the execution window, independently of the successful
+capture and recovery mechanism.
+
+The transport subagent separately found missing original pre-content HTTP
+response bodies for one Azure400, eleven Cerebras400 and one Cerebras429.
+Ten Qwen requests hit the existing 90s TTFT bound. Existing fallback reached
+Gemini for the first completion; its total latency was 123.559s. Successful
+fallthrough discards detailed HTTP evidence before final native capture.
+Original error-body causes remain unknown. A private passive same-store
+capture proposal is being qualified and remains unapplied pending the user's
+separate decision; no new provider replay, retry policy, route, prompt or
+benchmark change is made on this evidence.
+
+Private proofs are under `.context/wmh-resume-generation1/run14-grounded-retry60m/rca-protocol`
+and `rca-transport`; original native session is
+`c7806e3c6ef6417f94e50c7b97691b0c`. Durable original-run and archive evidence
+is enumerated in `docs/handoffs/whm-b07d9037-preservation/run14-grounded-retry60m.json`.

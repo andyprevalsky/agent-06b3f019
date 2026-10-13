@@ -906,7 +906,7 @@ async def cache_set(
         if resp.status_code != 200:
             logger.warning("fast_cache.set_failed", key=key, status=resp.status_code)
             return False
-        return True
+        return resp.json().get("stored") is True
     except Exception as exc:
         logger.warning("fast_cache.set_error", key=key, error=str(exc))
         return False
