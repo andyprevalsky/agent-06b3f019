@@ -206,15 +206,22 @@ export function createCompletionBackfillOwner(
   deps: Omit<PostSubscribeBackfillDeps, 'observedMessages'>,
 ) {
   let recovering = false;
+  let requested = false;
   const observedBrowserMessages = new Map<string, Message>();
   const reconcile = async () => {
+    requested = true;
     if (recovering || deps.isCancelled() || !deps.isCurrentAgent()) return;
     recovering = true;
     try {
-      await runPostSubscribeBackfill({
-        ...deps,
-        observedMessages: () => [...observedBrowserMessages.values()],
-      });
+      // A new init can arrive as the previous loop is returning. Retain its
+      // demand across that await boundary without creating a second reader.
+      do {
+        requested = false;
+        await runPostSubscribeBackfill({
+          ...deps,
+          observedMessages: () => [...observedBrowserMessages.values()],
+        });
+      } while (requested && !deps.isCancelled() && deps.isCurrentAgent());
     } finally {
       recovering = false;
     }

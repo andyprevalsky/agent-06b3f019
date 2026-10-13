@@ -72,8 +72,9 @@
       "Stripe refund succeeded",
       "no open payment attention"
     ],
-    "llm_dump_available": false,
-    "llm_dump_limitation": "Production disables full LLM dumps; no dump fabricated."
+    "llm_dump_available": true,
+    "llm_dump_limitation": "Actual Python planner requests/outputs retrieved with canonical encrypted-archive integrity checks. Raw artifacts and run bundle contain sensitive card data and remain private; sanitized evidence is being prepared.",
+    "llm_dump_published": false
   },
   "production_semantic": {
     "run_id": 38333858624,
@@ -92,7 +93,15 @@
       "cause": "Primary Cerebras route HTTP402, existing Together waterfall emitted unusable structured output; retries completed too late or exhausted. No proven valid-JSON parser defect.",
       "sample2_backend_completion_seconds": 16.239,
       "unchanged_milestone_deadline_seconds": 15,
-      "sample4_router_attempts_exhausted": true
+      "sample4_router_attempts_exhausted": true,
+      "credential_comparison": {
+        "CEREBRAS_API_KEY_present_both": true,
+        "CEREBRAS_API_KEY_equal": true,
+        "OPENROUTER_API_KEY_present_both": true,
+        "OPENROUTER_API_KEY_equal": true,
+        "upstream": "https://api.cerebras.ai/v1/chat/completions",
+        "values_disclosed": false
+      }
     }
   },
   "followup": {
@@ -112,7 +121,13 @@
       "ownership": {
         "command": "cd front-end && bash scripts/run-blackbox-tests.sh hooks-lib-browser-backfill",
         "exit_code": 0,
-        "tests_passed": 3
+        "tests_passed": 4
+      },
+      "handoff_race": {
+        "red_exit_code": 1,
+        "green_exit_code": 0,
+        "failure": "New browser init queued after the prior loop returned but before its owner released was lost.",
+        "fix": "Pending demand survives the owner await boundary; reads stay serialized and lifecycle leases are unchanged."
       }
     },
     "preserved_protections": [

@@ -230,4 +230,83 @@ describe('browser completion recovery ownership', () => {
       vi.useRealTimers();
     }
   });
+  it('retains a browser wake queued while the previous recovery is returning', async () => {
+    const start: Message = {
+      message_id: 'race-start',
+      timestamp: '2026-10-13T00:00:02Z',
+      text: '',
+      role: 'TOOL',
+      metadata: {
+        toolName: 'spawn_browser_agent',
+        toolCallId: 'race-call',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'browser',
+        task_id: 'race-task',
+        browser_url: 'https://example.com/live',
+      },
+    };
+    const terminal: Message = {
+      ...start,
+      message_id: 'race-terminal',
+      timestamp: '2026-10-13T00:00:03Z',
+      metadata: { ...start.metadata, action_type: 'task_complete', toolStatus: 'FINISHED' },
+    };
+    let calls = 0;
+    let phase: 'empty' | 'browser' | 'terminal' = 'empty';
+    server.use(
+      http.get(
+        `${API_BASE}/benchmarks/agent-preview/:agentId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(`${API_BASE}/agents/agent-1`, () => {
+        calls += 1;
+        return HttpResponse.json(
+          agentDetailJson(
+            phase === 'empty' ? [] : [start, ...(phase === 'terminal' ? [terminal] : [])],
+          ),
+        );
+      }),
+    );
+    let handlers: Parameters<typeof RealtimeMod.subscribeToAgent>[1] = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, incoming) => {
+      handlers = incoming;
+      return fakeChannel();
+    });
+    mockSession();
+    const deps = makeDeps();
+    let messages: Message[] = [];
+    let queued = false;
+    vi.mocked(deps.setMessages).mockImplementation((update) => {
+      messages = typeof update === 'function' ? update(messages) : update;
+      if (!queued) {
+        queued = true;
+        queueMicrotask(() => {
+          phase = 'browser';
+          act(() =>
+            handlers.onInsert?.({
+              agentId: 'agent-1',
+              id: start.message_id,
+              timestamp: start.timestamp,
+              text: start.text,
+              role: start.role,
+              metadata: start.metadata,
+            }),
+          );
+        });
+      }
+    });
+    vi.useFakeTimers();
+    try {
+      const hook = renderHook(() => useRealtimeSubscription(deps));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(computeActiveBrowserPanels(messages)).toHaveLength(1);
+      phase = 'terminal';
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(computeActiveBrowserPanels(messages)).toHaveLength(0);
+      expect(calls).toBeGreaterThan(1);
+      hook.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
