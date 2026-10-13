@@ -219,7 +219,9 @@
   "coordination": {
     "capture_worker_internal_id": "ph726g9hapm4pxe04pax5fhx7d8g6ak6",
     "capture_worker_same_devbox": true,
-    "capture_worker_scope": "isolated original PR1479 source/evidence/offline regressions; no provider mutation/paid/merge/deploy authority"
+    "capture_worker_scope": "isolated original PR1479 source/evidence/offline regressions; no provider mutation/paid/merge/deploy authority",
+    "hub_worker_internal_id": "ph76xdf0syxng7c12924a5fxbn8g7rve",
+    "inventory_worker_internal_id": "ph72h305a64vbj50j8mfnzn9gd8g7s6w"
   },
   "archival": {
     "replacement_must_remain": true,
@@ -227,5 +229,105 @@
     "remaining_old_host_closeout": "Old helper must retire exact local Hub/watch processes with positive birth/ownership checks and verify no late unsaved originals before preservation-conditioned archival. External stopped resource positively transferred above; no native release claimed."
   },
   "freedom_and_protected_instructions_preserved": true,
-  "paid_work_or_deployment_by_replacement": false
+  "paid_work_or_deployment_by_replacement": false,
+  "late_verification": {
+    "utc": "2026-10-13T00:24:08.288024+00:00",
+    "archives": [
+      {
+        "kind": "local-closeout",
+        "encrypted_sha256": "6112c492b3a1854d9b3747cd4479f5d82b87f6b7f8eaf7a0ca38d23928178886",
+        "decrypted_gzip_sha256": "b9b22538258d06abb2baa767c00cf4a0deabd3873425fa44efbbd6766cee9c63",
+        "members": 4,
+        "regular_files": 4,
+        "member_manifest_sha256": "0f5c868d0312f508c2ad578381419e74eff20ad7de4cdd4a5c0ecff9a33c8e5a",
+        "extracted_files": 4,
+        "authenticated": true
+      },
+      {
+        "kind": "old-host-observation",
+        "encrypted_sha256": "78d7f7ee0b2505272e7e6e9e6b6a4b720732faf0d9a23ffab87c4fc428977bbf",
+        "decrypted_gzip_sha256": "b3e0a62fdce89068c6c0f37bf1b118ee9183de3e6cccb47b7d1fc07a1e98dd1d",
+        "members": 1,
+        "regular_files": 1,
+        "member_manifest_sha256": "1b324149366e8872821d9bbac5da8cfb8d73497cf24c4ecd3ed22e9fd1721fbe",
+        "extracted_files": 1,
+        "authenticated": true
+      },
+      {
+        "kind": "original-session",
+        "encrypted_sha256": "84cc46107787e02d8c506bd9f71ab6f802c4dc735c3fc81c85fb73d4ca97264a",
+        "decrypted_gzip_sha256": "b4dfeb53c37ead56d78d060b4de1887c33ed88cebef3c7dba80a43336b253804",
+        "members": 43,
+        "regular_files": 40,
+        "member_manifest_sha256": "aa244b3fe2176b86dd2da9629c96b48935048a2f417de4bc11b7abf88563b860",
+        "extracted_files": 40,
+        "authenticated": true
+      }
+    ],
+    "member_comparison": {
+      "late_receipt_commit": "51c62e3bf8d293b7e841aa4f879bf9b9be86d777",
+      "local_closeout_members_verified": 4,
+      "old_host_observation_members_verified": 1,
+      "original_session_members_verified": 43,
+      "original_session_file_hashes_verified": 40,
+      "original_session_manifest_json_sha256": "ce5525b4dbe02416393b5ec01b557dc9684eff1efdc5972c135aeb1c4d45ff5e",
+      "mismatches": 0
+    },
+    "all_original_symlink_targets_also_compared": true,
+    "original_controller_absence_receipt": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-original-host-controller-absence.json",
+    "old_host_absence_is_current_observation_not_historical_release": true,
+    "original_local_hub_watch_terminal_receipts_downloaded_and_hash_verified": true,
+    "original_closed_native_session_and_subagents_restored_privately": true,
+    "original_deployment_authority_read": "Original user instruction2026-10-09T02:22:54Z says finish /deploy then five qualifying LIVE50 runs;2026-10-12T21:49:36Z directs independent deployment work instead of stalling the main coordinating thread. Snapshot approval and exact normal gates remain effective."
+  },
+  "setup_continuation": {
+    "cloud_init_exit_code": 0,
+    "post_setup_backend_api_keys_match": true,
+    "flyctl": "0.4.115 installed at /home/boxes/.fly/bin/flyctl; initial missing PATH resolved",
+    "isolated_candidate_worktree": "/home/boxes/rose-benchmark-infra-candidate",
+    "workspace_name": "rose-benchmark-infra-candidate-9beed9d6cf81",
+    "base_port": 56000,
+    "db_mode": "system Postgres; separately owned isolated database",
+    "queue": "navi-agent-tasks-rose-benchmark-infra-candidate-9beed9d6cf81",
+    "canonical_prepare_and_check_passed": true,
+    "candidate_source_ref": "e1de6a4af",
+    "preserved_original_donor_and_image_commits_composed": true,
+    "offline_checks": {
+      "image_publisher": "98 passed",
+      "donor_refresh": "26 passed",
+      "deploy_worktree_preflight": "passed",
+      "workspace_cloud_init": "passed"
+    },
+    "checks_precede_final_source_composition_and_are_not_full_deploy_or_live_credit": true,
+    "capture_route": "Same-host original helper invocation only after independently reviewed explicit services-isolation/full exact config restore repair and owning gates. Original foreign-host rejection preserved; no new-host identity transplant.",
+    "remaining_old_host_dependency": "Keep old box until this narrowly scoped capture/canonical recovery and its late originals are verified; no wait for whole LIVE50 goal."
+  },
+  "native_observation": {
+    "81245db9215698": {
+      "state": "stopped",
+      "name": "cloudbench-a87f045417be4848a5c1e14e",
+      "services_count": 1,
+      "volume_ids": [
+        "vol_4ql7650wx9yqlqwr"
+      ],
+      "image_digest_pinned": true
+    },
+    "85137da4416108": {
+      "state": "destroyed",
+      "name": "cloudbench-78db23e13bc94783a0b8a60f",
+      "services_count": 1,
+      "volume_ids": [
+        "vol_r1jgnp6j1dx93lzr"
+      ],
+      "image_digest_pinned": true
+    },
+    "vol_4ql7650wx9yqlqwr": {
+      "state": "created",
+      "attached_machine_id": "81245db9215698"
+    },
+    "vol_r1jgnp6j1dx93lzr": {
+      "state": "pending_destroy",
+      "attached_machine_id": null
+    }
+  }
 }
