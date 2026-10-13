@@ -109,7 +109,12 @@ does not copy unpushed files and its startup may reset to main. Its prompt must:
 3. Verify authoritative env files, toolchains and fresh workspace/queue/DB
    identity through repo setup guidance. No copied old runtime identity,
    printed secrets, or example env files replacing complete credentials.
-4. Push `docs/handoffs/swap-harness-<old-box-id>-resumed.json` with original box,
+4. When the user requests restoring thread names, include the original
+   canonical title in the prompt. The replacement inspects its current title,
+   applies that exact title through the supported current-thread title command,
+   and saves the canonical readback. Explicit user authorization covers an
+   existing manual title; request only a permission named by a typed denial.
+5. Push `docs/handoffs/swap-harness-<old-box-id>-resumed.json` with original box,
    replacement box/thread URL, harness, checkpoint SHA, handoff path, UTC time,
    and the actual first continuation action/result; confirm it is durable,
    then keep working on the original task. A launch acknowledgement alone is
@@ -168,6 +173,13 @@ unreachable endpoint. An expired harness with active/queued work can
 hold destruction pending until its 30-minute expiry; use only supported,
 authorized exact-turn interruption, or report that pending state. Further old
 box messages cancel pending destruction; continue conversations on the new box.
+
+For an explicit cleanup-label request, label accessible stale threads before
+archival. Current-thread title commands cannot edit other or archived threads;
+those require an authenticated UI or another supported title-edit capability.
+Do not wake or restore an archived box to label it. Preserve the intended
+`NEDS cleanup` label and original title in the coordinator record and report
+unapplied labels separately from verified replacement-title changes.
 
 Return PR/handoff URL, old/new box/thread IDs/URLs, checkpoint, continuation
 receipt, preservation/cleanup status, and destroy disposition or blocker.
