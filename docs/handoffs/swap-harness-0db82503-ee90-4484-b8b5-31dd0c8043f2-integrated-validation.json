@@ -1,5 +1,5 @@
 {
-  "recorded_at_utc": "2026-10-13T09:04:15.364457+00:00",
+  "recorded_at_utc": "2026-10-13T18:55:29.515678+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
   "source_head": "1484e8b4e6dbce152354b519d26fc96293d32665",
@@ -204,13 +204,28 @@
         "passed": 0,
         "total": 3,
         "owned_cleanup": "clean"
+      },
+      {
+        "id": "cd5b4088-de16-4e0e-8ab1-b5345f250a9d",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean",
+        "source_head": "e96e3c332573b6b9727d6fbce96c18829611fcfc",
+        "execution_seconds": [
+          37.2,
+          28.8,
+          43.0
+        ],
+        "catalog_unchanged": true
       }
     ],
     "observed_failure": "Native calls contain scalar and object strings despite correctly typed schemas; actual validation feedback did not repair encoding.",
     "provider_internal_parser_mechanism": "unproved",
     "pending_decoder": "SET_ASIDE_NOT_APPLIED. Exact snapshot0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad is preserved privately. User's copy-only Rose.complete condition remains; no broader decoder approval is being pursued."
   },
-  "pending_required_inputs": [],
+  "pending_required_inputs": [
+    "TAMY-CEREBRAS-1 exact existing TS projection reuse on Cerebras; source unapplied"
+  ],
   "incoming_main": "9fcea8b67ee1f6cb1f35325ad5ee50755f8f8803",
   "incoming_frontend_verification": "Fresh full application typecheck and all157coverage files pass on1484; fresh local semantic UI8pass and latency lane running.",
   "historic_semantic_and_e2b_source": "7cf5cbefd5d2480921af7cc1d46d4ba2d1bcfe4f",
@@ -487,5 +502,36 @@
       "network": "mocked; no paid calls"
     },
     "task_complete": false
+  },
+  "native_wire_verification": {
+    "source_head": "e96e3c332573b6b9727d6fbce96c18829611fcfc",
+    "source_changes": false,
+    "actual_python_whole_call": "Validation and paired-ID repair verified offline; repeated invalid capped at3 total calls",
+    "actual_sms_whole_call": "Returns invalid native arguments; existing dispatcher later rejects supplied wrong types",
+    "captured_native_tools": "9 flat correctly typed schemas, strict true, no response_format alongside tools",
+    "provider_header_control": "Same body named-tool calls fail with string budget under both TS version2 and Python omitted header",
+    "schema_projection_control": "Existing TS native Anthropic projection retained strict/names/descriptions and returned numeric budget; raw request returned string budget. Grep boolean became typed and unused nullable fields were omitted. All other body fields equal.",
+    "actual_raw_provider_sse": "Stored privately and independently parsed; wrong types precede TS parser",
+    "new_decoder": "WITHDRAWN_NOT_APPLIED",
+    "whole_native_retry_candidate": "PRIVATE_UNAPPLIED; incompatible with omitted fields under unchanged full Zod",
+    "cerebras_projection_candidate": {
+      "status": "PRIVATE_UNAPPLIED_AWAITING_EXACT_WIRE_SCOPE_APPROVAL",
+      "id": "TAMY-CEREBRAS-1",
+      "runtime_sha256": "69f8742a0139b126707e506e59217a735211b1daf1caba276ca72eeb352b9741",
+      "full_candidate_sha256": "0295c285434102ac15ae10dc27be271a7344a93d23aa4dff38bbac5a4c3ba219",
+      "independent_review": "no blocking revised runtime defect; scope broader than literal Python Rose projection",
+      "actual_sms_schema_effect": "27 nullable fields optional non-null; no bound keys or open objects exist in actual nine SMS schemas",
+      "general_projection_scope": "All automatically derived Cerebras tool envelopes; existing projection strips bounds, closes open objects and removes nullable array/map branches where present",
+      "candidate_task_outcome": "Not established; canonical current source0/3 retained"
+    },
+    "benchmark_fixed": false,
+    "all_current_owned_controllers_and_services_absent": true,
+    "private_archive_readback": "107 files PASS",
+    "private_candidate_review_archive_readback": "27 additional files PASS; original107 files PASS",
+    "fresh_candidate_offline_regression": {
+      "status": "PASS",
+      "seconds": 2.049,
+      "scope": "Private candidate only; mocked fetch/no provider calls; no changed-source benchmark success inferred"
+    }
   }
 }
