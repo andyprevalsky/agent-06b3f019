@@ -6,6 +6,7 @@ Uses run_agent for the core loop. Workflow handles:
 - continue_as_new for context overflow
 """
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import contextlib
 import hashlib
@@ -1870,7 +1871,7 @@ class AgentWorkflow:
                 self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=30),
+                    **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=30)),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 workflow.logger.info("Started agent_started SMS notification (deferred await)")
@@ -4784,7 +4785,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=30)),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info("Sent cost_limit SMS notification")
@@ -5615,7 +5616,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        **wmh_activity_timeout_options(self.world_model_mode, timedelta(seconds=30)),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")

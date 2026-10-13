@@ -212,6 +212,7 @@ def execution_identity(
     world_model_manifest_sha256: str,
     *,
     base_protocol_sha256: str = BASE_PROTOCOL_SHA256,
+    runtime_config: dict | None = None,
 ) -> dict:
     if base_protocol_sha256 != BASE_PROTOCOL_SHA256:
         raise ValueError("WMH execution policy base protocol identity differs from the pinned runtime")
@@ -231,6 +232,16 @@ def execution_identity(
         "base_protocol_sha256": base_protocol_sha256,
         **execution_policy(policy_name).metadata(),
     }
+    if runtime_config is not None:
+        required = {"inference_pool", "inference_pool_sha256", "azure_first", "exclude_failed_tool_examples"}
+        if (not isinstance(runtime_config, dict) or set(runtime_config) != required
+            or not isinstance(runtime_config["inference_pool"], str) or not runtime_config["inference_pool"]
+            or not isinstance(runtime_config["inference_pool_sha256"], str)
+            or len(runtime_config["inference_pool_sha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in runtime_config["inference_pool_sha256"])
+            or any(type(runtime_config[k]) is not bool for k in ("azure_first", "exclude_failed_tool_examples"))):
+            raise ValueError("Invalid WMH runtime inference configuration")
+        identity["runtime_config"] = dict(runtime_config)
     material = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {**identity, "execution_sha256": text_sha256(material)}
 
@@ -239,7 +250,8 @@ def validate_execution_identity(identity: dict, policy_name: str, *, system: str
     if not isinstance(identity, dict):
         raise ValueError("Missing WMH execution identity")
     expected = execution_identity(
-        policy_name, identity.get("base_world_model_id"), identity.get("base_world_model_manifest_sha256")
+        policy_name, identity.get("base_world_model_id"), identity.get("base_world_model_manifest_sha256"),
+        runtime_config=identity.get("runtime_config"),
     )
     if identity != expected:
         raise ValueError("WMH execution identity differs from the selected policy")
@@ -248,7 +260,7 @@ def validate_execution_identity(identity: dict, policy_name: str, *, system: str
     return expected
 
 
-def bind_execution_suite(source: str | Path, output: str | Path, policy_name: str) -> dict:
+def bind_execution_suite(source: str | Path, output: str | Path, policy_name: str, *, runtime_config: dict | None = None) -> dict:
     source, output = Path(source), Path(output)
     if source.resolve() == output.resolve():
         raise ValueError("Execution binding must preserve the original corpus suite")
@@ -263,7 +275,8 @@ def bind_execution_suite(source: str | Path, output: str | Path, policy_name: st
     ):
         raise ValueError("Execution binding requires a complete native conformance suite")
     suite["native_execution_identity"] = execution_identity(
-        policy_name, suite.get("native_world_model_id"), suite.get("native_world_model_manifest_sha256")
+        policy_name, suite.get("native_world_model_id"), suite.get("native_world_model_manifest_sha256"),
+        runtime_config=runtime_config,
     )
     suite["native_execution_binding"] = {"source_suite_sha256": hashlib.sha256(raw).hexdigest()}
     output.parent.mkdir(parents=True, exist_ok=True)

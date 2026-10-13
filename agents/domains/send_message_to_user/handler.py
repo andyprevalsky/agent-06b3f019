@@ -14,6 +14,7 @@ When is_question=True:
 
 from __future__ import annotations
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -134,7 +135,7 @@ class SendMessageToUserManager(ToolManager):
                 await workflow.execute_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=30),
+                    **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=30)),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 sms_sent = True
@@ -184,7 +185,7 @@ class SendMessageToUserManager(ToolManager):
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=30)),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
                     sms_sent = True

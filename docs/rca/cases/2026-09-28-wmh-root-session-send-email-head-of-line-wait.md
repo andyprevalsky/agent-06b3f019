@@ -103,6 +103,15 @@ The unchanged 600-second fundraiser was rerun with `BENCHMARK_SKIP_WMH_DELTA=1 b
 
 ## Human feedback
 
+On October 13 the user explicitly authorized WHM-only reliability changes and
+one new 60-minute benchmark. The earlier no-paid-trial boundary therefore no
+longer prohibits this one trial. The preparation receipt is
+`docs/handoffs/whm-b07d9037-preservation/run13-reliability-preparation.md`.
+The same offline scheduling audit now covers both original native send durations,
+and owning provider/native/workflow checks pass. These are contract checks,
+not a live root-cause or fundraising-outcome qualification. This case remains
+open. No ordinary-run activity or model configuration is changed by default.
+
 The user asked whether `message_person` was mocked through WHM, requested analysis of why approved email delivery was slow, and made overlapping same-session LLM calls a mandatory assertion. They asked whether updating the original GitHub dependency would fix it.
 
 On October13 the user pointed to Run12's `Failed to send Email` /

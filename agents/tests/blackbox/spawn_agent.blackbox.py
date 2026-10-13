@@ -1984,7 +1984,8 @@ async def test_simulate_mocks_specialized_agents_but_keeps_general_purpose_real(
     assert [call["args"][5] for call in simulated_calls] == [expected_simulated_timestamp_ms] * 3
     assert [call["args"][6] for call in simulated_calls] == ["root-a-1"] * 3
     for call in simulated_calls:
-        assert call["kwargs"]["start_to_close_timeout"] == timedelta(minutes=12)
+        assert "start_to_close_timeout" not in call["kwargs"]
+        assert call["kwargs"]["schedule_to_close_timeout"] > timedelta(hours=1)
         # The shared root objective is part of every specialized WMH request:
         # it conditions retrieval and is the exact DEMO cache namespace.
         assert call["args"][3]["root_goal"] == "root task"

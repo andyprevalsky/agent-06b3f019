@@ -393,6 +393,10 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
         "cache_namespace": complete_kwargs.get("cache_namespace"),
+        # Opt-in WHM behavior must not reuse an ordinary Flash response. Preserve
+        # the exact existing material for every caller that leaves these off.
+        **({"prefer_azure": True} if complete_kwargs.get("prefer_azure") else {}),
+        **({"retry_partial_errors": True} if complete_kwargs.get("retry_partial_errors") else {}),
         "exclude_anthropic_family": anthropic_family_excluded(
             bool(complete_kwargs.get("_exclude_anthropic_family", False))
         ),

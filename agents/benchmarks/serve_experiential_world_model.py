@@ -269,6 +269,7 @@ def main():
         artifact.world_model_id,
         retriever.world_model_manifest_sha256,
         base_protocol_sha256=artifact.prompt_sha256,
+        runtime_config=json.loads(os.environ.get("WMH_RUNTIME_CONFIG_JSON", "null")),
     )
     # Both services bind loopback. Credentials never leave the existing provider.
     client = httpx.AsyncClient(

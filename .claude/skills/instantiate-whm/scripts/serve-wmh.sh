@@ -12,6 +12,9 @@ set -a; source .env; set +a
 export PATH="$HOME/.local/bin:$PATH"
 export WMH_ENGINE="${WMH_ENGINE:-experiential}" WMH_ROSE_POOL="${WMH_ROSE_POOL:-rose-wmh-gpt61}" \
     WMH_EXECUTION_POLICY="${WMH_EXECUTION_POLICY:-rose-outcome-distribution-v3}"
+export WMH_INFERENCE_POOL="${WMH_INFERENCE_POOL:-rose-1-flash}" \
+    WMH_AZURE_FIRST="${WMH_AZURE_FIRST:-1}" \
+    WMH_EXCLUDE_FAILED_TOOL_EXAMPLES="${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}"
 # The run's own backend (DEMO-cache traffic), simulate-scoped cache keys, fast_cache:on writes.
 export BACKEND_API_URL="http://localhost:$backend_port" BENCHMARK_WORLD_MODEL_MODE=simulate \
     WMH_MODEL_NAME=rose-archive FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1

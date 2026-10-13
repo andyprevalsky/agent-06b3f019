@@ -76,7 +76,7 @@ def build_native(source_root, root, name, pool="rose-1-ultra", *, bind_only=Fals
     )
 
 
-def build_provider_bridge(provider, token, *, execution_policy=None):
+def build_provider_bridge(provider, token, *, execution_policy=None, runtime_config=None):
     from fastapi import FastAPI, Header, HTTPException
     from wmh.providers.base import Message
 
@@ -119,6 +119,8 @@ def build_provider_bridge(provider, token, *, execution_policy=None):
                 validate_execution_identity(
                     payload.get("execution_identity"), execution_policy, system=messages[0]["content"]
                 )
+                if payload["execution_identity"].get("runtime_config") != runtime_config:
+                    raise ValueError("Provider bridge runtime configuration differs")
             result = await provider.complete_scoped(
                 session_id,
                 prediction_id,
@@ -159,13 +161,24 @@ def serve_native(name, root, pool, port):
     policy = execution_policy(os.environ.get("WMH_EXECUTION_POLICY", DEFAULT_EXECUTION_POLICY))
     python = native_python()
     token = secrets.token_urlsafe(32)
-    provider = RoseWMHProvider(pool=pool, protocol=policy.response_protocol)
+    inference_pool = os.environ.get("WMH_INFERENCE_POOL") or pool
+    azure_first = os.environ.get("WMH_AZURE_FIRST", "0") == "1"
+    exclude_failed = os.environ.get("WMH_EXCLUDE_FAILED_TOOL_EXAMPLES", "0") == "1"
+    runtime_config = None
+    if inference_pool != pool or azure_first or exclude_failed:
+        runtime_config = {
+            "inference_pool": inference_pool,
+            "inference_pool_sha256": pool_sha256(inference_pool),
+            "azure_first": azure_first,
+            "exclude_failed_tool_examples": exclude_failed,
+        }
+    provider = RoseWMHProvider(pool=inference_pool, protocol=policy.response_protocol, prefer_azure=azure_first)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)
     bridge_port = listener.getsockname()[1]
     config = uvicorn.Config(
-        build_provider_bridge(provider, token, execution_policy=policy.name),
+        build_provider_bridge(provider, token, execution_policy=policy.name, runtime_config=runtime_config),
         host="127.0.0.1",
         log_level="warning",
         timeout_graceful_shutdown=10,
@@ -202,6 +215,7 @@ def serve_native(name, root, pool, port):
         "WMH_PROVIDER_BRIDGE_TOKEN": token,
         "WMH_ROSE_POOL_SHA256": pool_sha256(pool),
         "WMH_EXECUTION_POLICY": policy.name,
+        "WMH_RUNTIME_CONFIG_JSON": json.dumps(runtime_config),
     }
     child = subprocess.Popen(
         [

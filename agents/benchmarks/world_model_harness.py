@@ -4044,6 +4044,7 @@ async def evaluate_world_model_conformance_suite(
     min_content_accuracy: float = 0.25,
     client: Any | None = None,
     execution_policy: str = "upstream",
+    runtime_config: dict | None = None,
 ) -> JsonObject:
     """Replay the static 100-case suite against a served model and score it.
 
@@ -4085,7 +4086,8 @@ async def evaluate_world_model_conformance_suite(
         from benchmarks.wmh_execution_policy import execution_identity
 
         expected_execution = execution_identity(
-            execution_policy, expected_identity["world_model_id"], expected_identity["world_model_manifest_sha256"]
+            execution_policy, expected_identity["world_model_id"], expected_identity["world_model_manifest_sha256"],
+            runtime_config=runtime_config,
         )
         suite_execution = payload.get("native_execution_identity")
         if execution_policy != "upstream" and suite_execution is None:

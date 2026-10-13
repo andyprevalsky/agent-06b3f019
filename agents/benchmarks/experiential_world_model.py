@@ -437,6 +437,12 @@ class ParallelWorldModel:
                 top_k=self.top_k,
             )
             demos = await asyncio.to_thread(self.retriever.retrieve, query)
+            if (self.execution_identity or {}).get("runtime_config", {}).get("exclude_failed_tool_examples"):
+                from benchmarks.wmh_grounding_filter import failed_tool_result
+
+                demos = tuple(match for match in demos
+                              if not (match.transition.observation.kind == "tool_result"
+                                      and failed_tool_result(match.transition.observation.model_dump(mode="json"))))
             request = build_world_model_request(
                 task,
                 visible_messages=messages,

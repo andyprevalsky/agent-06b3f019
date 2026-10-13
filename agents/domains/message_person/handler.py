@@ -5,6 +5,7 @@ Thin ToolManager that orchestrates activities via Temporal workflow calls.
 
 from __future__ import annotations
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from datetime import timedelta
 from typing import Any, AsyncGenerator
 
@@ -584,7 +585,7 @@ class MessagePersonManager(ToolManager):
                 result = await workflow.execute_activity(
                     send_email_activity,
                     args=activity_args,
-                    start_to_close_timeout=timedelta(seconds=60),
+                    **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=60)),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
             except Exception as exc:
@@ -640,7 +641,7 @@ class MessagePersonManager(ToolManager):
                 result = await workflow.execute_activity(
                     send_agent_sms_activity,
                     args=activity_args,
-                    start_to_close_timeout=timedelta(seconds=45),
+                    **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=45)),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
             except Exception as exc:
@@ -685,7 +686,7 @@ class MessagePersonManager(ToolManager):
             result = await workflow.execute_activity(
                 queue_imessage_activity,
                 args=activity_args,
-                start_to_close_timeout=timedelta(seconds=150),
+                **wmh_activity_timeout_options(world_model_mode, timedelta(seconds=150)),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
                     backoff_coefficient=2.0,

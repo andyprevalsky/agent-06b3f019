@@ -33,9 +33,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Expected native runtime policy; never inferred from the server.",
     )
     parser.add_argument("--bind-execution-suite", help="Write a separately bound suite and exit without model calls.")
+    parser.add_argument("--runtime-config-file", help="Expected explicit WHM inference configuration JSON; never inferred from the server.")
     args = parser.parse_args(argv)
+    runtime_config = json.loads(Path(args.runtime_config_file).read_text()) if args.runtime_config_file else None
     if args.bind_execution_suite:
-        suite = bind_execution_suite(args.suite, args.bind_execution_suite, args.execution_policy)
+        suite = bind_execution_suite(args.suite, args.bind_execution_suite, args.execution_policy, runtime_config=runtime_config)
         print(
             json.dumps(
                 {
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             min_mean_score=args.min_mean_score,
             min_content_accuracy=args.min_content_accuracy,
             execution_policy=args.execution_policy,
+            runtime_config=runtime_config,
         )
     )
     summary = {key: value for key, value in report.items() if key not in {"results", "by_category"}}

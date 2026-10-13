@@ -647,8 +647,10 @@ class RoseWMHProvider:
         client: Optional[RoseClient] = None,
         usage: Optional[RoseUsageAccumulator] = None,
         protocol: str = "legacy",
+        prefer_azure: bool = False,
     ) -> None:
         self._pool: "PoolName" = pool
+        self._prefer_azure = prefer_azure
         if protocol not in _WMH_CALL_SITES:
             raise ValueError("Unknown world-model protocol")
         self._protocol = protocol
@@ -857,6 +859,8 @@ class RoseWMHProvider:
                 # The whole reply is one JSON transition: a cut-off gets Rose's
                 # shared recovery (larger output limit, then the next model).
                 result_required=True,
+                prefer_azure=self._prefer_azure,
+                retry_partial_errors=True,
             )
         except _WMHInvalidPrediction as exc:
             self._record_usage(exc.usage, exc.actual_model)

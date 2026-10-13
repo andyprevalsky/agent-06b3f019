@@ -220,7 +220,9 @@ class WMHHttpClient:
             headers["X-Rose-WMH-Invocation"] = hashlib.sha256(
                 json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        # The owned run retires this native operation. Socket reads must not
+        # abandon it merely because retrieval/rebase plus inference is slow.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, read=None)) as client:
             response = await client.post(
                 f"{self.base_url}/world_models/{world_model}/sessions/{session_id}/step",
                 json={"action": wmh_action},

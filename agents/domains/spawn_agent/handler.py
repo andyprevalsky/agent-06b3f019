@@ -6,6 +6,7 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 
 from __future__ import annotations
 
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 import asyncio
 import json
 import uuid as uuid_module
@@ -79,8 +80,8 @@ _WORLD_MODEL_SPECIALIZED_AGENT_TOOLS = {
     "code": "spawn_claude_code_agent",
 }
 
-# Must exceed helpers.world_model_runtime.WMH_HTTP_TIMEOUT_DEFAULT_SECONDS so
-# Temporal cannot cancel a valid long-running WMH transition first.
+# Retained as the ordinary activity budget; simulate uses owner cancellation
+# instead of a per-attempt deadline at this WMH boundary.
 _WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT = timedelta(minutes=12)
 
 
@@ -1256,7 +1257,7 @@ class SpawnAgentManager(ToolManager):
                         or ""
                     ),
                 ],
-                start_to_close_timeout=_WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT,
+                **wmh_activity_timeout_options("simulate", _WORLD_MODEL_SPECIALIZED_ACTIVITY_TIMEOUT),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             result_text = _world_model_specialized_result_text(result)

@@ -48,6 +48,59 @@ class Retriever:
         return ()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_failed_demo_filter_precedes_packing_and_preserves_live_errors_and_replay(enabled):
+    from exp.simulation.retrieval import RAGMatch, RAGTransition
+    from benchmarks.wmh_execution_policy import execution_identity
+
+    def match(n, failed):
+        return RAGMatch(transition=RAGTransition(
+            transition_id=f"example-{n}", trace_id="trace", lineage_id=f"lineage-{n}",
+            action_span_id=f"action-{n}", observation_span_id=f"obs-{n}", task="Inspect route",
+            initial_context={"task": "reference only"},
+            action={"kind": "tool_call", "tool_name": "rose.browser.spawn_browser_agent", "tool_arguments": {}},
+            observation={"kind": "tool_result", "content": json.dumps({"is_error": failed, "content": "no route"})},
+            key_text="Inspect route", key_sha256="a" * 64), score=1.0)
+
+    async def run():
+        demos = (match(1, True), match(2, False))
+        class Examples:
+            def retrieve(self, query):
+                return demos
+        requests, draws = [], []
+        async def complete(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return "invalid JSON"  # Repair must not reintroduce excluded examples.
+            evidence = json.loads(request.messages[1].content)
+            call = evidence["candidate_response"]["tool_calls"][0]["call_id"]
+            return json.dumps({"schema": "rose.wmh_outcome_distribution.v1", "outcomes": [{
+                "id": "live_failure", "probability": 1, "description": "Live boundary failure",
+                "tool_results": [{"call_id": call, "is_error": True, "content": "live error remains"}],
+                "state_patch": []}]})
+        def draw():
+            draws.append(0.5)
+            return draws[-1]
+        config = {"inference_pool": "rose-1-flash", "inference_pool_sha256": "b" * 64,
+                  "azure_first": True, "exclude_failed_tool_examples": enabled}
+        identity = execution_identity("rose-outcome-distribution-v2", "artifact-a", "a" * 64,
+                                      runtime_config=config)
+        model = ParallelWorldModel(complete, Examples(), execution_policy="rose-outcome-distribution-v2",
+                                   execution_identity=identity, sample_uniform=draw)
+        session = model.new_session("Research", {"receipts": []}, "root")
+        result = await model.step(session.id, action(1), "inv")
+        assert result["is_error"] is True and result["content"] == "live error remains"
+        assert await model.step(session.id, action(1), "inv") == result
+        assert len(draws) == 1 and len(requests) == 2
+        for request in requests:
+            evidence = json.loads(request.messages[1].content)
+            assert len(evidence["grounded_examples"]) == (1 if enabled else 2)
+            assert evidence["environment_state"] == {"receipts": []}
+            assert any(x["transition_id"] == "example-2" for x in evidence["grounded_examples"])
+        assert len(demos) == 2
+    asyncio.run(run())
+
+
 def distribution_reply(request, *, probability=0.05):
     evidence = json.loads(request.messages[1].content)
     call_id = evidence["candidate_response"]["tool_calls"][0]["call_id"]
