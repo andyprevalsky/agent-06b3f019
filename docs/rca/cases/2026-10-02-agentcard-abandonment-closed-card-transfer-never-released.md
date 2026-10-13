@@ -308,6 +308,18 @@ Still open:
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
 
+
+### Qualification defense: require the declared sandbox task
+
+PR #1503 also requires the catalog task to be non-production, tagged
+`agentcard-lifecycle-sandbox`, and explicitly expect `orgTransfer.livemode=false`.
+A globally leaked flag or malformed false-live response cannot authorize a
+production-only or unregistered task. This guard covers the reconciliation
+deadline classifier, task exception, owned payment cleanup, and CI skip
+acceptance. Four new permanent public-boundary controls fail on the prior
+source and pass with the guard; all 18 existing policy/recovery controls remain
+unchanged and pass. The same task catalog, timeouts, and LIVE oracle are intact.
+
 ## Human feedback
 
 None recorded.

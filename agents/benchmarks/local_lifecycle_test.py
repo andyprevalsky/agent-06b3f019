@@ -789,6 +789,93 @@ def test_local_stack_cleanup_rejects_wrong_receipts_and_unknown_identity():
             tools["main"].assert_not_called()
 
 
+def test_local_stack_cleanup_uses_native_receipt_identity_and_strict_legacy_proof():
+    """Wall-clock drift cannot replace process identity or authorize a recycled owner."""
+    from unittest.mock import Mock, patch
+    local = load_local()
+    cases = {
+        "native-drift": True, "native-wrong": False, "token": False, "pid": False,
+        "failed": False, "legacy-good": True, "legacy-drift": False,
+        "legacy-proof": True, "legacy-wrongproof": False, "recycled": False,
+    }
+    with tempfile.TemporaryDirectory(prefix="native-stack-receipt-") as temporary:
+        folder = Path(temporary)
+        stack = local.ServiceStack("fixture", folder, folder/"services.json", folder/"services.log", True)
+        owner = {"version": 1, "run_id": "fixture", "pid": 12345, "token": "fixture-token",
+                 "native_identity": "fixture-native", "birth": "old-wall-clock"}
+        atomic(folder/"local-stack-owner.json", owner)
+        for case, expected in cases.items():
+            token = "foreign" if case == "token" else "fixture-token"
+            pid = "12346" if case == "pid" else "12345"
+            state = "failed" if case == "failed" else "clean"
+            birth = "old-wall-clock" if case in {"legacy-good", "native-wrong", "token", "pid", "failed", "recycled"} else "shifted-wall-clock"
+            text = f"version=1\ntoken={token}\nstate={state}\nstack_pid={pid}\nstack_birth={birth}\n"
+            if case not in {"legacy-good", "legacy-drift", "legacy-proof", "legacy-wrongproof"}:
+                native = "foreign-native" if case == "native-wrong" else "fixture-native"
+                text += f"stack_native_identity={native}\n"
+            (folder/"local-stack-cleanup.status").write_text(text)
+            def identify(_pid):
+                if case == "recycled":
+                    return "foreign-native"
+                if case in {"legacy-proof", "legacy-wrongproof"}:
+                    return "fixture-native"
+                raise ProcessLookupError()
+            signal_boundary = Mock(return_value=3 if case == "legacy-wrongproof" else 0)
+            tools = {"current_identity": identify, "main": signal_boundary}
+            with patch.object(local, "_owned_shutdown_timeout", return_value=1), \
+                 patch.object(local, "_pid_is_alive", return_value=False), \
+                 patch.object(local, "_wait_for_pid_exit", return_value=True), \
+                 patch.object(local, "_process_identity_tools", return_value=tools):
+                try:
+                    local.stop_services(None, stack=stack)
+                except (RuntimeError, OSError, ValueError):
+                    accepted = False
+                else:
+                    accepted = True
+            assert accepted == expected, f"unsafe/misclassified native receipt: {case}"
+            if case not in {"legacy-proof", "legacy-wrongproof"}:
+                signal_boundary.assert_not_called()
+            else:
+                signal_boundary.assert_called_once()
+                args = signal_boundary.call_args.args[0]
+                assert args == ["process-identity", "--expect", "fixture-native", "--signal", "TERM", "12345"]
+
+
+def test_native_stack_cleanup_writer_binds_stable_identity_despite_wall_birth_drift():
+    """The actual shell publisher records its own OS-native identity, not only ps lstart."""
+    with tempfile.TemporaryDirectory(prefix="native-stack-writer-") as temporary:
+        folder = Path(temporary)
+        receipt = folder/"cleanup.status"
+        env = dict(os.environ, REVIEW_WRITER_RECEIPT=str(receipt), REVIEW_REPO=str(REPO))
+        command = r"""
+        SCRIPT_DIR="$REVIEW_REPO/scripts"
+        RUN_STACK_CLEANUP_STATUS_FILE="$REVIEW_WRITER_RECEIPT"
+        RUN_STACK_CLEANUP_TOKEN=fixture-token
+        ps() { printf '%s\n' 'synthetic-shifted-wall-birth'; }
+        . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+        expected=$(python3 "$SCRIPT_DIR/process-identity.py" "$$") || exit 1
+        run_publish_stack_cleanup_status clean || exit 1
+        printf '%s\n' "$expected"
+        """
+        result = subprocess.run(["bash", "-c", command], env=env, text=True, capture_output=True, check=True)
+        fields = dict(line.split("=", 1) for line in receipt.read_text().splitlines())
+        assert fields["version"] == "1" and fields["token"] == "fixture-token" and fields["state"] == "clean"
+        assert fields["stack_native_identity"] == result.stdout.strip()
+        assert fields["stack_birth"] == "synthetic-shifted-wall-birth"
+        old = receipt.read_bytes()
+        failure = r"""
+        SCRIPT_DIR="$REVIEW_REPO/scripts"
+        RUN_STACK_CLEANUP_STATUS_FILE="$REVIEW_WRITER_RECEIPT"
+        RUN_STACK_CLEANUP_TOKEN=fixture-token
+        ps() { printf '%s\n' 'synthetic-shifted-wall-birth'; }
+        python3() { return 1; }
+        . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+        if run_publish_stack_cleanup_status clean; then exit 9; fi
+        """
+        subprocess.run(["bash", "-c", failure], env=env, check=True, capture_output=True)
+        assert receipt.read_bytes() == old, "unreadable identity overwrote the verified receipt"
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     folder = Path(sys.argv[2]).resolve()

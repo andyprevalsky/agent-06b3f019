@@ -1747,6 +1747,22 @@ def _agentcard_release_skip_enabled() -> bool:
     return os.environ.get(AGENTCARD_RELEASE_SKIP_ENV) == "1"
 
 
+def _agentcard_release_skip_task(task_name: str | None) -> bool:
+    """The release waiver belongs only to known, explicitly sandbox catalog tasks."""
+    try:
+        task = get_task_by_name(task_name)
+    except ValueError:
+        return False
+    lifecycle = task.expected_payment_lifecycle
+    transfer = lifecycle.get("orgTransfer") if isinstance(lifecycle, dict) else None
+    return (
+        task.production_only is False
+        and "agentcard-lifecycle-sandbox" in task.tags
+        and isinstance(transfer, dict)
+        and transfer.get("livemode") is False
+    )
+
+
 def _agentcard_release_stalled(lifecycle: object) -> bool:
     """Only the AgentCard sandbox's release of a closed card's transfer is outstanding.
 
@@ -1782,6 +1798,7 @@ def _agentcard_release_stalled(lifecycle: object) -> bool:
 def _is_permitted_agentcard_release_skip(result: TaskResult) -> bool:
     return (
         result.status == "SKIPPED"
+        and _agentcard_release_skip_task(result.name)
         and _agentcard_release_skip_enabled()
         and (result.failure_reason or "").startswith(AGENTCARD_RELEASE_SKIP_REASON)
     )
@@ -2990,13 +3007,20 @@ class _PaymentReconciliationDeadline(TimeoutError):
     """The benchmark-owned reconciliation budget expired, rather than a failed lifecycle read."""
 
 
-def _payment_reconciliation_timeout(error: str, lifecycle: object, *, allow_release_skip: bool = True) -> RuntimeError:
+def _payment_reconciliation_timeout(
+    error: str, lifecycle: object, *, task_name: str | None = None, allow_release_skip: bool = True
+) -> RuntimeError:
     """Classify only the approved sandbox release state; keep the existing deadline owner."""
     message = (
         "Payment lifecycle did not reach the expected terminal state before timeout: "
         f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
     )
-    if allow_release_skip and _agentcard_release_skip_enabled() and _agentcard_release_stalled(lifecycle):
+    if (
+        allow_release_skip
+        and _agentcard_release_skip_task(task_name)
+        and _agentcard_release_skip_enabled()
+        and _agentcard_release_stalled(lifecycle)
+    ):
         return AgentCardReleaseStall(message)
     return RuntimeError(message)
 
@@ -3055,7 +3079,7 @@ async def _wait_for_expected_payment_lifecycle(
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
                     f"{_payment_lifecycle_settlement_state(lifecycle)}"
                 ) from last_fetch_error
-            raise _payment_reconciliation_timeout(error, lifecycle)
+            raise _payment_reconciliation_timeout(error, lifecycle, task_name=task.name)
         if recover_lifecycle is None:
             await asyncio.sleep(poll_interval_seconds)
         owned_timeout = None
@@ -3105,7 +3129,7 @@ async def _wait_for_expected_payment_lifecycle(
                 owned_timeout is not None and owned_timeout.expired()
             ):
                 raise _payment_reconciliation_timeout(
-                    error, lifecycle, allow_release_skip=last_fetch_error is None
+                    error, lifecycle, task_name=task.name, allow_release_skip=last_fetch_error is None
                 ) from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
@@ -6517,6 +6541,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     detail = str(error) or type(error).__name__
                     if (
                         isinstance(error, TimeoutError)
+                        and result is not None
+                        and _agentcard_release_skip_task(result.name)
                         and _agentcard_release_skip_enabled()
                         and await _owned_payments_release_stalled(base_url, evidence)
                     ):
@@ -14498,7 +14524,11 @@ async def _run_single_task_as_run_user(
 
     except Exception as e:
         duration = time.time() - start
-        release_skip = isinstance(e, AgentCardReleaseStall) and _agentcard_release_skip_enabled()
+        release_skip = (
+            isinstance(e, AgentCardReleaseStall)
+            and _agentcard_release_skip_task(task.name)
+            and _agentcard_release_skip_enabled()
+        )
         error_status = "SKIPPED" if release_skip else "ERROR"
         if release_skip:
             _warn_agentcard_release_skip(task.name, str(e))

@@ -9,8 +9,8 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: cloudbench_pid_start_time / script_snapshot_current_pid_start / agent_link_server._pid_start_time / cloudbench-port-lease.py / cloudbench-script-snapshot.py mint and verify process birth identities with `ps -o lstart=`, which Linux procps renders from the kernel's current boot-time estimate rather than a value fixed at fork
 symptoms:
   - "❌ script snapshot owner birth drifted from sealed identity"
+  - "stack cleanup receipt does not match its original process"
   - "FAIL: mandatory autoscaler attach budget must not run while its primary is intentionally stopped behind the boot-config barrier"
-  - "⚠️  central hub on :40192 has no exact owner proof; leaving it untouched"
   - "cloudbench-multi-workstream.test.sh blocked in wait(1) on a live test Hub after the failure"
   - "Could not capture the process table for owned tree teardown (first fix, failed controllers only)"
 tags:
@@ -20,6 +20,7 @@ tags:
   - deploy-gate
 sources:
   - PR #1341
+  - PR #1503
 repro: scripts/tests/cloudbench-pid-identity.test.sh replays a +143s wall-clock step with a ps shim; the pre-fix tree fails 4 checks (live owner, Hub owner record, script-snapshot owner, and a live port lease reaped as stale) and the fixed tree passes all
 status: fixed
 ---
@@ -181,6 +182,44 @@ clock-step section, so macOS also checks the real dependency boundary.
 At 10,000 agents this change still reads only the local supervisor's fixed
 process record and joins that exact owner within the existing budget. It adds
 no fleet-wide scan, shared row, broadcast channel, or cross-agent lock.
+
+### Recurrence: local stack receipt re-rendered wall-clock birth
+
+On October 13, retiring isolated stack `1791894395-3418352-47084` verified
+its original owner with the stable native process identity before TERM and
+joined its exit. All five original service processes were absent and the
+three owned listeners were closed. However, `stop_services` rejected the
+native cleanup receipt: the recorded startup birth was 12:26:35 UTC, while
+`run_publish_stack_cleanup_status` rendered 15:34:46 UTC at shutdown. The
+original receipt remained `state=clean`; its PID and ownership token matched.
+The observed shift is established, but its specific VM/NTP trigger was not
+captured. The original failed benchmark result remains failed.
+
+The first bad boundary is `scripts/lib/run-process-cleanup.sh` publishing a
+fresh `ps lstart` value as identity, followed by `agents/benchmarks/local.py`
+requiring equality with the startup rendering. The signal guard already uses
+stable native identity, so the receipt producer and verifier disagreed about
+the same owner. PR #1503 records native identity in new receipts and verifies
+that exact value, PID, unique token, and clean state. Existing receipts keep
+their original birth check. A shifted legacy receipt is accepted only by the
+same invocation that verified, signalled, and joined its exact native owner;
+an already-stopped mismatched legacy receipt remains rejected without that
+proof. The original October 13 receipt was not rewritten or upgraded.
+
+The two permanent controls in `agents/benchmarks/local_lifecycle_test.py`
+failed unchanged on the previous source and both pass after this fix. They
+exercise the public cleanup boundary with ten ownership/state cases and the
+actual shell publisher with shifted wall birth. Foreign native identity,
+recycled PID, wrong PID/token, failed state, unproved legacy drift, and failed
+signal proof remain strict; inability to read native identity preserves the
+previous receipt. The existing process-cleanup shell suite also passes.
+These controls are discovered by the normal benchmark blackbox domain under
+`/deploy` agents coverage. Private source-bound red/green and retirement
+receipts are retained under the Google RCA sandbox-policy-check directory.
+
+At 10,000 agents, this remains one local process-identity read per isolated
+stack receipt with no shared database, fleet scan, or additional provider call.
+It does not change payment verdicts, budgets, prompts, models, or tools.
 
 ## Human feedback
 
