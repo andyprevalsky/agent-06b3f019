@@ -58,6 +58,10 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
+export function TerminalContent(props: {
+  loadAgentsRef: React.MutableRefObject<(() => void) | null>;
+}): React.JSX.Element;
+export function TerminalContent(): React.JSX.Element;
 export function TerminalContent() {
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();

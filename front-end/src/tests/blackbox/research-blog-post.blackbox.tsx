@@ -129,24 +129,24 @@ describe('ResearchBlogPost page', () => {
     it('renders breadcrumb with Blog link to /research', () => {
       renderBlogPost(validPost.slug);
       const breadcrumbNav =
-        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+        document.querySelector<HTMLElement>('nav[aria-label]') ?? screen.getByRole('navigation');
       const blogLink = within(breadcrumbNav).getByText('Blog');
-      expect(blogLink.closest('a')).toHaveAttribute('href', '/research');
+      expect(blogLink.closest<HTMLElement>('a')).toHaveAttribute('href', '/research');
     });
 
     it('renders breadcrumb category matching the post category', () => {
       renderBlogPost(validPost.slug);
       const breadcrumbNav =
-        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+        document.querySelector<HTMLElement>('nav[aria-label]') ?? screen.getByRole('navigation');
       expect(within(breadcrumbNav).getByText(validPost.category)).toBeInTheDocument();
     });
 
     it('renders breadcrumb category link pointing to /research', () => {
       renderBlogPost(validPost.slug);
       const breadcrumbNav =
-        document.querySelector('nav[aria-label]') ?? screen.getByRole('navigation');
+        document.querySelector<HTMLElement>('nav[aria-label]') ?? screen.getByRole('navigation');
       const categoryLink = within(breadcrumbNav).getByText(validPost.category);
-      expect(categoryLink.closest('a')).toHaveAttribute('href', '/research');
+      expect(categoryLink.closest<HTMLElement>('a')).toHaveAttribute('href', '/research');
     });
   });
 

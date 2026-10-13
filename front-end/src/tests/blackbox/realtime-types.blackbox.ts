@@ -31,7 +31,6 @@ import {
   extractAgentModeStartedPayload,
   extractRecord,
   type InsertMessagePayload,
-  type ToolMessageMetadata,
 } from '@/lib/realtime-types';
 
 // ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ function buildToolMsg(
       toolName,
       toolStatus: 'IN_PROGRESS',
       ...metaOverrides,
-    } as ToolMessageMetadata,
+    },
     ...overrides,
   });
 }

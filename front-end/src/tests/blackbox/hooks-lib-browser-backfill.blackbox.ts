@@ -143,9 +143,9 @@ describe('browser completion recovery ownership', () => {
       deps.selectedAgentIdRef.current = 'agent-2';
       hook.rerender({ agentId: 'agent-2' });
       await vi.advanceTimersByTimeAsync(100);
-      const writesBeforeOldResponse = deps.setMessages.mock.calls.length;
-      const agentWritesBeforeOldResponse = deps.setAgent.mock.calls.length;
-      const modeWritesBeforeOldResponse = deps.setIsChatMode.mock.calls.length;
+      const writesBeforeOldResponse = vi.mocked(deps.setMessages).mock.calls.length;
+      const agentWritesBeforeOldResponse = vi.mocked(deps.setAgent).mock.calls.length;
+      const modeWritesBeforeOldResponse = vi.mocked(deps.setIsChatMode).mock.calls.length;
       release?.();
       await vi.advanceTimersByTimeAsync(100);
       expect(deps.setMessages).toHaveBeenCalledTimes(writesBeforeOldResponse);

@@ -19,7 +19,7 @@ interface SubAgentToolBubbleProps {
   toolCallId: string;
   title: string;
   message: string;
-  status: 'IN_PROGRESS' | 'FINISHED';
+  status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   progress: number; // Progress from metadata (0.0-1.0)
   agentId?: string; // Sub-agent ID from metadata
   onNavigate: (agentId: string) => void;

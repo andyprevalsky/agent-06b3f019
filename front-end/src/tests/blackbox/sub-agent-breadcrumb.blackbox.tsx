@@ -32,7 +32,7 @@ function gpDetail(overrides: Partial<AgentDetail> = {}): AgentDetail {
     agent_id: 'gp-1',
     goal: 'You are analyzing ONE creator: Casey Winters',
     model: 'benchmark-hub',
-    source: 'AGENT',
+    source: 'WEB',
     reasoning_effort: 'off',
     progress: 100,
     status: 'COMPLETED',

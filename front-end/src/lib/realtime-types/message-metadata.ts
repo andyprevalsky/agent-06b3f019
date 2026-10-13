@@ -1,4 +1,5 @@
 import type { BROWSER_EMITTED_ACTION_TYPES } from '../backendToolNames';
+import type { RequestUserApprovalMetadata } from './tool-metadata';
 
 // =============================================================================
 // Agent Channel Events (agent:{agentId})
@@ -85,6 +86,13 @@ export type ClaudeCodeWsMessage =
  * Different message types use different subsets of these fields.
  */
 export interface MessageMetadata {
+  auxiliary?: { coordinates?: { x: number; y: number } };
+  requestUserApproval?: Partial<RequestUserApprovalMetadata['requestUserApproval']>;
+  imageUrl?: string | null;
+  subAgentIds?: string[];
+  busId?: string;
+  spawnGroupId?: string;
+  forEachAggregate?: boolean;
   /** Links to a specific tool execution */
   toolCallId?: string;
   /** Name of the tool (e.g., "search_web", "set_plan") */
@@ -106,7 +114,7 @@ export interface MessageMetadata {
   /** Browser agent current URL */
   browser_url?: string;
   /** Action type for browser/code agents */
-  action_type?: BrowserActionType | CodeActionType;
+  action_type?: string;
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */

@@ -7,7 +7,7 @@
  *  - useSavedOutputFetch: fetches persisted output on first post-completion expand
  */
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -164,8 +164,8 @@ export function formatTerminalOutputForDisplay(
 }
 
 export interface TerminalManager {
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
+  terminalRef: MutableRefObject<XTermTerminal | null>;
+  outputBufferRef: MutableRefObject<string>;
   /** Initialize xterm in the container and observe resize; returns cleanup. */
   mount: (container: HTMLDivElement) => () => void;
 }
@@ -213,18 +213,18 @@ export function useTerminalManager(): TerminalManager {
 
 interface UseWebSocketArgs {
   wsUrl: string | undefined;
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
-  isCompletedRef: RefObject<boolean>;
+  terminalRef: MutableRefObject<XTermTerminal | null>;
+  outputBufferRef: MutableRefObject<string>;
+  isCompletedRef: MutableRefObject<boolean>;
   shouldClose: boolean;
   onStateChange: (state: ChipState) => void;
 }
 
 function applyWsMessage(
   msg: WsMessage,
-  terminalRef: RefObject<XTermTerminal | null>,
-  outputBufferRef: RefObject<string>,
-  isCompletedRef: RefObject<boolean>,
+  terminalRef: MutableRefObject<XTermTerminal | null>,
+  outputBufferRef: MutableRefObject<string>,
+  isCompletedRef: MutableRefObject<boolean>,
   onStateChange: (state: ChipState) => void,
 ): void {
   switch (msg.type) {
@@ -338,8 +338,8 @@ interface UseSavedOutputArgs {
   taskId: string;
   codeProvider: CodeProvider;
   shouldFetch: boolean;
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
+  terminalRef: MutableRefObject<XTermTerminal | null>;
+  outputBufferRef: MutableRefObject<string>;
   onOutputLoaded?: (output: string) => void;
 }
 

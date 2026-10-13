@@ -367,6 +367,7 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
  * Union of all tool-specific metadata types.
  */
 export type ToolMessageMetadata =
+  | SpawnAgentMetadata
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
   | SpawnSubAgentMetadata

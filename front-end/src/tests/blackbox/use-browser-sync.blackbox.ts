@@ -9,14 +9,9 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 
 import { useBrowserSync } from '@/features/integrations/hooks/useBrowserSync';
 
-type BrowserInfo = {
-  type: string;
-  name: string;
-  isInstalled: boolean;
-  needsManualPassword: boolean;
-};
+import type { BrowserInfo, IntegrationHandlers } from '@/features/integration-handlers-context';
 
-function makeHandlers(overrides: Record<string, unknown> = {}) {
+function makeHandlers(overrides: Partial<IntegrationHandlers> = {}) {
   const base = {
     browserCookies: {
       isAvailable: true,
@@ -30,7 +25,7 @@ function makeHandlers(overrides: Record<string, unknown> = {}) {
       openKeychainAccess: vi.fn(async () => ({ success: true })),
     },
   };
-  return { ...base, ...overrides } as never;
+  return { ...base, ...overrides } satisfies IntegrationHandlers;
 }
 
 describe('useBrowserSync', () => {
@@ -183,7 +178,7 @@ describe('useBrowserSync', () => {
     const handlers = makeHandlers({
       browserCookies: {
         isAvailable: true,
-        getInstalledBrowsers: vi.fn(async () => [
+        getInstalledBrowsers: vi.fn(async (): Promise<BrowserInfo[]> => [
           { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
         ]),
         syncBrowser: vi.fn(async () => {

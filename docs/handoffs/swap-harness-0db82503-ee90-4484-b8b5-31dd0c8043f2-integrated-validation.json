@@ -1,5 +1,5 @@
 {
-  "recorded_at_utc": "2026-10-13T04:41:25.596649+00:00",
+  "recorded_at_utc": "2026-10-13T05:29:33.486295+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
   "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
@@ -55,6 +55,24 @@
       "duration_seconds": 522,
       "exit_code": 0,
       "exact_owner_absent": true
+    },
+    "agentcard_sandbox": {
+      "status": "pass",
+      "source": "4bc120536114baca9c56b1a006206c305a038a56",
+      "run_id": "edf3c373-c7f8-49d5-bdfb-70682bab563f",
+      "tasks": 4,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 1023,
+      "reported_benchmark_llm_cost_usd": 0.02,
+      "provider_roots": 4,
+      "provider_cleanup_errors": 0,
+      "provider_cleanup_warnings": 0,
+      "benchmark_and_stack_cleanup_receipts": "clean",
+      "owned_stage_controller_stack_absent": true,
+      "approved_narrow_skip_flag_was_scoped_to_sandbox": true,
+      "skip_was_not_needed": true
     }
   },
   "focused_sms": {
@@ -92,5 +110,61 @@
     "Narrow sandbox warning only; production strict",
     "Only exact owned teardown",
     "No original source reconstruction or stash application"
+  ],
+  "frontend_repair": {
+    "original_app_typecheck_diagnostics": 215,
+    "cache_bug": "Cache compared absent content properties instead of actual Message.text, allowing stale same-id text.",
+    "existing_owning_regression": "RED before fix / GREEN15cases; current fullcoverage includes it.",
+    "type_only_application_edits": "Executable emissions unchanged except proven text cache comparison.",
+    "raw_wire_compatibility": "Generic metadata retains arbitrary action strings, partial approvals, and unknown keys; specialized tool contracts unchanged.",
+    "compiler_target_alignment": "ES2024 noEmit checker; installed Vite/SWC production targets unchanged;773-source emission comparison identical.",
+    "future_gate": "Existing frontend test:coverage performs full app typecheck before unchanged Vitest command.",
+    "p2_path_overlap": [],
+    "protected_instruction_edits": false,
+    "fresh_full_frontend_coverage": {
+      "source": "4bc120536+applied frontend repairs",
+      "status": "pass",
+      "test_files": 154,
+      "tests_passed": 2725,
+      "existing_skips": 3,
+      "app_type_diagnostics": 0,
+      "lines_percent": 83.33,
+      "statements_percent": 81.01,
+      "functions_percent": 81.38,
+      "branches_percent": 73.12,
+      "duration_seconds": 240,
+      "production_executable_source_sha256": {
+        "front-end/src/features/index/api.ts": "6dd6ab02746cd7edf60d3193d84f19869484a7c6751630c96122d44d04dbc635",
+        "front-end/src/features/index/hooks/useVideoStateMachine.ts": "44ca843cd05584ad2103eb11eb78f1d004158c3529edc949ef5e28ed384e8990",
+        "front-end/src/features/index/hooks/useVideoWatchdog.ts": "d1aaac5221438888321117e780819c67f7f8cfcb1d4c4f15a37f261a84379bd8",
+        "front-end/src/features/index/types.ts": "70a883492b69626643c1e158e2a8578bfb44b08b5bd644f5a044e755132fa652",
+        "front-end/src/features/terminal/components/TerminalContent.tsx": "13ab6eedfac1e6c5bda36bd05dceb7b0f0ff61c0b044e681b33b499639c7fe54",
+        "front-end/src/features/terminal/hooks/useAgentActions.ts": "65bb45c26e9c7dc915cce5cc10f54ac37f660aa877cb2f5cffdab11b00a808ae",
+        "front-end/src/features/terminal/hooks/useAgentOps.ts": "6aa4e2e927d062a522f397a0640f51ee643698bb96658fee8a98011455a0524b",
+        "front-end/src/features/terminal/hooks/useTerminalAgents.ts": "2be422d7bc79904836ab9c2b3ccd8e4a90f7aa9740cf23da58581dd1de86d1b0",
+        "front-end/src/features/terminal/types.ts": "35283e9b1e55ed6fe940144c22e1cb1e52d84d3345bc54849c190117f4125ce7",
+        "front-end/src/features/terminal-component-group/components/ExploreAgentBubble.tsx": "3e6d4aefbef54c5bfea7755443dead3b0f6692c746eb8f0d5f88c68dedddf595",
+        "front-end/src/features/terminal-component-group/components/MobileAgentDrawer.tsx": "3f9daaa1aa92a72f609585d03c88fffa58f4b4ccf28ce39a83409dfaf85cd260",
+        "front-end/src/features/terminal-component-group/components/SubAgentToolBubble.tsx": "82e0d8e740e53f7b21a3f6ec47acb4f30e94b22bdd6a24d03e3de2399d5e39bc",
+        "front-end/src/features/terminal-component-group/components/claudeCodeChip.terminal.ts": "a962c74c0b85da6f3898fe1c2e8ca15c619cd93b840d0e9a96c495fcdf10dd8b",
+        "front-end/src/features/terminal-component-group/components/useSubAgentTreeMerge.ts": "ae9406e14819e21ef252cb0f8350a04a05f6e3d43fad41a901a29b0d61c31143",
+        "front-end/src/features/terminal-component-group/components/wait-for-chip/InlineExploreChipHeader.tsx": "af4e5ef136dfdeac83a44a84d3a3a9b9040569ea45c50d84901b8dfd755f0d8d",
+        "front-end/src/lib/adminUsers.ts": "dd6ef4c13d39000e12cc6dc7ae2d4c0e38baa8edebe347822845240cdeffdc84",
+        "front-end/src/lib/api/types.ts": "56d5d81f1fd87808baf8273df776609663271da09a168f3a7d71df1becb21654",
+        "front-end/src/lib/realtime-types/message-metadata.ts": "ac1232756c1a9aeeba82a7d4654abdb9e48d6697a6c28b89472da56cff93670b",
+        "front-end/src/lib/realtime-types/message-payloads.ts": "c879f979aca8e7271075c2907ca819981f101387c4e28dac6c18b3c98b9b1268",
+        "front-end/src/lib/realtime-types/tool-metadata.ts": "24a315bd7b98dafe8b93da8981cd1b2d5e6ecab454e69eb04c42ae780a4f9391"
+      }
+    },
+    "final_lint_format": "pass after whitespace-only trim; existing whole-coverage proof retains identical executable code",
+    "future_gate_instruction_file_unchanged": true
+  },
+  "remaining_required_gates": [
+    "Fresh integrated semantic UI and latency",
+    "Explicit native object-string decoder approval and focused SMS real pass",
+    "Human-hosted saved live card setup and strict production AgentCard",
+    "Bounded immutable-head review",
+    "Merge",
+    "Applicable production deployment lanes and full time scorecard"
   ]
 }

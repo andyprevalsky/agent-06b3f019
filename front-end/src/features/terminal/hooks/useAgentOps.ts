@@ -1,3 +1,4 @@
+import type { ClientSource } from '@/lib/clientSource';
 /**
  * Terminal feature — composed agent actions + messaging hook.
  *
@@ -18,7 +19,7 @@ import type { useLoadingNetwork } from './useLoadingNetwork';
 export interface UseAgentOpsArgs {
   auth: ReturnType<typeof useAuth>;
   canSubmitGoals: boolean;
-  clientSource: string;
+  clientSource: ClientSource;
   ctx: ReturnType<typeof useAgentContext>;
   agentList: ReturnType<typeof useAgentList>;
   loading: ReturnType<typeof useLoadingNetwork>;

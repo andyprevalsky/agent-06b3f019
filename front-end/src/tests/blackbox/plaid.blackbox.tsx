@@ -9,6 +9,7 @@
  *   - Plaid attribution is not rendered as an extra card row
  */
 
+import type { PlaidItem } from '@/features/integrations/types';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';

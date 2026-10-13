@@ -17,6 +17,28 @@ function msg(id: string, metadata: Record<string, unknown>, text = ''): Message 
 }
 
 describe('useMessageFiltering mergeSubAgentTreeMessages', () => {
+  it('refreshes cached same-id tree text while retaining unchanged-message identity', () => {
+    const original = msg(
+      'stable-message',
+      {
+        toolCallId: 'stable-call',
+        toolName: 'spawn_sub_agent',
+        toolStatus: 'FINISHED',
+        busId: 'root-bus',
+        spawnGroupId: 'stable-group',
+        subAgentIds: ['child'],
+      },
+      'Original result',
+    );
+    const initial = mergeSubAgentTreeMessages([original]);
+    const unchanged = mergeSubAgentTreeMessages([original], initial.newCache);
+    expect(unchanged.result[0]).toBe(initial.result[0]);
+    const changed = { ...original, text: 'Updated result' };
+    const updated = mergeSubAgentTreeMessages([changed], initial.newCache);
+    expect(updated.result[0]?.text).toBe('Updated result');
+    expect(updated.result[0]).not.toBe(initial.result[0]);
+  });
+
   it('drops the full-message cache when its owning root agent changes', () => {
     const messageA = msg('message-agent-a', {
       toolCallId: 'shared-call',

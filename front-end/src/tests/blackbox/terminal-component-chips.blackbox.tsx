@@ -731,7 +731,7 @@ describe('SubAgentTree', () => {
   // stays VISIBLE ("spinning up...") instead of vanishing until refresh.
   it('shows a pending placeholder for a known sub-agent id with no node data yet', () => {
     const { container } = renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['missing']} title="t" onNavigate={vi.fn()} />,
+      <SubAgentTree busId="bus-1" subAgentIds={['missing']} onNavigate={vi.fn()} />,
     );
     expect(container.firstChild).not.toBeNull();
     expect(container.textContent).toContain('spinning up...');
@@ -742,9 +742,7 @@ describe('SubAgentTree', () => {
       'a1',
       makeNode({ agentId: 'a1', goal: '🎯 Find sock stores', costCents: 250 }),
     );
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={vi.fn()} />);
     expect(screen.getByText('Find sock stores')).toBeInTheDocument();
     expect(screen.getByText('$2.50')).toBeInTheDocument();
     expect(screen.getByText('Delegating Sub Agents')).toBeInTheDocument();
@@ -755,7 +753,7 @@ describe('SubAgentTree', () => {
     const user = userEvent.setup();
     treeRef.current.set('a1', makeNode({ agentId: 'a1', goal: 'Plan trip' }));
     renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={onNavigate} />,
+      <SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={onNavigate} />,
     );
     await user.click(screen.getByText('Plan trip'));
     expect(onNavigate).toHaveBeenCalledWith('a1');
@@ -763,9 +761,7 @@ describe('SubAgentTree', () => {
 
   it('renders all-terminal COMPLETED cluster with success message', () => {
     treeRef.current.set('a1', makeNode({ agentId: 'a1', goal: 'Done task', status: 'COMPLETED' }));
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={vi.fn()} />);
     expect(screen.getByText('Sub Agents completed successfully')).toBeInTheDocument();
   });
 
@@ -786,9 +782,7 @@ describe('SubAgentTree', () => {
         },
       }),
     );
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={vi.fn()} />);
     expect(screen.getByText('All Sub Agents failed')).toBeInTheDocument();
   });
 
@@ -820,7 +814,7 @@ describe('SubAgentTree', () => {
       }),
     );
     renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1', 'a2']} title="t" onNavigate={vi.fn()} />,
+      <SubAgentTree busId="bus-1" subAgentIds={['a1', 'a2']} onNavigate={vi.fn()} />,
     );
     expect(screen.getByText('Working')).toBeInTheDocument();
     // Status text for single tool
@@ -844,9 +838,7 @@ describe('SubAgentTree', () => {
         status: 'COMPLETED',
       }),
     );
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['root']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['root']} onNavigate={vi.fn()} />);
     // Full tree is visible by default (showAllIntermediaries=true)
     expect(screen.getByText('root goal')).toBeInTheDocument();
     expect(screen.getByText('mid goal')).toBeInTheDocument();
@@ -872,9 +864,7 @@ describe('SubAgentTree', () => {
       );
     }
 
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['root']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['root']} onNavigate={vi.fn()} />);
 
     await user.click(screen.getByText(/Collapse intermediary agents/));
 
@@ -900,9 +890,7 @@ describe('SubAgentTree', () => {
         }),
       );
     }
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['root']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['root']} onNavigate={vi.fn()} />);
     // Collapse first
     await user.click(screen.getByText(/Collapse intermediary agents/));
     // Finished summary line shows "3 finished agents"
@@ -918,7 +906,7 @@ describe('SubAgentTree', () => {
   it('hides header when hideHeader prop is true', () => {
     treeRef.current.set('a1', makeNode({ agentId: 'a1', goal: 'Hello' }));
     renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} hideHeader />,
+      <SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={vi.fn()} hideHeader />,
     );
     expect(screen.queryByText('Delegating tasks')).not.toBeInTheDocument();
     expect(screen.getByText('Hello')).toBeInTheDocument();
@@ -943,9 +931,7 @@ describe('SubAgentTree', () => {
         },
       }),
     );
-    renderWithProviders(
-      <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
-    );
+    renderWithProviders(<SubAgentTree busId="bus-1" subAgentIds={['a1']} onNavigate={vi.fn()} />);
     expect(screen.getByText('Did part')).toBeInTheDocument();
     expect(screen.getByText('All Sub Agents failed')).toBeInTheDocument();
   });

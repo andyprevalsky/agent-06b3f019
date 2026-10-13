@@ -10,25 +10,9 @@ import { Toaster } from '@/components/ui/toaster';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
+import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
 
 const API_BASE = 'http://localhost:3001/api';
-
-/**
- * Sets up a fully-signed-in session in localStorage so useAuth resolves
- * as authenticated with isFullySignedIn = true.
- */
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
-}
 
 /**
  * Default integrations endpoint handler returning empty list.
@@ -77,7 +61,9 @@ describe('Integrations page', () => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
       });
 
-      const browserSection = screen.getByText('Browser Cookies').closest('.rounded-lg')!;
+      const browserSection = screen
+        .getByText('Browser Cookies')
+        .closest<HTMLElement>('.rounded-lg')!;
       expect(within(browserSection).getByText('Desktop Only')).toBeInTheDocument();
       expect(
         within(browserSection).getByRole('link', { name: /download for mac/i }),
@@ -136,7 +122,9 @@ describe('Integrations page', () => {
         expect(screen.getByText('File System')).toBeInTheDocument();
       });
 
-      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      const fileSystemSection = screen
+        .getByText('File System')
+        .closest<HTMLElement>('.rounded-lg')!;
       expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
       expect(within(fileSystemSection).getByText('Desktop Only')).toBeInTheDocument();
       expect(
@@ -155,7 +143,9 @@ describe('Integrations page', () => {
         expect(screen.getByText('File System')).toBeInTheDocument();
       });
 
-      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      const fileSystemSection = screen
+        .getByText('File System')
+        .closest<HTMLElement>('.rounded-lg')!;
       expect(
         within(fileSystemSection).getByRole('button', { name: /connect file system/i }),
       ).toBeInTheDocument();
@@ -173,7 +163,9 @@ describe('Integrations page', () => {
       });
 
       clearCaptures();
-      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      const fileSystemSection = screen
+        .getByText('File System')
+        .closest<HTMLElement>('.rounded-lg')!;
       const connectButton = within(fileSystemSection).getByRole('button', {
         name: /connect file system/i,
       });
@@ -261,7 +253,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -269,7 +261,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('WhatsApp')).toBeInTheDocument();
       });
 
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Synced')).toBeInTheDocument();
       // Connected state replaces the Desktop-Only download affordance.
       expect(
@@ -284,7 +276,7 @@ describe('Integrations page', () => {
           isAvailable: true,
           getInstalledBrowsers: vi.fn(async () => [
             {
-              type: 'safari',
+              type: 'safari' as const,
               name: 'Safari',
               isInstalled: true,
               needsManualPassword: false,
@@ -307,7 +299,9 @@ describe('Integrations page', () => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
       });
 
-      const browserSection = screen.getByText('Browser Cookies').closest('.rounded-lg')!;
+      const browserSection = screen
+        .getByText('Browser Cookies')
+        .closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(browserSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -332,7 +326,7 @@ describe('Integrations page', () => {
       });
 
       // Find the Passwords section toggle button and click it
-      const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
+      const passwordsSection = screen.getByText('Passwords').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(passwordsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -351,7 +345,7 @@ describe('Integrations page', () => {
       });
 
       // Click the Messages toggle
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -373,7 +367,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
       });
 
-      const socialsSection = screen.getByText('Socials').closest('.rounded-lg')!;
+      const socialsSection = screen.getByText('Socials').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(socialsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -394,7 +388,7 @@ describe('Integrations page', () => {
       });
 
       // Expand Passwords section
-      const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
+      const passwordsSection = screen.getByText('Passwords').closest<HTMLElement>('.rounded-lg')!;
       const passwordsToggle = within(passwordsSection).getAllByRole('button')[0];
       await user.click(passwordsToggle);
 
@@ -403,7 +397,7 @@ describe('Integrations page', () => {
       });
 
       // Now expand Messages - should close Passwords
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const messagesToggle = within(messagesSection).getAllByRole('button')[0];
       await user.click(messagesToggle);
 
@@ -423,7 +417,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -445,7 +439,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -454,7 +448,7 @@ describe('Integrations page', () => {
       });
 
       // WhatsApp pairs only in the Mac app, so on web it reads "Desktop Only".
-      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      const whatsAppRow = screen.getByText('WhatsApp').closest<HTMLElement>('div.px-4')!;
       expect(within(whatsAppRow as HTMLElement).getByText('Desktop Only')).toBeInTheDocument();
       expect(within(whatsAppRow as HTMLElement).getByText('Download for Mac')).toBeInTheDocument();
     });
@@ -467,7 +461,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Socials')).toBeInTheDocument();
       });
 
-      const socialsSection = screen.getByText('Socials').closest('.rounded-lg')!;
+      const socialsSection = screen.getByText('Socials').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(socialsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -502,7 +496,7 @@ describe('Integrations page', () => {
       });
 
       // Expand Messages
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -513,7 +507,9 @@ describe('Integrations page', () => {
       clearCaptures();
 
       // Click the Gmail sync button
-      const gmailRow = screen.getByText('Gmail').closest('.flex.items-center.justify-between')!;
+      const gmailRow = screen
+        .getByText('Gmail')
+        .closest<HTMLElement>('.flex.items-center.justify-between')!;
       expect(
         within(gmailRow).getByText(/Google consent also requests Calendar and Drive access/),
       ).toBeInTheDocument();
@@ -551,7 +547,7 @@ describe('Integrations page', () => {
       });
 
       // Expand Messages
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -593,7 +589,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -624,7 +620,7 @@ describe('Integrations page', () => {
       });
 
       // Expand Passwords
-      const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
+      const passwordsSection = screen.getByText('Passwords').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(passwordsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -720,7 +716,7 @@ describe('Integrations page', () => {
       });
 
       // Expand Messages
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -729,7 +725,9 @@ describe('Integrations page', () => {
       });
 
       // Click Gmail sync button
-      const gmailRow = screen.getByText('Gmail').closest('.flex.items-center.justify-between')!;
+      const gmailRow = screen
+        .getByText('Gmail')
+        .closest<HTMLElement>('.flex.items-center.justify-between')!;
       const gmailButton = within(gmailRow).getByRole('button');
       await user.click(gmailButton);
 
@@ -764,7 +762,7 @@ describe('Integrations page', () => {
       // The Passwords section should show a connected (check) indicator
       // since chrome_passwords and apple_passwords are connected.
       // Expand to verify sub-items still render.
-      const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
+      const passwordsSection = screen.getByText('Passwords').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(passwordsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -794,7 +792,7 @@ describe('Integrations page', () => {
         expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 

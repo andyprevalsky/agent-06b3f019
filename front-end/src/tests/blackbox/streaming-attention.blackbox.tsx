@@ -62,6 +62,7 @@ describe('keyed streaming attention render lifecycle', () => {
         onSendMessage={vi.fn()}
         exploreStepMap={new Map()}
         waitForCheckMap={new Map()}
+        streamingMetricsBySubAgentId={new Map()}
       />,
     );
 

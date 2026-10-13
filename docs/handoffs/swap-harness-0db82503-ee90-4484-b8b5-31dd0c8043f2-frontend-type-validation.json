@@ -1,0 +1,21 @@
+{
+  "recorded_at_utc": "2026-10-13T05:29:33.486295+00:00",
+  "original_app_typecheck_errors": 215,
+  "local_same_owning_typecheck_after_fixes": "pass0errors",
+  "problem_class": [
+    "Empty solution-project check hides app typing errors",
+    "Cache reads obsolete message field"
+  ],
+  "cache_local_repro": "existing use-message-filtering suite: red1failure14pass, green15pass",
+  "normal_deploy_regressions": [
+    "existing frontend coverage includes cache regression",
+    "coverage now executes explicit nonempty app-project tsc",
+    "existing structural suite pins coverage/typecheck order"
+  ],
+  "compatibility": "Generic raw metadata tolerance retained; specialized validated tool contracts preserved; emitted app code only changes actual cached Message.text comparison.",
+  "p2_feature_work": false,
+  "p2_patch_path_overlap": [],
+  "environment_toolchain_dependency_schema_model_catalog_timeout_changes": false,
+  "compiler_check_target": "ES2024 noEmit matches existing Unicode-set syntax; Vite/SWC emitted targets unchanged (773 source comparisons).",
+  "pending_native_decoder_is_unapplied": true
+}

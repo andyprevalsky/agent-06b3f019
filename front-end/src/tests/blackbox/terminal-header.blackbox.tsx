@@ -39,12 +39,12 @@ const dripStyles = {
 function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> = {}) {
   const props: ComponentProps<typeof TerminalHeader> = {
     onCreateNewAgent: vi.fn(),
+    onRefreshAgents: vi.fn(),
     onSelectAgent: vi.fn(),
     onLoginClick: vi.fn(),
     onLogout: vi.fn(),
     isSignedIn: false,
     clientSource: 'WEB',
-    realtimeReady: true,
     agents: [],
     isLoadingAgents: false,
     selectedAgentId: null,
@@ -105,12 +105,12 @@ describe('TerminalHeader responsive auth action', () => {
 
     const renderHeaderProps: ComponentProps<typeof TerminalHeader> = {
       onCreateNewAgent: vi.fn(),
+      onRefreshAgents: vi.fn(),
       onSelectAgent: vi.fn(),
       onLoginClick: vi.fn(),
       onLogout: vi.fn(),
       isSignedIn: false,
       clientSource: 'WEB',
-      realtimeReady: true,
       agents: [],
       isLoadingAgents: false,
       selectedAgentId: null,

@@ -63,6 +63,10 @@ function makeContext(): AgentContextValue {
   return {
     agent: null,
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: null,
     setSelectedAgentId: () => undefined,
     messages,

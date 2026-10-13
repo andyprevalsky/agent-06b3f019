@@ -1,8 +1,9 @@
 import { vi } from 'vitest';
+import type { Message } from '@/lib/api';
 import type { RealtimeSubscriptionDeps } from '@/features/agent-context/hooks/useRealtimeSubscription';
 
 /** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
-export function agentDetailJson(messages: Array<Record<string, unknown>>) {
+export function agentDetailJson(messages: Array<Message | Record<string, unknown>>) {
   return {
     agent: {
       agent_id: 'agent-1',

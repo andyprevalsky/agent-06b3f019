@@ -22,6 +22,7 @@ import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import type { Message, AgentDetail } from '@/lib/api';
+import { makeCtx } from './browser-agent-chip.fixtures';
 
 const attemptMacAppHandoffMock = vi.hoisted(() => vi.fn());
 
@@ -59,25 +60,7 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
 }
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
-  return {
-    agent: null,
-    applyAgentDetail: () => true,
-    selectedAgentId: 'agent-1',
-    setSelectedAgentId: () => {},
-    messages: [],
-    streamingBubbles: new Map(),
-    streamingPlan: null,
-    streamingAttention: null,
-    streamingTools: new Map(),
-    streamedTextsRef,
-    registerMessageHandler: () => () => {},
-    sendMessage: async () => {},
-    isLoadingAgent: false,
-    forceResubscribe: () => {},
-    isChatMode: false,
-    ...overrides,
-  };
+  return { ...makeCtx([]), ...overrides };
 }
 
 function renderList(ctx: AgentContextValue, props: React.ComponentProps<typeof MessageList> = {}) {
@@ -389,6 +372,8 @@ describe('MessageList', () => {
         tool_call_id: 'sa-1',
         message: 'please respond',
         is_question: true,
+        sequence: 0,
+        done: false,
       },
     });
     const { container } = renderList(ctx);

@@ -9,6 +9,8 @@ function makeDeps(): QuickQueryDeps {
   return {
     selectedModel: 'rose-1-flash',
     canSubmitGoals: true,
+    authReady: true,
+    messageInput: '',
     clientSource: 'MAC_APP',
     pendingPriceLimitCents: 500,
     setCurrentView: vi.fn(),
