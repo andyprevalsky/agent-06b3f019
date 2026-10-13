@@ -431,6 +431,27 @@ production failure from an enriched large cache row is established. Many
 sub-budget origins can still exhaust the phase, and fewer bounded transfers
 are an improvement at 10,000 agents, not a measured capacity guarantee.
 
+### Golden-reference comparison for the October 12 fix
+
+Searched all four available reference trees for browser storage-state APIs,
+LocalStorage/IndexedDB, retained init scripts, profile snapshots/persistence,
+opaque JSONB/chunk transfer and duplicate-origin reconciliation.
+`hermes-agent/hermes_cli/browser_connect.py:355` excludes large cache and
+replay-prone IndexedDB state from profile snapshots; its copy operation applies
+that policy at line 691. Rose converges on reducing restore volume while
+retaining smaller IndexedDB origins, rather than excluding the storage class.
+`openclaw/extensions/browser/src/browser/chrome.ts:716` chooses persistent
+per-profile storage, and `pw-tools-core.storage.ts:151` mutates individual keys
+through the targeted page. That matches document-scoped mutation but avoids
+Rose's SQL-to-CDP transfer boundary.
+
+`claude-code-src/src/utils/claudeInChrome/mcpServer.ts:253` delegates browser
+implementation to the external Chrome MCP server.
+`codex/codex-rs/config/src/browser_use.rs:9` defines origin-access policy rather
+than restoration. No complete opaque-origin transport, byte-budget or
+oldest-first duplicate reconciliation analog was found in these trees; Rose's
+owning regression tests supply that proof. Reference files were read only.
+
 ## Human feedback
 
 The user required completing the infrastructure repair and ten consecutive
