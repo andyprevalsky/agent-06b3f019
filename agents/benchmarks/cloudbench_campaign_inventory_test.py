@@ -311,20 +311,18 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         fleet = (ROOT / "scripts/run-bench-fleet").read_text()
         boundary = fleet.split("fleet_infra_canary_preflight || exit $?\n", 1)[1].split(
             "# ── Clone one machine per bench", 1)[0]
-        admission = 'admit_app_capacity_with_wait() { test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"; }\n'
-        if admission_wait:
-            start = fleet.index("admit_app_capacity_with_wait() {")
-            admission = fleet[start:fleet.index("\n}\n", start) + 3]
-            admission += (
-                'CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1\n'
-                'fixture_capacity_calls=0\n'
-                'enforce_app_capacity_guard() {\n'
-                ' fixture_capacity_calls=$((fixture_capacity_calls + 1))\n'
-                ' CAPACITY_ADMISSION_RETRYABLE=1\n'
-                ' [ "$fixture_capacity_calls" -gt 1 ] || return 1\n'
-                ' test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"\n'
-                '}\n'
-            )
+        start = fleet.index("admit_app_capacity_with_wait() {")
+        admission = fleet[start:fleet.index("\n}\n", start) + 3]
+        admission += (
+            'CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1\n'
+            'fixture_capacity_calls=0\n'
+            'enforce_app_capacity_guard() {\n'
+            ' fixture_capacity_calls=$((fixture_capacity_calls + 1))\n'
+            ' CAPACITY_ADMISSION_RETRYABLE=1\n'
+            + (' [ "$fixture_capacity_calls" -gt 1 ] || return 1\n' if admission_wait else '')
+            + ' test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"\n'
+            '}\n'
+        )
         boundary = admission + boundary
     cli = scripts / "run-bench"
     cli.write_text(
@@ -1449,14 +1447,12 @@ def test_campaign_inventory_post_canary_admission_uses_parent_feed_without_nativ
     assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 6)
 
 
-@pytest.mark.parametrize("fault", (
-    "missing-health", "expired-health", "wrong-token", "publisher-birth",
-    "parent-birth", "wrong-app", "missing-owner", "missing-snapshot", "invalid-credentials",
-))
-def test_campaign_inventory_post_canary_unknown_or_invalid_feed_withholds_admission(tmp_path, fault):
+def post_canary_boundary_subject(tmp_path):
     fleet = (ROOT / "scripts/run-bench-fleet").read_text()
     boundary = fleet.split("fleet_infra_canary_preflight || exit $?\n", 1)[1].split(
         "# ── Clone one machine per bench", 1)[0]
+    admission_start = fleet.index("admit_app_capacity_with_wait() {")
+    admission = fleet[admission_start:fleet.index("\n}\n", admission_start) + 3]
     script = tmp_path / "boundary.sh"
     script.write_text(
         'set -euo pipefail\n'
@@ -1475,6 +1471,8 @@ def test_campaign_inventory_post_canary_unknown_or_invalid_feed_withholds_admiss
         '"$path" > "$path.tmp"; mv "$path.tmp" "$path"; }\n'
         'case "$2" in\n'
         ' missing-health) rm "$INVENTORY_INDEX/current/health";;\n'
+        ' empty-health) : > "$INVENTORY_INDEX/current/health";;\n'
+        ' invalid-health) replace_line "$INVENTORY_INDEX/current/health" valid_until malformed;;\n'
         ' expired-health) replace_line "$INVENTORY_INDEX/current/health" valid_until 1;;\n'
         ' wrong-token) replace_line "$INVENTORY_INDEX/current/health" publisher_token foreign;;\n'
         ' publisher-birth) replace_line "$INVENTORY_HOME/owner" pid_start invalid;;\n'
@@ -1482,19 +1480,36 @@ def test_campaign_inventory_post_canary_unknown_or_invalid_feed_withholds_admiss
         ' wrong-app) replace_line "$INVENTORY_HOME/owner" app foreign;;\n'
         ' missing-owner) rm "$INVENTORY_HOME/owner";;\n'
         ' missing-snapshot) rm "$MACHINES_SNAPSHOT";;\n'
-        ' invalid-credentials) unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR; SNAPSHOT_LOOP_PID="";;\n'
+        ' invalid-credentials|native-exit-75) unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR; SNAPSHOT_LOOP_PID="";;\n'
         'esac\n'
-        'FLY() { touch "$FLEET_DIR/native-read"; return 1; }\n'
-        'admit_app_capacity_with_wait() { touch "$FLEET_DIR/admitted"; }\n'
+        'fixture_fault=$2\n'
+        'FLY() { touch "$FLEET_DIR/native-read"; [ "$fixture_fault" != native-exit-75 ] || return 75; return 1; }\n'
+        + admission
+        + 'enforce_app_capacity_guard() { touch "$FLEET_DIR/admitted"; }\n'
+        + 'CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1\n'
+        + 'fixture_mode=${3:-negative}\n'
+        + 'sleep() { touch "$FLEET_DIR/pending-observed"; '
+        'if [ "$fixture_mode" = recovery ]; then command sleep "$1"; '
+        'else SECONDS=$((SECONDS + 300)); fi; }\n'
         + boundary
     )
+    return script
+
+
+@pytest.mark.parametrize("fault", (
+    "missing-health", "expired-health", "empty-health", "invalid-health", "wrong-token", "publisher-birth",
+    "parent-birth", "wrong-app", "missing-owner", "missing-snapshot", "invalid-credentials", "native-exit-75",
+))
+def test_campaign_inventory_post_canary_unknown_or_invalid_feed_withholds_admission(tmp_path, fault):
+    script = post_canary_boundary_subject(tmp_path)
     result = subprocess.run(
         ["bash", str(script), str(tmp_path), fault], capture_output=True, text=True,
         timeout=FIXTURE_HOST_GUARD_SECONDS,
     )
     assert result.returncode != 0, result.stdout + result.stderr
     assert not (tmp_path / "admitted").exists(), "unknown native inventory admitted mutation"
-    assert (tmp_path / "native-read").exists() == (fault == "invalid-credentials"), (
+    assert (tmp_path / "pending-observed").exists() == (fault in {"missing-health", "expired-health", "missing-snapshot"})
+    assert (tmp_path / "native-read").exists() == (fault in {"invalid-credentials", "native-exit-75"}), (
         "unavailable shared feed fanned out into a native provider request", result.stderr)
 
 
@@ -1505,3 +1520,33 @@ def test_campaign_inventory_post_canary_admission_wait_keeps_feed_and_standalone
     assert result.returncode == 0, result.stdout + result.stderr
     assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
     assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 8)
+
+
+@pytest.mark.parametrize("fault", ("missing-health", "expired-health"))
+def test_campaign_inventory_post_canary_live_feed_recovers_before_admission(tmp_path, fault):
+    script = post_canary_boundary_subject(tmp_path)
+    process = subprocess.Popen(
+        ["bash", str(script), str(tmp_path), fault, "recovery"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+        while not (tmp_path / "pending-observed").exists() and process.poll() is None:
+            assert time.monotonic() < deadline, "fixture host guard"
+            time.sleep(0.01)
+        assert (tmp_path / "pending-observed").exists(), "temporary feed loss aborted before re-observation"
+        assert not (tmp_path / "admitted").exists(), "unknown feed admitted mutation"
+        assert not (tmp_path / "native-read").exists(), "missing feed fanned out to provider"
+        health = tmp_path / "inventory/current/health"
+        temporary = health.with_suffix(".tmp")
+        temporary.write_text(f"publisher_token=fixture-token\nvalid_until={int(time.time()) + 120}\n")
+        temporary.replace(health)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert process.returncode == 0, stdout + stderr
+        assert (tmp_path / "admitted").exists()
+        assert not (tmp_path / "native-read").exists()
+        assert "inventory temporarily unavailable" in stderr
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)

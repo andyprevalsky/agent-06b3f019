@@ -95,7 +95,8 @@ original child logs contain the original post-canary error. Unchanged assertions
 against repaired source produced 4 passed (exit 0). Private logs are
 .context/post-canary-inventory/red.log and green.log. The original-source selector
 is CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST pointing to the private original directory;
-other scripts are unchanged, linked source. This is offline causal proof, not
+The inventory library is also an exact git-show copy; other unchanged scripts
+are linked source. This is offline causal proof, not
 native replay of the uncaptured provider error or benchmark outcome proof.
 
 ## Solution
@@ -108,9 +109,11 @@ owner births/token/finite-expiry fences, reservations, pool claims and exact
 post-mutation/release verification are unchanged. No prompt, task, provider,
 timeout or evaluator contract changes.
 
-This unifies the redundant read with the existing producer rather than adding a
-publisher, fallback, retry policy or budget. Missing/stale feed withholds admission
-and exits through existing cleanup; it never falls back to child provider reads.
+This unifies the redundant read with the existing producer. The existing
+300-second admission clock owns temporary feed re-observation; there is no new
+publisher, fallback or deadline. Missing/stale feed withholds the native capacity
+guard until a fresh generation arrives, or the same admission clock expires.
+It never falls back to child provider reads.
 Wrong token/app, changed parent/publisher births, absent owner/snapshot and rejected
 standalone credentials also withhold admission. Borrowers never stop the parent.
 The compact two-consumer controls observe two parent Machines reads, including
@@ -123,9 +126,14 @@ exact mutation/cleanup observations remain and are not claimed optimized.
 Registration already includes this owning file and the campaign_inventory selector
 in scripts/tests/benchmark-live-results.test.py, registered by
 scripts/run-deploy-structural-gates.py and /deploy Step 4s. No new suite, live gate
-or paid stage was added. Focused post-canary controls: 13 passed. Existing native
-capacity regression selection: 13 passed. The owning campaign suite: 56 passed. The final compact gate:
-548 passed, 4 skipped, 851 deselected in 245.51 seconds (exit 0). The gate log
+or paid stage was added. Focused post-canary controls after parent review: 18 passed. Existing native
+capacity regression selection: 13 passed. The ec436bad5 owning campaign suite: 56 passed. Its compact gate:
+548 passed, 4 skipped, 851 deselected in 245.51 seconds (exit 0). After the
+parent-requested re-observation repair, the compact gate produced 552 passed,
+4 skipped and one expected trusted-source-review rejection in the pre-service
+recovery fixture. The recipe fingerprint includes run-bench-fleet; registration
+requires independent review of the final immutable source. No validator or
+review-policy bypass was made. Final review and gate completion are pending. The gate log
 and source/check receipts are retained under .context/post-canary-inventory.
 
 The second compact-gate invocation exposed an independent fixture publication
@@ -150,6 +158,8 @@ benchmark acceptance or deployment is claimed. Independent review belongs to
 parent ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss; no additional worker was created.
 
 ## Human feedback
+
+Parent ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss reviewed ec436bad5 and accepted the shared-read/native-guard shape, but identified premature exit on temporary status 75. The same live, birth-fenced missing/expired feed now has permanent RED/GREEN recovery controls: both fail on ec436bad5 and pass with re-observation under the existing admission clock. The reader preserves 75; admission interprets it as retryable only for an attached feed, so unclassified native CLI exit 75 remains fatal for standalone operation. Empty/malformed health, wrong token/app and birth corruption remain immediate failures. Unknown feed cannot call the guard, mutate or fan out. Final independent review remains with the parent; no new worker was spawned.
 
 Continue on this devbox from exact original PR1482 source; do not reconstruct a
 missing herd implementation. Preserve native resource/capacity admission, feed

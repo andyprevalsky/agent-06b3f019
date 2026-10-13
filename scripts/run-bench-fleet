@@ -12601,7 +12601,8 @@ except Exception:
 }
 
 admit_app_capacity_with_wait() {
-    local deadline interval remaining
+    local deadline interval remaining inventory_status phase="during admission wait"
+    local refresh_inventory="${1:-0}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
     interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     case "$wait_seconds:$interval" in
@@ -12611,22 +12612,32 @@ admit_app_capacity_with_wait() {
         echo "❌ capacity admission wait and retry seconds must be positive" >&2
         return 2
     fi
+    [ "$refresh_inventory" != 1 ] || phase="after infra canary"
     deadline=$((SECONDS + wait_seconds))
     while :; do
-        enforce_app_capacity_guard && return 0
-        [ "$CAPACITY_ADMISSION_RETRYABLE" = 1 ] || return 1
+        inventory_status=0
+        if [ "$refresh_inventory" = 1 ]; then
+            warm_json="$(fleet_machines_json)" || inventory_status=$?
+        fi
+        if [ "$inventory_status" = 0 ]; then
+            enforce_app_capacity_guard && return 0
+            [ "$CAPACITY_ADMISSION_RETRYABLE" = 1 ] || return 1
+        elif [ "$inventory_status" = 75 ] && [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
+            echo "⚠️ native inventory temporarily unavailable; withholding capacity admission" >&2
+        else
+            echo "❌ App capacity guard could not refresh machine state $phase." >&2
+            return 1
+        fi
         remaining=$((deadline - SECONDS))
         if [ "$remaining" -le 0 ]; then
             echo "❌ capacity admission remained blocked for ${wait_seconds}s" >&2
             return 1
         fi
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
-        echo "⏳ capacity is reserved by live work; retrying provider admission in ${interval}s" >&2
+        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s" >&2
         sleep "$interval"
-        warm_json="$(fleet_machines_json)" || {
-            echo "❌ App capacity guard could not refresh machine state during admission wait." >&2
-            return 1
-        }
+        refresh_inventory=1
+        phase="during admission wait"
     done
 }
 release_capacity_reservation_after_primary_start_accounted() {
@@ -14202,15 +14213,13 @@ fleet_infra_canary_preflight || exit $?
 # this fleet only after it exits, or its canary counts our pending slots twice
 # and can deadlock against the app Machine ceiling before either fleet starts.
 # Campaign parent → birth/token-fenced native feed → unchanged capacity guard.
-# Borrow before this read; unavailable shared inventory must not fan out to Fly.
+# Borrow before admission; temporary feed loss shares its existing wait clock.
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
-    start_machines_snapshot_loop || exit $?
+    inventory_status=0
+    start_machines_snapshot_loop || inventory_status=$?
+    case "$inventory_status" in 0|75) ;; *) exit "$inventory_status" ;; esac
 fi
-warm_json="$(fleet_machines_json)" || {
-    echo "❌ App capacity guard could not refresh machine state after infra canary." >&2
-    exit 1
-}
-admit_app_capacity_with_wait || exit 1
+admit_app_capacity_with_wait 1 || exit 1
 
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"

@@ -443,8 +443,8 @@ _fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
     # provider request per child during the exact rate-limit condition we absorb.
     local f="$1"; shift
     if [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
-        inventory_index_healthy || return 1
-        [ -s "$f" ] || return 1
+        inventory_index_healthy || return $?
+        [ -s "$f" ] || return 75
         cat "$f"
         return 0
     fi
