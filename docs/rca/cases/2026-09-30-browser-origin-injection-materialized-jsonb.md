@@ -379,11 +379,16 @@ from 2026-10-12-mac-localstorage-reader-dropped-storage-key-first-byte, the
 dev box passed 3/3 at 12.4–13.5 s.
 
 Fix: restoration uses an 8 MiB serialized-payload ceiling
-(`BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES`) after a conservative stored-size
-prefilter. This is not an escaped CDP wire-byte ceiling. The existing staging statement
-first compares the O(1) `pg_column_size` against the budget, so an oversized
-row is never serialized, then checks the exact staged byte length. There is no
-extra round trip. Skips log table and byte counts at warn, with no origin
+(`BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES`). This is not an escaped CDP
+wire-byte ceiling. The October 13 review correction serializes the restore
+projection once in a materialized SQL CTE and measures its exact UTF-8 length
+before bytea staging. Oversized payloads reach neither staging nor the browser.
+This still serializes rejected rows inside PostgreSQL; it does not provide an
+O(1) early serialization-work bound. Stored JSONB bytes are compressed and
+binary JSONB size can exceed fitting serialized text, so neither is a valid
+exact admission rule. CacheStorage is measured after its names-only projection.
+Configured limits outside PostgreSQL's positive signed-integer range fall back
+to the default. There is no extra round trip. Skips log table and byte counts at warn, with no origin
 because origins are browsing history; restored counts stay truthful.
 Permanent regression: `verifyRealmRestoreBudget` in
 `browser-origin-payload.blackbox.ts`. The old source failed it with
@@ -413,23 +418,25 @@ local isolated `victoria_cloud-452e0019` database.
 
 Read-only adversarial review reconciled the preserved final `+fix-v2` variant
 against its `a040520d5` baseline. Its two production files are byte-identical to
-the continuation's owning code: `injectionOriginPayload.ts` SHA256
+the continuation's owning code at `279576174` before the review correction: `injectionOriginPayload.ts` SHA256
 `f5773e5def892645835d4057cc4e5afff10e2f6291a4fc04ee635165b6f9fff0` and
 `injectionState.ts` SHA256
 `6d229793a7fd8058a92a9ff0c473eb5f7d23e7b356baaa8a9d8536add5b3385b`.
-The existing RED/GREEN Kernel receipts therefore exercise the final owning
-implementation. They reproduce the init boundary with representative adverse
+The existing RED/GREEN Kernel receipts therefore exercise that checkpoint
+implementation. The October 13 admission correction additionally has fresh local
+RED/GREEN owning regressions, and does not claim identical paid Kernel inputs. They reproduce the init boundary with representative adverse
 origin shapes and synthetic values, not byte-exact production credential inputs
 or completion of the original user's task. No additional paid Kernel run was
 needed merely to establish this source correspondence. Production resolution
 still requires rollout verification; September's original OOM attribution and
 fleet acceptance remain open.
 
-The stored-size prefilter examines the full CacheStorage column before its
-names-only projection. Current Mac ingestion stores names only; no observed
-production failure from an enriched large cache row is established. Many
-sub-budget origins can still exhaust the phase, and fewer bounded transfers
-are an improvement at 10,000 agents, not a measured capacity guarantee.
+The October 13 owning regression first failed both the out-of-range configuration
+and enriched-cache projection cases, then passed with the admission correction.
+It also verifies that a compressed 12 MiB payload produces zero browser mutations.
+The conservative full-column prefilter has been removed. Many sub-budget origins
+can still exhaust the phase, and fewer bounded transfers are an improvement at
+10,000 agents, not a measured capacity guarantee.
 
 ### Golden-reference comparison for the October 12 fix
 

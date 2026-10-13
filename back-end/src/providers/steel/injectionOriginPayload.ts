@@ -32,7 +32,7 @@ const DEFAULT_MAX_RESTORED_ORIGIN_BYTES = 8 * 1024 * 1024;
 
 function maxRestoredOriginBytes(): number {
   const configured = Number(process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES);
-  return Number.isSafeInteger(configured) && configured > 0
+  return Number.isSafeInteger(configured) && configured > 0 && configured <= 2_147_483_647
     ? configured
     : DEFAULT_MAX_RESTORED_ORIGIN_BYTES;
 }
@@ -78,21 +78,21 @@ async function readOriginTextParts(
       );
       signal?.throwIfAborted();
       const budget = maxRestoredOriginBytes();
-      // The O(1) stored size skips an oversized row without serializing it;
-      // the staged length is the exact byte count that would be sent.
-      const [staged] = await tx.$queryRawUnsafe<
-        Array<{ storedBytes: number | null; rawBytes: number | null }>
-      >(
-        `WITH source AS (
-         SELECT pg_column_size("${column}")::int AS stored FROM "${table}"
+      // Serialize the restore projection once, then admit its exact UTF-8 size
+      // before staging or browser mutations. Stored/detoasted JSONB sizes are
+      // not wire-size bounds: compression and binary overhead go both ways.
+      // Exact sizing still requires SQL serialization, including rejected rows.
+      const [staged] = await tx.$queryRawUnsafe<Array<{ rawBytes: number | null }>>(
+        `WITH serialized AS MATERIALIZED (
+         SELECT (${payload})::text AS text FROM "${table}"
          WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp
+       ), measured AS MATERIALIZED (
+         SELECT text, octet_length(convert_to(text, 'UTF8'))::int AS raw FROM serialized
        ), staged AS (
-         INSERT INTO "${stage}" SELECT convert_to((${payload})::text, 'UTF8') FROM "${table}"
-         WHERE id=$1 AND "userId"=$2 AND origin=$3 AND hash=$4 AND "updatedAt"=$5::timestamp
-           AND pg_column_size("${column}") <= $6::int
-         RETURNING octet_length(payload)::int AS raw
+         INSERT INTO "${stage}" SELECT convert_to(text, 'UTF8') FROM measured
+         WHERE raw <= $6::int
        )
-       SELECT (SELECT stored FROM source) AS "storedBytes", (SELECT raw FROM staged) AS "rawBytes"`,
+       SELECT (SELECT raw FROM measured) AS "rawBytes"`,
         row.id,
         row.userId,
         row.origin,
@@ -101,10 +101,9 @@ async function readOriginTextParts(
         budget
       );
       signal?.throwIfAborted();
-      if (staged === undefined || staged.storedBytes === null)
+      if (staged === undefined || staged.rawBytes === null)
         throw new Error('Origin payload disappeared during injection');
-      // Decided before the first byte reaches the browser.
-      if (staged.rawBytes === null) throw new OriginPayloadOverBudget(staged.storedBytes);
+      // Decided before staging and before the first byte reaches the browser.
       if (staged.rawBytes > budget) throw new OriginPayloadOverBudget(staged.rawBytes);
       const decoder = new TextDecoder('utf-8', { fatal: true });
       let offset = 1;

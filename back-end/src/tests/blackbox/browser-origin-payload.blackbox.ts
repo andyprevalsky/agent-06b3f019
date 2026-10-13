@@ -353,6 +353,95 @@ async function verifyDatabaseUnicodeAndAbort() {
   }
 }
 
+/** Exercise PostgreSQL admission with compressed data and projected caches. */
+async function verifyProjectedPayloadAdmission() {
+  const userId = `origin-admission-${randomUUID()}`;
+  const saved = process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES;
+  const failures: string[] = [];
+  const selection = { id: true, userId: true, origin: true, hash: true, updatedAt: true } as const;
+  try {
+    const small = await prisma.localStorageOrigin.create({
+      data: { userId, origin, entries: [{ key: 'k', value: 'v' }], hash: 'small' },
+      select: selection,
+    });
+    process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES = '3000000000';
+    try {
+      assert(
+        await injectOriginPayload(
+          { writeOriginScript: async () => undefined },
+          small,
+          'LocalStorageOrigin',
+          'window.received.push(data);'
+        ),
+        'out-of-range configuration rejected a fitting payload'
+      );
+    } catch (error) {
+      failures.push(`configuration range: ${String(error)}`);
+    }
+    delete process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES;
+    await prisma.$executeRaw`
+      INSERT INTO "CacheStorageOrigin" (id, "userId", origin, caches, hash, "updatedAt")
+      SELECT ${randomUUID()}, ${userId}, ${origin},
+        jsonb_build_array(jsonb_build_object('name', 'kept', 'content',
+          (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 600000) i))),
+        'projected', now()`;
+    const cache = await prisma.cacheStorageOrigin.findFirstOrThrow({
+      where: { userId },
+      select: selection,
+    });
+    const [{ stored }] = await prisma.$queryRaw<Array<{ stored: number }>>`
+      SELECT pg_column_size(caches)::int AS stored FROM "CacheStorageOrigin" WHERE "userId"=${userId}`;
+    assert(stored > 8 * 1024 * 1024, 'cache fixture does not exercise projection before admission');
+    const scripts: string[] = [];
+    const restored = await injectOriginPayload(
+      {
+        writeOriginScript: async (_o, script) => {
+          scripts.push(script);
+        },
+      },
+      cache,
+      'CacheStorageOrigin',
+      'window.received.push(data);'
+    );
+    const r = receiver();
+    for (const script of scripts) runInContext(script, r.vm);
+    if (!restored || JSON.stringify(r.window.received) !== JSON.stringify([[{ name: 'kept' }]]))
+      failures.push('large cache content suppressed its fitting names-only projection');
+    // TOAST compresses this far below the byte ceiling, but its wire text exceeds it.
+    await prisma.localStorageOrigin.update({
+      where: { id: small.id },
+      data: { entries: [{ key: 'k', value: 'x'.repeat(12 * 1024 * 1024) }], hash: 'compressed' },
+    });
+    const compressed = await prisma.localStorageOrigin.findUniqueOrThrow({
+      where: { id: small.id },
+      select: selection,
+    });
+    let mutations = 0;
+    assert(
+      !(await injectOriginPayload(
+        {
+          writeOriginScript: async () => {
+            mutations++;
+          },
+        },
+        compressed,
+        'LocalStorageOrigin',
+        'window.received.push(data);'
+      )) && mutations === 0,
+      'compressed oversized payload reached the browser'
+    );
+    assert(failures.length === 0, failures.join('\n'));
+    console.log(
+      '✅ byte admission handles configuration range, projected caches and compressed oversized data'
+    );
+  } finally {
+    if (saved === undefined) delete process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES;
+    else process.env.BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES = saved;
+    await prisma.localStorageOrigin.deleteMany({ where: { userId } });
+    await prisma.cacheStorageOrigin.deleteMany({ where: { userId } });
+  }
+}
+
 /**
  * Production defaults, prod realm shape (agent 07281fc3): init for an admin.*
  * start URL beside a sibling Drive-style cache over the restore budget, plus
@@ -485,6 +574,7 @@ async function verifyRealmRestoreBudget() {
     await verifyAbort();
     await verifyDatabaseScopeAndRevision();
     await verifyDatabaseUnicodeAndAbort();
+    await verifyProjectedPayloadAdmission();
     await verifyRealmRestoreBudget();
   } finally {
     await prisma.$disconnect();
