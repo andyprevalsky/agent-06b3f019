@@ -307,3 +307,18 @@ markers remain insufficient authority. Private proof is retained in
 `phase2-snapshot-proof.json` and the independent finite audit beside it.
 The failed 71b Group 3 lifecycle is closed with no new Group 4; prior 4f
 qualification remains historical, and final canonical qualification is pending.
+
+
+### Complete-source qualification of the finite recipe registration
+
+Candidate `cb3cb598674b1047efc92a481f1b21d42b12986b` passed all 12 canonical
+Group 3 stages, including the ordered 1,795.4-second Linux controller gate
+and its owning bootstrap recovery and packed-helper controls. The registered
+40-input recipe remains
+`c1606f37698d1cfe48f7beaa6c02fa78e65aaaaf8c1f0fd5c9a439c33b6cebef`;
+all prior entries and the same two reviewed pre-service phases are preserved.
+The native four-task sandbox Hub `03318d88-b85e-430a-a39d-a4e8d72073a3` then
+passed all four unchanged tasks and verified its original process, archive
+and provider cleanup. Final source/input qualification, review and merge remain
+pending. These new results do not grant a historical failed source or a
+pre-service-only canary benchmark credit.

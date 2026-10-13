@@ -355,3 +355,22 @@ not a runtime, provider or task acceptance failure. The source recipe remains
 The failed coverage receipt remains FAILED, its controller successor was never
 launched, and fresh canonical qualification remains pending. Source-bound
 private receipts are retained in `phase3-count-proof.json`.
+
+
+### Complete-source qualification after snapshot and registration repairs
+
+Frozen executable source `cb3cb598674b1047efc92a481f1b21d42b12986b` passed
+all 12 canonical Group 3 stages. Agents coverage passed all 110 domains and
+ran the normally registered benchmark domain once before the ordered Linux
+controller. That controller passed in 1,795.4 seconds: 53 unittest controls,
+526 pytest controls and 78 shell checks, retaining its documented descend
+environment skip and successful negative controls. The original failed 71b
+controller and de189 coverage stages remain failed historical receipts.
+
+The next real local sandbox Hub `03318d88-b85e-430a-a39d-a4e8d72073a3` passed
+all four unchanged tasks with exit 0. Its genuine stack v2 cleanup receipt
+matches the original native identity, PID and token; its distinct benchmark
+interrupt receipt remains v1. All six original process births are physically
+absent. Archive/provider cleanup and full sandbox refund assertions pass.
+This is actual complete-source qualification, not a fabricated replacement
+for any earlier failed acknowledgement. Final review and rollout remain pending.
