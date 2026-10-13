@@ -103,3 +103,20 @@ canonical answer. Both router attempts ended with a JSON parse failure.
 Production retained only a 200-character error prefix, not the full model call;
 these samples remain a separate capture gap and are not attributed to this UI
 repair.
+
+The captured end fixture contains only the initial USER and the handler failure.
+Reconstructing that initial request with the unchanged router prompt, strict
+schema, temperature zero, minimal reasoning, Fast Mode flag, and 1,024-token
+limit provides a controlled provider replay. Binding only the GLM endpoint to
+Together reproduced malformed JSON twice: repeated search-query strings filled
+the output limit (`finish_reason: length`, 1,024 completion tokens; 7,547 and
+4,460 output characters). Binding the same model and inputs to Modal returned
+a valid `web_search` decision (`finish_reason: stop`, 595 characters, 2.365 s).
+Two earlier replays using the original automatic routing also passed on Modal.
+These are local replay outputs, not recovered raw responses from production.
+
+The primary Cerebras call returned HTTP 402 in those replays, with
+`payment_required_error` and `code: payment_required`. Billing and the endpoint
+generation behavior are separate from browser state and snapshot recovery.
+No provider policy, model, prompt, schema, generation budget, or semantic
+deadline was changed by this repair.
