@@ -106,6 +106,16 @@ the explicit stream-ID path keeps exact matching. The unchanged regression
 passes after that correction. Legacy rows without usable timing retain their
 previous cleanup behavior.
 
+Persistence time does not establish ownership when chat turns overlap. The
+producer already returns a unique stream ID; backend chat was dropping it when
+saving reasoning. New reasoning rows now retain that existing ID for generator,
+search-router and escalation output, including repeated searches. The public
+`chat-reasoning-identity` blackbox failed all four cases before the writer fix
+and passes all four afterward. Existing exact model-request fingerprint replays
+also pass: assistant model projections use message text and do not include this
+UI identity. No new model call, schema, deadline, channel or query was introduced.
+Legacy rows remain subject to the documented timing fallback.
+
 The frontend permanent reproduction is
 `front-end/src/tests/blackbox/hooks-lib-insert-delivery.blackbox.ts`; the same
 notification scenarios fail on the baseline and pass after deduplication.

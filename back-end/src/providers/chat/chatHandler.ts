@@ -130,7 +130,7 @@ export async function handleChatMessage(config: {
     throw error;
   }
 
-  const { decision, webSearchToolCallId } = routerResponse;
+  const { decision, webSearchToolCallId, streamId: routerStreamId } = routerResponse;
 
   if (decision.action !== 'direct_answer') {
     await speculativeGenerator.discard();
@@ -150,7 +150,8 @@ export async function handleChatMessage(config: {
   // (from the initial route, or from the route after the web search)
   // ============================================
   const escalate = async (
-    decision: Extract<RouterDecision, { action: 'start_superintelligence' }>
+    decision: Extract<RouterDecision, { action: 'start_superintelligence' }>,
+    producerStreamId: string
   ): Promise<ChatResult> => {
     log.info('[ChatHandler] Escalating to superintelligence', {
       agentId: config.agentId,
@@ -171,6 +172,7 @@ export async function handleChatMessage(config: {
         agentId: config.agentId,
         role: 'ASSISTANT',
         text: decision.reasoning,
+        metadata: { streamId: producerStreamId },
       });
       // Post-completion cutover: keep the prior Agent.goal on this chip so
       // replacing the live pointer does not drop the finished task's goal.
@@ -254,7 +256,7 @@ export async function handleChatMessage(config: {
   };
 
   if (decision.action === 'start_superintelligence') {
-    return escalate(decision);
+    return escalate(decision, routerStreamId);
   }
 
   // ============================================
@@ -268,8 +270,14 @@ export async function handleChatMessage(config: {
   if (decision.action === 'web_search') {
     let search: WebSearchDecision = decision;
     let earlyToolCallId = webSearchToolCallId;
+    let searchRouterStreamId = routerStreamId;
     for (let round = 1; ; round += 1) {
-      await runChatWebSearchRound({ agentId: config.agentId, decision: search, earlyToolCallId });
+      await runChatWebSearchRound({
+        agentId: config.agentId,
+        decision: search,
+        earlyToolCallId,
+        routerStreamId: searchRouterStreamId,
+      });
       generatorMessages = await loadChatModelMessages(chatContextConfig);
       const next = await routeAfterSearch({
         agentId: config.agentId,
@@ -280,7 +288,7 @@ export async function handleChatMessage(config: {
         stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
       });
       if (next.decision.action === 'start_superintelligence') {
-        return escalate(next.decision);
+        return escalate(next.decision, next.routerStreamId);
       }
       if (next.decision.action === 'direct_answer') {
         earlyGeneratorResponse = next.generatorResponse;
@@ -288,6 +296,7 @@ export async function handleChatMessage(config: {
       }
       search = next.decision;
       earlyToolCallId = next.webSearchToolCallId;
+      searchRouterStreamId = next.routerStreamId;
     }
   } else {
     earlyGeneratorResponse = await speculativeGenerator.commitDirectAnswer();
@@ -304,11 +313,12 @@ export async function handleChatMessage(config: {
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
 
-  // 1. Save reasoning as ASSISTANT message (no metadata) - matches worker behavior
+  // Persist the identity of the reasoning stream this canonical row closes.
   await createMessage({
     agentId: config.agentId,
     role: 'ASSISTANT',
     text: generatorResponse.reasoning,
+    metadata: { streamId: generatorResponse.streamId },
   });
 
   // 2. Save response as TOOL message with send_message_to_user metadata - matches worker behavior
@@ -371,6 +381,7 @@ async function routeAfterSearch(params: {
   decision: RouterDecision;
   generatorResponse: GeneratorResponse | null;
   webSearchToolCallId?: string;
+  routerStreamId: string;
 }> {
   const speculativeGenerator = createEarlyDirectGeneratorCoordinator({
     start: (speculative) => params.runGenerator(params.messages, speculative),
@@ -408,9 +419,14 @@ async function routeAfterSearch(params: {
       decision,
       generatorResponse: null,
       webSearchToolCallId: routerResponse.webSearchToolCallId,
+      routerStreamId: routerResponse.streamId,
     };
   }
-  return { decision, generatorResponse: await speculativeGenerator.commitDirectAnswer() };
+  return {
+    decision,
+    generatorResponse: await speculativeGenerator.commitDirectAnswer(),
+    routerStreamId: routerResponse.streamId,
+  };
 }
 
 // ============================================
