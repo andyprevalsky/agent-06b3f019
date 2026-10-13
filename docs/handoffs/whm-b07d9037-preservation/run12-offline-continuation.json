@@ -277,5 +277,14 @@
   "freedom_and_protected_instructions": "preserved",
   "paid_model_calls": 0,
   "merged": false,
-  "deployed": false
+  "deployed": false,
+  "additional_recorded_prediction_validation": {
+    "recorded_response_distributions": 107,
+    "every_branch_validated_against_exact_original_base_state": true,
+    "validated_branches": 341,
+    "timed_elapsed_and_exact_call_ids_validated": true,
+    "model_calls": 0,
+    "source": "existing benchmarks.wmh_outcomes.parse_distribution",
+    "scope": "Offline response-schema/state-patch validation; not calibration or benchmark success"
+  }
 }
