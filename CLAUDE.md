@@ -329,6 +329,33 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 
 **Benchmarks:** `scripts/run-bench` is the one supported entrypoint for humans,
 `/benchmark`, and `/descend`; see `agents/benchmarks/README.md` for the full CLI.
+**Benchmark communication and maintenance:** every launch prints the canonical
+parent-agent contract in `.claude/shared/benchmark-report-format.txt`; retrieve it
+without launching anything with `scripts/run-bench report-format`. All benchmark
+progress and final messages must use its exact fenced `text` scorecard, styled
+like `/deploy` Step 15, with no surrounding prose. Keep the stacked loading bar,
+queued/in-progress/complete percentages and counts, execution clocks, task
+PASS/FAIL, infra percentage/count, costs (including Azure), separate DEMO/agent/WMH
+cache and latency metrics, lifecycle evidence, and one line per active sub-agent
+with its task, blocking emoji, start/block timestamp and age. Preserve unknowns
+honestly and keep every section. At three hours since the last original slice
+trigger, a concrete no-new-slice reason, owner/action and resume condition are
+mandatory; retries and recovery never reset clocks or discard attempts.
+
+The root agent must continuously drive authorized benchmark work. Pause starting
+a new slice iff infra failures exceed 10% of all terminal attempts (including
+retries); exactly 10% permits continuing. Ordinary task failures do not stop
+iteration. Healthy current work and repairs continue during an infra hold. This
+root scheduling instruction does not replace current campaign scheduling, smoke
+gates, resource safety, explicit user stops, approvals or authorized budgets.
+Delegate independent issues with `/RCA` and their exact evidence. Delegate
+`/deploy` on an immutable full-SHA checkpoint captured at dispatch in an isolated
+checkout; later root changes are excluded unless explicitly handed off as a new
+verified checkpoint. On boxes.dev use managed threads by default. Existing
+human approval requests use `.claude/shared/approval-format.md` with the same
+scorecard styling, six required sections, exact diffs and clickable evidence
+links. Do not create additional approval gates for this presentation policy.
+
 The [PR #1450 continuation checkpoint](docs/benchmark-pr1450-continuation.md)
 records the current deployment gaps, source-bound verification and the pending
 five consecutive LIVE 50-task runs. Read it when continuing that work.

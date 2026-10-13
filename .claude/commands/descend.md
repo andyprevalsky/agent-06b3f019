@@ -1047,19 +1047,21 @@ FE link in the Links list; never replace the siblings with a count:
 ### <row ID> · <issue summary>
 
 ```text
-APPROVAL <row ID> — <issue summary>
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔐 APPROVAL <row ID> · ⏳ AWAITING DECISION
+ <issue summary>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Before:
   <Trigger, ordering, measured wrong result, and user-visible failure before
   the fix.>
-
+────────────────────────────────────────────────────────────────
 After:
   <The same trigger and ordering after the fix, including the measured passing
   result and what remains unchanged.>
-
+────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence: what to approve and its most important consequence>
-
+────────────────────────────────────────────────────────────────
 Evidence:
   What failed: When <the agent doing the task goal>, <it reached this step or
     site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
@@ -1087,7 +1089,7 @@ Evidence:
       <passes>/<attempts> recorded passes · <runs> proof runs
     <sibling task> — <its own observed boundary evidence> ·
       <passes>/<attempts> recorded passes · <runs> proof runs
-
+────────────────────────────────────────────────────────────────
 Detail:
   Core claim: <This task | These <n> tasks> failed because <issue class>.
   <One or two plain sentences describing the exact mismatch or failure; expand
@@ -1100,14 +1102,15 @@ Detail:
   Snapshot: <approval snapshot ID>
   Scope: <path:line> — <hunk summary>   (one line per affected hunk)
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
-
+────────────────────────────────────────────────────────────────
 Downstream:
   <Affected tasks, users, agents, services, data/cost/security impact,
   rollback, and 10k-agent behavior.>
-
+────────────────────────────────────────────────────────────────
 Approve: <row ID> approve
 Edit:    <row ID> edit: <instruction>
 Reject:  <row ID> reject
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 - **FE link:** [Open agent](frontend-agent-url) — <verification status>
@@ -1128,17 +1131,19 @@ After the affected lifecycle rows, include:
 ### A-<id> · <row IDs>
 
 ```text
-APPROVAL A-<id> — <row IDs>
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔐 APPROVAL A-<id> · ⏳ AWAITING DECISION
+ <row IDs>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Before:
   <The exact prompt or terminal behavior before this deploy.>
-
+────────────────────────────────────────────────────────────────
 After:
   <The exact prompt or terminal behavior after this deploy.>
-
+────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence: what to approve and its most important consequence>
-
+────────────────────────────────────────────────────────────────
 Evidence:
   What failed: When <the agent doing the task goal>, <it reached this step or
     site>, the LLM called `<tool>` to <attempt>, and <this broke, with the
@@ -1160,7 +1165,7 @@ Evidence:
       `<live_fixtures or none>`
     Task prompt:
       <full exact task.prompt, or `Not applicable — not a catalog task`>
-
+────────────────────────────────────────────────────────────────
 Detail:
   This deploy changes <one-line prompt or terminal-behavior effect>. Name the
   exact unchanged test or reproduction that failed before and passes after
@@ -1168,13 +1173,14 @@ Detail:
   Snapshot: <approval snapshot ID>
   Scope: <path:line> — <hunk summary>   (one line per affected hunk)
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
-
+────────────────────────────────────────────────────────────────
 Downstream:
   <Affected tasks, users, agents, services, data/cost/security impact,
   rollback, and 10k-agent behavior.>
-
+────────────────────────────────────────────────────────────────
 Approve: A-<id> approve
 Reject:  A-<id> reject: <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 - **FE link:** [Open agent](frontend-agent-url) — <verification status>
