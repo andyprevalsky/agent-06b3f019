@@ -191,3 +191,13 @@ fixed implementation. Only this helper's owned multipart uploads were aborted;
 original task files and resource controllers were untouched.
 
 Full preservation receipts cover 44485 original members, 23144595408 original bytes and 4131361474 ciphertext bytes across six private artifacts. Independent authenticated/decrypted member verification from the new box is mandatory before archival. The durable key is the existing trace archive key, ID `trace-archive-prod-2026-07-03`, preserved privately with original dotenvs and expected in fresh project setup. Latest skill revision is `724321f5d5e50cc9b817cdccdbb83579db7141fc`, installed for both harnesses including managed Codex discovery.
+
+Replacement startup disposition: the first full-checkpoint start and one
+explicitly authorized generation2 both returned nonretryable
+`agent_start_failed`. Supported complete child inventory shows failed status,
+no native thread, no execution instance and no active turn for both children.
+The exact failed receipts and complete nonsecret replacement prompt are in
+`whm-b07d9037-preservation/`. No further starts are attempted from the old box;
+the coordinator is arranging one supported root-owned start. Original files
+and all six private captures remain saved, and the old box remains retained
+until independent replacement member verification and meaningful continuation.
