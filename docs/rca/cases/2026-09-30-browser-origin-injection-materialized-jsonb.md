@@ -473,7 +473,8 @@ failed two independent gates. Browser task completion left a stale status chip
 when a terminal INSERT was missed after chat reconciliation had stopped; the
 connected channel suppressed the disconnected fallback. A frontend follow-up
 restarts one bounded, scoped reconciliation owner on new browser lifecycles and
-continues until authoritative terminal messages arrive. Its owning hook
+continues until authoritative terminal messages arrive or the existing finite
+lease expires. Its owning hook
 regression failed before the change and passed after it, including expired-lease
 and transient-read cases. Duplicate/progress events do not renew leases, and
 agent selection fences old responses.
@@ -484,7 +485,10 @@ bounded regeneration; one backend answer completed after 16.239 seconds, beyond
 the unchanged 15-second milestone. Another sample exhausted router retries.
 Logs do not prove that the parser rejected valid JSON. No deadline, schema,
 prompt, credit setting or paid fallback was changed to pass this gate. Production
-verification remains incomplete pending billing recovery and a green rerun.
+verification remains incomplete pending a green rerun. The subsequent local
+semantic qualification observed 39 successful direct Cerebras calls, no direct
+route errors and no chat-cache hits, so the earlier primary-route restriction
+is not established as current. No billing change was performed.
 The original September OOM attribution and the Mac producer work remain open.
 Sanitized deployment receipts are in the adjacent handoff production JSON;
 raw provider output and browsing-origin evidence remain private.
