@@ -5,7 +5,7 @@
   "all_original_task_source_checkpointed": true,
   "important_private_state_durably_preserved": true,
   "old_box_authenticated_all_archive_members": true,
-  "replacement_authenticated_member_verification": "pending; required before archival",
+  "replacement_authenticated_member_verification": "verified: all6archives/44485original members authenticated/decrypted from newe9afcffd; exact inventory comparisons passed",
   "archives": [
     "native-static-receipt.json",
     "original-runtime-receipt.json",
@@ -31,5 +31,5 @@
   "owned_runtime": "run12 finished naturally; benchmark and stack clean receipts; native retirement joined revision105; all exact owned processes absent",
   "standing_protections": "Freedom unchanged; protected original instruction copies privately preserved; no locks/permissions/ownership weakened",
   "migration_complete": false,
-  "archive_disposition": "retained until verified replacement continuation"
+  "archive_disposition": "ready for own old-box archive request; durable verified continuation63eb4817c; acceptance/completion not yet claimed"
 }

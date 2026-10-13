@@ -2,7 +2,8 @@
 
 This is the old-filesystem checkpoint for draft PR #1453. Source preservation
 is complete for the two WHM worktrees and the inspected local helpers/variants.
-Private evidence capture is complete. Replacement and archival are pending. Run12 finished
+Private evidence capture and independent NEW verification/meaningful continuation
+are complete. Own OLD archival request is the final pending operation. Run12 finished
 with a task timeout failure and clean benchmark/stack/WMH shutdown.
 Do not interpret this intermediate checkpoint as a completed migration.
 
@@ -214,3 +215,39 @@ checkpoint `677068533e050195c62afc8118f3d35a8511f5ea` and all six archive
 verification requirements. Launch receipt is in `whm-b07d9037-preservation/`.
 This is acceptance, not proof of independent restoration or meaningful
 continuation; old-box archival remains pending those receipts.
+
+## Verified continuation and OLD archive intent
+
+The new Codex replacement independently authenticated/decrypted every original
+member across all six private archives:44,485members,23,144,595,408source bytes.
+It restored15static native files and44,439runtime files into empty staging and
+usable task paths, verified15original helpers/four exact cache refs/full Git
+bundle, and read original result/retirement hashes exactly. Its original-task
+continuation inspected the frozen42,910-message fixture, ran26owning offline
+clock/stream tests, folded116/116 original canonical requests without new model
+calls, and analyzed the original trajectory and historical quality A/B.
+
+The durable [NEW continuation receipt](https://github.com/Rose-Ai-Labs/rose/blob/63eb4817c2f05cd70d147007a2dc7b9ec39c43ef/docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json)
+was independently read back from GitHub by the old worker and compared against
+all six original object identities/counts/ciphertext/gzip/manifest hashes,
+source helper/bundle hashes, exact cache commits and original evidence hashes.
+All checks passed. The new task continues on
+[e9afcffd Codex thread](https://boxes.dev/thread/thr_d2e1b555d6314abe8d9f74da7dd979aa).
+Fundraiser acceptance remains incomplete and merge/deploy remains held. Serving
+the recovered model still needs the documented>=40GB swap/memory scope preflight;
+the artifacts are restored, and that remaining original-task setup is not source loss.
+
+Final late-state check: original three worktrees retain clean tracked source;
+original helper hashes still match; benchmark and stack receipts are clean;
+all exact task/WMH/worker and migration-upload owners are absent. No important
+original task state remains unsaved. Private copies/keys remain durable and
+accessible from the replacement. No new paid benchmark/model calls, merge,
+deployment, Freedom changes or protected instruction weakening occurred.
+
+The old worker will now request its own b07d9037 archive using the supported
+managed operation. This paragraph records intent; acceptance and actual deletion
+are separate and must be reported honestly. After acceptance the worker returns
+immediately; the coordinator verifies actual archival. Do not message the old
+box after the request, because that cancels pending destruction. Continue in
+the linked new thread. Full nonsecret final checks are in
+`whm-b07d9037-preservation/old-box-closeout.json`.
