@@ -32030,3 +32030,26 @@ def test_fleet_publishes_evaluation_before_teardown_preserves_markerless_stage(
     wire = prepare_run_bundle_for_upload(after, required=True)
     assert wire["tasks"][0]["lifecycle_stage"] == expected_stage
     assert wire["tasks"][0]["passed"] == passed
+
+@pytest.mark.parametrize("case", ["duplicate_name", "reordered", "foreign_attachment", "missing_attachment", "wrong_name", "unknown_id", "duplicate_id", "invalid_type"])
+def test_warm_volume_selection_binds_exact_mounted_donor(tmp_path: Path, case: str) -> None:
+    source = CLOUD_SCRIPT.parent.joinpath("run-bench-fleet").read_text()
+    start = source.index('VOL_ID="$(FLY volumes list -a "$APP" --json')
+    end = source.index('\n[ -n "$VOL_ID" ]', start)
+    block = source[start:end]
+    warm = {"id": "vol_40ojpdjwx6xdp1k4", "name": "cloudbench_t10_ord_85a7e2c", "attached_machine_id": "8ed16dc75ee958", "size_gb": 40}
+    other = {"id": "vol_vwnz71086x8l0yqv", "name": warm["name"], "attached_machine_id": "e820271f4d9218", "size_gb": 40}
+    volumes = [other, warm]
+    expected = warm["id"]
+    if case == "reordered": volumes.reverse()
+    if case == "foreign_attachment": warm["attached_machine_id"] = "83426eb79ee718"; expected = ""
+    if case == "missing_attachment": warm.pop("attached_machine_id"); expected = ""
+    if case == "wrong_name": warm["name"] = "foreign_source"; expected = ""
+    if case == "invalid_type": volumes.append(None); expected = ""
+    if case == "unknown_id": volumes = [other]; expected = ""
+    if case == "duplicate_id": volumes.append(dict(warm)); expected = ""
+    fixture = tmp_path / "volumes.json"; fixture.write_text(json.dumps(volumes))
+    env = {**os.environ, "APP": "navi-whisper-lux-bench", "VOLUME_NAME": "cloudbench_t10_ord_85a7e2c", "WARM_VOLUME_ID": warm["id"], "WARM_ID": "8ed16dc75ee958", "VOLUME_FIXTURE": str(fixture)}
+    result = subprocess.run(["bash", "-c", 'FLY() { cat "$VOLUME_FIXTURE"; };\n' + block + '\nprintf "%s\\n" "$VOL_ID"'], env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
