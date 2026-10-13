@@ -378,3 +378,43 @@ and pass after respecting value-taking options, so filenames such as `--help`
 are not confused with help requests. The missing-contract fail-before-launch
 negative control remains intact. Full post-fix gates, final review and production
 verification remain required; this failed cohort is never recorded as a pass.
+
+
+### October13 10:19 UTC — complete frozen-source release qualification
+
+Frozen4b88ad7decb6f3ff31a8fba1b525c540ade0c683 passed all15 Group3
+commands in the09:14:12.487275–09:48:57.677313 runtime boundary: backend196
+domains/266unitfiles at89.56%lines80.98%branches92.60%functions with both
+teardown paths; frontend157files/2735PASS plus3existing intentional skips
+at83.33%lines; agents110domains/184fast-cache/134units at82%; lint,types,
+frontend bundle,46structural gates,5cold seeds max161MB under228MB; controller
+16scenarios,21clock tests and453pytest cases in250.83s. Credential health
+6PASS/1Anthropic creditWARN/0FAIL, Amplitude and router failover passed firsttry.
+
+Fresh Group4 passed8UI flows, realE2B, all8smoke tasks and4sandbox AgentCard
+lifecycles with independent full cleanup. All20 retained latency samples and
+4discarded warmups finished; lifecycle p50/max inms: direct783/820, web2309/3334,
+plan633/1133, execute786/795. The timed latency stage includes waiting for
+isolated benchmark cleanup; its09:52 start is not the measured-suite start.
+Existing stdout/barrier source establish cleanup-before-measurement ordering,
+while the exact measured-start timestamp was not separately captured.
+
+The exact load root49fb8199-37e8-4f12-8159-7f551da23123/Hub8fbf200a
+from stack1791885621-1465242-80941 had51COMPLETED agents captured before
+cleanup, zero owned rejection/exhaustion/age/oversize receipts and5,127HTTP202
+outcomes with no failed attempts or retries. Peak root writes64/sec, maximum
+queue467ms. Actual aggregate39fb9ad6-3cb8-457f-9a3d-ef2828515c52 persisted
+at10:04:33.672 with455542Bfullstored output; its2608Bwire frame was received
+at10:04:33.849338 with all50unique child refs matching the complete tree and
+no duplicated structured_response. This proves the benchmark subscriber, not
+desktop rendering. UI and dedicated rendering replay remain separate proofs.
+
+Canonical evidence publication for primary browser root80a2390d and load
+root49fb8199 passed fresh-browser and recording guards. All sandbox cards are
+CLOSED/zero/noattention; the abandonment4396cStripe refund and organization
+reclaim succeeded. Exact owners/service births are absent and both cleanup
+receipts clean. Shared semantic stack stopped by canonical worktree GC; its
+foreground143 is deliberate teardown, not a failed test. All8017runtime source
+hashes matched before this documentation/history stabilization. Fresh recorded
+benchmark costs18cprimary/0cload/1cAgentCard bring the explicit14-run ledger
+to122c. Final exact-head review, merge and all production gates remain pending.
