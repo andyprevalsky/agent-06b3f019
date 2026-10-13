@@ -187,3 +187,101 @@ def test_bridge_rejects_runtime_settings_different_from_served_configuration(mon
         assert response.status_code == 409 and provider.calls == 0
         assert "runtime configuration differs" in response.text
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatch, json_mode):
+    import json
+    import sys
+    from pathlib import Path
+    import httpx
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests/blackbox"))
+    from _test_utils import set_mock_handler, teardown_mock
+    from providers.fast_cache import client as cache
+    body = []
+    def handler(request):
+        assert request.url.host == "offline.azure.com", "No funded provider may be contacted"
+        body.append(json.loads(request.content))
+        text = 'data: {"type":"response.output_text.delta","delta":"{\\"result\\":true}"}\n\n'
+        text += 'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        text += 'data: [DONE]\n\n'
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+    monkeypatch.setattr(cache, "ensure_context", AsyncMock(return_value=None))
+    monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "https://offline.azure.com")
+    monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "offline-key")
+    monkeypatch.setenv("CEREBRAS_API_KEY", "")
+    monkeypatch.setenv("GPT_API_KEY", "")
+    set_mock_handler(handler)
+    try:
+        response = asyncio.run(RoseClient(openrouter_key="offline").collect(
+            pool="rose-1-flash", messages=[{"role": "user", "content": "Return JSON"}],
+            prefer_azure=True, json_mode=json_mode, dump_context=False))
+    finally:
+        teardown_mock()
+    assert response.content == '{"result":true}' and len(body) == 1
+    if json_mode:
+        assert body[0]["text"]["format"] == {"type": "json_object"}
+    else:
+        assert "text" not in body[0]
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_store_event_matches_actual_cache_write_result(monkeypatch, accepted):
+    from providers.fast_cache.context import FastCacheContext, set_context, reset_context
+    from providers.fast_cache import client as cache
+    import providers.rose.client as module
+    events = []
+    monkeypatch.setattr(module.logger, "info", lambda event, **kw: events.append(event))
+    monkeypatch.setattr(cache, "cache_set", AsyncMock(return_value=accepted))
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "0")
+    monkeypatch.setenv("FAST_MODE_CACHE_RECORD_DEMO", "1")
+    async def stream(**kw):
+        yield StreamChunk(kind="content", data={"text": "offline"})
+        yield StreamChunk(kind="done", data={})
+    client = RoseClient(openrouter_key="offline")
+    monkeypatch.setattr(client, "_complete_impl", stream)
+    async def run():
+        token = set_context(FastCacheContext(enabled=False, goal="offline", write_enabled=True))
+        try:
+            await client.collect(pool="rose-1-flash", messages=[])
+        finally:
+            reset_context(token)
+    asyncio.run(run())
+    assert ("llm.cache.stored" in events) is accepted
+    assert ("llm.cache.store_skipped" in events) is not accepted
+
+
+def test_json_mode_is_bound_in_execution_and_cache_identity():
+    from providers.fast_cache.rose_cache import request_key_material
+    config = {"inference_pool": "rose-1-flash", "inference_pool_sha256": "b" * 64,
+              "azure_first": True, "exclude_failed_tool_examples": True}
+    base = execution_identity("rose-outcome-distribution-v3", "artifact-a", "a" * 64, runtime_config=config)
+    formatted = execution_identity("rose-outcome-distribution-v3", "artifact-a", "a" * 64,
+                                    runtime_config={**config, "json_mode": True})
+    assert formatted["execution_sha256"] != base["execution_sha256"]
+    assert validate_execution_identity(formatted, "rose-outcome-distribution-v3") == formatted
+    ordinary = request_key_material({"pool": "rose-1-flash"})
+    assert "json_mode" not in ordinary
+    assert request_key_material({"pool": "rose-1-flash", "json_mode": False}) == ordinary
+    assert request_key_material({"pool": "rose-1-flash", "json_mode": True}) != ordinary
+
+
+def test_bridge_retains_rejected_reply_for_native_private_parser_repro():
+    import httpx
+    from benchmarks.experiential_bridge import build_provider_bridge
+    from benchmarks.wmh_rose_provider import _WMHInvalidPrediction
+    rejected = '{"outcomes":[{"id":"bad unescaped "quote""}]}'
+    class Provider:
+        async def complete_scoped(self, *args, **kwargs):
+            raise _WMHInvalidPrediction("invalid JSON fixture", {"prompt_tokens": 1}, "offline", rejected)
+    async def run():
+        app = build_provider_bridge(Provider(), "offline")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as client:
+            result = await client.post("/complete", headers={"X-Rose-Provider-Token": "offline"}, json={
+                "session_id": "session", "prediction_id": "prediction", "maximum_output_tokens": 16384,
+                "messages": [{"role": "system", "content": "fixture"}, {"role": "user", "content": "{}"}]})
+        assert result.status_code == 422
+        detail = result.json()["detail"]
+        assert detail["kind"] == "invalid_prediction"
+        assert detail["rejected_response"]["content"] == rejected
+    asyncio.run(run())

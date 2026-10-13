@@ -507,6 +507,8 @@ class ParallelWorldModel:
                         if failure is not None:
                             interval["error_type"] = type(failure).__name__
                             record["error"] = {"type": type(failure).__name__, "message": str(failure)}
+                            if getattr(failure, "rejected_response", None) is not None:
+                                record["rejected_response"] = deepcopy(failure.rejected_response)
                         else:
                             record["response"] = response
                         intervals.append(interval)

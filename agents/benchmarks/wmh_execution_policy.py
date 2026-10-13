@@ -234,13 +234,15 @@ def execution_identity(
     }
     if runtime_config is not None:
         required = {"inference_pool", "inference_pool_sha256", "azure_first", "exclude_failed_tool_examples"}
-        if (not isinstance(runtime_config, dict) or set(runtime_config) != required
+        if (not isinstance(runtime_config, dict) or set(runtime_config) not in (required, required | {"json_mode"})
             or not isinstance(runtime_config["inference_pool"], str) or not runtime_config["inference_pool"]
             or not isinstance(runtime_config["inference_pool_sha256"], str)
             or len(runtime_config["inference_pool_sha256"]) != 64
             or any(c not in "0123456789abcdef" for c in runtime_config["inference_pool_sha256"])
             or any(type(runtime_config[k]) is not bool for k in ("azure_first", "exclude_failed_tool_examples"))):
             raise ValueError("Invalid WMH runtime inference configuration")
+        if "json_mode" in runtime_config and type(runtime_config["json_mode"]) is not bool:
+            raise ValueError("Invalid WMH JSON format configuration")
         identity["runtime_config"] = dict(runtime_config)
     material = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {**identity, "execution_sha256": text_sha256(material)}

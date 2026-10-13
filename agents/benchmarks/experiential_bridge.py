@@ -129,7 +129,10 @@ def build_provider_bridge(provider, token, *, execution_policy=None, runtime_con
                 max_tokens=16384,
             )
         except _WMHInvalidPrediction as exc:
-            raise HTTPException(422, {"kind": "invalid_prediction", "reason": str(exc)}) from exc
+            # Loopback-only evidence for the native private, redacted record.
+            # Do not include the rejected reply in ordinary logs or tool errors.
+            raise HTTPException(422, {"kind": "invalid_prediction", "reason": str(exc),
+                                      "rejected_response": exc.rejected_response}) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {
@@ -164,15 +167,18 @@ def serve_native(name, root, pool, port):
     inference_pool = os.environ.get("WMH_INFERENCE_POOL") or pool
     azure_first = os.environ.get("WMH_AZURE_FIRST", "0") == "1"
     exclude_failed = os.environ.get("WMH_EXCLUDE_FAILED_TOOL_EXAMPLES", "0") == "1"
+    json_mode = os.environ.get("WMH_JSON_MODE", "0") == "1"
     runtime_config = None
-    if inference_pool != pool or azure_first or exclude_failed:
+    if inference_pool != pool or azure_first or exclude_failed or json_mode:
         runtime_config = {
             "inference_pool": inference_pool,
             "inference_pool_sha256": pool_sha256(inference_pool),
             "azure_first": azure_first,
             "exclude_failed_tool_examples": exclude_failed,
+            **({"json_mode": True} if json_mode else {}),
         }
-    provider = RoseWMHProvider(pool=inference_pool, protocol=policy.response_protocol, prefer_azure=azure_first)
+    provider = RoseWMHProvider(pool=inference_pool, protocol=policy.response_protocol, prefer_azure=azure_first,
+                               json_mode=json_mode)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)

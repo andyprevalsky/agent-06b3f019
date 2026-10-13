@@ -127,6 +127,28 @@ def distribution_reply(request, *, probability=0.05):
     )
 
 
+def test_rejected_reply_is_recorded_privately_before_protocol_repair_without_committing_it():
+    from exp.simulation.engines.text.prompt import TextWorldModelProtocolError
+    async def run():
+        records, calls = [], []
+        raw = '{"invalid JSON"'
+        async def complete(request):
+            calls.append(request)
+            if len(calls) == 1:
+                error = TextWorldModelProtocolError("invalid JSON fixture")
+                error.rejected_response = {"content": raw, "usage": {"prompt_tokens": 1}}
+                raise error
+            return distribution_reply(request)
+        model = distribution_model(complete, sample_uniform=lambda: 0.975, record_prediction=records.append)
+        session = model.new_session("Submit", {"receipts": []}, "root")
+        result = await model.step(session.id, action(1), "inv")
+        failures = [x for x in records if x.get("error")]
+        assert len(failures) == 1 and failures[0]["rejected_response"]["content"] == raw
+        assert session.revision == 1 and len(session.history) == 1
+        assert result["content"] == "submission confirmed" and raw not in json.dumps(session.history)
+    asyncio.run(run())
+
+
 def distribution_model(complete, *, policy="rose-outcome-distribution-v1", **kwargs):
     from benchmarks.wmh_execution_policy import execution_identity
 

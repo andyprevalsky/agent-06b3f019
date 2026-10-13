@@ -42,6 +42,7 @@ swap_gb=$(awk '/SwapTotal/{print int($2/1048576)}' /proc/meminfo)
 [ "$swap_gb" -ge 40 ] || log "warning: only ${swap_gb} GB swap; a cold native load peaks near 40 GB"
 log "commit $commit task $task timeout ${timeout}s state ${state_file:-none}"
 log "WMH inference ${WMH_INFERENCE_POOL:-rose-1-flash} azure_first=${WMH_AZURE_FIRST:-1} exclude_failed_examples=${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}"
+log "WMH json_mode=${WMH_JSON_MODE:-1}; DEMO recording enabled only for this isolated local run"
 date -u +%s > "$out/wmh-start.epoch"
 sudo systemd-run --scope --quiet --unit="$unit" -p MemoryHigh="$memory_high" -p MemorySwapMax=infinity \
     --uid="$(id -u)" --gid="$(id -g)" -- "$here/serve-wmh.sh" "$repo" "$wmh_root" "$wmh_port" "$base_port" \
@@ -72,6 +73,7 @@ printf 'commit=%s\nrun_id=%s\ntask=%s\ntimeout_seconds=%s\nstate_file=%s\nstate_
     "$(date -u +%s)" > "$out/run.env"
 printf 'wmh_inference_pool=%s\nwmh_azure_first=%s\nwmh_exclude_failed_tool_examples=%s\nbenchmark_fast_mode_cache=1\n' \
     "${WMH_INFERENCE_POOL:-rose-1-flash}" "${WMH_AZURE_FIRST:-1}" "${WMH_EXCLUDE_FAILED_TOOL_EXAMPLES:-1}" >> "$out/run.env"
+printf 'wmh_json_mode=%s\nfast_mode_cache_record_demo=1\n' "${WMH_JSON_MODE:-1}" >> "$out/run.env"
 # The fixture source and message cap define the run's starting data; record them without credentials.
 printf 'seed_source_db=%s\nseed_message_limit=%s\n' "${SEED_REMOTE_DATABASE_URL##*/}" \
     "${SEED_MESSAGE_LIMIT:-10000}" >> "$out/run.env"
@@ -90,6 +92,8 @@ extra=()
     export FAST_MODE_CACHE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/victoria_bench_${safe_run_id}"
     # Keep any Fast Mode pool small: the shared production pooler has a hard client cap.
     export FAST_CACHE_DB_POOL="${FAST_CACHE_DB_POOL:-5}" BENCHMARK_FAST_MODE_CACHE=1
+    # This DB is created by this invocation; never re-record the shared DEMO store.
+    export FAST_MODE_CACHE_RECORD_DEMO=1 FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=0
     exec scripts/run-bench --local "$task" --simulate --timeout-seconds "$timeout" "${extra[@]}" \
         --run-id "$run_id" --base-port "$base_port" --no-clean --no-dashboard
 ) > "$out/launcher.log" 2>&1

@@ -510,15 +510,18 @@ def build_codex_responses_body(
     if responses_tools:
         body["tools"] = responses_tools
     if response_format:
-        json_schema = response_format.get("json_schema") or {}
-        body["text"] = {
-            "format": {
-                "type": "json_schema",
-                "name": json_schema.get("name", "response"),
-                "strict": json_schema.get("strict", True),
-                "schema": json_schema.get("schema") or {},
+        if response_format.get("type") == "json_object":
+            body["text"] = {"format": {"type": "json_object"}}
+        else:
+            json_schema = response_format.get("json_schema") or {}
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": json_schema.get("name", "response"),
+                    "strict": json_schema.get("strict", True),
+                    "schema": json_schema.get("schema") or {},
+                }
             }
-        }
     if provider_fast_mode:
         body["service_tier"] = "priority"
     return body

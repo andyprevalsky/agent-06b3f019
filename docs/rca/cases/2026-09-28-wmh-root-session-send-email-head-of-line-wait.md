@@ -103,6 +103,15 @@ The unchanged 600-second fundraiser was rerun with `BENCHMARK_SKIP_WMH_DELTA=1 b
 
 ## Human feedback
 
+While the authorized Run13 was running unchanged on `badbbc2b3`, the faster
+Flash route produced malformed-JSON attempts, and DEMO store events overstated
+actual writes. Offline follow-up evidence and limitations are recorded in
+`docs/handoffs/whm-b07d9037-preservation/run13-offline-reliability-followup.md`.
+The store-event defect is reproduced on the exact baseline method with a
+rejected write and repaired by the same owning check. JSON format enforcement
+and retention of rejected replies are prepared and tested offline; they are
+not a paid provider/outcome qualification. No new review agent was launched.
+
 On October 13 the user explicitly authorized WHM-only reliability changes and
 one new 60-minute benchmark. The earlier no-paid-trial boundary therefore no
 longer prohibits this one trial. The preparation receipt is

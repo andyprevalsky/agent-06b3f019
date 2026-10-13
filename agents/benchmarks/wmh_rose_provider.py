@@ -297,12 +297,13 @@ class _WMHFastCacheContext(FastCacheContext):
 class _WMHInvalidPrediction(ValueError):
     """An unusable completion, retaining metering without retaining credentials."""
 
-    def __init__(self, reason: str, usage: dict, actual_model: str) -> None:
+    def __init__(self, reason: str, usage: dict, actual_model: str, content: str | None = None) -> None:
         super().__init__(f"WMH prediction rejected: {reason}")
         self.usage = {
             key: usage[key] for key in ("prompt_tokens", "completion_tokens", "finish_reason") if key in usage
         }
         self.actual_model = actual_model
+        self.rejected_response = {"content": content, "actual_model": actual_model, "usage": self.usage}
 
 
 def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
@@ -431,7 +432,7 @@ def _require_wmh_prediction(
         reason = "completion token limit reached"
     if reason is not None:
         logger.warning("wmh.rose.invalid_prediction", reason=reason, actual_model=actual_model)
-        raise _WMHInvalidPrediction(reason, usage, actual_model)
+        raise _WMHInvalidPrediction(reason, usage, actual_model, content)
 
 
 class _WMHCacheSafeRoseClient(RoseClient):
@@ -648,9 +649,11 @@ class RoseWMHProvider:
         usage: Optional[RoseUsageAccumulator] = None,
         protocol: str = "legacy",
         prefer_azure: bool = False,
+        json_mode: bool = False,
     ) -> None:
         self._pool: "PoolName" = pool
         self._prefer_azure = prefer_azure
+        self._json_mode = json_mode
         if protocol not in _WMH_CALL_SITES:
             raise ValueError("Unknown world-model protocol")
         self._protocol = protocol
@@ -861,6 +864,7 @@ class RoseWMHProvider:
                 result_required=True,
                 prefer_azure=self._prefer_azure,
                 retry_partial_errors=True,
+                **({"json_mode": True} if self._json_mode else {}),
             )
         except _WMHInvalidPrediction as exc:
             self._record_usage(exc.usage, exc.actual_model)

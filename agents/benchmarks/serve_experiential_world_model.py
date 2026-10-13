@@ -294,7 +294,9 @@ def main():
         if response.status_code == 422:
             detail = response.json().get("detail")
             if isinstance(detail, dict) and detail.get("kind") == "invalid_prediction":
-                raise TextWorldModelProtocolError(detail["reason"])
+                error = TextWorldModelProtocolError(detail["reason"])
+                error.rejected_response = detail.get("rejected_response")
+                raise error
         response.raise_for_status()
         result = response.json()
         if result.get("execution_identity") != effective_identity:

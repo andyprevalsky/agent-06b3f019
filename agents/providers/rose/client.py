@@ -880,8 +880,8 @@ class RoseClient:
             async for chunk in live_stream:
                 _fc_accumulate(acc, chunk)
                 if chunk.kind == "done" and ctx.should_write and not structured_response_model:
-                    await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
-                    logger.info("llm.cache.stored", call_site=call_site, key=key)
+                    stored = await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                    logger.info("llm.cache.stored" if stored else "llm.cache.store_skipped", call_site=call_site, key=key)
                 yield chunk
 
     async def _complete_impl(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
@@ -931,6 +931,7 @@ class RoseClient:
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
         prefer_azure: bool = False,
+        json_mode: bool = False,
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
     ) -> AsyncIterator[StreamChunk]:
@@ -953,7 +954,8 @@ class RoseClient:
         first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
-            build_openai_response_format(response_model) if response_model is not None else None
+            build_openai_response_format(response_model) if response_model is not None
+            else {"type": "json_object"} if json_mode else None
         )
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
@@ -2261,6 +2263,7 @@ class RoseClient:
         result_required: bool = False,
         prefer_azure: bool = False,
         retry_partial_errors: bool = False,
+        json_mode: bool = False,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks.
@@ -2293,6 +2296,7 @@ class RoseClient:
             result_required=result_required,
             **({"prefer_azure": True} if prefer_azure else {}),
             **({"retry_partial_errors": True} if retry_partial_errors else {}),
+            **({"json_mode": True} if json_mode else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()
