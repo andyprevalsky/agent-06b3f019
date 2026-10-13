@@ -2,7 +2,7 @@
 
 This is the old-filesystem checkpoint for draft PR #1453. Source preservation
 is complete for the two WHM worktrees and the inspected local helpers/variants.
-Private evidence capture, replacement and archival are pending. Run12 finished
+Private evidence capture is complete. Replacement and archival are pending. Run12 finished
 with a task timeout failure and clean benchmark/stack/WMH shutdown.
 Do not interpret this intermediate checkpoint as a completed migration.
 
@@ -164,23 +164,30 @@ cache Git bundle verification passed, exact helper checksums retained. Historica
 replacement offline checks reported189 passes; they remain separate from this
 checkpoint's original run. Broader task acceptance and merge/deploy remain held.
 
-Pending: authenticate private archive readbacks; finish full preservation receipt;
-push/verify checkpoint remotely; start one new Codex replacement, verify correct
+Completed: all original source and important private state are saved. Six
+private archives have passed authenticated remote download/decryption and every
+original archive-member SHA256 check on the old box. The complete preservation
+manifest and nonsecret archive receipts are in `whm-b07d9037-preservation/`.
+Raw original Claude/subagent context is privately encrypted, not in Git.
+
+Pending: push/verify the complete checkpoint remotely; start one new Codex replacement, verify correct
 checkout/handoff reading plus meaningful continuation receipt; then record and
 request old-box archival only when every important original file and resource
 is preserved or transferred. The old box remains retained until these steps pass.
 
 The bare upstream mirror at `/home/boxes/mirror-work/world-model-harness.git`
-contains no unpublished refs: its main and cli-help feature tip match native
-upstream reads exactly. A full verified Git bundle is preserved privately,
+has main and cli-help feature tips matching native upstream reads exactly.
+Its local rose-pin tag is retained in the complete private Git bundle. A full verified Git bundle is preserved privately,
 with the exact CLI-help commit patch included in the PR for accounting. It is
 an upstream reference, not task-owned changes requiring a separate PR.
 
 Archive validation reproduced R2 InvalidPart on the original32MB four-frame
-mirror capture: only the first part included the22-byte format header. R2
+mirror capture: only the first part included the24-byte format header. R2
 requires equal non-trailing part lengths. The migration helper now buffers the
 ciphertext stream into fixed8MiB physical parts, independent of encryption
 frames. The same original archive now uploads, authenticates, restores all5
 files, and passes streaming per-member SHA256 checks. Large captures use this
 fixed implementation. Only this helper's owned multipart uploads were aborted;
 original task files and resource controllers were untouched.
+
+Full preservation receipts cover 44485 original members, 23144595408 original bytes and 4131361474 ciphertext bytes across six private artifacts. Independent authenticated/decrypted member verification from the new box is mandatory before archival. The durable key is the existing trace archive key, ID `trace-archive-prod-2026-07-03`, preserved privately with original dotenvs and expected in fresh project setup. Latest skill revision is `724321f5d5e50cc9b817cdccdbb83579db7141fc`, installed for both harnesses including managed Codex discovery.

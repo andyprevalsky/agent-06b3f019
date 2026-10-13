@@ -1,0 +1,15 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "swap-harness/b07d9037-81f9-4c97-80d7-6f4d42b7adc1/20261012/protected-instruction-copies.tar.gz.gcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "f8af5c4626c8d96eb102cbd6cfeaae57e2033ecbd944d1075ee3e94ba84a301c",
+  "gzip_sha256": "e425a2534d1713ac39a9e16d45fce50c3b7d3d531e8c905d63690dad313338cc",
+  "stored_bytes": 74802,
+  "frames": 1,
+  "files": 4,
+  "original_bytes": 170577,
+  "manifest_sha256": "b4a2cac25eb2b709aba6fbb8cbcbddd48503c3c78b4aeb24b6da863b21983a7c",
+  "full_readback_verified": true,
+  "old_box_authenticated_member_verification": true
+}

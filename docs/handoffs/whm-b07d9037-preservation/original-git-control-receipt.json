@@ -11,5 +11,5 @@
   "original_bytes": 43957,
   "manifest_sha256": "79262ee3d4c81f51634faca68b172b4fd8cd303f47600083000b6c53c4093a2e",
   "full_readback_verified": true,
-  "restore_control_passed": true
+  "old_box_authenticated_member_verification": true
 }
