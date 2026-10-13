@@ -204,10 +204,10 @@ export async function runPostSubscribeBackfill({
 /** Subscription and browser lifecycle events share one scoped read owner. */
 export function createCompletionBackfillOwner(
   deps: Omit<PostSubscribeBackfillDeps, 'observedMessages'>,
+  observedBrowserMessages: Map<string, Message>,
 ) {
   let recovering = false;
   let requested = false;
-  const observedBrowserMessages = new Map<string, Message>();
   const reconcile = async () => {
     requested = true;
     if (recovering || deps.isCancelled() || !deps.isCurrentAgent()) return;

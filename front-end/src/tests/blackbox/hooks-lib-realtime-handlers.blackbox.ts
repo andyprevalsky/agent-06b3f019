@@ -1,4 +1,3 @@
-import type { SetStateAction } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/realtime', async (importOriginal) => {
@@ -20,15 +19,9 @@ import {
   handleToolStream,
   handleUpdateAgent,
   isChatCapableAgent,
-  type RealtimeSetters,
 } from '@/features/agent-context/hooks/realtimeHandlers';
-import type {
-  StreamingAttention,
-  StreamingBubble,
-  StreamingPlan,
-  StreamingTool,
-} from '@/features/agent-context/types';
-import type { AgentDetail, Message } from '@/lib/api';
+import type { AgentDetail } from '@/lib/api';
+import { mkSetters } from './realtime-handlers.fixtures';
 import { shouldShowStreamingAttention } from '@/features/terminal-component-group/components/streamingAttentionVisibility';
 
 function fakeChannel(state: 'joined' | 'closed' | 'errored' = 'joined') {
@@ -39,153 +32,6 @@ function fakeChannel(state: 'joined' | 'closed' | 'errored' = 'joined') {
 }
 
 describe('realtimeHandlers', () => {
-  function applyState<T>(current: T, action: SetStateAction<T>): T {
-    return typeof action === 'function' ? (action as (previous: T) => T)(current) : action;
-  }
-
-  function mkSetters() {
-    const state = {
-      streamingBubbles: new Map<string, StreamingBubble>(),
-      streamingPlan: null as StreamingPlan | null,
-      streamingAttention: null as StreamingAttention | null,
-      streamingTools: new Map<string, StreamingTool>(),
-      messages: [] as Message[],
-      agent: null as AgentDetail | null,
-      isChatMode: false,
-    };
-    return {
-      state,
-      setStreamingBubbles: (action: SetStateAction<Map<string, StreamingBubble>>) => {
-        state.streamingBubbles = applyState(state.streamingBubbles, action);
-      },
-      setStreamingPlan: (action: SetStateAction<StreamingPlan | null>) => {
-        state.streamingPlan = applyState(state.streamingPlan, action);
-      },
-      setStreamingAttention: (action: SetStateAction<StreamingAttention | null>) => {
-        state.streamingAttention = applyState(state.streamingAttention, action);
-      },
-      setStreamingTools: (action: SetStateAction<Map<string, StreamingTool>>) => {
-        state.streamingTools = applyState(state.streamingTools, action);
-      },
-      setMessages: (action: SetStateAction<Message[]>) => {
-        state.messages = applyState(state.messages, action);
-      },
-      setAgent: (action: SetStateAction<AgentDetail | null>) => {
-        state.agent = applyState(state.agent, action);
-      },
-      setIsChatMode: (action: SetStateAction<boolean>) => {
-        state.isChatMode = applyState(state.isChatMode, action);
-      },
-      dispatchMessage: vi.fn(),
-    } satisfies RealtimeSetters & { state: typeof state };
-  }
-
-  it('handleInsertMessage: ignores wrong agentId', () => {
-    const s = mkSetters();
-    handleInsertMessage({ agentId: 'other', id: 'm' } as never, 'me', s as never);
-    expect(s.state.messages).toEqual([]);
-  });
-
-  it('handleInsertMessage: appends a USER message and dispatches', () => {
-    const s = mkSetters();
-    handleInsertMessage(
-      {
-        agentId: 'me',
-        id: 'm1',
-        timestamp: 't',
-        text: 'hi',
-        role: 'USER',
-        metadata: null,
-      } as never,
-      'me',
-      s as never,
-    );
-    expect(s.state.messages).toHaveLength(1);
-    expect(s.dispatchMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it('handleInsertMessage: clears streamingPlan on set_plan FINISHED and streamingTools on toolCallId', () => {
-    const s = mkSetters();
-    s.state.streamingPlan = { stream_id: 'x' } as never;
-    s.state.streamingTools.set('tc1', { tool_name: 'foo' } as never);
-    handleInsertMessage(
-      {
-        agentId: 'me',
-        id: 'm1',
-        timestamp: 't',
-        text: '',
-        role: 'TOOL',
-        metadata: { toolName: 'set_plan', toolStatus: 'FINISHED', toolCallId: 'tc1' },
-      } as never,
-      'me',
-      s as never,
-    );
-    expect(s.state.streamingPlan).toBeNull();
-    expect(s.state.streamingTools.has('tc1')).toBe(false);
-  });
-
-  it('handleInsertMessage: dedup by existing message_id', () => {
-    const s = mkSetters();
-    s.state.messages = [{ message_id: 'dup' } as never];
-    handleInsertMessage(
-      { agentId: 'me', id: 'dup', timestamp: 't', text: '', role: 'USER' } as never,
-      'me',
-      s as never,
-    );
-    expect(s.state.messages).toHaveLength(1);
-  });
-
-  it('handleInsertMessage: ASSISTANT message cleans streaming bubble of same subAgentId', () => {
-    const s = mkSetters();
-    s.state.streamingBubbles.set('streamA', {
-      text: 'x',
-      sequence: 1,
-      done: false,
-      subAgentId: 'sub1',
-    });
-    handleInsertMessage(
-      {
-        agentId: 'me',
-        id: 'm1',
-        timestamp: 't',
-        text: 'assistant',
-        role: 'ASSISTANT',
-        metadata: { subAgentId: 'sub1' },
-      } as never,
-      'me',
-      s as never,
-    );
-    expect(s.state.streamingBubbles.size).toBe(0);
-  });
-
-  it('handleInsertMessage: ASSISTANT message with streamId cleans only that stream', () => {
-    const s = mkSetters();
-    s.state.streamingBubbles.set('streamA', {
-      text: 'first',
-      sequence: 1,
-      done: false,
-    });
-    s.state.streamingBubbles.set('streamB', {
-      text: 'second',
-      sequence: 1,
-      done: false,
-    });
-    handleInsertMessage(
-      {
-        agentId: 'me',
-        id: 'm1',
-        timestamp: 't',
-        text: 'assistant',
-        role: 'ASSISTANT',
-        metadata: { streamId: 'streamA' },
-      } as never,
-      'me',
-      s as never,
-    );
-    expect(s.state.streamingBubbles.has('streamA')).toBe(false);
-    expect(s.state.streamingBubbles.has('streamB')).toBe(true);
-  });
-
   it('handleUpdateAgent: merges partial updates and toggles chat mode', () => {
     const s = mkSetters();
     s.state.agent = {
