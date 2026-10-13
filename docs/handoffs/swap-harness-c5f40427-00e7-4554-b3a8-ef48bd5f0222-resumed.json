@@ -211,10 +211,11 @@
       "cf682c_release_meta": "66cab08fc4ad617258ae069850967ed23fdd34727310702fb907a5f1b1a8ea89"
     },
     "original_preflight_finding": "unsupported Machine config: services is set; no mutation",
-    "pending_capture_cleanup": true,
+    "pending_capture_cleanup": false,
     "original_host_birth_owner_records_unmodified": true,
     "provider_mutations_performed": false,
-    "cf682c_disposition": "Original canonical recovery exit0/native Machine and volume release verified in recovered delta; no duplicate recovery. Shared original local Hub retirement obligation remains old-host scope."
+    "cf682c_disposition": "Original canonical recovery exit0/native Machine and volume release verified in recovered delta; no duplicate recovery. Shared original local Hub retirement obligation remains old-host scope.",
+    "final_disposition": "Exact transferred original stopped Machine/volume now retired by original same-host canonical recovery; no new local allocation ever claimed."
   },
   "coordination": {
     "capture_worker_internal_id": "ph726g9hapm4pxe04pax5fhx7d8g6ak6",
@@ -226,7 +227,11 @@
   "archival": {
     "replacement_must_remain": true,
     "old_box_archival_not_requested_by_this_receipt": true,
-    "remaining_old_host_closeout": "Old helper must retire exact local Hub/watch processes with positive birth/ownership checks and verify no late unsaved originals before preservation-conditioned archival. External stopped resource positively transferred above; no native release claimed."
+    "remaining_old_host_closeout": "None for original task source/evidence or exact owned resource recovery; old helper may perform final no-unsaved-writers check and request its own managed archival. Replacement remains active; five-run goal remains0/5.",
+    "old_host_dependency_cleared": true,
+    "preservation_resource_and_old_local_owner_gates_verified": true,
+    "replacement_authorizes_preservation_conditioned_old_archival": true,
+    "actual_old_archival_status": "not yet observed/request disposition pending old helper"
   },
   "freedom_and_protected_instructions_preserved": true,
   "paid_work_or_deployment_by_replacement": false,
@@ -300,7 +305,8 @@
     },
     "checks_precede_final_source_composition_and_are_not_full_deploy_or_live_credit": true,
     "capture_route": "Same-host original helper invocation only after independently reviewed explicit services-isolation/full exact config restore repair and owning gates. Original foreign-host rejection preserved; no new-host identity transplant.",
-    "remaining_old_host_dependency": "Keep old box until this narrowly scoped capture/canonical recovery and its late originals are verified; no wait for whole LIVE50 goal."
+    "remaining_old_host_dependency": "Keep old box until this narrowly scoped capture/canonical recovery and its late originals are verified; no wait for whole LIVE50 goal.",
+    "normal_repo_hooks_path": "Inherited missing Mac hooks path preserved privately, corrected locally to repository .husky; existing hook executes successfully; no Mac paths changed in replacement commits."
   },
   "native_observation": {
     "81245db9215698": {
@@ -328,6 +334,68 @@
     "vol_r1jgnp6j1dx93lzr": {
       "state": "pending_destroy",
       "attached_machine_id": null
+    }
+  },
+  "final_original_resource_closure": {
+    "verified_utc": "2026-10-13T00:41:29.859163+00:00",
+    "canonical_old_host_receipt": "docs/handoffs/swap-harness-c5f40427-00e7-4554-b3a8-ef48bd5f0222-canonical-capture-release.json",
+    "source_review_commit": "f4ab9385382d5a883539b6139593f8aa8931f4c1",
+    "reviewed_capture_source": "7d535c0440fb22543dc50818a6423d502e22742e",
+    "encrypted_final_capture_verification": [
+      {
+        "kind": "final-capture",
+        "encrypted_sha256": "66158c63466ede8a0c681ba76c20cfe55f3987bcaa084cdceaa2c15c9fe8ffe5",
+        "decrypted_gzip_sha256": "5d3529b0f5c6f7756ac42e7e265427fa416e4065c2ec534c130360706c2af19a",
+        "members": 123,
+        "regular_files": 97,
+        "member_manifest_sha256": "9ce02f9367dea236ce03e74e883307cb226bcb1e98bd38845d13c7a7c44fa26b",
+        "extracted_files": 97,
+        "authenticated": true
+      }
+    ],
+    "every_final_original_member_comparison": {
+      "receipt_commit": "46b93df02",
+      "matched_original_members": 122,
+      "manifest_member_hash_matches": true,
+      "total_members_verified": 123,
+      "regular_file_hashes_verified": 97,
+      "mismatches": 0,
+      "manifest_json_sha256": "fca904ab4fc77816e0535d3a54536ad94a197ee9f8d6cf629f842eb41ac1df7b"
+    },
+    "independent_native_read": {
+      "utc": "2026-10-13T00:37:01.108419+00:00",
+      "81245db9215698": {
+        "state": "destroyed",
+        "name": "cloudbench-a87f045417be4848a5c1e14e",
+        "attached_machine_id": null
+      },
+      "vol_4ql7650wx9yqlqwr": {
+        "state": "pending_destroy",
+        "name": "cloudbench_data",
+        "attached_machine_id": null
+      }
+    },
+    "original_capture_provenance_and_reviewed_helper_hash_verified": true,
+    "captured_original_files": 9,
+    "missing_original_files": 6,
+    "missing_ACK_pid_and_run_json_not_fabricated": true,
+    "full_original_config_restored_and_stopped_before_canonical_reaper": true,
+    "sealed_audit_meta_sha256": "0ee724898e1f7aa6ad63ee1f625fbe64031b4b10e1bf72f124dad0bc5ca6b13a",
+    "sealed_native_audit_status": "provider-teardown-verified",
+    "hub_disposition": "retired-exact-owner-verified-absent",
+    "canonical_recovery_exit": 0,
+    "registry_absent": true,
+    "resource_release_verified": true,
+    "proof_credit": 0
+  },
+  "credential_diagnostic_incident": {
+    "delegated_thread": "ph76xdf0syxng7c12924a5fxbn8g7rve",
+    "incident": "One process-argument diagnostic exposed a credential in private managed tool output; value never copied into this receipt",
+    "mitigation": "Worker stopped printing command arguments; subsequent diagnostics expose PID/state only. Credentials left unchanged under original authority restrictions.",
+    "tracked_candidate_key_inclusion_check": {
+      "checked_files": 177,
+      "matching_files": 0,
+      "credential_value_not_logged": true
     }
   }
 }
