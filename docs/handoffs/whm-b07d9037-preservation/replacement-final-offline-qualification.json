@@ -105,7 +105,25 @@
     "protected_instructions_unchanged": true,
     "original_root_worktree_unchanged": true
   },
-  "old_archival_disposition": "Coordinator-owned; independent old worker verified full preservation in committed closeout b8a3fe78f. This thread has not independently received final archival acceptance/completion and does not infer it from intent. No old-box messages sent after its intent notice.",
+  "old_archival_disposition": {
+    "confirmed_by": "Coordinator using signed-in official boxes.dev lifecycle client; published evidence independently read here",
+    "published_evidence_commit": "adb505d4f8488aeac8bd08f06365953c2ca5ad3f",
+    "published_evidence_path": "docs/handoffs/swap-harness-20261012-teardown.json",
+    "published_evidence_sha256": "9ff98449f5db662cab50a27d14f41260e0e48d58101c2a229fe6ebd88589ee65",
+    "old_whm_box_lifecycle": {
+      "task": "WHM",
+      "oldDevboxId": "b07d9037-81f9-4c97-80d7-6f4d42b7adc1",
+      "operationId": "565174e7-3f82-452f-8a57-33829dfbecca",
+      "status": "completed",
+      "stage": "done",
+      "completedAtUtc": "2026-10-13T00:46:51.159Z",
+      "lastErrorCode": null,
+      "lastErrorDetail": null
+    },
+    "private_archives_remain_preserved": true,
+    "no_remaining_old_host_dependency": true,
+    "no_old_box_messages_after_archive_intent": true
+  },
   "pending_original_goal": "$5M fundraiser remains unmet. Another paid conformance/fundraiser trial requires explicit original-user approval and spending cap; previously requested multiple-choice decision remains unanswered.",
   "paid_model_or_benchmark_calls": 0,
   "merged": false,
