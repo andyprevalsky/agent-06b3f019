@@ -12,6 +12,13 @@ AI agent platform.
 
 ## Sub-agent delegation
 
+- Sub-agents must inherit the parent agent's model, reasoning/effort level, and
+  speed/service-tier settings. Do not silently substitute a lower-effort model
+  or a different speed setting. Use automatic inheritance when supported;
+  otherwise pass the parent's effective settings explicitly. Deviate only when
+  the user explicitly requests different settings for that sub-agent.
+  A tool's defaults or saved devbox settings are not proof of the active
+  parent's settings; verify the effective parent settings before delegating.
 - Use sub-agents maximally for independent work. Keep the main agent unblocked
   and focused on coordination and the critical path.
 - Give each sub-agent ordered priorities, a clear deliverable, and a deadline

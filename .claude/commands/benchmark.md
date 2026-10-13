@@ -38,9 +38,9 @@ Use a fresh benign comment/ref plus the normal `image-build --no-cache` and
 exact-image activation every trial. LIVE autoscale remains 15; the cached mass
 profile's maximum 2 and allocation deadline do not apply. Keep the original
 hundred-task result complete, exact thirty-second monitoring, grouped early
-verdicts, generous fixed historical LIVE stage targets and no paid deploy overlap
-with accepted LIVE latency. The existing stability wrapper's width-32 cap does
-not restrict this ordinary fleet; do not substitute smaller slices.
+verdicts and generous fixed historical LIVE stage targets. The existing stability
+wrapper's width-32 cap does not restrict this ordinary fleet; do not substitute
+smaller slices.
 
 Behavior:
 
