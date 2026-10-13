@@ -1104,6 +1104,9 @@ Detail:
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
 ────────────────────────────────────────────────────────────────
 Downstream:
+  Severity: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <effect>
+  Future prod trajectories affected: <estimated % or range> — <basis>
+  Risk: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <reason>
   <Affected tasks, users, agents, services, data/cost/security impact,
   rollback, and 10k-agent behavior.>
 ────────────────────────────────────────────────────────────────
@@ -1175,6 +1178,9 @@ Detail:
   <exact diff of every prompt / LLM-visible hunk, as +/- lines>
 ────────────────────────────────────────────────────────────────
 Downstream:
+  Severity: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <effect>
+  Future prod trajectories affected: <estimated % or range> — <basis>
+  Risk: <🟢 LOW | 🟡 MODERATE | 🟠 HIGH | 🔴 CRITICAL> — <reason>
   <Affected tasks, users, agents, services, data/cost/security impact,
   rollback, and 10k-agent behavior.>
 ────────────────────────────────────────────────────────────────

@@ -354,7 +354,10 @@ checkout; later root changes are excluded unless explicitly handed off as a new
 verified checkpoint. On boxes.dev use managed threads by default. Existing
 human approval requests use `.claude/shared/approval-format.md` with the same
 scorecard styling, six required sections, exact diffs and clickable evidence
-links. Do not create additional approval gates for this presentation policy.
+links. Downstream includes emoji severity, the evidence-based estimated share of
+future real production trajectories affected, and an emoji risk level; unknown
+estimates must stay explicit. Do not create additional approval gates for this
+presentation policy.
 
 The [PR #1450 continuation checkpoint](docs/benchmark-pr1450-continuation.md)
 records the current deployment gaps, source-bound verification and the pending

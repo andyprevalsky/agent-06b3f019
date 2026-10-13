@@ -77,6 +77,15 @@ def check(path, expected_blocks):
             )
         if block.splitlines()[-2] != "━" * 64 or "⏳ AWAITING DECISION" not in block:
             raise SystemExit(f"FAIL: {path} approval block must use the scorecard frame and status")
+        downstream = block.split("\nDownstream:\n", 1)[1].split("\n" + "─" * 64, 1)[0]
+        fields = ["Severity:", "Future prod trajectories affected:", "Risk:"]
+        positions = [downstream.find(field) for field in fields]
+        if -1 in positions or positions != sorted(positions):
+            raise SystemExit(f"FAIL: {path} downstream must show severity, affected share and risk in order")
+        for field in ("Severity:", "Risk:"):
+            row = next(line for line in downstream.splitlines() if field in line)
+            if not any(mark in row for mark in ("🟢", "🟡", "🟠", "🔴", "⚪")):
+                raise SystemExit(f"FAIL: {path} {field} needs an emoji and level")
         after = text[text.index(block) + len(block):].lstrip("\n")
         if not after.startswith("- **FE link:** [Open agent]("):
             raise SystemExit(f"FAIL: {path} approval block must be followed by its Links list")
@@ -85,6 +94,11 @@ def check(path, expected_blocks):
 check(sys.argv[1], 1)
 check(sys.argv[2], 2)
 PY
+
+require_text "$FORMAT" "Do not invent a percentage" \
+  "future production trajectory estimates must disclose their evidence or uncertainty"
+require_text "$FORMAT" "exclude benchmarks, tests and synthetic runs" \
+  "downstream production impact must use actual product trajectories"
 
 # Exercise the real CLI dispatch without credentials, databases or providers.
 # The scripts-only fixture deliberately has no usable application interpreter.
