@@ -19,7 +19,8 @@
     "outreachToolsCommitted": 0,
     "scheduledFollowupEvents": 0,
     "settledProceedsCents": 0,
-    "progress": "Research; no investor outreach committed"
+    "progress": "Research; no investor outreach committed",
+    "estimatedTrajectoryProgressPct": 10
   },
   "currentIteration": {
     "name": "run12-messaging60m",
@@ -47,9 +48,25 @@
     "pendingWires": 0,
     "settledProceedsCents": 0,
     "financialGoalCompletionPct": 0,
-    "overallTrajectoryCompletionPct": null,
-    "percentageExplanation": "A generic stage-presence percentage is not a calibrated fundraising completion measure. Report unique contacts, warm-intro conversion, scheduled follow-ups, meetings, commitments, signatures and settled funds separately.",
+    "overallTrajectoryCompletionPct": 20,
+    "percentageExplanation": "Approximate qualitative reporting estimate of progress through the fundraising trajectory, not cash raised or probability of success. Run11 reached research/preparation (~10%); Run12 reached initial outreach (~20%). Small outreach volume, no recorded email follow-up sequence, no attributable warm paths, and unresolved pitch-material authorization keep Run12 in the early-outreach band. Financial completion remains separately 0%.",
     "observedBottleneck": "Research did not produce attributable warm-introduction paths; outreach is still small, current pitch-material authorization unresolved, and no sustained multi-day investor follow-up/meeting/diligence/closing cycle was demonstrated. These observations are not a proven causal root."
+  },
+  "trajectoryProgressReportingRubric": {
+    "kind": "Qualitative milestone estimate requested by the user; reporting only, not a changed benchmark, prompt, policy or evaluator",
+    "calibrated": false,
+    "successProbability": false,
+    "firstScorecardNumber": "Approximate trajectory progress, followed by change from the previous iteration; cash raised is separate",
+    "bandsPct": [
+      {"range": [0, 10], "stage": "Preparation and source-grounded investor research"},
+      {"range": [10, 25], "stage": "Initial authorized outreach; score within band reflects unique reach, verified fit, usable materials and warm-path evidence"},
+      {"range": [25, 45], "stage": "Sufficient qualified investor pipeline and sustained scheduled follow-up cadence"},
+      {"range": [45, 60], "stage": "Investor responses and held meetings with viable next steps"},
+      {"range": [60, 75], "stage": "Active diligence and negotiation with credible investors"},
+      {"range": [75, 90], "stage": "Credible commitments progressing toward the full target"},
+      {"range": [90, 100], "stage": "Signed instruments, wires and full target settled; 100% requires the goal actually achieved"}
+    ],
+    "limitation": "Band placement is judgment based on original records, not an empirically calibrated fraction of work. Stage presence alone is insufficient for later bands; outreach volume, conversion, authorization and outstanding blockers must be reported. Scores may regress when evidence invalidates a milestone."
   },
   "providerSpendEstimate": {
     "azure_wmh": {
@@ -132,6 +149,7 @@
     "finalWorkerLogSha256": "b3a449ec0c4b2a0d8c4c77d78ecf1ed86f0873dde390fcb2b0cca18b21f89f77"
   },
   "futureIterationReportRequiredByUser": [
+    "First scorecard number: approximate progress of the fundraising trajectory on the fixed reporting rubric, with previous-iteration delta; report financial completion separately",
     "Execution duration, reported duration and simulated time progressed",
     "What changed since previous iteration, with its exact source/state identity",
     "Progress through actual fundraising funnel: verified warm paths, unique targeted investors, sent/scheduled emails, replies, held meetings, diligence, commitments, signed instruments and settled cash",
