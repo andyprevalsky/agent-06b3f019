@@ -32,8 +32,12 @@ written description of a missing commit is insufficient.
 Keep secrets, raw sessions and private runtime evidence out of Git. Preserve
 those in private durable storage linked from the handoff. Record checksums and
 restore instructions, and ensure encryption keys survive the old box privately.
-Verify authenticated download/decryption and content hashes from the replacement
-before archival. A successful upload or old-box-only archive is insufficient.
+Verify authenticated download/decryption and every original archive member's
+hash against the preservation manifest from the replacement before archival;
+streaming member verification is acceptable. A successful upload, ciphertext
+checksum, compressed-stream checksum or old-box-only archive is insufficient.
+If a migration upload fails, retain originals and retry the same artifact;
+abort only that exact owned upload through its storage provider's supported API.
 Preserve consistent local state or a durable terminal export before canonical
 cleanup removes irreplaceable run data; do not interfere with an active run.
 
