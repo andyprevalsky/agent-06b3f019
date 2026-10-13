@@ -1,0 +1,96 @@
+{
+  "recorded_at_utc": "2026-10-13T04:41:25.596649+00:00",
+  "task": "Tamy Whatsapp Bug",
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
+  "source_head": "e5184333cf23929968cc0bb46c66e09862f56c0c",
+  "runtime_source": "508042952891e040a3b78c16b7ab63c26ec8d055",
+  "preserved_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
+  "preserved_original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
+  "production_deploy_complete": false,
+  "current_integrated_gates": {
+    "backend_coverage": {
+      "status": "pass",
+      "domains": 193,
+      "unit_files": 266,
+      "lines_statements_percent": 89.55,
+      "branches_percent": 80.99,
+      "functions_percent": 92.59,
+      "normal_and_signal_teardown": "pass"
+    },
+    "cloud_controller": {
+      "status": "pass",
+      "remote_suites": 9,
+      "native_status_shutdown_control": "pass",
+      "owned_machine": "896269c6e67948",
+      "exact_machine_absence_verified": true
+    },
+    "static": {
+      "typescript": "pass",
+      "eslint": "pass",
+      "backend_structural": "pass",
+      "complete_deploy_structural_registry": "pass"
+    },
+    "live_probes": {
+      "credential_health": "pass with existing optional Anthropic funded-key warning",
+      "amplitude": "pass",
+      "chat_router_failover": "pass"
+    },
+    "predeploy_smoke": {
+      "status": "pass",
+      "actual_tasks": 10,
+      "passed": 10,
+      "failed": 0,
+      "duration_seconds": 1362.2,
+      "concurrency": 2,
+      "reported_benchmark_llm_cost_usd": 0.2,
+      "both_batch_benchmark_and_stack_cleanup_receipts": "clean"
+    },
+    "agents_coverage": {
+      "status": "pass",
+      "source": "e5184333cf23929968cc0bb46c66e09862f56c0c",
+      "domains": 110,
+      "fast_cache_tests": 184,
+      "unit_tests": 134,
+      "coverage_percent": 82,
+      "duration_seconds": 522,
+      "exit_code": 0,
+      "exact_owner_absent": true
+    }
+  },
+  "focused_sms": {
+    "status": "fail",
+    "runs": [
+      {
+        "id": "6c33c1f9-7208-42e0-8d2c-235d6eec9349",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean"
+      },
+      {
+        "id": "aec45ad6-56cd-44cc-bb75-67e345be33f0",
+        "passed": 0,
+        "total": 3,
+        "owned_cleanup": "clean"
+      }
+    ],
+    "observed_failure": "Native calls contain scalar and object strings despite correctly typed schemas; actual validation feedback did not repair encoding.",
+    "provider_internal_parser_mechanism": "unproved"
+  },
+  "pending_required_inputs": [
+    "Exact proposed existing-schema native-field JSON decoder approval; object-string acceptance extends Python behavior.",
+    "Human-hosted Stripe saved-card fixture setup."
+  ],
+  "incoming_main": "1120a6b8f2b43db139e32619db4acf1e876aac38",
+  "incoming_frontend_verification": "pending normal integration then fresh frontend and semantic checks",
+  "historic_semantic_and_e2b_source": "7cf5cbefd5d2480921af7cc1d46d4ba2d1bcfe4f",
+  "historic_proof_is_not_current_changed_frontend_proof": true,
+  "task_boundaries_preserved": [
+    "Freedom and protected instructions",
+    "No Browser Mode P2 feature work",
+    "No new migration or replacement",
+    "Exact-diff approval",
+    "Narrow sandbox warning only; production strict",
+    "Only exact owned teardown",
+    "No original source reconstruction or stash application"
+  ]
+}
