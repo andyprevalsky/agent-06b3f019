@@ -42,6 +42,7 @@ import {
   recoverCutoverKilledAgent,
 } from '../generationQueueCutover';
 import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from '../workflowGeneration';
+import { SmsSupervisorToolCallSchema } from './schema';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -142,6 +143,13 @@ export async function dispatchToolCall(
   log.info('Dispatching tool', { tool, args: JSON.stringify(args), userId });
 
   try {
+    if (SmsSupervisorToolCallSchema.options.some((schema) => schema.shape.tool.value === tool)) {
+      const parsed = SmsSupervisorToolCallSchema.safeParse(toolCall);
+      if (!parsed.success) {
+        return { tool, success: false, result: '', error: parsed.error.message };
+      }
+    }
+
     let result: ToolResult;
 
     switch (tool) {

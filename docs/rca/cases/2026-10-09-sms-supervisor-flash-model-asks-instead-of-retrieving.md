@@ -230,3 +230,11 @@ waterfall compatibility. At 10,000 agents the change remains bounded by each
 request's tool count, with no shared state, new network request, polling loop,
 or persistent resource. Applicable integrated deploy gates and live production
 verification remain required.
+
+### 2026-10-13 native argument validation follow-up
+
+The fresh three-task supervisor lane failed before any agent spawn. Saved requests carried the authored number/object types, but native Qwen responses supplied numeric budgets and nested grep filters as strings. The SSE and completion adapters preserved types correctly. The native response path reached dispatcher execution without the Zod validation used by the structured content path; budget validation produced a value-only error, and string filters expanded into numeric filter keys.
+
+The dispatcher now applies the existing `SmsSupervisorToolCallSchema` to known tools before side effects and returns its generated type errors through the existing native tool-result replay. Original call IDs, valid arguments, unknown-tool diagnostics, model selection, schemas, static feedback, and round limits are preserved. This follows the user’s conditional approval to preserve the established typed native-tool contract; no string coercion was added.
+
+The existing `sms-supervisor-stream` blackbox domain contains a red-to-green regression for malformed budgets/filters, unchanged typed queued writes, unknown tools, and native ID/error replay. All 16 cases and the native-contract/tool-feedback unit suites pass offline. Live recovery is pending; the failed attempt remains in the append-only history.
