@@ -9,13 +9,16 @@
   "production_deploy_complete": false,
   "current_integrated_gates": {
     "backend_coverage": {
-      "status": "pass",
-      "domains": 193,
-      "unit_files": 266,
-      "lines_statements_percent": 89.55,
-      "branches_percent": 80.99,
-      "functions_percent": 92.59,
-      "normal_and_signal_teardown": "pass"
+      "status": "fail",
+      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+      "domains_passed": 192,
+      "domains_failed": 1,
+      "unit_files_passed": 266,
+      "failed_domain": "browser-provider",
+      "observed_failure": "Live credential CDP reconnect times out after provider rotation. Exact standalone owning domain also failed on a later provider leg.",
+      "coverage_threshold_result": "not reported because actual blackbox failed",
+      "owned_local_processes_cleanup": "all30observedownersabsent/terminal",
+      "root_cause": "open; no source fix or fresh GREEN yet"
     },
     "cloud_controller": {
       "status": "pass",
@@ -297,5 +300,16 @@
     "canonical_AgentCard_transfer_mode": "live required; unchanged",
     "production_lane_after_merge": "still required; not yet run",
     "prior_wrong_account_hosted_setup_request": "withdrawn; forced alternate live account did not match prior actual successful runs."
+  },
+  "historical_source_bound_passes": {
+    "backend_coverage_508042952": {
+      "status": "pass",
+      "domains": 193,
+      "unit_files": 266,
+      "lines_statements_percent": 89.55,
+      "branches_percent": 80.99,
+      "functions_percent": 92.59,
+      "normal_and_signal_teardown": "pass"
+    }
   }
 }

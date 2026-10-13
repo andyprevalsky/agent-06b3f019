@@ -229,3 +229,26 @@ pre-service preservation controls, child-ACK/snapshot contracts and the 22
 reconnect controls. Original registration RED and reviewed-source compatibility
 receipts remain preserved. The parent independently confirmed source phases;
 this source qualification supplies no benchmark credit or original release proof.
+
+### October 13 coverage command source registration
+
+PR1473 changed only `front-end/package.json` within the recovery recipe:
+`test:coverage` now runs the actual app TypeScript check before unchanged
+Vitest coverage. The complete structural gate on `56e1e7133` rejected that
+unregistered recipe in its bootstrap, forensic and benchmark controls.
+
+An independent reviewer who did not author the manifest change compared all
+21 checkout inputs, 15 injected controls and three boot controls against the
+reviewed `508042952` source. Both `before-stack-launch` and
+`agent-network-index-bootstrap` remain unchanged and never invoke the coverage
+script. The existing native recipe helper produced fingerprint
+`d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda`.
+The append-only registration in `a8793a97a` preserves every older approval,
+phase predicate, ownership check and original receipt requirement.
+
+Fresh unchanged canonical scopes passed after committed registration:
+quiesced forensic 15 tests, bootstrap recovery 27 tests, and benchmark
+live-results 572 tests with four existing canonical skips. All three exact
+stage owners were absent at completion. Earlier failed results remain
+preserved. This qualifies the two existing early phases; it grants no
+benchmark acceptance credit or authority for a later execution phase.
