@@ -310,6 +310,9 @@ root = temporary / "production-routing"
 (root / "agents/venv/bin").mkdir(parents=True)
 for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+report_contract = root / ".claude/shared/benchmark-report-format.txt"
+report_contract.parent.mkdir(parents=True)
+shutil.copyfile(source / ".claude/shared/benchmark-report-format.txt", report_contract)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
     {"name": "production-route", "status": "ready", "production_only": True}
 ]))
