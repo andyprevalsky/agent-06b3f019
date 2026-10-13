@@ -2573,6 +2573,9 @@ exec "$@"
         repo / "scripts/run.sh",
         """#!/usr/bin/env bash
 set -u
+SCRIPT_DIR="""
+        + shlex.quote(str(ROOT / "scripts"))
+        + """
 source """
         + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
         + """

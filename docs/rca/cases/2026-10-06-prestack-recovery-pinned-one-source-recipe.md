@@ -229,3 +229,31 @@ pre-service preservation controls, child-ACK/snapshot contracts and the 22
 reconnect controls. Original registration RED and reviewed-source compatibility
 receipts remain preserved. The parent independently confirmed source phases;
 this source qualification supplies no benchmark credit or original release proof.
+
+### October 13 native cleanup receipt recipe registration
+
+Adding stable native identity to the local stack receipt writer in PR #1503
+changed one of the 39 reviewed recipe inputs. The normal structural aggregate
+correctly rejected that unregistered recipe in its bootstrap, forensic, and
+benchmark recovery controls. The failed aggregate remains recorded; no capture
+marker or prior fingerprint was reused to authorize the new source.
+
+Independent review compared immutable `10f0cbfede81ed83ac2125542b60dc02b057a561`
+with the prior reviewed recipe: 38 inputs are byte-identical; the sole change
+is `scripts/lib/run-process-cleanup.sh` reading its own stable native identity
+and appending it atomically to the stack receipt. Stack launch, signaling,
+allocation, index bootstrap, and release authority are unchanged. The exact
+new fingerprint is
+`638c7680cd7253b354be4876456e04ac330857f79ca6423875721728eff08afb`.
+The committed policy adds only that fingerprint for the same two phases,
+`before-stack-launch` and `agent-network-index-bootstrap`; it preserves every
+historical entry and the validator.
+
+A new permanent method in the existing bootstrap recovery suite fails on the
+previous committed policy and passes after registration. It also derives
+actual separate mutated writer and `run.sh` recipes and proves both remain
+rejected even when their capture-local review markers match. Four existing
+forged-review, direct-input, and ref-mismatch controls also pass. Private
+immutable recipe comparison and independent-review proof remain under the
+Google RCA sandbox-policy-check context. This is source qualification, with
+no provider calls, benchmark credit, original-owner release, or widened phase.

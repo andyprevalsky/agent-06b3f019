@@ -221,6 +221,17 @@ At 10,000 agents, this remains one local process-identity read per isolated
 stack receipt with no shared database, fleet scan, or additional provider call.
 It does not change payment verdicts, budgets, prompts, models, or tools.
 
+The first aggregate qualification also caught a fixture composition gap:
+the actual boot/driver interrupt control sourced the real cleanup library
+without defining the `SCRIPT_DIR` binding provided by production `run.sh`.
+The new writer correctly failed on that missing dependency and withheld the
+guest cleanup acknowledgement. Supplying the fixture's real script directory
+makes the unchanged owning control pass instead of HTTP 500; all 13 assertion
+ASTs are identical, including exact root deletion, clean matching token,
+HTTP 204, terminal acknowledgement, and cleanup ordering. Ten existing negative
+cleanup controls also pass. No production fallback or dependency predicate was
+weakened to accommodate the fixture.
+
 ## Human feedback
 
 Keep broad stage completion and whole-run timing as the operational gates;
