@@ -24,7 +24,7 @@
     "executionWindowSeconds": 3600,
     "reportedDurationSeconds": 3653.6,
     "nativeColdStartupSeconds": 604,
-    "launcherStartedToFinishedSeconds": 4379,
+    "launcherStartedToFinishedSeconds": 4399,
     "simulatedWorldElapsedSeconds": 618018.1,
     "finalWorldUtc": "2026-10-20T02:40:18.100Z"
   },
@@ -210,7 +210,11 @@
     "newPrivateArchiveFiles": 981,
     "newPrivateArchiveFullAuthenticatedReadback": true,
     "privateDbSnapshot": "Pre-cutoff consistent dump, captured2026-10-13T04:41:00Z; not claimed as final DB bytes.",
-    "finalTranscriptAndNativeRetirementPreserved": true
+    "finalTranscriptAndNativeRetirementPreserved": true,
+    "additionalPrivateAgentDumpsReceipt": "docs/handoffs/whm-b07d9037-preservation/run13-agent-dumps-receipt.json",
+    "additionalPrivateFiles": 417,
+    "additionalPrivateFullAuthenticatedReadback": true,
+    "totalNewPrivateFilesAuthenticated": 1398
   },
   "cleanup": {
     "benchmark": "clean",
