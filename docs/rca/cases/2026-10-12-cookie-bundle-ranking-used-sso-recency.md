@@ -160,6 +160,25 @@ rejected treating them as proof that all three prompts share an owned cause.
 The incident stays open pending Google-acceptance/native-state evidence;
 deploy verification is recorded separately from the local reproduction.
 
+## Related failed-restoration credential context
+
+A later task on this root started at Claude and navigated to Google Admin.
+Target preparation timed out after eighteen seconds; navigation continued,
+but the prior Claude inventory and assistance identity remained active.
+The separate case `2026-10-13-realm-transition-retained-stale-auth-context`
+records that causal boundary. Main PR #1497 preserves already validated target
+inventory alongside restoration failure, invalidates unrelated realm identity,
+and binds inventory to observed destination pages. It preserves this case's
+cookie ranking, expiry and SameSite fixes. It does not establish why that
+restoration stalled or whether Google accepted the original transferred state.
+
+The earlier Remote Desktop password attempt is not proven fixed by that repair.
+Current references remain ID-bound; the inventory and input guard still use
+canonical realm and base-domain scope. Related Google services can legitimately
+share SSO, so that permissiveness alone is not a newly proven defect. Correct
+service/account selection and compliance with the task's no-guess instruction
+remain unproven. The follow-up audit read no credential values.
+
 ## Human feedback
 
 The user supplied the earlier preliminary explanation, explicitly noting that
@@ -170,3 +189,46 @@ or equate stored cookie expiry with accepted authentication.
 ## Reusable lesson
 
 Rank credentials within their authentication realm and preserve cookie attributes while separating transport correctness from server-side session acceptance.
+
+
+### October13 09:37 UTC — late Google restoration phase captured
+
+A newly scoped Render/Fly capture for October12 22:20:00–22:21:10 binds two
+optional prepare-auth failures to this same root, browser task4adbfe99 and
+worker span4d63c7919d64. This extends the earlier capture, which ended before
+these attempts; it does not change the observed initial three assistance
+requests or establish an exhaustive all-time count. Both attempts completed
+addCookies and LocalStorage, then hit the18-second timer while IndexedDB
+transfer remained active. LocalStorage took7,255.686ms/6,629.159ms; the per-origin
+stream read67,108,864B/79,151,599B with76/89 script acknowledgements and
+7,467ms/7,802ms cumulative CDP wait. HTTP500 returned after18,387ms/18,380ms.
+`rawBytes` measures bytes read, not staged blob size.
+
+The worker/backend pairing is unique sequential temporal correlation
+14.578ms/17.048ms on the same session/instance; a shared request ID was not
+logged. Phase events lack explicit request IDs but lie inside the matching
+request spans. A rolling deployment overlaps the incident, so exact serving
+SHA remains unknown. All three causal source files are byte-identical across
+a040520d51bdd3cf543ba8c1b7c157b7c64404c0 and
+aeff89574ea3ed230e43b3f1cd0e6f915c6c981c.
+
+The existing2026-09-30-browser-origin-injection-materialized-jsonb case records
+this same agent's earlier eight init failures and the79,151,599B Drive-cache
+class, including a real Kernel unchanged3/3 FAIL to3/3 PASS reproduction after
+the payload bound plus LocalStorage-origin repair. This is a recurrence of
+that restoration-volume class, separate from this case's profile ranking and
+cookie-attribute defects. PR1477/d2632c7c53cefa3d8421a1aa1701e8448179a1c8
+already merged the exact8MiB serialized per-origin admission guard before
+staging/CDP; current live Render1e08f035a3c6a065c05c34cdc17e6241b04e285c
+contains it, with both budget/timeout overrides unset. Its owning permanent
+browser-origin-payload blackbox is included in the normal coverage gate.
+These are existing recorded proofs, not a new reproduction.
+
+The new capture localizes the original optional timeout and ties it to the
+known oversized-origin class, but does not reconstruct every pending operation
+or prove the exact row/origin identity or post-fix outcome of these two requests.
+Many smaller origins can still cumulatively exceed the deadline; per-origin
+admission is finite, not a general latency guarantee. PR1497 separately prevents
+this failure from retaining the previous Claude credential identity. Google
+server acceptance, native-profile precedence and the wrong password outcome
+remain open. The case status stays OPEN.

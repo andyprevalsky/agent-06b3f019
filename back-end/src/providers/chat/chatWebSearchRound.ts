@@ -47,6 +47,8 @@ export async function runChatWebSearchRound(
   params: {
     agentId: string;
     decision: WebSearchDecision;
+    /** Identity of the Router reasoning stream, distinct from the tool stream. */
+    routerStreamId: string;
     /** Tool call already announced for the first query while the Router streamed. */
     earlyToolCallId?: string;
   },
@@ -77,7 +79,12 @@ export async function runChatWebSearchRound(
   const fastMode = await deps.agentFastMode(agentId);
 
   // The Router's reasoning precedes its tool rows, matching worker behavior.
-  await deps.createMessage({ agentId, role: 'ASSISTANT', text: decision.reasoning });
+  await deps.createMessage({
+    agentId,
+    role: 'ASSISTANT',
+    text: decision.reasoning,
+    metadata: { streamId: params.routerStreamId },
+  });
 
   for (const search of searches) {
     const title = formatWebSearchStreamTitle(search.query);

@@ -120,7 +120,22 @@ fi
 
 if [[ "${1:-}" == "stability-proof" ]]; then
     shift
-    benchmark_agent_instructions
+    stability_proof_read_only=0
+    stability_proof_option_value=0
+    for arg in "$@"; do
+        if [ "$stability_proof_option_value" -eq 1 ]; then
+            stability_proof_option_value=0
+            continue
+        fi
+        case "$arg" in
+            --dry-sample|--help|-h) stability_proof_read_only=1 ;;
+            --runs|-k|--width|--concurrency|--seed|--timeout|--pool-file|--exclude-file|--min-successful-llm)
+                stability_proof_option_value=1 ;;
+        esac
+    done
+    if [ "$stability_proof_read_only" -eq 0 ]; then
+        benchmark_agent_instructions
+    fi
     exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
         --capability "$@"
 fi

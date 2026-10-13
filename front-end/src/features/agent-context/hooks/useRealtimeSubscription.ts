@@ -14,7 +14,7 @@ import type { AgentDetail, Message } from '@/lib/api';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
-import { MAX_RECONNECT_DELAY_MS } from '../config';
+import { createReconnectScheduler } from './agentReconnectScheduler';
 import { createCompletionBackfillOwner, type CompletionBackfillLease } from './agentBackfill';
 import {
   handleInsertMessage,
@@ -26,6 +26,7 @@ import {
   cleanupSubscription,
 } from './realtimeHandlers';
 import { useDisconnectedAgentBackfill } from './useDisconnectedAgentBackfill';
+import { useReceivedInserts, type ReceivedInserts } from './useReceivedInserts';
 import { endsCloudAgentMode, startsCloudAgentMode } from './cloudAgentMode';
 import {
   isAgentScopeActive,
@@ -68,6 +69,7 @@ function createRealtimeHandlers(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
   scheduleReconnect: () => void,
+  receivedRef: React.MutableRefObject<ReceivedInserts>,
   onBrowserMessage: (message: InsertMessagePayload) => void,
 ): AgentHandlers {
   const active = () => isScopeActive(deps, scope);
@@ -81,7 +83,11 @@ function createRealtimeHandlers(
   const setIsChatMode = scopedSetter(deps.setIsChatMode, active, current);
   return {
     onInsert: (data: InsertMessagePayload) => {
-      if (!active()) return;
+      if (!active() || data.agentId !== scope.agentId) return;
+      // A timed-out publisher can have delivered successfully. Claim the ID
+      // before any side effects, including the cloud-mode and stream setters.
+      if (receivedRef.current.ids.has(data.id)) return;
+      receivedRef.current.ids.add(data.id);
       if (startsCloudAgentMode(data, scope.agentId)) setIsChatMode(false);
       if (endsCloudAgentMode(data, scope.agentId)) setIsChatMode(true);
       handleInsertMessage(data, scope.agentId, {
@@ -138,43 +144,27 @@ function createRealtimeHandlers(
   };
 }
 
-function createReconnectScheduler(deps: RealtimeSubscriptionDeps, scope: AgentScope): () => void {
-  return () => {
-    if (!isScopeActive(deps, scope) || !deps.canSubscribe) return;
-    if (deps.reconnectTimeoutRef.current) clearTimeout(deps.reconnectTimeoutRef.current);
-    const attempt = deps.reconnectAttemptRef.current;
-    deps.reconnectAttemptRef.current += 1;
-    const backoff = attempt === 0 ? 0 : Math.min(1000 * 2 ** (attempt - 1), MAX_RECONNECT_DELAY_MS);
-    const delay = backoff === 0 ? 0 : backoff + Math.floor(Math.random() * 250);
-    const timeoutId = globalThis.setTimeout(() => {
-      if (deps.reconnectTimeoutRef.current !== timeoutId) return;
-      deps.reconnectTimeoutRef.current = null;
-      if (!isScopeActive(deps, scope) || typeof globalThis.window === 'undefined') return;
-      deps.setForceResubscribeCounter((previous) =>
-        isAgentScopeCurrent(deps.selectedAgentIdRef, scope) ? previous + 1 : previous,
-      );
-    }, delay) as unknown as number;
-    deps.reconnectTimeoutRef.current = timeoutId;
-  };
-}
-
 async function connectRealtime(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
   scheduleReconnect: () => void,
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
+  receivedRef: React.MutableRefObject<ReceivedInserts>,
 ): Promise<void> {
-  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner({
-    ...deps,
-    selectedAgentId: scope.agentId,
-    isCancelled: () => !isScopeActive(deps, scope),
-    isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
-    leaseRef,
-  });
+  const { reconcile, observeBrowserInsert } = createCompletionBackfillOwner(
+    {
+      ...deps,
+      selectedAgentId: scope.agentId,
+      isCancelled: () => !isScopeActive(deps, scope),
+      isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+      leaseRef,
+    },
+    receivedRef.current.browserMessages,
+  );
   try {
     const channel = await subscribeToAgent(
       scope.agentId,
-      createRealtimeHandlers(deps, scope, scheduleReconnect, observeBrowserInsert),
+      createRealtimeHandlers(deps, scope, scheduleReconnect, receivedRef, observeBrowserInsert),
     );
     if (!isScopeActive(deps, scope)) {
       unsubscribe(channel);
@@ -195,6 +185,7 @@ async function connectRealtime(
 function startAgentSubscription(
   deps: RealtimeSubscriptionDeps,
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
+  receivedRef: React.MutableRefObject<ReceivedInserts>,
 ): () => void {
   const scope: AgentScope = {
     agentId: deps.selectedAgentId ?? '',
@@ -225,17 +216,17 @@ function startAgentSubscription(
   if (deps.reconnectTimeoutRef.current) clearTimeout(deps.reconnectTimeoutRef.current);
   deps.reconnectTimeoutRef.current = null;
   const scheduleReconnect = createReconnectScheduler(deps, scope);
-  void connectRealtime(deps, scope, scheduleReconnect, leaseRef);
+  void connectRealtime(deps, scope, scheduleReconnect, leaseRef, receivedRef);
   return cleanup;
 }
 
 export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
   const leaseRef = useRef<CompletionBackfillLease | null>(null);
+  const receivedRef = useReceivedInserts(deps.selectedAgentId);
   const {
     selectedAgentId,
     selectedAgentIdRef,
     canSubscribe,
-    forceResubscribeCounter,
     channelRef,
     reconnectAttemptRef,
     reconnectTimeoutRef,
@@ -252,7 +243,6 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     setIsChatMode,
     setForceResubscribeCounter,
     dispatchMessage,
-    onLoadAgents,
   } = deps;
   useEffect(
     () =>
@@ -261,7 +251,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
           selectedAgentId,
           selectedAgentIdRef,
           canSubscribe,
-          forceResubscribeCounter,
+          forceResubscribeCounter: deps.forceResubscribeCounter,
           channelRef,
           reconnectAttemptRef,
           reconnectTimeoutRef,
@@ -278,16 +268,18 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
           setIsChatMode,
           setForceResubscribeCounter,
           dispatchMessage,
-          onLoadAgents,
+          onLoadAgents: deps.onLoadAgents,
         },
         leaseRef,
+        receivedRef,
       ),
     [
       selectedAgentId,
       canSubscribe,
-      forceResubscribeCounter,
+      deps.forceResubscribeCounter,
       dispatchMessage,
-      onLoadAgents,
+      deps.onLoadAgents,
+      receivedRef,
       selectedAgentIdRef,
       channelRef,
       reconnectAttemptRef,

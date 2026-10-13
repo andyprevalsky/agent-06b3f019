@@ -79,7 +79,11 @@ async function main(): Promise<void> {
     const queries = Array.from({ length: 50 }, (_, index) => `query ${index + 1}`);
     const { deps, rows, searched, maxInFlight } = recorder({});
     await runChatWebSearchRound(
-      { agentId: 'agent-fan-out', decision: decision([...queries, ' query 1 ']) },
+      {
+        agentId: 'agent-fan-out',
+        decision: decision([...queries, ' query 1 ']),
+        routerStreamId: 'router-fan-out',
+      },
       deps
     );
     assert.deepEqual([...searched].sort(), [...queries].sort(), 'every unique query runs once');
@@ -95,7 +99,11 @@ async function main(): Promise<void> {
   {
     const { deps, rows } = recorder({ failQuery: 'b' });
     await runChatWebSearchRound(
-      { agentId: 'agent-partial', decision: decision(['a', 'b', 'c']) },
+      {
+        agentId: 'agent-partial',
+        decision: decision(['a', 'b', 'c']),
+        routerStreamId: 'router-partial',
+      },
       deps
     );
     const started = toolRows(rows, 'IN_PROGRESS').map((row) => row.metadata?.toolCallId);
@@ -118,7 +126,14 @@ async function main(): Promise<void> {
   {
     const { deps, rows, searched } = recorder({ failFastMode: true });
     await assert.rejects(
-      runChatWebSearchRound({ agentId: 'agent-fast-mode', decision: decision(['a', 'b']) }, deps),
+      runChatWebSearchRound(
+        {
+          agentId: 'agent-fast-mode',
+          decision: decision(['a', 'b']),
+          routerStreamId: 'router-fast-mode',
+        },
+        deps
+      ),
       /fast mode lookup failed/
     );
     assert.deepEqual(rows, [], 'no reasoning or chip is persisted when Fast Mode cannot load');
@@ -128,7 +143,12 @@ async function main(): Promise<void> {
   {
     const { deps, rows } = recorder({});
     await runChatWebSearchRound(
-      { agentId: 'agent-early', decision: decision(['a', 'b']), earlyToolCallId: 'early-call' },
+      {
+        agentId: 'agent-early',
+        decision: decision(['a', 'b']),
+        earlyToolCallId: 'early-call',
+        routerStreamId: 'router-early',
+      },
       deps
     );
     assert.equal(

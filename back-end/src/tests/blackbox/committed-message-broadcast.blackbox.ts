@@ -1,0 +1,429 @@
+#!/usr/bin/env tsx
+
+import assert from 'node:assert/strict';
+
+// Exercise the public publisher against an ambiguous broker result, rather
+// than importing a retry helper or modifying the production request deadline.
+process.env.SUPABASE_URL = 'https://broadcast.blackbox.invalid';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'blackbox-service-key';
+process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '0';
+process.env.SUPABASE_BROADCAST_TIMEOUT_MS = '2000';
+process.env.SUPABASE_BROADCAST_BATCH_SIZE = '1';
+async function main() {
+  const publisher = await import('../../providers/chat/supabaseBroadcast');
+  const originalFetch = globalThis.fetch;
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  type WireMessage = { topic: string; event: string; payload: { record: { id?: string } } };
+  const bodyMessages = (init?: RequestInit): WireMessage[] =>
+    (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
+  const message = (id: string) => ({
+    id,
+    timestamp: new Date('2026-10-13T01:34:15.736Z'),
+    text: 'Opening browser',
+    role: 'TOOL',
+    metadata: { toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS', toolCallId: id },
+  });
+
+  let failed = 0;
+  let total = 0;
+  async function test(name: string, run: () => Promise<void>) {
+    total += 1;
+    try {
+      await run();
+      process.stdout.write(`PASS ${name}\n`);
+    } catch (error) {
+      failed += 1;
+      process.stderr.write(`FAIL ${name}: ${String(error)}\n`);
+    } finally {
+      await publisher.__flushBroadcastQueueForTests();
+    }
+  }
+
+  try {
+    await test('committed INSERT retries an accepted but unacknowledged send with identical body', async () => {
+      const bodies: string[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        bodies.push(String(init?.body));
+        if (bodies.length === 1) throw new DOMException('Acknowledgement lost', 'AbortError');
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      await publisher.broadcastMessageInsert('ambiguous-agent', message('committed-a'));
+      await publisher.__flushBroadcastQueueForTests();
+      assert.equal(bodies.length, 2, 'a committed INSERT must survive one ambiguous send failure');
+      assert.equal(
+        bodies[1],
+        bodies[0],
+        'the retry must preserve the original message ID and body'
+      );
+    });
+
+    await test('a stalled agent preserves INSERT order without blocking another agent', async () => {
+      const delivered: string[] = [];
+      let firstStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        firstStarted = resolve;
+      });
+      let firstAttempt = true;
+      let firstAborted = false;
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        if (rows.some((row) => row.payload.record.id === 'ordered-a') && firstAttempt) {
+          firstAttempt = false;
+          firstStarted();
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                firstAborted = true;
+                reject(new DOMException('Request timed out', 'AbortError'));
+              },
+              { once: true }
+            );
+          });
+        }
+        delivered.push(...rows.map((row) => row.payload.record.id ?? row.event));
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      await publisher.broadcastMessageInsert('ordered-agent', message('ordered-a'));
+      await started;
+      await publisher.broadcastMessageInsert('ordered-agent', message('ordered-b'));
+      await publisher.broadcastMessageInsert('healthy-agent', message('healthy'));
+      await sleep(150);
+      assert(
+        delivered.includes('healthy'),
+        'another agent must deliver before the stalled attempt expires'
+      );
+      assert.equal(
+        firstAborted,
+        false,
+        'isolation must not shorten the existing 2 s attempt timeout'
+      );
+      assert(
+        !delivered.includes('ordered-b'),
+        'later INSERTs must not overtake an uncertain earlier INSERT'
+      );
+      await publisher.__flushBroadcastQueueForTests();
+      assert(delivered.indexOf('ordered-a') < delivered.indexOf('ordered-b'));
+    });
+
+    await test('ephemeral stream failures are not retried', async () => {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        return new Response('', { status: 503 });
+      }) as typeof fetch;
+      await publisher.broadcastAssistantStream('ephemeral-agent', 'stream', 'delta', false, 1);
+      await publisher.__flushBroadcastQueueForTests();
+      assert.equal(calls, 1);
+    });
+
+    await test('retryable failures exhaust three sends with an attributed receipt; 403 is not retried', async () => {
+      const write = process.stderr.write;
+      const receipts: string[] = [];
+      process.stderr.write = ((chunk) => {
+        receipts.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        let calls = 0;
+        globalThis.fetch = (async () => {
+          calls += 1;
+          return new Response('', { status: 503 });
+        }) as typeof fetch;
+        await publisher.broadcastMessageInsert('exhaustion-agent', message('exhausted-id'));
+        await publisher.__flushBroadcastQueueForTests();
+        assert.equal(calls, 3, 'retryable failure must have a finite send budget');
+        assert(
+          receipts.some(
+            (line) => line.includes('delivery exhausted') && line.includes('exhausted-id')
+          )
+        );
+        calls = 0;
+        globalThis.fetch = (async () => {
+          calls += 1;
+          return new Response('', { status: 403 });
+        }) as typeof fetch;
+        await publisher.broadcastMessageInsert('exhaustion-agent', message('denied-id'));
+        await publisher.__flushBroadcastQueueForTests();
+        assert.equal(calls, 1, 'permission failures must not be retried');
+      } finally {
+        process.stderr.write = write;
+      }
+    });
+
+    await test('pending message and byte caps reject visibly and release capacity after completion', async () => {
+      const write = process.stderr.write;
+      const receipts: string[] = [];
+      process.stderr.write = ((chunk) => {
+        receipts.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const sent: string[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        sent.push(...bodyMessages(init).map((row) => row.payload.record.id!));
+        await gate;
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        for (let index = 0; index < 40; index += 1) {
+          await publisher.broadcastMessageInsert('capacity-agent', message(`capped-${index}`));
+        }
+        await sleep(30);
+        release();
+        await publisher.__flushBroadcastQueueForTests();
+        assert.equal(sent.length, 32, 'one agent may retain only 32 pending committed INSERTs');
+        assert.equal(receipts.filter((line) => line.includes('delivery rejected')).length, 8);
+        const before = sent.length;
+        await publisher.broadcastMessageInsert('capacity-agent', {
+          ...message('oversized'),
+          text: 'x'.repeat(256 * 1024),
+        });
+        await publisher.__flushBroadcastQueueForTests();
+        assert.equal(
+          sent.length,
+          before,
+          'an oversized notification must not bypass byte admission'
+        );
+        assert(
+          receipts.some((line) => line.includes('delivery rejected') && line.includes('oversized'))
+        );
+        await publisher.broadcastMessageInsert('capacity-agent', message('after-capacity-release'));
+        await publisher.__flushBroadcastQueueForTests();
+        assert.equal(sent.at(-1), 'after-capacity-release');
+      } finally {
+        release();
+        process.stderr.write = write;
+      }
+    });
+
+    await test('initial batch concurrency is bounded and resumes after occupied slots settle', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        await gate;
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        for (let index = 0; index < 65; index += 1) {
+          await publisher.broadcastMessageInsert(
+            `window-agent-${index}`,
+            message(`window-${index}`)
+          );
+        }
+        await sleep(50);
+        assert.equal(
+          calls,
+          64,
+          'the initial dispatcher must have a finite parallel request window'
+        );
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+      assert.equal(calls, 65, 'admitted work must resume once a slot is released');
+    });
+
+    await test('same-topic ephemeral requests preserve order while another topic progresses', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const delivered: string[] = [];
+      globalThis.fetch = (async (_url, init) => {
+        const rows = bodyMessages(init);
+        if (
+          rows.some(
+            (row) =>
+              row.topic === 'agent:ephemeral-ordered' &&
+              (row.payload.record as Record<string, unknown>).status === 'IN_PROGRESS'
+          )
+        ) {
+          started();
+          await gate;
+        }
+        delivered.push(
+          ...rows.map(
+            (row) =>
+              `${row.topic}:${String((row.payload.record as Record<string, unknown>).status ?? row.event)}`
+          )
+        );
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        await publisher.broadcastToolEvent(
+          'ephemeral-ordered',
+          'tool-stream',
+          'call',
+          'browser',
+          'IN_PROGRESS',
+          'Opening'
+        );
+        await firstStarted;
+        await publisher.broadcastToolEvent(
+          'ephemeral-ordered',
+          'tool-stream',
+          'call',
+          'browser',
+          'FINISHED',
+          'Done'
+        );
+        await publisher.broadcastMessageInsert('ephemeral-healthy', message('ephemeral-healthy'));
+        await sleep(50);
+        assert(
+          delivered.includes('agent:ephemeral-healthy:INSERT'),
+          'an independent topic must progress'
+        );
+        assert(
+          !delivered.includes('agent:ephemeral-ordered:FINISHED'),
+          'a terminal event must not overtake its initial event'
+        );
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+      assert(
+        delivered.indexOf('agent:ephemeral-ordered:IN_PROGRESS') <
+          delivered.indexOf('agent:ephemeral-ordered:FINISHED')
+      );
+    });
+
+    await test('retry settlement does not retain initial HTTP request slots', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const attempted = new Set<string>();
+      let healthy = false;
+      let retries = 0;
+      globalThis.fetch = (async (_url, init) => {
+        const topic = bodyMessages(init)[0].topic;
+        if (topic === 'agent:healthy-after-failures') {
+          healthy = true;
+          return new Response('', { status: 202 });
+        }
+        if (!attempted.has(topic)) {
+          attempted.add(topic);
+          return new Response('', { status: 503 });
+        }
+        retries += 1;
+        await gate;
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        for (let index = 0; index < 64; index += 1) {
+          await publisher.broadcastMessageInsert(
+            `settlement-${index}`,
+            message(`settlement-${index}`)
+          );
+        }
+        await sleep(150);
+        assert(retries > 0, 'the fixture must have retry settlements in flight');
+        await publisher.broadcastMessageInsert(
+          'healthy-after-failures',
+          message('healthy-after-failures')
+        );
+        await sleep(50);
+        assert(healthy, 'retry settlements must not occupy the initial request window');
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+    });
+
+    const shardPeers = [
+      'shard-peer-26',
+      'shard-peer-167',
+      'shard-peer-200',
+      'shard-peer-288',
+      'shard-peer-321',
+    ];
+    await test('accounting shard byte admission is bounded across distinct agents', async () => {
+      const write = process.stderr.write;
+      const receipts: string[] = [];
+      process.stderr.write = ((chunk) => {
+        receipts.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        await gate;
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        for (const peer of shardPeers) {
+          await publisher.broadcastMessageInsert(peer, {
+            ...message(peer),
+            text: 'x'.repeat(240 * 1024),
+          });
+        }
+        await sleep(30);
+        assert.equal(calls, 4, 'one accounting shard must not retain more than 1 MiB');
+        assert(
+          receipts.some(
+            (line) => line.includes('delivery rejected') && line.includes(shardPeers[4])
+          )
+        );
+      } finally {
+        release();
+        process.stderr.write = write;
+      }
+      await publisher.__flushBroadcastQueueForTests();
+    });
+
+    await test('retry concurrency is bounded within a shard', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const attempts = new Map<string, number>();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = (async (_url, init) => {
+        const topic = bodyMessages(init)[0].topic;
+        const attempt = (attempts.get(topic) ?? 0) + 1;
+        attempts.set(topic, attempt);
+        if (attempt === 1) return new Response('', { status: 503 });
+        active += 1;
+        peak = Math.max(peak, active);
+        await gate;
+        active -= 1;
+        return new Response('', { status: 202 });
+      }) as typeof fetch;
+      try {
+        for (const peer of shardPeers) await publisher.broadcastMessageInsert(peer, message(peer));
+        await sleep(150);
+        assert.equal(active, 4, 'one shard may issue only four retry requests concurrently');
+      } finally {
+        release();
+      }
+      await publisher.__flushBroadcastQueueForTests();
+      assert.equal(peak, 4);
+      assert([...attempts.values()].every((count) => count === 2));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  process.stdout.write(`RESULTS: ${total - failed}/${total} passed\n`);
+  process.exitCode = failed ? 1 : 0;
+}
+void main().catch((error) => {
+  process.stderr.write(String(error));
+  process.exitCode = 1;
+});
