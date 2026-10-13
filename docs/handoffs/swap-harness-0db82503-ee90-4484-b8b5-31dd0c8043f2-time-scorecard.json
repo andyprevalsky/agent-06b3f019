@@ -1,0 +1,546 @@
+{
+  "schema_version": 1,
+  "original_started_at": "2026-10-12T18:39:09Z",
+  "stop_recorded_at": "2026-10-13T09:13:02.322536+00:00",
+  "status": "BLOCKED_SMS_NEW_DECODER_DECISION",
+  "deployment_complete": false,
+  "durable_checkpoint_before_scorecard": "454fbb8972cef5c3b89fada8250b2d7be1d1e3ac",
+  "runtime_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+  "all_original_source_preserved": true,
+  "original_and_resumed_attempts": 169,
+  "attempt_outcomes": {
+    "passed": 142,
+    "failed": 25,
+    "interrupted": 2
+  },
+  "all_attempts_retained": true,
+  "lane_attempt_accounting": {
+    "prompt-approval": {
+      "attempts": 10,
+      "passed": 7,
+      "failed": 3,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 4.5,
+      "interval_union_seconds": 4.659538984298706
+    },
+    "agent-behavior-approval": {
+      "attempts": 9,
+      "passed": 9,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.6,
+      "interval_union_seconds": 1.4840705394744873
+    },
+    "llm-trajectory-injection-approval": {
+      "attempts": 9,
+      "passed": 9,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.6,
+      "interval_union_seconds": 1.4172847270965576
+    },
+    "prettier": {
+      "attempts": 4,
+      "passed": 3,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 6.9,
+      "interval_union_seconds": 7.021773338317871
+    },
+    "eslint-fix": {
+      "attempts": 4,
+      "passed": 3,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 55.5,
+      "interval_union_seconds": 55.53761386871338
+    },
+    "deploy-command-structural": {
+      "attempts": 5,
+      "passed": 3,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1334.8,
+      "interval_union_seconds": 1334.7648899555206
+    },
+    "seed-cache-decision": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 8.0,
+      "interval_union_seconds": 7.959066867828369
+    },
+    "canonical-seed-whatsapp-content": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.4,
+      "interval_union_seconds": 0.3735182285308838
+    },
+    "backend-structural": {
+      "attempts": 5,
+      "passed": 5,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 113.5,
+      "interval_union_seconds": 113.5003981590271
+    },
+    "eslint": {
+      "attempts": 5,
+      "passed": 5,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 117.6,
+      "interval_union_seconds": 117.60533332824707
+    },
+    "typescript": {
+      "attempts": 5,
+      "passed": 5,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 129.7,
+      "interval_union_seconds": 129.6911895275116
+    },
+    "agents-coverage-blackbox": {
+      "attempts": 5,
+      "passed": 5,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1860.4,
+      "interval_union_seconds": 1860.3843343257904
+    },
+    "backend-coverage-blackbox": {
+      "attempts": 7,
+      "passed": 5,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 1,
+      "summed_attempt_seconds": 4103.5,
+      "interval_union_seconds": 4103.452095031738
+    },
+    "credential-health": {
+      "attempts": 4,
+      "passed": 4,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 8.5,
+      "interval_union_seconds": 8.59748911857605
+    },
+    "amplitude-live": {
+      "attempts": 4,
+      "passed": 4,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 73.7,
+      "interval_union_seconds": 73.70964574813843
+    },
+    "chat-router-failover-live": {
+      "attempts": 4,
+      "passed": 4,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 59.0,
+      "interval_union_seconds": 58.997584104537964
+    },
+    "seed-memory-ratchet": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 330.4,
+      "interval_union_seconds": 330.4299855232239
+    },
+    "claude-code-e2b-smoke": {
+      "attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 59.9,
+      "interval_union_seconds": 59.97834134101868
+    },
+    "semantic": {
+      "attempts": 6,
+      "passed": 6,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 3727.3,
+      "interval_union_seconds": 3727.361172914505
+    },
+    "smoke": {
+      "attempts": 4,
+      "passed": 2,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 3427.9,
+      "interval_union_seconds": 3427.897522687912
+    },
+    "agentcard-lifecycle": {
+      "attempts": 4,
+      "passed": 2,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 6724.0,
+      "interval_union_seconds": 6724.028626203537
+    },
+    "cloudbench-controller": {
+      "attempts": 4,
+      "passed": 3,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 1,
+      "summed_attempt_seconds": 5708.3,
+      "interval_union_seconds": 5708.323352813721
+    },
+    "native-schema-owning": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.5,
+      "interval_union_seconds": 0.46973276138305664
+    },
+    "native-schema-route-compatibility": {
+      "attempts": 2,
+      "passed": 1,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.0,
+      "interval_union_seconds": 0.9988720417022705
+    },
+    "tamy-supervisor-live": {
+      "attempts": 2,
+      "passed": 0,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 244.2,
+      "interval_union_seconds": 244.20603704452515
+    },
+    "swap-harness-integration": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.4,
+      "interval_union_seconds": 0.42314863204956055
+    },
+    "payment-production-identity": {
+      "attempts": 3,
+      "passed": 0,
+      "failed": 3,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 13.8,
+      "interval_union_seconds": 13.741500854492188
+    },
+    "sms-native-argument-validation": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 5.0,
+      "interval_union_seconds": 5.036910057067871
+    },
+    "sms-native-argument-lint": {
+      "attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 2.0,
+      "interval_union_seconds": 2.041236400604248
+    },
+    "deploy-environment-structural": {
+      "attempts": 2,
+      "passed": 2,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 626.7,
+      "interval_union_seconds": 626.7608351707458
+    },
+    "sms-native-phase-compatibility": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.7,
+      "interval_union_seconds": 1.7161285877227783
+    },
+    "sms-native-budget-compatibility": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.7,
+      "interval_union_seconds": 1.663222074508667
+    },
+    "frontend-build": {
+      "attempts": 3,
+      "passed": 3,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 86.6,
+      "interval_union_seconds": 86.63609576225281
+    },
+    "frontend-typescript": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 27.2,
+      "interval_union_seconds": 27.19561457633972
+    },
+    "frontend-format": {
+      "attempts": 6,
+      "passed": 4,
+      "failed": 2,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 10.6,
+      "interval_union_seconds": 10.60089635848999
+    },
+    "frontend-lint": {
+      "attempts": 4,
+      "passed": 3,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 39.400000000000006,
+      "interval_union_seconds": 39.46733236312866
+    },
+    "frontend-coverage-blackbox": {
+      "attempts": 4,
+      "passed": 4,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 974.5,
+      "interval_union_seconds": 974.4518365859985
+    },
+    "deploy-frontend-type-wiring": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1.7,
+      "interval_union_seconds": 1.7378463745117188
+    },
+    "smoke-teardown": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 43.3,
+      "interval_union_seconds": 43.309757232666016
+    },
+    "backend-typescript": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 20.0,
+      "interval_union_seconds": 20.023463249206543
+    },
+    "backend-format": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.6,
+      "interval_union_seconds": 0.5844295024871826
+    },
+    "backend-lint": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 7.0,
+      "interval_union_seconds": 7.033544540405273
+    },
+    "structural-tests": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 6.6,
+      "interval_union_seconds": 6.632182836532593
+    },
+    "backend-browser-provider-repro": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 120.8,
+      "interval_union_seconds": 120.82813692092896
+    },
+    "cloudbench-bootstrap-recovery": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 28.4,
+      "interval_union_seconds": 28.367982625961304
+    },
+    "cloudbench-quiesced-forensic-retirement": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 34.1,
+      "interval_union_seconds": 34.11929154396057
+    },
+    "benchmark-live-results": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 298.1,
+      "interval_union_seconds": 298.126601934433
+    },
+    "browser-transport-owning": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 20.3,
+      "interval_union_seconds": 20.31447172164917
+    },
+    "backend-browser-provider-transport-live": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 130.8,
+      "interval_union_seconds": 130.79241061210632
+    },
+    "backend-transport-structural": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 13.4,
+      "interval_union_seconds": 13.371564626693726
+    },
+    "backend-transport-coverage-blackbox": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 630.3,
+      "interval_union_seconds": 630.2765805721283
+    },
+    "frontend-final-integration-coverage": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 201.7,
+      "interval_union_seconds": 201.7491340637207
+    },
+    "prompt-approval-audit": {
+      "attempts": 1,
+      "passed": 0,
+      "failed": 1,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.8,
+      "interval_union_seconds": 0.7692375183105469
+    },
+    "backend-final-integration-static": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 15.6,
+      "interval_union_seconds": 15.625651121139526
+    },
+    "backend-final-integration-structural": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 13.6,
+      "interval_union_seconds": 13.552321910858154
+    },
+    "backend-final-integration-coverage": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 516.1,
+      "interval_union_seconds": 516.077225446701
+    },
+    "approval-format-integration": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 0.4,
+      "interval_union_seconds": 0.37691211700439453
+    },
+    "semantic-final-integration-ui": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 40.6,
+      "interval_union_seconds": 40.58911442756653
+    },
+    "smoke-final-integration": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1394.9,
+      "interval_union_seconds": 1394.8913669586182
+    },
+    "agentcard-final-integration": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1040.9,
+      "interval_union_seconds": 1040.934298992157
+    },
+    "semantic-final-integration-latency": {
+      "attempts": 1,
+      "passed": 1,
+      "failed": 0,
+      "cancelled_or_interrupted_exit143": 0,
+      "summed_attempt_seconds": 1541.5,
+      "interval_union_seconds": 1541.5290887355804
+    }
+  },
+  "nonoverlapping_wall_accounting_seconds": {
+    "recorded_gate_review_runtime_seconds": 24951.722638130188,
+    "post_actual_command_to_late_collection_unclassified_seconds": 2671.3136649131775,
+    "approval_window_outside_recorded_activity_seconds_NOT_measured_user_idle": 15476.70609664917,
+    "quota_migration_proxy_outside_recorded_activity_seconds": 3085.6228880882263,
+    "other_unclassified_engineering_setup_wait_seconds": 6247.95724773407
+  },
+  "elapsed_wall_seconds": 52433.32253551483,
+  "reconciliation_difference_seconds": 0.0,
+  "accounting_limits": [
+    "Recorded gate/control time includes quota waiting and does not mean continuous CPU or paid execution.",
+    "Approval-window time outside recorded gates includes investigation; it is not measured user idle time.",
+    "Wrong Stripe account created a false human-card prerequisite; this was repaired and is not charged as user-blocked time.",
+    "Late factory collection is separated from actual command execution.",
+    "Ten older precise failure causes remain unknown; original private logs and receipts are preserved."
+  ],
+  "reported_benchmark_llm_cost_cents": 148,
+  "cost_receipts_sha_verified": 13,
+  "cost_limits": [
+    "Direct API and infrastructure costs are not completely metered.",
+    "Fresh AgentCard rounded run cost5c versus provider usage estimate0.067195USD; estimate is not a billed invoice."
+  ],
+  "current_independent_gates_complete": true,
+  "current_owned_stacks_and_providers_cleanup_complete": true,
+  "known_focused_sms_result": {
+    "unchanged_tasks": 3,
+    "passed": 0,
+    "failed": 3,
+    "retained_attempts": 2
+  },
+  "decoder_proposal_sha256": "0f2cade672c076b4128da8a2854b6175f57a2094655702e8c66f28c3ded71bad",
+  "decoder_applied": false,
+  "remaining": [
+    "Explicit new-decoder decision; copy-only condition unmet",
+    "Actual focused3SMS pass",
+    "Bounded current-head review",
+    "Merge and applicable production lanes"
+  ],
+  "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473"
+}
