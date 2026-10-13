@@ -16,6 +16,8 @@ import {
   validateBrowserConnection,
 } from '../../providers/steel/sessionConnection';
 import { createSteelRecoverySession } from '../../providers/steel/sessionRecovery';
+import { recreateSession } from '../../providers/steel/sessionResume';
+import { prisma } from '../../providers/database';
 import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
@@ -49,6 +51,150 @@ const replacementFailure = (cause: string) =>
   );
 
 async function main(): Promise<void> {
+  await test('same-profile replacement releases its uploading source before attaching it', async () => {
+    const originalFind = prisma.browserSession.findUnique;
+    const originalFingerprint = prisma.integration.findUnique;
+    const originalUpdate = prisma.browserSession.updateMany;
+    let released = false;
+    let creates = 0;
+    prisma.browserSession.findUnique = (async () => ({
+      id: 'offline-task',
+      sessionId: 'offline-source',
+      provider: 'steel',
+      providerProfileId: 'offline-profile',
+      providerProfileSource: 'session_bound',
+      providerProfilePersist: true,
+      contextId: 'offline-context',
+      agentId: null,
+      currentUrl: null,
+      startUrl: null,
+      proxyRotationCount: 4,
+      context: { userId: 'offline-user' },
+    })) as typeof originalFind;
+    prisma.integration.findUnique = (async () => null) as typeof originalFingerprint;
+    prisma.browserSession.updateMany = (async (args: unknown) => {
+      assert.deepStrictEqual((args as { where: unknown }).where, {
+        id: 'offline-task',
+        sessionId: 'offline-source',
+      });
+      assert.strictEqual((args as { data: { status: string } }).data.status, 'CLOSED');
+      assert.strictEqual(released, true);
+      return { count: 1 };
+    }) as typeof originalUpdate;
+    try {
+      await assert.rejects(
+        () =>
+          recreateSession(
+            'offline-task',
+            { forceManagedRotation: true },
+            {
+              createSession: async () => {
+                creates++;
+                if (!released)
+                  throw Object.assign(new Error('409 profile UPLOADING until source release'), {
+                    status: 409,
+                  });
+                throw Object.assign(new Error('offline terminal sentinel'), { status: 429 });
+              },
+              releaseSession: async (id) => {
+                assert.strictEqual(id, 'offline-source');
+                released = true;
+              },
+              validateConnection: async () => {
+                throw new Error('unexpected validation');
+              },
+            }
+          ),
+        /offline terminal sentinel/
+      );
+      assert.strictEqual(released, true);
+      assert.strictEqual(creates, 1);
+    } finally {
+      prisma.browserSession.findUnique = originalFind;
+      prisma.integration.findUnique = originalFingerprint;
+      prisma.browserSession.updateMany = originalUpdate;
+    }
+  });
+  for (const mode of [
+    'release-failure',
+    'changed-source',
+    'readonly-profile',
+    'provider-switch',
+  ] as const) {
+    await test(`profile replacement preserves custody for ${mode}`, async () => {
+      const find = prisma.browserSession.findUnique;
+      const fingerprint = prisma.integration.findUnique;
+      const update = prisma.browserSession.updateMany;
+      const profile = prisma.browserProviderProfile.findUnique;
+      let releases = 0;
+      let creates = 0;
+      let writes = 0;
+      prisma.browserSession.findUnique = (async () => ({
+        id: 'offline-task',
+        sessionId: 'offline-source',
+        provider: mode === 'provider-switch' ? 'kernel' : 'steel',
+        providerProfileId: 'offline-profile',
+        providerProfileSource: 'session_bound',
+        providerProfilePersist: mode !== 'readonly-profile',
+        contextId: 'offline-context',
+        agentId: null,
+        currentUrl: null,
+        startUrl: null,
+        proxyRotationCount: 4,
+        context: { userId: 'offline-user' },
+      })) as typeof find;
+      prisma.integration.findUnique = (async () => null) as typeof fingerprint;
+      prisma.browserProviderProfile.findUnique = (async () => ({
+        profileId: 'offline-context-profile',
+      })) as typeof profile;
+      prisma.browserSession.updateMany = (async () => {
+        writes++;
+        return { count: mode === 'changed-source' ? 0 : 1 };
+      }) as typeof update;
+      try {
+        await assert.rejects(
+          () =>
+            recreateSession(
+              'offline-task',
+              { forceManagedRotation: true },
+              {
+                createSession: async () => {
+                  creates++;
+                  throw Object.assign(new Error('offline terminal sentinel'), { status: 429 });
+                },
+                releaseSession: async (id) => {
+                  assert.strictEqual(id, 'offline-source');
+                  releases++;
+                  if (mode === 'release-failure') throw new Error('offline release refused');
+                },
+                validateConnection: async () => {
+                  throw new Error('unexpected validation');
+                },
+              }
+            ),
+          mode === 'release-failure'
+            ? /offline release refused/
+            : mode === 'changed-source'
+              ? /changed concurrently/
+              : /offline terminal sentinel/
+        );
+        assert.strictEqual(
+          releases,
+          mode === 'release-failure' || mode === 'changed-source' ? 1 : 0
+        );
+        assert.strictEqual(
+          creates,
+          mode === 'release-failure' || mode === 'changed-source' ? 0 : 1
+        );
+        assert.strictEqual(writes, mode === 'changed-source' ? 1 : 0);
+      } finally {
+        prisma.browserSession.findUnique = find;
+        prisma.integration.findUnique = fingerprint;
+        prisma.browserSession.updateMany = update;
+        prisma.browserProviderProfile.findUnique = profile;
+      }
+    });
+  }
   await test('validation stops at the first retry once Steel declares startup failure', async () => {
     let connects = 0;
     let probes = 0;
