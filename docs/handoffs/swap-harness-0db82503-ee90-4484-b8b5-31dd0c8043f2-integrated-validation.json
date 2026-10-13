@@ -1,193 +1,243 @@
 {
-  "recorded_at_utc": "2026-10-13T18:55:29.515678+00:00",
+  "recorded_at_utc": "2026-10-13T19:38:43.293443+00:00",
   "task": "Tamy Whatsapp Bug",
   "pr": "https://github.com/Rose-Ai-Labs/rose/pull/1473",
-  "source_head": "1484e8b4e6dbce152354b519d26fc96293d32665",
-  "runtime_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+  "source_head": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+  "runtime_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
   "preserved_checkpoint": "c8e72ed8821f5cc219c616b6454afee729c837a1",
   "preserved_original_warning_skip": "244a961d25558d4df563636ef3f8cc74d7894b89",
   "production_deploy_complete": false,
   "current_integrated_gates": {
-    "backend_coverage": {
-      "status": "pass",
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "domains_passed": 193,
-      "domains_failed": 0,
-      "unit_files_passed": 266,
-      "lines_percent": 89.55,
-      "statements_percent": 89.55,
-      "branches_percent": 80.97,
-      "functions_percent": 92.58,
-      "all_configured_thresholds_met": true,
-      "normal_and_sigterm_teardown_gate": "pass",
-      "all_eighteen_recorded_process_identities_absent_or_reused": true
+    "source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+    "runtime_equivalence": "Backend unchanged from0593671c6; only3test typing lines added",
+    "completed_offline": {
+      "integrated-main-backend-typescript": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 15.6,
+        "started_at": "2026-10-13T18:58:07Z",
+        "finished_at": "2026-10-13T18:58:22Z"
+      },
+      "integrated-main-backend-structural": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 15.0,
+        "started_at": "2026-10-13T19:00:18Z",
+        "finished_at": "2026-10-13T19:00:33Z"
+      },
+      "integrated-main-backend-affected-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 1.3,
+        "started_at": "2026-10-13T19:01:36Z",
+        "finished_at": "2026-10-13T19:01:37Z"
+      },
+      "integrated-main-approval-format": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 0.5,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:03:33Z"
+      },
+      "integrated-main-descend-command": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 51.7,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:04:24Z"
+      },
+      "integrated-main-campaign-owning": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 35.7,
+        "started_at": "2026-10-13T19:03:32Z",
+        "finished_at": "2026-10-13T19:04:08Z"
+      },
+      "integrated-main-campaign-grouping": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 3.3,
+        "started_at": "2026-10-13T19:04:09Z",
+        "finished_at": "2026-10-13T19:04:12Z"
+      },
+      "integrated-main-backend-importer-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 14.3,
+        "started_at": "2026-10-13T19:18:31Z",
+        "finished_at": "2026-10-13T19:18:46Z"
+      },
+      "integrated-main-frontend-typeonly-coverage": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 176.8,
+        "started_at": "2026-10-13T19:22:56Z",
+        "finished_at": "2026-10-13T19:25:53Z"
+      },
+      "integrated-main-frontend-typeonly-lint": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 21.4,
+        "started_at": "2026-10-13T19:22:58Z",
+        "finished_at": "2026-10-13T19:23:19Z"
+      },
+      "integrated-main-frontend-final-static": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 20.8,
+        "started_at": "2026-10-13T19:28:50Z",
+        "finished_at": "2026-10-13T19:29:11Z"
+      },
+      "integrated-main-frontend-final-build": {
+        "status": "passed",
+        "exit_code": 0,
+        "duration_seconds": 26.5,
+        "started_at": "2026-10-13T19:28:52Z",
+        "finished_at": "2026-10-13T19:29:18Z"
+      }
     },
-    "cloud_controller": {
-      "status": "pass",
-      "remote_suites": 9,
-      "native_status_shutdown_control": "pass",
-      "owned_machine": "896269c6e67948",
-      "exact_machine_absence_verified": true
+    "frontend": {
+      "source": "44aef9823b6d8c875d81775a4ae911bde83e7be4",
+      "source_tree": "a4b3211b4a3624acfaefd171116598130059bf55",
+      "typecheck_exit": 0,
+      "owning_tests_passed": 7,
+      "full_coverage": {
+        "files_passed": 160,
+        "tests_total": 2739,
+        "tests_passed": 2736,
+        "tests_skipped": 3,
+        "tests_failed": 0,
+        "exit_code": 0,
+        "vitest_duration_seconds": 163.68,
+        "measured_gate_duration_seconds": 185.3,
+        "thresholds": {
+          "lines": 80,
+          "statements": 75,
+          "functions": 75,
+          "branches": 70
+        },
+        "metrics": {
+          "lines": {
+            "total": 13556,
+            "covered": 11303,
+            "skipped": 0,
+            "pct": 83.38
+          },
+          "statements": {
+            "total": 15225,
+            "covered": 12340,
+            "skipped": 0,
+            "pct": 81.05
+          },
+          "functions": {
+            "total": 3936,
+            "covered": 3203,
+            "skipped": 0,
+            "pct": 81.37
+          },
+          "branches": {
+            "total": 11205,
+            "covered": 8203,
+            "skipped": 0,
+            "pct": 73.2
+          },
+          "branchesTrue": {
+            "total": 0,
+            "covered": 0,
+            "skipped": 0,
+            "pct": 100
+          }
+        },
+        "fresh_summary_generated_at": "2026-10-13T19:10:39.992105+00:00",
+        "summary_sha256": "fa57e854df1e74fc58c64e365d7842fdfeb84076137589226275532f3b8528e8",
+        "existing_skip_count_verified_from_prior_same_task_cohort": true
+      },
+      "affected_paths": 11,
+      "affected_eslint_exit": 0,
+      "affected_format_exit": 0,
+      "production_build_and_bundle_assertion_exit": 0,
+      "vite_seconds": 39.51,
+      "all26coverage_child_process_identities_and6controllers_absent": true,
+      "subsequent_type_only_lint_repairs": "pending fresh checks; no claim this source is unchanged"
     },
-    "static": {
-      "typescript": "pass",
-      "eslint": "pass",
-      "backend_structural": "pass",
-      "complete_deploy_structural_registry": "pass"
+    "canonical_sms": "no current source PASS; latest0/3 on e96 retained",
+    "full_backend_coverage": "pending exact wire-scope decision and source freeze",
+    "smoke_semantics_production": "fresh affected lanes remain required",
+    "backend_equivalence_to059": true,
+    "frontend_after_type_only_lint_repairs": {
+      "coverage_source": "efcf6521c4e37e23dab02348269c9a87b512045a",
+      "coverage": {
+        "files_passed": 160,
+        "tests_passed": 2736,
+        "tests_skipped": 3,
+        "tests_total": 2739,
+        "failed": 0,
+        "vitest_duration_seconds": 155.79,
+        "combined_tsc_coverage_stage_duration_seconds": 176.8,
+        "thresholds": {
+          "lines": 80,
+          "statements": 75,
+          "functions": 75,
+          "branches": 70
+        },
+        "metrics": {
+          "lines": {
+            "total": 13556,
+            "covered": 11303,
+            "skipped": 0,
+            "pct": 83.38
+          },
+          "statements": {
+            "total": 15225,
+            "covered": 12340,
+            "skipped": 0,
+            "pct": 81.05
+          },
+          "functions": {
+            "total": 3936,
+            "covered": 3203,
+            "skipped": 0,
+            "pct": 81.37
+          },
+          "branches": {
+            "total": 11205,
+            "covered": 8203,
+            "skipped": 0,
+            "pct": 73.2
+          },
+          "branchesTrue": {
+            "total": 0,
+            "covered": 0,
+            "skipped": 0,
+            "pct": 100
+          }
+        },
+        "fresh_summary_at": "2026-10-13T19:25:53.574268+00:00",
+        "summary_sha256": "fa57e854df1e74fc58c64e365d7842fdfeb84076137589226275532f3b8528e8",
+        "same_existing_skip_count_as_prior_source44": true
+      },
+      "full_eslint": {
+        "exit_code": 0,
+        "errors": 0,
+        "warnings": 9,
+        "duration_seconds": 21.4,
+        "console_sha256": "51ca336bf318a09b59667490a8e679498b389c016e7f2742964dc7ec33f83e49",
+        "earlier_broader_failed_lint_attempt_preserved": true
+      },
+      "all18captured_coverage_process_identities_absent": true,
+      "monitor_stopped": true,
+      "final_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+      "final_full_typecheck_and_twofile_formatter_exit": 0,
+      "final_production_build_and_bundle_assertion_exit": 0,
+      "difference_after_full_coverage": "One formatting-only call collapse; normalized emitted JavaScript unchanged. No claimed new full coverage run on later format commit."
     },
-    "live_probes": {
-      "credential_health": "pass with existing optional Anthropic funded-key warning",
-      "amplitude": "pass",
-      "chat_router_failover": "pass"
-    },
-    "predeploy_smoke": {
-      "status": "pass",
-      "actual_tasks": 10,
-      "passed": 10,
-      "failed": 0,
-      "duration_seconds": 1362.2,
-      "concurrency": 2,
-      "reported_benchmark_llm_cost_usd": 0.2,
-      "both_batch_benchmark_and_stack_cleanup_receipts": "clean"
-    },
-    "agents_coverage": {
-      "status": "pass",
-      "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
-      "domains": 110,
-      "fast_cache_tests": 184,
-      "unit_tests": 134,
-      "coverage_percent": 82,
-      "duration_seconds": 377.9,
-      "exit_code": 0,
-      "source_changes_after_this_pass": "Only RCA count and independently reviewed source fingerprint registration; agents executable bytes unchanged."
-    },
-    "agentcard_sandbox": {
-      "status": "pass",
-      "source": "4bc120536114baca9c56b1a006206c305a038a56",
-      "run_id": "edf3c373-c7f8-49d5-bdfb-70682bab563f",
-      "tasks": 4,
-      "passed": 4,
-      "failed": 0,
-      "skipped": 0,
-      "duration_seconds": 1023,
-      "reported_benchmark_llm_cost_usd": 0.02,
-      "provider_roots": 4,
-      "provider_cleanup_errors": 0,
-      "provider_cleanup_warnings": 0,
-      "benchmark_and_stack_cleanup_receipts": "clean",
-      "owned_stage_controller_stack_absent": true,
-      "approved_narrow_skip_flag_was_scoped_to_sandbox": true,
-      "skip_was_not_needed": true
-    },
-    "backend_coverage_latest": {
-      "status": "pass",
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "domains_passed": 193,
-      "domains_failed": 0,
-      "unit_files_passed": 266,
-      "lines_percent": 89.55,
-      "statements_percent": 89.55,
-      "branches_percent": 80.97,
-      "functions_percent": 92.58,
-      "all_configured_thresholds_met": true,
-      "normal_and_sigterm_teardown_gate": "pass",
-      "all_eighteen_recorded_process_identities_absent_or_reused": true
-    },
-    "recovery_recipe_requalification": {
-      "status": "pass",
-      "source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
-      "independent_review_source": "56e1e7133effb79fa549b9052a06c073297c51f6",
-      "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
-      "checkout_inputs": 21,
-      "injected_controls": 15,
-      "boot_controls": 3,
-      "only_changed_recipe_input": "frontend existing coverage command prefixes actual application typecheck",
-      "reviewed_phases": [
-        "before-stack-launch",
-        "agent-network-index-bootstrap"
-      ],
-      "quiesced_tests_passed": 15,
-      "bootstrap_tests_passed": 27,
-      "benchmark_live_results_tests_passed": 572,
-      "existing_canonical_skips": 4,
-      "new_skips_or_selectors": false,
-      "all_exact_stage_owners_absent": true,
-      "earlier_RED_preserved": true,
-      "helpers_phase_authority_and_original_receipts_unchanged": true
-    },
-    "frontend_coverage_latest": {
-      "status": "pass",
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "files_passed": 157,
-      "tests_passed": 2725,
-      "existing_skips": 3,
-      "statements_percent": 81.03,
-      "branches_percent": 73.14,
-      "functions_percent": 81.36,
-      "lines_percent": 83.36,
-      "all_configured_thresholds_met": true,
-      "all_seven_recorded_process_identities_absent_or_reused": true
-    },
-    "static_final_integration": {
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "typescript_exit": 0,
-      "backend_structural_exit": 0,
-      "affected_importer_eslint_exit": 0,
-      "changed_backend_prettier_exit": 0,
-      "affected_lint_seeds": 48,
-      "approval_format_owning_exit": 0,
-      "agent_behavior_guard_exit": 0,
-      "trajectory_guard_exit": 0,
-      "prompt_guard": "pass; exact original approved bytes and code-only transport; classification proof private"
-    },
-    "recovery_recipe_continuity": {
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
-      "checkout_inputs_unchanged": 21,
-      "injected_inputs_unchanged": 15,
-      "boot_inputs_unchanged": 3,
-      "independent_actual_native_helper_readback": "pass",
-      "committed_trusted_policy_covers_existing_two_phases": true,
-      "new_registration_required": false
-    },
-    "predeploy_smoke_latest": {
-      "status": "pass",
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "tasks_passed": 10,
-      "tasks_failed": 0,
-      "transient": 0,
-      "normal_batches": 2,
-      "duration_seconds": 1394.6,
-      "reported_benchmark_llm_cost_usd": 0.13,
-      "all_four_benchmark_and_stack_receipts": "token and birth verified clean",
-      "all_recorded_controllers_and_services_absent": true,
-      "kernel_allocations_reconciled": 5,
-      "native_kernel_closed": 5,
-      "e2b_allocations": 1,
-      "e2b_release": "Successful authenticated connect followed by same-instance awaited kill; SDK treats 2xx or 404 as terminal.",
-      "e2b_independent_current_get": "not performed; runtime credential hash not captured, no account guessed",
-      "e2b_raw_delete_status": "not captured; killed versus already absent not distinguished"
-    },
-    "agentcard_sandbox_latest": {
-      "status": "pass",
-      "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
-      "tasks_passed": 4,
-      "tasks_failed": 0,
-      "warnings": 0,
-      "skips": 0,
-      "stage_duration_seconds": 1040.9,
-      "reported_benchmark_llm_cost_usd": 0.05,
-      "provider_priced_usage_estimate_usd": 0.067195,
-      "cost_note": "Reported cents truncate/round differently; provider estimate is not a billed invoice. Infrastructure unmetered.",
-      "all_four_roots_deleted_and_tree_sealed": true,
-      "provider_cleanup_errors": 0,
-      "provider_cleanup_warnings": 0,
-      "provider_sessions_verified_absent": 5,
-      "benchmark_and_stack_receipts": "token-bound clean",
-      "all_recorded_controllers_absent": true,
-      "abandonment_transfer": "genuinely reclaimed, card closed; livemode false; refund succeeded",
-      "narrow_sandbox_warning_flag_scoped": true,
-      "approved_skip_was_not_needed": true
+    "frontend_type_only_repairs": {
+      "recording_player": "Existing props moved into interface plus formatting; normalized emitted JavaScript unchanged",
+      "benchmark_group_fixtures": "Existing production HubRunDetail type replaces erased asany; normalized emitted JavaScript unchanged",
+      "commit": "efcf6521c4e37e23dab02348269c9a87b512045a",
+      "final_format_commit": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
+      "additional_failed_lint_attempts_retained": true,
+      "P2_exclusive_source_overlap": []
     }
   },
   "focused_sms": {
@@ -288,11 +338,12 @@
     "future_gate_instruction_file_unchanged": true
   },
   "remaining_required_gates": [
-    "Repair the native SMS failure within the existing Rose.complete behavior and the user's exact-diff boundaries; broader decoder proposal has been set aside",
-    "Actual unchanged focused SMS3-task pass (current two0/3 failures retained)",
-    "Bounded current-head review",
-    "Merge",
-    "Applicable production lanes and final full time scorecard"
+    "TAMY-CEREBRAS-1 exact existing TS projection wiring decision; unapplied",
+    "Apply approved source, owning native-schema checks and exact unchanged focused SMS3-task pass; all three0/3 prior runs retained",
+    "Finish current frontend and rerun applicable integrated backend/static/smoke/semantic/live gates on changed runtime",
+    "Bounded immutable exact-head review cycle2",
+    "Merge PR1473 and verify applicable production lanes including strict live AgentCard transfer",
+    "Full original+resumed scorecard; no complete invoice or old-proof GREEN claim"
   ],
   "frontend_suppression_cleanup": {
     "recorded_at_utc": "2026-10-13T06:04:36.690159+00:00",
@@ -377,7 +428,7 @@
     "subsequent_terminal_extraction": "Fresh frontend coverage/build passed after equivalent pure-formatter move; semantic source remains explicitly bound to its earlier commit."
   },
   "incoming_main_integration": "normal merge complete at56e1e7133; all ledgers retained; RCA index canonical count refreshed to852.",
-  "latest_integrated_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+  "latest_integrated_source": "2e37e9c2f8c80733188199c9a919881fe2cb1c78",
   "production_payment_fixture": {
     "status": "ready",
     "read_only_prior_run_correlation": "three latest successful production agents match same dedicated107 payer and authoritative DB root",
@@ -401,6 +452,193 @@
       "branches_percent": 80.99,
       "functions_percent": 92.59,
       "normal_and_signal_teardown": "pass"
+    },
+    "pre_main_6f_integration": {
+      "receipt_runtime_source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+      "gates": {
+        "backend_coverage": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "domains_passed": 193,
+          "domains_failed": 0,
+          "unit_files_passed": 266,
+          "lines_percent": 89.55,
+          "statements_percent": 89.55,
+          "branches_percent": 80.97,
+          "functions_percent": 92.58,
+          "all_configured_thresholds_met": true,
+          "normal_and_sigterm_teardown_gate": "pass",
+          "all_eighteen_recorded_process_identities_absent_or_reused": true
+        },
+        "cloud_controller": {
+          "status": "pass",
+          "remote_suites": 9,
+          "native_status_shutdown_control": "pass",
+          "owned_machine": "896269c6e67948",
+          "exact_machine_absence_verified": true
+        },
+        "static": {
+          "typescript": "pass",
+          "eslint": "pass",
+          "backend_structural": "pass",
+          "complete_deploy_structural_registry": "pass"
+        },
+        "live_probes": {
+          "credential_health": "pass with existing optional Anthropic funded-key warning",
+          "amplitude": "pass",
+          "chat_router_failover": "pass"
+        },
+        "predeploy_smoke": {
+          "status": "pass",
+          "actual_tasks": 10,
+          "passed": 10,
+          "failed": 0,
+          "duration_seconds": 1362.2,
+          "concurrency": 2,
+          "reported_benchmark_llm_cost_usd": 0.2,
+          "both_batch_benchmark_and_stack_cleanup_receipts": "clean"
+        },
+        "agents_coverage": {
+          "status": "pass",
+          "source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+          "domains": 110,
+          "fast_cache_tests": 184,
+          "unit_tests": 134,
+          "coverage_percent": 82,
+          "duration_seconds": 377.9,
+          "exit_code": 0,
+          "source_changes_after_this_pass": "Only RCA count and independently reviewed source fingerprint registration; agents executable bytes unchanged."
+        },
+        "agentcard_sandbox": {
+          "status": "pass",
+          "source": "4bc120536114baca9c56b1a006206c305a038a56",
+          "run_id": "edf3c373-c7f8-49d5-bdfb-70682bab563f",
+          "tasks": 4,
+          "passed": 4,
+          "failed": 0,
+          "skipped": 0,
+          "duration_seconds": 1023,
+          "reported_benchmark_llm_cost_usd": 0.02,
+          "provider_roots": 4,
+          "provider_cleanup_errors": 0,
+          "provider_cleanup_warnings": 0,
+          "benchmark_and_stack_cleanup_receipts": "clean",
+          "owned_stage_controller_stack_absent": true,
+          "approved_narrow_skip_flag_was_scoped_to_sandbox": true,
+          "skip_was_not_needed": true
+        },
+        "backend_coverage_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "domains_passed": 193,
+          "domains_failed": 0,
+          "unit_files_passed": 266,
+          "lines_percent": 89.55,
+          "statements_percent": 89.55,
+          "branches_percent": 80.97,
+          "functions_percent": 92.58,
+          "all_configured_thresholds_met": true,
+          "normal_and_sigterm_teardown_gate": "pass",
+          "all_eighteen_recorded_process_identities_absent_or_reused": true
+        },
+        "recovery_recipe_requalification": {
+          "status": "pass",
+          "source": "a8793a97afb7b25e443d75ae6c934b463ac4fc07",
+          "independent_review_source": "56e1e7133effb79fa549b9052a06c073297c51f6",
+          "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+          "checkout_inputs": 21,
+          "injected_controls": 15,
+          "boot_controls": 3,
+          "only_changed_recipe_input": "frontend existing coverage command prefixes actual application typecheck",
+          "reviewed_phases": [
+            "before-stack-launch",
+            "agent-network-index-bootstrap"
+          ],
+          "quiesced_tests_passed": 15,
+          "bootstrap_tests_passed": 27,
+          "benchmark_live_results_tests_passed": 572,
+          "existing_canonical_skips": 4,
+          "new_skips_or_selectors": false,
+          "all_exact_stage_owners_absent": true,
+          "earlier_RED_preserved": true,
+          "helpers_phase_authority_and_original_receipts_unchanged": true
+        },
+        "frontend_coverage_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "files_passed": 157,
+          "tests_passed": 2725,
+          "existing_skips": 3,
+          "statements_percent": 81.03,
+          "branches_percent": 73.14,
+          "functions_percent": 81.36,
+          "lines_percent": 83.36,
+          "all_configured_thresholds_met": true,
+          "all_seven_recorded_process_identities_absent_or_reused": true
+        },
+        "static_final_integration": {
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "typescript_exit": 0,
+          "backend_structural_exit": 0,
+          "affected_importer_eslint_exit": 0,
+          "changed_backend_prettier_exit": 0,
+          "affected_lint_seeds": 48,
+          "approval_format_owning_exit": 0,
+          "agent_behavior_guard_exit": 0,
+          "trajectory_guard_exit": 0,
+          "prompt_guard": "pass; exact original approved bytes and code-only transport; classification proof private"
+        },
+        "recovery_recipe_continuity": {
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "fingerprint": "d4f0e43fc2142ea49b82e64626efd74da443eff0b3f0eac419343c55cc867bda",
+          "checkout_inputs_unchanged": 21,
+          "injected_inputs_unchanged": 15,
+          "boot_inputs_unchanged": 3,
+          "independent_actual_native_helper_readback": "pass",
+          "committed_trusted_policy_covers_existing_two_phases": true,
+          "new_registration_required": false
+        },
+        "predeploy_smoke_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "tasks_passed": 10,
+          "tasks_failed": 0,
+          "transient": 0,
+          "normal_batches": 2,
+          "duration_seconds": 1394.6,
+          "reported_benchmark_llm_cost_usd": 0.13,
+          "all_four_benchmark_and_stack_receipts": "token and birth verified clean",
+          "all_recorded_controllers_and_services_absent": true,
+          "kernel_allocations_reconciled": 5,
+          "native_kernel_closed": 5,
+          "e2b_allocations": 1,
+          "e2b_release": "Successful authenticated connect followed by same-instance awaited kill; SDK treats 2xx or 404 as terminal.",
+          "e2b_independent_current_get": "not performed; runtime credential hash not captured, no account guessed",
+          "e2b_raw_delete_status": "not captured; killed versus already absent not distinguished"
+        },
+        "agentcard_sandbox_latest": {
+          "status": "pass",
+          "source": "1484e8b4e6dbce152354b519d26fc96293d32665",
+          "tasks_passed": 4,
+          "tasks_failed": 0,
+          "warnings": 0,
+          "skips": 0,
+          "stage_duration_seconds": 1040.9,
+          "reported_benchmark_llm_cost_usd": 0.05,
+          "provider_priced_usage_estimate_usd": 0.067195,
+          "cost_note": "Reported cents truncate/round differently; provider estimate is not a billed invoice. Infrastructure unmetered.",
+          "all_four_roots_deleted_and_tree_sealed": true,
+          "provider_cleanup_errors": 0,
+          "provider_cleanup_warnings": 0,
+          "provider_sessions_verified_absent": 5,
+          "benchmark_and_stack_receipts": "token-bound clean",
+          "all_recorded_controllers_absent": true,
+          "abandonment_transfer": "genuinely reclaimed, card closed; livemode false; refund succeeded",
+          "narrow_sandbox_warning_flag_scoped": true,
+          "approved_skip_was_not_needed": true
+        }
+      },
+      "not_current_changed_runtime_proof": true
     }
   },
   "historical_backend_failures": [
@@ -481,7 +719,7 @@
     "all_smoothness": 1.0,
     "root_teardown": "pass; exact root and all four recorded services absent; owned queue workers and required listeners zero; system PG and root database preserved"
   },
-  "all_fresh_independent_continuation_gates_complete": true,
+  "all_fresh_independent_continuation_gates_complete": false,
   "all_current_continuation_owned_stacks_stopped": true,
   "reported_benchmark_llm_cost_so_far_usd": 1.48,
   "cost_coverage": "Reported benchmark cost_cents, including original attempts. Some direct API and infrastructure costs remain unmetered; provider estimates differ from rounded cents.",
@@ -533,5 +771,40 @@
       "seconds": 2.049,
       "scope": "Private candidate only; mocked fetch/no provider calls; no changed-source benchmark success inferred"
     }
-  }
+  },
+  "incoming_main_6f_integration": {
+    "incoming_main": "6f5c4a9f9502dcd0a4a25cfe7cbffccc64edd1e5",
+    "merge_commit": "0593671c6a0304ba5c14007ee17df2183aa3a64a",
+    "paths": 33,
+    "only_conflict": "docs/rca/INDEX.md regenerated from all854 cases; both source cases retained",
+    "rose_sms_catalog_paths_changed": false,
+    "P2_exclusive_source_overlap": [],
+    "P2_shared_ledger_overlap": [
+      "agents/benchmarks/history/task_attempts.jsonl",
+      "agents/benchmarks/history/task_durations.jsonl"
+    ],
+    "all_old_ledger_lines_retained": true,
+    "foreign_main_history_not_counted_as_Tamy_verification": true,
+    "native_recipe_input_continuity": {
+      "all39inputs_unchanged": true,
+      "independent_readback": true
+    }
+  },
+  "incoming_frontend_test_typing_repair": {
+    "source": "0593671c6a0304ba5c14007ee17df2183aa3a64a",
+    "typecheck_exit_before": 2,
+    "diagnostics_before": 2,
+    "path": "front-end/src/tests/blackbox/hooks-lib-insert-delivery.blackbox.ts",
+    "commit": "44aef9823b6d8c875d81775a4ae911bde83e7be4",
+    "runtime_values_and_assertions_unchanged": true,
+    "scratch_full_typecheck": "PASS0diagnostics",
+    "existing_scratch_owning_tests_passed": 7,
+    "actual_full_frontend_gate": "PASS on44aef9823 exact frontend tree before subsequent type-only lint repairs",
+    "reported_early_patch_sha256": "0b42df61bbffdb6dce3aeb2ce2feea7d4545516bd9fa36d8899d81ab462c9055",
+    "early_patch_hash_independently_verified": false,
+    "committed_git_diff_sha256": "b600d62cdfda96aa2673cf7df031229c2a1ecd77fab3008c0b768d62e5fb7095",
+    "final_scratch_patch_sha256": "5447f5f50494dcdd335c9296b5fc53f8729f0e9358783c6078ff44df66501d97",
+    "actual_committed_file_sha256": "0c3a37a0e72802f66fc6fff87dc7b3b85ce55ae6394428548bb0b814cd317df2"
+  },
+  "current_frontend_and_static_checks_complete": true
 }
