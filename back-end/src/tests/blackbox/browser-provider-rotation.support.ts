@@ -397,6 +397,11 @@ export async function runCrossProviderRotationLadder(
         Boolean(steelRotated.browser_session_metadata.steel_profile_id),
       'call 4 lost the Steel profile binding'
     );
+    assert(
+      steelRotated.browser_session_metadata?.steel_profile_id ===
+        switched.browser_session_metadata?.steel_profile_id,
+      'call 4 changed the exact persisted Steel profile'
+    );
     recordAllocation(steelRotated.session_id);
     assert(
       steelRotated.session_id !== undefined && steelRotated.session_id !== switched.session_id,

@@ -373,8 +373,9 @@ export async function recreateSession(
           ? consecutiveCdpTimeouts + 1
           : 0;
       // Each timeout already includes three CDP handshakes against a distinct
-      // new session. Two in a row indicate a provider transport outage; leave
-      // the old session intact and let browser recovery try another provider.
+      // new session. Two in a row indicate a provider transport outage. The
+      // old session stays intact unless its persisted profile required release;
+      // in that case its binding remains honestly CLOSED for browser recovery.
       if (consecutiveCdpTimeouts >= 2) break;
       if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;

@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { assertSteelSameProfileReplacement } from '../blackbox/browser-provider.helpers';
 /**
  * Steel marks a session whose browser never boots `failed` (`startup_failed`)
  * seconds after creation. Validation must stop retrying CDP against that
@@ -10,9 +11,7 @@
  */
 
 import assert from 'node:assert';
-import { chromium, type Browser } from 'playwright';
-import { rotateProxy } from '../../providers/browser';
-import { steel } from '../../providers/steel/session';
+import type { Browser } from 'playwright';
 import {
   steelStartupProbe,
   validateBrowserConnection,
@@ -54,103 +53,8 @@ const replacementFailure = (cause: string) =>
 
 async function main(): Promise<void> {
   for (const retryClosed of [false, true]) {
-    await test(`successful same-profile rebind${retryClosed ? ' after CLOSED failure and release404' : ' without duplicate facade release'}`, async () => {
-      const find = prisma.browserSession.findUnique;
-      const fingerprint = prisma.integration.findUnique;
-      const update = prisma.browserSession.updateMany;
-      const remember = prisma.browserProviderProfile.upsert;
-      const contextUpdate = prisma.browserContext.update;
-      const create = steel.sessions.create;
-      const release = steel.sessions.release;
-      const connect = chromium.connectOverCDP;
-      const row = {
-        id: 'offline-task',
-        sessionId: 'offline-source',
-        provider: 'steel',
-        providerProfileId: 'offline-profile',
-        providerProfileSource: 'session_bound',
-        providerProfilePersist: true,
-        contextId: 'offline-context',
-        agentId: null,
-        currentUrl: null,
-        startUrl: null,
-        proxyRotationCount: 4,
-        status: 'ACTIVE',
-        context: { userId: 'offline-user' },
-      };
-      let ready = false;
-      let releases = 0;
-      let failCreate = retryClosed;
-      prisma.browserSession.findUnique = (async (args: unknown) => {
-        if ('agentId' in ((args as { select?: object }).select ?? {})) return null;
-        return { ...row };
-      }) as typeof find;
-      prisma.integration.findUnique = (async () => null) as typeof fingerprint;
-      prisma.browserSession.updateMany = (async (args: unknown) => {
-        const { where, data } = args as { where: { sessionId: string }; data: Partial<typeof row> };
-        if (where.sessionId !== row.sessionId) return { count: 0 };
-        Object.assign(row, data);
-        return { count: 1 };
-      }) as typeof update;
-      prisma.browserProviderProfile.upsert = (async () => ({})) as typeof remember;
-      prisma.browserContext.update = (async () => ({})) as typeof contextUpdate;
-      steel.sessions.release = (async (id: string) => {
-        assert.strictEqual(id, 'offline-source');
-        releases++;
-        if (ready) throw Object.assign(new Error('already released'), { status: 404 });
-        ready = true;
-        return {};
-      }) as typeof release;
-      steel.sessions.create = (async (input: { profileId?: string }) => {
-        assert.strictEqual(ready, true);
-        assert.strictEqual(row.status, 'CLOSED');
-        assert.strictEqual(input.profileId, 'offline-profile');
-        if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
-        return {
-          id: 'offline-replacement',
-          debugUrl: 'https://offline.invalid',
-          profileId: 'offline-profile',
-        };
-      }) as typeof create;
-      chromium.connectOverCDP = (async () => fakeBrowser()) as typeof connect;
-      try {
-        if (retryClosed) {
-          await assert.rejects(
-            () => recreateSession('offline-task', { forceManagedRotation: true }),
-            /offline create failed/
-          );
-          assert.strictEqual(row.status, 'CLOSED');
-          assert.strictEqual(row.sessionId, 'offline-source');
-          failCreate = false;
-          const recovered = await recreateSession('offline-task', { forceManagedRotation: true });
-          assert.strictEqual(recovered.previousSessionReleased, true);
-          assert.strictEqual(
-            releases,
-            2,
-            'second invocation must use the existing idempotent release404 contract'
-          );
-        } else {
-          const result = await rotateProxy('offline-task', {
-            provider: 'steel',
-            proxyType: 'residential',
-            recoveryAction: 'ip_rotated',
-          });
-          assert.strictEqual(result.sessionId, 'offline-replacement');
-          assert.strictEqual(releases, 1, 'facade released the source a second time');
-        }
-        assert.strictEqual(row.status, 'ACTIVE');
-        assert.strictEqual(row.sessionId, 'offline-replacement');
-      } finally {
-        prisma.browserSession.findUnique = find;
-        prisma.integration.findUnique = fingerprint;
-        prisma.browserSession.updateMany = update;
-        prisma.browserProviderProfile.upsert = remember;
-        prisma.browserContext.update = contextUpdate;
-        steel.sessions.create = create;
-        steel.sessions.release = release;
-        chromium.connectOverCDP = connect;
-      }
-    });
+    await test(`successful same-profile rebind ${retryClosed ? 'from CLOSED' : 'without duplicate release'}`, () =>
+      assertSteelSameProfileReplacement(retryClosed));
   }
   await test('same-profile replacement releases its uploading source before attaching it', async () => {
     const originalFind = prisma.browserSession.findUnique;
