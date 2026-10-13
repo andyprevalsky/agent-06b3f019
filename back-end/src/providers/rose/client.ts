@@ -83,10 +83,6 @@ function requiredEnv(name: string): string {
   return v;
 }
 
-function shortRequestId(): string {
-  return randomUUID().replace(/-/g, '').slice(0, 12);
-}
-
 function openAiApiKey(): string | undefined {
   return process.env[GPT_API_KEY_ENV];
 }
@@ -121,7 +117,7 @@ export async function createStreamingCompletion(
       : options.response_format,
   };
 
-  const requestId = shortRequestId();
+  const requestId = randomUUID().replace(/-/g, '').slice(0, 12);
   const callSite = options.dump_context?.call_site ?? 'chat';
 
   log.info('request', {
