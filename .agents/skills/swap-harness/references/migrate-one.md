@@ -156,7 +156,15 @@ the replacement. Request only the permission named by a typed denial.
 An accepted request waits for **all** old-box agents and queued work to finish.
 Return immediately after acceptance; don't wait for your own destruction.
 The coordinator verifies archival with scoped inventory. Accepted does not
-prove archival or deletion. An expired harness with active/queued work can
+prove archival or deletion. Archived threads mean history was saved and
+machine deletion started; a null `devboxId` only confirms no attached routing
+identity. Verify terminal shutdown/deletion using a supported authoritative
+lifecycle/provider read or an authenticated UI that explicitly reports it.
+Save the old devbox ID, observed terminal state, UTC time and evidence source.
+If those tools do not expose terminal state, report preservation and
+continuation as verified but keep teardown verification pending. Do not wake
+or start a thread on the old box as a status probe, or infer shutdown from an
+unreachable endpoint. An expired harness with active/queued work can
 hold destruction pending until its 30-minute expiry; use only supported,
 authorized exact-turn interruption, or report that pending state. Further old
 box messages cancel pending destruction; continue conversations on the new box.

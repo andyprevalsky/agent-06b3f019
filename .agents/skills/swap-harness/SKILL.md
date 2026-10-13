@@ -78,7 +78,11 @@ project threads → confirm quota stop + identify old box
    Retry observation timeouts on the same turn; review complete `output.text`
    or `threads result --turn <id>`, since reads are bounded previews. Keep the
    coordinator active until all migration workers finish. Verify every PR,
-   replacement's meaningful continuation receipt, and old-box archive state.
+   replacement's meaningful continuation receipt, old-box archive state, and
+   terminal machine shutdown/deletion through an authoritative lifecycle or
+   provider observation. Archival and a null attached devbox ID do not prove
+   physical shutdown; keep teardown verification pending if no supported
+   terminal-status route is available.
    Do not wait for replacements to finish their original tasks; they should
    continue independently. Report actual outcomes and concrete blockers.
 
