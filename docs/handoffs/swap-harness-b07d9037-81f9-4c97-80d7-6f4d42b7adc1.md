@@ -5,7 +5,7 @@ is complete for the two WHM worktrees and the inspected local helpers/variants.
 Private evidence capture and independent NEW verification/meaningful continuation
 are complete. Own OLD archival request is the final pending operation. Run12 finished
 with a task timeout failure and clean benchmark/stack/WMH shutdown.
-Do not interpret this intermediate checkpoint as a completed migration.
+The migration awaits managed OLD archival acceptance and coordinator disposition.
 
 ## Goal, authority and boundaries
 
@@ -48,9 +48,10 @@ is written in a separate worktree.
   `ph7c227aym08mq92ryd0pajzs18g5gtq`, is archived. The coordinator's supported
   reuse probe returned nonretryable `target_not_found`. Its historical partial
   receipt is not a full-checkpoint continuation receipt. Never route to a Template.
-- One new replacement generation is authorized only after complete source and
-  evidence preservation and run12 reconciliation. Stable start key:
-  `swap-harness-whm-20261012-full-checkpoint-replacement`.
+- The full-checkpoint old-box start key
+  `swap-harness-whm-20261012-full-checkpoint-replacement` and its authorized
+  generation2 both failed before placement. The verified root-owned replacement
+  and actual successful key are recorded below; no further starts are needed.
 
 Read the existing thread-based harness handoff, current `WMH_HANDOFF.md`, active
 WMH continuation plan and `.claude/skills/instantiate-whm/SKILL.md`. October12
@@ -171,10 +172,10 @@ original archive-member SHA256 check on the old box. The complete preservation
 manifest and nonsecret archive receipts are in `whm-b07d9037-preservation/`.
 Raw original Claude/subagent context is privately encrypted, not in Git.
 
-Pending: push/verify the complete checkpoint remotely; start one new Codex replacement, verify correct
-checkout/handoff reading plus meaningful continuation receipt; then record and
-request old-box archival only when every important original file and resource
-is preserved or transferred. The old box remains retained until these steps pass.
+The complete checkpoint is pushed and verified remotely. The replacement's
+correct checkout, authenticated original-member restoration and meaningful
+continuation are independently verified below. The only pending migration
+operation is managed OLD archival; original task acceptance remains incomplete.
 
 The bare upstream mirror at `/home/boxes/mirror-work/world-model-harness.git`
 has main and cli-help feature tips matching native upstream reads exactly.
@@ -199,9 +200,9 @@ explicitly authorized generation2 both returned nonretryable
 no native thread, no execution instance and no active turn for both children.
 The exact failed receipts and complete nonsecret replacement prompt are in
 `whm-b07d9037-preservation/`. No further starts are attempted from the old box;
-the coordinator is arranging one supported root-owned start. Original files
-and all six private captures remain saved, and the old box remains retained
-until independent replacement member verification and meaningful continuation.
+the coordinator then created one supported root-owned replacement. Original
+files and all six private captures remain saved; that replacement's independent
+member verification and meaningful continuation are complete below.
 
 The coordinator's ONE supported root-owned start has now been accepted:
 new devbox `e9afcffd-7ba9-4bfd-8703-d770952fe1c3`, internal thread
@@ -213,8 +214,8 @@ request `407eed10-adb1-4d76-b4f3-36aa96b29cd0`; the earlier keys failed terminal
 before any execution attachment. The accepted prompt retains complete
 checkpoint `677068533e050195c62afc8118f3d35a8511f5ea` and all six archive
 verification requirements. Launch receipt is in `whm-b07d9037-preservation/`.
-This is acceptance, not proof of independent restoration or meaningful
-continuation; old-box archival remains pending those receipts.
+Independent restoration and meaningful continuation were subsequently verified
+in the receipt below. OLD archival is now ready to request.
 
 ## Verified continuation and OLD archive intent
 
