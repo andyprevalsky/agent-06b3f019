@@ -140,3 +140,12 @@ resume that same operation within its original budget instead of depending only
 on a busy global backstop. Keep native task outcomes separate from later cleanup
 and local proof, and preserve backend ownership for accepted operations after a
 local wait is cancelled.
+
+
+### Native sandbox qualification and deadline diagnostic on 2026-10-13
+
+The next unchanged four-task sandbox gate on candidate `aad5e7b83fae43bfc24ceac3c33479ca3d10eb27` produced three PASSED tasks and one ERROR. Hub run `4389f88d-4c08-470e-88de-ec92bc818421` retained the failing abandonment agent `c8a9e779-ec5f-452d-9b75-739259a23fe2`, duration542.3s, recorded LLM cost0c and terminal archive. The wrapper exited1 after1893.6s and retained its services/database because cleanup remained unverified. The original failed verdict is preserved.
+
+This occurrence reaches a different boundary from the two original LIVE attempts: acknowledged card closure and repeated real release-observation passes still returned the exact4396c sandbox transfer as consumed with released0. A read-only lifecycle snapshot at12:50 showed cardCLOSED/zero, purchaseHELD, fundingRECLAIMING, no refund and no attention. Aggregate recoveries on the same cardholder cannot establish release of this transfer. The owning provider recurrence is recorded in `2026-10-02-agentcard-abandonment-closed-card-transfer-never-released`; repeated closes or concurrent mints are not demonstrated exclusive causes. The owned callback repair is not a repair of this unreleased-provider outcome.
+
+The new bounded wait also exposed a diagnostic defect: its timer could expire during sleep before any GET, then the generic exception handler reported one unavailable read with an empty TimeoutError string. The last known provider state disappeared from that message. A real25ms local timer and100ms sleep reproduced this with zero GET or recovery calls. Two new normally registered controls failed on aad5 and passed after the diagnostic repair; seven existing negative controls also pass. The wait now identifies expiration of its own timeout separately from a failed read, and both error paths retain the last purchase, funding, card and transfer state. No deadline, recovery eligibility, allocation, payment oracle or verdict changed. The fresh native task remains failed; later recovery cannot turn it into PASS. Final source qualification and review remain pending.

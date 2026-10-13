@@ -3566,6 +3566,94 @@ async def test_owned_payment_recovery_cancels_a_callback_at_its_deadline():
     assert stopped.is_set(), "timed-out owned recovery must relinquish its operation"
 
 
+async def test_owned_payment_sleep_deadline_preserves_the_last_observed_state():
+    """An actual timer expiring before any request cannot be a failed lifecycle read."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+        "agentCard": {"status": "CLOSED", "balanceCents": 0},
+        "orgTransfer": {
+            "id": "local-timer-transfer", "cardId": "local-timer-card",
+            "status": "consumed", "transferredCents": 4396, "releasedCents": 0,
+        },
+    }
+    calls = {"reads": 0, "recoveries": 0}
+
+    async def fetch_lifecycle(_base_url, _agent_id):
+        calls["reads"] += 1
+        raise AssertionError("a request started after the owned timer expired")
+
+    async def recover_lifecycle(_base_url, _agent_id):
+        calls["recoveries"] += 1
+        raise AssertionError("recovery started after the owned timer expired")
+
+    try:
+        await asyncio.wait_for(
+            _wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid", "local-timer-agent",
+                get_task_by_name("agent-payment-abandonment"), lifecycle,
+                timeout_seconds=0.025, poll_interval_seconds=0.1,
+                fetch_lifecycle=fetch_lifecycle, recover_lifecycle=recover_lifecycle,
+                resume_pending_after_seconds=120,
+            ), timeout=0.5,
+        )
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("pending provider state cannot become a terminal success")
+    assert calls == {"reads": 0, "recoveries": 0}
+    assert "remained unavailable" not in message, f"zero requests were made: {message}"
+    assert "did not reach the expected terminal state before timeout" in message
+    for marker in (
+        "purchase.status='HELD'", "walletFunding.status='RECLAIMING'",
+        'agentCard={"status": "CLOSED", "balanceCents": 0}',
+        '"id": "local-timer-transfer"', '"cardId": "local-timer-card"',
+        '"status": "consumed"', '"transferredCents": 4396', '"releasedCents": 0',
+    ):
+        assert marker in message, message
+
+
+async def test_payment_fetch_failure_deadline_keeps_the_last_observed_state():
+    """A genuine failed read keeps its outage diagnosis and the last durable money state."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"}, "walletFunding": {"status": "RECLAIMING"},
+        "agentCard": {"status": "CLOSED", "balanceCents": 0},
+        "orgTransfer": {"status": "consumed", "transferredCents": 4396, "releasedCents": 0},
+    }
+    reads = 0
+
+    async def fetch_lifecycle(_base_url, _agent_id):
+        nonlocal reads
+        reads += 1
+        await asyncio.sleep(0.035)
+        raise ConnectionError("local provider read unavailable")
+
+    try:
+        await asyncio.wait_for(
+            _wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid", "local-fetch-agent",
+                get_task_by_name("agent-payment-abandonment"), lifecycle,
+                timeout_seconds=0.025, poll_interval_seconds=0,
+                fetch_lifecycle=fetch_lifecycle,
+            ), timeout=0.5,
+        )
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("an unavailable lifecycle cannot become a terminal success")
+    assert reads == 1
+    assert "remained unavailable" in message
+    assert "after 1 consecutive reads: local provider read unavailable" in message
+    for marker in ("purchase.status='HELD'", "walletFunding.status='RECLAIMING'", '"status": "CLOSED"', '"status": "consumed"', '"releasedCents": 0'):
+        assert marker in message, message
+
+
 async def test_abandonment_waits_for_cron_reconciliation():
     """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -22230,6 +22318,14 @@ async def run_all_tests():
     await r.record_async(
         "owned_payment_recovery_cancels_callback_at_deadline",
         test_owned_payment_recovery_cancels_a_callback_at_its_deadline,
+    )
+    await r.record_async(
+        "owned_payment_sleep_deadline_preserves_observed_state",
+        test_owned_payment_sleep_deadline_preserves_the_last_observed_state,
+    )
+    await r.record_async(
+        "payment_fetch_failure_deadline_preserves_observed_state",
+        test_payment_fetch_failure_deadline_keeps_the_last_observed_state,
     )
     await r.record_async(
         "abandonment_waits_for_cron_reconciliation",

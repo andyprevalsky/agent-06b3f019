@@ -2903,6 +2903,9 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
     if not isinstance(lifecycle, dict):
         return ""
     parts = []
+    purchase = lifecycle.get("purchase")
+    if isinstance(purchase, dict):
+        parts.append(f"purchase.status={purchase.get('status')!r}")
     wallet_funding = lifecycle.get("walletFunding")
     if isinstance(wallet_funding, dict):
         parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
@@ -2915,6 +2918,10 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
         fields = ("id", "cardId", "status", "transferredCents", "releasedCents")
         parts.append(f"orgTransfer={json.dumps({key: org_transfer.get(key) for key in fields})}")
     return f"; last observed {', '.join(parts)}" if parts else ""
+
+
+class _PaymentReconciliationDeadline(TimeoutError):
+    """The benchmark-owned reconciliation budget expired, rather than a failed lifecycle read."""
 
 
 async def _wait_for_expected_payment_lifecycle(
@@ -2969,6 +2976,7 @@ async def _wait_for_expected_payment_lifecycle(
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
+                    f"{_payment_lifecycle_settlement_state(lifecycle)}"
                 ) from last_fetch_error
             raise RuntimeError(
                 "Payment lifecycle did not reach the expected terminal state before timeout: "
@@ -2976,16 +2984,17 @@ async def _wait_for_expected_payment_lifecycle(
             )
         if recover_lifecycle is None:
             await asyncio.sleep(poll_interval_seconds)
+        owned_timeout = None
         try:
             if recover_lifecycle is None:
                 lifecycle = await fetch_lifecycle(base_url, agent_id)
             else:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("Payment reconciliation deadline reached before recovery")
+                    raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached before recovery")
                 # An owned recovery may take longer than a read. Keep its sleep,
                 # observation and idempotent POST inside the original deadline.
-                async with asyncio.timeout(remaining):
+                async with asyncio.timeout(remaining) as owned_timeout:
                     await asyncio.sleep(poll_interval_seconds)
                     if resume_pending_after_seconds is None:
                         candidate = await recover_lifecycle(base_url, agent_id)
@@ -2993,7 +3002,7 @@ async def _wait_for_expected_payment_lifecycle(
                         candidate = await fetch_lifecycle(base_url, agent_id)
                         now = time.monotonic()
                         if now >= deadline:
-                            raise TimeoutError("Payment reconciliation deadline reached after observation")
+                            raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached after observation")
                         candidate_error = _validate_payment_lifecycle(
                             task, {"_benchmark": {"payment_lifecycle": candidate}}
                         )
@@ -3007,17 +3016,24 @@ async def _wait_for_expected_payment_lifecycle(
                         )
                         if candidate_error is not None and resumable and now >= next_resume_at:
                             if time.monotonic() >= deadline:
-                                raise TimeoutError("Payment reconciliation deadline reached before resuming cleanup")
+                                raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached before resuming cleanup")
                             # The backend still applies its stale-lease CAS and
                             # purchase fencing. This resumes the same allocation.
                             next_resume_at = now + resume_pending_after_seconds
                             candidate = await recover_lifecycle(base_url, agent_id)
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Payment reconciliation response arrived after its deadline")
+                    raise _PaymentReconciliationDeadline("Payment reconciliation response arrived after its deadline")
                 lifecycle = candidate
             consecutive_fetch_errors = 0
             last_fetch_error = None
         except Exception as fetch_error:
+            if isinstance(fetch_error, _PaymentReconciliationDeadline) or (
+                owned_timeout is not None and owned_timeout.expired()
+            ):
+                raise RuntimeError(
+                    "Payment lifecycle did not reach the expected terminal state before timeout: "
+                    f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
+                ) from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
@@ -3031,6 +3047,7 @@ async def _wait_for_expected_payment_lifecycle(
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
+                    f"{_payment_lifecycle_settlement_state(lifecycle)}"
                 ) from fetch_error
             print(
                 "    ⚠ Transient payment lifecycle read failed "
