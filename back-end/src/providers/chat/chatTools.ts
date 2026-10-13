@@ -230,9 +230,14 @@ export async function executeWebSearch(
     });
 
     // Return error message instead of fallback
-    return {
-      answer: `Unable to search at this time: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      sources: [],
-    };
+    return webSearchErrorResult(error);
   }
+}
+
+/** The result a failed search reports in place of its findings. */
+export function webSearchErrorResult(error: unknown): WebSearchResult {
+  return {
+    answer: `Unable to search at this time: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    sources: [],
+  };
 }

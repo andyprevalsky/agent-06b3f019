@@ -1,0 +1,18 @@
+Vendored Python distributions installed through agents/requirements.txt
+(`--find-links ./vendor`, resolved relative to that file from any working directory).
+
+world_model_harness-0.1.0+rose.8e6d55dd-py3-none-any.whl
+  sha256: 5acc541d5380056fa4ee56244bb48b0f13027968eb6f166f9627cde4b7c41917
+  source: github.com/experientiallabs/world-model-harness @ 8e6d55ddc4b846d6a4e5a141983cbdfc0c22c364
+          (Silen Naihin, 2026-07-03). The experientiallabs account was removed upstream in
+          October 2026. The identical commit was re-fetched from github.com/gbsierra/world-model-harness;
+          its `wmh/` tree matches the original pinned build byte for byte.
+  license: none declared upstream. Kept in this private repository for internal use only;
+           do not republish.
+  version: the `+rose.8e6d55dd` local label is the only change to upstream pyproject.toml.
+           PyPI rejects local versions, so this pin can never resolve to PyPI's unrelated
+           world-model-harness 0.1.0 (different code, uploaded 2026-07-21).
+  rebuild: copy wmh/, README.md and pyproject.toml from that commit, set
+           version = "0.1.0+rose.8e6d55dd", then
+           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct 8e6d55dd) pip wheel --no-deps -w dist .
+           The build is reproducible: the sha256 above.

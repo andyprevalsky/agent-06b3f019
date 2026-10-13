@@ -11,6 +11,8 @@
  * MessageList top-level function body below the 80-line strict limit.
  *
  * STATE MACHINE:
+ *   Live web_search chip in a turn that already searched --> folded into that
+ *     turn's single search row (WebSearchGroupItem), not rendered at the tail
  *   Any task + web client --> preview banner --> open app | automatic download fallback
  *   Any task + Mac client ---------------------> no preview banner
  *   <=1 thinking stream --> one indicator; >1 streams --> one per stream
@@ -34,6 +36,7 @@ import { StatusBanners, WebPreviewBanner } from './StatusBanners';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { StreamingTools, StreamingAttentionBubble } from './StreamingMessageItems';
 import { shouldShowStreamingAttention } from './streamingAttentionVisibility';
+import type { WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 const EMPTY_STREAMING_METRICS = { charCount: 0 };
 
@@ -49,6 +52,7 @@ export interface MessageListViewProps {
   agent: AgentDetail | null;
   selectedAgentId: string | null;
   filteredMessages: Message[];
+  webSearchGrouping: WebSearchTurnGrouping;
   exploreStepMap: Map<string, ExploreStep[]>;
   waitForCheckMap: Map<string, WaitForCheck[]>;
   streaming: FilteredStreamingState;
@@ -113,6 +117,20 @@ function ThinkingIndicators({
   });
 }
 
+function thinkingTokenCount(
+  metrics: ReturnType<typeof buildStreamingMetricsBySubAgentId>,
+  subAgentId: string | undefined,
+): number {
+  return Math.round((metrics.get(subAgentId ?? '') ?? EMPTY_STREAMING_METRICS).charCount / 4);
+}
+
+/** Live tool chips for the list tail; web searches folded into a turn's row are left out. */
+function tailTools(tools: Map<string, StreamingTool>, grouping: WebSearchTurnGrouping) {
+  return [...tools.values()].filter(
+    (tool) => !grouping.foldedStreamingToolCallIds.has(tool.tool_call_id),
+  );
+}
+
 export function MessageListView(props: MessageListViewProps) {
   const {
     containerRef,
@@ -126,6 +144,7 @@ export function MessageListView(props: MessageListViewProps) {
     agent,
     selectedAgentId,
     filteredMessages,
+    webSearchGrouping,
     exploreStepMap,
     waitForCheckMap,
     streaming,
@@ -147,15 +166,13 @@ export function MessageListView(props: MessageListViewProps) {
     streamingBubbles,
     streamingTools,
   );
-  const targetStreamingKey = subAgentId ?? '';
-  const targetStreamingMetrics =
-    streamingMetricsBySubAgentId.get(targetStreamingKey) ?? EMPTY_STREAMING_METRICS;
-  const thinkingStreamTokenCount = Math.round(targetStreamingMetrics.charCount / 4);
+  const thinkingStreamTokenCount = thinkingTokenCount(streamingMetricsBySubAgentId, subAgentId);
 
   return (
     <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
       <MessageListItems
         filteredMessages={filteredMessages}
+        webSearchGrouping={webSearchGrouping}
         currentAnimatingId={animation.currentAnimatingId}
         onAnimationComplete={animation.handleAnimationComplete}
         onNavigateToAgent={onNavigateToAgent}
@@ -183,7 +200,7 @@ export function MessageListView(props: MessageListViewProps) {
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
       )}
       {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
-      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
+      <StreamingTools tools={tailTools(streaming.tools, webSearchGrouping)} compact={compact} />
       <ThinkingIndicators
         visible={thinkingVisible}
         compact={compact}

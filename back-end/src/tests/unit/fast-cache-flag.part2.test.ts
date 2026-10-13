@@ -142,8 +142,10 @@ test('chat router caches successful output without gating downstream work', () =
   );
   assert.ok(router.includes('agentFastMode'), 'router must read Fast Mode flag');
   assert.ok(
-    router.includes("contentKey(fastMode.goal, 'chat_router'"),
-    'router must use a canonical request key'
+    router.includes('contentKey(fastMode.goal, routerStage.callSite') &&
+      /initial: \{\s*callSite: 'chat_router',/.test(router) &&
+      /after_search: \{\s*callSite: 'chat_router_after_search',/.test(router),
+    'router must use a canonical request key per stage; the first route keeps chat_router'
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
   assert.ok(
@@ -209,8 +211,8 @@ test('backend chat cache sites support write-only without reads', () => {
     join(process.cwd(), 'src', 'providers', 'chat', 'chatTools.ts'),
     'utf8'
   );
-  const handler = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'chat', 'chatHandler.ts'),
+  const searchRound = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'chat', 'chatWebSearchRound.ts'),
     'utf8'
   );
   assert.ok(
@@ -235,8 +237,8 @@ test('backend chat cache sites support write-only without reads', () => {
     'chat web_search must log write-only mode'
   );
   assert.ok(
-    handler.includes('fastMode.writeEnabled'),
-    'chat handler must pass write-enabled state to web_search'
+    searchRound.includes('fastMode.writeEnabled'),
+    'the chat search round must pass write-enabled state to web_search'
   );
 });
 

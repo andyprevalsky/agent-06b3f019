@@ -8,6 +8,9 @@
  * message with the same toolCallId, so selectors expose both identities.
  * Tool name/status and cloud-agent start phase are exposed as inert data
  * attributes for end-to-end route verification.
+ *
+ * With a web-search grouping, a turn's searches render as one row at the first
+ * search's position (WebSearchGroupItem); the other searches render nothing.
  */
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -16,6 +19,8 @@ import {
   resolveSubAgentStreamingMetrics,
   type SubAgentStreamingMetrics,
 } from './useMessageFiltering';
+import { WebSearchGroupItem } from './WebSearchGroupItem';
+import { EMPTY_WEB_SEARCH_GROUPING, type WebSearchTurnGrouping } from './webSearchTurnGroups';
 
 interface MessageListItemsProps {
   filteredMessages: Message[];
@@ -31,7 +36,15 @@ interface MessageListItemsProps {
   streamingPlanCharCount?: number;
   streamingPlanStartedAtMs?: number;
   streamingMetricsBySubAgentId: Map<string, SubAgentStreamingMetrics>;
+  webSearchGrouping?: WebSearchTurnGrouping;
 }
+
+type MessageListItemProps = Omit<
+  MessageListItemsProps,
+  'filteredMessages' | 'webSearchGrouping'
+> & {
+  message: Message;
+};
 
 function resolveMessageThinkingMetrics(
   message: Message,
@@ -66,8 +79,8 @@ function getMessageRenderKey(message: Message): string {
   return message.message_id;
 }
 
-export function MessageListItems({
-  filteredMessages,
+function MessageListItem({
+  message,
   currentAnimatingId,
   onAnimationComplete,
   onNavigateToAgent,
@@ -80,66 +93,80 @@ export function MessageListItems({
   streamingPlanCharCount,
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
+}: MessageListItemProps) {
+  const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
+  const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
+  const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
+  const toolCallId =
+    typeof message.metadata?.toolCallId === 'string' ? message.metadata.toolCallId : undefined;
+  const toolName =
+    typeof message.metadata?.toolName === 'string' ? message.metadata.toolName : undefined;
+  const toolStatus =
+    typeof message.metadata?.toolStatus === 'string' ? message.metadata.toolStatus : undefined;
+  const rawAgentStartPhase = message.metadata?.startPhase;
+  const agentStartPhase =
+    toolName === 'cloud_agent' &&
+    (rawAgentStartPhase === 'plan' || rawAgentStartPhase === 'execute')
+      ? rawAgentStartPhase
+      : undefined;
+
+  return (
+    <div
+      data-message-id={message.message_id}
+      data-message-role={message.role}
+      data-message-kind={isFinalAnswer ? 'final-answer' : undefined}
+      data-message-state={isFinalAnswer ? 'canonical' : undefined}
+      data-tool-call-id={toolCallId}
+      data-tool-name={toolName}
+      data-tool-status={toolStatus}
+      data-agent-start-phase={agentStartPhase}
+      className="min-w-0 max-w-full"
+    >
+      <MessageBubble
+        message={message}
+        shouldType={message.message_id === currentAnimatingId}
+        onTypingComplete={onAnimationComplete}
+        onNavigateToAgent={onNavigateToAgent}
+        agentId={selectedAgentId || undefined}
+        onSendMessage={selectedAgentId ? onSendMessage : undefined}
+        compact={compact}
+        onSubmitFeedback={onSubmitFeedback}
+        exploreStepHistory={exploreStepMap.get(message.message_id)}
+        waitForChecks={waitForCheckMap.get(message.message_id)}
+        planCharCount={planCharCount}
+        planStreamStartedAtMs={planCharCount !== undefined ? streamingPlanStartedAtMs : undefined}
+        thinkingStreamTokenCount={thinkingMetrics.thinkingStreamTokenCount}
+        thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
+        streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+      />
+    </div>
+  );
+}
+
+export function MessageListItems({
+  filteredMessages,
+  webSearchGrouping = EMPTY_WEB_SEARCH_GROUPING,
+  ...itemProps
 }: MessageListItemsProps) {
   return (
     <>
       {filteredMessages.map((message) => {
-        const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
-        const thinkingMetrics = resolveMessageThinkingMetrics(
-          message,
-          streamingMetricsBySubAgentId,
-        );
-        const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
-        const toolCallId =
-          typeof message.metadata?.toolCallId === 'string'
-            ? message.metadata.toolCallId
-            : undefined;
-        const toolName =
-          typeof message.metadata?.toolName === 'string' ? message.metadata.toolName : undefined;
-        const toolStatus =
-          typeof message.metadata?.toolStatus === 'string'
-            ? message.metadata.toolStatus
-            : undefined;
-        const rawAgentStartPhase = message.metadata?.startPhase;
-        const agentStartPhase =
-          toolName === 'cloud_agent' &&
-          (rawAgentStartPhase === 'plan' || rawAgentStartPhase === 'execute')
-            ? rawAgentStartPhase
-            : undefined;
-
-        return (
-          <div
-            key={getMessageRenderKey(message)}
-            data-message-id={message.message_id}
-            data-message-role={message.role}
-            data-message-kind={isFinalAnswer ? 'final-answer' : undefined}
-            data-message-state={isFinalAnswer ? 'canonical' : undefined}
-            data-tool-call-id={toolCallId}
-            data-tool-name={toolName}
-            data-tool-status={toolStatus}
-            data-agent-start-phase={agentStartPhase}
-            className="min-w-0 max-w-full"
-          >
-            <MessageBubble
-              message={message}
-              shouldType={message.message_id === currentAnimatingId}
-              onTypingComplete={onAnimationComplete}
-              onNavigateToAgent={onNavigateToAgent}
-              agentId={selectedAgentId || undefined}
-              onSendMessage={selectedAgentId ? onSendMessage : undefined}
-              compact={compact}
-              onSubmitFeedback={onSubmitFeedback}
-              exploreStepHistory={exploreStepMap.get(message.message_id)}
-              waitForChecks={waitForCheckMap.get(message.message_id)}
-              planCharCount={planCharCount}
-              planStreamStartedAtMs={
-                planCharCount !== undefined ? streamingPlanStartedAtMs : undefined
-              }
-              thinkingStreamTokenCount={thinkingMetrics.thinkingStreamTokenCount}
-              thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
-              streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+        if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
+        const group = webSearchGrouping.groupsByLeadId.get(message.message_id);
+        if (group) {
+          return (
+            <WebSearchGroupItem
+              key={`web-search-group:${group.key}`}
+              group={group}
+              currentAnimatingId={itemProps.currentAnimatingId}
+              onAnimationComplete={itemProps.onAnimationComplete}
+              agentId={itemProps.selectedAgentId || undefined}
+              compact={itemProps.compact}
             />
-          </div>
+          );
+        }
+        return (
+          <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />
         );
       })}
     </>

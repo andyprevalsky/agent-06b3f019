@@ -32,14 +32,16 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-async function listRunningWorkflowIds(queue: string): Promise<string[]> {
+async function listRunningWorkflows(
+  queue: string
+): Promise<Array<{ workflowId: string; runId: string }>> {
   const client = await getTemporalClient();
   const query = `TaskQueue = "${queue}" AND ExecutionStatus = "Running"`;
-  const ids: string[] = [];
+  const executions: Array<{ workflowId: string; runId: string }> = [];
   for await (const execution of client.workflow.list({ query })) {
-    ids.push(execution.workflowId);
+    executions.push({ workflowId: execution.workflowId, runId: execution.runId });
   }
-  return ids;
+  return executions;
 }
 
 async function mapConcurrently<T>(
@@ -74,17 +76,17 @@ async function main(): Promise<void> {
   }
 
   const concurrency = positiveInteger(process.env.WORKFLOW_MIGRATION_CONCURRENCY, 16);
-  const workflowIds = await listRunningWorkflowIds(queue);
-  process.stdout.write(`Found ${workflowIds.length} running workflow(s) on ${queue}\n`);
+  const executions = await listRunningWorkflows(queue);
+  process.stdout.write(`Found ${executions.length} running workflow(s) on ${queue}\n`);
 
   const summary = { cleared: 0, skipped: 0, failed: 0 };
-  await mapConcurrently(workflowIds, concurrency, async (workflowId) => {
-    const outcome = await clearSupersededGenerationWorkflow(queue, workflowId);
+  await mapConcurrently(executions, concurrency, async ({ workflowId, runId }) => {
+    const outcome = await clearSupersededGenerationWorkflow(queue, workflowId, {}, runId);
     summary[outcome] += 1;
     process.stdout.write(`${outcome.toUpperCase()} ${workflowId}\n`);
   });
 
-  const remaining = await listRunningWorkflowIds(queue);
+  const remaining = (await listRunningWorkflows(queue)).map((execution) => execution.workflowId);
   process.stdout.write(`${JSON.stringify({ queue, ...summary, remaining })}\n`);
   if (summary.failed > 0 || remaining.length > 0) {
     process.exitCode = 1;

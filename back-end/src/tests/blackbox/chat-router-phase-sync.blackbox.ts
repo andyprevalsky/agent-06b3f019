@@ -7,6 +7,9 @@
  * they match the TS mirrors — if someone edits one phase prompt without the other,
  * this fails. It also asserts the router prompt actually embeds both mirrors and
  * that the structured-output `mode` field defers to the prompt's Mode Selection.
+ * Every router stage (the first route, the route after a round of web searches,
+ * and the route once the turn's search rounds are spent) must list exactly the
+ * actions its structured-output schema allows.
  */
 
 import { readFileSync } from 'fs';
@@ -14,9 +17,30 @@ import { resolve, dirname } from 'path';
 import {
   PLAN_PHASE_PROMPT_MIRROR,
   EXECUTE_PHASE_PROMPT_MIRROR,
+  ROUTER_AFTER_SEARCH_SYSTEM_PROMPT,
+  ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
   ROUTER_SYSTEM_PROMPT,
 } from '../../providers/chat/chatPrompts';
-import { ROUTER_JSON_SCHEMA } from '../../providers/chat/routerDecisionJsonSchema';
+import {
+  ROUTER_JSON_SCHEMA,
+  ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
+} from '../../providers/chat/routerDecisionJsonSchema';
+
+const ROUTER_STAGE_PROMPTS = [
+  ['ROUTER_SYSTEM_PROMPT', ROUTER_SYSTEM_PROMPT, ROUTER_JSON_SCHEMA],
+  ['ROUTER_AFTER_SEARCH_SYSTEM_PROMPT', ROUTER_AFTER_SEARCH_SYSTEM_PROMPT, ROUTER_JSON_SCHEMA],
+  [
+    'ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT',
+    ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT,
+    ROUTER_SEARCH_BUDGET_SPENT_JSON_SCHEMA,
+  ],
+] as const;
+
+/** The numbered actions under "# Available Actions". */
+function listedActions(prompt: string): string[] {
+  const section = prompt.split('# Available Actions')[1]?.split('\n# ')[0] ?? '';
+  return [...section.matchAll(/^\d+\. (\w+) - /gm)].map((match) => match[1]);
+}
 
 interface TestResult {
   name: string;
@@ -94,26 +118,44 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
-    'router prompt embeds both phase-prompt mirrors',
+    'every router stage prompt embeds both phase-prompt mirrors',
     () => {
-      if (!ROUTER_SYSTEM_PROMPT.includes(PLAN_PHASE_PROMPT_MIRROR)) {
-        throw new Error('ROUTER_SYSTEM_PROMPT does not embed PLAN_PHASE_PROMPT_MIRROR');
+      for (const [name, prompt] of ROUTER_STAGE_PROMPTS) {
+        if (!prompt.includes(PLAN_PHASE_PROMPT_MIRROR)) {
+          throw new Error(`${name} does not embed PLAN_PHASE_PROMPT_MIRROR`);
+        }
+        if (!prompt.includes(EXECUTE_PHASE_PROMPT_MIRROR)) {
+          throw new Error(`${name} does not embed EXECUTE_PHASE_PROMPT_MIRROR`);
+        }
       }
-      if (!ROUTER_SYSTEM_PROMPT.includes(EXECUTE_PHASE_PROMPT_MIRROR)) {
-        throw new Error('ROUTER_SYSTEM_PROMPT does not embed EXECUTE_PHASE_PROMPT_MIRROR');
+    },
+  ],
+  [
+    'each router stage lists exactly the actions its schema allows',
+    () => {
+      for (const [name, prompt, schema] of ROUTER_STAGE_PROMPTS) {
+        const listed = listedActions(prompt);
+        const allowed = [...schema.properties.action.enum];
+        if (JSON.stringify(listed) !== JSON.stringify(allowed)) {
+          throw new Error(
+            `${name} lists ${JSON.stringify(listed)} but its schema allows ${JSON.stringify(allowed)}`
+          );
+        }
       }
     },
   ],
   [
     'router prompt defines closed output media and satisfaction as emission',
     () => {
-      for (const needle of [
-        'This surface cannot emit: images',
-        'Describing where that representation exists',
-        'A finished agent run does not shrink this rule',
-      ]) {
-        if (!ROUTER_SYSTEM_PROMPT.includes(needle)) {
-          throw new Error(`ROUTER_SYSTEM_PROMPT missing capability contract: ${needle}`);
+      for (const [name, prompt] of ROUTER_STAGE_PROMPTS) {
+        for (const needle of [
+          'This surface cannot emit: images',
+          'Describing where that representation exists',
+          'A finished agent run does not shrink this rule',
+        ]) {
+          if (!prompt.includes(needle)) {
+            throw new Error(`${name} missing capability contract: ${needle}`);
+          }
         }
       }
     },

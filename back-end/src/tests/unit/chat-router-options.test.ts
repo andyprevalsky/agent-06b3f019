@@ -123,14 +123,44 @@ async function run(): Promise<void> {
   );
   assert.deepEqual(
     parsePartialRouterDecisionJson(
+      '{"reasoning":"closed explanation","action":"web_search","queries":["latest provider status","provider outage today"],"goal":"","mode":"plan"'
+    ),
+    {
+      action: 'web_search',
+      queries: ['latest provider status', 'provider outage today'],
+      reasoning: 'closed explanation',
+    }
+  );
+  assert.deepEqual(
+    parsePartialRouterDecisionJson(
       '{"reasoning":"closed explanation","action":"web_search","query":"latest provider status","goal":"","mode":"plan"'
     ),
-    { action: 'web_search', query: 'latest provider status', reasoning: 'closed explanation' }
+    { action: 'web_search', queries: ['latest provider status'], reasoning: 'closed explanation' },
+    'a legacy single-query response recovers as one query'
+  );
+  assert.equal(
+    parsePartialRouterDecisionJson(
+      '{"action":"web_search","queries":["latest provider status","provider out'
+    ),
+    null,
+    'deadline recovery must not guess from an unclosed queries array'
   );
   assert.equal(
     parsePartialRouterDecisionJson('{"action":"web_search","query":"latest provider status'),
     null,
     'deadline recovery must not guess from an unterminated action-specific field'
+  );
+  assert.deepEqual(
+    parsePartialRouterDecisionJson(
+      '{"reasoning":"closed explanation","action":"start_superintelligence","queries":[],"goal":"inspect the workspace","mode":"plan"'
+    ),
+    {
+      action: 'start_superintelligence',
+      goal: 'inspect the workspace',
+      mode: 'plan',
+      reasoning: 'closed explanation',
+    },
+    'an empty queries array before goal does not stop field recovery'
   );
   assert.equal(
     parsePartialRouterDecisionJson('{"reasoning":"embedded \\"action\\":\\"direct_answer\\" text'),

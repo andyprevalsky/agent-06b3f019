@@ -3,7 +3,9 @@
  * Implements the fixed LLM call sequence based on Manus architecture:
  *
  * - direct_answer: Router → Generator (2 LLM calls)
- * - web_search: Router → Search → Generator (2 LLM calls + search)
+ * - web_search: Router → parallel searches → Router → … → Generator or escalation
+ *   (up to MAX_CHAT_SEARCH_ROUNDS search rounds; the Generator overlaps each
+ *   after-search Router and is committed only when that Router answers)
  * - agent_start_task: Router only → start Temporal (1 LLM call, exit)
  *
  * Both Router and Generator stream their reasoning as ASSISTANT_STREAM (thinking).
@@ -19,8 +21,13 @@
  *                             │                 └─ Cerebras Gemma-4-31B
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
- *                             ├─ web_search/future writes ──> refresh messages
+ *                             ├─ web_search ──> round: 1+ queries in parallel ──> reload
  *                             │    └─ closed action ──> abort/discard speculation
+ *                             └─ round results ──> Router (after_search; the last
+ *                                  │                round's route cannot search)
+ *                                  ├─ web_search ──> next round
+ *                                  ├─ direct_answer ──> commit overlapped Generator
+ *                                  └─ escalation ──> discard Generator, Temporal
  *
  * Synchronous chat uses explicit phase routes and performs no OAuth credential
  * lookup or rotation. A later Temporal workflow retains its requested-model auth path.
@@ -35,20 +42,12 @@ import { createMessage } from '../messages';
 import { acceptChatWorkflowExecution } from '../workflowGeneration';
 import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
-import { callGeneratorLlm } from './generatorLlm';
-import { selectChatPhaseModels } from './phaseModels';
-import { executeWebSearch } from './chatTools';
-import { agentFastMode } from '../fastCacheStore';
-import {
-  resolveGeneratorMessages,
-  startInitialChatContext,
-  loadChatModelMessages,
-} from './initialContext';
-import {
-  broadcastToolEvent,
-  broadcastAgentModeStarted,
-  generateStreamId,
-} from './supabaseBroadcast';
+import { MAX_CHAT_SEARCH_ROUNDS, type RouterStage } from './routerDecision';
+import { runChatWebSearchRound, type WebSearchDecision } from './chatWebSearchRound';
+import { callGeneratorLlm, type GeneratorResponse } from './generatorLlm';
+import { selectChatPhaseModels, type ChatPhaseModels } from './phaseModels';
+import { startInitialChatContext, loadChatModelMessages, type ChatMessage } from './initialContext';
+import { broadcastAgentModeStarted } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
@@ -148,8 +147,11 @@ export async function handleChatMessage(config: {
 
   // ============================================
   // BRANCH: start_superintelligence → Escalate to autonomous agent
+  // (from the initial route, or from the route after the web search)
   // ============================================
-  if (decision.action === 'start_superintelligence') {
+  const escalate = async (
+    decision: Extract<RouterDecision, { action: 'start_superintelligence' }>
+  ): Promise<ChatResult> => {
     log.info('[ChatHandler] Escalating to superintelligence', {
       agentId: config.agentId,
       goal: decision.goal,
@@ -249,104 +251,55 @@ export async function handleChatMessage(config: {
     }
 
     return { status: 'escalated', decision };
+  };
+
+  if (decision.action === 'start_superintelligence') {
+    return escalate(decision);
   }
 
   // ============================================
-  // BRANCH: web_search → Execute search, then synthesize
+  // BRANCH: web_search → search, then route again with the results.
+  // The Router owns escalation; the Generator can only reply. After each
+  // round the Router answers, searches again, or escalates; once the turn's
+  // rounds are spent it can only answer or escalate.
   // ============================================
+  let generatorMessages = messages;
+  let earlyGeneratorResponse: GeneratorResponse | null;
   if (decision.action === 'web_search') {
-    // Use tool call ID from early detection, or generate new one
-    const streamId = generateStreamId();
-    const toolCallId = webSearchToolCallId || uuidv4();
-
-    log.info('[ChatHandler] Executing web search', {
-      agentId: config.agentId,
-      query: decision.query,
-      toolCallId,
-      wasDetectedEarly: !!webSearchToolCallId,
-    });
-    const displayQuery =
-      decision.query.length > 80 ? `${decision.query.slice(0, 77)}...` : decision.query;
-    const searchTitle = `🔍 Searching the web for ${displayQuery}`;
-
-    // Insert ASSISTANT message with router's reasoning BEFORE tool execution
-    // This matches worker behavior where ASSISTANT message comes before tools
-    await createMessage({
-      agentId: config.agentId,
-      role: 'ASSISTANT',
-      text: decision.reasoning,
-    });
-
-    // If web_search wasn't detected early by router, broadcast IN_PROGRESS now
-    if (!webSearchToolCallId) {
-      await broadcastToolEvent(
-        config.agentId,
-        streamId,
-        toolCallId,
-        'web_search',
-        'IN_PROGRESS',
-        searchTitle
-      );
+    let search: WebSearchDecision = decision;
+    let earlyToolCallId = webSearchToolCallId;
+    for (let round = 1; ; round += 1) {
+      await runChatWebSearchRound({ agentId: config.agentId, decision: search, earlyToolCallId });
+      generatorMessages = await loadChatModelMessages(chatContextConfig);
+      const next = await routeAfterSearch({
+        agentId: config.agentId,
+        userId: config.userId,
+        messages: generatorMessages,
+        phaseModels,
+        runGenerator,
+        stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
+      });
+      if (next.decision.action === 'start_superintelligence') {
+        return escalate(next.decision);
+      }
+      if (next.decision.action === 'direct_answer') {
+        earlyGeneratorResponse = next.generatorResponse;
+        break;
+      }
+      search = next.decision;
+      earlyToolCallId = next.webSearchToolCallId;
     }
-
-    // Create IN_PROGRESS message in DB (matches worker behavior)
-    // createMessage() auto-broadcasts INSERT event to frontend
-    await createMessage({
-      agentId: config.agentId,
-      role: 'TOOL',
-      text: '',
-      skipDuplicateToolCheck: true,
-      metadata: {
-        title: searchTitle,
-        toolName: 'web_search',
-        toolCallId,
-        toolStatus: 'IN_PROGRESS',
-      },
-    });
-
-    // Execute search. Backend chat mode does not go through the Python
-    // web_search_activity, so it has to pass Fast Mode context explicitly.
-    const fastMode = await agentFastMode(config.agentId);
-    const searchResult = await executeWebSearch(
-      decision.query,
-      fastMode.goal,
-      fastMode.enabled,
-      fastMode.writeEnabled
-    );
-
-    // Save tool result as TOOL message using shared helper
-    // createMessage() auto-broadcasts INSERT event to frontend
-    await createMessage({
-      agentId: config.agentId,
-      role: 'TOOL',
-      text: `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`,
-      skipDuplicateToolCheck: true,
-      metadata: {
-        title: `Web search completed for ${displayQuery}`,
-        toolName: 'web_search',
-        toolCallId,
-        toolStatus: 'FINISHED',
-        query: decision.query,
-        sources: searchResult.sources,
-      },
-    });
+  } else {
+    earlyGeneratorResponse = await speculativeGenerator.commitDirectAnswer();
   }
 
   // ============================================
-  // LLM CALL 2: Generator - Create response
+  // Generator - Create response
   // Streams reasoning as thinking, returns response for true message
-  // (Called for both direct_answer and web_search)
+  // (Called for direct_answer, and for web_search the Router answered)
   // ============================================
   log.info('[ChatHandler] Generating response', { agentId: config.agentId });
 
-  const generatorMessages = await resolveGeneratorMessages({
-    action: decision.action,
-    initialMessages: messages,
-    refreshMessages: async () => loadChatModelMessages(chatContextConfig),
-  });
-
-  const earlyGeneratorResponse =
-    decision.action === 'direct_answer' ? await speculativeGenerator.commitDirectAnswer() : null;
   const generatorResponse = earlyGeneratorResponse ?? (await runGenerator(generatorMessages));
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
@@ -395,6 +348,69 @@ export async function handleChatMessage(config: {
   });
 
   return { status: 'complete', decision };
+}
+
+// ============================================
+// Helper: Route again after a round of web searches
+// ============================================
+/**
+ * Most searches answer the question, so the Generator overlaps this route
+ * under the same commit/discard gate the initial direct_answer speculation uses.
+ */
+async function routeAfterSearch(params: {
+  agentId: string;
+  userId: string;
+  messages: ChatMessage[];
+  phaseModels: ChatPhaseModels;
+  stage: Exclude<RouterStage, 'initial'>;
+  runGenerator: (
+    messages: ChatMessage[],
+    speculative: { abortSignal: AbortSignal; streamGate: TransactionalStreamGate }
+  ) => Promise<GeneratorResponse>;
+}): Promise<{
+  decision: RouterDecision;
+  generatorResponse: GeneratorResponse | null;
+  webSearchToolCallId?: string;
+}> {
+  const speculativeGenerator = createEarlyDirectGeneratorCoordinator({
+    start: (speculative) => params.runGenerator(params.messages, speculative),
+  });
+  let routerResponse;
+  try {
+    routerResponse = await callRouterLlm({
+      agentId: params.agentId,
+      messages: params.messages,
+      model: params.phaseModels.router,
+      providerRoute: params.phaseModels.routerProviderRoute,
+      stage: params.stage,
+      onRouterStarted: speculativeGenerator.start,
+      onActionDetected: (action) => {
+        if (action !== 'direct_answer') void speculativeGenerator.discard();
+      },
+    });
+  } catch (error) {
+    await speculativeGenerator.discard();
+    throw error;
+  }
+
+  recordChatUsage(params.agentId, params.userId, 'chat_router', routerResponse.usage);
+  const { decision } = routerResponse;
+  log.info('[ChatHandler] Router decision after search', {
+    agentId: params.agentId,
+    stage: params.stage,
+    action: decision.action,
+    reasoning: decision.reasoning.substring(0, 100),
+  });
+
+  if (decision.action !== 'direct_answer') {
+    await speculativeGenerator.discard();
+    return {
+      decision,
+      generatorResponse: null,
+      webSearchToolCallId: routerResponse.webSearchToolCallId,
+    };
+  }
+  return { decision, generatorResponse: await speculativeGenerator.commitDirectAnswer() };
 }
 
 // ============================================
