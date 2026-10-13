@@ -62,22 +62,70 @@
     "successProbability": false,
     "firstScorecardNumber": "Approximate trajectory progress, followed by change from the previous iteration; cash raised is separate",
     "bandsPct": [
-      {"range": [0, 10], "stage": "Preparation and source-grounded investor research"},
-      {"range": [10, 25], "stage": "Initial authorized outreach; score within band reflects unique reach, verified fit, usable materials and warm-path evidence"},
-      {"range": [25, 45], "stage": "Sufficient qualified investor pipeline and sustained scheduled follow-up cadence"},
-      {"range": [45, 60], "stage": "Investor responses and held meetings with viable next steps"},
-      {"range": [60, 75], "stage": "Active diligence and negotiation with credible investors"},
-      {"range": [75, 90], "stage": "Credible commitments progressing toward the full target"},
-      {"range": [90, 100], "stage": "Signed instruments, wires and full target settled; 100% requires the goal actually achieved"}
+      {
+        "range": [
+          0,
+          10
+        ],
+        "stage": "Preparation and source-grounded investor research"
+      },
+      {
+        "range": [
+          10,
+          25
+        ],
+        "stage": "Initial authorized outreach; score within band reflects unique reach, verified fit, usable materials and warm-path evidence"
+      },
+      {
+        "range": [
+          25,
+          45
+        ],
+        "stage": "Sufficient qualified investor pipeline and sustained scheduled follow-up cadence"
+      },
+      {
+        "range": [
+          45,
+          60
+        ],
+        "stage": "Investor responses and held meetings with viable next steps"
+      },
+      {
+        "range": [
+          60,
+          75
+        ],
+        "stage": "Active diligence and negotiation with credible investors"
+      },
+      {
+        "range": [
+          75,
+          90
+        ],
+        "stage": "Credible commitments progressing toward the full target"
+      },
+      {
+        "range": [
+          90,
+          100
+        ],
+        "stage": "Signed instruments, wires and full target settled; 100% requires the goal actually achieved"
+      }
     ],
     "limitation": "Band placement is judgment based on original records, not an empirically calibrated fraction of work. Stage presence alone is insufficient for later bands; outreach volume, conversion, authorization and outstanding blockers must be reported. Scores may regress when evidence invalidates a milestone."
   },
   "stallAndFixtureVerification": {
     "scope": "Additional read-only inspection of original prediction records/final joined history and the replacement isolated restored fixture; no new trial",
     "longFailedNativePredictions": 4,
-    "nativeElapsedSecondsRange": [979.678, 994.712],
+    "nativeElapsedSecondsRange": [
+      979.678,
+      994.712
+    ],
     "providerFailureObservation": "Four Foundry partial-output attempts ended with RoseDeadlineError: idle for120s; native HTTP500 records finish in the same terminal interval. Exact provider-to-native mapping and causal root remain unproven.",
-    "longFailedPredictionIntervalUtc": ["2026-10-12T23:17:36.315Z", "2026-10-12T23:34:11.027Z"],
+    "longFailedPredictionIntervalUtc": [
+      "2026-10-12T23:17:36.315Z",
+      "2026-10-12T23:34:11.027Z"
+    ],
     "successfulPredictionsFinishedInThatIntervalAndPresentInFinalHistory": 7,
     "successfulPredictionsFinishedAfterThoseFailuresAndPresentInFinalHistory": 32,
     "wholeRunPermanentDeadlockObserved": false,
@@ -130,7 +178,12 @@
       "startedCallsWithoutTerminalTiming": 4,
       "timingSource": "Exact request_id matching in original WMH final serve log; elapsed_s where available, otherwise start/done timestamps recorded to whole-second precision",
       "precision": "Approximate:102 Foundry success durations use second-resolution timestamps;6 OpenRouter success and4 failure logs supply elapsed_s",
-      "successOnly": {"count": 108, "avgSeconds": 128.40225925925927, "p95Seconds": 203, "p99Seconds": 265}
+      "successOnly": {
+        "count": 108,
+        "avgSeconds": 128.40225925925927,
+        "p95Seconds": 203,
+        "p99Seconds": 265
+      }
     },
     "coverageLimit": "Calls without terminal timing are excluded, rather than assigning a fabricated finish time. These are observed-terminal-call latency distributions, not a complete distribution for all started calls.",
     "latencyBreakdown": {
@@ -138,12 +191,19 @@
       "agentActualModel": "gpt-6-sol-foundry",
       "WMHAzureSuccessfulCalls": 102,
       "WMHOpenRouterSuccessfulCalls": 6,
-      "WMHActualModels": ["gpt-6.1-sol-foundry", "openai/gpt-6.1-sol"],
+      "WMHActualModels": [
+        "gpt-6.1-sol-foundry",
+        "openai/gpt-6.1-sol"
+      ],
       "WMHAzureOnlySuccessfulMeanSeconds": 124.7843137254902,
       "WMHFallbackSuccessfulMeanSeconds": 189.90733333333333,
       "WMHMeanFirstProductiveChunkSeconds112TerminalCalls": 20.910116071428572,
       "WMHMeanRemainingTimeAfterFirstProductiveChunkSeconds112TerminalCalls": 110.76113392857143,
-      "WMHFirstProductiveKinds": {"codex_reasoning_item": 93, "reasoning": 17, "content": 2},
+      "WMHFirstProductiveKinds": {
+        "codex_reasoning_item": 93,
+        "reasoning": 17,
+        "content": 2
+      },
       "firstProductiveChunkLimit": "Mostly reasoning signals, not first visible answer token; remaining time includes subsequent reasoning/generation, delivery and failed-call idle time, not a measured pure decode duration",
       "agentMeanInputTokens125FinalMeteredCalls": 16629.088,
       "agentMeanOutputTokens125FinalMeteredCalls": 775.024,
@@ -151,7 +211,10 @@
       "WMHMeanOutputTokens108FinalMeteredCalls": 6482.805555555556,
       "WMHPoolFromAll116StartLogs": "rose-wmh-gpt61",
       "WMHConfiguredFoundryAndFallbackReasoningEffort": "xhigh",
-      "WMHActualResponseOutcomeBranchRange": [2, 6],
+      "WMHActualResponseOutcomeBranchRange": [
+        2,
+        6
+      ],
       "causalInterpretation": "Both sets used Azure. WHM's much larger input/output workload, different model and high-effort distribution generation are plausible latency drivers. The four logged failures add about3.27s to the observed mean versus successful calls; fallback calls are slower but only6 of108 successes. These observations do not isolate model, effort, context length, generation length, deployment load or transport as a proven causal root; no controlled same-input comparison was run."
     },
     "widerNativePredictionOperationDiagnostic": {
@@ -272,7 +335,16 @@
       "hits": 0,
       "lookups": 116,
       "stores": 107,
-      "denominator": "response-cache lookups"
+      "denominator": "response-cache lookups",
+      "loggedStoreQualification": {
+        "loggedStores": 107,
+        "explicitFrozenNamespaceSkips": 107,
+        "durableWritesFromThoseEvents": 0,
+        "originalWMHLookups": 116,
+        "originalAgentLookups": 129,
+        "combinedOriginalLookups": 245,
+        "explanation": "Keep original logged107 stores as historical evidence; every such event corresponds to an explicit skipped write. They are not durable replay entries."
+      }
     },
     "agentPromptCacheFinalAllInput": {
       "hitPct": 77.27509770830487,
