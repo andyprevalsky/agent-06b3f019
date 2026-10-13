@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from benchmarks.wmh_grounding_filter import failed_tool_result
 from benchmarks.wmh_execution_policy import execution_identity, validate_execution_identity
+from benchmarks.wmh_grounding_filter import failed_tool_result
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from providers.rose.client import RoseClient
 from providers.rose.errors import RoseStallError
@@ -163,6 +163,7 @@ def test_all_partial_provider_failures_stop_after_one_fallback():
 
 def test_bridge_rejects_runtime_settings_different_from_served_configuration(monkeypatch):
     import httpx
+
     from benchmarks.experiential_bridge import build_provider_bridge
     monkeypatch.setattr("benchmarks.wmh_execution_policy.validate_execution_identity", lambda identity, *_args, **_kw: identity)
     policy = "rose-outcome-distribution-v3"
@@ -194,9 +195,11 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
     import json
     import sys
     from pathlib import Path
+
     import httpx
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests/blackbox"))
     from _test_utils import set_mock_handler, teardown_mock
+
     from providers.fast_cache import client as cache
     body = []
     def handler(request):
@@ -227,9 +230,9 @@ def test_flash_json_mode_reaches_foundry_body_and_default_stays_plain(monkeypatc
 
 @pytest.mark.parametrize("accepted", [False, True])
 def test_store_event_matches_actual_cache_write_result(monkeypatch, accepted):
-    from providers.fast_cache.context import FastCacheContext, set_context, reset_context
-    from providers.fast_cache import client as cache
     import providers.rose.client as module
+    from providers.fast_cache import client as cache
+    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
     events = []
     monkeypatch.setattr(module.logger, "info", lambda event, **kw: events.append(event))
     monkeypatch.setattr(cache, "cache_set", AsyncMock(return_value=accepted))
@@ -268,6 +271,7 @@ def test_json_mode_is_bound_in_execution_and_cache_identity():
 
 def test_bridge_retains_rejected_reply_for_native_private_parser_repro():
     import httpx
+
     from benchmarks.experiential_bridge import build_provider_bridge
     from benchmarks.wmh_rose_provider import _WMHInvalidPrediction
     rejected = '{"outcomes":[{"id":"bad unescaped "quote""}]}'
@@ -285,3 +289,169 @@ def test_bridge_retains_rejected_reply_for_native_private_parser_repro():
         assert detail["kind"] == "invalid_prediction"
         assert detail["rejected_response"]["content"] == rejected
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [
+    "comma", "colon", "extra_data", "duplicate_key", "probability", "call_identity", "outcome_keys",
+])
+def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_strict(monkeypatch, failure):
+    """Synthetic boundary controls, not a replay of Run13's missing reply bytes."""
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+
+    from benchmarks import wmh_rose_provider as module
+    from benchmarks.experiential_bridge import build_provider_bridge
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+
+    marker = "private-rejected-reply-marker"
+    distribution = {
+        "schema": "rose.wmh_timed_outcome_distribution.v1",
+        "outcomes": [{
+            "id": "observed", "probability": 1, "elapsed_ms": 1000,
+            "description": "offline result", "state_patch": [],
+            "tool_results": [{"call_id": "call-1", "content": marker, "is_error": False}],
+        }],
+    }
+    if failure == "probability":
+        distribution["outcomes"][0]["probability"] = 0.7
+    elif failure == "call_identity":
+        distribution["outcomes"][0]["tool_results"][0]["call_id"] = "foreign-call"
+    elif failure == "outcome_keys":
+        distribution["outcomes"][0]["unexpected"] = True
+    rejected = json.dumps(distribution)
+    if failure == "comma":
+        rejected = rejected.replace('", "content"', '" "content"')
+    elif failure == "colon":
+        rejected = rejected.replace('"content":', '"content"')
+    elif failure == "extra_data":
+        rejected += " {}"
+    elif failure == "duplicate_key":
+        rejected = rejected.replace('"probability": 1', '"probability": 1, "probability": 1')
+
+    request = {
+        "environment_state": {},
+        "candidate_response": {"tool_calls": [{"call_id": "call-1"}]},
+    }
+    messages = [{"role": "system", "content": "offline distribution fixture"},
+                {"role": "user", "content": json.dumps(request)}]
+    safe_usage = {"prompt_tokens": 10, "completion_tokens": 5, "finish_reason": "stop"}
+    leased_usage = {**safe_usage, "compute_token_used": {"accessToken": "private-lease-marker"}}
+    logs = []
+    monkeypatch.setattr(module.logger, "warning", lambda event, **kw: logs.append((event, kw)))
+
+    async def stream(self, **kwargs):
+        yield StreamChunk(kind="metadata", data={"actual_model": "offline-model"})
+        yield StreamChunk(kind="content", data={"text": rejected})
+        yield StreamChunk(kind="usage", data=leased_usage)
+        yield StreamChunk(kind="done", data={})
+
+    monkeypatch.setattr(RoseClient, "_complete_impl", stream)
+    client = object.__new__(module._WMHCacheSafeRoseClient)
+    seen = []
+
+    async def consume():
+        with pytest.raises(module._WMHInvalidPrediction) as caught:
+            async for chunk in client._complete_impl(
+                call_site="wmh_world_model_timed_distribution_v1", messages=messages,
+            ):
+                seen.append(chunk)
+        assert caught.value.rejected_response["content"] == rejected
+        assert caught.value.rejected_response["usage"] == safe_usage
+        assert caught.value.rejected_response["request"] == {
+            "call_site": "wmh_world_model_timed_distribution_v1", "messages": messages,
+        }
+
+    asyncio.run(consume())
+    assert not any(chunk.kind == "done" for chunk in seen), "Rejected output reached DEMO cache completion"
+
+    cached_client = SimpleNamespace(collect=AsyncMock(return_value=SimpleNamespace(
+        content=rejected, usage=leased_usage, actual_model="offline-model",
+    )))
+    usage = module.RoseUsageAccumulator()
+    provider = module.RoseWMHProvider(
+        client=cached_client, usage=usage, protocol=TIMED_DISTRIBUTION_PROTOCOL, user_id="offline-user",
+    )
+    monkeypatch.setattr(provider, "_lease_auth", AsyncMock(return_value=(None, None)))
+
+    async def call_bridge():
+        app = build_provider_bridge(provider, "offline-token")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as bridge:
+            response = await bridge.post("/complete", headers={"X-Rose-Provider-Token": "offline-token"}, json={
+                "session_id": "offline-session", "prediction_id": "offline-prediction",
+                "maximum_output_tokens": 16384, "messages": messages,
+            })
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["kind"] == "invalid_prediction"
+        assert detail["rejected_response"] == {
+            "content": rejected, "actual_model": "offline-model", "usage": safe_usage,
+            "request": {
+                "pool": "rose-1-ultra", "messages": cached_client.collect.await_args.kwargs["messages"],
+                "max_tokens": 16384, "call_site": "wmh_world_model_timed_distribution_v1",
+                "dump_context": False, "cache_namespace": "wmh:session:offline-session",
+                "result_required": True, "prefer_azure": False, "retry_partial_errors": True,
+            },
+        }
+        assert marker not in detail["reason"]
+        assert "private-lease-marker" not in response.text
+
+    asyncio.run(call_bridge())
+    assert usage.snapshot().calls == 1
+    assert marker not in repr(logs) and "private-lease-marker" not in repr(logs)
+
+
+def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(monkeypatch):
+    """Capture the actual collect input, including stream units and format flags."""
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+
+    from benchmarks import wmh_rose_provider as module
+    from benchmarks.experiential_bridge import build_provider_bridge
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from benchmarks.wmh_wire_stream import STREAM_GUIDE
+    from benchmarks.wmh_wire_stream_test import evidence
+
+    monkeypatch.setenv("WMH_WIRE_STREAM", "1")
+    rejected = '{"private-wire-reply-marker":'
+    client = SimpleNamespace(collect=AsyncMock(return_value=SimpleNamespace(
+        content=rejected, usage={"prompt_tokens": 10, "completion_tokens": 1}, actual_model="offline-model",
+    )))
+    provider = module.RoseWMHProvider(
+        client=client, protocol=TIMED_DISTRIBUTION_PROTOCOL, pool="rose-1-flash",
+        prefer_azure=True, json_mode=True, user_id="offline-user", usage=module.RoseUsageAccumulator(),
+    )
+    secret = "private-wire-auth-marker"
+    monkeypatch.setattr(provider, "_lease_auth", AsyncMock(return_value=(None, {"accessToken": secret})))
+    logs = []
+    monkeypatch.setattr(module.logger, "warning", lambda event, **kw: logs.append((event, kw)))
+    monkeypatch.setattr(module.logger, "info", lambda event, **kw: logs.append((event, kw)))
+
+    async def run():
+        app = build_provider_bridge(provider, "offline-token")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://offline") as bridge:
+            response = await bridge.post("/complete", headers={"X-Rose-Provider-Token": "offline-token"}, json={
+                "session_id": "wire-session", "prediction_id": "wire-prediction", "maximum_output_tokens": 16384,
+                "messages": [{"role": "system", "content": "offline policy"},
+                             {"role": "user", "content": json.dumps(evidence([], call="wire-call"))}],
+            })
+        assert response.status_code == 422
+        capture = response.json()["detail"]["rejected_response"]
+        sent = client.collect.await_args.kwargs
+        assert capture["request"] == {
+            "pool": "rose-1-flash", "messages": sent["messages"], "max_tokens": 16384,
+            "call_site": "wmh_world_model_timed_distribution_v1", "dump_context": False,
+            "cache_namespace": "wmh:session:wire-session", "result_required": True,
+            "prefer_azure": True, "retry_partial_errors": True, "json_mode": True,
+        }
+        assert STREAM_GUIDE in sent["messages"][0]["content"]
+        assert any(isinstance(message["content"], list) for message in sent["messages"])
+        assert sent["gpt_auth"]["accessToken"] == secret
+        assert secret not in response.text
+        assert capture["content"] == rejected
+
+    asyncio.run(run())
+    assert "private-wire-reply-marker" not in repr(logs) and secret not in repr(logs)

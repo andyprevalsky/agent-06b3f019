@@ -1,0 +1,18 @@
+--- a/back-end/src/domains/agents/types.ts
++++ b/back-end/src/domains/agents/types.ts
+@@ -53,6 +53,7 @@
+ export const NestedResponseSchemaFieldSchema = z
+   .object({
+     name: z.string(),
++    description: z.string().optional(),
+     type: z.enum([
+       'str',
+       'int',
+@@ -73,6 +74,7 @@
+ export const ResponseSchemaFieldSchema = z
+   .object({
+     name: z.string(),
++    description: z.string().optional(),
+     type: z.enum([
+       'str',
+       'int',

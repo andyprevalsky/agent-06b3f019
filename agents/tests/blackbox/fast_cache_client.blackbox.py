@@ -18,7 +18,10 @@ These tests drive the real client with a hanging backend and the real
 """
 
 import asyncio
+import json
 from datetime import timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -217,6 +220,110 @@ async def test_shared_fetch_failure_is_a_plain_exception_for_every_waiter():
         cache_client._GET_RETRY_BACKOFF_S = orig_backoff
 
 
+async def _native_demo_recording_case(*, compatibility: bool, recording: bool, status: int):
+    """Exercise the real native context, cache write policy and Rose completion.
+
+    Only the external model stream and cache HTTP server are controlled. A
+    successful model response is not a persisted replay entry when the frozen
+    namespace or the server rejects its write.
+    """
+    import benchmarks.wmh_rose_provider as native
+    import providers.fast_cache.client as cache_client
+    import providers.fast_cache.rose_cache as cache_wrapper
+    import providers.rose.client as rose_module
+    from providers.fast_cache.context import reset_context, set_context
+    from providers.rose.types import StreamChunk
+
+    rows, events, provider_calls = {}, [], []
+
+    class _CacheBackend:
+        async def post(self, url, *, json, **kwargs):
+            del kwargs
+            assert url == "http://cache.test/api/fast-cache/set", url
+            if status == 200:
+                rows[json["key"]] = json["value"]
+            return type("Response", (), {"status_code": status})()
+
+    async def read_first(keys):
+        return next(((rows[key], key) for key in keys if key in rows), (None, None))
+
+    async def stream(**kwargs):
+        provider_calls.append(kwargs)
+        yield StreamChunk(kind="content", data={"text": "offline native prediction"})
+        yield StreamChunk(kind="done", data={})
+
+    tasks = json.loads((Path(__file__).parents[2] / "benchmarks/tasks.json").read_text())
+    goal = next(task["prompt"] for task in tasks if task["name"] == "raise-5m-rose-labs-brex")
+    context = native._WMHFastCacheContext(
+        enabled=True, goal=goal, root_goal=goal, write_enabled=True, provider_fast_mode=False,
+    )
+    assert context.read_enabled and context.soft_complete_allowed
+    client = rose_module.RoseClient(openrouter_key="offline")
+    env = {
+        "FAST_MODE_CACHE_RECORD_DEMO": "1" if recording else "0",
+        "FAST_MODE_CACHE_DISABLE_WRITE_THROUGH": "0",
+        "BENCHMARK_DEMO_CACHE_READ_ONLY": "0",
+    }
+    with patch.dict("os.environ", env), \
+            patch.object(cache_client, "_backend", return_value=("http://cache.test", "offline")), \
+            patch.object(cache_client, "_shared_client", return_value=_CacheBackend()), \
+            patch.object(cache_client, "_archive_cache_write", new=AsyncMock()), \
+            patch.object(cache_client, "cache_get_first", side_effect=read_first), \
+            patch.object(cache_client, "cache_get_position_fallback", new=AsyncMock(return_value=(None, None))), \
+            patch.object(client, "_complete_impl", new=stream), \
+            patch.object(rose_module.logger, "info", side_effect=lambda event, **kw: events.append(event)), \
+            patch.object(cache_wrapper.logger, "info", side_effect=lambda event, **kw: events.append(event)):
+        token = set_context(context)
+        try:
+            for _ in range(2):
+                kwargs = {
+                    "pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}],
+                    "dump_context": False,
+                }
+                if compatibility:
+                    result = [chunk async for chunk in cache_wrapper.cached_complete(
+                        client, call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                else:
+                    result = [chunk async for chunk in client.complete(
+                        call_site="wmh_world_model_timed_distribution_v1", **kwargs)]
+                assert result[-1].kind == "done"
+                assert any(chunk.kind == "content" for chunk in result)
+        finally:
+            reset_context(token)
+    accepted = recording and status == 200
+    assert len(rows) == int(accepted), rows
+    assert events.count("llm.cache.stored") == int(accepted), (
+        "Rose reported a stored response without an accepted cache write", events)
+    assert events.count("llm.cache.store_skipped") == (0 if accepted else 2), events
+    assert events.count("llm.cache.replay") == int(accepted), events
+    assert len(provider_calls) == (1 if accepted else 2), provider_calls
+    assert all(call["provider_fast_mode"] is False for call in provider_calls)
+
+
+async def test_native_frozen_namespace_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=False, recording=False, status=200)
+
+
+async def test_compatibility_native_frozen_namespace_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=True, recording=False, status=200)
+
+
+async def test_native_rejected_cache_write_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=False, recording=True, status=503)
+
+
+async def test_compatibility_native_rejected_cache_write_never_reports_a_store():
+    await _native_demo_recording_case(compatibility=True, recording=True, status=503)
+
+
+async def test_native_recording_replays_exact_key_with_provider_fast_button_off():
+    await _native_demo_recording_case(compatibility=False, recording=True, status=200)
+
+
+async def test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off():
+    await _native_demo_recording_case(compatibility=True, recording=True, status=200)
+
+
 async def run_all_tests():
     print("fast-cache-client blackbox tests:")
     r = BlackboxResult()
@@ -228,6 +335,28 @@ async def run_all_tests():
     await r.record_async(
         "shared_fetch_failure_is_a_plain_exception_for_every_waiter",
         test_shared_fetch_failure_is_a_plain_exception_for_every_waiter,
+    )
+    await r.record_async(
+        "native_frozen_namespace_never_reports_a_store", test_native_frozen_namespace_never_reports_a_store,
+    )
+    await r.record_async(
+        "compatibility_native_frozen_namespace_never_reports_a_store",
+        test_compatibility_native_frozen_namespace_never_reports_a_store,
+    )
+    await r.record_async(
+        "native_rejected_cache_write_never_reports_a_store", test_native_rejected_cache_write_never_reports_a_store,
+    )
+    await r.record_async(
+        "compatibility_native_rejected_cache_write_never_reports_a_store",
+        test_compatibility_native_rejected_cache_write_never_reports_a_store,
+    )
+    await r.record_async(
+        "native_recording_replays_exact_key_with_provider_fast_button_off",
+        test_native_recording_replays_exact_key_with_provider_fast_button_off,
+    )
+    await r.record_async(
+        "compatibility_native_recording_replays_exact_key_with_provider_fast_button_off",
+        test_compatibility_native_recording_replays_exact_key_with_provider_fast_button_off,
     )
     teardown_mock()
     return r.all_passed

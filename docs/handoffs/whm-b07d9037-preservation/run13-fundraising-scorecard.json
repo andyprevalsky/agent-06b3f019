@@ -104,9 +104,21 @@
       "EMAIL": 10593,
       "WHATSAPP": 9187
     },
-    "nativeInitialStateBytes": 10523,
     "nativeStartingContactsCount": 2225,
-    "limitation": "The native seed contains source counts/connectivity, not the full message bodies. Correct DB seeding alone does not establish real warm-connection grounding."
+    "limitation": "All 42,910 messages were seeded correctly. The native seed contains source counts/connectivity; whole specialized simulation bypasses the real grep-backed Explore path. One tested long message-line prefix shared by two fixture rows appears later in a candidate goal and five histories; absence of IDs/prefixes does not prove absence of paraphrases. Full-history source access is not demonstrated.",
+    "nativeInitialStateDefaultSerializedBytes": 10523,
+    "nativeInitialStateRawFileBytes": 13909,
+    "nativeInitialStateCompactCanonicalBytes": 10151,
+    "nativeInitialStateSha256": "cdf955f29336eb54f70e3779bc8c07b79db6bf2c4a80f7d5bf0c61ba5e183c49",
+    "offlineSourceAccessPreparation": {
+      "messageRecords": 42910,
+      "contactRecords": 2225,
+      "snapshotRecords": 45135,
+      "messageDocumentBytes": 73266788,
+      "contactDocumentBytes": 733549,
+      "genericGrepReadOnlyVerified": true,
+      "runtimeWired": false
+    }
   },
   "latency": {
     "agent_latency": {
@@ -189,8 +201,6 @@
   },
   "failureDiagnostics": {
     "nativeAttempts": 540,
-    "rejectedJSONAttempts": 125,
-    "rejectedJSONAttemptPct": 23.14814814814815,
     "firstAttemptRejections": 100,
     "repairAttemptRejections": 25,
     "exhaustedRepairDistinctCallIds": 21,
@@ -200,9 +210,35 @@
     "failedGeneralPurposeAgentsByStepLimit": 8,
     "sampledLiveToolIsErrorObservations": 0,
     "semanticPredictionFidelityMeasured": false,
-    "rawRejectedRepliesInThisRun": "Not retained by original provider; precise stream/model origin remains an observability gap. Next prepared code captures them privately before repair.",
+    "rawRejectedRepliesInThisRun": "Not retained by original provider; exact sent Rose wire layouts also not captured. Canonical inputs alone do not prove identical wire messages. New prepared code captures rejected bytes and credential-free collect inputs privately.",
     "retrievedExampleAppearances": 2318,
-    "failedRetrievedExampleAppearances": 0
+    "failedRetrievedExampleAppearances": 0,
+    "rejectedProtocolAttempts": 125,
+    "rejectedProtocolAttemptPct": 23.14814814814815,
+    "rejectedProtocolQualification": "125 native protocol errors: 111 JSON syntax/trailing-data errors and 14 structural/semantic errors; JSON mode alone does not enforce all native invariants.",
+    "failedGeneralPurposeAgentQualification": "Eight investor task children reached 25 execute calls each; these are general-purpose agent caps, not eight Explore-loop caps. Verifier-context investigation is separate from sampled tool failures.",
+    "rejectionBreakdown": {
+      "expectingCommaDelimiter": 91,
+      "extraData": 18,
+      "expectingColonDelimiter": 1,
+      "expectingPropertyName": 1,
+      "duplicateJSONKey": 7,
+      "invalidToolObservationOrCallIdentity": 3,
+      "probabilitiesDoNotSumToOne": 3,
+      "invalidOutcomeKeys": 1
+    },
+    "distinctRejectedCallIds": 93,
+    "meteredCompletionsFinishStop": 540,
+    "rejectedAttemptActualModels": {
+      "gpt-5.6-luna-foundry": 124,
+      "qwen/qwen3.8-27b": 1
+    },
+    "rootVerifierScoreQualification": "Internal root verifier reported 1.0 with zero funding; canonical benchmark remained FAIL. Original USER goal and field-description loss are separate investigated contracts; no causal model replay or fundraiser repair claimed.",
+    "nativeProtocolRejectionsOnFailedGPChildren": 92,
+    "failedGPChildRejectionBreakdown": {
+      "syntax": 82,
+      "protocol": 10
+    }
   },
   "preservation": {
     "allOriginalSixArchivesRemainAuthenticatedAndPreserved": true,
@@ -231,7 +267,8 @@
   "validation": {
     "runSourceBeforeLaunch": "native58/provider194; Rose224; fast-cache-client, message-person, spawn-agent, workflow and workflow-determinism passed",
     "offlineFollowup": "native59/provider200, Rose224 and cache suites passed; source files copied exactly from tested separate worktree; no new paid trial",
-    "RCAOutcomeStillOpen": true
+    "RCAOutcomeStillOpen": true,
+    "offlineRCAOwningSuites": "world-model-harness and fast-cache-client: 2 domains passed in 16.5s; 59 native and 208 provider/reliability cases; isolated Ruff 0.17.0 passed"
   },
   "merged": false,
   "deployed": false,

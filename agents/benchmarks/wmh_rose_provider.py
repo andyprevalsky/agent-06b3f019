@@ -297,13 +297,28 @@ class _WMHFastCacheContext(FastCacheContext):
 class _WMHInvalidPrediction(ValueError):
     """An unusable completion, retaining metering without retaining credentials."""
 
-    def __init__(self, reason: str, usage: dict, actual_model: str, content: str | None = None) -> None:
+    def __init__(
+        self, reason: str, usage: dict, actual_model: str, content: str | None = None,
+        request: dict | None = None,
+    ) -> None:
         super().__init__(f"WMH prediction rejected: {reason}")
         self.usage = {
             key: usage[key] for key in ("prompt_tokens", "completion_tokens", "finish_reason") if key in usage
         }
         self.actual_model = actual_model
         self.rejected_response = {"content": content, "actual_model": actual_model, "usage": self.usage}
+        if request is not None:
+            self.rejected_response["request"] = _wmh_prediction_request(request)
+
+
+def _wmh_prediction_request(kwargs: dict) -> dict:
+    """Private replay input; auth objects and credentials never enter the capture."""
+    fields = (
+        "pool", "messages", "max_tokens", "call_site", "dump_context", "cache_namespace",
+        "result_required", "prefer_azure", "retry_partial_errors", "json_mode", "model",
+        "tools", "tool_choice", "temperature", "reasoning_effort", "reasoning_max_tokens", "skip_models",
+    )
+    return deepcopy({key: kwargs[key] for key in fields if key in kwargs})
 
 
 def _native_call_ids(messages: list[dict]) -> tuple[str, ...] | None:
@@ -373,6 +388,7 @@ def _require_wmh_prediction(
     protocol: str = "legacy",
     expected_call_ids: tuple[str, ...] | None = None,
     base_state: dict | None = None,
+    request: dict | None = None,
 ) -> None:
     from helpers.world_model_runtime import parse_world_model_prediction
 
@@ -432,7 +448,7 @@ def _require_wmh_prediction(
         reason = "completion token limit reached"
     if reason is not None:
         logger.warning("wmh.rose.invalid_prediction", reason=reason, actual_model=actual_model)
-        raise _WMHInvalidPrediction(reason, usage, actual_model, content)
+        raise _WMHInvalidPrediction(reason, usage, actual_model, content, request)
 
 
 class _WMHCacheSafeRoseClient(RoseClient):
@@ -468,6 +484,7 @@ class _WMHCacheSafeRoseClient(RoseClient):
                         base_state=_native_environment_state(kwargs.get("messages", []))
                         if protocol in DISTRIBUTION_PROTOCOLS
                         else None,
+                        request=kwargs,
                     )
             if is_wmh and chunk.kind == "usage":
                 token = chunk.data.get("compute_token_used")
@@ -850,21 +867,24 @@ class RoseWMHProvider:
             )
         try:
             claude_auth, gpt_auth = await self._lease_auth()
+            prediction_request = {
+                "pool": self._pool,
+                "messages": rose_messages,
+                "max_tokens": max_tokens,
+                "call_site": _WMH_CALL_SITES[self._protocol],
+                "dump_context": False,
+                "cache_namespace": cache_namespace,
+                "result_required": True,
+                "prefer_azure": self._prefer_azure,
+                "retry_partial_errors": True,
+                **({"json_mode": True} if self._json_mode else {}),
+            }
             response = await self._client.collect(
-                pool=self._pool,
-                messages=rose_messages,
-                max_tokens=max_tokens,
+                **prediction_request,
                 claude_auth=claude_auth,
                 gpt_auth=gpt_auth,
-                call_site=_WMH_CALL_SITES[self._protocol],
-                dump_context=False,
-                cache_namespace=cache_namespace,
                 # The whole reply is one JSON transition: a cut-off gets Rose's
                 # shared recovery (larger output limit, then the next model).
-                result_required=True,
-                prefer_azure=self._prefer_azure,
-                retry_partial_errors=True,
-                **({"json_mode": True} if self._json_mode else {}),
             )
         except _WMHInvalidPrediction as exc:
             self._record_usage(exc.usage, exc.actual_model)
@@ -884,6 +904,7 @@ class RoseWMHProvider:
             protocol=self._protocol,
             expected_call_ids=_prediction_call_ids(rose_messages, self._protocol),
             base_state=_native_environment_state(rose_messages) if self._protocol in DISTRIBUTION_PROTOCOLS else None,
+            request=prediction_request,
         )
 
         completion_type = _NativeCompletion if self._protocol in _NATIVE_WMH_PROTOCOLS else Completion
