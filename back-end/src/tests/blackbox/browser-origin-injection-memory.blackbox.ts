@@ -173,7 +173,13 @@ async function main() {
         sessionId,
       ],
       {
-        env: { ...process.env, BROWSER_STATE_INJECTION_TIMEOUT_MS: '60000' },
+        // Production skips origins over 8 MiB; this measures the transfer
+        // path's memory when an operator raises both bounds explicitly.
+        env: {
+          ...process.env,
+          BROWSER_STATE_INJECTION_TIMEOUT_MS: '60000',
+          BROWSER_STATE_ORIGIN_PAYLOAD_MAX_BYTES: String(256 * 1024 * 1024),
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );

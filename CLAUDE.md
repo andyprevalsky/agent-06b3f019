@@ -10,6 +10,16 @@ AI agent platform.
 - Backend API: https://navi-j9a9.onrender.com
 - API Docs: https://docs.roselabs.ai
 
+## Sub-agent delegation
+
+- Use sub-agents maximally for independent work. Keep the main agent unblocked
+  and focused on coordination and the critical path.
+- Give each sub-agent ordered priorities, a clear deliverable, and a deadline
+  or time budget. Monitor progress and reprioritize or narrow scope early so
+  work completes on time.
+- The user's north star goal must always take priority when assigning work,
+  resolving tradeoffs, and deciding what to do next.
+
 ## Architecture
 
 ```

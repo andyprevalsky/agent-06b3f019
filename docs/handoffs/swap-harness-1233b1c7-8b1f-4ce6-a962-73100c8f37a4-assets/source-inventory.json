@@ -1,0 +1,134 @@
+[
+  {
+    "original_path": ".context/deploy-changed-ts.txt",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/deploy-changed-ts.txt",
+    "sha256": "b5fb623ac5521ce28006347805a594def61572ddc20c61e5c5cbef3caa5cf6ea",
+    "bytes": 1145
+  },
+  {
+    "original_path": ".context/deploy-lint-ts.txt",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/deploy-lint-ts.txt",
+    "sha256": "b5fb623ac5521ce28006347805a594def61572ddc20c61e5c5cbef3caa5cf6ea",
+    "bytes": 1145
+  },
+  {
+    "original_path": ".context/deploy-step0.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/deploy-step0.sh",
+    "sha256": "0942d9f37c403ee8882db7abb9da50a8df1756e83c151b1a2a12df8e325ef187",
+    "bytes": 2358
+  },
+  {
+    "original_path": ".context/g3/be-cov.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/be-cov.sh",
+    "sha256": "8f6ab958ad8b274931aaf335c9fe738ca4bb99e6ccbf125a0294e19bf3f48a0c",
+    "bytes": 267
+  },
+  {
+    "original_path": ".context/g3/cloudbench.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/cloudbench.sh",
+    "sha256": "63b8b097dbc03613ace0506dd9e340e62ea9e9b57ac0a21bbdad4d3372cf95da",
+    "bytes": 275
+  },
+  {
+    "original_path": ".context/g3/e2b.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/e2b.sh",
+    "sha256": "f046bd5be2154f20f7e73239e15a4d932959f8147af26e526a4fd2a52329d735",
+    "bytes": 829
+  },
+  {
+    "original_path": ".context/g3/env.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/env.sh",
+    "sha256": "9b670876bd2617ee96670832a4b96b6de11409705f8ff73a5727340bd8b9a9a0",
+    "bytes": 140
+  },
+  {
+    "original_path": ".context/g3/fe-cov.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/fe-cov.sh",
+    "sha256": "206dc06ae69f44d3e6e4c3a82a1f4766cbbe67300fb2787dddce5ec13c82e039",
+    "bytes": 200
+  },
+  {
+    "original_path": ".context/g3/live.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/live.sh",
+    "sha256": "e90e6095969874ce2aeb662a888e5aba0ca00c0bf77895deff69ab4d647474f1",
+    "bytes": 106
+  },
+  {
+    "original_path": ".context/g3/seed.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/seed.sh",
+    "sha256": "8b6aa98f59b574d646828fe03fe191b69577cdfff70816bf290e09adeb5481e6",
+    "bytes": 194
+  },
+  {
+    "original_path": ".context/g3/semantic.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/semantic.sh",
+    "sha256": "ef077833527ab0932dc217fdc782b7411f0adc30d8283caef08daf5baca09e0d",
+    "bytes": 719
+  },
+  {
+    "original_path": ".context/g3/stack.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/stack.sh",
+    "sha256": "d4b8f4a8a9b7761e421002864ffe2f2cb95a1a5cd18814a1dd82517e3d51613c",
+    "bytes": 343
+  },
+  {
+    "original_path": ".context/g3/static.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/static.sh",
+    "sha256": "28bf3687411a9dbe31714479a1b58966a1d07755c7010df68d6f54567138026b",
+    "bytes": 435
+  },
+  {
+    "original_path": ".context/g3/structural.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/structural.sh",
+    "sha256": "963543fd9decd08ff5d5ae2357bc707514bb0fb424ce13d1c4fd38cc897d6fed",
+    "bytes": 520
+  },
+  {
+    "original_path": ".context/g3/structural2.sh",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/g3/structural2.sh",
+    "sha256": "cafc6fc7c0616103d82a6986447136a39c60bb6331e5cddfa1a4a10ed7f1ba70",
+    "bytes": 202
+  },
+  {
+    "original_path": ".context/macls/vitest.config.mts",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/macls/vitest.config.mts",
+    "sha256": "311b532e0da3986eb3561e6e0cd71e8bea13d60447ff8d9d6afb62871f9aa899",
+    "bytes": 206
+  },
+  {
+    "original_path": ".context/pr-body-summary.md",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/pr-body-summary.md",
+    "sha256": "d98c2f3fcc38b219bfd52aca90c91cbfa84025306d7fe89363d186b1335760bc",
+    "bytes": 3072
+  },
+  {
+    "original_path": ".context/rca-state-injection/chrome-ls-format.mjs",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/rca-state-injection/chrome-ls-format.mjs",
+    "sha256": "282ba114c16aaacb9ef6597d7ad46884d757c291e461ed787a6b3305043c9e38",
+    "bytes": 1552
+  },
+  {
+    "original_path": ".context/rca-state-injection/ingest-fix.patch",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/rca-state-injection/ingest-fix.patch",
+    "sha256": "6c332ec96775c02bd2378f95135bee176c397a0e89c12116b2b1765845f72328",
+    "bytes": 2453
+  },
+  {
+    "original_path": ".context/rca-state-injection/prod-fix-v2.patch",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/rca-state-injection/prod-fix-v2.patch",
+    "sha256": "17ac31840bef16dc4443371172c79a442ab7185ef2d4cc59595654fe825dcbda",
+    "bytes": 11504
+  },
+  {
+    "original_path": ".context/rca-state-injection/prod-fix.patch",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/rca-state-injection/prod-fix.patch",
+    "sha256": "98af5a63f419c33a86f287a56ff947831c3d39fff42e9ca61a82b3a1fee146a4",
+    "bytes": 9648
+  },
+  {
+    "original_path": ".context/rca-state-injection/repro-kernel.ts",
+    "committed_copy": "docs/handoffs/swap-harness-1233b1c7-8b1f-4ce6-a962-73100c8f37a4-assets/originals/.context/rca-state-injection/repro-kernel.ts",
+    "sha256": "6e9fd5456dfd46927d497fc7008bb312a40d02a6020cfe58bcf93baad69fb332",
+    "bytes": 6790
+  }
+]
