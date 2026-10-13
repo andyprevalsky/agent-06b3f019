@@ -11,11 +11,16 @@ import {
   type ToolStreamPayload,
 } from '@/lib/realtime';
 import type { AgentDetail, Message } from '@/lib/api';
+import { computeActiveBrowserPanels } from '@/lib/browserPanelLifecycle';
 import { publishBrowserSessionBinding } from '@/lib/browserSessionBindings';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
 import { MAX_RECONNECT_DELAY_MS } from '../config';
-import { runPostSubscribeBackfill, type CompletionBackfillLease } from './agentBackfill';
+import {
+  runPostSubscribeBackfill,
+  registerBrowserBackfillTask,
+  type CompletionBackfillLease,
+} from './agentBackfill';
 import {
   handleInsertMessage,
   handleUpdateAgent,
@@ -68,6 +73,7 @@ function createRealtimeHandlers(
   deps: RealtimeSubscriptionDeps,
   scope: AgentScope,
   scheduleReconnect: () => void,
+  onBrowserMessage: (message: InsertMessagePayload) => void,
 ): AgentHandlers {
   const active = () => isScopeActive(deps, scope);
   const current = () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope);
@@ -94,6 +100,9 @@ function createRealtimeHandlers(
           if (active()) deps.dispatchMessage(message);
         },
       });
+      if (data.agentId === scope.agentId && data.metadata?.toolName === 'spawn_browser_agent') {
+        onBrowserMessage(data);
+      }
     },
     onUpdate: (updated: UpdateAgentPayload) => {
       if (!active()) return;
@@ -160,10 +169,47 @@ async function connectRealtime(
   scheduleReconnect: () => void,
   leaseRef: React.MutableRefObject<CompletionBackfillLease | null>,
 ): Promise<void> {
+  // Subscription and lifecycle INSERTs share one read owner. A browser can
+  // start after the initial chat recovery has already finished.
+  let recovering = false;
+  const observedBrowserMessages = new Map<string, Message>();
+  const reconcile = async () => {
+    if (recovering || !isScopeActive(deps, scope)) return;
+    recovering = true;
+    try {
+      await runPostSubscribeBackfill({
+        selectedAgentId: scope.agentId,
+        observedMessages: () => [...observedBrowserMessages.values()],
+        isCancelled: () => !isScopeActive(deps, scope),
+        isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
+        leaseRef,
+        initialLoadDoneRef: deps.initialLoadDoneRef,
+        setMessages: deps.setMessages,
+        setAgent: deps.setAgent,
+        setIsChatMode: deps.setIsChatMode,
+      });
+    } finally {
+      recovering = false;
+    }
+  };
   try {
     const channel = await subscribeToAgent(
       scope.agentId,
-      createRealtimeHandlers(deps, scope, scheduleReconnect),
+      createRealtimeHandlers(deps, scope, scheduleReconnect, (data) => {
+        observedBrowserMessages.set(data.id, {
+          message_id: data.id,
+          timestamp: data.timestamp,
+          text: data.text,
+          role: data.role,
+          metadata: data.metadata ?? undefined,
+        });
+        const task = computeActiveBrowserPanels([observedBrowserMessages.get(data.id)!])[0];
+        // Progress, duplicate INSERTs and terminal events cannot renew or restart
+        // a spent lifecycle lease. Only a genuinely new browser init can wake it.
+        if (task && registerBrowserBackfillTask(leaseRef, scope.agentId, task.taskId)) {
+          void reconcile();
+        }
+      }),
     );
     if (!isScopeActive(deps, scope)) {
       unsubscribe(channel);
@@ -172,16 +218,7 @@ async function connectRealtime(
     deps.channelRef.current = channel;
     deps.reconnectAttemptRef.current = 0;
     deps.isReconnectingRef.current = false;
-    await runPostSubscribeBackfill({
-      selectedAgentId: scope.agentId,
-      isCancelled: () => !isScopeActive(deps, scope),
-      isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
-      leaseRef,
-      initialLoadDoneRef: deps.initialLoadDoneRef,
-      setMessages: deps.setMessages,
-      setAgent: deps.setAgent,
-      setIsChatMode: deps.setIsChatMode,
-    });
+    await reconcile();
   } catch (error) {
     if (!isScopeActive(deps, scope)) return;
     console.error('Failed to subscribe:', error);
