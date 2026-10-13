@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "old_devbox_id": "0db82503-ee90-4484-b8b5-31dd0c8043f2",
+  "new_devbox_id": "acc001c9-41fa-46c7-8e16-04bb9d3223bd",
+  "new_thread_url": "https://boxes.dev/thread/thr_87085cb874ce4cbca5c4ceac73cb6e90",
+  "verified_at": "2026-10-13T00:28:21.677412+00:00",
+  "validated_source_head": "51128ac864c1bd94fd192a3213a9906a436c15a3",
+  "main_integration_commit": "0a500c3749a3ef77077d7750cdb1b25245b0818b",
+  "runtime_source_unchanged_since_main_integration": true,
+  "deploy_run": "20261012-234924-2614623",
+  "stage_attempts": [
+    {
+      "stage": "prompt-approval",
+      "status": "failed",
+      "exit_code": 1,
+      "duration_seconds": 0.5,
+      "started_at": "2026-10-12T23:49:24Z",
+      "finished_at": "2026-10-12T23:49:24Z"
+    },
+    {
+      "stage": "agent-behavior-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.2,
+      "started_at": "2026-10-12T23:49:24Z",
+      "finished_at": "2026-10-12T23:49:25Z"
+    },
+    {
+      "stage": "llm-trajectory-injection-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.2,
+      "started_at": "2026-10-12T23:49:25Z",
+      "finished_at": "2026-10-12T23:49:25Z"
+    },
+    {
+      "stage": "prompt-approval",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.4,
+      "started_at": "2026-10-12T23:49:53Z",
+      "finished_at": "2026-10-12T23:49:54Z"
+    },
+    {
+      "stage": "prettier",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1.5,
+      "started_at": "2026-10-12T23:49:55Z",
+      "finished_at": "2026-10-12T23:49:57Z"
+    },
+    {
+      "stage": "eslint-fix",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 14.0,
+      "started_at": "2026-10-12T23:49:57Z",
+      "finished_at": "2026-10-12T23:50:11Z"
+    },
+    {
+      "stage": "eslint",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 16.6,
+      "started_at": "2026-10-12T23:50:17Z",
+      "finished_at": "2026-10-12T23:50:34Z"
+    },
+    {
+      "stage": "typescript",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 35.9,
+      "started_at": "2026-10-12T23:50:34Z",
+      "finished_at": "2026-10-12T23:51:10Z"
+    },
+    {
+      "stage": "backend-structural",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 35.6,
+      "started_at": "2026-10-12T23:51:19Z",
+      "finished_at": "2026-10-12T23:51:55Z"
+    },
+    {
+      "stage": "agents-coverage-blackbox",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 301.7,
+      "started_at": "2026-10-12T23:50:24Z",
+      "finished_at": "2026-10-12T23:55:26Z"
+    },
+    {
+      "stage": "deploy-command-structural",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 333.4,
+      "started_at": "2026-10-12T23:50:17Z",
+      "finished_at": "2026-10-12T23:55:51Z"
+    },
+    {
+      "stage": "seed-cache-decision",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 2.4,
+      "started_at": "2026-10-12T23:55:51Z",
+      "finished_at": "2026-10-12T23:55:53Z"
+    },
+    {
+      "stage": "canonical-seed-whatsapp-content",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "started_at": "2026-10-12T23:55:53Z",
+      "finished_at": "2026-10-12T23:55:53Z"
+    },
+    {
+      "stage": "backend-coverage-blackbox",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 646.2,
+      "started_at": "2026-10-12T23:50:24Z",
+      "finished_at": "2026-10-13T00:01:10Z"
+    },
+    {
+      "stage": "cloudbench-controller",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1585.1,
+      "started_at": "2026-10-12T23:55:40Z",
+      "finished_at": "2026-10-13T00:22:05Z"
+    },
+    {
+      "stage": "credential-health",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 1.8,
+      "started_at": "2026-10-13T00:22:10Z",
+      "finished_at": "2026-10-13T00:22:11Z"
+    },
+    {
+      "stage": "amplitude-live",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 36.9,
+      "started_at": "2026-10-13T00:22:10Z",
+      "finished_at": "2026-10-13T00:22:46Z"
+    },
+    {
+      "stage": "chat-router-failover-live",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 13.9,
+      "started_at": "2026-10-13T00:22:47Z",
+      "finished_at": "2026-10-13T00:23:00Z"
+    },
+    {
+      "stage": "seed-memory-ratchet",
+      "status": "passed",
+      "exit_code": 0,
+      "duration_seconds": 107.4,
+      "started_at": "2026-10-13T00:22:11Z",
+      "finished_at": "2026-10-13T00:23:58Z"
+    }
+  ],
+  "notes": [
+    "Initial prompt guard detected recovered, previously approved edits; rerun passed after checking original approved bytes unchanged.",
+    "All results apply to integrated current source, not the unapplied scratch proposal.",
+    "Mac app excluded on Linux. No runtime edits were made by the replacement.",
+    "No merge or production verification has been performed."
+  ],
+  "coverage": {
+    "backend": {
+      "domains_passed": 192,
+      "unit_test_files_passed": 266,
+      "lines_percent": 89.58,
+      "branches_percent": 81.04,
+      "functions_percent": 92.64,
+      "owned_backend_teardown": "PASS"
+    },
+    "agents": {
+      "blackbox_domains_passed": 110,
+      "fast_cache_tests_passed": 184,
+      "unit_tests_passed": 134,
+      "coverage_percent": 82
+    }
+  },
+  "cold_seed": {
+    "runs_passed": 5,
+    "fidelity": "verified",
+    "peak_mb": 165,
+    "budget_mb": 228
+  },
+  "owned_cloud_gate_cleanup": {
+    "machine_id": "85137da4416308",
+    "state": "absent from native inventory",
+    "verified_utc": "2026-10-13T00:22:39.044022+00:00",
+    "gate_exit_code": 0,
+    "other_resources_modified": false
+  },
+  "approval_pending": {
+    "id": "native-schema-1473",
+    "patch_sha256": "f46f31cd2eadb5ee03b53e0d493a316d393f339a4b3e51b46f52cf0d6ed8b55d",
+    "applied": false,
+    "reason": "Provider projection changes model-visible schema construction beyond recovered approvals. Explicit approval has not arrived.",
+    "offline_candidate_validation": "The unchanged actual-supervisor projection checks failed on current source and passed on the private scratch candidate; not live benchmark proof."
+  },
+  "remaining_gates": [
+    "semantic UI and latency",
+    "smoke",
+    "AgentCard sandbox",
+    "E2B",
+    "incremental exact HEAD review",
+    "merge readiness",
+    "merge",
+    "Render exact SHA + backend health",
+    "production semantics",
+    "production AgentCard",
+    "full original and resumed timing scorecard"
+  ],
+  "preservation": "complete; original checkpoint and private archives remain preserved"
+}
