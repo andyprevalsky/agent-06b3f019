@@ -144,7 +144,9 @@ esac
     env = {**os.environ, "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet)}
     for args in (["spawn-sub-agents", "--wait"], ["spawn-sub-agents", "-k", "2"],
                  ["--local", "spawn-sub-agents"], ["eval", "--list"],
-                 ["stability-proof", "-k", "2"]):
+                 ["stability-proof", "-k", "2"],
+                 ["stability-proof", "--pool-file", "--help"],
+                 ["stability-proof", "--exclude-file", "--dry-sample"]):
         result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, (args, result.stderr)
         assert result.stdout.count(expected) == 1, (args, "launch must emit one complete contract")
@@ -153,7 +155,9 @@ esac
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.count(expected) == 1 and "--prod" in result.stdout, "production route needs the contract"
-    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"]):
+    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"],
+                 ["stability-proof", "--dry-sample"], ["stability-proof", "--help"],
+                 ["stability-proof", "--pool-file", "--help", "--dry-sample"]):
         result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, (args, result.stderr)
         assert expected not in result.stdout, (args, "non-launch output must keep its format")

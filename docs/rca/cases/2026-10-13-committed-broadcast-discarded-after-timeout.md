@@ -357,3 +357,24 @@ finite in-memory retry queue provides durable delivery.
 A failed acknowledgement does not prove a committed event was undelivered.
 Keep retry ownership isolated, finite and observable, and make notification
 consumers idempotent before retrying uncertain outcomes.
+
+
+### October13 09:11 UTC — integrated operational gate failures
+
+After main b12f0ef05 was merged as71b6d2718, the full Group3 boundary
+08:31:43.737491–08:46:18.660559 UTC failed. Backend, frontend and agents
+coverage, static checks and five cold seeds passed, but the controller and
+deploy-structural lanes failed. The new benchmark-parent contract contaminated
+`stability-proof --dry-sample` JSON stdout; synthetic campaign fixtures lacked
+its required exact report asset; the old prose banner check rejected newly
+approved fenced examples. These are separate verification regressions, not
+additional proof of the historical notification symptom.
+
+The exact registered fleet stability proof is unchanged: before JSONDecodeError,
+after all27 tests and structural controls pass. Fixture completion preserves
+task, clock, retry and cleanup assertions. The prose guard now checks outside
+balanced canonical text fences. Additional report-route controls fail before
+and pass after respecting value-taking options, so filenames such as `--help`
+are not confused with help requests. The missing-contract fail-before-launch
+negative control remains intact. Full post-fix gates, final review and production
+verification remain required; this failed cohort is never recorded as a pass.
