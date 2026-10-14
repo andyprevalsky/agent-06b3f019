@@ -11961,8 +11961,10 @@ start_central_hub() {
 require_central_hub_visibility() {
     local attempt page
     for attempt in $(seq 1 "${CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS:-30}"); do
-        page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/" 2>/dev/null || true)"
-        if printf '%s' "$page" | grep -Fq "$RUN_ID"; then
+        # The exact run is already served by the owned hub. Reading its card
+        # avoids rescanning every run for each concurrent controller's probe.
+        page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/run/$RUN_ID/report-card.json" 2>/dev/null || true)"
+        if printf '%s' "$page" | jq -e --arg run "$RUN_ID" 'type == "object" and .run_id == $run' >/dev/null 2>&1; then
             echo "✅ central hub registration verified: run=$RUN_ID"
             return 0
         fi

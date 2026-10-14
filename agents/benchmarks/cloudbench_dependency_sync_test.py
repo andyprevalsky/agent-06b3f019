@@ -21065,6 +21065,71 @@ def test_bring_up_report_attributes_time_to_named_steps(tmp_path: Path) -> None:
     assert "p50" in out and "max" in out
 
 
+def test_private_fleet_source_hub_visibility_uses_exact_run_when_index_busy(
+    tmp_path: Path,
+) -> None:
+    """A busy aggregate index cannot hide an independently served owned run."""
+    hub = _load_reviewed_cloudbench_module(AGENT_LINK_SERVER)
+    runs = tmp_path / "runs"
+    for index in range(600):
+        batch = runs / f"run-{index:04d}" / "_batch"
+        batch.mkdir(parents=True)
+        (batch / "report-card.json").write_text(
+            json.dumps({"run_id": f"run-{index:04d}", "status": "starting"})
+        )
+    requests: list[str] = []
+    production_handler = hub._make_handler(SimpleNamespace(root=runs, hub_runs_dir=runs))
+
+    class BusyIndexHandler(production_handler.func):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            if self.path == "/":
+                self._send_bytes(b"aggregate index busy", "text/plain", 503)
+                return
+            super().do_GET()
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        lambda *args, **kwargs: BusyIndexHandler(*args, directory=str(runs), **kwargs),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    visibility = _extract_fleet_function(fleet_source_text(), "require_central_hub_visibility() {")
+
+    def check(run_id: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", "-c", f"""set -uo pipefail
+RUN_ID={shlex.quote(run_id)}
+DASH_BASE={server.server_port}
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=1
+{visibility}
+require_central_hub_visibility
+"""],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+
+    try:
+        result = check("run-0420")
+        assert result.returncode == 0, result.stderr
+        assert "central hub registration verified: run=run-0420" in result.stdout
+        assert check("missing-run").returncode != 0
+        card = runs / "run-0420" / "_batch" / "report-card.json"
+        for body in (
+            json.dumps({"run_id": "run-0419", "note": "run-0420"}),
+            json.dumps([{"run_id": "run-0420"}]),
+            "not JSON: run-0420",
+        ):
+            card.write_text(body)
+            assert check("run-0420").returncode != 0
+        assert "/" not in requests, "visibility probed the aggregate 600-run index"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+
 def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     """A fired run must appear in the central hub IMMEDIATELY with an explicit
     starting phase — a run waiting on a snapshot/heal/provisioning was invisible
@@ -21140,7 +21205,7 @@ RUN_ID=visible-run
 DASH_BASE=8765
 UNIFIED_DASH_PID=
 {visibility_fn}
-curl() {{ printf '<html>visible-run</html>'; }}
+curl() {{ printf '%s' '{{"run_id":"visible-run"}}'; }}
 require_central_hub_visibility
 curl() {{ return 1; }}
 sleep() {{ :; }}
