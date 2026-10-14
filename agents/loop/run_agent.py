@@ -227,6 +227,7 @@ async def run_agent(
     response_schema: Optional[Dict[str, Any]] = None,
     # Dynamic schema getter - called at verification time (handles race condition with async schema generation)
     get_response_schema: Optional[Callable[[], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    get_requirement_revision: Optional[Callable[[], int]] = None,
     # Claude OAuth token for direct Anthropic calls via Rose endpoint
     claude_token: Optional[str] = None,
     # Dynamic token getter - called before each LLM call to get latest token
@@ -2204,6 +2205,8 @@ async def run_agent(
                     post_message=post_message,
                     response_schema=response_schema,
                     get_response_schema=get_response_schema,
+                    poll_messages=poll_messages,
+                    get_requirement_revision=get_requirement_revision,
                     claude_token=verifier_claude_token,
                     claude_token_source=verifier_claude_token_source,
                     claude_token_pool_id=verifier_claude_token_pool_id,
@@ -2317,6 +2320,12 @@ async def run_agent(
                         }
                     )
 
+                if _verifier_superseded_by_user_feedback(
+                    verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+                ):
+                    recent_verifier_scores.pop()
+                    continue
+
                 # If complete, exit (blueprint saved in workflow._mark_complete)
                 if score >= 1.0:
                     _log_cache_summary("completed-verified")
@@ -2332,6 +2341,8 @@ async def run_agent(
                         "message": v_reasoning,
                         "score": score,
                         "structured_response": structured_response,
+                        "_verified_user_requirement_keys": verifier_result.get("_verified_user_requirement_keys"),
+                        "_verified_requirement_revision": verifier_result.get("_verified_requirement_revision"),
                     }
 
                 # Not complete - add feedback to context, including score trend
@@ -2432,6 +2443,9 @@ async def run_agent(
     final_verifier_progress = 0.0
     final_verifier_reasoning = ""
     final_partial_structured_response = None
+    final_verifier_superseded = False
+    final_verifier_requirement_keys = None
+    final_verifier_requirement_revision = None
 
     if verifier_prompt_generator and not skip_verification:
         try:
@@ -2456,6 +2470,8 @@ async def run_agent(
                 post_message=post_message,
                 response_schema=response_schema,
                 get_response_schema=get_response_schema,
+                poll_messages=poll_messages,
+                get_requirement_revision=get_requirement_revision,
                 claude_token=final_verifier_claude_token,
                 claude_token_source=final_verifier_claude_token_source,
                 claude_token_pool_id=final_verifier_claude_token_pool_id,
@@ -2504,11 +2520,20 @@ async def run_agent(
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
 
-            final_verifier_progress = final_verifier_result.get("score", 0.0)
-            final_verifier_reasoning = final_verifier_result.get("reasoning", "")
-            final_partial_structured_response = final_verifier_result.get("structured_response")
-
-            logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
+            if poll_messages:
+                last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+            final_verifier_superseded = _verifier_superseded_by_user_feedback(
+                final_verifier_result, context, get_requirement_revision() if get_requirement_revision else None,
+            )
+            final_verifier_requirement_keys = final_verifier_result.get("_verified_user_requirement_keys")
+            final_verifier_requirement_revision = final_verifier_result.get("_verified_requirement_revision")
+            if final_verifier_superseded:
+                final_verifier_progress = None
+            else:
+                final_verifier_progress = final_verifier_result.get("score", 0.0)
+                final_verifier_reasoning = final_verifier_result.get("reasoning", "")
+                final_partial_structured_response = final_verifier_result.get("structured_response")
+                logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
         except Exception as e:
             logger.error(f"Final verifier call failed: {e}")
 
@@ -2539,6 +2564,9 @@ async def run_agent(
         "verifier_progress": final_verifier_progress,
         "verifier_reasoning": final_verifier_reasoning,
         "partial_structured_response": final_partial_structured_response,
+        "_verified_user_requirement_keys": final_verifier_requirement_keys,
+        "_verified_requirement_revision": final_verifier_requirement_revision,
+        **({"verifier_superseded_by_user_feedback": True} if final_verifier_superseded else {}),
     }
 
 
@@ -2668,6 +2696,33 @@ async def _compress_context(
     return new_context, True
 
 
+def _real_user_requirement_keys(context: List[Dict]) -> set:
+    keys = set()
+    for message in context:
+        if (message.get("role") or "").upper() != "USER" or (message.get("metadata") or {}).get("hidden"):
+            continue
+        metadata = message.get("metadata") or {}
+        request_id = metadata.get("attentionRequestId")
+        if metadata.get("source") == "attention_response" and isinstance(request_id, str) and request_id:
+            keys.add(("attention_response", request_id))
+            continue
+        message_id = message.get("message_id") or message.get("id")
+        keys.add(("id", str(message_id)) if message_id else
+                 ("legacy", str(message.get("timestamp") or ""), str(message.get("text") or "")))
+    return keys
+
+
+def _verifier_superseded_by_user_feedback(result: Dict, context: List[Dict], requirement_revision: Optional[int] = None) -> bool:
+    """Version the verdict without rewriting the provider's judgment or usage."""
+    judged_keys = result.get("_verified_user_requirement_keys")
+    if judged_keys is not None and (_real_user_requirement_keys(context) - set(map(tuple, judged_keys))):
+        result["superseded_by_user_feedback"] = True
+    judged_revision = result.get("_verified_requirement_revision")
+    if judged_revision is not None and requirement_revision is not None and judged_revision != requirement_revision:
+        result["superseded_by_user_feedback"] = True
+    return result.get("superseded_by_user_feedback") is True
+
+
 async def _run_verifier(
     execute_activity,
     context: List[Dict],
@@ -2694,6 +2749,8 @@ async def _run_verifier(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
+    poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,
+    get_requirement_revision: Optional[Callable[[], int]] = None,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = tool_call_id or str(_safe_uuid4())
@@ -2715,13 +2772,24 @@ async def _run_verifier(
             },
         )
 
-    # Generate verifier prompt at verification time (allows schema polling)
-    verifier_prompt = await verifier_prompt_generator()
-
-    # Get response schema dynamically if getter provided (handles race condition with async schema generation)
-    current_response_schema = response_schema
-    if get_response_schema:
-        current_response_schema = await get_response_schema()
+    # Resolve the prompt and schema under the same accepted requirement revision.
+    while True:
+        judged_revision = get_requirement_revision() if get_requirement_revision else None
+        verifier_prompt = await verifier_prompt_generator()
+        current_response_schema = await get_response_schema() if get_response_schema else response_schema
+        if not get_requirement_revision or judged_revision == get_requirement_revision():
+            break
+    judged_user_keys = _real_user_requirement_keys(context)
+    verification_cursor = datetime.fromtimestamp(0, tz=timezone.utc)
+    for message in context:
+        try:
+            timestamp = datetime.fromisoformat(str(message.get("timestamp") or "").replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            verification_cursor = max(verification_cursor, timestamp)
+        except ValueError:
+            continue
+    verification_cursor = max(datetime.fromtimestamp(0, tz=timezone.utc), verification_cursor - timedelta(milliseconds=1))
 
     # C7: dead `phase` positional arg has been removed from check_progress;
     # callers no longer pass it. `model` is kept as a positional but ignored
@@ -2760,6 +2828,11 @@ async def _run_verifier(
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
 
+    result["_verified_user_requirement_keys"] = sorted(judged_user_keys)
+    result["_verified_requirement_revision"] = judged_revision
+    if poll_messages:
+        await poll_and_update_context(poll_messages, context, verification_cursor)
+    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
     score = result.get("score", 0.0)
     reasoning = result.get("reasoning", "")
     structured_response = result.get("structured_response")
@@ -2827,10 +2900,14 @@ async def _run_verifier(
                 ),
                 "subAgentId": task_id,
                 "verifierMessage": True,
+                **({"supersededByUserFeedback": True} if result.get("superseded_by_user_feedback") else {}),
             },
         )
 
     logger.info(f"Verifier score: {score * 100:.1f}%")
+    if poll_messages:
+        await poll_and_update_context(poll_messages, context, verification_cursor)
+    _verifier_superseded_by_user_feedback(result, context, get_requirement_revision() if get_requirement_revision else None)
     # Surface the schema the verifier actually judged against so soft-accept
     # does not re-validate against a stale static response_schema when
     # get_response_schema resolved a different field set (CodeRabbit #1260).

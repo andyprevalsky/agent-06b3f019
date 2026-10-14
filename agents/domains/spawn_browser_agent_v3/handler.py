@@ -989,7 +989,7 @@ async def _refresh_browser_output_schema(
     messages = state.get("user_instruction_messages") or []
     if len(messages) <= int(state.get("schema_user_instruction_count") or 0):
         return response_schema, {}
-    from helpers.llm import _generate_response_schema_with_rose
+    from helpers.llm import _build_verifier_response_model, _generate_response_schema_with_rose
 
     usage: Dict[str, Any] = {}
     try:
@@ -1005,6 +1005,8 @@ async def _refresh_browser_output_schema(
         )
         if not isinstance(schema, dict) or not schema.get("fields"):
             raise ValueError("Browser schema refresh returned no fields")
+        if _build_verifier_response_model(schema).model_json_schema() == _build_verifier_response_model(response_schema).model_json_schema():
+            schema = response_schema
     except WorkflowGenerationSealed:
         raise
     except Exception as error:
@@ -1018,6 +1020,43 @@ async def _refresh_browser_output_schema(
         return response_schema, usage
     state["schema_user_instruction_count"] = len(messages)
     return schema, usage
+
+
+async def _sync_browser_user_instructions(
+    *,
+    agent_id: str,
+    goal: str,
+    response_schema: Dict[str, Any],
+    instruction_state: Dict[str, Any],
+    turn_messages: List[Dict[str, Any]],
+    compute_auth: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+    """Use the resume transport for live input and accept only its latest contract."""
+    state = instruction_state
+    usages = []
+    while True:
+        state = await _load_browser_resume_user_instructions(agent_id, state)
+        count = len(state.get("user_instruction_messages") or [])
+        _append_browser_user_instructions(state, turn_messages)
+        state["delivered_user_instruction_count"] = count
+        if count <= max(
+            int(state.get("schema_user_instruction_count") or 0),
+            int(state.get("schema_attempted_user_instruction_count") or 0),
+        ):
+            break
+        # This activity attempts a failed revision once. The accepted count alone
+        # survives suspension, so a fresh activity can retry without losing input.
+        state["schema_attempted_user_instruction_count"] = count
+        response_schema, usage = await _refresh_browser_output_schema(
+            goal=goal, agent_id=agent_id, response_schema=response_schema,
+            resume_state=state, compute_auth=compute_auth,
+        )
+        if usage:
+            usages.append(usage)
+        # A correction can arrive while schema generation awaits its provider.
+        # The same cursor and source-ID ledger admit it before publishing state.
+    state["browser_output_schema"] = response_schema
+    return state, response_schema, usages
 
 
 def _append_browser_user_instructions(
@@ -5339,7 +5378,11 @@ def _simulated_browser_resume_payload(
 ) -> Dict[str, Any]:
     compact_state = _compact_simulated_resume_value(browser_state)
     compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
-    compact_turns = [_compact_browser_turn_message_for_resume(message) for message in turn_messages[-24:]]
+    retained_turns = [message for message in turn_messages[:-24] if message.get("role") == "user"] + turn_messages[-24:]
+    compact_turns = [
+        dict(message) if message.get("role") == "user" else _compact_browser_turn_message_for_resume(message)
+        for message in retained_turns
+    ]
     return {
         "simulated_browser_state": compact_state,
         "simulated_action_entries": compact_actions,
@@ -5429,6 +5472,7 @@ def _simulated_browser_verifier_context(
     action_entries: List[Dict[str, Any]],
     frame: Optional[Dict[str, Any]],
     payment_card_last4: Optional[str],
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     state_text = json.dumps(
         {k: v for k, v in browser_state.items() if k not in {"screenshot", "frame", "website_frame"}},
@@ -5465,6 +5509,7 @@ def _simulated_browser_verifier_context(
             },
         },
     ]
+    context[1:1] = [{"role": "USER", "text": message["content"]} for message in user_instruction_messages or []]
     payment_evidence = _build_payment_card_verifier_evidence(payment_card_last4)
     if payment_evidence:
         context.append(payment_evidence)
@@ -5486,6 +5531,7 @@ async def _verify_simulated_browser_completion(
     gpt_account_id: Optional[str],
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     from helpers.llm import check_progress
 
@@ -5499,6 +5545,7 @@ async def _verify_simulated_browser_completion(
                 action_entries=action_entries,
                 frame=frame,
                 payment_card_last4=payment_card_last4,
+                user_instruction_messages=user_instruction_messages,
             ),
             build_verifier_prompt(response_schema=remote_schema),
             VERIFIER_ULTRA_MODEL,
@@ -5576,6 +5623,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
     config = load_config()
     started_at = safe_time()
     resume = write_lock_resume_state or {}
+    output_schema = resume.get("browser_output_schema") or output_schema
+    instruction_state = dict(resume)
+    instruction_state.setdefault("user_message_cursor", datetime.now(timezone.utc).isoformat())
     task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
     browser_url = "about:blank"
     browser_state = dict(resume.get("simulated_browser_state") or {})
@@ -5631,9 +5681,50 @@ async def _spawn_browser_agent_activity_v3_simulated(
     )
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
+    resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(instruction_state.get("delivered_user_instruction_count") or 0)
+    _append_browser_user_instructions(instruction_state, turn_messages)
+    instruction_state["delivered_user_instruction_count"] = len(instruction_state.get("user_instruction_messages") or [])
+
+    async def sync_user_instructions() -> None:
+        nonlocal instruction_state, output_schema, dynamic_system_context
+        nonlocal total_input_tokens, total_output_tokens
+        previous_schema = output_schema
+        instruction_state, output_schema, usages = await _sync_browser_user_instructions(
+            agent_id=agent_id, goal=goal, response_schema=output_schema,
+            instruction_state=instruction_state, turn_messages=turn_messages,
+            compute_auth={
+                "type": "gpt" if gpt_token else "claude", "accessToken": gpt_token or token_state.access_token,
+                "accountId": gpt_account_id if gpt_token else None,
+                "source": gpt_token_source if gpt_token else token_state.source,
+                "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+            },
+        )
+        if output_schema != previous_schema:
+            dynamic_system_context = build_browser_dynamic_system_context(
+                "# Simulated Browser Runtime\n"
+                "Operate the stateful simulated website one concrete action per turn. Continue until the requested "
+                "outcome is actually visible in state. Do not claim actions you did not take.",
+                response_schema=output_schema,
+            )
+        for usage in usages:
+            input_tokens = int(usage.get("prompt_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or 0)
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            accumulate_model_usage(
+                usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(usage.get("from_fast_cache")),
+                cache_sequence_id=usage.get("cache_sequence_id"),
+            )
 
     def resume_payload() -> Dict[str, Any]:
-        return _simulated_browser_resume_payload(
+        return {key: instruction_state.get(key) for key in (
+            "user_instruction_messages", "user_instruction_message_ids", "user_message_cursor",
+            "delivered_user_instruction_count", "schema_user_instruction_count", "browser_output_schema",
+        )} | _simulated_browser_resume_payload(
             browser_state=browser_state,
             action_entries=action_entries,
             turn_messages=turn_messages,
@@ -5756,7 +5847,10 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 frames=frames,
             )
 
-        pending_action = resume.get("pending_action")
+        previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
+        await sync_user_instructions()
+        new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
+        pending_action = None if new_user_input else resume.get("pending_action")
         if isinstance(pending_action, dict):
             pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
             approved_action_name = str(pending_action.get("action") or "unknown")
@@ -5808,6 +5902,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
+            await sync_user_instructions()
             with contextlib.suppress(Exception):
                 browser_activity_checkpoint(f"Simulated browser step {iteration}")
             if recorder:
@@ -5926,6 +6021,12 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     "result": {"success": True, "verification_requested": True},
                 }
                 action_entries.append(completion_entry)
+                await sync_user_instructions()
+                verification_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
+                if int(instruction_state.get("schema_user_instruction_count") or 0) < verification_instruction_count:
+                    completion_entry["schema_refresh_pending"] = True
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
                 progress = await _verify_simulated_browser_completion(
                     goal=goal,
                     output_schema=output_schema,
@@ -5940,7 +6041,16 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     gpt_account_id=gpt_account_id,
                     gpt_token_source=gpt_token_source,
                     gpt_token_pool_id=gpt_token_pool_id,
+                    user_instruction_messages=instruction_state.get("user_instruction_messages"),
                 )
+                await sync_user_instructions()
+                if (
+                    verification_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
+                    or int(instruction_state.get("schema_user_instruction_count") or 0) < len(instruction_state.get("user_instruction_messages") or [])
+                ):
+                    completion_entry["verifier_superseded_by_user_feedback"] = True
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
                 structured = progress.get("structured_response")
                 required = [
                     str(field.get("name"))
@@ -5993,6 +6103,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                                 world_model_name=world_model.world_model_name,
                             ),
                             "structured_response": structured,
+                            "browser_output_schema": output_schema,
                             "steps_taken": iteration,
                         },
                     )
@@ -6011,6 +6122,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                         "simulated_browser_steps": iteration,
                         "simulated_latest_frame": latest_frame,
                         "structured_response": structured,
+                        "browser_output_schema": output_schema,
                         "execution_time_ms": (safe_time() - started_at) * 1000,
                         "usage_items": _simulated_browser_usage_items(
                             total_input_tokens,
@@ -7600,6 +7712,62 @@ async def _spawn_browser_agent_activity_v3_real(
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+        instruction_state = {
+            **(write_lock_resume_state or {}),
+            "user_instruction_messages": user_instruction_messages,
+            "user_message_cursor": user_message_cursor,
+            "user_instruction_message_ids": user_instruction_message_ids,
+            "delivered_user_instruction_count": len(user_instruction_messages),
+            "schema_user_instruction_count": schema_user_instruction_count,
+            "schema_attempted_user_instruction_count": len(user_instruction_messages),
+        }
+
+        async def sync_user_instructions() -> None:
+            nonlocal instruction_state, response_schema, user_instruction_messages
+            nonlocal user_message_cursor, user_instruction_message_ids, dynamic_system_context
+            nonlocal latest_structured_response, total_input_tokens, total_output_tokens
+            nonlocal pending_write_lock_action, pending_write_lock_target, schema_user_instruction_count
+            previous_count = len(user_instruction_messages)
+            previous_schema = response_schema
+            instruction_state, response_schema, usages = await _sync_browser_user_instructions(
+                agent_id=agent_id, goal=goal, response_schema=response_schema,
+                instruction_state=instruction_state, turn_messages=browser_turn_messages,
+                compute_auth={
+                    "type": "gpt" if gpt_token else "claude",
+                    "accessToken": gpt_token or token_state.access_token,
+                    "accountId": gpt_account_id if gpt_token else None,
+                    "source": gpt_token_source if gpt_token else token_state.source,
+                    "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                    "userId": user_id, "agentId": agent_id, "rootAgentId": agent_id,
+                },
+            )
+            user_instruction_messages = instruction_state["user_instruction_messages"]
+            user_message_cursor = instruction_state["user_message_cursor"]
+            user_instruction_message_ids = instruction_state["user_instruction_message_ids"]
+            schema_user_instruction_count = int(instruction_state.get("schema_user_instruction_count") or 0)
+            if len(user_instruction_messages) != previous_count:
+                latest_structured_response = None
+                pending_write_lock_action = None
+                pending_write_lock_target = None
+            if response_schema != previous_schema:
+                dynamic_system_context = build_browser_dynamic_system_context(
+                    base_custom_instructions,
+                    available_files=(list(available_file_paths.keys()) if available_file_paths else None),
+                    response_schema=response_schema,
+                )
+            for usage in usages:
+                input_tokens = int(usage.get("prompt_tokens") or 0)
+                output_tokens = int(usage.get("completion_tokens") or 0)
+                total_input_tokens += input_tokens
+                total_output_tokens += output_tokens
+                accumulate_model_usage(
+                    usage_by_model, usage.get("actual_model"), input_tokens, output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
+                )
+
         if (
             (write_lock_resume_state or {}).get("approval_type") == "payment"
             and (write_lock_resume_state or {}).get("pending_action") is None
@@ -7964,6 +8132,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 focus_cache=tab_focus_cache,
             )
             step_timer.mark("tab_rebind")
+
+            await sync_user_instructions()
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -9545,6 +9715,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"
                 try:
+                    await sync_user_instructions()
+                    verification_instruction_count = len(user_instruction_messages)
+                    if int(instruction_state.get("schema_user_instruction_count") or 0) < verification_instruction_count:
+                        continue
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="\u2696\ufe0f Verifying completion",
@@ -9647,6 +9821,13 @@ async def _spawn_browser_agent_activity_v3_real(
                         from_fast_cache=bool(v_usage.get("from_fast_cache")),
                         cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
+
+                    await sync_user_instructions()
+                    if (
+                        verification_instruction_count != len(user_instruction_messages)
+                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
+                    ):
+                        continue
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
@@ -10622,6 +10803,7 @@ Based on this feedback, I need to continue working on the task and address the i
         # than before) and never blocks the terminal return.
         if latest_structured_response is None and response_schema and dom_service:
             try:
+                await sync_user_instructions()
                 # Re-read the FINAL-state DOM before grading: browser_state was
                 # captured before the last action, so verifying against it evaluates
                 # stale ground truth and can misreport a last-step completion. Fall
@@ -10655,6 +10837,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 final_verifier_prompt = build_verifier_prompt(
                     response_schema=transform_schema_for_remote_session(response_schema)
                 )
+                verification_instruction_count = len(user_instruction_messages)
                 final_progress = await call_temporal_activity_from_activity(
                     check_progress,
                     args=[
@@ -10706,7 +10889,12 @@ Based on this feedback, I need to continue working on the task and address the i
                     from_fast_cache=bool(fv_usage.get("from_fast_cache")),
                     cache_sequence_id=fv_usage.get("cache_sequence_id"),
                 )
-                if final_progress.get("structured_response") is not None:
+                await sync_user_instructions()
+                if (
+                    verification_instruction_count == len(user_instruction_messages)
+                    and int(instruction_state.get("schema_user_instruction_count") or 0) >= len(user_instruction_messages)
+                    and final_progress.get("structured_response") is not None
+                ):
                     latest_structured_response = final_progress["structured_response"]
             except Exception as final_verifier_error:
                 logger.warning(

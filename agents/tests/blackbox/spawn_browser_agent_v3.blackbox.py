@@ -20860,9 +20860,14 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
         await drain_background_browser_cleanups(timeout=1)
 
-    assert result["status"] == "completed"
-    assert result["session_id"] == "session-cookie"
-    assert result["structured_response"] == {"result": "ride requested"}
+    if schema_failure:
+        assert result["status"] != "completed", "schema failure accepted completion under the unacknowledged previous contract"
+        assert result.get("structured_response") is None, "schema failure returned structured output from the previous contract"
+        assert result["success"] is False
+    else:
+        assert result["status"] == "completed"
+        assert result["structured_response"] == {"result": "ride requested"}
+        assert result["session_id"] == "session-cookie"
     close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False)
     create_auth_mock.assert_not_awaited()
     restart_mock.assert_awaited_once_with(
@@ -21680,6 +21685,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     close_mock = AsyncMock()
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
         patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
         patch(
@@ -23261,6 +23267,86 @@ async def test_browser_schema_failure_keeps_usage_and_generation_fence():
             await h._refresh_browser_output_schema(
                 goal="Read the calendar", agent_id="agent-1", response_schema=initial, resume_state=state, compute_auth=None,
             )
+
+
+async def test_browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    schema = {"fields": [{"name": "events", "type": "list[str]", "required": True}]}
+    row = {"id": "active-schema-timeout", "role": "USER", "text": "Use Andy's shared calendar instead.",
+           "timestamp": "2026-10-14T17:28:33+00:00"}
+    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00"}
+    turns = []
+    usage = {"prompt_tokens": 12, "completion_tokens": 6, "actual_model": "schema-model"}
+    generation = AsyncMock(side_effect=[TimeoutError("schema provider unavailable"), (schema, None, usage)])
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[row])), patch(
+        "helpers.llm._generate_response_schema_with_rose", generation
+    ):
+        state, accepted, usages = await h._sync_browser_user_instructions(
+            agent_id="agent-1", goal="Read today's events", response_schema=schema,
+            instruction_state=state, turn_messages=turns, compute_auth=None,
+        )
+        assert turns == [{"role": "user", "content": row["text"]}], "schema failure lost genuine USER delivery"
+        assert state["user_instruction_message_ids"] == [row["id"]]
+        assert int(state.get("schema_user_instruction_count") or 0) == 0, "failed generation acknowledged the contract"
+        assert accepted is schema and usages == []
+        # A subsequent suspension starts a new generation attempt while keeping
+        # the native delivered-input and acknowledged-contract counts distinct.
+        carried = {}
+        h._copy_browser_resume_continuity_fields(state, carried)
+        state, accepted, usages = await h._sync_browser_user_instructions(
+            agent_id="agent-1", goal="Read today's events", response_schema=accepted,
+            instruction_state=carried, turn_messages=turns, compute_auth=None,
+        )
+    assert generation.await_count == 2, "accepted input was never retried after generation failure"
+    assert state["schema_user_instruction_count"] == 1 and usages == [usage]
+    assert turns == [{"role": "user", "content": row["text"]}], "retry duplicated genuine USER input"
+    assert accepted is schema, "unchanged output requirements replaced the accepted schema"
+
+
+async def test_browser_coalesced_schema_failure_retains_completed_usage_and_latest_input():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    initial = {"fields": [{"name": "events", "type": "list[str]", "required": True}]}
+    first_schema = {"fields": [{"name": "access_account", "type": "str", "required": True}]}
+    final_schema = {"fields": [{"name": "calendar_accessible", "type": "bool", "required": True}]}
+    rows = [{"id": "first-update", "role": "USER", "text": "Return only access_account.",
+             "timestamp": "2026-10-14T17:28:33+00:00"}]
+    usage = {"prompt_tokens": 12, "completion_tokens": 6, "actual_model": "schema-model"}
+    generation_calls = []
+
+    async def generate(requirements, **kwargs):
+        generation_calls.append(requirements)
+        if len(generation_calls) == 1:
+            rows.append({"id": "later-update", "role": "USER", "text": "Return only calendar_accessible.",
+                         "timestamp": "2026-10-14T17:28:34+00:00"})
+            return first_schema, None, usage
+        if len(generation_calls) == 2:
+            raise TimeoutError("later schema refresh unavailable")
+        return final_schema, None, usage
+
+    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00"}
+    turns = []
+    with patch.object(h, "poll_new_messages", AsyncMock(side_effect=lambda *args: copy.deepcopy(rows))), patch(
+        "helpers.llm._generate_response_schema_with_rose", AsyncMock(side_effect=generate)
+    ):
+        state, accepted, usages = await h._sync_browser_user_instructions(
+            agent_id="agent-1", goal="Read today's events", response_schema=initial,
+            instruction_state=state, turn_messages=turns, compute_auth=None,
+        )
+        assert accepted == first_schema and usages == [usage], "later failure lost completed schema generation usage"
+        assert state["schema_user_instruction_count"] == 1
+        assert state["user_instruction_message_ids"] == ["first-update", "later-update"]
+        assert turns == [{"role": "user", "content": row["text"]} for row in rows]
+        carried = {}
+        h._copy_browser_resume_continuity_fields(state, carried)
+        state, accepted, usages = await h._sync_browser_user_instructions(
+            agent_id="agent-1", goal="Read today's events", response_schema=accepted,
+            instruction_state=carried, turn_messages=turns, compute_auth=None,
+        )
+    assert accepted == final_schema and usages == [usage] and state["schema_user_instruction_count"] == 2
+    assert len(turns) == 2 and len(generation_calls) == 3
+    assert rows[-1]["text"] in generation_calls[-1], "retry lost the correction arriving during prior generation"
 
 
 async def test_browser_resume_delivers_user_corrections_once_to_actor_and_verifier():
@@ -25851,6 +25937,313 @@ def test_browser_tool_events_declare_action_type():
     )
 
 
+_CALENDAR_FEEDBACK_ORIGINAL_GOAL = (
+    "Open Google Calendar in the browser signed into the account tamara@roselabs.ai "
+    "(if not already signed in, sign in with that account). Navigate to today, "
+    "Wednesday October 14, 2026, in the America/Los_Angeles timezone. List all of "
+    "Tamara's events for today with start time, end time, title, and any location "
+    "or notes. If there are no events today, say so. Report the full day's "
+    "schedule back in a clear list."
+)
+
+
+_CALENDAR_FEEDBACK_USER_UPDATE = (
+    "Update: Do NOT sign in with tamara@roselabs.ai. The user does not have login "
+    "access to that account. Instead, sign in to Google with andy@roselabs.ai "
+    "(the user's normal Rose Labs Gmail). Once signed in, open Google Calendar "
+    "and look for Tamara's calendar in the calendar list (it may be a shared "
+    "calendar, or find it by searching 'Tamara' or 'tamara@roselabs.ai' in the "
+    "calendar sidebar). If you can't find a shared calendar, check the user's "
+    "own calendar for events that mention Tamara or are in her name. Then list "
+    "all of Tamara's events for today, Wednesday October 14, 2026, in "
+    "America/Los_Angeles timezone: start time, end time, title, location/notes. "
+    "If there are no events, say so."
+)
+
+
+async def _run_browser_durable_user_feedback_replay(*, change_fields=False, verifier_feedback=None, schema_failure=False):
+    """Replay ae17b024's durable USER correction through the real activity loop."""
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    initial_schema = {
+        "fields": [{
+            "name": "events", "type": "list[object]", "required": True,
+            "properties": [
+                {"name": "start_time", "type": "str", "required": True},
+                {"name": "end_time", "type": "str", "required": True},
+                {"name": "title", "type": "str", "required": True},
+                {"name": "location", "type": "str", "required": False},
+                {"name": "notes", "type": "str", "required": False},
+            ],
+        }],
+    }
+    expected_schema = {
+        "fields": [
+            {"name": "calendar_accessible", "type": "bool", "required": True},
+            {"name": "access_account", "type": "str", "required": True},
+        ],
+    } if change_fields else copy.deepcopy(initial_schema)
+    feedback = _CALENDAR_FEEDBACK_USER_UPDATE
+    if change_fields:
+        feedback += (
+            " Change the deliverable: return only calendar_accessible and "
+            "access_account; do not return the events list."
+        )
+    now = datetime.now(timezone.utc)
+    durable_messages = [{
+        "id": "4ac1d843-b7c3-41c6-982b-ca3569ea1385", "agentId": "agent-1",
+        "role": "USER", "text": _CALENDAR_FEEDBACK_ORIGINAL_GOAL,
+        "timestamp": (now - timedelta(minutes=10)).isoformat(),
+        "createdAt": (now - timedelta(minutes=10)).isoformat(), "metadata": None,
+    }, {
+        "id": "browser-task-started", "agentId": "agent-1", "role": "TOOL",
+        "text": "Browser task started", "timestamp": (now - timedelta(minutes=1)).isoformat(),
+        "metadata": {"toolName": "spawn_browser_agent", "action_type": "task_started", "task_id": "task-1", "toolCallId": "tool-1"},
+    }]
+    feedback_message = {
+        "id": "70979068-bddc-4fb1-9e47-35a5cfcd2d87", "agentId": "agent-1",
+        "role": "USER", "text": feedback,
+        "timestamp": now.isoformat(), "createdAt": now.isoformat(),
+        "metadata": {"source": "sms_supervisor"},
+    }
+    model_calls = []
+    verifier_calls = []
+    latest_schema = {"fields": [
+        {"name": "calendar_accessible", "type": "bool", "required": True},
+        {"name": "access_account", "type": "str", "required": True},
+    ]}
+    second_feedback = (
+        "Updated deliverable: return only calendar_accessible and access_account. "
+        "Do not return the events list."
+    )
+
+    async def fetch_agent_snapshot(agent_id, since):
+        assert agent_id == "agent-1"
+        return copy.deepcopy([message for message in durable_messages
+            if datetime.fromisoformat(message["timestamp"]) >= since])
+
+    async def browser_decision(**kwargs):
+        model_calls.append(copy.deepcopy({
+            key: kwargs[key] for key in ("task", "dynamic_system_context", "turn_messages")
+        }))
+        first_turn = len(model_calls) == 1
+        if first_turn:
+            # The durable update arrives while the browser activity is active.
+            feedback_message["timestamp"] = datetime.now(timezone.utc).isoformat()
+            feedback_message["createdAt"] = feedback_message["timestamp"]
+            durable_messages.append(feedback_message)
+        return {
+            "action": {
+                "action": "read_browser_state" if first_turn else "attempt_completion",
+                "thinking": "Inspect the calendar" if first_turn else "Calendar inspected",
+                "params": {} if first_turn else {"reasoning": "Shared calendar inspected"},
+            },
+            "usage": {}, "mode": "waterfall",
+        }
+
+    async def verifier(activity_function, *, args, **kwargs):
+        verifier_calls.append(copy.deepcopy(args[:4]))
+        if schema_failure:
+            return {"score": 1.0, "reasoning": "Passing verdict under previous events contract",
+                    "structured_response": {"events": []}, "usage": {}}
+        if verifier_feedback and len(verifier_calls) == 1:
+            await asyncio.sleep(0)
+            timestamp = datetime.now(timezone.utc).isoformat()
+            durable_messages.append({
+                "id": "during-verifier-correction", "role": "USER", "text": second_feedback,
+                "timestamp": timestamp, "createdAt": timestamp, "metadata": {"source": "sms_supervisor"},
+            })
+            return {
+                "score": 0.5 if verifier_feedback == "omit_fields" else 1.0,
+                "reasoning": "Verdict for the previous events requirement",
+                "structured_response": {"events": [{"title": "STALE PREVIOUS VERDICT"}]}, "usage": {},
+            }
+        if verifier_feedback:
+            return {
+                "score": 1.0, "reasoning": "Verdict for the current access requirement",
+                "structured_response": None if verifier_feedback == "omit_fields" else {
+                    "calendar_accessible": True, "access_account": "andy@roselabs.ai",
+                },
+                "usage": {},
+            }
+        return {
+            "score": 1.0, "reasoning": "Calendar evidence confirmed",
+            "structured_response": {
+                "calendar_accessible": True, "access_account": "andy@roselabs.ai",
+            } if change_fields else {"events": []},
+            "usage": {},
+        }
+
+    async def generate_schema(requirements, **kwargs):
+        if schema_failure:
+            raise TimeoutError("schema provider unavailable")
+        schema = latest_schema if verifier_feedback and second_feedback in requirements else (expected_schema if feedback in requirements else initial_schema)
+        return copy.deepcopy(schema), None, {}
+
+    generator = AsyncMock(side_effect=generate_schema)
+    root_schema_persistence = AsyncMock()
+    fake_browser = SimpleNamespace(
+        contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock(),
+    )
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://session-1", "fingerprint_injection": None, "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "same_session_available": True,
+    }
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(side_effect=fetch_agent_snapshot)),
+        patch("helpers.llm._generate_response_schema_with_rose", generator),
+        patch("helpers.llm.set_response_schema_activity", root_schema_persistence),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_browser_control_state", AsyncMock(return_value="agent")),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", AsyncMock(side_effect=browser_decision)),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", AsyncMock(return_value={"success": True, "message": "Shared calendar inspected"})),
+        # Keep the real verifier context builder; only its external file read is mocked.
+        patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity", AsyncMock(side_effect=verifier)),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    if schema_failure:
+        from domains.spawn_browser_agent_v3 import handler as h
+        original_refresh = h._refresh_browser_output_schema
+
+        async def refresh_retaining_accepted_contract(**kwargs):
+            # Model the native refresh failure contract at the active caller
+            # boundary even before its sibling implementation is published.
+            try:
+                return await original_refresh(**kwargs)
+            except TimeoutError:
+                return kwargs["response_schema"], {}
+
+        patch_targets.extend([
+            patch.object(h, "MAX_ITERATIONS", 3),
+            patch.object(h, "_refresh_browser_output_schema", refresh_retaining_accepted_contract),
+        ])
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal=_CALENDAR_FEEDBACK_ORIGINAL_GOAL,
+            tool_call_id="tool-1", task_id="task-1", is_resume=True,
+            output_schema=initial_schema, use_claude_mode=False,
+            write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1",
+                "user_message_cursor": (now - timedelta(minutes=1)).isoformat()},
+        )
+    return {
+        "result": result, "model_calls": model_calls, "verifier_calls": verifier_calls,
+        "initial_schema": initial_schema, "expected_schema": expected_schema,
+        "feedback": feedback, "generator": generator,
+        "second_feedback": second_feedback, "latest_schema": latest_schema,
+        "root_schema_persistence": root_schema_persistence,
+    }
+
+
+@_in_browser_activity_context
+async def test_browser_active_user_feedback_updates_model_and_verifier_preserving_fields():
+    replay = await _run_browser_durable_user_feedback_replay()
+    assert replay["result"]["status"] == "completed", replay["result"]
+    assert len(replay["model_calls"]) == 2
+    initial, corrected = replay["model_calls"]
+    assert replay["feedback"] in json.dumps(corrected["turn_messages"]), (
+        "durable USER correction absent from the next browser decision"
+    )
+    assert replay["feedback"] in json.dumps(replay["verifier_calls"][0][0]), (
+        "browser verifier still evaluates the original task without the USER correction"
+    )
+    assert corrected["task"] == initial["task"], "feedback rewrote the cached task prefix"
+    assert corrected["dynamic_system_context"] == initial["dynamic_system_context"]
+    assert replay["verifier_calls"][0][3] == replay["initial_schema"], "unchanged deliverable changed output fields"
+    replay["generator"].assert_awaited_once()
+    assert replay["feedback"] in replay["generator"].await_args.args[0]
+    replay["root_schema_persistence"].assert_not_awaited()
+
+
+@_in_browser_activity_context
+async def test_browser_active_user_feedback_changes_only_browser_output_fields():
+    replay = await _run_browser_durable_user_feedback_replay(change_fields=True)
+    assert replay["result"]["status"] == "completed", replay["result"]
+    initial, corrected = replay["model_calls"]
+    assert replay["feedback"] in json.dumps(corrected["turn_messages"]), (
+        "durable USER correction absent from the next browser decision"
+    )
+    real_inputs = [message["content"] for message in corrected["turn_messages"] if message.get("role") == "user"]
+    assert real_inputs == [replay["feedback"]], "schema update fabricated a user instruction"
+    assert corrected["task"] == initial["task"]
+    assert corrected["dynamic_system_context"] != initial["dynamic_system_context"]
+    assert "calendar_accessible" in corrected["dynamic_system_context"]
+    assert "access_account" in corrected["dynamic_system_context"]
+    assert replay["feedback"] in json.dumps(replay["verifier_calls"][0][0])
+    assert replay["verifier_calls"][0][3] == replay["expected_schema"], (
+        "browser verifier did not receive the revised exact output field set"
+    )
+    assert replay["initial_schema"]["fields"][0]["name"] == "events", "browser update mutated the root schema"
+    replay["generator"].assert_awaited_once()
+    replay["root_schema_persistence"].assert_not_awaited()
+
+
+@_in_browser_activity_context
+async def test_browser_feedback_arriving_during_verifier_invalidates_passing_verdict():
+    replay = await _run_browser_durable_user_feedback_replay(verifier_feedback="pass")
+    assert len(replay["verifier_calls"]) == 2, (
+        "browser completed from a passing verdict superseded by USER feedback during verification"
+    )
+    assert len(replay["model_calls"]) == 3
+    assert replay["second_feedback"] in json.dumps(replay["model_calls"][-1]["turn_messages"])
+    assert not any("superseded" in message.get("content", "") for message in replay["model_calls"][-1]["turn_messages"]), "stale verdict manufactured a tool instruction"
+    assert replay["second_feedback"] in json.dumps(replay["verifier_calls"][-1][0])
+    assert replay["verifier_calls"][-1][3] == replay["latest_schema"]
+    assert replay["result"]["structured_response"] == {
+        "calendar_accessible": True, "access_account": "andy@roselabs.ai",
+    }
+
+
+@_in_browser_activity_context
+async def test_browser_schema_revision_discards_previous_verifier_structured_response():
+    replay = await _run_browser_durable_user_feedback_replay(verifier_feedback="omit_fields")
+    assert len(replay["verifier_calls"]) == 2
+    assert replay["verifier_calls"][-1][3] == replay["latest_schema"]
+    assert replay["result"].get("structured_response") is None, (
+        "a verifier omitting revised fields reused structured data cached under the previous schema"
+    )
+    assert "STALE PREVIOUS VERDICT" not in json.dumps(replay["result"])
+
+
+@_in_browser_activity_context
+async def test_browser_pending_schema_failure_does_not_accept_previous_contract_completion():
+    replay = await _run_browser_durable_user_feedback_replay(change_fields=True, schema_failure=True)
+    assert replay["result"]["status"] != "completed", "unacknowledged deliverable accepted completion under old schema"
+    assert replay["result"].get("structured_response") is None, "failed schema refresh exposed old-contract structured output"
+    corrected_inputs = replay["model_calls"][-1]["turn_messages"]
+    assert [message["content"] for message in corrected_inputs if message.get("role") == "user"] == [replay["feedback"]], (
+        "schema failure lost, repeated or fabricated the actual USER correction"
+    )
+    assert replay["generator"].await_count >= 1
+    replay["root_schema_persistence"].assert_not_awaited()
+
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -25863,6 +26256,13 @@ async def run_all_tests():
         "payment_card_tool_args_raise_typed_validation_error",
         test_payment_card_tool_args_raise_typed_validation_error,
     )
+    await r.record_async("browser_active_user_feedback_changes_only_browser_output_fields", test_browser_active_user_feedback_changes_only_browser_output_fields)
+    await r.record_async("browser_active_user_feedback_updates_model_and_verifier_preserving_fields", test_browser_active_user_feedback_updates_model_and_verifier_preserving_fields)
+    await r.record_async("browser_feedback_arriving_during_verifier_invalidates_passing_verdict", test_browser_feedback_arriving_during_verifier_invalidates_passing_verdict)
+    await r.record_async("browser_schema_revision_discards_previous_verifier_structured_response", test_browser_schema_revision_discards_previous_verifier_structured_response)
+    await r.record_async("browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract", test_browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract)
+    await r.record_async("browser_coalesced_schema_failure_retains_completed_usage_and_latest_input", test_browser_coalesced_schema_failure_retains_completed_usage_and_latest_input)
+    await r.record_async("browser_pending_schema_failure_does_not_accept_previous_contract_completion", test_browser_pending_schema_failure_does_not_accept_previous_contract_completion)
     await r.record_async(
         "browser_tool_validation_error_feeds_back_through_normal_path",
         test_browser_tool_validation_error_feeds_back_through_normal_path,

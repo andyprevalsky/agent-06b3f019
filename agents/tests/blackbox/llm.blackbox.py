@@ -74,6 +74,52 @@ def test_generated_response_schema_preserves_constraints():
     assert field["properties"][1]["required"] is False
 
 
+async def test_schema_generation_preserves_field_contract_metadata():
+    """An unchanged generated contract retains descriptions and nullable values."""
+    from helpers.llm import _generate_response_schema_with_rose, _structured_response_satisfies_schema
+    from providers.rose.types import RoseResponse
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    legacy_schema = {"fields": [
+        {"name": "signed_in_account", "type": "str", "required": True, "nullable": False,
+         "description": "Authenticated account used for calendar access.", "minLength": 1},
+        {"name": "events", "type": "list[object]", "required": True, "nullable": False,
+         "description": "Verified calendar events, including an empty day.", "minItems": 0, "maxItems": 40,
+         "properties": [
+             {"name": "title", "type": "str", "required": True, "nullable": False,
+              "description": "Full calendar title.", "minLength": 1, "maxLength": 120},
+             {"name": "notes", "type": "str", "required": True, "nullable": True, "description": "Calendar notes when present."},
+         ]},
+        {"name": "confirmation_message", "type": "str", "required": True, "nullable": True, "description": ""},
+    ]}
+    output = {"signed_in_account": "shared-calendar-user", "events": [{"title": "Calendar event", "notes": None}], "confirmation_message": None}
+    canonical_schema = ResponseSchemaConfig.model_validate(legacy_schema).model_dump()
+    for original_schema in (legacy_schema, canonical_schema):
+        response = RoseResponse(content=json.dumps({"reasoning": "The required calendar outputs are unchanged.", **original_schema}))
+        with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
+            generated, _, _ = await _generate_response_schema_with_rose("List calendar events using shared access", agent_id="schema-metadata")
+        assert generated == original_schema, "typed schema generation dropped field contract metadata"
+        assert _structured_response_satisfies_schema(output, original_schema)
+        assert _structured_response_satisfies_schema(output, generated), "schema parsing removed nullable output support"
+
+
+async def test_schema_generation_preserves_peer_compute_usage():
+    """Metadata preservation keeps the generator's existing accounting result."""
+    from helpers.llm import _generate_response_schema_with_rose
+    from providers.rose.types import RoseResponse
+
+    usage = {
+        "prompt_tokens": 50, "completion_tokens": 10, "actual_model": "schema-model",
+        "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20,
+        "cache_sequence_id": "schema-sequence", "from_fast_cache": True,
+    }
+    response = RoseResponse(content=json.dumps({"reasoning": "Report the account.", "fields": [{"name": "account", "type": "str"}]}), usage=usage)
+    with patch("helpers.llm.RoseClient.collect", AsyncMock(return_value=response)):
+        schema, _, actual_usage = await _generate_response_schema_with_rose("Report the account", agent_id="schema-usage")
+    assert schema == {"fields": [{"name": "account", "type": "str", "required": True}]}
+    assert actual_usage == {**usage, "total_tokens": 60}
+
+
 def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
     from pydantic import ValidationError
     from helpers.llm import (
@@ -8941,6 +8987,8 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
     r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
+    await r.record_async("schema_generation_preserves_field_contract_metadata", test_schema_generation_preserves_field_contract_metadata)
+    await r.record_async("schema_generation_preserves_peer_compute_usage", test_schema_generation_preserves_peer_compute_usage)
     r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
     r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
     r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
