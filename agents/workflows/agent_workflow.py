@@ -1410,8 +1410,6 @@ class AgentWorkflow:
             if isinstance(data, dict) and "request_id" in data:
                 req_id = data["request_id"]
                 actual_response = data.get("response", "")
-                self._signal_responses[req_id] = actual_response
-                workflow.logger.info(f"💬 Stored response for request {req_id}")
                 # Explicit authored provenance is separate from the gate protocol.
                 if "user_message" in data:
                     self._record_response_schema_feedback(data["user_message"], request_id=req_id, authored=True)
@@ -1419,6 +1417,10 @@ class AgentWorkflow:
                     if isinstance(actual_response, str) and actual_response.strip() == REJECTION_SENTINEL:
                         await self._receive_rejection_schema_feedback()
                     self._record_response_schema_feedback(actual_response)
+                # Publish only after intake: request-scoped waiters may run while
+                # legacy rejection feedback awaits its durable poll.
+                self._signal_responses[req_id] = actual_response
+                workflow.logger.info(f"💬 Stored response for request {req_id}")
                 return
         except (ValueError, TypeError, KeyError):
             pass

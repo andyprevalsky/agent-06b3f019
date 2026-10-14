@@ -155,6 +155,47 @@ reconstructing it from whichever rows survived context compaction.
 The case remains open pending rollout. The
 deleted production Calendar agent was not rerun or modified by these tests.
 
+### Request waiter publication ordering follow-up
+
+Cycle 2 review (finding 4277021253) identified a remaining receive-boundary race.
+The keyed receiver published `_signal_responses[request_id]` before awaiting
+legacy rejection feedback polling. A concurrent request waiter could consume the
+rejection while its durable USER requirements still had no admitted revision.
+The earlier rejection tests awaited the entire receiver, so they could not
+observe this intermediate state. This is a recurrence at the same intake owner,
+not evidence that the deleted Calendar incident used the rejection endpoint.
+Archive follow-up searches used `receive_user_response rejection request-scoped
+wait` and `waiter released before durable feedback admission`; this case owns
+the observed boundary.
+
+Two permanent workflow tests invoke the native receiver with its external
+message-poll activity blocked and an independent request-key waiter. Both fail
+on 1ed6269b3ee7 with `request-scoped waiter consumed rejection before durable
+feedback admission`. The identical tests pass after moving only response
+publication and its log below existing authored/legacy feedback admission.
+Success exposes the original authored bytes and revision before the waiter
+runs; polling failure leaves the request unpublished and propagates the
+existing error. The success control also repeats the canonical attention event
+and verifies that its revision remains one. Existing explicit-null controls,
+authored protocol-looking words and exact-byte tests remain unchanged.
+There is no schema helper, payload, provenance, budget or model narration change.
+
+Focused command, from the isolated response-ordering worktree:
+
+    source agents/venv/bin/activate
+    python .context/rejection-ordering/repro.py
+
+The retained `before.txt` records two causal failures and three existing control
+passes; `after.txt` records five passes using unchanged fixtures/assertions.
+The full owning command from `agents/` is
+`python scripts/run_blackbox_tests.py workflow`. It failed on the two new waiter
+assertions before the fix (31.6s), then passed one domain with zero failures in
+41.6s; the complete latter output is retained in
+`.context/rejection-ordering/workflow-after.txt`. Both new tests are registered
+in that normal deploy-owned workflow runner. Scoped Ruff, compilation and diff
+checks pass. Production acceptance and the single combined rollout remain
+pending the deployment owner.
+
 ## Human feedback
 
 The user asked to follow the root standard and implement missing support there,

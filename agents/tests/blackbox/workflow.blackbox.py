@@ -3353,6 +3353,82 @@ async def test_workflow_keyed_rejection_polls_durable_user_feedback_without_sche
         _restore_workflow(original)
 
 
+async def _assert_keyed_rejection_waiter_orders_feedback(*, poll_fails: bool):
+    wf, fake, replacement = _user_schema_refresh_fixture()
+    request_id = "ordered-rejection"
+    correction = {
+        "id": "ordered-correction", "role": "USER",
+        "text": "  Use Andy's shared account.\nInclude venue prices.  ",
+        "timestamp": "2026-10-14T17:28:00Z",
+        "metadata": {"source": "attention_response", "attentionRequestId": request_id},
+    }
+    wf.context = [{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-14T17:21:00Z"}]
+    unblock_poll = asyncio.Event()
+    fake.activity_blockers["poll_new_messages"] = unblock_poll
+    fake.activity_returns["poll_new_messages"] = [correction]
+    if poll_fails:
+        fake.activity_fail_for.add("poll_new_messages")
+    original = _patch_workflow(fake)
+
+    async def await_request_response():
+        # Same request-scoped predicate used by the approval wait_condition.
+        while request_id not in wf._signal_responses:
+            await asyncio.sleep(0)
+        return wf._signal_responses[request_id], list(wf._response_schema_feedback), wf._response_schema_revision
+
+    signal_task = asyncio.create_task(wf.receive_user_response(json.dumps({
+        "request_id": request_id, "response": "__REJECTED__",
+    })))
+    waiter = asyncio.create_task(await_request_response())
+    try:
+        for _ in range(20):
+            if any(call[0] == "poll_new_messages" for call in fake.activity_calls):
+                break
+            await asyncio.sleep(0)
+        assert any(call[0] == "poll_new_messages" for call in fake.activity_calls), "rejection did not reach its durable poll"
+        await asyncio.sleep(0)
+        assert not signal_task.done(), "durable poll was not blocked"
+        assert request_id not in wf._signal_responses and not waiter.done(), (
+            "request-scoped waiter consumed rejection before durable feedback admission"
+        )
+        unblock_poll.set()
+        if poll_fails:
+            try:
+                await signal_task
+                raise AssertionError("failed durable poll was hidden")
+            except RuntimeError as error:
+                assert str(error) == "poll_new_messages failed"
+            await asyncio.sleep(0)
+            assert request_id not in wf._signal_responses and not waiter.done(), "failed intake published the rejection"
+            assert wf._response_schema_revision == 0 and wf._response_schema_feedback == []
+        else:
+            await signal_task
+            response, feedback, revision = await waiter
+            assert response == "__REJECTED__"
+            assert feedback == [correction["text"]] and revision == 1, "waiter observed rejection before its authored revision"
+            await wf._wait_for_response_schema_refresh()
+            assert wf.output_schema == replacement
+            assert correction in wf.context
+            await wf.receive_user_response(json.dumps({"request_id": request_id, "response": "__REJECTED__"}))
+            assert wf._response_schema_revision == 1, "retry admitted the same attention event twice"
+        assert not any(call[0] == "post_agent_message" and call[1][2] == "USER" for call in fake.activity_calls)
+    finally:
+        unblock_poll.set()
+        for task in (signal_task, waiter):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(signal_task, waiter, return_exceptions=True)
+        _restore_workflow(original)
+
+
+async def test_workflow_keyed_rejection_waiter_releases_after_feedback_admission():
+    await _assert_keyed_rejection_waiter_orders_feedback(poll_fails=False)
+
+
+async def test_workflow_failed_rejection_intake_does_not_release_waiter():
+    await _assert_keyed_rejection_waiter_orders_feedback(poll_fails=True)
+
+
 async def test_workflow_schema_requirements_preserve_distinct_durable_reversions():
     wf, fake, _replacement = _user_schema_refresh_fixture()
     rows = [
@@ -10154,6 +10230,8 @@ async def run_all_tests():
     )
     await r.record_async("wf_keyed_rejection_already_polled_feedback", test_workflow_keyed_rejection_admits_already_polled_durable_feedback)
     await r.record_async("wf_keyed_rejection_durable_feedback", test_workflow_keyed_rejection_polls_durable_user_feedback_without_schema_narration)
+    await r.record_async("wf_keyed_rejection_waiter_after_feedback", test_workflow_keyed_rejection_waiter_releases_after_feedback_admission)
+    await r.record_async("wf_failed_rejection_intake_keeps_waiter", test_workflow_failed_rejection_intake_does_not_release_waiter)
     await r.record_async("wf_schema_durable_reversions", test_workflow_schema_requirements_preserve_distinct_durable_reversions)
     await r.record_async("wf_attention_row_before_signal_event_identity", test_workflow_attention_row_before_signal_is_one_requirement_event)
     await r.record_async("wf_attention_signal_distinct_identical_row", test_workflow_attention_signal_does_not_consume_another_identical_event_row)
