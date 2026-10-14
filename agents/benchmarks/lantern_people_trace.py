@@ -265,7 +265,7 @@ def check_lantern_people_trace(data: dict, check: dict) -> tuple[bool, str]:
                     and params.get("query") == check["query"]
                     and params.get("limit") == check["page_size"]
                     and isinstance(params.get("titles"), list)
-                    and set(check["required_titles"]).issubset(params["titles"])
+                    and params["titles"] == check["required_titles"]
                 ):
                     if len(records) >= check["min_records"]:
                         evidence = records
@@ -277,7 +277,7 @@ def check_lantern_people_trace(data: dict, check: dict) -> tuple[bool, str]:
                     and params.get("query") == check["query"]
                     and params.get("limit") == check["page_size"]
                     and isinstance(params.get("titles"), list)
-                    and set(check["required_titles"]).issubset(params["titles"])
+                    and params["titles"] == check["required_titles"]
                 ):
                     discovered.update((key, record["generation"]) for key, record in records.items())
                 if params.get("mode") != "enrich" or not records:
@@ -319,8 +319,7 @@ def check_lantern_people_trace(data: dict, check: dict) -> tuple[bool, str]:
                 ):
                     continue
                 if check.get("required_titles") and (
-                    not isinstance(params.get("titles"), list)
-                    or not set(check["required_titles"]).issubset(params["titles"])
+                    not isinstance(params.get("titles"), list) or params["titles"] != check["required_titles"]
                 ):
                     continue
                 cursor = result.get("next_cursor")

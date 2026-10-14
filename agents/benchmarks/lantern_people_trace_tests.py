@@ -297,6 +297,15 @@ def test_lantern_config_missing_final_and_null_native_fields():
 def test_lantern_reviewer_owner_constraint_and_native_counterexamples():
     for scenario in ("discovery", "enrichment", "pagination"):
         check, data, tools, _ = _fixture(scenario)
+        for tool in tools:
+            _rewrite(
+                tool,
+                change_params=lambda p: (
+                    p.update(titles=["Software Engineer", "Founder"]) if p.get("mode") == "discover" else None
+                ),
+            )
+        assert not _run(check, data)[0], "extra titles broaden the explicitly requested filter"
+        check, data, tools, _ = _fixture(scenario)
         _rewrite(tools[0 if scenario == "enrichment" else -1], change_params=lambda p: p.update(limit=25))
         assert not _run(check, data)[0], (scenario, "wrong limit")
         check, data, tools, _ = _fixture(scenario)
