@@ -45,6 +45,7 @@ import argparse
 import copy
 import ctypes
 import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -624,30 +625,55 @@ class RecoveryLock:
     def __init__(self, registry: Path) -> None:
         self.lock = registry / "recovery-lock"
         self.payload = b""
+        self.guard_fd = -1
 
     def acquire(self) -> None:
         host = socket.gethostname()
         start = bash_lib("cloudbench-env.sh", ["cloudbench_pid_start_time", str(os.getpid())])
         if not start:
             raise Refusal("could not record this helper's process birth")
-        for _ in range(2):
+        # Share one persistent inode with the normal fleet recoverer. It lives
+        # outside the removable registry and is never unlinked on release.
+        guards = self.lock.parent.parent.parent / "cloudbench-fleet-recovery-locks"
+        guards.mkdir(mode=0o700, exist_ok=True)
+        if guards.is_symlink():
+            raise Refusal("recovery guard directory is a symlink")
+        guard = guards / self.lock.parent.name
+        try:
+            self.guard_fd = os.open(guard, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            raise Refusal("could not open one regular recovery guard") from None
+        try:
+            opened, current = os.fstat(self.guard_fd), guard.lstat()
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+                raise Refusal("recovery guard is not one persistent regular inode")
             try:
-                os.mkdir(self.lock, 0o700)
-            except FileExistsError:
-                holder = fields(self.lock / "meta")
-                state = (pid_birth_state(holder.get("pid", ""), holder.get("pid_start", ""))
-                         if holder.get("host") == host else "unknown")
-                if state != "absent":
-                    raise Refusal(f"exact-owner recovery lock is held ({state}); retry after it exits") from None
-                (self.lock / "meta").unlink()
-                os.rmdir(self.lock)
-                continue
-            self.payload = f"host={host}\npid={os.getpid()}\npid_start={start}\n".encode()
-            temporary = self.lock / f"meta.tmp.{os.getpid()}"
-            temporary.write_bytes(self.payload)
-            os.replace(temporary, self.lock / "meta")
-            return
-        raise Refusal("could not acquire the exact-owner recovery lock")
+                fcntl.flock(self.guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Refusal("exact-owner recovery guard is held; retry after it exits") from None
+            for _ in range(2):
+                try:
+                    os.mkdir(self.lock, 0o700)
+                except FileExistsError:
+                    holder = fields(self.lock / "meta")
+                    state = (pid_birth_state(holder.get("pid", ""), holder.get("pid_start", ""))
+                             if holder.get("host") == host else "unknown")
+                    if state != "absent":
+                        raise Refusal(f"exact-owner recovery lock is held ({state}); retry after it exits") from None
+                    (self.lock / "meta").unlink()
+                    os.rmdir(self.lock)
+                    continue
+                self.payload = f"host={host}\npid={os.getpid()}\npid_start={start}\n".encode()
+                temporary = self.lock / f"meta.tmp.{os.getpid()}"
+                temporary.write_bytes(self.payload)
+                os.replace(temporary, self.lock / "meta")
+                return
+            raise Refusal("could not acquire the exact-owner recovery lock")
+        except BaseException:
+            os.close(self.guard_fd)
+            self.guard_fd = -1
+            raise
 
     def release(self) -> None:
         # Remove only this helper's exact lock; never another holder's.
@@ -658,6 +684,9 @@ class RecoveryLock:
         except (Refusal, OSError) as error:
             print(f"⚠️ recovery lock was not released: {error}", file=sys.stderr)
         self.payload = b""
+        if self.guard_fd >= 0:
+            os.close(self.guard_fd)
+            self.guard_fd = -1
 
 
 def wait_for(fly: Fly, machine_id: str, predicate, seconds: int, label: str) -> dict:
@@ -714,8 +743,8 @@ def stop_and_restore(fly: Fly, ident: dict, original: dict, journal: Journal, se
         fly.api("POST", f"/machines/{machine_id}", {"config": original, "skip_launch": True})
         journal("restore-requested")
         current = wait_for(
-            fly, machine_id, lambda m: m.get("state") == "stopped" and m.get("config") == original,
-            seconds, "stopped with the exact original config",
+            fly, machine_id, lambda m: m.get("state") in idle and m.get("config") == original,
+            seconds, "idle with the exact original config",
         )
     journal("restored", instance_id=current.get("instance_id"))
     return current
@@ -834,8 +863,8 @@ def cross_check_receipts(out: Path, ident: dict, originals: dict[str, bytes]) ->
 def final_native_proof(fly: Fly, ident: dict, original: dict) -> tuple[dict, dict]:
     machine = fly.machine(ident["machine_id"])
     volume = fly.volume(ident["volume_id"])
-    if machine.get("state") != "stopped" or machine.get("config") != original:
-        raise CaptureFailure("final native Machine is not stopped with the exact original config")
+    if machine.get("state") not in ("stopped", "created") or machine.get("config") != original:
+        raise CaptureFailure("final native Machine is not idle with the exact original config")
     if volume.get("attached_machine_id") != ident["machine_id"] or volume.get("state") != "created":
         raise CaptureFailure("final native volume is not attached to the exact Machine")
     return machine, volume
@@ -888,6 +917,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         raise Refusal(f"could not save the original config privately: {error}") from None
     inert = inert_variant(original)
     stage, mutated, local = "inert-config", False, None
+    restore_hint = "--restore-original-config" + (" --isolate-services" if ident.get("isolate_services") else "")
     mutations: list[str] = []
 
     def interrupted(signum, _frame):
@@ -898,8 +928,8 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         mutated = True
         mutations.append("config-inert")
         fly.api("POST", f"/machines/{machine_id}", {"config": inert, "skip_launch": True})
-        wait_for(fly, machine_id, lambda m: m.get("state") == "stopped" and m.get("config") == inert,
-                 args.wait_seconds, "stopped with the inert config")
+        wait_for(fly, machine_id, lambda m: m.get("state") in ("stopped", "created") and m.get("config") == inert,
+                 args.wait_seconds, "idle with the inert config")
         journal("inert-config-applied")
         stage = "inert-start"
         mutations.append("start")
@@ -935,7 +965,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
             "machine_id": machine_id, "volume_id": ident["volume_id"], "guest_run_token": ident["token"],
             "stage": stage, "error": str(error)[:500], "provider_mutations_attempted": mutations, **outcome,
             "unverified_download": local.name if local else None,
-            "next_step": ("--restore-original-config" if not outcome.get("restored") else
+            "next_step": (restore_hint if not outcome.get("restored") else
                           "investigate; rerun with a fresh capture directory"),
         }
         publish_bytes(artifacts["capture-failure.json"], canonical(failure) + b"\n")
@@ -943,7 +973,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         print(f"❌ original-volume capture failed at {stage}: {str(error)[:300]}", file=sys.stderr)
         if not outcome.get("restored"):
             print("❌ the exact original config is NOT proven restored; rerun with "
-                  "--restore-original-config and the same capture directory", file=sys.stderr)
+                  f"{restore_hint} and the same capture directory", file=sys.stderr)
         return EXIT_FAILED
     finally:
         for sig, handler in previous.items():
@@ -976,7 +1006,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
     journal("published", archive_sha256=provenance["archive_sha256"])
     print(json.dumps({"captured": True, "machine_id": machine_id, "archive": str(artifacts["tar.gz"]),
                       "files": len(inventory["files"]), "missing": inventory["missing"],
-                      "native_final_state": "stopped", "proof_credit": 0}, sort_keys=True))
+                      "native_final_state": final_machine.get("state"), "proof_credit": 0}, sort_keys=True))
     return 0
 
 
@@ -1001,11 +1031,11 @@ def restore_only(args: argparse.Namespace) -> int:
         journal = Journal(capture_dir / f"{machine_id}.capture-journal.jsonl")
         try:
             stop_and_restore(fly, ident, original, journal, args.wait_seconds)
-            final_native_proof(fly, ident, original)
+            final_machine, _ = final_native_proof(fly, ident, original)
         except CaptureFailure as error:
             print(f"❌ restore did not verify: {error}", file=sys.stderr)
             return EXIT_FAILED
-        print(json.dumps({"restored": True, "machine_id": machine_id, "native_final_state": "stopped",
+        print(json.dumps({"restored": True, "machine_id": machine_id, "native_final_state": final_machine.get("state"),
                           "proof_credit": 0}, sort_keys=True))
         return 0
     finally:

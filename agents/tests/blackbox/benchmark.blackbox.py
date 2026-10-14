@@ -983,6 +983,7 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
             suite + "::test_failed_fleet_forensic_original_volume_preflight_is_read_only",
             suite + "::test_failed_fleet_forensic_original_volume_controls_are_in_permanent_gate",
             suite + "::test_failed_fleet_forensic_original_volume_service_isolation",
+            suite + "::test_failed_fleet_forensic_original_volume_recovery_lock_fences_stale_successor",
             suite + "::test_boot_terminal_runtime_evidence_admission_precedes_guest_start",
             str(repo_root / "agents/benchmarks/cloudbench_runtime_retention_test.py"),
             str(repo_root / "agents/benchmarks/cloudbench_worker_evidence_test.py"),

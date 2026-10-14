@@ -2112,6 +2112,7 @@ for snapshot in snapshots:
         read -r candidate state candidate_ids <<< "$(printf '%s' "$snapshots_json" \
             | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" REQUESTED_AT="$requested_at" \
                 BASELINE_EMPTY="$([ -n "$before_ids" ] || echo 1)" \
+                SCHEDULE_RETRIED="$([ "$schedule_attempt" -gt 1 ] && echo 1 || echo 0)" \
                 CLOCK_SKEW="${CLOUDBENCH_SNAPSHOT_CLOCK_SKEW_SECONDS:-300}" python3 -c '
 import json, os, sys
 from datetime import datetime
@@ -2123,7 +2124,11 @@ bound = os.environ.get("BOUND_ID", "")
 # A snapshot Fly dated well before this request cannot be its result, even if a
 # transiently empty baseline omitted it. Pending snapshots carry a zero date and
 # unparseable dates stay candidates, so this never adopts by time.
-predates = float(os.environ["REQUESTED_AT"]) - float(os.environ["CLOCK_SKEW"])
+# A scheduling retry follows a positively competing transaction. Its snapshot
+# may finish after our baseline but before this accepted request; the ordinary
+# clock-skew allowance must not let us adopt that earlier transaction.
+skew = 0 if os.environ.get("SCHEDULE_RETRIED") == "1" else float(os.environ["CLOCK_SKEW"])
+predates = float(os.environ["REQUESTED_AT"]) - skew
 def created_before_request(snapshot):
     try:
         created = datetime.fromisoformat(str(snapshot.get("created_at") or "").replace("Z", "+00:00"))

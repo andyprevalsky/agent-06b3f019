@@ -5519,8 +5519,49 @@ fleet_registry_remove_if_empty() {  # fleet_registry_remove_if_empty <registry-d
 
 acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
     local registry="$1" lock="$1/recovery-lock" tmp
+    local guard="${registry%/*/*}/cloudbench-fleet-recovery-locks/${registry##*/}"
+    # The capture helper uses this same persistent inode. Never unlink it:
+    # removing the registry metadata must not split concurrent recoverers.
+    python3 - "$guard" <<'PYGUARD' || return 1
+import os, stat, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.parent.mkdir(mode=0o700, exist_ok=True)
+if path.parent.is_symlink():
+    raise SystemExit(1)
+fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    value = os.fstat(fd)
+    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+PYGUARD
+    exec {REGISTRY_RECOVERY_GUARD_FD}< "$guard" || return 1
+    local guard_status=1
     for _ in $(seq 1 30); do
-        [ -d "$registry" ] || return 2
+        guard_status=0
+        python3 - "$REGISTRY_RECOVERY_GUARD_FD" "$guard" <<'PYGUARD' || guard_status=$?
+import fcntl, os, stat, sys
+fd = int(sys.argv[1])
+opened, current = os.fstat(fd), os.lstat(sys.argv[2])
+if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+    raise SystemExit(2)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+PYGUARD
+        if [ "$guard_status" -eq 1 ]; then
+            sleep 1
+            continue
+        fi
+        if [ "$guard_status" -ne 0 ]; then
+            release_registry_recovery_guard
+            return 1
+        fi
+        [ -d "$registry" ] || { release_registry_recovery_guard; return 2; }
         if mkdir "$lock" 2>/dev/null; then
             tmp="$lock/meta.tmp.$$"
             {
@@ -5538,13 +5579,31 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
             case $? in
                 0) sleep 1; continue ;;
                 1) rm -rf "$lock"; continue ;;
-                *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; return 1 ;;
+                *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; release_registry_recovery_guard; return 1 ;;
             esac
         fi
         sleep 1
     done
     echo "❌ timed out waiting for stale fleet recovery lock: $registry" >&2
+    release_registry_recovery_guard
     return 1
+}
+
+release_registry_recovery_guard() {
+    if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        exec {REGISTRY_RECOVERY_GUARD_FD}<&-
+        unset REGISTRY_RECOVERY_GUARD_FD
+    fi
+}
+
+release_registry_recovery_lock() {
+    local registry="$1" meta="$1/recovery-lock/meta"
+    if [ "$(registry_meta_value "$meta" host)" = "$FLEET_OWNER_HOST" ] \
+        && [ "$(registry_meta_value "$meta" pid)" = "$$" ] \
+        && [ "$(registry_meta_value "$meta" pid_start)" = "$FLEET_OWNER_PID_START" ]; then
+        rm -rf "$registry/recovery-lock"
+    fi
+    release_registry_recovery_guard
 }
 
 reserve_cleanup_disk_space() {
@@ -6110,7 +6169,7 @@ reconcile_stale_fleet_registries() {
         fi
         echo "🧭 recovering stale fleet registry $(basename "$registry") (same-host controller identity is dead)"
         if ! recover_registry_audit_only_fresh "$registry"; then
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             # Registries are independent ownership scopes. Preserve this one
             # and keep the overall startup fail-closed, but continue cleaning
             # later registries whose exact IDs and dead owners can be proven.
@@ -6122,29 +6181,29 @@ reconcile_stale_fleet_registries() {
         # before spending six more destroy/read attempts or blocking a healthy
         # unrelated fleet. The registry remains owned and retryable.
         if stale_registry_only_waits_for_provider_detach "$registry"; then
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             continue
         fi
         if ! reap_registry_clones "$registry" stale; then
             if stale_registry_only_waits_for_provider_detach "$registry"; then
-                rm -rf "$registry/recovery-lock"
+                release_registry_recovery_lock "$registry"
                 continue
             fi
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             unresolved=1
             continue
         fi
         if ! recover_exact_pool_claims "$meta"; then
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             unresolved=1
             continue
         fi
         if ! fleet_audit_finalize_recovered_registry "$registry"; then
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             unresolved=1
             continue
         fi
-        rm -rf "$registry/recovery-lock"
+        release_registry_recovery_lock "$registry"
         fleet_registry_remove_if_empty "$registry" || unresolved=1
     done
     [ "$unresolved" = "0" ]
@@ -10344,7 +10403,7 @@ PY
                 && [ ! -L "$registry/runtime-evidence-unconfirmed" ]; then
                 fleet_recovery_retire_one_sealed_machine "$registry" || true
             fi
-            rm -rf "$registry/recovery-lock"
+            release_registry_recovery_lock "$registry"
             return 1
         fi
     fi
@@ -10359,19 +10418,19 @@ PY
             *) echo "❌ sealed Machine-only retirement did not verify; full ownership retained" >&2 ;;
         esac
         echo "❌ exact stale-owner runtime evidence is incomplete; original volumes remain retained" >&2
-        rm -rf "$registry/recovery-lock"
+        release_registry_recovery_lock "$registry"
         return 1
     fi
     if ! fleet_recovery_confirm_pool_claims "$registry"; then
         echo "❌ exact stale-owner pool claims lack complete guest receipts" >&2
-        rm -rf "$registry/recovery-lock"
+        release_registry_recovery_lock "$registry"
         return 1
     fi
     policy="$(registry_meta_value "$meta" cleanup_policy)"
     cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
     if [ "$cleanup_state" != "reap" ]; then
         echo "❌ exact stale-owner receipts did not authorize provider teardown" >&2
-        rm -rf "$registry/recovery-lock"
+        release_registry_recovery_lock "$registry"
         return 1
     fi
     # The supervising waiter already proved the entire controller process group
@@ -10383,10 +10442,10 @@ PY
         || ! recover_exact_pool_claims "$meta" exact \
         || ! capacity_release_stale_owner_reservations "$meta" "$token-primary" \
         || ! fleet_audit_finalize_recovered_registry "$registry"; then
-        rm -rf "$registry/recovery-lock"
+        release_registry_recovery_lock "$registry"
         return 1
     fi
-    rm -rf "$registry/recovery-lock"
+    release_registry_recovery_lock "$registry"
     fleet_registry_remove_if_empty "$registry" || return 1
     fleet_publish_recovered_terminal_projection "$FLEET_AUDIT_ROOT/$token"
 }

@@ -18663,8 +18663,8 @@ def test_refresh_deps_snapshot_waits_for_already_scheduled_snapshot(tmp_path: Pa
     cloud = CLOUD_SCRIPT.read_text()
     create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
 
-    def run(rejections: int, schedule_attempts: int) -> tuple[subprocess.CompletedProcess[str], str]:
-        state = tmp_path / f"scheduled-{rejections}-{schedule_attempts}"
+    def run(rejections: int, schedule_attempts: int, raced: bool = False) -> tuple[subprocess.CompletedProcess[str], str]:
+        state = tmp_path / f"scheduled-{rejections}-{schedule_attempts}-{raced}"
         state.mkdir()
         (state / "creates").write_text("0\n")
         script = f"""set -uo pipefail
@@ -18682,12 +18682,20 @@ FLY() {{
     fi
     touch "$STATE/created"
     return 0
+  elif [ -f "$STATE/created" ] && [ {int(raced)} -eq 1 ]; then
+    polls=$(( $(cat "$STATE/polls" 2>/dev/null || echo 0) + 1 )); echo "$polls" > "$STATE/polls"
+    if [ "$polls" -eq 1 ]; then
+      echo '[{{"id":"snap-prior-transaction","status":"complete","size":50,"created_at":"2026-10-12T20:28:19Z"}}]'
+    else
+      echo '[{{"id":"snap-owned","status":"complete","size":10,"created_at":"2026-10-12T20:28:20Z"}}]'
+    fi
   elif [ -f "$STATE/created" ]; then
     echo '[{{"id":"snap-pending-foreign","status":"created","size":50}},{{"id":"snap-owned","status":"created","size":10}}]'
   else
     echo '[{{"id":"snap-pending-foreign","status":"waiting","size":0}}]'
   fi
 }}
+date() {{ echo 1791836900; }}
 sleep() {{ echo "sleep $*" >> "$STATE/sleeps"; }}
 {create_snapshot}
 create_volume_snapshot_exact vol-1 || exit $?
@@ -18716,6 +18724,11 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     assert "snapshot creation request failed" in exhausted.stderr
     assert "EXACT=" not in exhausted.stdout
 
+
+    raced, _ = run(rejections=1, schedule_attempts=3, raced=True)
+    assert raced.returncode == 0, raced.stderr
+    assert "EXACT=snap-owned" in raced.stdout, "adopted the peer snapshot completed before our accepted request"
+    assert "transaction snapshot: snap-prior-transaction" not in raced.stdout
 
 def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
     """An unresolved ref is input failure and must cause zero Fly API calls."""
@@ -29375,6 +29388,8 @@ class _FakeMachinesApi:
                 if self.fault == "restore-drift" and cmd == _CAPTURE_DRIVER_CMD:
                     config.pop("metadata", None)
                 machine["config"] = config
+                if self.fault == "update-created":
+                    machine["state"] = "created"
                 machine["instance_id"] = f"v{len(self.events)}"
                 self._publish()
                 return 200, machine
@@ -29583,7 +29598,7 @@ _CAPTURE_ROLLBACKS = (
 
 
 @pytest.mark.parametrize(
-    "fault", ["none", "pool", *_CAPTURE_REFUSALS, *_CAPTURE_ROLLBACKS, "restore-drift"],
+    "fault", ["none", "pool", *_CAPTURE_REFUSALS, *_CAPTURE_ROLLBACKS, "restore-drift", "update-created"],
 )
 def test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_closed(
     tmp_path: Path, fault: str
@@ -29645,7 +29660,8 @@ def test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_c
         ["stop", _CAPTURE_INERT_CMD], ["update", _CAPTURE_DRIVER_CMD],
     ]
     assert all(event[2] is True for event in events if event[0] == "update")
-    assert final["state"] == "stopped" and final["config"] == fx.config
+    assert final["state"] == ("created" if fault == "update-created" else "stopped") and final["config"] == fx.config
+    assert json.loads(result.stdout)["native_final_state"] == final["state"]
     assert [call[1:3] for call in calls] == [
         ["console", "-a"], ["sftp", "put"], ["sftp", "put"], ["console", "-a"], ["sftp", "get"]]
     assert stat.S_IMODE(fx.capture.stat().st_mode) == 0o700
@@ -29654,7 +29670,7 @@ def test_failed_fleet_forensic_original_volume_capture_is_inert_exact_and_fail_c
     assert snapshot == fx.config
     provenance = json.loads((fx.capture / f"{machine}.provenance.json").read_text())
     assert provenance["proof_credit"] == 0 and provenance["direct_original_volume"] is True
-    assert provenance["native_release_verified"] is False and provenance["native_final_state"] == "stopped"
+    assert provenance["native_release_verified"] is False and provenance["native_final_state"] == final["state"]
     assert (provenance["machine_id"], provenance["volume_id"]) == (machine, fx.volume)
     assert provenance["allocation_kind"] == fx.kind and provenance["guest_run_token"] == fx.token
     assert provenance["archive_sha256"] == hashlib.sha256(published.read_bytes()).hexdigest()
@@ -29815,6 +29831,7 @@ def test_failed_fleet_forensic_original_volume_controls_are_in_permanent_gate() 
             "test_failed_fleet_forensic_original_volume_restore_only_returns_exact_config",
             "test_failed_fleet_forensic_original_volume_preflight_is_read_only",
             "test_failed_fleet_forensic_original_volume_service_isolation",
+            "test_failed_fleet_forensic_original_volume_recovery_lock_fences_stale_successor",
         )
     }
     assert required <= targets, f"original-volume controls missing from permanent gate: {required - targets}"
@@ -29854,6 +29871,9 @@ def test_failed_fleet_forensic_original_volume_service_isolation(tmp_path: Path,
     else:
         failure = json.loads((fx.capture / f"{fx.machine}.capture-failure.json").read_bytes())
         assert failure["restored"] is (fault != "restore-drift")
+        if fault == "restore-drift":
+            assert failure["next_step"] == "--restore-original-config --isolate-services"
+            assert "--restore-original-config --isolate-services" in result.stderr
         assert not (fx.capture / f"{fx.machine}.provenance.json").exists()
 
 
@@ -32053,3 +32073,77 @@ def test_warm_volume_selection_binds_exact_mounted_donor(tmp_path: Path, case: s
     result = subprocess.run(["bash", "-c", 'FLY() { cat "$VOLUME_FIXTURE"; };\n' + block + '\nprintf "%s\\n" "$VOL_ID"'], env=env, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
+
+
+def test_failed_fleet_forensic_original_volume_recovery_lock_fences_stale_successor(tmp_path: Path) -> None:
+    """A second recoverer cannot replace a stale lock while the first observes it."""
+    import fcntl
+
+    source = ORIGINAL_VOLUME_CAPTURE_SCRIPT.read_text()
+    tree = ast.parse(source)
+    definition = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RecoveryLock")
+    registry = tmp_path / "cloudbench-fleet-ownership" / ("c" * 32)
+    lock = registry / "recovery-lock"
+    lock.mkdir(parents=True)
+    stale = f"host={socket.gethostname()}\npid=99999999\npid_start=dead\n".encode()
+    (lock / "meta").write_bytes(stale)
+    observed, resume = threading.Event(), threading.Event()
+    errors = []
+    class Refusal(Exception):
+        pass
+    def read_fields(path):
+        return dict(line.split("=", 1) for line in path.read_text().splitlines())
+    def birth(pid, start):
+        if threading.current_thread().name == "first-recovery" and start == "dead":
+            observed.set()
+            assert resume.wait(10)
+        return "absent" if start == "dead" else "alive"
+    scope = dict(Path=Path, os=os, socket=socket, stat=stat, fcntl=fcntl, sys=sys,
+                 Refusal=Refusal, fields=read_fields, pid_birth_state=birth,
+                 bash_lib=lambda *_args: "live-birth", regular_bytes=lambda p, *_args: p.read_bytes())
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(ORIGINAL_VOLUME_CAPTURE_SCRIPT), "exec"), scope)
+    first, second = scope["RecoveryLock"](registry), scope["RecoveryLock"](registry)
+    def acquire_first():
+        try:first.acquire()
+        except BaseException as error:errors.append(error)
+    thread = threading.Thread(target=acquire_first, name="first-recovery")
+    thread.start()
+    try:
+        assert observed.wait(10)
+        refused = False
+        try:second.acquire()
+        except Refusal:refused = True
+        resume.set();thread.join(10)
+        assert not thread.is_alive() and not errors, errors
+        assert refused, "concurrent stale recoverer acquired and published a successor lock"
+        assert (lock / "meta").read_bytes() == first.payload
+        fleet = fleet_source_text()
+        functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
+            "acquire_registry_recovery_lock", "release_registry_recovery_guard", "release_registry_recovery_lock"))
+        script = """set -u
+FLEET_OWNER_HOST=fixture
+FLEET_OWNER_PID_START=fixture-birth
+sleep() { :; }
+registry_meta_value() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
+registry_owner_alive() { return 1; }
+""" + functions + '\nacquire_registry_recovery_lock "$1"; result=$?; echo "LOCK_RESULT=$result"; release_registry_recovery_lock "$1"'
+        shell = subprocess.run(["bash", "-c", script, "_", str(registry)], text=True, capture_output=True, timeout=30)
+        assert "LOCK_RESULT=1" in shell.stdout, shell.stdout + shell.stderr
+        assert (lock / "meta").read_bytes() == first.payload
+        first.release()
+        shell = subprocess.run(["bash", "-c", script, "_", str(registry)], text=True, capture_output=True, timeout=30)
+        assert "LOCK_RESULT=0" in shell.stdout, shell.stdout + shell.stderr
+        assert not lock.exists()
+        guard = registry.parent.parent / "cloudbench-fleet-recovery-locks" / registry.name
+        foreign = tmp_path / "foreign-guard"
+        foreign.write_bytes(b"foreign original bytes\n")
+        for fault in ("symlink", "hardlink"):
+            guard.unlink()
+            if fault == "symlink":guard.symlink_to(foreign)
+            else:os.link(foreign, guard)
+            candidate = scope["RecoveryLock"](registry)
+            with pytest.raises(Refusal):candidate.acquire()
+            assert not lock.exists() and foreign.read_bytes() == b"foreign original bytes\n"
+    finally:
+        resume.set();thread.join(10)
+        second.release();first.release()
