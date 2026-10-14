@@ -2321,7 +2321,7 @@ async def _iter_payment_fill_targets(
     session: Any,
     input_page: Any = None,
 ) -> List[tuple[str, Any]]:
-    """Yield (label, target) pairs for every reachable document (main + iframes).
+    """Yield (label, target) pairs for the focused document and its iframes.
 
     Prefer Playwright frames (trusted keyboard focus path), then the browser-use
     page, then CDP iframe/page targets. No host/path filters.
@@ -2354,7 +2354,37 @@ async def _iter_payment_fill_targets(
         except Exception as exc:
             logger.debug("Payment fill get_all_frames failed", error=str(exc))
             all_frames = {}
-        for _frame_id, info in all_frames.items():
+        # browser-use's cross-origin frame inventory spans every tab. A field
+        # found in another tab cannot establish that this page received the
+        # approved card. Follow frame ownership from the focused target only;
+        # an orphaned iframe has no proven owner and must stay excluded.
+        focused_target = getattr(session, "agent_focus_target_id", None)
+        children: Dict[str, List[str]] = {}
+        focused_frames: List[str] = []
+        for frame_id, info in all_frames.items():
+            if not isinstance(info, dict):
+                continue
+            parent_id = info.get("parentFrameId") or info.get("parentId")
+            if parent_id:
+                children.setdefault(str(parent_id), []).append(frame_id)
+            if (
+                isinstance(focused_target, str)
+                and focused_target
+                and info.get("frameTargetId") == focused_target
+                and not parent_id
+            ):
+                focused_frames.append(frame_id)
+        owned_frames: set[str] = set()
+        while focused_frames:
+            frame_id = focused_frames.pop()
+            if frame_id in owned_frames:
+                continue
+            owned_frames.add(frame_id)
+            focused_frames.extend(children.get(frame_id, []))
+
+        for frame_id, info in all_frames.items():
+            if frame_id not in owned_frames:
+                continue
             if not isinstance(info, dict):
                 continue
             target_id = info.get("frameTargetId")
