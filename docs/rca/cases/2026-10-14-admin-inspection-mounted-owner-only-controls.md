@@ -125,6 +125,18 @@ three skips, 151.70 seconds. Coverage is 81.05% statements, 73.19% branches,
 browser schema and stale subagent text regressions also fail before and pass
 after, preserving displayed native state.
 
+CodeRabbit also identified the period before detail loading establishes
+ownership. Deep-linked and newly selected agents now keep the composer and
+browser controls read-only during that interval. A delayed-detail reproduction
+previously exposed an editable composer and an automatic browser-control POST.
+Auditing failed detail loading found that clearing only the selected ID left
+stale realtime browser messages mounted; the existing full selection reset now
+flushes those messages and subscriptions before restoring the landing input.
+The same five owning suites fail 42/43 on the intermediate loading candidate
+and pass all 43 after the failure reset, in 14.36 seconds. App typecheck,
+targeted lint and diff checks pass. Ordinary owned control, optimistic creation,
+and the unselected landing composer retain their existing behavior.
+
 ## Human feedback
 
 The user reported the mobile pause error and asked to continue. No request to

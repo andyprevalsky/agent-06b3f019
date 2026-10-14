@@ -991,17 +991,32 @@ async def _refresh_browser_output_schema(
         return response_schema, {}
     from helpers.llm import _generate_response_schema_with_rose
 
-    schema, _title, usage = await _generate_response_schema_with_rose(
-        "\n\n".join([
-            goal,
-            json_dumps_compact({"output_schema": response_schema}),
-            *[message["content"] for message in messages],
-        ]),
-        agent_id=agent_id,
-        compute_auth=compute_auth,
-    )
-    if not isinstance(schema, dict) or not schema.get("fields"):
-        raise RuntimeError("Browser schema refresh returned no fields")
+    usage: Dict[str, Any] = {}
+    try:
+        schema, _title, usage = await _generate_response_schema_with_rose(
+            "\n\n".join([
+                goal,
+                "Current output schema (preserve fields unless later user feedback changes them):\n"
+                + json_dumps_compact(response_schema),
+                *[message["content"] for message in messages],
+            ]),
+            agent_id=agent_id,
+            compute_auth=compute_auth,
+        )
+        if not isinstance(schema, dict) or not schema.get("fields"):
+            raise ValueError("Browser schema refresh returned no fields")
+    except WorkflowGenerationSealed:
+        raise
+    except Exception as error:
+        # Instruction delivery is independent of this optional model request.
+        # Keep the accepted contract and leave this input revision retryable.
+        logger.warning(
+            "Browser schema refresh failed; retaining accepted schema",
+            agent_id=agent_id,
+            error=extract_error_message(error),
+        )
+        return response_schema, usage
+    state["schema_user_instruction_count"] = len(messages)
     return schema, usage
 
 
@@ -1034,6 +1049,7 @@ def _browser_resume_continuity_state(
     user_message_cursor: Optional[str] = None,
     user_instruction_message_ids: Optional[List[str]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
+    schema_user_instruction_count: int = 0,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -1048,7 +1064,7 @@ def _browser_resume_continuity_state(
         "delivered_user_instruction_count": len(user_instruction_messages or []),
         "user_message_cursor": user_message_cursor,
         "user_instruction_message_ids": list(user_instruction_message_ids or []),
-        "schema_user_instruction_count": len(user_instruction_messages or []),
+        "schema_user_instruction_count": schema_user_instruction_count,
         "browser_output_schema": response_schema,
     }
     return state
@@ -6406,8 +6422,14 @@ async def _spawn_browser_agent_activity_v3_real(
     auth_assistance_resume_mode: Optional[str] = None
     payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
-        pending_write_lock_action = write_lock_resume_state.get("pending_action")
-        pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
+        has_new_user_input = len(write_lock_resume_state.get("user_instruction_messages") or []) > int(
+            write_lock_resume_state.get("delivered_user_instruction_count") or 0
+        )
+        # An approved queued action predates this input. The actor must decide
+        # what to do after reading it, even when write permission remains valid.
+        if not has_new_user_input:
+            pending_write_lock_action = write_lock_resume_state.get("pending_action")
+            pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
         write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
@@ -6490,6 +6512,7 @@ async def _spawn_browser_agent_activity_v3_real(
             "rootAgentId": agent_id,
         },
     )
+    schema_user_instruction_count = int((write_lock_resume_state or {}).get("schema_user_instruction_count") or 0)
     schema_input_tokens = int(schema_usage.get("prompt_tokens") or 0)
     schema_output_tokens = int(schema_usage.get("completion_tokens") or 0)
     total_input_tokens += schema_input_tokens
@@ -7856,6 +7879,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             state=_browser_resume_continuity_state(
                                 action_history=action_history,
                                 response_schema=response_schema,
+                                schema_user_instruction_count=schema_user_instruction_count,
                                 user_instruction_messages=user_instruction_messages,
                                 user_message_cursor=user_message_cursor,
                                 user_instruction_message_ids=user_instruction_message_ids,
@@ -8986,6 +9010,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
                             response_schema=response_schema,
+                            schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
                             user_instruction_message_ids=user_instruction_message_ids,
@@ -10297,6 +10322,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
                             response_schema=response_schema,
+                            schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
                             user_instruction_message_ids=user_instruction_message_ids,
@@ -10441,6 +10467,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
                             response_schema=response_schema,
+                            schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
                             user_instruction_message_ids=user_instruction_message_ids,

@@ -154,6 +154,45 @@ tests, at 82% coverage (337.0-second recorded stage).
 All 46 deploy structural gates passed. The merged-source backend and frontend
 typechecks pass with zero errors; frontend lint passes with nine warnings.
 
+The first CodeRabbit cycle exposed additional suspension boundaries. Schema
+generation failure must not prevent delivery of actual input: the browser now
+keeps its accepted schema, delivers the message, and retains a retryable schema
+revision across suspension. The schema generator uses the root's existing
+preserve-unaffected-fields contract; acting-model history gains no synthetic
+turn. New input also invalidates a previously queued browser action so the
+next action is chosen after reading the correction. Six permanent browser
+regressions cover these paths; the browser and timing domains pass together
+in 57.9 seconds.
+
+Reserved protocol values are excluded after whitespace normalization while
+genuine authored text retains its original bytes. Its unchanged owning
+assertion failed before this correction and passes afterward. Background root
+schema generation now has no persistence side effect: only an accepted
+revision is written through the generation-fenced API. Continuation prefers
+that accepted native schema if the database write failed or its acknowledgement
+was lost. Five causal persistence regressions failed before and pass after;
+the workflow and LLM domains pass in 52.9 seconds and worker registration passes
+32 tests in 71.0 seconds.
+
+The shared transport audit also reproduced a producer-side loss: typed
+approval replies reached the keyed signal without creating a durable USER row.
+Text-entry producers now send an explicit optional user_message, preserving
+the original bytes separately from the approval protocol response. Default
+buttons, explicit token overrides and generated completion notices omit that
+field. The unchanged frontend request-body matrix goes from 13 failures to
+29 passes; five owning suites pass 255 tests with one existing skip. The backend
+stores authored input in the same transaction as gate resolution, then
+broadcasts and signals after commit. Request-linked source identity and the
+existing attention lock cover retries and waiters joining during resolution;
+the browser continues using the same durable message stream.
+
+New keyed signals distinguish authored user_message from an explicit null
+protocol-only value. The root keeps the gate response unchanged and uses only
+the authored value for schema feedback. Signals from legacy producers without
+the field retain their existing behavior. Two permanent receiver regressions
+fail against the previous receiver and pass afterward; the owning workflow
+suite passes in 41.7 seconds. No USER or TOOL narration is manufactured.
+
 Golden references read: codex/codex-rs/core/src/session/input_queue.rs:389
 drains pending typed input; hermes-agent/agent/agent_runtime_helpers.py:3758
 appends actual steering as a standalone user row after a tool batch;

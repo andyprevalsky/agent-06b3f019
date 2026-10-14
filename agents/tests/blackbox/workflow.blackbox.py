@@ -804,6 +804,11 @@ async def mock_set_response_schema_activity(
     return None
 
 
+@activity.defn(name="persist_response_schema_activity")
+async def mock_persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    return None
+
+
 @activity.defn(name="send_direct_sms_activity")
 async def mock_send_direct_sms_activity(user_id: str, message: str) -> Dict:
     return {"success": True}
@@ -1061,6 +1066,7 @@ MOCK_ACTIVITIES = [
     mock_populate_tool_params_activity,
     mock_save_blueprint_activity,
     mock_set_response_schema_activity,
+    mock_persist_response_schema_activity,
     mock_send_direct_sms_activity,
     mock_resolve_fast_cache_goal_activity,
     mock_create_approval_request_activity,
@@ -3140,6 +3146,32 @@ async def test_workflow_signal_control_reply_does_not_refresh_schema():
         _restore_workflow(original)
 
 
+async def test_workflow_signal_normalized_controls_do_not_refresh_schema():
+    controls = ["  __REJECTED__\n", "\t__AUTH_ASSISTANCE_COMPLETED__  ",
+                " RESOLVED ", " SOURCE_CONNECTED\n", " SUBSCRIPTION_ACTIVE ", "", " \n"]
+    for keyed in (True, False):
+        wf = _bare_workflow_instance()
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            for index, response in enumerate(controls):
+                value = json.dumps({"request_id": str(index), "response": response}) if keyed else response
+                await wf.receive_user_response(value)
+                assert wf._response_schema_feedback == [], "control or empty input became schema feedback"
+                assert wf._response_schema_revision == 0
+                if keyed:
+                    assert wf._signal_responses[str(index)] == response
+                else:
+                    assert wf._last_signal_response == response
+            genuine = "  Also return venue prices.\n"
+            value = json.dumps({"request_id": "user", "response": genuine}) if keyed else genuine
+            await wf.receive_user_response(value)
+            assert wf._response_schema_feedback == [genuine], "genuine user text was changed"
+            assert wf._response_schema_revision == 1
+        finally:
+            _restore_workflow(original)
+
+
 async def test_workflow_signal_unknown_schema_envelope_is_user_feedback():
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
@@ -3224,6 +3256,49 @@ async def test_workflow_keyed_user_message_updates_native_schema_without_injecti
             call[0] == "post_agent_message" and call[1][2] == "USER"
             for call in fake.activity_calls
         ), "schema refresh fabricated a USER message"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_keyed_authored_message_refreshes_schema_separately_from_control():
+    feedback = "  Include the price for each venue.\nKeep this authored text unchanged.  "
+    for control in ("__REJECTED__", "RESOLVED", "__AUTH_ASSISTANCE_COMPLETED__"):
+        wf, fake, replacement = _user_schema_refresh_fixture()
+        original = _patch_workflow(fake)
+        try:
+            await wf.receive_user_response(json.dumps({
+                "request_id": "authored-control", "response": control, "user_message": feedback,
+            }))
+            await wf._wait_for_response_schema_refresh()
+            assert wf._signal_responses["authored-control"] == control, "authored input overwrote the gate protocol"
+            assert wf._response_schema_feedback == [feedback], "protocol reply dropped or rewrote actual user input"
+            assert wf.output_schema == replacement, "authored input beside a protocol reply left the root schema stale"
+            generation = [call for call in fake.activity_calls if call[0] == "set_response_schema_activity"]
+            assert len(generation) == 1 and feedback.strip() in generation[0][1][1]
+            assert not any(
+                call[0] == "post_agent_message" and call[1][2] == "USER"
+                for call in fake.activity_calls
+            ), "schema refresh invented a USER row"
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_explicit_protocol_only_reply_does_not_refresh_schema():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        for control in ("Approved", "Message sent via Mac app ✅", "Authentication complete"):
+            await wf.receive_user_response(json.dumps({
+                "request_id": "protocol-only", "response": control, "user_message": None,
+            }))
+            assert wf._signal_responses["protocol-only"] == control
+        assert wf._response_schema_revision == 0 and wf._response_schema_feedback == []
+        assert wf._has_new_messages is False and fake.activity_calls == []
+        legacy = "Also include entry notes."
+        await wf.receive_user_response(json.dumps({"request_id": "legacy", "response": legacy}))
+        assert wf._response_schema_feedback == [legacy]
+        assert wf._signal_responses["legacy"] == legacy
     finally:
         _restore_workflow(original)
 
@@ -3570,6 +3645,159 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
         assert wf._response_schema_applied_revision == 2
     finally:
         _restore_workflow(original)
+
+
+async def _exercise_schema_refresh_persistence(
+    *, latest_fails: bool, feedback_during_persist: bool = False,
+    persist_ack_lost: bool = False, persist_fails_before_commit: bool = False,
+):
+    """Run real schema generation/persistence through the workflow's revision gate."""
+    import copy
+    import httpx
+    from temporalio.testing import ActivityEnvironment
+    from unittest.mock import AsyncMock, patch
+    from _test_utils import setup_mock_fn
+    import workflows.agent_workflow as workflow_module
+
+    wf, _unused_fake, _unused_replacement = _user_schema_refresh_fixture()
+    wf.max_iterations = 20
+    wf.context_gates = {}
+    initial_schema = copy.deepcopy(wf.output_schema)
+    stale_schema = {"fields": [{"name": "prices", "type": "list[int]", "required": True}]}
+    latest_schema = {"fields": [{"name": "addresses", "type": "list[str]", "required": True}]}
+    database = {"schema": copy.deepcopy(initial_schema)}
+    writes = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    generation_count = 0
+
+    async def generate_schema(*_args, **_kwargs):
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 1:
+            first_started.set()
+            await release_first.wait()
+            return copy.deepcopy(stale_schema), None, {"prompt_tokens": 10, "completion_tokens": 2}
+        if latest_fails or generation_count > 2:
+            raise RuntimeError("latest schema generation failed")
+        return copy.deepcopy(latest_schema), None, {"prompt_tokens": 12, "completion_tokens": 3}
+
+    def database_http(request):
+        if request.method == "PATCH" and request.url.path == f"/api/agents/{wf.agent_id}":
+            body = json.loads(request.content)
+            if body["response_schema"] == latest_schema and persist_fails_before_commit:
+                raise httpx.ReadError("accepted schema persistence unavailable", request=request)
+            database["schema"] = copy.deepcopy(body["response_schema"])
+            writes.append(copy.deepcopy(database["schema"]))
+            if body["response_schema"] == latest_schema:
+                if feedback_during_persist:
+                    wf._record_response_schema_feedback("Also include phone numbers")
+                if persist_ack_lost:
+                    raise httpx.ReadError("accepted schema acknowledgement lost", request=request)
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(404, json={"error": "unexpected schema fixture request"})
+
+    class SchemaActivityWorkflow(_FakeWorkflowModule):
+        async def execute_activity(self, fn, args=None, **kwargs):
+            name = getattr(fn, "__name__", str(fn))
+            if name in {"set_response_schema_activity", "persist_response_schema_activity"}:
+                self.activity_calls.append((name, args))
+                return await ActivityEnvironment().run(fn, *(args or []))
+            return await super().execute_activity(fn, args=args, **kwargs)
+
+    fake = SchemaActivityWorkflow()
+    fake.activity_returns["poll_new_messages"] = []
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+    observed_resume_schema = []
+
+    async def resumed_agent(**kwargs):
+        observed_resume_schema.append(copy.deepcopy(kwargs["response_schema"]))
+        return {"status": "completed", "context": [], "structured_response": None,
+                "token_count": 0, "context_size": 0}
+
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="https://schema-fixture.test", api_key="fixture-key"))
+    try:
+        setup_mock_fn(database_http)
+        with (
+            patch("helpers.llm.load_config", return_value=config),
+            patch("helpers.llm._generate_response_schema_with_rose", generate_schema),
+            patch("providers.fast_cache.client.resolve_agent_fast_mode", AsyncMock(return_value=(False, "", False, "", "", False))),
+        ):
+            await wf.receive_user_response("Include prices")
+            await asyncio.wait_for(first_started.wait(), timeout=2)
+            await wf.receive_user_response("Return addresses instead")
+            release_first.set()
+            await wf._wait_for_response_schema_refresh()
+
+            accepted_schema = copy.deepcopy(wf.output_schema)
+            state = wf._continuation_resume_state(wf.context)
+            fake.activity_returns.update({
+                "fetch_agent_config": {"response_schema": copy.deepcopy(database["schema"]), "write_lock_enabled": True},
+                "get_model_context_window": 200_000,
+                "get_agent_source": "WEB",
+                "get_user_context": "",
+                "get_user_system_name": "Rose",
+                "generate_completion_summary": {"summary": "done", "tool_counts": {}, "usage": {}},
+            })
+            workflow_module.run_agent = resumed_agent
+            restored = _bare_workflow_instance()
+            await restored.run(
+                wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
+                {"type": "FLOAT_LLM_JUDGE"}, context=wf.context,
+                start_phase="execute_continued", resume_state=state,
+            )
+        return initial_schema, latest_schema, accepted_schema, database["schema"], writes, observed_resume_schema
+    finally:
+        release_first.set()
+        if wf._response_schema_refresh_task is not None:
+            await wf._response_schema_refresh_task
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+        teardown_mock()
+
+
+async def test_workflow_superseded_schema_never_persists_when_latest_generation_fails():
+    initial, _latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(latest_fails=True)
+    assert (accepted, persisted, resumed) == (initial, initial, [initial]), (
+        "Superseded schema reached durable state or the resumed native contract: "
+        f"accepted={accepted!r}, persisted={persisted!r}, resumed={resumed!r}, writes={writes!r}"
+    )
+    assert writes == [], "discarded schema generation must not issue a persistence write"
+
+
+async def test_workflow_only_accepted_latest_schema_persists_and_resumes():
+    _initial, latest, accepted, persisted, writes, resumed = await _exercise_schema_refresh_persistence(latest_fails=False)
+    assert (accepted, persisted, resumed, writes) == (latest, latest, [latest], [latest]), (
+        "The revision gate must persist only the accepted latest schema and preserve it across continuation"
+    )
+
+
+async def test_workflow_feedback_during_schema_persistence_keeps_accepted_contract():
+    _initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
+        latest_fails=False, feedback_during_persist=True,
+    )
+    assert (accepted, persisted, resumed) == (latest, latest, [latest]), (
+        "Input arriving during persistence discarded a schema that had already been accepted"
+    )
+
+
+async def test_workflow_schema_commit_with_lost_acknowledgement_keeps_accepted_contract():
+    _initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
+        latest_fails=False, persist_ack_lost=True,
+    )
+    assert (accepted, persisted, resumed) == (latest, latest, [latest]), (
+        "A committed schema was treated as discarded after its acknowledgement was lost"
+    )
+
+
+async def test_workflow_restored_accepted_schema_wins_over_stale_database_config():
+    initial, latest, accepted, persisted, _writes, resumed = await _exercise_schema_refresh_persistence(
+        latest_fails=False, persist_fails_before_commit=True,
+    )
+    assert (accepted, persisted, resumed) == (latest, initial, [latest]), (
+        "Continuation replaced the accepted native contract with an older database snapshot"
+    )
 
 
 async def test_workflow_signal_signup_completed_and_dismissed():
@@ -9358,6 +9586,10 @@ async def run_all_tests():
         test_workflow_signal_control_reply_does_not_refresh_schema,
     )
     await r.record_async(
+        "wf_signal_normalized_controls_no_schema",
+        test_workflow_signal_normalized_controls_do_not_refresh_schema,
+    )
+    await r.record_async(
         "wf_signal_schema_prefix_is_feedback",
         test_workflow_signal_treats_schema_prefix_as_genuine_user_feedback,
     )
@@ -9372,6 +9604,14 @@ async def run_all_tests():
     await r.record_async(
         "wf_keyed_user_native_schema",
         test_workflow_keyed_user_message_updates_native_schema_without_injection,
+    )
+    await r.record_async(
+        "wf_keyed_authored_message_separate_from_control",
+        test_workflow_keyed_authored_message_refreshes_schema_separately_from_control,
+    )
+    await r.record_async(
+        "wf_explicit_protocol_only_reply_no_schema",
+        test_workflow_explicit_protocol_only_reply_does_not_refresh_schema,
     )
     await r.record_async(
         "wf_schema_change_native_contract",
@@ -9404,6 +9644,26 @@ async def run_all_tests():
     await r.record_async(
         "wf_schema_refresh_coalesces_feedback",
         test_workflow_schema_refresh_coalesces_rapid_feedback,
+    )
+    await r.record_async(
+        "wf_superseded_schema_never_persists_on_latest_failure",
+        test_workflow_superseded_schema_never_persists_when_latest_generation_fails,
+    )
+    await r.record_async(
+        "wf_only_accepted_schema_persists_and_resumes",
+        test_workflow_only_accepted_latest_schema_persists_and_resumes,
+    )
+    await r.record_async(
+        "wf_feedback_during_schema_persistence_keeps_accepted_contract",
+        test_workflow_feedback_during_schema_persistence_keeps_accepted_contract,
+    )
+    await r.record_async(
+        "wf_schema_commit_lost_ack_keeps_accepted_contract",
+        test_workflow_schema_commit_with_lost_acknowledgement_keeps_accepted_contract,
+    )
+    await r.record_async(
+        "wf_restored_accepted_schema_wins_stale_config",
+        test_workflow_restored_accepted_schema_wins_over_stale_database_config,
     )
     await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
     await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)

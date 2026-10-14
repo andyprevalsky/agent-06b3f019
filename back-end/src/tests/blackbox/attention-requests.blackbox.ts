@@ -14,6 +14,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { appendGateWaiter, findPendingByGateKey } from '../../domains/attention-requests/repo';
 
 config();
 
@@ -1038,6 +1039,186 @@ async function testRespond_authLookingMetadataWithoutAuthRowIsGeneric() {
   );
 }
 
+async function testRespond_authoredMessagePersistsExactlyOnceWithOriginalBytes() {
+  const fixture = await createFixture('respond-authored');
+  const created = await createAttentionRequest(fixture);
+  const beforeMessages = await prisma.message.findMany({
+    where: { agentId: fixture.realAgentId, role: 'USER' },
+    select: { id: true },
+  });
+  const text = '  Return only venue_prices\nKeep these exact bytes.  ';
+  const send = (userMessage: string) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify({ response: text, user_message: userMessage }),
+    });
+  const responses = await Promise.all([send(text), send(text)]);
+  for (const response of responses) assertStatus(response.status, 200, response.data);
+  const retried = await send(text);
+  assertStatus(retried.status, 200, retried.data);
+  const messages = await prisma.message.findMany({
+    where: {
+      agentId: fixture.realAgentId,
+      role: 'USER',
+      id: { notIn: beforeMessages.map(({ id }) => id) },
+    },
+  });
+  assert(
+    messages.length === 1,
+    `Expected one authored USER row after concurrent/repeated replies, got ${messages.length}`
+  );
+  assert(
+    messages[0].text === text,
+    'Authored attention response must preserve every original byte'
+  );
+}
+
+async function testRespond_authoredInputAfterControlIsPreservedAndConflictsAreExplicit() {
+  const fixture = await createFixture('respond-authored-after-control');
+  const initialCount = await countAgentMessages(fixture.realAgentId);
+  const created = await createAttentionRequest(fixture);
+  const send = (body: object) =>
+    request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify(body),
+    });
+  const control = await send({ response: 'Approved' });
+  assertStatus(control.status, 200, control.data);
+  const text = '  Return only venue_prices after the button approval.  ';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await send({ response: text.trim(), user_message: text });
+    assertStatus(result.status, 200, result.data);
+  }
+  const rows = await prisma.message.findMany({
+    where: {
+      agentId: fixture.realAgentId,
+      role: 'USER',
+      metadata: { path: ['attentionRequestId'], equals: created.id },
+    },
+  });
+  assert(
+    rows.length === 1 && rows[0].text === text,
+    'A control-first race must preserve the first authored reply once'
+  );
+  const conflict = await send({
+    response: 'A distinct later message',
+    user_message: 'A distinct later message',
+  });
+  assertStatus(conflict.status, 409, conflict.data);
+  assert(
+    (await countAgentMessages(fixture.realAgentId)) === initialCount + 1,
+    'Conflicting reply must not add USER input'
+  );
+  const persisted = await getRequestById(created.id, authHeaders(fixture.ownerToken));
+  assert(
+    persisted.userResponse === 'Approved',
+    'Authored input must not overwrite the accepted protocol decision'
+  );
+}
+
+async function testRespond_controlsAndNarrativesDoNotBecomeUserMessages() {
+  const fixture = await createFixture('respond-controls');
+  const beforeMessages = await countAgentMessages(fixture.realAgentId);
+  for (const response of ['Approved', 'Message sent via Mac app ✅', 'Authentication complete']) {
+    const created = await createAttentionRequest(fixture);
+    const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+      method: 'POST',
+      headers: authHeaders(fixture.ownerToken),
+      body: JSON.stringify({ response }),
+    });
+    assertStatus(result.status, 200, result.data);
+  }
+  const messages = await prisma.message.count({
+    where: { agentId: fixture.realAgentId, role: 'USER' },
+  });
+  assert(
+    messages === beforeMessages,
+    'Controls and completion narratives must not manufacture USER messages'
+  );
+}
+
+async function testRespond_authoredMessageFailureLeavesGatePending() {
+  const fixture = await createFixture('respond-authored-missing-agent');
+  const created = await createAttentionRequest(fixture, { agentId: fixture.missingAgentId });
+  const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({
+      response: 'Return only venue_prices',
+      user_message: 'Return only venue_prices',
+    }),
+  });
+  assertStatus(result.status, 500, result.data);
+  const row = await getRequestById(created.id, authHeaders(fixture.ownerToken));
+  assert(
+    row.userResponse === null,
+    'Failed authored-message persistence must roll back gate resolution'
+  );
+}
+
+async function testRespond_authoredReplyFansOutOnceAndReachesLateWaiters() {
+  const fixture = await createFixture('respond-authored-fanout');
+  const waiter = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Authored gate waiter', status: 'ACTIVE' },
+  });
+  const lateWaiter = await prisma.agent.create({
+    data: { userId: fixture.ownerUserId, goal: 'Late authored gate waiter', status: 'ACTIVE' },
+  });
+  for (const agent of [waiter, lateWaiter]) trackedRealAgentIds.add(agent.id);
+  const gateKey = `authored:${RUN_ID}:${randomUUID()}`;
+  const created = await createAttentionRequest(fixture, {
+    metadata: {
+      gateWaiters: [
+        { agentId: fixture.realAgentId, workflowId: makeWorkflowId('same-agent-waiter') },
+        { agentId: waiter.id, workflowId: makeWorkflowId('first-waiter') },
+        { agentId: waiter.id, workflowId: makeWorkflowId('duplicate-agent-waiter') },
+      ],
+    },
+  });
+  await prisma.agentAttentionRequest.update({ where: { id: created.id }, data: { gateKey } });
+  // Capture the pending lookup, then let resolution win before append takes its row lock.
+  const pending = await findPendingByGateKey(fixture.ownerUserId, gateKey);
+  assert(pending?.id === created.id, 'Late join must start from a pending gate lookup');
+  const text = '  Approved\nKeep these authored bytes.  ';
+  const result = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ response: 'RESOLVED', user_message: text }),
+  });
+  assertStatus(result.status, 200, result.data);
+  for (const agentId of [fixture.realAgentId, waiter.id]) {
+    const rows = await prisma.message.findMany({
+      where: {
+        agentId,
+        role: 'USER',
+        metadata: { path: ['attentionRequestId'], equals: created.id },
+      },
+    });
+    assert(
+      rows.length === 1 && rows[0].text === text,
+      'Each notified agent must receive one exact authored USER row'
+    );
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const joined = await appendGateWaiter(pending.id, makeWorkflowId('late-waiter'), lateWaiter.id);
+    assert(
+      joined.pending === false && joined.response === 'RESOLVED',
+      'Late waiter must retain the protocol response'
+    );
+    assert(
+      joined.userMessage === text,
+      'Late waiter signal must carry the same authored provenance'
+    );
+    const rows = await prisma.message.findMany({ where: { agentId: lateWaiter.id, role: 'USER' } });
+    assert(
+      rows.length === 1 && rows[0].text === text,
+      'Late join must commit authored input once before returning for signal'
+    );
+  }
+}
+
 async function testRespond_noAuth() {
   const fixture = await createFixture('respond-no-auth');
   const created = await createAttentionRequest(fixture);
@@ -1237,7 +1418,17 @@ async function testReject_withMessageCreatesTrimmedUserMessage() {
     afterMessages === beforeMessages + 1,
     `Expected one new agent message, got count ${afterMessages}`
   );
-  await expectLatestMessage(fixture.realAgentId, 'Do not proceed with this');
+  await expectLatestMessage(fixture.realAgentId, '  Do not proceed with this  ');
+  const retry = await request(`${BASE_URL}/api/attention-requests/${created.id}/reject`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ message: '  Do not proceed with this  ' }),
+  });
+  assertStatus(retry.status, 200, retry.data);
+  assert(
+    (await countAgentMessages(fixture.realAgentId)) === afterMessages,
+    'Repeated rejection must not duplicate authored input'
+  );
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
   assert(
@@ -1417,6 +1608,26 @@ async function runAll() {
       name: 'POST /:id/respond',
       tests: [
         {
+          name: 'control-first authored input persists once and later conflict is explicit',
+          fn: testRespond_authoredInputAfterControlIsPreservedAndConflictsAreExplicit,
+        },
+        {
+          name: 'authored replies reach immediate and late waiters exactly once',
+          fn: testRespond_authoredReplyFansOutOnceAndReachesLateWaiters,
+        },
+        {
+          name: 'authored input persists once with original bytes',
+          fn: testRespond_authoredMessagePersistsExactlyOnceWithOriginalBytes,
+        },
+        {
+          name: 'controls and completion narratives do not become USER input',
+          fn: testRespond_controlsAndNarrativesDoNotBecomeUserMessages,
+        },
+        {
+          name: 'authored input failure rolls back gate resolution',
+          fn: testRespond_authoredMessageFailureLeavesGatePending,
+        },
+        {
           name: 'happy path persists state and decrements count',
           fn: testRespond_happyPersistsStateAndDecrementsCount,
         },
@@ -1451,7 +1662,7 @@ async function runAll() {
       tests: [
         { name: 'happy path persists rejected state', fn: testReject_happyPersistsRejectedState },
         {
-          name: 'with message creates one trimmed USER message',
+          name: 'with message preserves authored bytes once',
           fn: testReject_withMessageCreatesTrimmedUserMessage,
         },
         {

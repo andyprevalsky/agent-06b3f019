@@ -20655,7 +20655,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -20727,8 +20727,10 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     ]
     captured_turns = []
     captured_system_context = []
+    decision_order = []
 
     async def capture_actor(**kwargs):
+        decision_order.append("model")
         captured_turns.append(copy.deepcopy(kwargs["turn_messages"]))
         captured_system_context.append(kwargs["dynamic_system_context"])
         return actor_responses[len(captured_turns) - 1]
@@ -20736,17 +20738,31 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     actor_call = AsyncMock(side_effect=capture_actor)
     actor_call.captured_turns = captured_turns
     actor_call.captured_system_context = captured_system_context
+    actor_call.decision_order = decision_order
     judge_call = AsyncMock(return_value={"score": 1.0, "reasoning": "completed", "structured_response": {"result": "ride requested"}, "usage": {}})
     schema_generator = AsyncMock(return_value=(
         generated_schema or {"fields": [{"name": "result", "type": "string"}]},
         None, {"prompt_tokens": 10, "completion_tokens": 5},
     ))
+    schema_generator.side_effect = schema_failure
+    pending_preparation = AsyncMock(return_value=(pending_action, {}, "https://example.com"))
+
+    async def execute_pending(*args, **kwargs):
+        decision_order.append("queued_action")
+        return {"success": True, "current_url": "https://example.com"}
+
+    pending_execution = AsyncMock(side_effect=execute_pending)
+    actor_call.pending_execution = pending_execution
     schema_client = AsyncMock(return_value=SimpleNamespace(
         content=json.dumps({"reasoning": "The requested output contract follows the real user input.", **(generated_schema or {"fields": [{"name": "result", "type": "str"}]})}),
         tool_calls=[], usage={"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "gpt-5.6-luna", "cache_read_input_tokens": 8, "cache_sequence_id": "schema-generation-1"},
     ))
     actor_call.schema_generator = schema_client if real_schema_generator else schema_generator
     patch_targets = [
+        *([
+            patch("domains.spawn_browser_agent_v3.handler._prepare_pending_write_lock_action", pending_preparation),
+            patch("domains.spawn_browser_agent_v3.handler.execute_action", pending_execution),
+        ] if pending_action else []),
         *( [patch("helpers.llm.RoseClient.collect", schema_client)] if real_schema_generator else
             [patch("helpers.llm._generate_response_schema_with_rose", schema_generator)] ),
         patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
@@ -20837,6 +20853,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
                 "approval_type": approval_type,
                 "task_id": "task-1",
                 "user_message_cursor": "2026-10-14T17:21:35.438+00:00",
+                "pending_action": pending_action,
             },
         )
 
@@ -20898,7 +20915,40 @@ async def test_browser_resume_recomputes_its_own_schema_for_real_user_feedback()
     generator_goal = generator.await_args.args[0]
     assert generator_goal.startswith("Buy socks\n\n")
     assert correction in generator_goal
-    assert '"output_schema"' in generator_goal and '"result"' in generator_goal
+    assert "Current output schema (preserve fields unless later user feedback changes them):\n" in generator_goal
+    assert '"result"' in generator_goal
+
+
+async def test_browser_schema_failure_preserves_actual_input_for_actor_and_verifier():
+    correction = "Use the shared calendar instead. Include confirmed entry notes."
+    row = {"id": "schema-unavailable-input", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER", "text": correction}
+    actor, judge = await _exercise_browser_resume_user_input(
+        [row], schema_failure=RuntimeError("schema provider unavailable"),
+    )
+    assert all([message for message in turns if message.get("role") == "user"] == [
+        {"role": "user", "content": correction}
+    ] for turns in actor.captured_turns)
+    assert judge.await_args.kwargs["args"][3] == {"fields": [{"name": "result", "type": "string"}]}
+    assert [message["text"] for message in judge.await_args.kwargs["args"][0] if message.get("role") == "USER"][1:] == [correction]
+
+
+async def test_browser_new_input_requires_fresh_decision_before_queued_action():
+    correction = "Do not submit this purchase. Read the current order details instead."
+    row = {"id": "queued-action-correction", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER", "text": correction}
+    action = {"action": "click", "params": {"index": 4}, "thinking": "Submit the original purchase"}
+    actor, _judge = await _exercise_browser_resume_user_input([row], pending_action=action)
+    assert actor.decision_order[0] == "model", "queued action executed before the model read the actual correction"
+    actor.pending_execution.assert_not_awaited()
+    assert [message for message in actor.captured_turns[0] if message.get("role") == "user"] == [
+        {"role": "user", "content": correction}
+    ]
+
+
+async def test_browser_without_new_input_executes_approved_pending_action():
+    action = {"action": "click", "params": {"index": 4}, "thinking": "Submit the approved purchase"}
+    actor, _judge = await _exercise_browser_resume_user_input(pending_action=action)
+    assert actor.decision_order[0] == "queued_action"
+    actor.pending_execution.assert_awaited_once()
 
 
 async def test_browser_schema_generation_preserves_selected_compute_auth_at_client_boundary():
@@ -23098,15 +23148,17 @@ async def test_browser_schema_refresh_survives_repeated_resume_without_new_user_
         )
         assert unchanged is initial and usage == {}
         generation.assert_not_awaited()
+        state = {"user_instruction_messages": [correction]}
         accepted, usage = await h._refresh_browser_output_schema(
             goal="Read the shared calendar", agent_id="agent-1", response_schema=initial,
-            resume_state={"user_instruction_messages": [correction]}, compute_auth=compute_auth,
+            resume_state=state, compute_auth=compute_auth,
         )
         assert accepted == replacement and usage == {"prompt_tokens": 12, "completion_tokens": 6}
         assert generation.await_args.kwargs["compute_auth"] == compute_auth
         parked = h._browser_resume_continuity_state(
             action_history=SimpleNamespace(get_entries=lambda: []), visited_urls=[], verifier_checkpoints=[],
             browser_turn_messages=[correction], user_instruction_messages=[correction], response_schema=accepted,
+            schema_user_instruction_count=state["schema_user_instruction_count"],
         )
         carried = {}
         h._copy_browser_resume_continuity_fields(parked, carried)
@@ -23123,6 +23175,92 @@ async def test_browser_schema_refresh_survives_repeated_resume_without_new_user_
         )
         assert resumed == replacement and resumed_usage == {}
         assert generation.await_count == 1, "duplicate resume regenerated an already accepted schema"
+
+
+async def test_browser_schema_failure_keeps_revision_retryable_across_snapshot():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    initial = {"fields": [{"name": "result", "type": "str", "required": True}]}
+    replacement = {"fields": [{"name": "notes", "type": "str", "required": True}]}
+    correction = {"role": "user", "content": "Include entry notes."}
+    state = {"user_instruction_messages": [correction], "schema_user_instruction_count": 0}
+    generation = AsyncMock(side_effect=[RuntimeError("schema provider unavailable"), (replacement, None, {})])
+    with patch("helpers.llm._generate_response_schema_with_rose", generation):
+        unchanged, usage = await h._refresh_browser_output_schema(
+            goal="Read the shared calendar", agent_id="agent-1", response_schema=initial,
+            resume_state=state, compute_auth=None,
+        )
+        assert unchanged == initial and usage == {}
+        assert state["schema_user_instruction_count"] == 0, "failed schema refresh accepted a new revision"
+        turns = []
+        h._append_browser_user_instructions(state, turns)
+        parked = h._browser_resume_continuity_state(
+            action_history=SimpleNamespace(get_entries=lambda: []), visited_urls=[], verifier_checkpoints=[],
+            browser_turn_messages=turns, user_instruction_messages=[correction], response_schema=unchanged,
+            schema_user_instruction_count=state["schema_user_instruction_count"],
+        )
+        carried = {}
+        h._copy_browser_resume_continuity_fields(parked, carried)
+        assert carried["schema_user_instruction_count"] == 0
+        next_turns = list(carried["browser_turn_messages"])
+        h._append_browser_user_instructions(carried, next_turns)
+        assert next_turns == [correction], "retry duplicated already delivered actual input"
+        accepted, usage = await h._refresh_browser_output_schema(
+            goal="Read the shared calendar", agent_id="agent-1", response_schema=carried["browser_output_schema"],
+            resume_state=carried, compute_auth=None,
+        )
+        assert accepted == replacement and carried["schema_user_instruction_count"] == 1
+        assert generation.await_count == 2
+
+
+async def test_browser_schema_refresh_preserves_complete_native_model_contract():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    initial = {"fields": [
+        {"name": "start_time", "type": "str", "required": True},
+        {"name": "end_time", "type": "str", "required": True},
+        {"name": "title", "type": "str", "required": True},
+    ]}
+    additions = {"fields": [*initial["fields"], {"name": "notes", "type": "str", "required": True}]}
+    removals = {"fields": [{"name": "title", "type": "str", "required": True}]}
+    for correction, generated in [
+        ("Include entry notes too.", additions),
+        ("Return only each event title.", removals),
+    ]:
+        generator = AsyncMock(return_value=(generated, None, {}))
+        with patch("helpers.llm._generate_response_schema_with_rose", generator):
+            accepted, _ = await h._refresh_browser_output_schema(
+                goal="Read today's event start time, end time and title", agent_id="agent-1", response_schema=initial,
+                resume_state={"user_instruction_messages": [{"role": "user", "content": correction}]}, compute_auth=None,
+            )
+        goal, schema_requirement, actual_input = generator.await_args.args[0].split("\n\n")
+        assert goal == "Read today's event start time, end time and title"
+        clause = "Current output schema (preserve fields unless later user feedback changes them):\n"
+        assert schema_requirement.startswith(clause), "schema refresh lost the existing prior-contract semantics"
+        full_schema = schema_requirement.removeprefix(clause)
+        assert json.loads(full_schema) == initial
+        assert actual_input == correction
+        assert accepted == generated, "transport overrode the schema owner's typed model decision"
+
+
+async def test_browser_schema_failure_keeps_usage_and_generation_fence():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    initial = {"fields": [{"name": "result", "type": "str", "required": True}]}
+    state = {"user_instruction_messages": [{"role": "user", "content": "Include notes."}]}
+    usage = {"prompt_tokens": 13, "completion_tokens": 4, "actual_model": "gpt-5.6-luna"}
+    with patch("helpers.llm._generate_response_schema_with_rose", AsyncMock(return_value=({"fields": []}, None, usage))):
+        schema, actual_usage = await h._refresh_browser_output_schema(
+            goal="Read the calendar", agent_id="agent-1", response_schema=initial, resume_state=state, compute_auth=None,
+        )
+    assert schema is initial and actual_usage == usage
+    assert not state.get("schema_user_instruction_count"), "invalid schema advanced the accepted revision"
+    with patch("helpers.llm._generate_response_schema_with_rose", AsyncMock(side_effect=WorkflowGenerationSealed("replaced"))):
+        with pytest.raises(WorkflowGenerationSealed):
+            await h._refresh_browser_output_schema(
+                goal="Read the calendar", agent_id="agent-1", response_schema=initial, resume_state=state, compute_auth=None,
+            )
 
 
 async def test_browser_resume_delivers_user_corrections_once_to_actor_and_verifier():
@@ -27851,12 +27989,36 @@ async def run_all_tests():
         test_browser_resume_recomputes_its_own_schema_for_real_user_feedback,
     )
     await r.record_async(
+        "browser_schema_failure_preserves_actual_input_for_actor_and_verifier",
+        test_browser_schema_failure_preserves_actual_input_for_actor_and_verifier,
+    )
+    await r.record_async(
+        "browser_new_input_requires_fresh_decision_before_queued_action",
+        test_browser_new_input_requires_fresh_decision_before_queued_action,
+    )
+    await r.record_async(
+        "browser_without_new_input_executes_approved_pending_action",
+        test_browser_without_new_input_executes_approved_pending_action,
+    )
+    await r.record_async(
         "browser_schema_generation_preserves_selected_compute_auth_at_client_boundary",
         test_browser_schema_generation_preserves_selected_compute_auth_at_client_boundary,
     )
     await r.record_async(
         "browser_schema_refresh_survives_repeated_resume_without_new_user_input",
         test_browser_schema_refresh_survives_repeated_resume_without_new_user_input,
+    )
+    await r.record_async(
+        "browser_schema_failure_keeps_revision_retryable_across_snapshot",
+        test_browser_schema_failure_keeps_revision_retryable_across_snapshot,
+    )
+    await r.record_async(
+        "browser_schema_refresh_preserves_complete_native_model_contract",
+        test_browser_schema_refresh_preserves_complete_native_model_contract,
+    )
+    await r.record_async(
+        "browser_schema_failure_keeps_usage_and_generation_fence",
+        test_browser_schema_failure_keeps_usage_and_generation_fence,
     )
     await r.record_async(
         "manager_write_approval_hour_wait_resume",

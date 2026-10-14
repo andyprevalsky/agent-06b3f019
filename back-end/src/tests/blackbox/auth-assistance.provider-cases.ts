@@ -22,6 +22,18 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+export async function assertAuthoredCompletionMessages(
+  agentId: string,
+  expected?: string
+): Promise<void> {
+  const rows = await prisma.message.findMany({ where: { agentId, role: 'USER' } });
+  assert(
+    rows.length === (expected ? 1 : 0),
+    'Only explicit authored input may create one auth completion USER row'
+  );
+  if (expected) assert(rows[0].text === expected, 'Auth completion must preserve authored bytes');
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   assert(typeof value === 'object' && value !== null, 'Expected object response');
   return value as Record<string, unknown>;
@@ -30,7 +42,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 async function request(
   path: string,
   userId: string,
-  method = 'POST'
+  method = 'POST',
+  body?: object
 ): Promise<{ status: number; data: unknown }> {
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -39,6 +52,7 @@ async function request(
       'X-API-Key': API_KEY,
       'X-User-Id': userId,
     },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = response.headers.get('content-type')?.includes('application/json')
     ? await response.json()
@@ -314,7 +328,51 @@ async function testDeclineDoesNotCompleteAuthAssistance(): Promise<void> {
   }
 }
 
+async function testAuthoredCompletion(controlFirst: boolean): Promise<void> {
+  await withFixture('authored', 'kernel', async (fixture) => {
+    const requestId = await createLiveViewRequest(fixture, 'example.com');
+    if (controlFirst) {
+      await completeAndAssertResumed(fixture, requestId);
+      await assertAuthoredCompletionMessages(fixture.agentId);
+    }
+    const text = '  Return only venue_prices\nDo not use the old account.  ';
+    const path = `/api/attention-requests/${requestId}/respond`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assertStatus(
+        await request(path, fixture.userId, 'POST', {
+          response: 'Authentication complete',
+          user_message: text,
+        }),
+        200
+      );
+      await assertAuthoredCompletionMessages(fixture.agentId, text);
+      const row = await prisma.agentAttentionRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      });
+      assert(
+        row.userResponse === '__AUTH_ASSISTANCE_COMPLETED__',
+        'Authored input must preserve the auth protocol decision'
+      );
+      const agent = await prisma.agent.findUniqueOrThrow({ where: { id: fixture.agentId } });
+      assert(agent.status === 'ACTIVE', 'Authored completion must resume the agent');
+    }
+    assertStatus(
+      await request(path, fixture.userId, 'POST', {
+        response: 'Authentication complete',
+        user_message: 'A distinct later authored reply',
+      }),
+      409
+    );
+    await assertAuthoredCompletionMessages(fixture.agentId, text);
+  });
+}
+
 export const authAssistanceProviderCompletionTests: TestCase[] = [
+  ['auth completion preserves explicit authored input once', () => testAuthoredCompletion(false)],
+  [
+    'authored input survives an automatic auth completion winning first',
+    () => testAuthoredCompletion(true),
+  ],
   ['a declined live_view request is not completed', testDeclineDoesNotCompleteAuthAssistance],
   ['POST /api/auth-assistance/:id/complete resumes Kernel live_view', testKernelCompletion],
   [

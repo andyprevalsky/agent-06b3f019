@@ -126,6 +126,7 @@ from helpers.llm import (
     mark_claude_token_rate_limited_activity,
     mark_compute_token_rate_limited_activity,
     mark_gpt_token_rate_limited_activity,
+    persist_response_schema_activity,
     release_compute_token_lineage_activity,
     set_response_schema_activity,
 )
@@ -1227,6 +1228,7 @@ async def main():
         call_llm_activity,
         call_planner_llm_activity,
         set_response_schema_activity,
+        persist_response_schema_activity,
         fetch_claude_max_token_activity,
         fetch_compute_token_activity,
         fetch_gpt_code_token_activity,
