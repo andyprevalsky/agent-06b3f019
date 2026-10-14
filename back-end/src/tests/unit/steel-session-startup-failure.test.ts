@@ -52,9 +52,9 @@ const replacementFailure = (cause: string) =>
   );
 
 async function main(): Promise<void> {
-  for (const retryClosed of [false, true]) {
-    await test(`successful same-profile rebind ${retryClosed ? 'from CLOSED' : 'without duplicate release'}`, () =>
-      assertSteelSameProfileReplacement(retryClosed));
+  for (const retryFailedReplacement of [false, true]) {
+    await test(`successful same-profile rebind ${retryFailedReplacement ? 'from retained PAUSED custody' : 'without duplicate release'}`, () =>
+      assertSteelSameProfileReplacement(retryFailedReplacement));
   }
   await test('same-profile replacement releases its uploading source before attaching it', async () => {
     const originalFind = prisma.browserSession.findUnique;
@@ -66,6 +66,8 @@ async function main(): Promise<void> {
       id: 'offline-task',
       sessionId: 'offline-source',
       provider: 'steel',
+      status: 'ACTIVE',
+      closedAt: null,
       providerProfileId: 'offline-profile',
       providerProfileSource: 'session_bound',
       providerProfilePersist: true,
@@ -81,9 +83,15 @@ async function main(): Promise<void> {
       assert.deepStrictEqual((args as { where: unknown }).where, {
         id: 'offline-task',
         sessionId: 'offline-source',
+        provider: 'steel',
+        status: 'ACTIVE',
+        closedAt: null,
+        providerProfileId: 'offline-profile',
+        providerProfileSource: 'session_bound',
+        providerProfilePersist: true,
       });
-      assert.strictEqual((args as { data: { status: string } }).data.status, 'CLOSED');
-      assert.strictEqual(released, true);
+      assert.deepStrictEqual((args as { data: unknown }).data, { status: 'PAUSED', closedAt: null });
+      assert.strictEqual(released, false, 'provider release must follow durable resumable custody');
       return { count: 1 };
     }) as typeof originalUpdate;
     try {
@@ -138,6 +146,8 @@ async function main(): Promise<void> {
         id: 'offline-task',
         sessionId: 'offline-source',
         provider: mode === 'provider-switch' ? 'kernel' : 'steel',
+        status: 'ACTIVE',
+        closedAt: null,
         providerProfileId: 'offline-profile',
         providerProfileSource: 'session_bound',
         providerProfilePersist: mode !== 'readonly-profile',
@@ -180,18 +190,18 @@ async function main(): Promise<void> {
           mode === 'release-failure'
             ? /offline release refused/
             : mode === 'changed-source'
-              ? /changed concurrently/
+              ? /changed before Steel profile handoff/
               : /offline terminal sentinel/
         );
         assert.strictEqual(
           releases,
-          mode === 'release-failure' || mode === 'changed-source' ? 1 : 0
+          mode === 'release-failure' ? 1 : 0
         );
         assert.strictEqual(
           creates,
           mode === 'release-failure' || mode === 'changed-source' ? 0 : 1
         );
-        assert.strictEqual(writes, mode === 'changed-source' ? 1 : 0);
+        assert.strictEqual(writes, mode === 'changed-source' || mode === 'release-failure' ? 1 : 0);
       } finally {
         prisma.browserSession.findUnique = find;
         prisma.integration.findUnique = fingerprint;

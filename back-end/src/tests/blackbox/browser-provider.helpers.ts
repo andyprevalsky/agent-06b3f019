@@ -264,7 +264,7 @@ export function withProvider(value: string | undefined, test: () => void): void 
 }
 
 /** Exercise actual Steel replacement/facade with offline native and DB boundaries. */
-export async function assertSteelSameProfileReplacement(retryClosed: boolean): Promise<void> {
+export async function assertSteelSameProfileReplacement(retryFailedReplacement: boolean): Promise<void> {
   const find = prisma.browserSession.findUnique;
   const fingerprint = prisma.integration.findUnique;
   const update = prisma.browserSession.updateMany;
@@ -286,11 +286,12 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
+    closedAt: null as Date | null,
     context: { userId: 'offline-user' },
   };
   let ready = false;
   let releases = 0;
-  let failCreate = retryClosed;
+  let failCreate = retryFailedReplacement;
   prisma.browserSession.findUnique = (async (args: unknown) => {
     if ('agentId' in ((args as { select?: object }).select ?? {})) return null;
     return { ...row };
@@ -298,7 +299,7 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
   prisma.integration.findUnique = (async () => null) as typeof fingerprint;
   prisma.browserSession.updateMany = (async (args: unknown) => {
     const { where, data } = args as { where: { sessionId: string }; data: Partial<typeof row> };
-    if (where.sessionId !== row.sessionId) return { count: 0 };
+    if (!Object.entries(where).every(([key, value]) => (row as Record<string, unknown>)[key] === value)) return { count: 0 };
     Object.assign(row, data);
     return { count: 1 };
   }) as typeof update;
@@ -313,7 +314,7 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
   }) as typeof release;
   steel.sessions.create = (async (input: { profileId?: string }) => {
     nodeAssert.strictEqual(ready, true);
-    nodeAssert.strictEqual(row.status, 'CLOSED');
+    nodeAssert.strictEqual(row.status, 'PAUSED');
     nodeAssert.strictEqual(input.profileId, 'offline-profile');
     if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
     return {
@@ -328,12 +329,12 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
       close: async () => {},
     }) as unknown as Browser) as typeof connect;
   try {
-    if (retryClosed) {
+    if (retryFailedReplacement) {
       await nodeAssert.rejects(
         () => recreateSession('offline-task', { forceManagedRotation: true }),
         /offline create failed/
       );
-      nodeAssert.strictEqual(row.status, 'CLOSED');
+      nodeAssert.strictEqual(row.status, 'PAUSED');
       nodeAssert.strictEqual(row.sessionId, 'offline-source');
       failCreate = false;
       const recovered = await recreateSession('offline-task', { forceManagedRotation: true });
