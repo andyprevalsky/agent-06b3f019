@@ -517,15 +517,16 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
     corrected = False
 
     def handler(request):
-        if request.url.host != "api.cerebras.ai":
+        if request.url.host not in {"api.cerebras.ai", "openrouter.ai"}:
             return httpx.Response(200, json={})
         body = json.loads(request.content)
         requests.append(body)
         function = body["tools"][0]["function"]
         assert function["name"] == "generic_lookup"
-        assert function["strict"] is True
+        if request.url.host == "api.cerebras.ai":
+            assert function["strict"] is True
         assert function["parameters"]["properties"]["labels"]["type"] == "array"
-        assert body["model"] == "qwen-3.8-27b"
+        assert body["model"] == ("qwen-3.8-27b" if request.url.host == "api.cerebras.ai" else "google/gemini-3.8-flash")
         assert body["tool_choice"] == "required"
         assert "response_format" not in body
         # Exact observed malformed encoding: a JSON array encoded as a string.
@@ -575,6 +576,7 @@ async def test_cerebras_strict_native_response_retains_parser_retry():
         else:
             raise AssertionError("Malformed native arrays were silently coerced")
         assert len(requests) == 3
+        assert [body["model"] for body in requests] == ["qwen-3.8-27b", "qwen-3.8-27b", "google/gemini-3.8-flash"]
         assert all(
             any(row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"])
             for body in requests[1:]
@@ -8298,9 +8300,81 @@ async def test_rose_client_preserves_native_tools_for_waterfall():
 # =====================================================================
 
 
+async def test_direct_auth_honors_candidate_exclusions():
+    from types import SimpleNamespace
+    from providers.rose.truncation import model_key
+
+    for kind in ("claude", "gpt"):
+        pool = get_pool("rose-1-ultra")
+        excluded = pool.claude_auth_model if kind == "claude" else pool.gpt_auth_model
+        hosts = []
+
+        def handler(request, hosts=hosts):
+            hosts.append(request.url.host)
+            assert request.url.host == "openrouter.ai", "Excluded direct candidate was requested"
+            return httpx.Response(
+                200,
+                text="\n".join(
+                    _openai_sse(
+                        [
+                            {"choices": [{"delta": {"content": "eligible"}, "finish_reason": "stop"}]},
+                            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                        ]
+                    )
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        set_mock_handler(handler)
+        with patch(
+            "providers.rose.client.load_config", return_value=SimpleNamespace(anthropic=SimpleNamespace(api_key=""))
+        ):
+            chunks = await _drain(
+                RoseClient(openrouter_key="offline").complete(
+                    pool=pool.name,
+                    messages=[{"role": "user", "content": "offline exclusion"}],
+                    claude_auth=ClaudeAuthContext(token="offline", source="user", user_id="offline")
+                    if kind == "claude"
+                    else None,
+                    gpt_auth=gpt_auth_from_token("offline", "offline") if kind == "gpt" else None,
+                    _skip_models=frozenset({model_key(excluded)}),
+                    dump_context=False,
+                )
+            )
+        assert hosts == ["openrouter.ai"]
+        assert any(c.kind == "content" and c.data.get("text") == "eligible" for c in chunks)
+
+
+async def test_truncation_retains_incoming_candidate_exclusions():
+    from providers.rose.truncation import recover_truncated
+
+    seen = []
+
+    async def attempt(**kwargs):
+        seen.append(kwargs.get("_skip_models"))
+        yield StreamChunk(kind="metadata", data={"actual_model": "candidate-b-gpt"})
+        yield StreamChunk(
+            kind="usage", data={"finish_reason": "length" if len(seen) == 1 else "stop", "completion_tokens": 1}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    await _drain(
+        recover_truncated(
+            attempt,
+            {"messages": [], "response_model": object, "max_tokens": 100, "_skip_models": frozenset({"candidatea"})},
+        )
+    )
+    assert len(seen) == 2
+    assert all("candidatea" in excluded for excluded in seen)
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "truncation_preserves_candidate_exclusions", test_truncation_retains_incoming_candidate_exclusions
+    )
+    await r.record_async("direct_auth_candidate_exclusions", test_direct_auth_honors_candidate_exclusions)
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("build_anthropic_body_no_input_mutation", test_build_anthropic_body_does_not_mutate_caller_messages)
@@ -8850,7 +8924,7 @@ async def run_all_tests():
     return r.summary()
 
 
-async def probe_cerebras_native_contract(dump_path: str) -> None:
+async def probe_cerebras_native_contract(dump_path: str, protocol: str = "native", max_tokens: int = 128) -> None:
     """Explicit paid opt-in: one bounded native request, never a waterfall."""
     from helpers.httpx_capture import install_capture, uninstall_capture
     from providers.rose.cerebras import build_cerebras_body
@@ -8859,17 +8933,35 @@ async def probe_cerebras_native_contract(dump_path: str) -> None:
     if not _LIVE_CEREBRAS_API_KEY:
         raise RuntimeError("Configured Cerebras credential is missing")
     dump = json.loads(Path(dump_path).read_text())
+    response_model = create_agent_action_model([tool["name"] for tool in dump["tools"]])
+    assert build_anthropic_tools_from_response_model(response_model) == dump["tools"], "Captured model schema differs"
+    response_format = (
+        None
+        if protocol == "native"
+        else {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_model.__name__,
+                "strict": False,
+                "schema": response_model.model_json_schema(),
+            },
+        }
+    )
     body = build_cerebras_body(
         model=get_pool("rose-1-flash").cerebras_model,
         messages=dump["messages"],
-        tools=dump["tools"],
+        tools=dump["tools"] if protocol == "native" else None,
         tool_choice="any",
-        response_format=None,
+        response_format=response_format,
         temperature=1,
-        max_tokens=128,
+        max_tokens=max_tokens,
         effort="high",
     )
-    print("PROBE_TOOL_CONTRACT", [(t["function"]["name"], t["function"]["strict"]) for t in body["tools"]])
+    print(
+        "PROBE_TOOL_CONTRACT",
+        protocol,
+        [(t["function"]["name"], t["function"]["strict"]) for t in body.get("tools", [])],
+    )
     uninstall_capture()
     try:
         async with asyncio.timeout(30):
@@ -8888,6 +8980,45 @@ async def probe_cerebras_native_contract(dump_path: str) -> None:
                 print(
                     "PROBE_RESULT", [(c.kind, c.data.get("name")) for c in chunks if c.kind in {"tool_call", "usage"}]
                 )
+                print("PROBE_FINISH", [c.data.get("finish_reason") for c in chunks if c.kind == "done"])
+                if protocol == "json":
+                    text = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+                    try:
+                        parsed = response_model.model_validate_json(text)
+                    except Exception as exc:
+                        print("PROBE_TYPED_RESULT", "INVALID", type(exc).__name__, "content_chars", len(text))
+                        if hasattr(exc, "errors"):
+                            print("PROBE_VALIDATION", [{"loc": e["loc"], "type": e["type"]} for e in exc.errors()])
+                        try:
+                            raw = json.loads(text)
+                        except json.JSONDecodeError:
+                            print("PROBE_JSON", "INVALID")
+                        else:
+                            print("PROBE_JSON_ROOT_TYPE", type(raw).__name__)
+                            print(
+                                "PROBE_ARGUMENT_TYPES",
+                                [
+                                    {
+                                        "tool": t.get("tool"),
+                                        "argument_types": {k: type(v).__name__ for k, v in t.items()},
+                                    }
+                                    for t in (raw.get("tool_calls", []) if isinstance(raw, dict) else [])
+                                    if isinstance(t, dict)
+                                ],
+                            )
+                    else:
+                        print(
+                            "PROBE_TYPED_RESULT",
+                            "VALID",
+                            [
+                                {
+                                    "tool": t.tool,
+                                    "argument_types": {k: type(v).__name__ for k, v in t.model_dump().items()},
+                                }
+                                for t in parsed.tool_calls
+                            ],
+                        )
+
     finally:
         install_capture()
 
@@ -8895,8 +9026,14 @@ async def probe_cerebras_native_contract(dump_path: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cerebras-native-contract-probe")
+    parser.add_argument("--cerebras-protocol", choices=["native", "json"], default="native")
+    parser.add_argument("--probe-max-tokens", type=int, choices=[128, 1024], default=128)
     args = parser.parse_args()
     if args.cerebras_native_contract_probe:
-        asyncio.run(probe_cerebras_native_contract(args.cerebras_native_contract_probe))
+        asyncio.run(
+            probe_cerebras_native_contract(
+                args.cerebras_native_contract_probe, args.cerebras_protocol, args.probe_max_tokens
+            )
+        )
     else:
         asyncio.run(run_all_tests())

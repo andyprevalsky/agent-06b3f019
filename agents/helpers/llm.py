@@ -17,7 +17,7 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, create_model, model_validator
+from pydantic import BaseModel, Field, ValidationError, create_model, model_validator
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -80,6 +80,7 @@ from providers.rose.schema import (
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
+from providers.rose.truncation import model_key
 from utils.error_utils import extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
@@ -423,7 +424,9 @@ _SchemaNestedFieldType = Literal[
 class _GeneratedResponseSchemaNestedField(BaseModel):
     name: str = Field(description="Nested field name in snake_case.")
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
+    )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
 
     @model_validator(mode="before")
@@ -444,7 +447,9 @@ class _GeneratedResponseSchemaField(BaseModel):
         default=None,
         description="Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.",
     )
-    constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
+    constraints: List[ResponseSchemaBound] = Field(
+        default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
+    )
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
 
     @model_validator(mode="before")
@@ -1370,9 +1375,7 @@ async def _resolve_verifier_file_evidence(
                     try:
                         text_content = file_content.decode("utf-8")
                         filename = fp.original_filename or ""
-                        is_deliverable = bool(
-                            _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename)
-                        )
+                        is_deliverable = bool(_VERIFIER_DELIVERABLE_FILENAME_RE.search(filename))
                         per_file_cap = (
                             VERIFIER_MAX_INLINE_FILE_CHARS
                             if is_deliverable
@@ -2495,9 +2498,7 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
             if orphan_ids:
                 repaired = True
-                remaining = [
-                    tc for tc in (assistant_msg.get("tool_calls") or []) if tc.get("id") not in orphan_ids
-                ]
+                remaining = [tc for tc in (assistant_msg.get("tool_calls") or []) if tc.get("id") not in orphan_ids]
                 if remaining:
                     assistant_msg["tool_calls"] = remaining
                 else:
@@ -2664,6 +2665,9 @@ async def call_llm_structured_streaming(
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
+    _parse_failed_model: Optional[str] = None,
+    _parse_failed_count: int = 0,
+    _skip_models: frozenset[str] = frozenset(),
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -2780,12 +2784,7 @@ async def call_llm_structured_streaming(
             return reasoning or text_buffer
 
         def _total_stream_bytes() -> int:
-            return (
-                len(accumulated_reasoning)
-                + len(accumulated_json)
-                + len(text_buffer)
-                + hidden_stream_bytes
-            )
+            return len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer) + hidden_stream_bytes
 
         async def _emit_raw_progress() -> None:
             if not on_raw_progress:
@@ -2796,6 +2795,8 @@ async def call_llm_structured_streaming(
             _prof_calls["raw_progress"] += 1
 
         rose_kwargs: Dict[str, Any] = {}
+        if _skip_models:
+            rose_kwargs["_skip_models"] = _skip_models
         if deadline_s is not None:
             rose_kwargs["deadline_s"] = deadline_s
         if ttft_timeout_s is not None:
@@ -3219,9 +3220,7 @@ async def call_llm_structured_streaming(
             # empty stream becomes "" and can salvage JSON from reasoning.
             # Multiple final_answer items stay empty so the parse-retry
             # regenerates instead of accepting one competing blob.
-            accumulated_json = (
-                "" if structured_output.is_ambiguous() else structured_output.current_text()
-            )
+            accumulated_json = "" if structured_output.is_ambiguous() else structured_output.current_text()
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -3277,6 +3276,10 @@ async def call_llm_structured_streaming(
                 context_tools=context_tools,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
+                _parse_retry_attempt=_parse_retry_attempt,
+                _parse_failed_model=_parse_failed_model,
+                _parse_failed_count=_parse_failed_count,
+                _skip_models=_skip_models,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
             logger.warning(
@@ -3300,11 +3303,7 @@ async def call_llm_structured_streaming(
         # Rose models output: [explanation text]```json\n{...}\n```
         # We need to extract the JSON from within the markdown code block
         try:
-            if (
-                not accumulated_json
-                and accumulated_reasoning
-                and not structured_output.is_ambiguous()
-            ):
+            if not accumulated_json and accumulated_reasoning and not structured_output.is_ambiguous():
                 # Thinking models (GPT-5.2, Kimi-K2.5) may put structured JSON
                 # in reasoning tokens instead of content tokens.
                 # Use balanced-brace extraction with JSON validation to skip
@@ -3493,6 +3492,26 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
+                failed_model = (
+                    model_key(actual_model)
+                    if isinstance(e, (json.JSONDecodeError, ValidationError))
+                    and actual_model
+                    and actual_model
+                    not in {"unknown", "fast-cache", "fast-mode-soft-complete", "fast-mode-scrape-passthrough"}
+                    and not (stream_usage or {}).get("from_fast_cache")
+                    else None
+                )
+                failed_count = _parse_failed_count + 1 if failed_model and failed_model == _parse_failed_model else 1
+                retry_exclusions = _skip_models
+                if failed_model and failed_count >= 2:
+                    retry_exclusions = _skip_models | {failed_model}
+                    logger.warning(
+                        "llm.structured_candidate_excluded",
+                        actual_model=actual_model,
+                        candidate_key=failed_model,
+                        failed_responses=failed_count,
+                        remaining_attempts=MAX_STRUCTURED_PARSE_RETRIES - _parse_retry_attempt,
+                    )
                 retry_messages = _build_structured_retry_messages(
                     messages,
                     error_message=error_message,
@@ -3533,13 +3552,16 @@ async def call_llm_structured_streaming(
                     thinking=thinking,
                     effort=effort,
                     tool_choice=tool_choice,
-                context_tools=context_tools,
+                    context_tools=context_tools,
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
+                    _parse_failed_model=failed_model,
+                    _parse_failed_count=failed_count,
+                    _skip_models=retry_exclusions,
                 )
             logger.error(
                 f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
@@ -4092,10 +4114,7 @@ async def call_llm(
             # SMS approval (incident eab955b6 / "Please share the"). Escalate
             # before caching so we never persist a truncated draft.
             if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
-                logger.warning(
-                    f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, "
-                    "retrying with 32768"
-                )
+                logger.warning(f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768")
                 return await call_llm(
                     messages=messages,
                     model=model,
@@ -4222,8 +4241,7 @@ async def call_llm(
 
         if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
             logger.warning(
-                f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, "
-                "retrying with 32768"
+                f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, retrying with 32768"
             )
             return await call_llm(
                 messages=messages,
@@ -4545,9 +4563,7 @@ async def _call_llm_verifier(
         # check_progress retry loop regenerates on the ValueError below.
         # Ambiguous multi-item streams stay empty so we do not salvage
         # one competing blob from reasoning.
-        accumulated_json = (
-            "" if structured_output.is_ambiguous() else structured_output.current_text()
-        )
+        accumulated_json = "" if structured_output.is_ambiguous() else structured_output.current_text()
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.
@@ -4745,11 +4761,7 @@ def _iter_trusted_verifier_tool_evidences(
                 if tool_name not in _VERIFIER_TRUSTED_TOOL_NAMES:
                     continue
                 raw_call_id = payload.get("tool_call_id")
-                call_id = (
-                    raw_call_id.strip()
-                    if isinstance(raw_call_id, str) and raw_call_id.strip()
-                    else None
-                )
+                call_id = raw_call_id.strip() if isinstance(raw_call_id, str) and raw_call_id.strip() else None
                 result = payload.get("result")
                 if isinstance(result, str):
                     result_text = result
@@ -4853,8 +4865,7 @@ def _extract_payment_card_last4_from_verifier_messages(messages: List[Dict[str, 
         # Avoid double-counting the same raw TOOL message text that
         # `_iter_trusted_verifier_tool_evidences` also yields.
         if tool_call_id is None and any(
-            _is_trusted_tool_role_message(message)
-            and text in _iter_verifier_message_text_parts(message)
+            _is_trusted_tool_role_message(message) and text in _iter_verifier_message_text_parts(message)
             for message in messages
         ):
             continue
@@ -5036,9 +5047,7 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if normalized in ("list[object]", "list[dict]"):
         # Empty {} placeholders must not satisfy object-list deliverables.
         return (
-            isinstance(value, list)
-            and len(value) > 0
-            and all(isinstance(item, dict) and bool(item) for item in value)
+            isinstance(value, list) and len(value) > 0 and all(isinstance(item, dict) and bool(item) for item in value)
         )
     if normalized == "object":
         return isinstance(value, dict) and bool(value)
@@ -5159,10 +5168,7 @@ def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
 
 
 def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
-    if (
-        metadata.get("toolName") != "attempt_completion"
-        or metadata.get("toolStatus") != "FINISHED"
-    ):
+    if metadata.get("toolName") != "attempt_completion" or metadata.get("toolStatus") != "FINISHED":
         return False
     title = str(metadata.get("title") or "")
     if "Verifier rejected" in title:
@@ -5267,15 +5273,20 @@ def _build_verifier_response_model(
     if response_schema and response_schema.get("fields"):
         output_fields: Dict[str, Any] = {}
         for field in response_schema["fields"]:
-            if field.get("required", True) is False or any(
-                nested.get("required", True) is False for nested in _nested_fields_for_object_field(field)
-            ) or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field)):
+            if (
+                field.get("required", True) is False
+                or any(nested.get("required", True) is False for nested in _nested_fields_for_object_field(field))
+                or (field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field))
+            ):
                 openai_strict = False
             annotation = _verifier_field_annotation_for_field(field)
             output_fields[field["name"]] = (
                 annotation,
-                Field(... if field.get("required", True) else None,
-                      description=field.get("description", ""), **_pydantic_field_bounds(field)),
+                Field(
+                    ... if field.get("required", True) else None,
+                    description=field.get("description", ""),
+                    **_pydantic_field_bounds(field),
+                ),
             )
         output_model = create_model("VerifierOutput", **output_fields)
         fields["output"] = (output_model, ...)
@@ -5332,8 +5343,11 @@ def _build_nested_verifier_model(name: str, nested_fields: List[Dict[str, Any]])
             continue
         model_fields[nested_name] = (
             _verifier_field_annotation_for_field(nested),
-            Field(... if nested.get("required", True) else None,
-                  description=nested.get("description", ""), **_pydantic_field_bounds(nested)),
+            Field(
+                ... if nested.get("required", True) else None,
+                description=nested.get("description", ""),
+                **_pydantic_field_bounds(nested),
+            ),
         )
     return create_model(f"Verifier{safe_name.title().replace('_', '')}", **model_fields)
 
@@ -5579,11 +5593,14 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             # schema contains an open-object field (`object` / `list[object]`),
             # we drop strict so the open shape is accepted. Anthropic +
             # claudeAuth paths are unaffected (they always accept open shapes).
-            "strict": not has_open_object and all(
-                field.get("required", True) and all(
-                    nested.get("required", True) for nested in _nested_fields_for_object_field(field)
-                ) for field in response_schema.get("fields", [])
-            ) if response_schema else not has_open_object,
+            "strict": not has_open_object
+            and all(
+                field.get("required", True)
+                and all(nested.get("required", True) for nested in _nested_fields_for_object_field(field))
+                for field in response_schema.get("fields", [])
+            )
+            if response_schema
+            else not has_open_object,
         },
     }
 
@@ -5608,6 +5625,8 @@ def max_tokens_for_verifier_call_site(call_site: str) -> int:
     if str(call_site or "") == "benchmark_declared_evaluator":
         return DECLARED_EVALUATOR_MAX_TOKENS
     return VERIFIER_MAX_TOKENS
+
+
 # A verifier is advisory and must never outlive the agent benchmark/activity
 # that requested it. Bound each provider attempt, and fence the retry loop so
 # individually bounded attempts cannot accumulate into a multi-minute zombie.
@@ -6010,19 +6029,12 @@ async def check_progress(
         # agent loops until the activity times out (verify18 leaves). Promote
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
-        if (
-            fast_mode_cache_enabled
-            and float(score or 0) < 1.0
-            and bool((usage or {}).get("from_fast_cache"))
-        ):
+        if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.fast_cache.context import current_context as _fm_ctx
             from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
             _ctx = _fm_ctx()
-            if (
-                _fm_soft(call_site) is not None
-                and (_ctx.soft_complete_allowed if _ctx is not None else False)
-            ):
+            if _fm_soft(call_site) is not None and (_ctx.soft_complete_allowed if _ctx is not None else False):
                 logger.warning(
                     "Verifier Fast Mode soft-pass after cached reject",
                     call_site=call_site,
@@ -6075,8 +6087,7 @@ async def check_progress(
             return {
                 "score": 1.0,
                 "reasoning": (
-                    "Fast Mode cache trajectory ended; prior tool evidence is "
-                    "sufficient to treat the goal as complete."
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as complete."
                 ),
                 "message": (
                     "Fast Mode cache trajectory ended; prior tool evidence is "
@@ -6627,18 +6638,13 @@ async def set_response_schema_activity(
         # mass-agent T7 fails with "Root task title is missing").
         _fc_material = {
             "pool": "rose-1-flash",
-            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
-            + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
+            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
             "user": f"Goal: {goal}",
-            "response_model": (
-                "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
-            ),
+            "response_model": ("_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"),
             "temperature": 0.3,
             "max_tokens": [2000, 4000],
         }
-        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(
-            goal, "response_schema", _fc_material
-        )
+        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(goal, "response_schema", _fc_material)
         _fc_key = _fc_lookup_keys[0]
         if fast_mode_cache_enabled:
             try:
@@ -6873,11 +6879,7 @@ async def fetch_compute_token_activity(
     pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
 
-    if (
-        pinned_benchmark_type
-        and token_type in ("claude", "gpt")
-        and token_type != pinned_benchmark_type
-    ):
+    if pinned_benchmark_type and token_type in ("claude", "gpt") and token_type != pinned_benchmark_type:
         logger.info(
             "Skipping compute token fetch: rotation asked for %s but "
             "BENCHMARK_COMPUTE_TOKEN_TYPE=%s (keep waterfall affinity)",
@@ -6920,8 +6922,7 @@ async def fetch_compute_token_activity(
                 if token and provider_type in ("claude", "gpt"):
                     if pinned_benchmark_type and provider_type != pinned_benchmark_type:
                         logger.warning(
-                            "Rejecting compute token type=%s under "
-                            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                            "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
                             provider_type,
                             pinned_benchmark_type,
                         )

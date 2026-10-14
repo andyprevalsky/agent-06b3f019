@@ -8884,9 +8884,123 @@ def test_ensure_tool_result_pairing_preserves_well_formed_messages():
     assert fixed == msgs, f"Well-formed messages mutated:\nin={msgs}\nout={fixed}"
 
 
+async def test_structured_validation_retries_exclude_only_repeated_known_candidate():
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+    import providers.fast_cache.rose_cache as cache_module
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    for bad_count, hide_metadata in (
+        (0, False),
+        (1, False),
+        (2, False),
+        (3, False),
+        (2, True),
+        (2, "no-usage"),
+        (2, "synthetic-no-usage"),
+    ):
+        requests = []
+
+        def handler(request, requests=requests, bad_count=bad_count):
+            if request.url.host not in {"api.cerebras.ai", "openrouter.ai"}:
+                return httpx.Response(200, json={})
+            body = json.loads(request.content)
+            requests.append((request.url.host, body))
+            assert body["tools"][0]["function"]["parameters"]["properties"]["labels"]["type"] == "array"
+            args = {"labels": '["typed"]' if len(requests) <= bad_count else ["typed"]}
+            data = [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": f"t{len(requests)}",
+                                        "type": "function",
+                                        "function": {"name": "typed_lookup", "arguments": json.dumps(args)},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(x) for x in data) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        original_cached = cache_module.cached_complete
+
+        async def filtered(*args, _original=original_cached, _mode=hide_metadata, **kwargs):
+            async for chunk in _original(*args, **kwargs):
+                if _mode in {"no-usage", "synthetic-no-usage"} and chunk.kind == "usage":
+                    continue
+                if _mode is True and chunk.kind == "metadata":
+                    continue
+                if _mode == "synthetic-no-usage" and chunk.kind == "metadata":
+                    chunk = type(chunk)(kind="metadata", data={**chunk.data, "actual_model": "fast-cache"})
+                yield chunk
+
+        async def on_chunk(*args):
+            pass
+
+        with (
+            patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline"}),
+            patch.object(cache_module, "cached_complete", filtered if hide_metadata else original_cached),
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "offline typed data"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=model,
+                    on_chunk=on_chunk,
+                    call_site="test",
+                    _exclude_anthropic_family=True,
+                    skip_cache_write=True,
+                )
+            except LLMStructuredOutputError:
+                assert bad_count == 3
+            else:
+                assert bad_count < 3
+                assert result.tool_calls[0].labels == ["typed"]
+        expected_count = min(bad_count + 1, 3)
+        assert len(requests) == expected_count
+        expected_hosts = ["api.cerebras.ai"] * min(expected_count, 2)
+        if expected_count == 3:
+            expected_hosts.append(
+                "api.cerebras.ai" if hide_metadata in {True, "synthetic-no-usage"} else "openrouter.ai"
+            )
+        assert [host for host, _ in requests] == expected_hosts
+        for _, body in requests[1:]:
+            assert any(
+                row.get("role") == "tool" and "valid list" in str(row.get("content")) for row in body["messages"]
+            )
+        if hide_metadata not in {True, "synthetic-no-usage"} and expected_count == 3:
+            assert requests[-1][1]["model"] == "google/gemini-3.8-flash"
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "structured_validation_candidate_eligibility",
+        test_structured_validation_retries_exclude_only_repeated_known_candidate,
+    )
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)

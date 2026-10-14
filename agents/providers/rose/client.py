@@ -1134,17 +1134,19 @@ class RoseClient:
             waterfall_tools = direct_auth_tools
             waterfall_tool_choice = effective_tool_choice or "any"
 
+        eligible_claude_auth = claude_auth if model_key(pool_spec.claude_auth_model) not in _skip_models else None
+        eligible_gpt_auth = gpt_auth if model_key(pool_spec.gpt_auth_model) not in _skip_models else None
         if not pool_spec.direct_auth_enabled:
             # An open-weights-only pool must never reach a proprietary
             # direct-token provider, or the model guarantee it exists to make
             # is silently void.
             direct_auth = None
-        elif _exclude_anthropic_family and gpt_auth is not None:
-            direct_auth = gpt_auth
+        elif _exclude_anthropic_family and eligible_gpt_auth is not None:
+            direct_auth = eligible_gpt_auth
         elif _exclude_anthropic_family:
             direct_auth = None
         else:
-            direct_auth = claude_auth or gpt_auth
+            direct_auth = eligible_claude_auth or eligible_gpt_auth
 
         logger.info(
             "rose.complete.start",
@@ -1442,6 +1444,14 @@ class RoseClient:
             direct_rotations = 0
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
+                candidate = (
+                    pool_spec.claude_auth_model if direct_auth.token_type == "claude" else pool_spec.gpt_auth_model
+                )
+                if model_key(candidate) in _skip_models:
+                    logger.info(
+                        "rose.complete.direct_auth.skipped", actual_model=candidate, reason="candidate_excluded"
+                    )
+                    break
                 if _exclude_anthropic_family and direct_auth.token_type == "claude":
                     logger.info(
                         "rose.complete.direct_auth.skipped",

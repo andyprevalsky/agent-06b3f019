@@ -78,28 +78,61 @@ USAGE_COUNTERS = (
 )
 
 
+def _with_abandoned_usage(chunk: StreamChunk, abandoned: List[Dict[str, Any]]) -> StreamChunk:
+    if chunk.kind != "usage" or not abandoned:
+        return chunk
+    merged = dict(chunk.data)
+    for counter in USAGE_COUNTERS:
+        extra = sum(int(item.get(counter) or 0) for item in abandoned)
+        if extra or counter in merged:
+            merged[counter] = int(merged.get(counter) or 0) + extra
+    merged["abandoned_attempts"] = list(abandoned)
+    return StreamChunk(kind="usage", data=merged)
+
+
+def _log_unrecovered(
+    cut_off: bool, kwargs: Dict[str, Any], actual_model: str, completion_tokens: int, out_of_time: bool
+) -> None:
+    if cut_off:
+        logger.warning(
+            "rose.truncation.unrecovered",
+            call_site=kwargs.get("call_site"),
+            agent_id=kwargs.get("agent_id"),
+            actual_model=actual_model,
+            completion_tokens=completion_tokens,
+            out_of_time=out_of_time,
+        )
+
+
 async def recover_truncated(
     attempt: Callable[..., AsyncIterator[StreamChunk]],
     kwargs: Dict[str, Any],
 ) -> AsyncIterator[StreamChunk]:
     """Run ``attempt(**kwargs)`` under the cut-off policy above, streaming live."""
-    if not needs_result(
-        tools=kwargs.get("tools"),
-        tool_choice=kwargs.get("tool_choice"),
-        response_model=kwargs.get("response_model"),
-    ):
-        async with aclosing(attempt(**kwargs)) as stream:
-            async for chunk in stream:
-                yield chunk
-        return
+    source = (
+        _recover_structured_truncation(attempt, kwargs)
+        if needs_result(
+            tools=kwargs.get("tools"),
+            tool_choice=kwargs.get("tool_choice"),
+            response_model=kwargs.get("response_model"),
+        )
+        else attempt(**kwargs)
+    )
+    async with aclosing(source) as stream:
+        async for chunk in stream:
+            yield chunk
 
+
+async def _recover_structured_truncation(
+    attempt: Callable[..., AsyncIterator[StreamChunk]], kwargs: Dict[str, Any]
+) -> AsyncIterator[StreamChunk]:
     started = time.monotonic()
     deadline_s = kwargs.get("deadline_s")
     larger = escalated_max_tokens(kwargs.get("max_tokens"))
     # Stages still available after the attempt that just ran.
     remaining: List[str] = (["larger_limit"] if larger else []) + ["next_model"]
     current = dict(kwargs)
-    skipped: FrozenSet[str] = frozenset()
+    skipped: FrozenSet[str] = frozenset(kwargs.get("_skip_models", ()))
     # Tokens the abandoned attempts consumed are real spend; they ride on the
     # final usage chunk (per attempt, with the model that produced them) so the
     # ledgers see the whole call rather than its last attempt.
@@ -131,25 +164,9 @@ async def recover_truncated(
         elapsed = time.monotonic() - started
         out_of_time = deadline_s is not None and float(deadline_s) - elapsed < MIN_RETRY_BUDGET_S
         if not cut_off or not remaining or out_of_time:
-            if cut_off:
-                logger.warning(
-                    "rose.truncation.unrecovered",
-                    call_site=kwargs.get("call_site"),
-                    agent_id=kwargs.get("agent_id"),
-                    actual_model=actual_model,
-                    completion_tokens=completion_tokens,
-                    out_of_time=out_of_time,
-                )
+            _log_unrecovered(cut_off, kwargs, actual_model, completion_tokens, out_of_time)
             for chunk in held:
-                if chunk.kind == "usage" and abandoned:
-                    merged = dict(chunk.data)
-                    for counter in USAGE_COUNTERS:
-                        extra = sum(int(item.get(counter) or 0) for item in abandoned)
-                        if extra or counter in merged:
-                            merged[counter] = int(merged.get(counter) or 0) + extra
-                    merged["abandoned_attempts"] = list(abandoned)
-                    chunk = StreamChunk(kind="usage", data=merged)
-                yield chunk
+                yield _with_abandoned_usage(chunk, abandoned)
             return
 
         # Every model that cut off so far is excluded once we move on, not just
