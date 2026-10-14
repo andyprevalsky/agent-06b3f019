@@ -90,6 +90,7 @@ async def foundry_complete(
     cache_namespace: Optional[str],
     ttft_timeout_s: float,
     idle_timeout_s: Optional[float],
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     global _auth_cooldown_until
     endpoint = os.environ["AZURE_FOUNDRY_ENDPOINT"].strip().rstrip("/")
@@ -123,6 +124,8 @@ async def foundry_complete(
                 # Foundry Standard deployments honor caller cache markers as breakpoints.
                 cache_breakpoints=True,
             )
+            if max_tokens is not None:
+                body["max_output_tokens"] = max_tokens
             if foundry_model(pool_spec) in _NO_REASONING_MODELS:
                 body.pop("reasoning", None)
                 body.pop("include", None)

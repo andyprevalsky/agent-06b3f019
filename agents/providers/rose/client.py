@@ -1681,6 +1681,7 @@ class RoseClient:
                 try:
                     async for chunk in _guarded(
                         _try_openai_api_key(
+                            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                             pool_spec=pool_spec,
                             model=pool_spec.gpt_auth_model,
                             messages=messages,
@@ -1926,6 +1927,7 @@ class RoseClient:
                     try:
                         async with aclosing(
                             foundry_complete(
+                                **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                                 pool_spec=pool_spec,
                                 messages=messages,
                                 response_format=None if gpt_api_key_tools else openrouter_response_format,
@@ -2511,12 +2513,14 @@ async def _try_openai_api_key(
     cache_namespace: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Yield from the funded OpenAI API-key route, buffering metadata for
     pre-content fall-through."""
     buffered: Optional[StreamChunk] = None
     yielded_any = False
     gen = openai_api_key_complete(
+        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
         pool_spec=pool_spec,
         model=model,
         messages=messages,

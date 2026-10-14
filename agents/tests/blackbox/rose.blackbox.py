@@ -8511,6 +8511,123 @@ def test_wmh_response_schema_preserves_native_json_values():
             raise AssertionError("Nonfinite state JSON is forbidden")
 
 
+async def test_wmh_foundry_preserves_requested_output_budget():
+    import inspect
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    captured = []
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-5.6-luna"}
+    def callback(request):
+        captured.append(json.loads(request.content))
+        raise Captured()
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        for requested in (16384, 32000):
+            try:
+                await owner._complete_async("Unchanged policy.", [types.SimpleNamespace(role="user", content="Unchanged input.")], max_tokens=requested)
+            except Captured:
+                pass
+            assert captured[-1].get("max_output_tokens") == requested, "Actual WHM requested output budget must reach Foundry HTTP"
+        # None/omitted defaults are byte-identical; explicit budget is the only body difference.
+        async def direct(limit="omitted"):
+            kw = dict(pool_spec=get_pool("rose-1-flash"), messages=[{"role": "user", "content": "Unchanged input."}], response_format=None, tools=None, context_tools=None, tool_choice=None, temperature=None, effort=None, provider_fast_mode=True, request_id="same", route_key="same", agent_id=None, call_site="test", cache_namespace="same", ttft_timeout_s=90, idle_timeout_s=120)
+            if limit != "omitted" and "max_tokens" in inspect.signature(foundry.foundry_complete).parameters:
+                kw["max_tokens"] = limit
+            try:
+                async for _ in foundry.foundry_complete(**kw):
+                    pass
+            except Captured:
+                pass
+            return captured[-1]
+        default = await direct()
+        none = await direct(None)
+        bounded = await direct(16384)
+        from providers.rose.gpt_auth import build_codex_responses_body
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override="gpt-5.6-luna", messages=[{"role": "user", "content": "Unchanged input."}], response_format=None, request_id="same", cache_namespace="same", cache_breakpoints=True)
+        assert default == none == reference and "max_output_tokens" not in default
+        assert bounded == {**default, "max_output_tokens": 16384}
+
+
+async def test_funded_openai_preserves_requested_output_budget():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    from providers.rose.gpt_auth import build_codex_responses_body
+    import providers.rose.client as client
+    import providers.rose.transport as transport
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    messages = [{"role": "system", "content": "Unchanged policy."}, {"role": "user", "content": "Unchanged evidence."}]
+    seen = []
+    def callback(request):
+        assert request.url.host == "api.openai.com"
+        assert request.url.path == "/v1/responses"
+        seen.append(json.loads(request.content))
+        raise Captured()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(callback), trust_env=False) as mock_client:
+        with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(client, "_openai_api_key", return_value="offline-only-key"), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
+            rose = RoseClient(openrouter_key="offline")
+            async def collect(limit="omitted"):
+                kwargs = dict(pool="rose-1-ultra", messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", dump_context=False)
+                if limit != "omitted":
+                    kwargs["max_tokens"] = limit
+                count = len(seen)
+                try:
+                    await rose.collect(**kwargs)
+                except Captured:
+                    pass
+                assert len(seen) == count + 1
+                return seen[-1]
+            for requested in (16384, 32000):
+                body = await collect(requested)
+                assert body.get("max_output_tokens") == requested, "Funded OpenAI caller output budget must reach actual Responses HTTP transport"
+            default = await collect()
+            none = await collect(None)
+            bounded = await collect(16384)
+            assert default == none and "max_output_tokens" not in default
+            assert bounded == {**default, "max_output_tokens": 16384}
+            reference = build_codex_responses_body(pool_spec=get_pool("rose-1-ultra"), model_override=get_pool("rose-1-ultra").gpt_auth_model, messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", cache_breakpoints=True)
+            assert default == reference
+    # Foundry default route remains the same shared-converter body.
+    seen_foundry = []
+    real = httpx.AsyncClient
+    def foundry_callback(request):
+        assert request.url.host == "offline.invalid"
+        seen_foundry.append(json.loads(request.content))
+        raise Captured()
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-ultra"))}
+    module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(foundry_callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
+    with patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+        try:
+            async for _ in foundry.foundry_complete(pool_spec=get_pool("rose-1-ultra"), messages=messages, response_format=None, tools=None, context_tools=None, tool_choice=None, temperature=None, effort=None, provider_fast_mode=True, request_id="same-offline-request", route_key="same", agent_id=None, call_site="test", cache_namespace="same-offline-cache", ttft_timeout_s=90, idle_timeout_s=120):
+                pass
+        except Captured:
+            pass
+    foundry_reference = build_codex_responses_body(pool_spec=get_pool("rose-1-ultra"), model_override=foundry_model(get_pool("rose-1-ultra")), messages=messages, request_id="same-offline-request", cache_namespace="same-offline-cache", cache_breakpoints=True)
+    assert seen_foundry == [foundry_reference]
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
@@ -9087,6 +9204,8 @@ async def run_all_tests():
 
     await r.record_async("wmh_native_response_model_reaches_foundry_http", test_wmh_native_response_model_reaches_foundry_http)
     r.record("wmh_response_schema_preserves_native_json_values", test_wmh_response_schema_preserves_native_json_values)
+    await r.record_async("wmh_foundry_preserves_requested_output_budget", test_wmh_foundry_preserves_requested_output_budget)
+    await r.record_async("funded_openai_preserves_requested_output_budget", test_funded_openai_preserves_requested_output_budget)
     return r.summary()
 
 

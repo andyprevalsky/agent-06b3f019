@@ -180,9 +180,9 @@ async def recover_truncated(
                 **({"usage_complete": bool(usage_data), "error_type": type(failure).__name__} if failure else {}),
             }
         )
-        # Codex-style Responses routes (direct GPT, the funded OpenAI key,
-        # Foundry) send no output limit at all, so a larger limit changes
-        # nothing for them; go straight to the next model.
+        # Preserve the existing next-model cutoff policy for Responses routes.
+        # The subscription route ignores output limits; public API wrappers
+        # forward caller limits, but retain this recovery policy.
         if "larger_limit" in remaining and actual_model.endswith(("-gpt", "-openai", "-foundry")):
             remaining.remove("larger_limit")
             if not remaining:

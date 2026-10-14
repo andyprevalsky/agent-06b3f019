@@ -652,6 +652,7 @@ async def openai_api_key_complete(
     provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
+    max_tokens: Optional[int] = None,
 ) -> AsyncIterator[StreamChunk]:
     body = build_codex_responses_body(
         pool_spec=pool_spec,
@@ -677,6 +678,8 @@ async def openai_api_key_complete(
         ),
         request_id=request_id,
     )
+    if max_tokens is not None:
+        body["max_output_tokens"] = max_tokens
     actual_model = f"{model}-openai"
     last_error: Optional[Exception] = None
 
