@@ -23,7 +23,7 @@ sources:
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
   - PR #1511
 repro: front-end/src/tests/blackbox/admin-agent-inspection.blackbox.tsx
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -100,9 +100,8 @@ git diff --check passed. No frontend source changed during that final run.
 The initial app-tsconfig check reported the same 218 diagnostics on HEAD
 and the first candidate; no added or removed diagnostic keys. That early check was not passing. Main-sync canonical type repairs and owning
 fixture fixes now produce a zero-error frontend app typecheck and passing lint
-(nine warnings). This case remains
-open pending deployment. The user's subsequent direction authorizes preserving
-actual messages and native schema updates in the combined browser repair. No live agent was paused or modified.
+(nine warnings). Deployment verification and retained evidence are tracked in PR #1511. The user's subsequent direction authorizes preserving
+actual messages and native schema updates in the combined browser repair. The incident agent was not paused or modified during investigation.
 
 At 10,000 agents, deriving view interactivity from the already-loaded selected
 agent context adds no query, subscription, polling loop or shared contention.

@@ -24,7 +24,7 @@ sources:
   - commit 949b4be32
   - PR #1511
 repro: agents/tests/blackbox/run_agent.blackbox.py::test_keyed_feedback_revision_supersedes_verdict_without_user_row
-status: open
+status: fixed
 ---
 
 ## Problem

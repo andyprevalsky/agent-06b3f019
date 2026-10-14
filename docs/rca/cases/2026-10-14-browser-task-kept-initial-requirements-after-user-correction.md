@@ -25,7 +25,7 @@ sources:
   - commit 949b4be32
   - PR #1511
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_active_user_feedback_updates_model_and_verifier_preserving_fields
-status: open
+status: fixed
 ---
 
 ## Problem

@@ -24,7 +24,7 @@ sources:
   - commit 949b4be32
   - PR #1511
 repro: agents/tests/blackbox/workflow.blackbox.py::test_workflow_keyed_rejection_admits_already_polled_durable_feedback
-status: open
+status: fixed
 ---
 
 ## Problem

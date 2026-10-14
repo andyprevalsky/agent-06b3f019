@@ -23,7 +23,7 @@ sources:
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
   - PR #1511
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_resumed_call_and_judge_receive_durable_captured_user_correction
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -209,11 +209,11 @@ the next model call; claude-code-src/src/query.ts:1570 drains scoped queued
 commands. The repair converges on preserving original user input at the next
 execution boundary rather than manufacturing a recovery nudge.
 
-The case remains open pending deployment. The user explicitly directed removal
+The fix is locally verified; deployment verification and retained evidence are tracked in PR #1511. The user explicitly directed removal
 of harness injections, preservation of sent user messages, and schema updates
 when needed. That direction authorizes this scoped runtime change; the normal
-trajectory guard is satisfied with recorded user-direction provenance. No
-production agent was resumed, rerun or modified during this RCA. At 10,000
+trajectory guard is satisfied with recorded user-direction provenance. The deleted
+incident agent was not resumed, rerun or modified during investigation. At 10,000
 agents the combined repair reads each task’s scoped durable tail at resume,
 decision and verification boundaries through the same cursor/source-ID ledger.
 It adds no shared user fan-in or second input transport. Existing auth, write-permission,
@@ -224,8 +224,7 @@ diff, then passed under the user's explicit revised implementation direction.
 The evidence publisher could not produce a share viewer for this deleted
 non-benchmark agent because its current CLI requires a Hub run UUID. The final
 verifier dump 56a48ebda7ec was rendered and published separately with a 7-day
-signed HTTPS URL. Do not claim that the deleted agent's frontend viewer was
-validated or that production verification has occurred.
+signed HTTPS URL. The deleted agent's frontend viewer was not validated. Deployment verification is tracked in PR #1511.
 
 ## Human feedback
 

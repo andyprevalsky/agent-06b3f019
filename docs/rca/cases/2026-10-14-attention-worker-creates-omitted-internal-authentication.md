@@ -27,7 +27,7 @@ sources:
   - agent b32f4e86-1d09-47c0-99b6-9ae62996b6d3
   - benchmark run 20261014_214347_b4880458-8d1e-4331-a7ab-767eb86844f3
 repro: back-end/src/tests/blackbox/attention-requests.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -140,9 +140,7 @@ Scoped Ruff, Python compilation, ESLint, formatting, and full backend typecheck
 passed. At 10000 agents this adds only two headers to existing requests, without
 new network calls, retries, state machines, or per-agent credential storage.
 
-The source mechanism is reproduced and repaired. The exact unchanged paid task
-outcomes remain pending the deployment owner's post-integration smoke rerun;
-this case stays open until those outcomes are verified.
+The source mechanism and unchanged task outcomes are verified. The local agent-payment-new-user-journey task passed in 209.7 seconds and agent-payment-setup-resume passed in 178.7 seconds, without changing their definitions, timeouts, evaluators, or pass criteria. The corresponding run IDs are 8af77f88-95a2-42ad-bea9-8b72b296c0f6 and e2b96199-42c4-4eb3-bb29-3ddb1dc0e24a. Deployment verification and retained evidence are tracked in PR #1511.
 
 ## Human feedback
 

@@ -20,7 +20,7 @@ sources:
   - commit c65baa4f435f12b27fa3e6bd950a3711b6e2a275
   - PR #1511
 repro: back-end/src/tests/blackbox/attention-requests.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
