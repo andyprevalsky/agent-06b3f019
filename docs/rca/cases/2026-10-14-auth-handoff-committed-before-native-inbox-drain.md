@@ -19,7 +19,7 @@ sources:
   - agent 3caf15c9-92a8-4590-8bbb-93b4875f91fc
   - commit e576489611da771499791db3980d78a1db8c5c02
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -69,7 +69,7 @@ Command from isolated root: agents/venv/bin/python
 .context/email-2fa-rca/run-focused.py. Baseline output: native handoff controls
 failed ['fresh', 'during_drain']; candidate: PASS native OTP handoff boundary
 and controls. Test is registered in the permanent spawn-browser-agent-v3 suite;
-full suite validation pending.
+full canonical domain passed in51.0s, including every registered new control.
 
 Archive searches were request_user_assistance_for_authentication and email OTP
 minted inbox. Today's handoff/pending-verification case and older Gmail lookup
@@ -109,8 +109,24 @@ availability is not advertised as a new durable-completion guarantee.
 
 First candidate16abaf295 unchanged local benchmark passed100.6s, agent
 7084b8da-2edd-4fc4-a34b-e423b96278ba. Both benchmark and stack native cleanup
-receipts clean. Refined drain candidate and app-approval benchmark pending;
-do not treat first candidate as final source verification or deploy-ready.
+receipts clean. Refined candidate aadfc21406cab94073b21390b6efb252a6b8abe4 passed both
+unchanged canonical tasks: email2FA106.3s, app approval91.0s, run
+bac99aab-ff15-467c-aad1-5a40c5e531b5. Actual email run03a78f95 reproduced
+stale step5 assistance without OTP, then refreshed step6 typed the actual OTP
+and the site accepted it. App root74c2f651 followed human assistance, one
+helper approval and verified sign-in. Both unchanged no_tool_failures passed;
+email root had52 persisted messages and zero execution failure rows.
+helpers/messages.py570-635 broadcasts TOOL_STREAM ephemerally with no DB
+insert; the ERROR closure is an abandoned stream, not an executed tool failure.
+The exact stale model decision remains in its preserved LLM dump.
+
+Native benchmark and local-stack cleanup receipts both clean for final run.
+The no-OTP app_approval fixture in the causal test proves ordinary assistance
+retention only; genuine app-approval preservation is proven by the unchanged
+canonical live task above. Local correction verified; deployment/parent source
+adoption remains held. No new LLM-visible text was added. Agent control-transfer
+and native input sequencing changes require parent runtime-behavior/trajectory
+review before adoption, with exact11-line runtime diff.
 
 ## Human feedback
 
