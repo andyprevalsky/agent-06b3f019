@@ -6004,3 +6004,5 @@
 {"task": "lantern-people-pagination", "duration_seconds": 88.3, "cost_cents": 0.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "8f1c3e98-8c89-4439-832f-7dc33b96ca6d"}
 {"task": "lantern-people-enrichment", "duration_seconds": 111.0, "cost_cents": 0.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "dffafb89-7ba1-4c46-82dd-bbad2ab5456f"}
 {"task": "lantern-people-discovery", "duration_seconds": 146.4, "cost_cents": 3.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "d96f415a-e738-4ec9-ad1c-d3cc8db5a26c"}
+{"task": "lantern-people-discovery", "duration_seconds": 69.8, "cost_cents": 0.0, "timestamp": "2026-10-14T20:31:57.743200+00:00", "agent_id": "5b64dd64-f77b-4e14-b829-da3c6cf8be79"}
+{"task": "lantern-people-enrichment", "duration_seconds": 105.3, "cost_cents": 0.0, "timestamp": "2026-10-14T20:31:57.743200+00:00", "agent_id": "adf03215-aab1-48e8-acfb-971ebb1327f9"}
