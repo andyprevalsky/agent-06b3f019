@@ -9,6 +9,7 @@
 
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { START_PHASE_DESCRIPTION } from './schema';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 export const TOOL_SCHEMAS = [
   {
@@ -277,7 +278,9 @@ Returns:
       properties: {
         message: {
           type: 'string' as const,
-          description: userFacingTextDescription('The exact SMS message to send to the user.'),
+          description: userFacingTextDescription(
+            `The exact SMS message to send to the user. ${SMS_DELIVERY_INSTRUCTIONS}`
+          ),
         },
         reply_to_message_id: {
           type: 'string' as const,

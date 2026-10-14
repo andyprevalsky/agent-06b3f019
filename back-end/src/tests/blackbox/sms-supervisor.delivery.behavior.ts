@@ -1,5 +1,12 @@
+import {
+  testSendUserMessage_rejectsEmojiOnlySms,
+  testSmsQuotedReplies,
+} from './sms-supervisor.reply.behavior';
 import assert from 'node:assert/strict';
 import type { PrismaClient } from '@prisma/client';
+import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
+import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
+import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
 import { grep as userDataGrep } from '../../domains/data/service';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
@@ -149,57 +156,6 @@ export async function testSendUserMessage_continuesUntilSubstantiveResult(prisma
   }
 }
 
-export async function testSendUserMessage_rejectsEmojiOnlySms(prisma: PrismaClient) {
-  const probe = await request(`${BASE_URL}/api/test/captures`);
-  assertStatus(probe.status, 200, probe.data);
-  const cursor = (probe.data as { nextId: number }).nextId - 1;
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const token = captureToken('sms-supervisor-reject-emoji-only');
-  const emoji = '👩🏽‍💻';
-  const inbound = 'Please say hello in a sentence.';
-  const reply = 'Hello! Happy to help 👋🏽';
-  try {
-    await setFixtureOverride(
-      userId,
-      JSON.stringify(
-        [emoji, reply].map((message) => ({
-          reasoning: 'Reject the standalone emoji, then send a substantive greeting with emoji.',
-          tool_calls: [
-            { tool: 'send_user_message', arguments: { message } },
-            { tool: 'attempt_completion', arguments: {} },
-          ],
-        }))
-      )
-    );
-    const response = await request(`${BASE_URL}/api/sms/inbound`, {
-      method: 'POST',
-      headers: { 'X-Capture-Token': token },
-      body: JSON.stringify({
-        data: { body: inbound, conversation: { contact: { phone_number: phone } } },
-      }),
-    });
-    assertStatus(response.status, 200, response.data);
-    await waitFor(() => findSurgeCallForReply(token, cursor, phone, reply));
-    const stored = await waitFor(async () => {
-      const session = await prisma.smsSession.findUnique({ where: { userId } });
-      const assistants = parseSmsSessionMessages(session?.messages)
-        .filter((message) => message.role === 'assistant')
-        .map((message) => message.content);
-      return assistants.includes(reply) ? assistants : null;
-    });
-    const sent = (await readCapturesAfter(cursor))
-      .filter((call) => call.url.includes('surge.app') && call.url.endsWith('/messages'))
-      .map(capturedSmsBody)
-      .filter((body) => body?.to === phone)
-      .map((body) => body?.body);
-    assert.deepEqual(sent, [reply], 'Only the substantive SMS reaches the provider');
-    assert.deepEqual(stored, [reply], 'Only the substantive SMS is persisted');
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
 export async function testSendUserMessage_identicalBodyNotResent(prisma: PrismaClient) {
   const probe = await request(`${BASE_URL}/api/test/captures`);
   if (probe.status !== 200) return;
@@ -248,6 +204,103 @@ export async function testSendUserMessage_identicalBodyNotResent(prisma: PrismaC
     if (delivered.length !== 1) {
       throw new Error(
         `Identical send_user_message bodies must deliver once, got ${String(delivered.length)}`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+export function testSmsMessageLimit_isTaughtOnEverySupervisorPromptSurface() {
+  const sendTool = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+  const contracts = [
+    SMS_SURFACE_OVERLAY,
+    JSON.stringify(sendTool),
+    JSON.stringify(SUPERVISOR_RESPONSE_SCHEMA),
+  ];
+  for (const contract of contracts) {
+    if (
+      !contract.includes('at most 1600 characters') ||
+      !contract.includes('spaces, line breaks, and URLs') ||
+      !contract.includes('actual delivery error') ||
+      !contract.includes('do not claim delivery until the send succeeds')
+    ) {
+      throw new Error(
+        'SMS supervisor prompt and send schemas must teach the full-body 1600-character limit and delivery-error correction'
+      );
+    }
+  }
+}
+
+export async function testSendUserMessage_rejectedBodyFeedsErrorToNextModelRound(
+  prisma: PrismaClient
+) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  assertStatus(probe.status, 200, probe.data);
+  const cursor = (probe.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-oversize-correction');
+  const url = 'https://www.roselabs.ai/';
+  const rejected = `The report is ready. ${'Detailed report. '.repeat(110)}\n${url}`;
+  const corrected = `The report is ready. Read the details: ${url}`;
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify([
+        {
+          reasoning: 'send the report and request completion',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: rejected } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+        {
+          expected_tool_result_substrings: [
+            '[send_user_message] ERROR:',
+            'should be at most 1600 character(s)',
+            'Rejected: this run has not successfully called send_user_message',
+          ],
+          reasoning: 'the provider rejected the oversized report; shorten it and preserve the link',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: corrected } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+      ])
+    );
+    const response = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Please send me the report.',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, corrected));
+    const session = await waitFor(async () => {
+      const stored = await prisma.smsSession.findUnique({ where: { userId } });
+      if (stored === null) return null;
+      const messages = parseSmsSessionMessages(stored.messages);
+      return messages.some(
+        (message) => message.role === 'assistant' && message.content === corrected
+      )
+        ? messages
+        : null;
+    });
+    const sent = session
+      .filter((message) => message.role === 'assistant')
+      .map((message) => message.content);
+    if (sent.length !== 1 || sent[0] !== corrected) {
+      throw new Error(
+        `Only the corrected successfully delivered SMS belongs in the transcript: ${JSON.stringify(sent)}`
       );
     }
   } finally {
@@ -541,94 +594,19 @@ export async function testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma: Pr
   }
 }
 
-async function testSmsQuotedReplies(prisma: PrismaClient) {
-  for (const kind of ['current', 'earlier-user', 'earlier-assistant', 'legacy'] as const) {
-    const phone = uniqueSmsPhone();
-    const userId = await provisionUserWithPhone(prisma, phone);
-    const incomingId = `msg_incoming_${userId}`;
-    const earlierId = `msg_earlier_${userId}`;
-    const earlierText = 'Earlier message\nSecond line 🧑🏽‍🚀';
-    const inbound = 'Please reply to this message';
-    const answer = 'Here is the answer.';
-    const confirmation = 'Finished quote test.';
-    const target =
-      kind === 'current' ? incomingId : kind === 'legacy' ? 'session-message:1' : earlierId;
-    const expected = `Replying to ${kind === 'earlier-assistant' ? 'my' : 'your'} message:\n“${kind === 'current' ? inbound : earlierText}”\n\nHere is the answer.`;
-    try {
-      if (kind === 'earlier-user') await recordInboundSms(userId, earlierText, earlierId);
-      if (kind === 'earlier-assistant') await appendOutboundSms(userId, earlierText, earlierId);
-      if (kind === 'legacy')
-        await appendOutboundSms(userId, 'An older answer', earlierId, earlierText);
-      const quote = {
-        tool: 'send_user_message',
-        arguments: { message: answer, reply_to_message_id: target },
-      };
-      await setFixtureOverride(
-        userId,
-        JSON.stringify([
-          {
-            reasoning: 'Reply to the selected message.',
-            tool_calls: [quote, quote, { tool: 'attempt_completion', arguments: {} }],
-          },
-          {
-            reasoning: 'Finish after the duplicate was rejected.',
-            tool_calls: [
-              { tool: 'send_user_message', arguments: { message: confirmation } },
-              { tool: 'attempt_completion', arguments: {} },
-            ],
-          },
-        ])
-      );
-      const probe = await request(`${BASE_URL}/api/test/captures`);
-      assertStatus(probe.status, 200, probe.data);
-      const cursor = (probe.data as { nextId: number }).nextId - 1;
-      const response = await request(`${BASE_URL}/api/sms/inbound`, {
-        method: 'POST',
-        body: JSON.stringify({
-          data: {
-            id: incomingId,
-            body: inbound,
-            conversation: { contact: { phone_number: phone } },
-          },
-        }),
-      });
-      assertStatus(response.status, 200, response.data);
-      await waitFor(() => findSurgeCallForReply('', cursor, phone, confirmation));
-      const sent = (await readCapturesAfter(cursor))
-        .filter((call) => call.url.includes('surge.app'))
-        .map(capturedSmsBody)
-        .filter((body) => body?.to === phone)
-        .map((body) => body?.body);
-      if (JSON.stringify(sent) !== JSON.stringify([expected, confirmation])) {
-        throw new Error(
-          `Expected one full quote then confirmation for ${kind}; got ${JSON.stringify(sent)}`
-        );
-      }
-      await waitFor(async () => {
-        const session = await prisma.smsSession.findUnique({ where: { userId } });
-        const stored = parseSmsSessionMessages(session?.messages);
-        if (!stored.some((message) => message.content === confirmation)) return null;
-        if (
-          !stored.some(
-            (message) => message.content === inbound && message.providerMessageId === incomingId
-          )
-        )
-          throw new Error('SMS inbound ID was not persisted');
-        if (!stored.some((message) => message.role === 'assistant' && message.content === expected))
-          throw new Error('Stored SMS must match the actual quoted body');
-        return true;
-      });
-    } finally {
-      await cleanupAgentScopedUser(prisma, userId);
-    }
-  }
-}
-
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
     {
       name: 'send -- SMS quotes current, earlier, sent, and legacy messages once',
       fn: () => testSmsQuotedReplies(prisma),
+    },
+    {
+      name: 'send -- prompt and schemas teach complete-body SMS limit and correction',
+      fn: async () => testSmsMessageLimit_isTaughtOnEverySupervisorPromptSurface(),
+    },
+    {
+      name: 'send -- rejected oversized SMS feeds the provider error into the next model round',
+      fn: () => testSendUserMessage_rejectedBodyFeedsErrorToNextModelRound(prisma),
     },
     {
       name: 'catch-up -- a lifecycle SMS is visible to an ISO watermark',

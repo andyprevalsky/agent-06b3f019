@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import {
   acquireWorkflowDeploymentLease,
@@ -61,6 +62,48 @@ async function main(): Promise<void> {
       await replacement.assertOwned();
     } finally {
       await replacement.release();
+    }
+  });
+
+  await test('custom source leases renew and release only their own key and type', async () => {
+    const firstKey = `test:browser-handoff:${randomUUID()}`;
+    const secondKey = `test:browser-handoff:${randomUUID()}`;
+    const first = await acquireWorkflowDeploymentLease({
+      operationKey: firstKey,
+      operationType: 'BROWSER_PROFILE_HANDOFF_LEASE',
+      leaseMs: 1_000,
+      heartbeatMs: 100,
+    });
+    const second = await acquireWorkflowDeploymentLease({
+      operationKey: secondKey,
+      operationType: 'BROWSER_PROFILE_HANDOFF_LEASE',
+      leaseMs: 1_000,
+      heartbeatMs: 100,
+    });
+    try {
+      const before = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: firstKey },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const renewed = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: firstKey },
+      });
+      assert(renewed.updatedAt > before.updatedAt, 'custom lease heartbeat did not renew');
+      assert.equal(renewed.externalId, first.ownerId);
+      assert.equal(renewed.operationType, 'BROWSER_PROFILE_HANDOFF_LEASE');
+      await first.assertOwned();
+      await first.release();
+      await second.assertOwned();
+      const released = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: firstKey },
+      });
+      assert.equal(released.status, 'RELEASED');
+    } finally {
+      await first.release();
+      await second.release();
+      await prisma.toolSideEffect.deleteMany({
+        where: { operationKey: { in: [firstKey, secondKey] } },
+      });
     }
   });
 

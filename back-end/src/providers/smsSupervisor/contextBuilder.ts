@@ -14,6 +14,7 @@ import { CompletionMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../rose';
 import { createLogger } from '../logger';
 import { extractFingerprintTimeZone, formatUserTemporalContext } from './timeContext';
 import { formatReplyTargetIndex } from './messageReply';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 const log = createLogger('SmsContext');
 
@@ -618,6 +619,8 @@ Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allo
 export const SMS_SURFACE_OVERLAY = `# Your Surface
 
 You are responding over SMS. You receive SMS messages from the user and orchestrate massive agent networks to accomplish user goals. Be conversational but concise — this is texting, not email.
+
+${SMS_DELIVERY_INSTRUCTIONS}
 
 Context is available to you primarily through grep, this tool's purpose is to acquire factual information from the user's own data (contacts/network, message history, transactions, documents). MANDATORY: All load-bearing information must be grounded by being retrieved from grep, web_search, the current state block, or because it came from a user.
 

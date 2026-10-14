@@ -1,5 +1,6 @@
 import { SmsSupervisorResponseSchema, SmsSupervisorReactionResponseSchema } from './schema';
 import type { ToolCall } from './supervisorTools';
+import type { CompletionMessage } from '../rose';
 
 interface SupervisorFixtureResponse {
   reasoning: string;
@@ -26,11 +27,7 @@ export function clearSupervisorFixtureOverride(userId: string): void {
   fixtureCursors.delete(userId);
 }
 
-function selectFixture(
-  userId: string,
-  raw: string,
-  advanceCursor: boolean
-): Record<string, unknown> {
+function selectFixture(userId: string, raw: string, advanceCursor = true): Record<string, unknown> {
   const parsed = JSON.parse(raw) as unknown;
   let selected: unknown = parsed;
   if (Array.isArray(parsed)) {
@@ -48,7 +45,8 @@ function selectFixture(
 /** Resolve deterministic single- or multi-round fixtures for blackbox runs. */
 export function loadBlackboxSupervisorResponseFixture(
   userId: string,
-  reactionOnly = false
+  reactionOnly = false,
+  messages: CompletionMessage[] = []
 ): LoadedSupervisorFixture | null {
   if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') return null;
 
@@ -72,6 +70,7 @@ export function loadBlackboxSupervisorResponseFixture(
     });
     return { response, delayMs: 0 };
   }
+  validateExpectedToolResults(rawObject, messages);
   const delayMs =
     typeof rawObject.delay_ms === 'number' &&
     Number.isFinite(rawObject.delay_ms) &&
@@ -85,4 +84,45 @@ export function loadBlackboxSupervisorResponseFixture(
     response: { reasoning: parsed.reasoning, tool_calls: parsed.tool_calls },
     delayMs,
   };
+}
+
+/** Reuse per-key fixture sequences for notification composers without a global fallback. */
+export function loadBlackboxFixtureObject(
+  key: string,
+  messages: readonly CompletionMessage[]
+): Record<string, unknown> | null {
+  if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND !== '1') return null;
+  const raw = fixtureOverrides.get(key);
+  if (raw === undefined || raw === BYPASS_FIXTURE_REAL_LLM) return null;
+  const rawObject = selectFixture(key, raw);
+  validateExpectedToolResults(rawObject, messages);
+  return rawObject;
+}
+
+function validateExpectedToolResults(
+  rawObject: Record<string, unknown>,
+  messages: readonly CompletionMessage[]
+): void {
+  const expectedToolResults = rawObject.expected_tool_result_substrings;
+  if (expectedToolResults !== undefined) {
+    if (
+      !Array.isArray(expectedToolResults) ||
+      expectedToolResults.some((part) => typeof part !== 'string')
+    ) {
+      throw new Error('Expected tool result substrings must be an array of strings');
+    }
+    const toolResults = messages.filter(
+      (message) => message.role === 'tool' && typeof message.content === 'string'
+    );
+    for (const part of expectedToolResults) {
+      if (
+        !toolResults.some(
+          (message) => typeof message.content === 'string' && message.content.includes(part)
+        )
+      ) {
+        throw new Error(`SMS fixture did not receive expected tool feedback: ${String(part)}`);
+      }
+    }
+  }
+  delete rawObject.expected_tool_result_substrings;
 }
