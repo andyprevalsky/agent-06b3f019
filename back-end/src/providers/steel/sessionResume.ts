@@ -81,6 +81,8 @@ class ConcurrentSessionReplacementError extends Error {
   }
 }
 
+class SteelProfileFailedError extends Error {}
+
 async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLocation> {
   if (!hasValue(agentId)) return DEFAULT_GEOLOCATION;
 
@@ -157,6 +159,7 @@ export interface SteelSessionReplacementDependencies {
   /** Resolves null when the session accepts CDP, otherwise the failure reason. */
   validateConnection: (wsUrl: string, sessionId: string) => Promise<string | null>;
   releaseSession?: (sessionId: string) => Promise<void>;
+  retrieveProfile?: (profileId: string) => Promise<{ status: string }>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
@@ -218,6 +221,21 @@ export async function recreateSession(
           persistProfile: oldSession.providerProfilePersist ?? true,
         }
       : undefined;
+  const writerProfileId = boundProfile?.persistProfile ? boundProfile.profileId : null;
+  if (writerProfileId !== null) {
+    // Steel persists a writer's profile only after release. Keeping that writer
+    // live until its replacement exists makes every dependent create return 409.
+    try {
+      await (dependencies.releaseSession ?? releaseSteelRemoteSession)(oldSession.sessionId);
+    } catch (error) {
+      throw new SteelSessionCleanupError(oldSession.sessionId, error);
+    }
+    const paused = await prisma.browserSession.updateMany({
+      where: { id: taskId, sessionId: oldSession.sessionId },
+      data: { status: 'PAUSED', closedAt: null },
+    });
+    if (paused.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
+  }
   let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
@@ -230,6 +248,19 @@ export async function recreateSession(
     let committed = false;
     let attemptCdpTimedOut = false;
     try {
+      if (writerProfileId !== null) {
+        const profile = await (
+          dependencies.retrieveProfile ??
+          ((id: string) =>
+            steel.get<unknown, { status: string }>(`/v1/profiles/${encodeURIComponent(id)}`))
+        )(writerProfileId);
+        if (profile.status === 'FAILED') {
+          throw new SteelProfileFailedError(`Steel profile ${writerProfileId} failed to persist`);
+        }
+        if (profile.status !== 'READY') {
+          throw new Error(`Steel profile ${writerProfileId} is not ready (${profile.status})`);
+        }
+      }
       const proxySettings = buildSteelProxySettings(
         proxyGeo,
         dropProxyCity,
@@ -341,6 +372,7 @@ export async function recreateSession(
         }
       }
       if (error instanceof ConcurrentSessionReplacementError) throw error;
+      if (error instanceof SteelProfileFailedError) throw error;
 
       const status =
         (error as Record<string, unknown>)?.status ??
