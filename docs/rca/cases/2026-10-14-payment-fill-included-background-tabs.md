@@ -208,13 +208,13 @@ secrets model`; this is a deeper repair to the same incident following explicit
 human feedback, rather than a separate incident.
 
 The final public regressions use test-file SHA-256
-`cec82249be6077e26adc9964af0620cb17cb3d94a9d8a5c002d647da2485cbd2`:
-the pinned baseline fails all three in 2.036 seconds, while the repaired source
-passes all three in 1.786 seconds. Independent review also found a literal
+`1c4d5aab20b7fc262613d70ae40751411bcc154440d80ca7b4c2491f909e5f2e`:
+the pinned baseline fails all three in 1.790 seconds, while the repaired source
+passes all three in 1.890 seconds. Independent review also found a literal
 credential error could bypass ordinary results through credential-outcome
 classification and the Temporal failure delivered to the parent model. The
-unchanged full-activity regression fails against `235ff2cd6` in 0.679 seconds
-and passes with the additional boundary repair in 0.579 seconds. Propagation
+unchanged full-activity regression fails against `235ff2cd6` in 0.570 seconds
+and passes with the additional boundary repair in 0.611 seconds. Propagation
 requests, responses, and diagnostics now redact private values, and sanitized
 Temporal failures retain their type and retry policy without retaining a raw
 cause chain. Activity-scoped fallback redaction also covers private hydration
@@ -239,4 +239,4 @@ and authentication observations remain unresolved.
 
 ## Reusable lesson
 
-Bind semantic secret-field discovery to the focused page's proven frame tree before interpreting a successful fill as current-page progress.
+Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.
