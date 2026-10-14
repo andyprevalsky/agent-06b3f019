@@ -1193,6 +1193,43 @@ def test_campaign_inventory_seed_preflight_normalizes_guest_pg_default_before_co
         thread.join()
 
 
+def _assert_publication_process_retired(pid, birth):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"pid": pid, "birth": birth, "state": "absent"}
+    observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,ppid=,pgid="], capture_output=True, text=True)
+    assert observed.returncode == 0 and observed.stdout.strip(), f"unknown publication state for {pid}"
+    identity = subprocess.run([sys.executable, str(ROOT / "scripts/process-identity.py"), str(pid)], capture_output=True, text=True)
+    assert identity.returncode == 0 and identity.stdout.strip() == birth, f"publication birth changed or unreadable for {pid}"
+    assert observed.stdout.strip().startswith("Z"), f"owned publication process {pid} remains executing: {observed.stdout.strip()}"
+    state, ppid, pgid = observed.stdout.split()
+    return {"pid": pid, "birth": birth, "state": state, "ppid": int(ppid), "pgid": int(pgid)}
+
+
+def test_campaign_inventory_publication_retirement_distinguishes_owned_zombie():
+    """A real unreaped exit is not an executing publication process."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        with pytest.raises(AssertionError, match="remains executing"):
+            _assert_publication_process_retired(child.pid, birth)
+        child.stdin.close()
+        deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+        while time.monotonic() < deadline:
+            state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True).strip()
+            if state.startswith("Z"):
+                break
+            time.sleep(0.01)
+        assert state.startswith("Z"), "controlled child did not reach native zombie state"
+        with pytest.raises(AssertionError, match="birth changed or unreadable"):
+            _assert_publication_process_retired(child.pid, birth + "-foreign")
+        _assert_publication_process_retired(child.pid, birth)
+    finally:
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
 @pytest.mark.parametrize("phase", ["starting", "final"])
 def test_campaign_inventory_group_publication_cancellation_retires_only_its_owned_processes(tmp_path, phase):
     """The real campaign must honor cancellation during both Hub handoffs."""
@@ -1215,7 +1252,8 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
         'if phase != os.environ["FIXTURE_PHASE"]: sys.exit(0)\n'
         'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(120)"])\n'
         'marker=Path(os.environ["FIXTURE_MARKER"]); temporary=marker.with_suffix(".tmp")\n'
-        'temporary.write_text(json.dumps({"pid":os.getpid(),"child_pid":child.pid})); temporary.replace(marker)\n'
+        'births={str(pid):subprocess.check_output([sys.executable,os.environ["FIXTURE_IDENTITY"],str(pid)],text=True).strip() for pid in (os.getpid(),child.pid)}\n'
+        'temporary.write_text(json.dumps({"pid":os.getpid(),"child_pid":child.pid,"births":births})); temporary.replace(marker)\n'
         'while not Path(os.environ["FIXTURE_RELEASE"]).exists(): time.sleep(0.1)\n'
         "child.terminate(); child.wait()\n"
     )
@@ -1225,6 +1263,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
             environment.pop(name)
     environment.update(
         FIXTURE_PHASE=phase,
+        FIXTURE_IDENTITY=str(ROOT / "scripts/process-identity.py"),
         FIXTURE_MARKER=str(marker),
         FIXTURE_RELEASE=str(release),
         FIXTURE_ADMITTED=str(admitted),
@@ -1266,12 +1305,11 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
             assert admitted.exists() == (phase == "final")
             assert summary["jobs"][0]["status"] == ("passed" if phase == "final" else "cancelled")
             assert foreign.poll() is None, "cancellation must preserve the unrelated process"
-            for owned_pid in owner.values():
-                try:
-                    os.kill(owned_pid, 0)
-                except ProcessLookupError:
-                    continue
-                raise AssertionError(f"owned publication process {owned_pid} remains")
+            observations = [
+                _assert_publication_process_retired(owned_pid, owner["births"][str(owned_pid)])
+                for owned_pid in (owner["pid"], owner["child_pid"])
+            ]
+            (fixture / "publication-retirement.safe.json").write_text(json.dumps(observations))
         finally:
             release.touch()
             try:
