@@ -10589,6 +10589,7 @@ def _clone_machine_bundle(source: str) -> str:
             _worker_ledger_lock_bundle(source),
             _extract_fleet_function(source, "clone_failure_definitively_unallocated() {"),
             _extract_fleet_function(source, "clone_failure_owned_volume_id() {"),
+            _extract_fleet_function(source, "fleet_clone_with_queue_admission() {"),
             _extract_fleet_function(source, "clone_machine_target() {"),
         )
     )
