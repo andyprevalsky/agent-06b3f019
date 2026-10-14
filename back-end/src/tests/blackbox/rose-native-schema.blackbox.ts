@@ -10,6 +10,9 @@ import {
   withNativeToolContract,
 } from '../../providers/rose/transforms';
 import type { CompletionOptions } from '../../providers/rose/types';
+import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
+import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
+import { registerUserDataGrep, type UserDataGrepParams } from '../../providers/userDataSearch';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import {
   SUPERVISOR_RESPONSE_MODEL,
@@ -187,7 +190,199 @@ async function verifyResponsesWire(): Promise<void> {
   }
 }
 
+async function verifyCerebrasDerivedProjection(): Promise<void> {
+  for (const strict of [true, false]) {
+    const format = {
+      ...SUPERVISOR_RESPONSE_SCHEMA,
+      json_schema: { ...SUPERVISOR_RESPONSE_SCHEMA.json_schema, strict },
+    };
+    const derived = withNativeToolContract({ ...options, response_format: format });
+    const body = buildCerebrasChatBody(derived);
+    const expected = extractToolsFromResponseFormat(format)!.tools.map((tool) => ({
+      ...tool,
+      strict,
+    }));
+    assert.deepEqual(body.tools, openAiChatTools(expected));
+    const rawBody = buildCerebrasChatBody({ ...derived, cerebras_tools: undefined });
+    const { tools: projectedTools, ...projectedRest } = body;
+    const { tools: rawTools, ...rawRest } = rawBody;
+    assert.notDeepEqual(projectedTools, rawTools);
+    assert.deepEqual(projectedRest, rawRest, 'only derived Cerebras tool schema may change');
+    assert.deepEqual(derived.tools, extractToolsFromResponseFormat(format, false)!.tools);
+    assert.deepEqual(derived.anthropic_tools, extractToolsFromResponseFormat(format)!.tools);
+    assert.equal(Object.hasOwn(body, 'cerebras_tools'), false);
+    assert.equal(Object.hasOwn(body, 'cerebras_tools_source'), false);
+  }
+  const explicit = [
+    {
+      name: 'grep',
+      description: 'Explicit fixture',
+      input_schema: {
+        type: 'object',
+        properties: { pattern: { type: 'string' } },
+        required: ['pattern'],
+      },
+      strict: false,
+    },
+  ];
+  for (const tools of [explicit, []]) {
+    const caller = { ...options, tools };
+    const derived = withNativeToolContract(caller);
+    assert.equal(derived, caller);
+    assert.equal(derived.cerebras_tools, undefined);
+    assert.deepEqual(buildCerebrasChatBody(derived).tools, openAiChatTools(tools));
+  }
+  const projected = withNativeToolContract(options);
+  for (const tools of [explicit, [], [...(projected.tools ?? [])]]) {
+    const overridden = withNativeToolContract({ ...projected, tools });
+    assert.deepEqual(
+      buildCerebrasChatBody(overridden).tools,
+      openAiChatTools(tools),
+      'replacing the generic tools array must invalidate stale dialect metadata'
+    );
+  }
+  const normalized = { ...projected, provider_fast_mode: true };
+  assert.deepEqual(
+    buildCerebrasChatBody(normalized).tools,
+    buildCerebrasChatBody(projected).tools,
+    'normalization preserving generic tool identity must preserve the derived dialect'
+  );
+  const plain = { model: options.model, messages: options.messages };
+  assert.equal(withNativeToolContract(plain), plain);
+  assert.deepEqual(
+    buildCerebrasChatBody(withNativeToolContract(plain)),
+    buildCerebrasChatBody(plain)
+  );
+  const raw = { ...options, response_model: undefined };
+  assert.equal(withNativeToolContract(raw), raw);
+
+  const captures: UserDataGrepParams[] = [];
+  registerUserDataGrep(async (_userId, params) => {
+    captures.push(params);
+    return {
+      matches: [],
+      total_matches: 0,
+      truncated: false,
+      pattern: params.pattern ?? '',
+      sources: [params.source ?? ''],
+      applied_limit: 20,
+      applied_offset: 0,
+      returned: 0,
+      has_more: false,
+      next_offset: null,
+      display_order: 'oldest_first',
+      context_unit: 'logical_line',
+    };
+  });
+  const pending: PendingOp[] = [];
+  const grepArgs = {
+    pattern: 'Offline',
+    source: 'messages',
+    '-i': false,
+    offset: 0,
+    filters: { since: null },
+  };
+  assert.equal(
+    (await dispatchToolCall({ tool: 'grep', arguments: grepArgs }, 'offline', pending)).success,
+    true
+  );
+  assert.equal(captures[0]['-i'], false);
+  assert.equal(captures[0].offset, 0);
+  assert.equal(captures[0].filters, undefined);
+  const omittedBudget = { goal: 'Offline', start_phase: 'plan' };
+  assert.equal(
+    (
+      await dispatchToolCall(
+        { tool: 'start_new_agent', arguments: omittedBudget },
+        'offline',
+        pending
+      )
+    ).success,
+    true
+  );
+  assert.deepEqual(pending[0].args, omittedBudget, 'no default fields are fabricated');
+  assert.equal(
+    (
+      await dispatchToolCall(
+        {
+          tool: 'start_new_agent',
+          arguments: {
+            ...omittedBudget,
+            budget_dollars: '1',
+          },
+        },
+        'offline',
+        pending
+      )
+    ).success,
+    false
+  );
+  assert.equal(
+    (
+      await dispatchToolCall(
+        {
+          tool: 'grep',
+          arguments: {
+            ...grepArgs,
+            '-i': 'false',
+          },
+        },
+        'offline',
+        pending
+      )
+    ).success,
+    false
+  );
+  assert.equal(pending.length, 1);
+  assert.equal(captures.length, 1);
+
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.CEREBRAS_API_KEY;
+  process.env.CEREBRAS_API_KEY = 'offline-mocked-key';
+  let requests = 0;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), 'https://api.cerebras.ai/v1/chat/completions');
+    const body = record(JSON.parse(String(init?.body)));
+    const expected = extractToolsFromResponseFormat(SUPERVISOR_RESPONSE_SCHEMA)!.tools.map(
+      (tool) => ({ ...tool, strict: true })
+    );
+    assert.deepEqual(body.tools, openAiChatTools(expected));
+    assert.equal(Object.hasOwn(body, 'cerebras_tools'), false);
+    assert.equal(Object.hasOwn(body, 'cerebras_tools_source'), false);
+    requests++;
+    const call = {
+      index: 0,
+      id: 'native-original',
+      type: 'function',
+      function: {
+        name: 'attempt_completion',
+        arguments: '{}',
+      },
+    };
+    return new Response(
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [call] } }] })}\n\ndata: [DONE]\n\n`
+    );
+  };
+  try {
+    const calls = [];
+    for await (const chunk of await createStreamingCompletion({
+      ...options,
+      model: 'rose-labs/rose-1-flash',
+      response_format: undefined,
+    })) {
+      calls.push(...(chunk.choices[0]?.delta.tool_calls ?? []));
+    }
+    assert.equal(requests, 1);
+    assert.equal(calls[0].id, 'native-original');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = originalKey;
+  }
+}
+
 async function main(): Promise<void> {
+  await verifyCerebrasDerivedProjection();
   verifyProjection();
   await verifyResponsesWire();
   process.stdout.write(

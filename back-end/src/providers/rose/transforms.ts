@@ -434,10 +434,18 @@ export function withNativeToolContract(options: CompletionOptions): CompletionOp
   if (!options.response_model || options.tools !== undefined) return options;
   const extracted = extractToolsFromResponseFormat(options.response_format, false);
   if (!extracted) return options;
+  const anthropicTools = extractToolsFromResponseFormat(options.response_format)?.tools;
   return {
     ...options,
     tools: extracted.tools,
-    anthropic_tools: extractToolsFromResponseFormat(options.response_format)?.tools,
+    anthropic_tools: anthropicTools,
+    cerebras_tools_source: extracted.tools,
+    cerebras_tools: anthropicTools?.map((tool, index) => ({
+      ...tool,
+      ...(typeof extracted.tools[index].strict === 'boolean'
+        ? { strict: extracted.tools[index].strict }
+        : {}),
+    })),
     tool_choice: options.tool_choice ?? 'any',
     response_format: undefined,
   };

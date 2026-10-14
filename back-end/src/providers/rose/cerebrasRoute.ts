@@ -125,7 +125,11 @@ export function buildCerebrasChatBody(
 }
 
 function cerebrasToolFields(options: CompletionOptions, model: string): Record<string, unknown> {
-  const tools = openAiChatTools(options.tools);
+  const selectedTools =
+    options.cerebras_tools_source === options.tools
+      ? (options.cerebras_tools ?? options.tools)
+      : options.tools;
+  const tools = openAiChatTools(selectedTools);
   if (!tools) return {};
   return {
     tools,
