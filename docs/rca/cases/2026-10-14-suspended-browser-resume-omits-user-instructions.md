@@ -79,8 +79,12 @@ state across every external suspension, is not a coherent repair here: those
 states have different owners and contracts, and this evidence concerns actual
 user instructions. The repair transports original user content rather than
 adding task-specific coaching. The original incident proves missing input; it does
-not prove the original calendar-events schema was wrong. Schema refresh is
-covered separately because the user explicitly requested it.
+not prove the root calendar-events schema was wrong. The final browser verifier
+request 56a48ebda7ec independently confirms a stale delegated schema: its required
+signed_in_account field says the account should be tamara@roselabs.ai after the
+user explicitly directed Andy's account. Native schema refresh therefore also
+repairs an evidenced browser contract mismatch, while additional-field
+regressions cover the user's broader schema-update request.
 
 ## Solution
 
@@ -144,8 +148,10 @@ The first whole agents-coverage attempt passed 109 of 110 domains; the
 remaining deploy-resume fixture omitted the newly required durable-message
 route. Adding that API-shaped fixture route preserves all existing handoff,
 exact-once completion, billing, and timing assertions. The unchanged owning
-suite now passes in 26.2 seconds. Full coverage will repeat on the merged frozen
-source. All 46 deploy structural gates passed.
+suite now passes in 26.2 seconds. The repeated merged-source
+coverage run passes all 110 agents domains; aggregate unit coverage is finishing.
+All 46 deploy structural gates passed. The merged-source backend and frontend
+typechecks pass with zero errors; frontend lint passes with nine warnings.
 
 Golden references read: codex/codex-rs/core/src/session/input_queue.rs:389
 drains pending typed input; hermes-agent/agent/agent_runtime_helpers.py:3758

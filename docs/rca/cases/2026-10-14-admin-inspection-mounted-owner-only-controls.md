@@ -97,9 +97,10 @@ Final npm run test:coverage discovered the new regressions and passed 157 files,
 73.17% branches, 81.43% functions and 83.35% lines. Targeted ESLint and
 git diff --check passed. No frontend source changed during that final run.
 
-The additional app-tsconfig check reported the same 218 diagnostics on HEAD
-and the candidate; no added or removed diagnostic keys. It is not a passing
-typecheck and is retained as a deploy-verification limitation. This case remains
+The initial app-tsconfig check reported the same 218 diagnostics on HEAD
+and the first candidate; no added or removed diagnostic keys. That early check was not passing. Main-sync canonical type repairs and owning
+fixture fixes now produce a zero-error frontend app typecheck and passing lint
+(nine warnings). This case remains
 open pending deployment. The user's subsequent direction authorizes preserving
 actual messages and native schema updates in the combined browser repair. No live agent was paused or modified.
 
@@ -112,6 +113,15 @@ to permitted owner/admin authority; hermes-agent/hermes_cli/cli_tui_mixin.py:223
 read-only input to its blocking state. Those are authority/state analogs, not
 evidence about this incident's unidentified caller. Claude's PromptInput was
 searched for an admin-inspection analogue and none was found.
+
+The first final merged-source frontend coverage run passed 162 files / 2,759
+tests with three skips, and failed only the mobile ownership-switch test's
+selection of a minimized sidebar row. Main now omits those rows, so the fixture
+opens the actual mobile menu before selecting the owned agent. All assertions
+remain unchanged; the three owning suites pass 22 tests in 12.10 seconds. The
+full coverage stage is repeating on that fixture correction. Latest accepted
+browser schema and stale subagent text regressions also fail before and pass
+after, preserving displayed native state.
 
 ## Human feedback
 

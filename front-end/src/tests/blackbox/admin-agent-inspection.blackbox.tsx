@@ -196,6 +196,7 @@ describe('admin agent inspection', () => {
     );
     expect(mutations).toEqual([]);
 
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
     await user.click(await screen.findByText('Test agent'));
 
     expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
