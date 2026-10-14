@@ -5813,7 +5813,7 @@ def canary_descendant(pid, ancestor):
         seen.add(pid)
         if not native_birth(pid):
             return False
-        observed = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+        observed = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "args="],
                                   capture_output=True, text=True, check=False)
         try:
             args = shlex.split(observed.stdout.strip())

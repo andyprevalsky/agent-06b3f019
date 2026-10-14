@@ -32690,6 +32690,7 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_for_nested_canary_after_f
 @pytest.mark.parametrize('fault', ['valid', 'unrelated-descendant', 'stale-parent-birth', 'same-pid', 'unknown-ancestry', 'foreign-parent', 'foreign-manifest-pid'])
 def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fences(tmp_path: Path, monkeypatch, fault: str) -> None:
     """Exercise the actual budget evaluator with native born parent/child identities."""
+    monkeypatch.setenv("COLUMNS", "80")
     reserve = _extract_fleet_function(fleet_source_text(), 'reserve_cleanup_disk_space() {')
     body = reserve.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
     definitions = body.split('\ntry:\n    parent = directory(path.parent)', 1)[0]
