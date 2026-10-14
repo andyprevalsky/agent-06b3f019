@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
-  "snapshot_at": "2026-10-14T20:26:58.831922+00:00",
+  "snapshot_at": "2026-10-14T21:19:48.442128+00:00",
   "original_started_at": "2026-10-12T18:39:09+00:00",
-  "wall_seconds": 179269.8319220543,
+  "wall_seconds": 182439.44212794304,
   "original_attempts": 31,
-  "resumed_attempts": 234,
+  "resumed_attempts": 244,
   "all_attempts": [
     {
       "schema_version": 1,
@@ -3450,15 +3450,145 @@
       "status": "passed",
       "exit_code": 0,
       "log": "logs/chat-router-failover-live-20261014-200653-752792.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-exact-owner-owning",
+      "started_at": "2026-10-14T20:35:43Z",
+      "finished_at": "2026-10-14T20:35:49Z",
+      "started_epoch": 1792010143.722228,
+      "finished_epoch": 1792010149.6521778,
+      "duration_seconds": 5.9,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-exact-owner-owning-20261014-203543-1024068.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-trajectory",
+      "started_at": "2026-10-14T20:37:27Z",
+      "finished_at": "2026-10-14T20:37:27Z",
+      "started_epoch": 1792010247.4892418,
+      "finished_epoch": 1792010247.726684,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-cleanup-trajectory-20261014-203727-1043846.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-agent-behavior",
+      "started_at": "2026-10-14T20:37:27Z",
+      "finished_at": "2026-10-14T20:37:27Z",
+      "started_epoch": 1792010247.4925942,
+      "finished_epoch": 1792010247.735793,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-cleanup-agent-behavior-20261014-203727-1043847.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-prompt-unflagged",
+      "started_at": "2026-10-14T20:37:27Z",
+      "finished_at": "2026-10-14T20:37:28Z",
+      "started_epoch": 1792010247.4870098,
+      "finished_epoch": 1792010248.1599324,
+      "duration_seconds": 0.7,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-cleanup-prompt-unflagged-20261014-203727-1043844.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-prompt-approved",
+      "started_at": "2026-10-14T20:38:38Z",
+      "finished_at": "2026-10-14T20:38:39Z",
+      "started_epoch": 1792010318.7349708,
+      "finished_epoch": 1792010319.4139159,
+      "duration_seconds": 0.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-cleanup-prompt-approved-20261014-203838-1070141.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-postfix-agents",
+      "started_at": "2026-10-14T20:36:35Z",
+      "finished_at": "2026-10-14T20:40:46Z",
+      "started_epoch": 1792010195.3129559,
+      "finished_epoch": 1792010446.3686254,
+      "duration_seconds": 251.1,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-cleanup-postfix-agents-20261014-203635-1031602.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-open-native-cleanup",
+      "started_at": "2026-10-14T20:42:09Z",
+      "finished_at": "2026-10-14T20:43:33Z",
+      "started_epoch": 1792010529.370046,
+      "finished_epoch": 1792010613.9951267,
+      "duration_seconds": 84.6,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-open-native-cleanup-20261014-204209-1115900.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-null-override-owning",
+      "started_at": "2026-10-14T20:55:38Z",
+      "finished_at": "2026-10-14T20:55:43Z",
+      "started_epoch": 1792011338.1306095,
+      "finished_epoch": 1792011343.830087,
+      "duration_seconds": 5.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-null-override-owning-20261014-205538-1268552.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-nullable-guard-agents",
+      "started_at": "2026-10-14T20:56:47Z",
+      "finished_at": "2026-10-14T21:01:02Z",
+      "started_epoch": 1792011407.6527956,
+      "finished_epoch": 1792011662.6598446,
+      "duration_seconds": 255.0,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/sms-nullable-guard-agents-20261014-205647-1279468.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-open-nullable-cleanup",
+      "started_at": "2026-10-14T21:01:46Z",
+      "finished_at": "2026-10-14T21:02:49Z",
+      "started_epoch": 1792011706.6779845,
+      "finished_epoch": 1792011769.7705715,
+      "duration_seconds": 63.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-open-nullable-cleanup-20261014-210146-1358356.log"
     }
   ],
   "all_attempts_retained": true,
   "attempt_statuses": {
-    "failed": 46,
-    "passed": 219
+    "failed": 49,
+    "passed": 226
   },
   "interrupted_exit143_count": 2,
-  "summed_attempt_seconds": 43934.6,
+  "summed_attempt_seconds": 44601.8,
   "all_lane_attempt_accounting": {
     "prompt-approval": {
       "attempts": 12,
@@ -4578,6 +4708,86 @@
       },
       "summed_attempt_seconds": 259.1,
       "interval_union_seconds": 259.08898997306824
+    },
+    "sms-exact-owner-owning": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 5.9,
+      "interval_union_seconds": 5.929949760437012
+    },
+    "sms-cleanup-trajectory": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.2374422550201416
+    },
+    "sms-cleanup-agent-behavior": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.24319887161254883
+    },
+    "sms-cleanup-prompt-unflagged": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 0.7,
+      "interval_union_seconds": 0.6729226112365723
+    },
+    "sms-cleanup-prompt-approved": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.7,
+      "interval_union_seconds": 0.6789450645446777
+    },
+    "sms-cleanup-postfix-agents": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 251.1,
+      "interval_union_seconds": 251.05566954612732
+    },
+    "sms-open-native-cleanup": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 84.6,
+      "interval_union_seconds": 84.62508082389832
+    },
+    "sms-null-override-owning": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 5.7,
+      "interval_union_seconds": 5.699477434158325
+    },
+    "sms-nullable-guard-agents": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 255.0,
+      "interval_union_seconds": 255.00704908370972
+    },
+    "sms-open-nullable-cleanup": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 63.1,
+      "interval_union_seconds": 63.09258699417114
     }
   },
   "failed_interrupted_attempts": [
@@ -5178,13 +5388,52 @@
       "status": "failed",
       "exit_code": 1,
       "log": "logs/chat-router-failover-live-20261014-200310-717099.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-cleanup-prompt-unflagged",
+      "started_at": "2026-10-14T20:37:27Z",
+      "finished_at": "2026-10-14T20:37:28Z",
+      "started_epoch": 1792010247.4870098,
+      "finished_epoch": 1792010248.1599324,
+      "duration_seconds": 0.7,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-cleanup-prompt-unflagged-20261014-203727-1043844.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-open-native-cleanup",
+      "started_at": "2026-10-14T20:42:09Z",
+      "finished_at": "2026-10-14T20:43:33Z",
+      "started_epoch": 1792010529.370046,
+      "finished_epoch": 1792010613.9951267,
+      "duration_seconds": 84.6,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-open-native-cleanup-20261014-204209-1115900.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-open-nullable-cleanup",
+      "started_at": "2026-10-14T21:01:46Z",
+      "finished_at": "2026-10-14T21:02:49Z",
+      "started_epoch": 1792011706.6779845,
+      "finished_epoch": 1792011769.7705715,
+      "duration_seconds": 63.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-open-nullable-cleanup-20261014-210146-1358356.log"
     }
   ],
   "nonoverlapping_accounting": {
-    "recorded_gates_review_control_seconds_NOT_continuous_CPU": 32850.279802799225,
-    "late_collection_unclassified_seconds": 2671.3136649131775,
+    "recorded_gates_review_control_seconds_NOT_continuous_CPU": 32532.3339407444,
+    "late_collection_unclassified_seconds": 5346.594775676727,
     "known_approved_or_withdrawn_snapshot_windows_outside_recorded_activity_NOT_measured_idle": 43184.346182346344,
-    "pending_menu_snapshot_window_outside_recorded_activity_NOT_measured_idle": 0,
+    "pending_menu_snapshot_window_outside_recorded_activity_NOT_measured_idle": 812.2749571800232,
     "quota_migration_proxy_outside_activity_seconds": 3085.6228880882263,
     "unclassified_engineering_setup_conditional_authority_wait_seconds_NOT_user_delay": 97478.26938390732
   },
@@ -5253,8 +5502,20 @@
     {
       "stage": "runtime-blackbox",
       "start": "2026-10-14T19:36:19.967156+00:00",
-      "recorded_finish": null,
-      "snapshot_cap": "2026-10-14T20:26:58.831922+00:00"
+      "recorded_finish": "2026-10-14T20:29:16.031300+00:00",
+      "actual_accounting_finish": "2026-10-14T20:07:10.841411+00:00"
+    },
+    {
+      "stage": "runtime-blackbox",
+      "start": "2026-10-14T20:36:01.072561+00:00",
+      "recorded_finish": "2026-10-14T20:54:22.367397+00:00",
+      "actual_accounting_finish": "2026-10-14T20:43:33.995127+00:00"
+    },
+    {
+      "stage": "runtime-blackbox",
+      "start": "2026-10-14T20:56:04.277915+00:00",
+      "recorded_finish": "2026-10-14T21:14:31.489522+00:00",
+      "actual_accounting_finish": "2026-10-14T21:02:49.770571+00:00"
     }
   ],
   "old_decoder_request": {
@@ -5410,6 +5671,20 @@
       "sha256": "8e41061ce7fc48a92098f23d53abb28467d0e487bfc0721498fd12c108d23806",
       "reported_cost_cents": 0.0,
       "task_count": 3
+    },
+    {
+      "run_id": "e04ace9e-ec79-47f1-b4fe-2260982d113b",
+      "path": "agents/benchmarks/runs/20261014_204303_e04ace9e-ec79-47f1-b4fe-2260982d113b_sms-supervisor-open-spawns-agent.json",
+      "sha256": "86661b361c49df9c326a84975f0ed832b1dbf9ba8883a5a1611dcb72833fd2cf",
+      "reported_cost_cents": 0.0,
+      "task_count": 1
+    },
+    {
+      "run_id": "ad18e9ea-ab76-48ed-b63f-2064807bb34a",
+      "path": "agents/benchmarks/runs/20261014_210245_ad18e9ea-ab76-48ed-b63f-2064807bb34a_sms-supervisor-open-spawns-agent.json",
+      "sha256": "42a210b812a253a6c2814e66866c37c20a68a0a1efbd3eb5de8bab85474a8886",
+      "reported_cost_cents": 0.0,
+      "task_count": 1
     }
   ],
   "earlier_sms_before_approved_projection": {
@@ -5450,9 +5725,9 @@
   "provenance": {
     "input_sha256": {
       ".context/tamy-resumed/original-timing/stages.jsonl": "1a9ce12d904777370e4192a221149955fb4c181b76f68a538c38b3c333825a79",
-      ".context/deploy-runs/20261012-234924-2614623/stages.jsonl": "8059cc6afd4ab8917fb6d4eab3a05740cfd8761d7a28a0f23e449e7340a68f24",
+      ".context/deploy-runs/20261012-234924-2614623/stages.jsonl": "5196cfe76b7c25d670d9597bd870df1a5f85e1aa054890be2c654bb4c0c460fc",
       ".context/tamy-resumed/original-timing/factory-events.jsonl": "7f6eda672c1b67a7c49bcdfec014a6e4d97c3ce156018d4508b188060a673c20",
-      ".context/factory-events.jsonl": "6c4410b1ce7d029368060e844e48a57b7223886804dfc09c579960f3c8d2b3f7"
+      ".context/factory-events.jsonl": "213dce07e5226f833bde0efc4a1026df7c403d56ef788dac6fb363c2660bf39b"
     },
     "prior_scorecard_sha256": "ce6ad67054fb6da562ac090a59d1fea920562924b9ab6cdf941fc593183d304f",
     "prior_stop_sha256": "cad7f0282cb706db5aa9f4aa3dcf94be16b3f58c0a5b1c9f561ac9572ac56647"
@@ -5508,17 +5783,18 @@
     "green_wall_seconds": 0.9959104790032143,
     "scope": "PRIVATE candidate fixture-input confirmation; not live task success; not a separately recorded stage"
   },
-  "private_snapshot_sha256": "7f210533e6c046741c0307ecb9d4572c466668c99a6dc0639efa3990611d18b5",
-  "prior_public_scorecard_sha256": "f2c54a5078dee79de228e3c51bc0ec25f2713ab02a1a85e6c08cdc1da831f9aa",
-  "approval_wait_qualification": "Exact snapshot associations verified against event timestamps; known withdrawal closes its request. Withdrawn decoder has no exact event and cannot capture an unrelated decision. Pending request is not approval or measured user idle. Recorded stage/control intervals take priority; no continuous CPU work is inferred.",
+  "private_snapshot_sha256": "f831e72d9a1c3c6797f9501f9877302913cd624e8c78ac48d48dfd73f9fb005a",
+  "prior_public_scorecard_sha256": "7b5c28797edbe2e9a0149e16c12d85db8e0916b0f4be3b14b197ff4133b2e5b4",
+  "approval_wait_qualification": "Exact snapshot associations verified against event timestamps; known withdrawal closes its request. Withdrawn decoder has no exact event and cannot capture an unrelated decision. Pending request is not approval or measured user idle. Recorded controls are not continuous CPU; pending-request intervals do not measure user delay.",
   "latest_source_evidence": {
-    "runtime_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
-    "Group3": "FRESH_AGENTS_FRONTEND_STATIC_AND_POST_SYNC_LIVE_PROBES_PASS_WITH_EXISTING_ANTHROPIC_WARNING; backend/controller qualified",
-    "current_SMS_contracts": "approved date/profile input patches applied; fill/open PASS; closed FAIL",
-    "pending_menu_snapshot": "AWAITING_DECISION_UNAPPLIED",
-    "cleanup_fix": "PRIVATE_UNAPPLIED_UNDER_REVIEW",
+    "runtime_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "agents_full": "FRESH_PASS110_DOMAINS_82_PERCENT",
+    "other_Group3_lanes": "SOURCE_QUALIFIED_UNCHANGED_FE_BACKEND_CONTROLLER_LIVE_PROBES",
+    "current_SMS": "latestopen ERROR durablecleanupPending, 29.8s, evaluatorPASS; earlierclosed FAIL remains",
+    "pending_menu": "UNAPPLIED_AWAITING_DECISION",
+    "private_correction": "Existing exact scoped durable cleanup consumer integration under RCA",
     "deployment_complete": false,
     "PR_merged": false
   },
-  "direct_provider_invoice_cost": "NOT_ESTABLISHED; reported benchmark cost excludes direct SMS and live probes"
+  "direct_provider_invoice_cost": "NOT_ESTABLISHED; reported benchmark costs exclude direct SMS/live probes"
 }

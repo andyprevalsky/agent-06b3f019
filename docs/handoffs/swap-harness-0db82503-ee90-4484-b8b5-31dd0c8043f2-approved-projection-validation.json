@@ -474,15 +474,15 @@
     "raw_publication": false
   },
   "latest_deploy_state": {
-    "runtime_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
-    "Group3": "FRESH_AGENTS_FRONTEND_STATIC_AND_POST_SYNC_LIVE_PROBES_PASS_WITH_EXISTING_ANTHROPIC_WARNING; backend/controller qualified by actual identical inputs",
+    "runtime_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "Group3": "FRESH_FULL_AGENTS_ead_PASS110_DOMAINS_82_PERCENT; unchangedFE/backend/controller/liveprobes qualified; realSMScleanup gate ERROR on durableoutbox pending",
     "SMS_test_changes": "TAMY-FIXTURE-DATE-1 and TAMY-JUDGE-PROFILE-1 APPROVED_APPLIED_EXACTLY",
     "SMS_current_outcome": "2_PASS_1_FAIL; closed no-spawn still fails",
-    "SMS_native_resource_audit": "10/10 known native generations match first-run and owned queue and are terminal; both known Kernel browsers deleted/profiles404; no global inventory claim",
+    "SMS_native_resource_audit": "10 earlier known nativegenerations terminal; both newer open roots terminal with ownqueue/firstRun match; positivelycreatedcurrent Kernelprofile deleted404; capturedprocesses retired; stopped DB outbox discharge UNKNOWN",
     "pending_snapshot_IDs": [
       "TAMY-FIXTURE-MENU-1"
     ],
-    "cleanup_source_fix": "PRIVATE_UNAPPLIED; parent callback cancellation custody and candidate coordinator owning assertions under review",
+    "cleanup_source_fix": "APPLIED_b08_AND_NULL_OVERRIDE_606; canonical149PASS; actualtwoopenERRORs expose missing durableobligation drain; private correction under sourceRCA",
     "current_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-post-approval-validation.json",
     "historic_fields": "Earlier result sections retain their stated source/timestamp; do not treat them as current runtime proof",
     "review_cycle_2": "NOT_STARTED",

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "recorded_at_utc": "2026-10-14T20:27:43.115831+00:00",
+  "recorded_at_utc": "2026-10-14T21:19:49.614790+00:00",
   "source_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
   "pr": 1473,
   "source_preservation": {
@@ -454,7 +454,7 @@
       "owning_green_count": 77,
       "live_outcome": "NOT_ESTABLISHED"
     },
-    "SMS_cleanup_correction": "PRIVATE_UNAPPLIED; independent review requires exact current-task root registration/release through existing parent callback, durable failure receipt before SQL, and owning tests loading the actual candidate coordinator closure",
+    "SMS_cleanup_correction": "PRIVATE_DURABLE_OUTBOX_CONSUMER_CORRECTION_IN_PROGRESS; pending flag retained; actual2ERRORs, known native/provider/process resources closed",
     "review_cycle_2": "NOT_STARTED",
     "Group4_production_gates": "NOT_FRESHLY_VERIFIED"
   },
@@ -633,5 +633,96 @@
     "paid_ad_hoc_probes": false,
     "primary_database_writes": false,
     "foreign_resource_actions": 0
-  }
+  },
+  "latest_cleanup_source": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+  "latest_cleanup_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-sms-cleanup-validation.json",
+  "current_cleanup_source": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+  "current_full_agents_after_cleanup": {
+    "schema_version": 1,
+    "stage": "sms-nullable-guard-agents",
+    "source_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "source_head_at_readback": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "dispatch_source_unchanged_at_terminal": true,
+    "overall_exit_code": 0,
+    "blackbox": {
+      "passed": 110,
+      "failed": 0,
+      "total": 110,
+      "concurrency": 4,
+      "benchmark_domain_ran_exactly_once": true
+    },
+    "focused_pytest_summaries": [
+      {
+        "suite": "fast_cache",
+        "passed": 184,
+        "seconds": 4.97
+      },
+      {
+        "suite": "unit",
+        "passed": 134,
+        "seconds": 47.99
+      }
+    ],
+    "coverage": {
+      "combined_percent": 82,
+      "required_threshold_percent": 80,
+      "passed": true,
+      "statements": 32703,
+      "statement_misses": 5001,
+      "branches": 12112,
+      "partial_branches": 1943
+    },
+    "started_utc": "2026-10-14T20:56:47.604880+00:00",
+    "finished_utc": "2026-10-14T21:01:02.861306+00:00",
+    "wall_seconds": 255.2564561367035,
+    "canonical_stage_duration_seconds": 255.0,
+    "timing_run": "20261012-234924-2614623",
+    "timing_stage_recorded_once": true,
+    "prior_failed_0602_full_attempt_preserved": true,
+    "actual_permanent_owning_registration": "Current benchmark owning SMS entire-file pytest subprocess PASS plus35 direct cloud cleanup markers; separately archived canonical149 owning stdout/timing proves all40 parametrized cloud cases",
+    "retirement": {
+      "checked_utc": "2026-10-14T21:03:46.741682+00:00",
+      "observed_process_births": 1488,
+      "observed_owned_group_count": 332,
+      "captured_exact_processes_remaining": [],
+      "observed_group_members_remaining": [],
+      "monitor_native_absent": true,
+      "complete_descendant_capture_proved": false,
+      "global_resource_cleanup_certified": false,
+      "primary_database_mutated": false,
+      "new_database_or_queue_allocated": false,
+      "foreign_or_prior_controller_resource_mutations_or_signals": 0
+    },
+    "source_hashes_unchanged_since_dispatch": true,
+    "changed_selected_dispatch_sources": [],
+    "source_qualification_files": {
+      "controller_captured_inputs": "controller-integrated-readback.json",
+      "controller_changed_python_transitive": "controller-python-transitive-qualification.json",
+      "frontend_backend": "frontend-backend-source-qualification.json"
+    },
+    "entire_12_controller_gates_all_inputs_byte_equal_claimed": false,
+    "full_backend_or_production_agents_runtime_unchanged_claimed": false,
+    "new_paid_cloud_machines": 0,
+    "raw_logs_task_captures_environment_values_transcripts_private": true,
+    "console_sha256": "8600a17dcaef0a003c39f821807bb666a9b96d82d9bccecfb06c58f9b5e43aa6",
+    "canonical_blackbox_summary_sha256": "24f8c9bed4d23d692829846e6e750f475783141f4fc4fe692b3a81dc383f3ac4",
+    "recorded_utc": "2026-10-14T21:03:46.782359+00:00",
+    "previous_434_full_gate_PASS_preserved_as_historical_not_current": true,
+    "fresh_canonical_owning_current_109SMS_40cloud_149PASS_separate_from_full_lane": true,
+    "gate_agent_source_env_model_timeout_assertion_edits": false
+  },
+  "current_full_agents_private_readback": {
+    "archive_path": "/project/tamy-supervisor-continuation/acc001c9-41fa-46c7-8e16-04bb9d3223bd/sms-nullable-guard-agents-20261014-210422.tar.gz",
+    "archive_sha256": "cd9b96c07db9360a38be9a471370a3954d8e7923128e4baad1e7831d346b2d84",
+    "mode": "0o600",
+    "regular_files_verified": 370,
+    "all_archive_member_hashes_equal_source_files": true,
+    "all_original_file_hashes_match_readback": true,
+    "raw_captures_task_data_environment_values_private": true,
+    "safe_summary_sha256": "8d1094f092f58c452f3c0540b02ff7d53c1bcb0b899207a87cf41fd5802b2797",
+    "source_head": "ead07c363608bf2bf4e5bc1afefb03a74434073e",
+    "archive_file_manifest_sha256": "512f19403cf1e9c3b04cc007c0d06740f9bc4588a5a77d4bdacdbbe24cc84b47",
+    "checked_utc": "2026-10-14T21:04:27.142661+00:00"
+  },
+  "current_live_SMS_open": "ERROR29.8s even though evaluatorPASS: durablecleanup pending; no task PASS or dischargedoutbox claimed"
 }
