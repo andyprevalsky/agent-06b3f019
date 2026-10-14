@@ -314,20 +314,14 @@ function fixtureRoot(name: string) {
   });
   writeFileSync(
     path.join(root, ".claude/shared/benchmark-report-format.txt"),
-    readFileSync(path.join(project, ".claude/shared/benchmark-report-format.txt")),
+    readFileSync(
+      path.join(project, ".claude/shared/benchmark-report-format.txt"),
+    ),
   );
   mkdirSync(path.join(root, "agents/benchmarks"), {
     recursive: true,
     mode: 0o700,
   });
-  mkdirSync(path.join(root, ".claude/shared"), {
-    recursive: true,
-    mode: 0o700,
-  });
-  symlinkSync(
-    path.join(project, ".claude/shared/benchmark-report-format.txt"),
-    path.join(root, ".claude/shared/benchmark-report-format.txt"),
-  );
   for (const name of [
     "run-bench",
     "cloudbench_catalog.py",
@@ -418,9 +412,10 @@ function schedule(id: string, members = ["m1", "m2"], status = "running") {
 test(
   "campaign copies publish one durable group before cleanup",
   { timeout: 90_000 },
-  async () => {
+  async (t) => {
     const boundary = owningBoundary();
     const api = await apiBoundary(boundary);
+    t.after(() => api.close());
     const fixture = fixtureRoot("scheduler");
     const receipts = path.join(workRoot, "scheduler-observations");
     mkdirSync(receipts, { mode: 0o700 });
@@ -516,7 +511,6 @@ test(
       writeFileSync(path.join(receipts, "release"), "");
       await completed;
       stream.end();
-      await api.close();
     }
     assert.equal(child.exitCode, 0);
     assert.ok(
@@ -549,6 +543,57 @@ test(
         actual_guest_acks: ackCount,
       }) + "\n",
       { mode: 0o600 },
+    );
+  },
+);
+
+test(
+  "fixture setup failure closes the already acquired local API",
+  { timeout: 90_000 },
+  async (t) => {
+    const control = path.join(workRoot, "setup-failure");
+    mkdirSync(path.join(control, "scheduler"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    writeFileSync(
+      path.join(control, "scheduler/scripts"),
+      "intentional fixture directory collision\n",
+    );
+    const childEnv = { ...process.env, ROSE_GROUPING_CONTROL_ROOT: control };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const child = spawn(
+      process.execPath,
+      [
+        require.resolve("tsx/cli"),
+        "--test",
+        "--test-name-pattern=^campaign copies publish one durable group before cleanup$",
+        fileURLToPath(import.meta.url),
+      ],
+      {
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    t.after(() => {
+      if (child.exitCode === null) child.kill("SIGTERM");
+    });
+    let output = "";
+    child.stdout!.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr!.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    await once(child, "close");
+    writeFileSync(path.join(control, "child.private.log"), output, {
+      mode: 0o600,
+    });
+    assert.equal(child.exitCode, 1);
+    assert.match(output, /EEXIST/);
+    assert.match(
+      output,
+      /not ok 1 - campaign copies publish one durable group before cleanup/,
     );
   },
 );
