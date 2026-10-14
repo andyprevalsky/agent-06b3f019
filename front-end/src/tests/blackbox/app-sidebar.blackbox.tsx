@@ -26,6 +26,8 @@ import {
 describe('AppSidebar', () => {
   beforeEach(() => {
     mockSession();
+    // Label/nav scenarios intentionally exercise an expanded saved preference.
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(SIDEBAR_WIDTH_EXPANDED));
   });
   afterEach(() => {
     localStorage.clear();
@@ -46,13 +48,18 @@ describe('AppSidebar', () => {
     expect(labels).toHaveLength(3); // all three render; order is the nav array order
   });
 
-  it('renders expanded by default with a drag handle instead of a toggle button', () => {
+  it('renders a minimized icon rail by default with a drag handle', () => {
+    localStorage.removeItem(SIDEBAR_WIDTH_STORAGE_KEY);
     renderWithProviders(<AppSidebar {...defaultProps()} />);
     // The one-click chevron is gone; width is driven by the drag handle.
     expect(screen.queryByLabelText('Expand sidebar')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Resize sidebar')).toBeInTheDocument();
-    expect(screen.getByText('New Agent')).toBeInTheDocument();
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
+    expect(screen.getByRole('button', { name: 'New Agent' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Integrations' })).toBeInTheDocument();
+    expect(screen.getByText('New Agent')).toHaveClass('hidden');
+    expect(screen.queryByText('Integrations')).not.toBeInTheDocument();
   });
 
   it('renders New Agent below visible desktop headroom, above the flat Search row', () => {
@@ -70,14 +77,36 @@ describe('AppSidebar', () => {
     expect(search.className).toContain('shadow-none');
   });
 
-  it('defaults to the wider expanded width and restores a stored width', () => {
-    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
-    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_EXPANDED);
-    unmount();
+  it.each([SIDEBAR_WIDTH_COLLAPSED, SIDEBAR_WIDTH_EXPANDED, 420])(
+    'restores an explicitly saved width of %i',
+    (width) => {
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+      renderWithProviders(<AppSidebar {...defaultProps()} />);
+      expect(sidebarWidth()).toBe(width);
+    },
+  );
 
-    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '420');
+  it.each(['', 'invalid', 'NaN'])('minimizes when the saved width is invalid (%s)', (stored) => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, stored);
     renderWithProviders(<AppSidebar {...defaultProps()} />);
-    expect(sidebarWidth()).toBe(420);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
+  });
+
+  it('minimizes when storage is unavailable and still allows resizing', () => {
+    const getItem = localStorage.getItem.bind(localStorage);
+    vi.spyOn(localStorage, 'getItem').mockImplementation((key) => {
+      if (key === SIDEBAR_WIDTH_STORAGE_KEY) throw new Error('Storage unavailable');
+      return getItem(key);
+    });
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('Storage unavailable');
+    });
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
+
+    dragHandleTo(360);
+
+    expect(sidebarWidth()).toBe(360);
   });
 
   it('clamps a stored width above the max and snaps a tiny one to the rail', () => {
@@ -91,14 +120,18 @@ describe('AppSidebar', () => {
     expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
   });
 
-  it('resizes the rail by dragging the handle and persists the new width', async () => {
-    renderWithProviders(<AppSidebar {...defaultProps()} />);
-    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_EXPANDED);
+  it('expands the minimized rail by dragging and restores that preference on reload', async () => {
+    localStorage.removeItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
 
     dragHandleTo(360);
 
     await waitFor(() => expect(sidebarWidth()).toBe(360));
     expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('360');
+    unmount();
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(360);
   });
 
   it('collapses to the rail when dragged below the snap threshold', async () => {

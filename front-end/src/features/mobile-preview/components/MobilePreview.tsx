@@ -191,12 +191,7 @@ export default function MobilePreview() {
           selectedAgentId="a1"
           onSelectAgent={noop}
           onCreateAgent={noop}
-          onResumeAgent={async () => {
-            /* preview */
-          }}
-          resumingAgentId={null}
           onRefreshAgents={noop}
-          realtimeReady={false}
           isSignedIn
           onLoginClick={noop}
           onLogout={noop}
