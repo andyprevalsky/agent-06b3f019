@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { inspect } from 'node:util';
+import { mock } from 'node:test';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import {
   prepareSessionCredentials,
@@ -218,6 +219,10 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     const previousTimeout = process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
     let releasePendingScript: (() => void) | undefined;
     let pendingScriptCalls = 0;
+    let markPendingScriptStarted: (() => void) | undefined;
+    const pendingScriptStarted = new Promise<void>((resolve) => {
+      markPendingScriptStarted = resolve;
+    });
     const pendingScript = new Promise<void>((resolve) => {
       releasePendingScript = resolve;
     });
@@ -230,6 +235,7 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
           },
           addInitScript: async () => {
             pendingScriptCalls += 1;
+            markPendingScriptStarted?.();
             await pendingScript;
           },
         },
@@ -238,13 +244,20 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
         callerBrowserCloseCount += 1;
       },
     } as unknown as Browser;
+    mock.timers.enable({ apis: ['setTimeout'] });
     process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = '25';
     try {
       let injectionError: unknown;
       try {
-        await prepareSessionCredentials(sessionId, userId, 'https://shop.example.co.uk/login', {
-          browser: timeoutBrowser,
-        });
+        const preparation = prepareSessionCredentials(
+          sessionId,
+          userId,
+          'https://shop.example.co.uk/login',
+          { browser: timeoutBrowser }
+        );
+        await Promise.race([pendingScriptStarted, preparation]);
+        mock.timers.tick(25);
+        await preparation;
       } catch (error) {
         injectionError = error;
       }
@@ -306,6 +319,7 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       else process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = previousTimeout;
       releasePendingScript?.();
       await new Promise<void>((resolve) => setImmediate(resolve));
+      mock.timers.reset();
     }
     assert(pendingScriptCalls === 1, 'timeout allowed later browser-state mutations');
 

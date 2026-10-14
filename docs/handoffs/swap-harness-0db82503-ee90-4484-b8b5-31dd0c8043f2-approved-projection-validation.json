@@ -59,7 +59,18 @@
     "passed": 109,
     "failed": 1,
     "cause": "Duplicate original test copies shadow main strengthened fixture/flag setup",
-    "repair": "Applied duplicate-only test repair with all canonical assertions preserved; fresh full coverage running"
+    "repair": "Applied duplicate-only test repair with all canonical assertions preserved; fresh full coverage running",
+    "latest_status": "PASS",
+    "latest_source": "e87ac65479b0ff20aad069dfe49a8f6214dfea44",
+    "latest_domains": 110,
+    "latest_passed": 110,
+    "latest_failed": 0,
+    "fast_cache_tests": 184,
+    "unit_tests": 134,
+    "coverage_percent": 82.0,
+    "threshold_percent": 80.0,
+    "tracked_PID_birth_identities_absent": 43,
+    "original_failed_attempt_retained": true
   },
   "non_author_finite_recipe_review": {
     "fingerprint": "a6a1b58b4d679a971332ace36d66333549c62eb87c13e7209aa92a662b671933",
@@ -73,5 +84,47 @@
   },
   "deployment_complete": false,
   "PR_merged": false,
-  "raw_transcripts_and_values": "PRIVATE; not included in this receipt"
+  "raw_transcripts_and_values": "PRIVATE; not included in this receipt",
+  "updated_at_utc": "2026-10-14T02:37:20.484872+00:00",
+  "backend_credential_fixture_repair": {
+    "patch_sha256": "50ffb3495980fa84d920376f256c761e00a6ffafce01a7620fcadc351db1dac5",
+    "scope": "Existing test-only mock clock;25ms and all assertions preserved; production source unchanged",
+    "controlled_admission_delay_ms": 60,
+    "controlled_baseline_exit": 1,
+    "controlled_candidate_exit": 0,
+    "ordinary_baseline": "Passed on quieter run; not relabeled failure",
+    "actual_applied_local_owning_gate": "PASS",
+    "full_typescript_and_lint": "PASS",
+    "full_backend_coverage_after_repair": "NOT_RERUN;197-domain prior194PASS3FAIL retained"
+  },
+  "verification_target_incident": {
+    "incident": "One direct verification continued afterfailedDB guard andran againstremoteDB; notaccepted aslocalproof",
+    "fixture_data": "Generated anonymousjit-credentials rows only; realuserids notused",
+    "cleanup_readonly_audit": "PASS; all8affectedmodelcounts zero",
+    "corrected_local_gate": "PASS withset-euo-pipefail andexplicitlocalworkspaceDBtarget",
+    "source_environment_files_changed": false
+  },
+  "provider_native_cleanup_readback": {
+    "Kernel_sessions_deleted": 5,
+    "Steel_sessions_released": 1,
+    "owning_Kernel_profile": "GET404",
+    "cleanup_mutations": "NONE; readonlyexactresourceaudit",
+    "Steel_profile_metadata_state": "UNVERIFIED; noactiveownedsessionfound",
+    "overdue_old_mint_provider_readback": "UNVERIFIED; originalfailedledgerclassification preserved"
+  },
+  "new_pending_prompt_approval": {
+    "id": "TAMY-CONDITION-1",
+    "status": "PRIVATE_UNAPPLIED",
+    "proposal_sha256": "6e01a73f22b685ea6ad7031210032a8b57932eeabe771024b158906680f1d206",
+    "scope": "OneaddedSMSconditionalactioninstruction; noclassifier/tooldescription/schema/model/catalog/timeout change",
+    "existing_composition_test": "PASS0.393s",
+    "real_post_fix_task_pass": "NOT_ESTABLISHED",
+    "independent_review": "Reasonablepromptproductdecision; ambiguousfallbackscope refined; notclaiminggoldencopyorprovedfix"
+  },
+  "private_dump_archive_readback": {
+    "files": 46,
+    "sha256_matches": 46,
+    "descendant_completeness": "NOT_INDEPENDENTLY_ESTABLISHED"
+  },
+  "all_raw_transcripts_values_task_captures": "PRIVATE"
 }
