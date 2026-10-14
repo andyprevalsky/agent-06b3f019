@@ -1542,7 +1542,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 )
                 return {"success": False, "error": dom_patch_reason}
         timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
-        fingerprint = _evaluate_code_fingerprint(code)
+        fingerprint = _evaluate_code_fingerprint((context.model_params or context.params).get("code", ""))
         logger.info(
             "Browser evaluate starting",
             session_id=context.session_id,
