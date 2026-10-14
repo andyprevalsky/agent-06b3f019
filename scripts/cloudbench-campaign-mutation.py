@@ -111,6 +111,52 @@ def feed(app: str, *, validate_inventory: bool = False) -> bool:
     return int(expiry) >= time.time()
 
 
+def strict_primary_deadline(args: argparse.Namespace) -> float:
+    """Use only the original held strict manifest and original parent clock."""
+    directory = Path(AUTHORITY['directory'])
+    barrier = Path(os.environ['RUN_BENCH_CAMPAIGN_BARRIER_DIR'])
+    cohort = os.environ['RUN_BENCH_CAMPAIGN_COHORT']
+    job = os.environ['RUN_BENCH_CAMPAIGN_JOB_ID']
+    if (barrier.is_symlink() or barrier.name != cohort
+            or barrier.parent.resolve() != (directory.parent / 'startup-cohorts').resolve()):
+        raise ValueError('foreign strict clone queue')
+    manifest = barrier / 'manifest.json'
+    regular(manifest)
+    record = json.loads(manifest.read_text())
+    if record.get('cohort_id') != cohort or not isinstance(record.get('jobs'), dict):
+        raise ValueError('invalid strict clone membership')
+    if type(record['jobs'].get(job)) is not int or record['jobs'][job] != args.owner_pid:
+        raise ValueError('strict clone owner changed')
+    deadline = record.get('e2e_deadline_monotonic')
+    if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline) or deadline <= time.monotonic()
+            or str(deadline) != os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC')):
+        raise ValueError('expired or invalid original campaign deadline')
+    parent_lock = barrier.parent / 'parent.lock'
+    regular(parent_lock)
+    with parent_lock.open('r') as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            raise ValueError('strict campaign parent lock is not held')
+    if args.task_root is None or args.task_root.is_symlink():
+        raise ValueError('missing owned primary task root')
+    runs = directory.parents[3] / 'fleet' / 'runs'
+    task = args.task_root.resolve()
+    if not task.is_relative_to(runs.resolve()) or task.name != os.environ.get('RUN_BENCH_CAMPAIGN_TASK'):
+        raise ValueError('foreign primary task root')
+    strict_primary_not_finished(barrier, task)
+    return float(deadline)
+
+
+def strict_primary_not_finished(barrier: Path, task: Path) -> None:
+    if (barrier / 'abort.json').exists() or (task / 'benchmark-child.finished').exists() or (task / 'autoscaler.runtime-completed').exists():
+        raise ValueError('strict clone campaign cancelled or task finished')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['pace', 'acquire', 'release', 'start-native', 'join-native'])
@@ -122,6 +168,8 @@ def main() -> int:
     parser.add_argument('--slots', type=int, default=4)
     parser.add_argument('--lease', default='')
     parser.add_argument('--native-owner-pid', type=int)
+    parser.add_argument('--strict-primary', action='store_true')
+    parser.add_argument('--task-root', type=Path)
     args = parser.parse_args()
     if args.owner_pid < 1 or args.slots < 1 or not args.app or '/' in args.app:
         raise ValueError('invalid mutation admission contract')
@@ -174,11 +222,19 @@ def main() -> int:
             return 0
         if args.wait_seconds is None or args.wait_seconds < 1:
             raise ValueError('invalid existing mutation wait budget')
-        deadline = time.monotonic() + args.wait_seconds
+        if args.strict_primary and args.action != 'pace':
+            raise ValueError('strict queue supports only primary create admission')
+        if args.strict_primary:
+            feed(args.app)
+            deadline = strict_primary_deadline(args)
+        else:
+            deadline = time.monotonic() + args.wait_seconds
         while time.monotonic() < deadline:
             if not live(args.owner_pid, owner_birth):
                 raise ValueError('mutation caller owner changed')
             ready = feed(args.app)
+            if args.strict_primary:
+                strict_primary_not_finished(Path(os.environ['RUN_BENCH_CAMPAIGN_BARRIER_DIR']), args.task_root)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -202,9 +258,18 @@ def main() -> int:
                             continue
                     if not feed(args.app, validate_inventory=True):
                         continue
+                    native_budget = args.wait_seconds
+                    if args.strict_primary:
+                        if strict_primary_deadline(args) != deadline:
+                            raise ValueError('original strict deadline changed')
+                        native_budget = min(args.wait_seconds, math.floor(deadline - time.monotonic() - 0.1))
+                        if native_budget < 1:
+                            raise ValueError('no original campaign budget remains for native clone')
                     temporary = directory / f'.create-{uuid.uuid4().hex}'
                     temporary.write_text(json.dumps({'app': args.app, 'host': HOST, 'last_dispatch': now}))
                     temporary.replace(state)
+                    if args.strict_primary:
+                        print(native_budget)
                     return 0
                 policy = directory / 'update-policy.json'
                 expected_policy = {'app': args.app, 'host': HOST, 'slots': args.slots}
