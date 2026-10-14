@@ -112,7 +112,7 @@ export async function completeAuthAssistanceForUser(
       where: { id },
       include: {
         attentionRequest: {
-          select: { workflowId: true, userResponse: true },
+          select: { workflowId: true, userResponse: true, userId: true, agentId: true },
         },
       },
     });
@@ -120,7 +120,11 @@ export async function completeAuthAssistanceForUser(
     if (request === null) {
       return { status: 'not_found' as const };
     }
-    if (request.userId !== userId) {
+    if (
+      request.userId !== userId ||
+      request.attentionRequest.userId !== userId ||
+      request.attentionRequest.agentId !== request.agentId
+    ) {
       return { status: 'forbidden' as const };
     }
     if (request.completedAt !== null) {
@@ -130,12 +134,16 @@ export async function completeAuthAssistanceForUser(
         agentId: request.agentId,
         userMessage,
       });
+      const attention = await tx.agentAttentionRequest.findUniqueOrThrow({
+        where: { id },
+        select: { workflowId: true, userResponse: true },
+      });
       return {
         status: 'already_completed' as const,
         request,
-        interrupted: request.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        interrupted: attention.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
         retrySideEffects: true,
-        workflowId: request.attentionRequest.workflowId,
+        workflowId: attention.workflowId,
         ...authored,
       };
     }

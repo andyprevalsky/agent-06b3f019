@@ -218,6 +218,9 @@ export async function resolveAndSignal(
             signalResponse: response,
           };
         }
+        // A late waiter can be registering while this answered-row CAS misses.
+        // Read its fan-out only after owning the same attention row lock.
+        await tx.$queryRaw`SELECT id FROM "AgentAttentionRequest" WHERE id = ${request.id} FOR UPDATE`;
         const answered = await tx.agentAttentionRequest.findUnique({ where: { id: request.id } });
         if (answered === null)
           return {
