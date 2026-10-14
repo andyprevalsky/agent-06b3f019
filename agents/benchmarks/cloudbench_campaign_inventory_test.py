@@ -804,7 +804,8 @@ def test_campaign_inventory_seed_preflight_late_hash_cancellation_refuses_proof(
         thread.join()
 
 
-def test_campaign_inventory_seed_preflight_full_get_once_for_exact_50_and_standalone(tmp_path, monkeypatch):
+@pytest.mark.parametrize("e2e_limit", [False, True])
+def test_campaign_inventory_seed_preflight_full_get_once_for_exact_50_and_standalone(tmp_path, monkeypatch, e2e_limit):
     root, module, server, thread, calls, body = seed_fixture(tmp_path, monkeypatch)
     try:
         binary = root / "bin"
@@ -840,6 +841,8 @@ python3 "$root/scripts/cloudbench-campaign-barrier.py" --controller-pid "$$" --d
             "local-fixture-control",
             "--forward-arg=--strict-barrier",
         ]
+        if e2e_limit:
+            command += ["--e2e-timeout", "90"]
         result = subprocess.run(command, env=dict(os.environ), capture_output=True, timeout=90)
         assert result.returncode == 0, "owning local campaign failed; inspect private test capture"
         summary = json.loads(next((root / ".context/benchmarks/campaigns").glob("*/summary.json")).read_text())
@@ -2211,3 +2214,93 @@ def test_campaign_inventory_stress600_plan_cli_counts_actual_three_copies(monkey
     assert plan['worker_reservation_slots'] == 8400
     assert plan['native_org_quota_proven'] is False
     assert plan['local_machine_ceiling_minimum'] is None
+
+
+@pytest.mark.parametrize("fault", ["legacy", "deadline", "unknown", "bool", "nan", "infinite", "zero", "negative", "string", "null"])
+def test_campaign_inventory_seed_manifest_accepts_only_declared_deadline(tmp_path, fault):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("seed_manifest_deadline", ROOT / "scripts/cloudbench-campaign-seed.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    barrier = tmp_path / "c001"
+    barrier.mkdir()
+    value = {"cohort_id": "c001", "jobs": {"r001-j0001": None}}
+    if fault == "unknown":
+        value["foreign_deadline"] = 1
+    elif fault != "legacy":
+        value["e2e_deadline_monotonic"] = {"deadline": time.monotonic()+60, "bool": True, "nan": float("nan"), "infinite": float("inf"), "zero": 0, "negative": -1, "string": "60", "null": None}[fault]
+    (barrier / "manifest.json").write_text(json.dumps(value))
+    if fault in ("legacy", "deadline"):
+        assert module.manifest(barrier) == value
+    else:
+        with pytest.raises(ValueError):
+            module.manifest(barrier)
+
+
+def test_campaign_inventory_seed_preflight_refuses_deadline_changed_during_get(tmp_path, monkeypatch):
+    import fcntl
+    root, module, server, thread, calls, _body = seed_fixture(tmp_path, monkeypatch)
+    inventory = root / "campaign/shared-inventory"
+    inventory.mkdir(parents=True)
+    barrier = root / "campaign/startup-cohorts/c001"
+    barrier.mkdir(parents=True)
+    lock = (barrier.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    authority = {"app": "navi-whisper-lux-bench", "pid": str(os.getpid()), "pid_start": module.birth(os.getpid()), "token": "local-deadline-fixture", "parent_pid": str(os.getpid()), "parent_start": module.birth(os.getpid())}
+    (inventory / "owner").write_text("".join(f"{k}={v}\n" for k,v in authority.items()))
+    value = {"cohort_id": "c001", "jobs": {"fixture": os.getpid()}, "e2e_deadline_monotonic": time.monotonic()+60}
+    path = barrier / "manifest.json"
+    path.write_text(json.dumps(value))
+    original_get = module.get
+    def changed_get(*args, **kwargs):
+        result = original_get(*args, **kwargs)
+        value["e2e_deadline_monotonic"] += 1
+        path.write_text(json.dumps(value))
+        return result
+    monkeypatch.setattr(module, "get", changed_get)
+    try:
+        with pytest.raises(ValueError, match="membership changed"):
+            module.prepare(root, root / "scripts", inventory, barrier)
+        assert len(calls) == 1 and calls[0][0] == "GET"
+        assert not (barrier / "seed-proof.private.json").exists()
+    finally:
+        lock.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("fault", ["legacy", "deadline", "unknown", "bool", "nan", "infinite", "zero", "negative", "string", "null", "member-pid", "foreign-member"])
+@pytest.mark.parametrize("consumer", ["capture", "pending"])
+def test_campaign_inventory_cleanup_manifest_declared_deadline(tmp_path, fault, consumer):
+    import ast, fcntl, hashlib, math, re, stat
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    block = source[source.index("import errno\n", source.index("reserve_cleanup_disk_space()")):].split("\nPY\n", 1)[0]
+    tree = ast.parse(block)
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    scope = dict(Path=Path, os=os, json=json, math=math, fcntl=fcntl, hashlib=hashlib, re=re, stat=stat, subprocess=subprocess)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "actual-cleanup-allocator", "exec"), scope)
+    cohort = tmp_path / "startup-cohorts/c001"
+    cohort.mkdir(parents=True)
+    lock = (cohort.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    job = "r001-j0001"
+    value = {"cohort_id": "c001", "jobs": {job: os.getpid()}}
+    if fault == "unknown": value["foreign_deadline"] = 1
+    elif fault not in ("legacy", "member-pid", "foreign-member"):
+        value["e2e_deadline_monotonic"] = {"deadline": time.monotonic()+60, "bool": True, "nan": float("nan"), "infinite": float("inf"), "zero": 0, "negative": -1, "string": "60", "null": None}[fault]
+    if fault == "member-pid": value["jobs"][job] = True
+    if fault == "foreign-member": value["jobs"] = {"r001-j0002": os.getpid()}
+    (cohort / "manifest.json").write_text(json.dumps(value))
+    scope.update(cohort_path=str(cohort), cohort_id="c001", job=job, owner_pid=os.getpid(), path=tmp_path/"reserve", preferred=512, headroom=256, minimum=32, birth_snapshot=scope["capture_births"]())
+    info = (cohort.parent / "parent.lock").stat()
+    group = {"directory": str(cohort), "members": [job], "consumed": {}, "parent_lock_identity": [info.st_dev, info.st_ino]}
+    try:
+        invoke = (lambda: scope["capture_cohort"]()) if consumer == "capture" else (lambda: scope["pending_members"](group))
+        if fault in ("legacy", "deadline"):
+            result = invoke()
+            assert (result[1]["members"] == [job]) if consumer == "capture" else result == 1
+        else:
+            with pytest.raises(ValueError): invoke()
+    finally:
+        lock.close()
