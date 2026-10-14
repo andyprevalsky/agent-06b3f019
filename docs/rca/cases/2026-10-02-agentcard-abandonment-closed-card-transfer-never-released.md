@@ -308,6 +308,18 @@ Still open:
   benchmark run an exclusive sandbox cardholder, or serialize payment benchmarks
   across machines on the shared one.
 
+
+### Qualification defense: require the declared sandbox task
+
+PR #1503 also requires the catalog task to be non-production, tagged
+`agentcard-lifecycle-sandbox`, and explicitly expect `orgTransfer.livemode=false`.
+A globally leaked flag or malformed false-live response cannot authorize a
+production-only or unregistered task. This guard covers the reconciliation
+deadline classifier, task exception, owned payment cleanup, and CI skip
+acceptance. Four new permanent public-boundary controls fail on the prior
+source and pass with the guard; all 18 existing policy/recovery controls remain
+unchanged and pass. The same task catalog, timeouts, and LIVE oracle are intact.
+
 ## Human feedback
 
 None recorded.
@@ -430,3 +442,21 @@ cloudbench recovery classification; it does not touch mint, cleanup or reclaim.
 
 The unchanged lane rerun at 20:09 on the same HEAD passed all four tasks.
 `agent-payment-abandonment` (agent `0b475599-c482-4d55-a988-2e43de5710ac`) passed in 208s.
+
+
+### Recurrence on 2026-10-13 during PR1503 qualification
+
+Candidate `aad5e7b83fae43bfc24ceac3c33479ca3d10eb27` ran the unchanged four-task sandbox gate. Hub `4389f88d-4c08-470e-88de-ec92bc818421` produced three PASSED tasks and abandonment ERROR on agent `c8a9e779-ec5f-452d-9b75-739259a23fe2` (542.3s). Card `card_2ea23060a394ab41697f7239` closed with zero balance, but transfer `owt_fd6500e9322cc31892ceee6e` remained consumed/released0 for the4396c mint. Purchase `bc6ff9d2-cdc6-4b6c-bfb1-cf1fe971e0c4` stayedHELD and fundingRECLAIMING; Stripe test-mode refund remained absent.
+
+The first release read was12:39:16.711UTC. Real release-observation passes executed at12:39:16,12:42:00,12:44:34,12:46:43,12:49:01 and12:51:45. Close acknowledgements returnedCLOSED before those passes. The exact transfer still returnedconsumed/released0 at12:56:50. Other recoveries on that cardholder yielded1448c,10488c and1448c; those aggregate amounts cannot be attributed to this transfer and cannot satisfy its refund or benchmark assertion. No investigator recoveryPOST, new mint, increased deadline or weakened assertion was performed.
+
+The benchmark now resumes eligible owned reconciliation and demonstrably reaches the provider boundary. Therefore this occurrence is not only the earlier GET-only busy-cron failure. The demonstrated bad boundary is lack of release on the exact provider transfer despite closed-card acknowledgements and actual observation passes. A release-clock reset by repeated closure and exclusive attribution to shared-cardholder netting remain unproven. The native failure and retained cleanup authority remain open. The harness's separate deadline-diagnostic repair preserves this state in errors; it does not establish provider recovery.
+
+
+### Standing approved sandbox warning policy recovered on October13
+
+The user explicitly instructed on October12: "make this test skippable w a warnging for all future agents then finish" (NEDS Tamy thread, user turn85 at22:14:25UTC). Original commit244a961d25558d4df563636ef3f8cc74d7894b89 implemented `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`, but that implementation was preserved in PR1473 without reaching main. The Google RCA follow-up therefore ran without the approved exception and initially treated its absence as a new approval boundary. The existing standing instruction supersedes that interpretation; no repeated confirmation is required.
+
+The restored deploy-scoped flag reports the exact sandbox release stall as `SKIPPED` with a loud warning, neverPASS. It requires purchaseHELD, fundingRECLAIMING, a CLOSEDcard with zero balance, matching nonempty card/transfer card IDs, and a test-mode transfer stillconsumed with released0. The common predicate additionally rejects missing/boolean balance and foreign-card state; both legacy and owned-timer boundaries are covered while preserving existing deadlines. Genuine read failures, cancellation, live transfers and unrelated cleanup errors remain strict. Owned cleanup may record this sandbox failure as a warning after fresh exact-owner reads; the test capture/refund remains explicitly unresolved. Production LIVE abandonment/refund requirements remain unchanged.
+
+Six permanent owning controls cover CI skip admission, exact native stall classification, owned cleanup warning, identity/balance guards, both timeout owners with flagON/OFF, and read-error/cancellation rejection. Against the original4db runtime 0/6passed; with the restored policy all6pass, alongside12unchanged payment controls. No timeout, task definition, prompt, model or payment success oracle changed. The original4389native run's3PASSED/1ERROR and original failed cleanup receipt remain historical evidence; an explicit waiver does not retroactively make that attempt pass.

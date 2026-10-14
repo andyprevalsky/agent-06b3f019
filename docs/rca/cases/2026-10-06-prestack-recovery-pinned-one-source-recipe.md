@@ -252,3 +252,96 @@ live-results 572 tests with four existing canonical skips. All three exact
 stage owners were absent at completion. Earlier failed results remain
 preserved. This qualifies the two existing early phases; it grants no
 benchmark acceptance credit or authority for a later execution phase.
+
+### October 13 native cleanup receipt recipe registration
+
+Adding stable native identity to the local stack receipt writer in PR #1503
+changed one of the 39 reviewed recipe inputs. The normal structural aggregate
+correctly rejected that unregistered recipe in its bootstrap, forensic, and
+benchmark recovery controls. The failed aggregate remains recorded; no capture
+marker or prior fingerprint was reused to authorize the new source.
+
+Independent review compared immutable `10f0cbfede81ed83ac2125542b60dc02b057a561`
+with the prior reviewed recipe: 38 inputs are byte-identical; the sole change
+is `scripts/lib/run-process-cleanup.sh` reading its own stable native identity
+and appending it atomically to the stack receipt. Stack launch, signaling,
+allocation, index bootstrap, and release authority are unchanged. The exact
+new fingerprint is
+`638c7680cd7253b354be4876456e04ac330857f79ca6423875721728eff08afb`.
+The committed policy adds only that fingerprint for the same two phases,
+`before-stack-launch` and `agent-network-index-bootstrap`; it preserves every
+historical entry and the validator.
+
+A new permanent method in the existing bootstrap recovery suite fails on the
+previous committed policy and passes after registration. It also derives
+actual separate mutated writer and `run.sh` recipes and proves both remain
+rejected even when their capture-local review markers match. Four existing
+forged-review, direct-input, and ref-mismatch controls also pass. Private
+immutable recipe comparison and independent-review proof remain under the
+Google RCA sandbox-policy-check context. This is source qualification, with
+no provider calls, benchmark credit, original-owner release, or widened phase.
+
+### October 13 native receipt consumer and helper registration
+
+The cloud guest acknowledgement repair changes the stack receipt writer and
+driver and stages the existing process identity helper in both native launch
+paths. Its packed payload admits exactly one additional known basename,
+`process-identity.py`; the native recipe still validates those bytes against
+`git show` of the immutable source. This is a disclosed input-closure update,
+not a claim that the validator is unchanged. The canonical synthetic bootstrap
+configuration adds that same real packed input without changing any assertion.
+
+Independent review of immutable candidate `7d5d507dae1b30b451eff0a64401ebc5947bc3d4`
+derives source fingerprint
+`380314261909483d2225acf49918d5e3d0e5b58a05a292581d6a0667793dc06d`
+from 40 inputs: 21 checkout, 16 injected and three boot controls. Relative to
+reviewed `638c7680cd7253b354be4876456e04ac330857f79ca6423875721728eff08afb`,
+34 input entries are unchanged, five changed and the helper is newly included.
+The independent finite-source audit certifies only `before-stack-launch` and
+`agent-network-index-bootstrap`. Its explicit policy candidate retains every
+prior entry and phase; capture-local review markers still cannot authorize an
+unregistered or mutated executable source.
+
+Private source-bound functional proof is retained separately from recipe
+approval. Registration and final committed-source recovery qualification
+remain root-owned and pending; no provider call or benchmark credit is supplied
+by this review.
+
+### October 13 sealed snapshot dependency closure recurrence
+
+The next frozen canonical controller run on `71b5adb6d267a0fdfeb489eafdea6f042de3a5c0`
+failed before either concurrent workstream became boot-ready. The new native
+identity consumer required `process-identity.py` from its trusted control
+bundle, but the fleet's explicit immutable snapshot copy set omitted it. The
+unchanged real two-workstream self-test fails with exit 1 before the one-line
+producer repair and passes with exit 0 afterward. A new executable public
+launcher snapshot/manifest/packed-transport/helper control likewise fails
+before and passes after. This recurrence is recorded in the existing PID
+identity case; it adds no new receipt, phase or payload admission exception.
+
+Independent review of immutable candidate
+`c5705b1e02cdc84115b50ed52460dc97e9a67dbc` derives the exact new fingerprint
+`c1606f37698d1cfe48f7beaa6c02fa78e65aaaaf8c1f0fd5c9a439c33b6cebef`.
+The recipe still has 40 inputs: 39 are identical to reviewed `38031426`, and
+only the checkout entry `scripts/run-bench-fleet` changes. The additional
+finite policy entry must retain every historical entry and the same two
+phases, `before-stack-launch` and `agent-network-index-bootstrap`; capture-local
+markers remain insufficient authority. Private proof is retained in
+`phase2-snapshot-proof.json` and the independent finite audit beside it.
+The failed 71b Group 3 lifecycle is closed with no new Group 4; prior 4f
+qualification remains historical, and final canonical qualification is pending.
+
+
+### Complete-source qualification of the finite recipe registration
+
+Candidate `cb3cb598674b1047efc92a481f1b21d42b12986b` passed all 12 canonical
+Group 3 stages, including the ordered 1,795.4-second Linux controller gate
+and its owning bootstrap recovery and packed-helper controls. The registered
+40-input recipe remains
+`c1606f37698d1cfe48f7beaa6c02fa78e65aaaaf8c1f0fd5c9a439c33b6cebef`;
+all prior entries and the same two reviewed pre-service phases are preserved.
+The native four-task sandbox Hub `03318d88-b85e-430a-a39d-a4e8d72073a3` then
+passed all four unchanged tasks and verified its original process, archive
+and provider cleanup. Final source/input qualification, review and merge remain
+pending. These new results do not grant a historical failed source or a
+pre-service-only canary benchmark credit.

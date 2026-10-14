@@ -197,6 +197,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
         )
         write(self.run / "execution-provenance.json", json.dumps(document))
         names = (
+            "process-identity.py",
             "cloudbench-benchmark-target.py",
             "cloudbench-codex-auth.py",
             "cloudbench-current-run-artifact.py",
@@ -546,6 +547,53 @@ class BootstrapRecoveryTest(unittest.TestCase):
             self.assertFalse(
                 snapshot.exists(), "normal exact snapshot owner did not retire"
             )
+
+    def test_unreviewed_native_recipe_changes_remain_rejected(self):
+        """Registering one audited recipe never authorizes changed executable blobs."""
+        _, receipt = self.verify()
+        self.assertIn(
+            receipt["bootstrap_phase"],
+            recovery.trusted_source_review_policy().get(receipt["source_review_fingerprint"], []),
+        )
+        original_run = subprocess.run
+        for path in ("scripts/lib/run-process-cleanup.sh", "scripts/run.sh", "scripts/process-identity.py"):
+            with self.subTest(path=path):
+                config = self.config
+                if path == "scripts/process-identity.py":
+                    # Bind the changed helper in both packed input and source
+                    # lookup, so finite policy owns the rejection.
+                    config = copy.deepcopy(self.config)
+                    packed_file = next(item for item in config["files"] if item["guest_path"] == "/cloudbench-boot-payload.json.gz")
+                    packed = json.loads(gzip.decompress(base64.b64decode(packed_file["raw_value"])))
+                    helper = base64.b64decode(packed["files"]["process-identity.py"])
+                    packed["files"]["process-identity.py"] = base64.b64encode(helper + b"\n# unreviewed executable-source fixture mutation\n").decode()
+                    envelope = gzip.compress(json.dumps(packed).encode())
+                    packed_file["raw_value"] = base64.b64encode(envelope).decode()
+                    config["env"]["CLOUDBENCH_BOOT_PAYLOAD_SHA256"] = recovery.sha(envelope)
+                def changed_blob(argv, *args, **kwargs):
+                    result = original_run(argv, *args, **kwargs)
+                    if argv == ["git", "-C", str(REPO), "show", REF + ":" + path]:
+                        self.assertEqual(result.returncode, 0)
+                        result.stdout += b"\n# unreviewed executable-source fixture mutation\n"
+                    return result
+
+                with patch.object(recovery.subprocess, "run", side_effect=changed_blob):
+                    ref, recipe_sha, fingerprint = recovery.native_recipe(
+                        recovery.fields(self.registry / "meta"), config
+                    )
+                self.assertEqual(ref, REF)
+                self.assertNotEqual(fingerprint, receipt["source_review_fingerprint"])
+                changed = dict(receipt, source_recipe_sha256=recipe_sha, source_review_fingerprint=fingerprint)
+                # A matching capture-local review marker still has no authority
+                # to bless an executable recipe absent from committed policy.
+                write(self.captures / "source-boundary-reviewed.safe.json", json.dumps({
+                    "reviewed": True, "reviewer": "capture writer", "source_ref": ref,
+                    "source_recipe_sha256": recipe_sha,
+                    "pre_service_boundaries": [changed["bootstrap_phase"]],
+                }))
+                with self.assertRaisesRegex(ValueError, "trusted independent review"):
+                    recovery.require_independent_source_review(changed)
+                self.assertFalse((self.out / "guest-bootstrap.confirmed").exists())
 
     def test_capture_local_review_cannot_authorize_unreviewed_executable_source(self):
         out, receipt = self.verify()
