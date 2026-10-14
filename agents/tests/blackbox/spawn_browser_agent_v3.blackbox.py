@@ -16960,19 +16960,36 @@ async def test_fill_payment_ref_directly_uses_cdp_iframe_targets():
     )
     iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
     session = _fake_session_with_event_bus()
+    session.agent_focus_target_id = "target-page-pay"
     session.get_all_frames = AsyncMock(
         return_value=(
             {
+                "page-frame": {
+                    "id": "page-frame",
+                    "frameTargetId": "target-page-pay",
+                    "parentFrameId": None,
+                    "url": "https://checkout.example/pay",
+                },
                 "frame-1": {
                     "id": "frame-1",
                     "frameTargetId": "target-iframe-pay",
+                    "parentFrameId": "page-frame",
+                    "parentTargetId": "target-page-pay",
                     "url": "https://pay.example/elements",
                 }
             },
-            {"target-iframe-pay": "sess-1"},
+            {"target-page-pay": "sess-page", "target-iframe-pay": "sess-1"},
         )
     )
-    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+    root_cdp = SimpleNamespace(
+        session_id="sess-page",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+            evaluate=AsyncMock(return_value={"result": {"value": {"filled": False}}}),
+        ))),
+    )
+    session.get_or_create_cdp_session = AsyncMock(
+        side_effect=lambda target_id, **_kwargs: iframe_cdp if target_id == "target-iframe-pay" else root_cdp,
+    )
 
     result = await service_actions._fill_payment_ref_directly(
         session,
@@ -17104,6 +17121,136 @@ async def test_fill_payment_ref_directly_real_child_frame_fixture():
             assert result.get("filled") is True
             value = await frame.locator('input[autocomplete="cc-number"]').input_value()
             assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_payment_ref_fill_isolated_to_focused_page_and_child_frames():
+    """A login tab must not report card-fill success from a background checkout OOPIF."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True, args=["--site-per-process"])
+        try:
+            context = await browser.new_context()
+
+            async def serve_fixture(route):
+                url = route.request.url
+                if url == "https://checkout.fixture.test/pay":
+                    body = '<h1>Checkout</h1><iframe src="https://stripe-payment.test/card"></iframe>'
+                elif url in {"https://stripe-payment.test/card", "https://unrelated.fixture.test/pay"}:
+                    body = '<input autocomplete="cc-number" name="number" />'
+                else:
+                    body = '<h1>Login</h1><input autocomplete="username" /><iframe srcdoc="Login help"></iframe>'
+                await route.fulfill(status=200, content_type="text/html", body=body)
+
+            await context.route("**/*", serve_fixture)
+            login_page = await context.new_page()
+            await login_page.goto("https://login.fixture.test/sign-in")
+            checkout_page = await context.new_page()
+            await checkout_page.goto("https://checkout.fixture.test/pay")
+            card_field = checkout_page.frame_locator("iframe").locator('input[autocomplete="cc-number"]')
+            await card_field.wait_for(state="visible")
+            stripe_frame = next(frame for frame in checkout_page.frames if frame.parent_frame is not None)
+            unrelated_page = await context.new_page()
+            await unrelated_page.goto("https://unrelated.fixture.test/pay")
+            unrelated_field = unrelated_page.locator('input[autocomplete="cc-number"]')
+
+            # Capture the ownership keys browser-use get_all_frames actually exposes:
+            # id/frameTargetId plus parentFrameId/parentTargetId, derived from CDP.
+            frames = {}
+            transports = {}
+            for page_or_frame in (login_page, checkout_page, stripe_frame, unrelated_page):
+                transport = await context.new_cdp_session(page_or_frame)
+                target_info = (await transport.send("Target.getTargetInfo"))["targetInfo"]
+                frame_tree = (await transport.send("Page.getFrameTree"))["frameTree"]
+                target_id = target_info["targetId"]
+                transports[target_id] = transport
+
+                def collect(node, parent_frame_id=None):
+                    frame = node["frame"]
+                    frame_id = frame["id"]
+                    parent_id = frame.get("parentId") or parent_frame_id
+                    existing = frames.get(frame_id, {})
+                    frames[frame_id] = {
+                        **existing, **frame,
+                        "frameTargetId": target_id,
+                        "parentFrameId": parent_id or existing.get("parentFrameId"),
+                        "childFrameIds": [child["frame"]["id"] for child in node.get("childFrames", [])],
+                        "isCrossOrigin": target_info["type"] == "iframe",
+                        "isValidTarget": True,
+                    }
+                    for child in node.get("childFrames", []):
+                        collect(child, frame_id)
+
+                collect(frame_tree)
+
+            for frame in frames.values():
+                parent = frames.get(frame.get("parentFrameId"))
+                if parent is not None:
+                    frame["parentTargetId"] = parent["frameTargetId"]
+            login_target = next(frame["frameTargetId"] for frame in frames.values() if frame["url"] == login_page.url)
+            checkout_target = next(frame["frameTargetId"] for frame in frames.values() if frame["url"] == checkout_page.url)
+            stripe_info = next(frame for frame in frames.values() if frame["url"] == stripe_frame.url)
+            assert stripe_info["isCrossOrigin"], "fixture must exercise an actual out-of-process iframe"
+            assert stripe_info["parentTargetId"] == checkout_target, "iframe ownership must identify the background checkout"
+
+            focused_page = login_page
+
+            async def get_page():
+                return focused_page
+
+            async def get_cdp(target_id=None, *, focus=False):
+                transport = transports[target_id or session.agent_focus_target_id]
+
+                async def evaluate(*, params, session_id):
+                    return await transport.send("Runtime.evaluate", params)
+
+                return SimpleNamespace(
+                    session_id=target_id or session.agent_focus_target_id,
+                    cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+                )
+
+            session = SimpleNamespace(
+                agent_focus_target_id=login_target,
+                get_page=get_page,
+                get_all_frames=AsyncMock(return_value=(frames, {key: key for key in transports})),
+                get_or_create_cdp_session=get_cdp,
+            )
+            await login_page.bring_to_front()
+            # A frame inventory may also race parent teardown: keep the captured
+            # OOPIF's parentFrameId but omit its parent row, making ownership unprovable.
+            orphan_frames = {
+                key: frame for key, frame in frames.items()
+                if frame["frameTargetId"] != checkout_target
+            }
+            for label, available_frames in (("background checkout", frames), ("orphan iframe", orphan_frames)):
+                session.get_all_frames.return_value = (available_frames, {key: key for key in transports})
+                result = await service_actions._fill_payment_ref_directly(
+                    session, "card_number", "4111111111111111", input_page=login_page,
+                )
+                value = await card_field.input_value()
+                assert value == "", (
+                    f"approved payment-card fill changed the {label} while the login tab was focused; "
+                    f"background value length={len(value)}, reported success={bool(result)}"
+                )
+                assert await unrelated_field.input_value() == "", "an unrelated payment tab must remain untouched"
+                assert result is None, "a focused login page without payment fields must not report fill success"
+
+            # The same cross-origin iframe remains fillable when its owning checkout is focused.
+            focused_page = checkout_page
+            session.agent_focus_target_id = checkout_target
+            session.get_all_frames.return_value = (frames, {key: key for key in transports})
+            await checkout_page.bring_to_front()
+            result = await service_actions._fill_payment_ref_directly(
+                session, "card_number", "4111111111111111",
+            )
+            assert result and result.get("filled") is True
+            assert result["target"].startswith("cdp:"), "focused checkout must retain its real CDP child iframe"
+            assert (await card_field.input_value()).replace(" ", "") == "4111111111111111"
+            assert await login_page.locator('input[autocomplete="username"]').input_value() == ""
         finally:
             await browser.close()
 
@@ -17354,19 +17501,36 @@ async def test_fill_payment_ref_via_keyboard_types_after_cdp_focus():
     )
     iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
     session = _fake_session_with_event_bus()
+    session.agent_focus_target_id = "target-page-pay"
     session.get_all_frames = AsyncMock(
         return_value=(
             {
+                "page-frame": {
+                    "id": "page-frame",
+                    "frameTargetId": "target-page-pay",
+                    "parentFrameId": None,
+                    "url": "https://checkout.example/pay",
+                },
                 "frame-1": {
                     "id": "frame-1",
                     "frameTargetId": "target-iframe-pay",
+                    "parentFrameId": "page-frame",
+                    "parentTargetId": "target-page-pay",
                     "url": "https://pay.example/elements",
                 }
             },
-            {"target-iframe-pay": "sess-1"},
+            {"target-page-pay": "sess-page", "target-iframe-pay": "sess-1"},
         )
     )
-    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+    root_cdp = SimpleNamespace(
+        session_id="sess-page",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+            evaluate=AsyncMock(return_value={"result": {"value": {"focused": False}}}),
+        ))),
+    )
+    session.get_or_create_cdp_session = AsyncMock(
+        side_effect=lambda target_id, **_kwargs: iframe_cdp if target_id == "target-iframe-pay" else root_cdp,
+    )
     input_page = MagicMock()
     input_page.frames = []
     humanizer = MagicMock()
@@ -27270,6 +27434,10 @@ async def run_all_tests():
     await r.record_async(
         "fill_payment_ref_directly_real_child_frame_fixture",
         test_fill_payment_ref_directly_real_child_frame_fixture,
+    )
+    await r.record_async(
+        "payment_ref_fill_isolated_to_focused_page_and_child_frames",
+        test_payment_ref_fill_isolated_to_focused_page_and_child_frames,
     )
     await r.record_async(
         "fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs",
