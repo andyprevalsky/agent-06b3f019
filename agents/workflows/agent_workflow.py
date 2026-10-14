@@ -118,6 +118,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_search import web_search
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
+    from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
@@ -1866,7 +1867,7 @@ class AgentWorkflow:
                 self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=30),
+                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 workflow.logger.info("Started agent_started SMS notification (deferred await)")
@@ -4780,7 +4781,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info("Sent cost_limit SMS notification")
@@ -5586,7 +5587,7 @@ class AgentWorkflow:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")
