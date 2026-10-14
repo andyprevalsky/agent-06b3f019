@@ -1189,6 +1189,156 @@ async function setNotificationFixture(agentId: string, fixture: unknown): Promis
   assertStatus(response.status, 200, response.data);
 }
 
+async function testBoundary_notificationSummarizesInternalGoalLinks(): Promise<void> {
+  const token = captureToken('notify-internal-goal-links');
+  const internalLinks = Array.from(
+    { length: 4 },
+    (_, index) => `https://example.test/internal-source-${index}?context=${'q'.repeat(450)}`
+  );
+  const goal = `Review the full task using these internal sources:\n${internalLinks.map((link) => `(${link})`).join('\n')}`;
+  assert(goal.length > 1600, 'Expected internal source links to exceed the SMS body limit');
+  const agent = await createNotifyAgent(goal);
+  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  try {
+    await setNotificationFixture(agent.id, {
+      expected_tool_result_substrings: ['should be at most 1600 character(s)'],
+      message: corrected,
+    });
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(calls.length === 1, `Expected one accepted kickoff summary, got ${calls.length}`);
+    assert(calls[0].responseStatus === 200, 'Expected summary accepted');
+    const body = JSON.parse(calls[0].requestBody!).body as string;
+    assert(body === corrected && body.length <= 1600, 'Expected the complete bounded summary');
+    assertAgentLinkPresent(body, agent.id);
+    assert(
+      internalLinks.every((link) => !body.includes(link)),
+      'Internal task links leaked'
+    );
+    const persisted = await prisma.agent.findUnique({ where: { id: agent.id } });
+    assert(persisted?.goal === goal, 'Notification changed the full underlying task');
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notificationRequiresCanonicalActionLink(): Promise<void> {
+  const token = captureToken('notify-missing-action-link');
+  const goal = 'Internal planning details. '.repeat(80);
+  const agent = await createNotifyAgent(goal);
+  const corrected = `I'm on it: Review the requested task.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  try {
+    await setNotificationFixture(agent.id, [
+      { message: "I'm on it: Review the requested task." },
+      {
+        expected_tool_result_substrings: ['omitted a required link'],
+        message: corrected,
+      },
+    ]);
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(calls.length === 1, `Missing action link reached transport; got ${calls.length} calls`);
+    assert(
+      JSON.parse(calls[0].requestBody!).body === corrected,
+      'Expected restored exact action link'
+    );
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notificationDoesNotRewriteNonContentRejections(): Promise<void> {
+  for (const status of [401, 403, 404, 429]) {
+    const token = captureToken(`notify-noncontent-${status}`);
+    const goal = `Set up the requested account. __BLACKBOX_SURGE_${status}__`;
+    const agent = await createNotifyAgent(goal);
+    try {
+      await setNotificationFixture(agent.id, {
+        message: `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`,
+      });
+      const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+        body: JSON.stringify({
+          user_id: TEST_USER_ID,
+          agent_id: agent.id,
+          event_type: 'agent_started',
+          payload: { goal },
+        }),
+      });
+      assertStatus(response.status, 500, response.data);
+      const calls = filterSurgeCalls(await readCapturesForToken(token));
+      assert(
+        calls.length === 1,
+        `HTTP ${status} caused a model rewrite/resend: ${calls.length} calls`
+      );
+      assert(calls[0].responseStatus === status, `Expected HTTP ${status} replay`);
+    } finally {
+      await clearNotificationFixture(agent.id);
+      await prisma.agent.deleteMany({ where: { id: agent.id } });
+    }
+  }
+}
+
+async function testBoundary_notificationRepairsHttp400BodyRejection(): Promise<void> {
+  const token = captureToken('notify-content-400');
+  const goal = 'Set up the requested account. __BLACKBOX_SURGE_400__';
+  const agent = await createNotifyAgent(goal);
+  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  try {
+    await setNotificationFixture(agent.id, {
+      expected_tool_result_substrings: ['Surge API error: 400', 'body rejected by provider'],
+      message: corrected,
+    });
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(
+      calls.length === 2,
+      `Expected one HTTP 400 rejection then correction, got ${calls.length}`
+    );
+    assert(
+      calls[0].responseStatus === 400 && calls[1].responseStatus === 200,
+      'Expected rejected then accepted'
+    );
+    assert(JSON.parse(calls[1].requestBody!).body === corrected, 'Expected exact model correction');
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
 async function clearNotificationFixture(agentId: string): Promise<void> {
   await request(
     `${BASE_URL}/api/test/sms-supervisor-fixture?userId=${encodeURIComponent(notificationFixtureKey(agentId))}`,
@@ -2204,6 +2354,22 @@ async function runAll() {
         {
           name: 'notify feeds provider rejection to model and sends correction',
           fn: testBoundary_notificationRepairsProviderRejection,
+        },
+        {
+          name: 'notify summarizes internal goal links while preserving the task',
+          fn: testBoundary_notificationSummarizesInternalGoalLinks,
+        },
+        {
+          name: 'notify repairs omission of the exact canonical action link',
+          fn: testBoundary_notificationRequiresCanonicalActionLink,
+        },
+        {
+          name: 'notify does not rewrite auth, routing, or rate-limit rejections',
+          fn: testBoundary_notificationDoesNotRewriteNonContentRejections,
+        },
+        {
+          name: 'notify repairs an explicit HTTP 400 body rejection',
+          fn: testBoundary_notificationRepairsHttp400BodyRejection,
         },
         {
           name: 'notify does not retry ambiguous gateway failure',

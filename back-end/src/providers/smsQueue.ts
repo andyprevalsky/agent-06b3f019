@@ -49,6 +49,7 @@ interface SmsArchiveOptions {
   archiveRootAgentId?: string;
   archiveContext?: Record<string, unknown>;
   abortSignal?: AbortSignal;
+  onDeliveryAttempt?: () => void;
 }
 
 async function archiveSmsTransportBoundary(params: {
@@ -103,6 +104,7 @@ export async function sendSms(
   messageSid?: string;
   error?: string;
   definitiveFailure?: boolean;
+  statusCode?: number;
 }> {
   const requestBody = {
     to: phoneNumber,
@@ -130,6 +132,7 @@ export async function sendSms(
       seed: mockSeed,
       reason: mockReason,
     });
+    options.onDeliveryAttempt?.();
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
       requestBody,
@@ -154,6 +157,7 @@ export async function sendSms(
   }
 
   try {
+    options.onDeliveryAttempt?.();
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
       method: 'POST',
       headers: {
@@ -178,6 +182,7 @@ export async function sendSms(
       return {
         success: false,
         error: `Surge API error: ${response.status}: ${errorText}`,
+        statusCode: response.status,
         definitiveFailure:
           response.status >= 400 && response.status < 500 && response.status !== 408,
       };
@@ -222,7 +227,13 @@ export async function sendMms(
   message: string,
   mediaUrl: string,
   options: SmsArchiveOptions = {}
-): Promise<{ success: boolean; messageSid?: string; error?: string; definitiveFailure?: boolean }> {
+): Promise<{
+  success: boolean;
+  messageSid?: string;
+  error?: string;
+  definitiveFailure?: boolean;
+  statusCode?: number;
+}> {
   const requestBody = {
     to: phoneNumber,
     body: message,
@@ -240,6 +251,7 @@ export async function sendMms(
     return {
       success: false,
       error: `Benchmark MMS mock eligibility lookup failed: ${messageText}`,
+      definitiveFailure: true,
     };
   }
   if (mockReason !== null) {
@@ -249,6 +261,7 @@ export async function sendMms(
       seed: mockSeed,
       reason: mockReason,
     });
+    options.onDeliveryAttempt?.();
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
       requestBody,
@@ -273,6 +286,7 @@ export async function sendMms(
   }
 
   try {
+    options.onDeliveryAttempt?.();
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
       method: 'POST',
       headers: {
@@ -297,6 +311,7 @@ export async function sendMms(
       return {
         success: false,
         error: `Surge API error: ${response.status}: ${errorText}`,
+        statusCode: response.status,
         definitiveFailure:
           response.status >= 400 && response.status < 500 && response.status !== 408,
       };

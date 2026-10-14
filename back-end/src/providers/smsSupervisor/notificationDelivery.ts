@@ -14,6 +14,12 @@ interface DeliveryResult {
   error?: string;
   definitiveFailure?: boolean;
   recipientUnreachable?: boolean;
+  statusCode?: number;
+}
+
+export interface NotificationContent {
+  message: string;
+  requiredLinks: readonly string[];
 }
 
 export class NotificationDeliveryError extends Error {
@@ -27,15 +33,16 @@ export class NotificationDeliveryError extends Error {
 }
 
 /** Correct rejected notification text without resending an accepted message. */
-export async function deliverNotificationMessage(config: {
-  channel: SupervisorChannel;
-  message: string;
-  agentId?: string;
-  eventType?: unknown;
-  correctionBudget?: { remaining: number };
-  send: (message: string) => Promise<DeliveryResult>;
-}): Promise<DeliveryResult & { message: string }> {
-  const requiredLinks = config.message.match(/https?:\/\/[^\s]+/g) ?? [];
+export async function deliverNotificationMessage(
+  config: NotificationContent & {
+    channel: SupervisorChannel;
+    agentId?: string;
+    eventType?: unknown;
+    correctionBudget?: { remaining: number };
+    send: (message: string) => Promise<DeliveryResult>;
+  }
+): Promise<DeliveryResult & { message: string }> {
+  const requiredLinks = config.requiredLinks;
   const messages: CompletionMessage[] = [
     { role: 'system', content: SMS_NOTIFICATION_SYSTEM_PROMPT },
     {
@@ -71,7 +78,10 @@ export async function deliverNotificationMessage(config: {
     });
     // A timeout/disconnect does not prove non-delivery. Rewriting and sending
     // again could duplicate a message already accepted by the provider.
-    if (!result.definitiveFailure || result.recipientUnreachable) return { ...result, message };
+    const correctable =
+      error !== undefined || result.statusCode === 400 || result.statusCode === 422;
+    if (!result.definitiveFailure || result.recipientUnreachable || !correctable)
+      return { ...result, message };
     if (attempt + 1 === MAX_NOTIFICATION_DELIVERY_ATTEMPTS) return { ...result, message };
     if (correctionBudget.remaining === 0) return { ...result, message };
     correctionBudget.remaining--;

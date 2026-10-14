@@ -10,8 +10,9 @@ first_bad_boundary: SMS model surfaces omit the outgoing body contract; smsQueue
 symptoms:
   - "Killed the stuck agent. New one is creating the Pro 500 Codex account"
   - "should be at most 1600 character(s)"
-  - "Surge API error"
   - "Kickoff SMS exceeds captured Surge limit: 1762 > 1600"
+  - "Notification message omitted a required link"
+  - "failure before sending must be retryable"
 tags:
   - sms
   - surge
@@ -88,6 +89,12 @@ Evidence snapshots are private under `.context/rca-sms-2026-10-14/`. The latest 
 Adversarial review found two related ambiguity bugs once failures were surfaced: write-lock dispatch marked every thrown failure FAILED, and all-failed mirrored delivery inherited the SMS channel's definite rejection even when WhatsApp was ambiguous. The final code preserves typed delivery certainty, keeps unknown claims STARTED, and requires every failed channel to be definitely rejected before a claim can become reclaimable. The unchanged owning `send-sms-whatsapp-mirroring` suite first failed with two repeated SMS sends on the original service, then failed with six SMS sends and two WhatsApp attempts on the original mixed-channel aggregation (`1792005216-347924-2276`, 707ms). After both fixes it passed in 565ms (`1792005279-358369-179`): one SMS attempt for the single-channel unknown outcome, three rejected SMS attempts plus one ambiguous WhatsApp attempt for the mixed outcome, and no resend on a repeated request. Its positive control verifies an explicitly rejected claim can be corrected and retried. Final adversarial review passed after this proof and the live model smoke.
 
 Full coverage found an existing waitlist test asserting that HTTP 503 was a definite SMS rejection. Its positive control now uses the captured 422 rejection class and adds unknown-outcome controls for 503 and 408. Extending the same controls to MMS exposed a related owned error-feedback gap: `response.text()` failure discarded the already received HTTP status. The unchanged expanded regression failed 7/9 before the shared SMS/MMS error-reader fix (`1792006397-716530-16848`), then passed 9/9 after it (`1792006444-725373-11737`, 462ms). The same final run passed the notification, mirrored-delivery, and supervisor domains. Both message transports retain status and body-read diagnostics; explicit 4xx rejection remains definite, while 408 and 5xx remain ambiguous.
+
+Initial exact-HEAD deployment review found two retry-boundary defects, and independent review reproduced a third composition defect. The notification helper inferred required links from every URL in the internal task. Three research URLs totaling 1890 characters made a valid 125-character kickoff summary impossible to deliver, even though it preserved the canonical agent link. Required links now come from typed event composition: the run or approval link, exact authentication handoff link, or AgentCard setup link. Internal task URLs remain available for summarization without becoming mandatory notification text. The full stored task is unchanged.
+
+Delivery certainty and correction eligibility are separate. Typed HTTP status now permits model correction for local validation or HTTP 400/422; 401, 403, 404, and 429 return their real failure without rewriting or resending. The unchanged owning `send-sms` suite failed 60/62 before these producer changes (`1792010857-1863011-28380`) and passed 62/62 afterward (`1792011000-1886332-24376`, 1891ms). Controls require the exact agent, browser handoff, and setup links, including real TOOL feedback when a model omits them.
+
+Write-lock claims also distinguish preparation from transport. A failed phone lookup, attachment read, upload, or MMS eligibility lookup has not sent a notification and can safely release the claim for a repaired retry. The send-attempt callback runs immediately before the real Surge/Meta fetch, or after successful mock acceptance. Unknown outcomes and failures persisting an accepted SMS/MMS remain non-reclaimable. The permanent `sms-write-lock-claim.test.ts` was run byte-for-byte unchanged against the original `9cdf57c4` service and SMS sender, then restored fixed bytes: 4 preparation failures / 4 safety controls passed before (914ms), 8/8 passed afterward (895ms). Proof is in `.context/sms-presend-claim/owning-final-before.log`, `owning-final-after.log`, and `final-proof.json`. Independent review found no remaining blocker in the combined stabilization. Full deploy gates and production verification still apply after this local proof.
 
 ## Human feedback
 

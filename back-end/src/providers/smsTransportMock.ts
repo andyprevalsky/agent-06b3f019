@@ -32,6 +32,14 @@ export function mockSurgeMessageId(seed: string): string {
 /** Captured Surge responses, including the real SMS body validation contract. */
 export function buildMockSurgeFetchResponse(requestBody: string | null): Response {
   const sms = JSON.parse(requestBody ?? '{}') as { body?: unknown };
+  for (const status of [400, 401, 403, 404, 429]) {
+    if (typeof sms.body === 'string' && sms.body.includes(`__BLACKBOX_SURGE_${status}__`)) {
+      return new Response(JSON.stringify({ error: 'body rejected by provider' }), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+  }
   if (
     typeof sms.body === 'string' &&
     (sms.body.length > SMS_MAX_BODY_CHARACTERS || sms.body.includes('__BLACKBOX_SURGE_422__'))
