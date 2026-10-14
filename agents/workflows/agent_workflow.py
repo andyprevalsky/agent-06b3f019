@@ -98,10 +98,10 @@ with workflow.unsafe.imports_passed_through():
         mint_subscription_checkout_activity,
         raise_gate_direct,
     )
-    from tools.google_oauth_demo import google_oauth_demo
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.google_oauth_demo import google_oauth_demo
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -305,7 +305,9 @@ def _message_body(message: Dict[str, Any]) -> str:
     if text:
         return text
     metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    return str(metadata.get("result") or metadata.get("content") or metadata.get("message") or "").strip()
+    return str(
+        metadata.get("result") or metadata.get("content") or metadata.get("message") or ""
+    ).strip()
 
 
 def _is_plumbing_tool_text(text: str) -> bool:
@@ -341,12 +343,19 @@ def last_real_completion_text(
         if (
             str(message.get("role") or "").upper() == "ASSISTANT"
             and len(text) >= 200
-            and (metadata.get("plannedToolName") == "reasoning" or metadata.get("dagTaskIndex") is not None)
+            and (
+                metadata.get("plannedToolName") == "reasoning"
+                or metadata.get("dagTaskIndex") is not None
+            )
         ):
             return text
     if isinstance(structured_response, dict):
         for value in structured_response.values():
-            if isinstance(value, str) and len(value.strip()) >= 200 and not is_ablated_completion_summary(value):
+            if (
+                isinstance(value, str)
+                and len(value.strip()) >= 200
+                and not is_ablated_completion_summary(value)
+            ):
                 return value.strip()
     return ""
 
@@ -376,7 +385,11 @@ def strip_fast_mode_card_narration(text: str) -> str:
     if not raw or not completion_card_has_fast_mode_markers(raw):
         return raw
     parts = re.split(r"(?<=[.!?])\s+", raw)
-    kept = [part.strip() for part in parts if part.strip() and not completion_card_has_fast_mode_markers(part)]
+    kept = [
+        part.strip()
+        for part in parts
+        if part.strip() and not completion_card_has_fast_mode_markers(part)
+    ]
     return " ".join(kept).strip()
 
 
@@ -454,7 +467,9 @@ def card_summary_from_evidence(
             for value in structured_response.values()
             if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
         ]
-        brief = strip_fast_mode_card_narration(brief_card_summary(" ".join(parts), min_chars=min_chars))
+        brief = strip_fast_mode_card_narration(
+            brief_card_summary(" ".join(parts), min_chars=min_chars)
+        )
         if brief and len(brief) >= min_chars:
             return brief
     return ""
@@ -656,7 +671,11 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
         return {}
     found = {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
     items = nested.get("items") if "items" in nested else obj.get("items")
-    if "top_creators_analysis" in names and "top_creators_analysis" not in found and isinstance(items, list):
+    if (
+        "top_creators_analysis" in names
+        and "top_creators_analysis" not in found
+        and isinstance(items, list)
+    ):
         analyses = []
         for item in items:
             if not isinstance(item, dict):
@@ -970,7 +989,9 @@ class AgentWorkflow:
         )
         if isinstance(runtime.get("signal_responses"), dict):
             self._signal_responses = dict(runtime["signal_responses"])
-        self._pending_approval_resume = _canonical_pending_approval_resume(runtime.get("pending_approval_resume"))
+        self._pending_approval_resume = _canonical_pending_approval_resume(
+            runtime.get("pending_approval_resume")
+        )
         if isinstance(runtime.get("response_schema_feedback"), list):
             self._response_schema_feedback = [
                 value for value in runtime["response_schema_feedback"] if isinstance(value, str)
@@ -1190,7 +1211,9 @@ class AgentWorkflow:
                 "has_new_messages": self._has_new_messages,
                 "last_signal_response": self._last_signal_response,
                 "signal_responses": dict(self._signal_responses),
-                "pending_approval_resume": _canonical_pending_approval_resume(self._pending_approval_resume),
+                "pending_approval_resume": _canonical_pending_approval_resume(
+                    self._pending_approval_resume
+                ),
                 "response_schema_feedback": list(self._response_schema_feedback),
                 "response_schema_revision": self._response_schema_revision,
                 "response_schema_applied_revision": self._response_schema_applied_revision,
@@ -1820,7 +1843,9 @@ class AgentWorkflow:
                     # Compute-token cache affinity pins by the child's goal —
                     # keep it on the same stable namespace, not the root's.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or persisted_goal or self.goal)
+                        _fast_cache_compute_affinity_key(
+                            user_id, self.fast_cache_goal or persisted_goal or self.goal
+                        )
                         if self.fast_mode_cache_enabled
                         else None
                     )
@@ -1981,7 +2006,12 @@ class AgentWorkflow:
                 # win a race, then regenerate from the latest USER below.
                 response_schema = None
                 self.output_schema = None
-        if response_schema is None and self.goal and not is_sub_agent and not prior_run_superseded:
+        if (
+            response_schema is None
+            and self.goal
+            and not is_sub_agent
+            and not prior_run_superseded
+        ):
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
@@ -2052,7 +2082,9 @@ class AgentWorkflow:
         # =====================================================================
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = (
-            ["google_workspace_run", "attempt_completion"] if matches_demo_goal(self.goal) else EXECUTE_PHASE_TOOLS
+            ["google_workspace_run", "attempt_completion"]
+            if matches_demo_goal(self.goal)
+            else EXECUTE_PHASE_TOOLS
         )
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
@@ -2828,7 +2860,11 @@ class AgentWorkflow:
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
-        if self._cost_limit_wrapup_pending and self._cost_limit_reached and not self._is_finished:
+        if (
+            self._cost_limit_wrapup_pending
+            and self._cost_limit_reached
+            and not self._is_finished
+        ):
             if not self._cost_limit_wrapup_consumed:
                 # First pause-check after arming wrap-up: allow one more turn.
                 self._cost_limit_wrapup_consumed = True
@@ -2845,6 +2881,7 @@ class AgentWorkflow:
         preceding _check_paused. The loop then returns status='aborted' instead of
         waiting forever on a parent that will never resume it."""
         return self._orphaned
+
 
     async def _check_generation_handoff(self) -> Optional[str]:
         """Return live task queue when this execution should hand off generations.
@@ -3124,7 +3161,9 @@ class AgentWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
             except Exception as release_error:
-                workflow.logger.warning(f"Failed to release compute token lineage during rotation: {release_error}")
+                workflow.logger.warning(
+                    f"Failed to release compute token lineage during rotation: {release_error}"
+                )
         self._clear_compute_token()
         await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
@@ -3212,7 +3251,11 @@ class AgentWorkflow:
             # bottleneck: each July GP step blocked on a 30s write. Start the
             # write and keep looping; flush before terminal status so the
             # transcript is durable when COMPLETED lands.
-            if self.fast_mode_cache_enabled and not self._is_finished and is_oai_demo_mass_agent_task(self):
+            if (
+                self.fast_mode_cache_enabled
+                and not self._is_finished
+                and is_oai_demo_mass_agent_task(self)
+            ):
                 handle = workflow.start_activity(
                     post_agent_message,
                     args=[self.agent_id, text, role, metadata],
@@ -4504,7 +4547,8 @@ class AgentWorkflow:
                 output_rate = actual_pricing["output_cents_per_1k"]
                 if input_rate == 0 and output_rate == 0:
                     workflow.logger.info(
-                        f"💰 $0 user charge: actual_model={actual_model}, in={tokens_in_delta}, out={tokens_out_delta}"
+                        f"💰 $0 user charge: actual_model={actual_model}, "
+                        f"in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 
         # Calculate cost with provider-specific cache discounts
@@ -4881,7 +4925,9 @@ class AgentWorkflow:
             await self._wait_for_response_schema_refresh()
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
-            workflow.logger.info(f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)")
+            workflow.logger.info(
+                f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
+            )
             workflow.continue_as_new(
                 args=self._continuation_args(
                     result.get("context"),
@@ -4912,7 +4958,10 @@ class AgentWorkflow:
             fm_trajectory_complete = (
                 bool(getattr(self, "fast_mode_cache_enabled", False))
                 and is_oai_demo_mass_agent_task(self)
-                and (verifier_progress >= 1.0 or "fast mode cache trajectory ended" in verifier_reasoning.lower())
+                and (
+                    verifier_progress >= 1.0
+                    or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+                )
             )
             if fm_trajectory_complete:
                 # Fast Mode replay hit the step cap after the verifier already
@@ -5209,7 +5258,9 @@ class AgentWorkflow:
             list(context or []),
         )
 
-    def _coalesce_structured_response(self, context: List[Dict], structured_response: Optional[Dict]) -> Optional[Dict]:
+    def _coalesce_structured_response(
+        self, context: List[Dict], structured_response: Optional[Dict]
+    ) -> Optional[Dict]:
         """Fill missing schema fields from `# field_name` sections in the transcript.
 
         Fast Mode assemble-final (and other dag_reasoning slots) often persist the
@@ -5377,9 +5428,13 @@ class AgentWorkflow:
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             summary_is_invalid = is_ablated_completion_summary(summary)
-            needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(str(summary or "").strip()) < 200
+            needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(
+                str(summary or "").strip()
+            ) < 200
             if summary_is_invalid or needs_demo_detail:
-                recovered = strip_fast_mode_card_narration(card_summary_from_evidence(transcript, structured_response))
+                recovered = strip_fast_mode_card_narration(
+                    card_summary_from_evidence(transcript, structured_response)
+                )
                 if (
                     recovered
                     and not is_ablated_completion_summary(recovered)
@@ -5458,7 +5513,9 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
-            structured_response, summary = normalize_completion_notice(self.goal, structured_response, summary)
+            structured_response, summary = normalize_completion_notice(
+                self.goal, structured_response, summary
+            )
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
