@@ -17,8 +17,21 @@ def native(pid):
     return p.stdout.strip() or None
 
 
-def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
+def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
     from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function, fleet_source_text
+
+    # The inventory producer publishes a complete generation atomically. Keep
+    # that contract when restoring the fixture even if its writer is delayed.
+    write_text = Path.write_text
+
+    def slow_health_write(path, data, *args, **kwargs):
+        if path.name.startswith("health"):
+            with path.open("w") as handle:
+                time.sleep(0.2)
+                return handle.write(data)
+        return write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", slow_health_write)
 
     BASE = tmp_path
     BASH = shutil.which("bash") or "bash"
@@ -261,9 +274,12 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                         time.sleep(0.1)
                         assert scaler.poll() is None, "transient-inventory-aborted-live-autoscaler"
                         assert not (case / "calls").exists(), "capacity-mutated-before-fresh-inventory"
-                        (case / "inventory/current/health").write_text(
+                        health = case / "inventory/current/health"
+                        temporary_health = health.with_suffix(".tmp")
+                        temporary_health.write_text(
                             f"publisher_token=fixture-publisher\nvalid_until={int(time.time()) + 120}\n"
                         )
+                        temporary_health.replace(health)
                         restored_inventory = True
                     if mode == "metrics_proxy_loss_then_ready" and not restored_metrics_proxy and (case / "proxy-recovery-expired").exists():
                         time.sleep(0.1)
@@ -392,6 +408,10 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path):
                 "source_sha256": receipt["source_sha256"],
                 "control_sha256": receipt["control_sha256"],
                 "owners_absent": all(r["all_recorded_owners_absent"] for r in results),
+                "failed_cases": [
+                    {"mode": r["mode"], "error": r["error"], "scaler_rc": r["scaler_rc"]}
+                    for r in results if not r["passed"]
+                ],
             }
         )
     )
