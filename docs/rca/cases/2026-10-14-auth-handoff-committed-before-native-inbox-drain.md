@@ -126,7 +126,11 @@ retention only; genuine app-approval preservation is proven by the unchanged
 canonical live task above. Local correction verified; deployment/parent source
 adoption remains held. No new LLM-visible text was added. Agent control-transfer
 and native input sequencing changes require parent runtime-behavior/trajectory
-review before adoption, with exact11-line runtime diff.
+review before adoption, with exact11-line runtime diff. Durable evidence
+publication for both final agents subsequently failed closed with
+HubVisibilityError: benchmark Hub upload failed: The read operation timed out.
+No durable FE/recording verification is claimed; this remote publication gate
+remains outstanding before rollout approval despite verified local correction.
 
 ## Human feedback
 
