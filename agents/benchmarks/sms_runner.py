@@ -1269,7 +1269,7 @@ async def _cleanup_owned_sms_roots(
             if row["start_pending"]:
                 raise RuntimeError("SMS workflow creation outcome is not yet known")
             if row["workflow_id"]:
-                if not row["first_run_id"] or row["queue"] != queue:
+                if not row["first_run_id"] or (row["queue"] is not None and row["queue"] != queue):
                     raise RuntimeError("SMS workflow generation or owned queue is unproved")
                 bind(row["workflow_id"], row["first_run_id"], row["id"])
             elif row["id"] not in seeded_ids:
@@ -1313,7 +1313,7 @@ async def _cleanup_owned_sms_roots(
             raise RuntimeError("SMS terminal generation cleanup is still pending")
         for row in after:
             if row["workflow_id"]:
-                if not row["first_run_id"] or row["queue"] != queue:
+                if not row["first_run_id"] or (row["queue"] is not None and row["queue"] != queue):
                     raise RuntimeError("SMS terminal generation or queue changed")
                 bind(row["workflow_id"], row["first_run_id"], row["id"])
             if row["stale_workflow_id"]:

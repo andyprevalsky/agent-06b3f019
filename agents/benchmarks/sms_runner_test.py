@@ -1346,11 +1346,17 @@ def test_unverified_native_cleanup_retains_rows_and_fixture_identity():
     assert not any('DELETE' in q for q in seen)
 
 
-@pytest.mark.parametrize('failure',[None,'native-running','wrong-native-queue','wrong-first-run','provider-failure','foreign-parent','unknown-start','continued-as-new'])
-def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_proof(tmp_path,monkeypatch,failure):
-    events=[];state={'status':WorkflowExecutionStatus.RUNNING};rows=[_row()]
-    if failure=='foreign-parent':rows=[_row(parent=FOREIGN)]
-    if failure=='unknown-start':rows=[_row(start_pending=True)]
+@pytest.mark.parametrize('queue_override,failure',[
+    *[(QUEUE,failure) for failure in [None,'native-running','wrong-native-queue','wrong-first-run','provider-failure','foreign-parent','unknown-start','continued-as-new']],
+    pytest.param(None,None,id='null-valid-native-proof'),
+    pytest.param(None,'wrong-native-queue',id='null-wrong-native-queue'),
+    pytest.param(None,'wrong-first-run',id='null-wrong-first-run'),
+    pytest.param('foreign-queue',None,id='nonempty-foreign-override'),
+])
+def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_proof(tmp_path,monkeypatch,queue_override,failure):
+    events=[];state={'status':WorkflowExecutionStatus.RUNNING};rows=[_row(queue=queue_override)]
+    if failure=='foreign-parent':rows=[_row(queue=queue_override,parent=FOREIGN)]
+    if failure=='unknown-start':rows=[_row(queue=queue_override,start_pending=True)]
     monkeypatch.setenv('BENCHMARK_CONTEXT_DIR',str(tmp_path))
     monkeypatch.setattr(bench.cloud_batch_cleanup,'contract',lambda:(tmp_path/'status','exact-token'))
     monkeypatch.setattr(bench,'_local_benchmark_task_queue',lambda _:QUEUE)
@@ -1384,9 +1390,9 @@ def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_pr
         results[0].logs={'cloud_cleanup_evidence':{'final':{'tree_agent_ids':[ROOT]}},'cloud_provider_cleanup':{'tree_sealed':True}}
     monkeypatch.setattr(bench,'_finalize_owned_cloud_batch',finalize)
     run=lambda:asyncio.run(_cleanup_owned_sms_roots(bench,'http://localhost:39999',OWNER,{ROOT},set(), {"name":"fixture", "passed":False, "failure_reason":"SMS contract"}))
-    if failure:
+    if failure or queue_override not in (QUEUE,None):
         with pytest.raises(RuntimeError):run()
-        if failure in ('wrong-native-queue','wrong-first-run','foreign-parent','unknown-start'):
+        if queue_override not in (QUEUE,None) or failure in ('wrong-native-queue','wrong-first-run','foreign-parent','unknown-start'):
             assert 'canonical-finalizer' not in events
         for p in tmp_path.glob('sms-owned-cleanup-*.json'):
             assert json.loads(p.read_text())['verified'] is False
