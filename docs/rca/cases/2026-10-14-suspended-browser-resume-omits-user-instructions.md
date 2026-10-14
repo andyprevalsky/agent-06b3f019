@@ -21,6 +21,7 @@ tags:
 sources:
   - agent ae17b024-5287-4199-84d0-6cce3bd1765d
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
+  - PR #1511
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_resumed_call_and_judge_receive_durable_captured_user_correction
 status: open
 ---
@@ -93,13 +94,14 @@ fetching input or making another model call.
 
 The final owning reproduction drives the actual resumed activity and verifier
 request construction using the exact captured original goal and correction.
-Command: source agents/venv/bin/activate; python
-.context/rca-ae17b024/rca-browser-repro.py. The RCA_BASELINE=1 switch selects
-unchanged HEAD handler/service in an isolated module namespace; assertions,
-request data and fixture are identical. Baseline: exit 1 after 0.646 seconds,
+Identical command: source agents/venv/bin/activate; RCA_BASELINE=1 python
+.context/rca-ae17b024/rca-browser-repro.py. The switch loads the committed HEAD
+handler/service in an isolated module namespace; assertions, request data and
+fixture are identical. With buggy HEAD b784977b0: exit 1 after 0.646 seconds,
 "resumed actor lost or duplicated the durable user correction". Candidate:
-exit 0 after 0.850 seconds, exact correction delivered once to the actor and
-judge. Six focused regression/lifecycle controls passed. The permanent
+exit 0 after 0.850 seconds; the same command with committed fixed HEAD
+e015fe45c passed in 0.684 seconds, exact correction delivered once to the actor
+and judge. Six focused regression/lifecycle controls passed. The permanent
 spawn-browser-agent-v3 runner discovered all new regressions and passed:
 1 domain passed, 0 failed, 55.3 seconds. Ruff, compilation and diff checks
 passed. The fixture drains its owned asynchronous browser cleanups.
@@ -127,6 +129,13 @@ production agent was resumed, rerun or modified during this RCA. At 10,000
 agents the design adds one scoped durable-tail read per resumed task, with no
 new per-step polling or shared user fan-in. Existing auth, write-permission,
 payment and generation snapshots preserve the same instruction custody.
+Draft PR #1511 contains the reviewed code. The normal deploy prompt and agent
+terminal-behavior guards passed; Step 0c stopped on the runtime-context diff.
+The evidence publisher could not produce a share viewer for this deleted
+non-benchmark agent because its current CLI requires a Hub run UUID. The final
+verifier dump 56a48ebda7ec was rendered and published separately with a 7-day
+signed HTTPS URL. Do not claim that the deleted agent's frontend viewer was
+validated or that production verification has occurred.
 
 ## Human feedback
 

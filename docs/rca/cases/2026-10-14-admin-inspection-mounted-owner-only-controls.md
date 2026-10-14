@@ -21,6 +21,7 @@ tags:
 sources:
   - agent ae17b024-5287-4199-84d0-6cce3bd1765d
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
+  - PR #1511
 repro: front-end/src/tests/blackbox/admin-agent-inspection.blackbox.tsx
 status: open
 ---
