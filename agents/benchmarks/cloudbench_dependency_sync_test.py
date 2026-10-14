@@ -33000,7 +33000,7 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
         publisher.terminate(); publisher.wait(timeout=5); lock.close()
 
 
-def test_autoscaler_runtime_handoff_cancelled_worker_capture_failure_is_terminal_without_forgetting_ownership(tmp_path):
+def test_autoscaler_runtime_handoff_capacity_cancelled_worker_capture_failure_is_terminal_without_forgetting_ownership(tmp_path):
     """A joined failed preservation attempt must not wait the provisioning budget."""
     source = fleet_source_text()
     out = tmp_path / 'bench'; out.mkdir()
@@ -33073,7 +33073,7 @@ test -s "$out/autoscaler.failed" || exit 85
 
 
 @pytest.mark.parametrize('tracked,cancelled,expected_failure', [(True, True, True), (True, False, True), (False, True, False)])
-def test_autoscaler_runtime_handoff_worker_cleanup_failure_outcome_respects_exact_tracking(tmp_path, tracked, cancelled, expected_failure):
+def test_autoscaler_runtime_handoff_capacity_worker_cleanup_failure_outcome_respects_exact_tracking(tmp_path, tracked, cancelled, expected_failure):
     source = fleet_source_text(); out = tmp_path / 'bench'; out.mkdir()
     wid = 'deadbeef000020'
     (out / 'worker-clones.ids').write_text(wid + '\n' if tracked else '')
