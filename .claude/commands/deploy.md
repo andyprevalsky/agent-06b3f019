@@ -10,6 +10,34 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the Claude fallback, or the usage-exhaustion skip) is the only review gate.
 
+## Provider outages: report and retry every 10 minutes
+
+When a provider outage blocks a deploy gate, promptly tell the user which
+provider and gate are affected, the observed failure, the official incident
+link when available, the deployment impact, and the next retry time in UTC.
+Distinguish confirmed attribution from a suspected cause supported by an
+incident and matching traces; a status-page incident alone does not prove causality.
+
+Keep the deploy active and retry the affected failed check every 10 minutes.
+Persist each attempt's start time and set its next retry due time to start +
+600 seconds. Before each retry, recheck provider status and report the result
+and next due time. Never overlap attempts: if execution or owned cleanup lasts
+past the due time, join it before starting the next retry. Keep healthy checks
+and independent diagnosis moving; do not rerun successful payment checks or
+other successful lanes merely because an unrelated provider is unavailable.
+
+Preserve every failed attempt, its original clocks, actual source identity,
+artifacts and cleanup evidence. An outage does not waive a gate or turn a
+failure into a pass. Continue this cadence until the affected gate passes, the
+user stops the work, or evidence identifies a different cause requiring the
+normal repair or credential/budget handling. Retain existing authorization,
+financial limits and bounded review cycles; review-provider usage exhaustion
+still follows Step 9a. A retryable outage alone is not a reason to end the turn
+with a terminal blocked handoff or ask the user for another approval.
+This outage path takes precedence over generic failure-handling directions;
+gate criteria, cleanup, credential, financial and review requirements remain
+mandatory.
+
 ## Canonical human-approval format
 
 Every human approval request in this command—including prompt or
@@ -2468,7 +2496,7 @@ gh run watch "$SEMANTIC_RUN_ID" --exit-status
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; use `gh run rerun "$SEMANTIC_RUN_ID" --failed` once the prior attempt is terminal so only failed jobs are retried. Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
