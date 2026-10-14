@@ -91,59 +91,6 @@ seed overlay; the local controller import does not propagate to that path.
 condition. Full backend coverage and the 100-run fleet proof remain pending;
 this domain pass supplies no fleet acceptance credit.
 
-## Recurrence — 2026-10-14 deploy validation
-
-The unchanged `e576489611da771499791db3980d78a1db8c5c02` backend coverage run
-reported `codex-code` 26 passed, one failed, zero skipped (46,708 ms). The
-persisted 5,446-byte smoke output for session
-`3fd51655-483e-49f5-b2e3-cc828bd2ed3b` contains `token_revoked`,
-`refresh_token_invalidated`, and revoked-refresh prose before the funded-key
-`no credits remaining` error. Replaying this output through the unchanged
-classifier returned `skip: null`; the October 1 revocation-veto regression is
-working. This is not an all-paths funding skip or a new classifier defect.
-
-The original coverage process used the system-Postgres `victoria` fallback.
-It imported current October 14 local auth into a new integration, but selected
-an older October 7 connected integration belonging to another account. Private
-access/refresh comparisons matched that selected row to production's existing
-revoked lineage without exposing credential values. Thus the September 27
-instruction to import current auth was insufficient in a multi-account seed:
-import preserves other accounts, and does not prove which identity the smoke
-exercised. No provider fault is inferred from token expiry alone.
-
-Configuration-only recovery used the existing native runner/sync scripts in a
-fresh local DB with aligned `CODEX_TOKEN_USER_ID` and
-`CODEX_BLACKBOX_USER_ID=5e5d14b5-9d72-49f4-abe4-0ee6f4e86f8e`, explicit current
-`CODEX_AUTH_PATH=/home/boxes/.codex/auth.json`,
-`CODEX_TOKEN_POOLING_ENABLED=false`, and `BACKEND_CODEX_TOKEN_SYNC_SKIP=0`.
-The unchanged `npm run test:blackbox -- codex-code` passed 27 tests, zero
-failed, zero skipped (50,803 ms); the real ChatGPT OAuth smoke took 34,966 ms
-and verified completion and output-file sentinels. Selected integration
-`a70da527-80db-4ac8-9a79-5d18afc27bc5` matched the current local auth. Both
-initial setup failure and original coverage failure remain retained.
-
-Safe configuration and native receipts are in the controller's
-`.context/codex-recovery-config.json` and
-`.context/test-runs/codex_recovery_20261014_201703_83bf30/` under
-`/home/boxes/rose-deploy-auth`. The rerun on authorized backend verification
-source `a5aaa8fc3b50bbb3b8a2bd024315fb0dbc5ca027` explicitly names its own
-`victoria_rose-backend-verification-537d914c902b` coverage DB and carries the
-same supported identity configuration. The canonical coverage command passed
-266 unit files and all 196 requested blackbox domains, with 89.60% statement
-and line, 81.03% branch, and 92.66% function coverage in 778.3 seconds. Its
-Codex domain passed 27 tests with zero failures or skips; the actual ChatGPT
-OAuth smoke took 18,409 ms. Normal-exit and SIGTERM teardown controls passed.
-The timing run is `20261014-214106-1111770`; the full-suite run is
-`1792014135-1122715-26840`. This is backend verification only: final runtime
-source, all-auth regression, and production deployment remain separate gates.
-
-This remains a controller-local mitigation. Other-account production OAuth
-revocation, generic credential ownership, and the original Gmail incident are
-not fixed by fixture isolation. No production credential row, prompt,
-evaluator, timeout, skip policy, or credential-selection implementation was
-changed. Validate the selected account as well as the imported credential,
-and use a uniquely owned coverage DB before attributing the failure to source.
-
 ## Human feedback
 
 The user required infrastructure-only readiness without changing benchmark
