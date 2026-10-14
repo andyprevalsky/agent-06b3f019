@@ -6,6 +6,7 @@
     "types": ["vite/client", "vitest/globals"],
     "module": "ESNext",
     "skipLibCheck": true,
+    "types": ["vitest/globals", "vite/client", "node"],
 
     /* Bundler mode */
     "moduleResolution": "bundler",

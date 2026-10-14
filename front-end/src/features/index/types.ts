@@ -108,9 +108,9 @@ export interface WaitlistPayload {
 }
 
 export interface WaitlistResponse {
-  error?: string;
   success: boolean;
   message: string;
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------

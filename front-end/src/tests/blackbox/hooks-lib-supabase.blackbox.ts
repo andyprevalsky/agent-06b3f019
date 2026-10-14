@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw';
-import type { Session } from '@supabase/supabase-js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Session } from '@supabase/supabase-js';
 
 import { server } from './msw/server';
 
@@ -36,9 +36,9 @@ function mockSession() {
     user: {
       id: 'user-12345678',
       is_anonymous: false,
+      aud: 'authenticated',
       app_metadata: {},
       user_metadata: {},
-      aud: 'authenticated',
       created_at: '2026-01-01T00:00:00Z',
     },
   };

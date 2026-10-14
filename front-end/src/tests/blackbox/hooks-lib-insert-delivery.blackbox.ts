@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import type { Message } from '@/lib/api';
 import type { StreamingBubble } from '@/features/agent-context/types';
-import type { InsertMessagePayload, ToolStatus } from '@/lib/realtime';
+import type { InsertMessagePayload } from '@/lib/realtime';
 import { useRealtimeSubscription } from '@/features/agent-context/hooks/useRealtimeSubscription';
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { server } from './msw/server';
@@ -211,7 +211,10 @@ describe('committed INSERT delivery', () => {
     });
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
-    const browser = (id: string, toolStatus: ToolStatus): InsertMessagePayload => ({
+    const browser = (
+      id: string,
+      toolStatus: NonNullable<InsertMessagePayload['metadata']>['toolStatus'],
+    ): InsertMessagePayload => ({
       ...insert,
       id,
       metadata: { toolName: 'spawn_browser_agent', toolCallId: 'browser-a', toolStatus },

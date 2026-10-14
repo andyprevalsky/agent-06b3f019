@@ -1,88 +1,25 @@
 /**
  * Blackbox tests for MessageBubble component.
  *
- * Covers all routing branches:
+ * Covers message, attention, approval, and completion routing:
  *  - USER role: bubble with text, with file_pointer
  *  - ASSISTANT role: Thought tool card, streaming, file_pointer
  *  - SYSTEM role: plain bubble
  *  - TOOL role: ToolMessage card (IN_PROGRESS / FINISHED / ERROR with chevron)
  *  - isUserAttentionMessage → AttentionMessage with waiting indicator
- *  - isSubAgentTool: pre-spawn error, spawning-in-progress
  *  - isSignupRequest → SignupPromptBubble
- *  - isSetPlanTool → PlanChip (IN_PROGRESS / ERROR)
- *  - isPhoneCallTool → PhoneCallCard
- *  - isExploreAgent → ExploreAgentBubble
- *  - isWaitFor → WaitForChip
- *  - isClaudeCodeTool → ClaudeCodeChip
  *  - isCompletionSummary → CompletionSummaryCard + FeedbackBanner
  *  - Tool approval (returns null)
+ * Specialized tool routes are covered in message-bubble-specialized-tools.blackbox.tsx.
  */
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { TooltipProvider } from '@/components/ui/tooltip';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
-import { AgentContext } from '@/features/agent-context';
-import type { AgentContextValue } from '@/features/agent-context';
-import type { Message } from '@/lib/api';
 import { server } from './msw/server';
-
-function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
-  return {
-    agent: null,
-    applyAgentDetail: () => true,
-    inspectionContext: null,
-    stagePendingAgentCreation: () => {},
-    reconcilePendingAgentCreation: async () => {},
-    rollbackPendingAgentCreation: () => false,
-    selectedAgentId: null,
-    setSelectedAgentId: () => {},
-    messages: [],
-    streamingBubbles: new Map(),
-    streamingPlan: null,
-    streamingAttention: null,
-    streamingTools: new Map(),
-    streamedTextsRef,
-    registerMessageHandler: () => () => {},
-    sendMessage: async () => {},
-    isLoadingAgent: false,
-    forceResubscribe: () => {},
-    isChatMode: false,
-    ...overrides,
-  };
-}
-
-function renderBubble(ui: React.ReactNode, agentCtx: AgentContextValue = makeAgentCtx()) {
-  return render(
-    <AgentContext.Provider value={agentCtx}>
-      <TooltipProvider>{ui}</TooltipProvider>
-    </AgentContext.Provider>,
-  );
-}
-
-function baseMessage(overrides: Partial<Message> = {}): Message {
-  return {
-    message_id: 'm-1',
-    timestamp: new Date().toISOString(),
-    text: 'hello',
-    role: 'ASSISTANT',
-    ...overrides,
-  };
-}
-
-function storeTestSession() {
-  localStorage.setItem(
-    'rose-session',
-    JSON.stringify({
-      access_token: 'test-token',
-      expires_at: Math.floor(Date.now() / 1000) + 3600,
-      user: { id: 'user-1' },
-    }),
-  );
-}
+import { baseMessage, renderBubble, storeTestSession } from './message-bubble.fixtures';
 
 describe('MessageBubble', () => {
   it('renders USER message with right-aligned text bubble', () => {
@@ -398,67 +335,6 @@ describe('MessageBubble', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders set_plan tool as PlanChip (IN_PROGRESS)', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: '',
-      metadata: {
-        toolCallId: 'tc-8',
-        toolName: 'set_plan',
-        title: 'My plan',
-        toolStatus: 'IN_PROGRESS',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText(/plan/i)).toBeInTheDocument());
-  });
-
-  it('renders set_plan tool as PlanChip (ERROR)', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'bad plan',
-      metadata: {
-        toolCallId: 'tc-9',
-        toolName: 'set_plan',
-        title: 'Plan Failed',
-        toolStatus: 'ERROR',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText(/Plan Failed/)).toBeInTheDocument());
-  });
-
-  it('renders general-purpose spawn IN_PROGRESS as spawning line', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'starting',
-      metadata: {
-        toolCallId: 'tc-10',
-        toolName: 'spawn_general_purpose_agent',
-        toolStatus: 'IN_PROGRESS',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() =>
-      expect(screen.getByText(/Spawning general-purpose agents/)).toBeInTheDocument(),
-    );
-  });
-
-  it('renders general-purpose pre-spawn ERROR as failed tree-node', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'DAG param failed',
-      metadata: {
-        toolCallId: 'tc-11',
-        toolName: 'spawn_general_purpose_agent_for_each',
-        toolStatus: 'ERROR',
-        title: 'General-purpose agent',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getByText(/DAG param failed/)).toBeInTheDocument());
-  });
-
   it('renders completion-summary message with CompletionSummaryCard', async () => {
     const msg = baseMessage({
       role: 'TOOL',
@@ -479,180 +355,236 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(screen.getByText(/Completed the mission/)).toBeInTheDocument());
   });
 
-  it('renders wait_for tool as WaitForChip', async () => {
+  it('renders markdown photos inside a finished FYI attention bubble', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: 'waiting',
+      text: 'Cyber Racoon interior',
       metadata: {
-        toolCallId: 'tc-13',
-        toolName: 'wait_for',
-        title: 'Wait for signal',
-        toolStatus: 'IN_PROGRESS',
-      },
-    });
-    const { container } = renderBubble(<MessageBubble message={msg} waitForChecks={[]} />);
-    await waitFor(() => expect(container.textContent).toMatch(/Waiting|Wait|signal/i));
-  });
-
-  it('renders explore agent as ExploreAgentBubble', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: '',
-      metadata: {
-        toolCallId: 'tc-14',
-        toolName: 'spawn_agent',
-        title: 'Explore foo',
-        toolStatus: 'IN_PROGRESS',
-        agentType: 'explore',
-        taskId: 'task-1',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(screen.getAllByText(/Explore foo/).length).toBeGreaterThan(0));
-    expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
-  });
-
-  it('renders finished explore agent with state-only header and result body', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'The production deployment is ready. Status: READY. URL: https://roselabs.ai',
-      metadata: {
-        toolCallId: 'tc-14-finished',
-        toolName: 'spawn_agent',
-        title: 'Explore foo',
-        fullGoal: 'Explore foo in detail',
+        toolCallId: 'tc-photo-fyi',
+        toolName: 'send_message_to_user',
+        isUserAttentionMessage: true,
         toolStatus: 'FINISHED',
-        agentType: 'explore',
-        taskId: 'task-1-finished',
+        attentionMessage:
+          'Cyber Racoon interior:\n\n![Cyber Racoon PC Cafe](https://www.cyberracoon.com/gallery/room.jpg)',
+        sendMessageToUser: { isQuestion: false, attentionKind: 'info', isWaitingForUser: false },
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
-
-    await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
-    expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
-    expect(document.body.textContent).toContain('The production deployment is ready');
-    expect(container.querySelector('.tool-message-markdown')).not.toBeNull();
-  });
-
-  it('hides Fast Mode / cached-trajectory copy from explore chips', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'Fast Mode parallel replay: explore started and will run its full cached trajectory before this agent completes.',
-      metadata: {
-        toolCallId: 'tc-fast-mode-explore',
-        toolName: 'spawn_agent',
-        title: 'Identify top creators',
-        fullGoal: 'Identify top creators',
-        toolStatus: 'FINISHED',
-        agentType: 'explore',
-        taskId: 'task-fast-mode',
-        fastModeParallel: true,
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-
-    await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
-    expect(document.body.textContent).not.toMatch(/fast\s*mode/i);
-    expect(document.body.textContent).not.toMatch(/fast[\s-]*cache/i);
-    expect(document.body.textContent).not.toMatch(/cached trajectory/i);
-  });
-
-  it('renders failed explore agent with state-only header and error result body', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: 'Activity task failed: web_search_activity failed: Parallel AI search returned HTTP 429 Too Many Requests',
-      metadata: {
-        toolCallId: 'tc-14-error',
-        toolName: 'spawn_agent',
-        title: 'Check deploy status',
-        fullGoal: 'Check whether the production deployment finished',
-        toolStatus: 'ERROR',
-        agentType: 'explore',
-        taskId: 'task-1-error',
-      },
-    });
-    renderBubble(<MessageBubble message={msg} />);
-
-    await waitFor(() => expect(screen.getByText('Explore Failed')).toBeInTheDocument());
-    expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
-    expect(document.body.textContent).toContain(
-      'Parallel AI search returned HTTP 429 Too Many Requests',
-    );
-  });
-
-  it('renders Claude Code tool message as ClaudeCodeChip', async () => {
-    const msg = baseMessage({
-      role: 'TOOL',
-      text: '',
-      metadata: {
-        toolCallId: 'tc-15',
-        toolName: 'spawn_claude_code_agent',
-        toolStatus: 'IN_PROGRESS',
-        task_id: 'ccc-1',
-      },
-    });
-    const { container } = renderBubble(<MessageBubble message={msg} />);
-    // ClaudeCodeChip renders an <img alt="Claude Code"> logo — unique to that branch.
     await waitFor(() => {
-      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+      const img = container.querySelector('img[alt="Cyber Racoon PC Cafe"]');
+      expect(img).not.toBeNull();
+      expect(img).toHaveAttribute('src', 'https://www.cyberracoon.com/gallery/room.jpg');
     });
   });
 
-  it('renders Codex code tool message when provider metadata is codex', async () => {
+  it('renders streaming attention message using StreamingText (isStreaming=true)', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: '',
+      text: 'streaming body',
       metadata: {
-        toolCallId: 'tc-codex',
-        toolName: 'spawn_claude_code_agent',
+        toolCallId: 'tc-19',
+        toolName: 'send_message_to_user',
+        isUserAttentionMessage: true,
         toolStatus: 'IN_PROGRESS',
-        task_id: 'codex-1',
-        code_provider: 'codex',
+        attentionMessage: 'streaming body',
       },
     });
-    renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => {
-      expect(screen.getByText('Codex Spinning up...')).toBeInTheDocument();
-    });
-    expect(screen.getByAltText('Codex')).toBeInTheDocument();
+    const { container } = renderBubble(<MessageBubble message={msg} isStreaming={true} />);
+    await waitFor(() => expect(container.textContent).toContain('streaming body'));
   });
 
-  it('renders phone call tool as PhoneCallCard', async () => {
+  it('renders USER message with image file_pointer showing loading placeholder', async () => {
     const msg = baseMessage({
-      role: 'TOOL',
-      text: '',
-      metadata: {
-        toolCallId: 'tc-16',
-        toolName: 'call_phone_number',
-        title: '📞 +15551234567',
-        toolStatus: 'IN_PROGRESS',
+      role: 'USER',
+      text: 'look',
+      file_pointer: {
+        id: 'img1',
+        storage_path: 'uploads/pic.png',
+        original_filename: 'pic.png',
+        mime_type: 'image/png',
+        size_bytes: 2048,
+        created_at: new Date().toISOString(),
       },
     });
-    const { container } = renderBubble(<MessageBubble message={msg} />);
-    await waitFor(() => expect(container.textContent).toMatch(/555|Unknown|call/i));
+    const { container } = renderBubble(<MessageBubble message={msg} agentId="agent-img" />);
+    // Image placeholder renders the filename while signed URL loads.
+    await waitFor(() => expect(screen.getByText('pic.png')).toBeInTheDocument());
+    expect(container.textContent).toContain('look');
   });
 
-  it('renders phone call FINISHED with phoneCall metadata', async () => {
+  it('renders iMessage action metadata block with Send via Mac button', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: '',
+      text: 'please send this',
       metadata: {
-        toolCallId: 'tc-17',
-        toolName: 'call_phone_number',
-        title: '✅ Call ended',
-        toolStatus: 'FINISHED',
-        phoneCall: {
-          status: 'ended',
-          to: '+15551234567',
-          duration: 42,
-          summary: 'Chat summary',
+        toolCallId: 'tc-22',
+        toolName: 'request_user_attention',
+        title: 'Need Mac send',
+        toolStatus: 'IN_PROGRESS',
+        requestUserAttention: {
+          onSuccess: 'sendSmsThroughIMessage',
+          to: '+15551112222',
+          message: 'Howdy',
+          attentionRequestId: 'att-1',
         },
       },
     });
     renderBubble(<MessageBubble message={msg} />);
-    // PhoneCallCard renders the target phone number as unique text.
-    await waitFor(() => expect(screen.getByText('+15551234567')).toBeInTheDocument());
-    // Duration is formatted as m:ss (42s -> 0:42) — confirms FINISHED branch specifically.
-    expect(screen.getByText('0:42')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Send via Mac iMessage/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Howdy/)).toBeInTheDocument();
+  });
+
+  it('AttentionMessage with Start Autonomous Execution button when onSendMessage given', async () => {
+    const onSend = vi.fn();
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'answer me',
+      metadata: {
+        toolCallId: 'tc-auto',
+        toolName: 'send_message_to_user',
+        isUserAttentionMessage: true,
+        toolStatus: 'IN_PROGRESS',
+        attentionMessage: 'answer me',
+      },
+    });
+    renderBubble(<MessageBubble message={msg} onSendMessage={onSend} />);
+    const btn = await screen.findByRole('button', {
+      name: /Start Autonomous Execution/,
+    });
+    await userEvent.click(btn);
+    expect(onSend).toHaveBeenCalled();
+  });
+
+  it('renders TOOL IN_PROGRESS with progressComplete in 0-100 range', () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-23',
+        toolName: 'compute',
+        title: 'Computing',
+        toolStatus: 'IN_PROGRESS',
+        progressComplete: 75,
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    const inner = container.querySelector('.bg-primary') as HTMLElement | null;
+    expect(inner).not.toBeNull();
+    expect(inner!.style.width).toContain('75');
+  });
+
+  it('renders completion summary with FeedbackBanner when onSubmitFeedback is passed', async () => {
+    const onSubmitFeedback = vi.fn();
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-fb',
+        toolName: 'complete',
+        isFinalSummary: true,
+        completionSummary: {
+          summary: 'All done',
+          outputs: [],
+          totalToolCalls: 1,
+          durationSeconds: 10,
+        },
+      },
+    });
+    renderBubble(<MessageBubble message={msg} onSubmitFeedback={onSubmitFeedback} />);
+    // FeedbackBanner's initial rating step prompts "How was this result?".
+    await waitFor(() => expect(screen.getByText(/How was this result\?/i)).toBeInTheDocument());
+  });
+
+  it('iMessage action button shows toast when bridge is missing', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'please send',
+      metadata: {
+        toolCallId: 'tc-ims',
+        toolName: 'request_user_attention',
+        title: 'iMessage',
+        toolStatus: 'IN_PROGRESS',
+        requestUserAttention: {
+          onSuccess: 'sendSmsThroughIMessage',
+          to: '+15550000000',
+          message: 'Hi',
+          attentionRequestId: 'att-9',
+        },
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+    const btn = await screen.findByRole('button', { name: /Send via Mac iMessage/ });
+    await userEvent.click(btn);
+    // Button still present - no crash.
+    expect(btn).toBeInTheDocument();
+  });
+
+  it('renders thought TOOL FINISHED as collapsed tool card', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'final thought',
+      metadata: {
+        toolCallId: 'tc-th-done',
+        toolName: 'thought',
+        title: 'Thought',
+        toolStatus: 'FINISHED',
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => expect(screen.getByText('Thought')).toBeInTheDocument());
+    expect(container).toBeTruthy();
+  });
+
+  it('calls onTypingComplete immediately for tool-approval message when shouldType=true', async () => {
+    const onTypingComplete = vi.fn();
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'approve?',
+      metadata: {
+        toolCallId: 'tc-ap-type',
+        toolName: 'some_tool',
+        requestUserApproval: { toolApproval: true },
+      },
+    });
+    renderBubble(
+      <MessageBubble message={msg} shouldType={true} onTypingComplete={onTypingComplete} />,
+    );
+    await waitFor(() => expect(onTypingComplete).toHaveBeenCalled());
+  });
+
+  it('compact prop removes gap-3 container class in completion summary', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-cs-compact',
+        toolName: 'complete',
+        isFinalSummary: true,
+        completionSummary: {
+          summary: 'Short',
+          outputs: [],
+          totalToolCalls: 0,
+          durationSeconds: 0,
+        },
+      },
+    });
+    const { container: compactContainer } = renderBubble(
+      <MessageBubble message={msg} compact={true} />,
+    );
+    // Control render without compact — must have gap-3.
+    const { container: defaultContainer } = renderBubble(
+      <MessageBubble message={msg} compact={false} />,
+    );
+    await waitFor(() => expect(compactContainer.querySelector('.flex')).not.toBeNull());
+    // The compact outer flex wrapper must NOT contain gap-3.
+    const compactFlex = compactContainer.querySelector('.flex') as HTMLElement | null;
+    expect(compactFlex).not.toBeNull();
+    expect(compactFlex!.classList.contains('gap-3')).toBe(false);
+    // Sanity: default render DOES include gap-3.
+    const defaultFlex = defaultContainer.querySelector('.flex') as HTMLElement | null;
+    expect(defaultFlex).not.toBeNull();
+    expect(defaultFlex!.classList.contains('gap-3')).toBe(true);
   });
 });

@@ -1,4 +1,3 @@
-import type { AgentDetail } from '@/lib/api';
 /**
  * Blackbox tests for @/features/agent-context/hooks.ts — useAgentProvider +
  * useAgentContext.
@@ -13,6 +12,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import React from 'react';
+import type { AgentDetail } from '@/lib/api';
 import type { AgentContextValue, AgentProviderProps } from '@/features/agent-context/types';
 import { benchmarkShareToken, captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 

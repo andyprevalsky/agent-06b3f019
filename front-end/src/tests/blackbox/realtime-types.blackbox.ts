@@ -1,9 +1,9 @@
 /**
  * Unit tests for src/lib/realtime-types.ts
  *
- * Covers every exported runtime function: type-guards (is*) and
- * extractors (extract*). No React, no DOM, no network - these are pure
- * functions operating on plain objects.
+ * Covers the exported type guards (is*). Envelope extractor coverage lives
+ * in realtime-payload-extractors.blackbox.ts. These are pure functions
+ * operating on plain objects, without React, DOM, or network dependencies.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -19,16 +19,6 @@ import {
   isInsertMessagePayload,
   isAssistantStreamPayload,
   isAgentStateChangedPayload,
-  extractInsertPayload,
-  extractUpdatePayload,
-  extractDeletePayload,
-  extractAssistantStreamPayload,
-  extractPlanStreamPayload,
-  extractToolStreamPayload,
-  extractAttentionStreamPayload,
-  extractAgentStateChangedPayload,
-  extractAgentModeStartedPayload,
-  extractRecord,
   type InsertMessagePayload,
 } from '@/lib/realtime-types';
 
@@ -72,13 +62,6 @@ function buildToolMsg(
   });
 }
 
-/**
- * Wrap any record into the Supabase realtime broadcast envelope.
- */
-function wrap<T>(record: T) {
-  return { payload: { record } };
-}
-
 // Silence console.error while still being able to assert it fires.
 let errSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -87,10 +70,6 @@ beforeEach(() => {
 afterEach(() => {
   errSpy.mockRestore();
 });
-
-// ===========================================================================
-// isToolMessage
-// ===========================================================================
 
 // ===========================================================================
 // isToolMessage
@@ -112,10 +91,11 @@ describe('isToolMessage', () => {
   });
 
   it('returns false and logs when metadata.toolName is not a string', () => {
-    const msg = {
+    const msg: unknown = {
       ...buildInsertMsg({ role: 'TOOL' }),
       metadata: { toolCallId: 'x', toolName: 123, toolStatus: 'IN_PROGRESS' },
     };
+    if (!isInsertMessagePayload(msg)) throw new Error('Invalid message envelope in fixture');
     expect(isToolMessage(msg)).toBe(false);
     expect(errSpy).toHaveBeenCalled();
   });
@@ -320,11 +300,11 @@ describe('isAssistantFileMessage', () => {
     const msg = buildInsertMsg({
       role: 'ASSISTANT',
       file_pointer: {
-        id: 'file-1',
+        id: 'fp-1',
         storage_path: 'bucket/path.png',
         original_filename: 'path.png',
         mime_type: 'image/png',
-        size_bytes: 1,
+        size_bytes: 1024,
         created_at: '2026-04-17T12:00:00Z',
       },
     });
@@ -347,11 +327,11 @@ describe('isAssistantFileMessage', () => {
     const msg = buildInsertMsg({
       role: 'USER',
       file_pointer: {
-        id: 'file-1',
+        id: 'fp-1',
         storage_path: 'bucket/path.png',
         original_filename: 'path.png',
         mime_type: 'image/png',
-        size_bytes: 1,
+        size_bytes: 1024,
         created_at: '2026-04-17T12:00:00Z',
       },
     });

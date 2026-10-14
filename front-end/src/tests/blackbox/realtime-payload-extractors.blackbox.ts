@@ -1,24 +1,5 @@
-/**
- * Unit tests for src/lib/realtime-types.ts
- *
- * Covers every exported runtime function: type-guards (is*) and
- * extractors (extract*). No React, no DOM, no network - these are pure
- * functions operating on plain objects.
- */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  isToolMessage,
-  isSpawnBrowserAgentMessage,
-  isSpawnClaudeCodeAgentMessage,
-  isSpawnAgentMessage,
-  isExploreAgentMessage,
-  isSetPlanMessage,
-  isSendMessageToUserMessage,
-  isRequestUserSignupMessage,
-  isAssistantFileMessage,
-  isInsertMessagePayload,
-  isAssistantStreamPayload,
-  isAgentStateChangedPayload,
   extractInsertPayload,
   extractUpdatePayload,
   extractDeletePayload,
@@ -29,57 +10,12 @@ import {
   extractAgentStateChangedPayload,
   extractAgentModeStartedPayload,
   extractRecord,
-  type InsertMessagePayload,
 } from '@/lib/realtime-types';
 
-// ---------------------------------------------------------------------------
-// Builders
-// ---------------------------------------------------------------------------
-
-/**
- * Build a minimal valid InsertMessagePayload for tests.
- */
-function buildInsertMsg(overrides: Partial<InsertMessagePayload> = {}): InsertMessagePayload {
-  return {
-    agentId: 'agent-1',
-    id: 'msg-1',
-    timestamp: '2026-04-17T12:00:00Z',
-    text: 'hello',
-    role: 'ASSISTANT',
-    metadata: null,
-    file_pointer: null,
-    ...overrides,
-  };
-}
-
-/**
- * Build a TOOL InsertMessagePayload with a given toolName (minimal valid metadata).
- */
-function buildToolMsg(
-  toolName: string,
-  metaOverrides: Record<string, unknown> = {},
-  overrides: Partial<InsertMessagePayload> = {},
-): InsertMessagePayload {
-  return buildInsertMsg({
-    role: 'TOOL',
-    metadata: {
-      toolCallId: 'tc-1',
-      toolName,
-      toolStatus: 'IN_PROGRESS',
-      ...metaOverrides,
-    },
-    ...overrides,
-  });
-}
-
-/**
- * Wrap any record into the Supabase realtime broadcast envelope.
- */
 function wrap<T>(record: T) {
   return { payload: { record } };
 }
 
-// Silence console.error while still being able to assert it fires.
 let errSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -87,14 +23,6 @@ beforeEach(() => {
 afterEach(() => {
   errSpy.mockRestore();
 });
-
-// ===========================================================================
-// isToolMessage
-// ===========================================================================
-
-// ===========================================================================
-// extractInsertPayload
-// ===========================================================================
 
 describe('extractInsertPayload', () => {
   it('returns the record for a valid wrapper', () => {

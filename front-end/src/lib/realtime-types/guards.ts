@@ -21,10 +21,8 @@ import type { AgentStateChangedPayload } from './bus-channel';
  * TOOL messages are guaranteed to have metadata with toolName/toolCallId/toolStatus.
  */
 export function isToolMessage(
-  msg: Omit<InsertMessagePayload, 'metadata'> & {
-    metadata?: { toolName?: unknown } | null;
-  },
-): msg is ToolMessagePayload {
+  msg: InsertMessagePayload,
+): msg is InsertMessagePayload & ToolMessagePayload {
   if (msg.role !== 'TOOL') return false;
   if (!msg.metadata || typeof msg.metadata.toolName !== 'string') {
     console.error(
@@ -41,7 +39,7 @@ export function isToolMessage(
  */
 export function isSpawnBrowserAgentMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<SpawnBrowserAgentMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<SpawnBrowserAgentMetadata> {
   return (
     msg.role === 'TOOL' &&
     msg.metadata !== null &&
@@ -55,7 +53,7 @@ export function isSpawnBrowserAgentMessage(
  */
 export function isSpawnClaudeCodeAgentMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<SpawnClaudeCodeAgentMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<SpawnClaudeCodeAgentMetadata> {
   return (
     msg.role === 'TOOL' &&
     msg.metadata !== null &&
@@ -69,7 +67,7 @@ export function isSpawnClaudeCodeAgentMessage(
  */
 export function isSpawnAgentMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<SpawnAgentMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<SpawnAgentMetadata> {
   return (
     msg.role === 'TOOL' &&
     msg.metadata !== null &&
@@ -90,7 +88,7 @@ export function isExploreAgentMessage(msg: InsertMessagePayload): boolean {
  */
 export function isSetPlanMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<SetPlanMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<SetPlanMetadata> {
   return (
     msg.role === 'TOOL' &&
     msg.metadata !== null &&
@@ -104,7 +102,7 @@ export function isSetPlanMessage(
  */
 export function isSendMessageToUserMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<SendMessageToUserMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<SendMessageToUserMetadata> {
   if (msg.role !== 'TOOL' || msg.metadata === null || msg.metadata === undefined) return false;
   return (
     msg.metadata.toolName === 'send_message_to_user' ||
@@ -117,7 +115,7 @@ export function isSendMessageToUserMessage(
  */
 export function isRequestUserSignupMessage(
   msg: InsertMessagePayload,
-): msg is ToolMessagePayload<RequestUserSignupMetadata> {
+): msg is InsertMessagePayload & ToolMessagePayload<RequestUserSignupMetadata> {
   return (
     msg.role === 'TOOL' &&
     msg.metadata !== null &&

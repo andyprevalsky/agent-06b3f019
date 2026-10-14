@@ -1,5 +1,3 @@
-import type { MessageMetadata } from '../realtime-types/message-metadata';
-
 // Shared types used across api submodules and external consumers.
 
 // File attachment types
@@ -135,7 +133,32 @@ export interface Message {
   timestamp: string;
   text: string;
   role: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
-  metadata?: MessageMetadata;
+  metadata?: {
+    toolCallId?: string;
+    toolName?: string;
+    toolStatus?: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
+    title?: string;
+    subAgentId?: string;
+    progress?: number;
+    progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
+    error?: boolean;
+    browser_url?: string;
+    task_id?: string;
+    action_type?: import('../realtime-types/message-metadata').MessageMetadata['action_type'];
+    auxiliary?: {
+      coordinates?: { x: number; y: number };
+      [key: string]: unknown;
+    };
+    requestUserApproval?: Partial<
+      import('../realtime-types/tool-metadata').RequestUserApprovalMetadata['requestUserApproval']
+    >;
+    imageUrl?: string;
+    subAgentIds?: string[];
+    busId?: string;
+    spawnGroupId?: string;
+    forEachAggregate?: boolean;
+    [key: string]: unknown;
+  };
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)
 }
 

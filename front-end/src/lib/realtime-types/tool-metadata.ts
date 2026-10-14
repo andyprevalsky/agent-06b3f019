@@ -370,6 +370,7 @@ export type ToolMessageMetadata =
   | SpawnAgentMetadata
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
+  | SpawnAgentMetadata
   | SpawnSubAgentMetadata
   | WaitForMetadata
   | SetPlanMetadata

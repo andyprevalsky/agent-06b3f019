@@ -60,7 +60,29 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
 }
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
-  return { ...makeCtx([]), ...overrides };
+  const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
+  return {
+    agent: null,
+    applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
+    selectedAgentId: 'agent-1',
+    setSelectedAgentId: () => {},
+    messages: [],
+    streamingBubbles: new Map(),
+    streamingPlan: null,
+    streamingAttention: null,
+    streamingTools: new Map(),
+    streamedTextsRef,
+    registerMessageHandler: () => () => {},
+    sendMessage: async () => {},
+    isLoadingAgent: false,
+    forceResubscribe: () => {},
+    isChatMode: false,
+    ...overrides,
+  };
 }
 
 function renderList(ctx: AgentContextValue, props: React.ComponentProps<typeof MessageList> = {}) {
@@ -202,10 +224,7 @@ describe('MessageList', () => {
         }),
         msg('credential-classified', {
           role: 'TOOL',
-          text:
-            'Browser run failed.\n\n' +
-            'Failure reason: unknown\n\n' +
-            "Raw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
+          text: "Browser run failed.\n\nFailure reason: unknown\n\nRaw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
           timestamp: new Date(baseTime + 2000).toISOString(),
           metadata: {
             toolCallId: 'credential-failure-classifier:agent-1',
@@ -369,11 +388,11 @@ describe('MessageList', () => {
       streamingBubbles: new Map([['sb-1', { text: 'streaming...', sequence: 1, done: false }]]),
       streamingAttention: {
         stream_id: 'str-a',
+        sequence: 1,
+        done: false,
         tool_call_id: 'sa-1',
         message: 'please respond',
         is_question: true,
-        sequence: 0,
-        done: false,
       },
     });
     const { container } = renderList(ctx);

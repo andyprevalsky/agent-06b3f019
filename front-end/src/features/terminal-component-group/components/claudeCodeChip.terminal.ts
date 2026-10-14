@@ -12,7 +12,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { fetchCodeAgentSession } from '../hooks';
 import { CLAUDE_CODE_WS_MAX_RETRIES, CLAUDE_CODE_WS_RETRY_DELAYS } from '../config';
-import { type ChipState, type CodeProvider, type WsMessage } from '../types';
+import { type ChipState, type WsMessage } from '../types';
 import {
   formatTerminalOutputForDisplay,
   parseExitCode,
@@ -22,15 +22,11 @@ export {
   formatTerminalOutputForDisplay,
   normalizeTerminalWhitespace,
 } from './claudeCodeChip.theme';
+import type * as TerminalTypes from './claudeCodeChip.terminal.types';
 
-export interface TerminalManager {
-  terminalRef: MutableRefObject<XTermTerminal | null>;
-  outputBufferRef: MutableRefObject<string>;
-  /** Initialize xterm in the container and observe resize; returns cleanup. */
-  mount: (container: HTMLDivElement) => () => void;
-}
+export type { TerminalManager } from './claudeCodeChip.terminal.types';
 
-export function useTerminalManager(): TerminalManager {
+export function useTerminalManager(): TerminalTypes.TerminalManager {
   const terminalRef = useRef<XTermTerminal | null>(null);
   const outputBufferRef = useRef<string>('');
 
@@ -69,15 +65,6 @@ export function useTerminalManager(): TerminalManager {
   }, []);
 
   return { terminalRef, outputBufferRef, mount };
-}
-
-interface UseWebSocketArgs {
-  wsUrl: string | undefined;
-  terminalRef: MutableRefObject<XTermTerminal | null>;
-  outputBufferRef: MutableRefObject<string>;
-  isCompletedRef: MutableRefObject<boolean>;
-  shouldClose: boolean;
-  onStateChange: (state: ChipState) => void;
 }
 
 function applyWsMessage(
@@ -140,7 +127,7 @@ export function useClaudeCodeWebSocket({
   isCompletedRef,
   shouldClose,
   onStateChange,
-}: UseWebSocketArgs): void {
+}: TerminalTypes.UseWebSocketArgs): void {
   const wsRef = useRef<WebSocket | null>(null);
 
   const connect = useCallback(
@@ -194,15 +181,6 @@ export function useClaudeCodeWebSocket({
   }, [shouldClose]);
 }
 
-interface UseSavedOutputArgs {
-  taskId: string;
-  codeProvider: CodeProvider;
-  shouldFetch: boolean;
-  terminalRef: MutableRefObject<XTermTerminal | null>;
-  outputBufferRef: MutableRefObject<string>;
-  onOutputLoaded?: (output: string) => void;
-}
-
 export function useSavedOutputFetch({
   taskId,
   codeProvider,
@@ -210,7 +188,7 @@ export function useSavedOutputFetch({
   terminalRef,
   outputBufferRef,
   onOutputLoaded,
-}: UseSavedOutputArgs): void {
+}: TerminalTypes.UseSavedOutputArgs): void {
   const [fetched, setFetched] = useState(false);
 
   useEffect(() => {

@@ -1,4 +1,3 @@
-import type { ClientSource } from '@/lib/clientSource';
 /**
  * Terminal feature — composed agent actions + messaging hook.
  *
@@ -8,6 +7,7 @@ import type { ClientSource } from '@/lib/clientSource';
 
 import type { useAuth } from '@/features/auth';
 import type { useAgentContext } from '@/features/agent-context';
+import type { ClientSource } from '@/lib/clientSource';
 
 import type { TerminalView } from '../types';
 

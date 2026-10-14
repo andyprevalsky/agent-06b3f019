@@ -25,7 +25,7 @@ function makeHandlers(overrides: Partial<IntegrationHandlers> = {}) {
       openKeychainAccess: vi.fn(async () => ({ success: true })),
     },
   };
-  return { ...base, ...overrides } satisfies IntegrationHandlers;
+  return { ...base, ...overrides };
 }
 
 describe('useBrowserSync', () => {

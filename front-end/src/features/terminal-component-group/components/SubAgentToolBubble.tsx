@@ -5,7 +5,7 @@
  * Renders a sub-agent tool call with progress indicator.
  *
  * Props-driven visual states:
- * - status: 'IN_PROGRESS' | 'FINISHED'
+ * - status: 'IN_PROGRESS' | 'FINISHED' | 'ERROR'
  * - progress: 0.0-1.0 (for progress bar)
  *
  * Click handler navigates to sub-agent via onNavigate callback.

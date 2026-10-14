@@ -1,18 +1,14 @@
 /**
- * Blackbox tests for ClaudeCodeChip and SubAgentTree.
+ * Blackbox tests for ClaudeCodeChip.
  *
- * These components depend on agent-context and useAgentTree subscriptions,
- * both of which require live Supabase realtime. We stub those hooks to drive
- * the components through their state branches deterministically.
+ * The component depends on agent-context and live Supabase realtime.
+ * We stub those dependencies to drive its state branches deterministically.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
-import {
-  makeAgentTreeNode as makeNode,
-  makeChipMessage as makeMsg,
-} from './terminal-component-chips.fixtures';
+import { makeChipMessage as makeMsg } from './terminal-component-chips.fixtures';
 
 // ── Mocks (must be hoisted before the module-under-test imports) ─────────────
 
@@ -66,23 +62,7 @@ vi.mock('@/features/terminal-component-group/api', async (importOriginal) => {
   };
 });
 
-// Agent tree — drive SubAgentTree node map deterministically.
-const treeRef: { current: Map<string, unknown> } = { current: new Map() };
-vi.mock('@/hooks/useAgentTree', async () => {
-  const actual = await vi.importActual<Record<string, unknown>>('@/hooks/useAgentTree');
-  return {
-    ...actual,
-    useAgentTree: () => treeRef.current,
-  };
-});
-
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
-import {
-  formatTerminalOutputForDisplay,
-  normalizeTerminalWhitespace,
-} from '@/features/terminal-component-group/components/claudeCodeChip.terminal';
-import { ParseCodeAgentTranscript as parseCodeAgentTranscript } from '@/features/terminal-component-group/components/claudeCodeChip.transcript';
-import SubAgentTree from '@/features/terminal-component-group/components/SubAgentTree';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ClaudeCodeChip
