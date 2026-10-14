@@ -9,12 +9,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 
 import { useBrowserSync } from '@/features/integrations/hooks/useBrowserSync';
 
-type BrowserInfo = {
-  type: string;
-  name: string;
-  isInstalled: boolean;
-  needsManualPassword: boolean;
-};
+import type { BrowserInfo } from '@/features/integration-handlers-context';
 
 function makeHandlers(overrides: Record<string, unknown> = {}) {
   const base = {
@@ -30,7 +25,7 @@ function makeHandlers(overrides: Record<string, unknown> = {}) {
       openKeychainAccess: vi.fn(async () => ({ success: true })),
     },
   };
-  return { ...base, ...overrides } as never;
+  return { ...base, ...overrides };
 }
 
 describe('useBrowserSync', () => {

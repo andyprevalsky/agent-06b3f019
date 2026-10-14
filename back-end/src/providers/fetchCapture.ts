@@ -33,7 +33,7 @@ import { NonBlockingFileCache } from './nonBlockingFetchCache';
 import {
   markMessagingFetchFakesInstalled,
   mockAgentPhoneMessageId,
-  mockSurgeMessageId,
+  buildMockSurgeFetchResponse,
 } from './smsTransportMock';
 
 /**
@@ -476,37 +476,12 @@ export function installFetchCapture(): Router {
       url.includes('api.surge.app') &&
       url.includes('/messages')
     ) {
-      if (requestBody?.includes('__BLACKBOX_SURGE_THROW__')) {
-        throw new Error('blackbox fake Surge network failure');
-      }
-      if (requestBody?.includes('__BLACKBOX_SURGE_502__')) {
-        const body = 'blackbox fake Surge upstream unavailable';
-        entry.durationMs = Date.now() - start;
-        entry.responseStatus = 502;
-        entry.responseBody = body;
-        captures.push(entry);
-
-        return new globalThis.Response(body, {
-          status: 502,
-          statusText: 'Bad Gateway',
-          headers: { 'content-type': 'text/plain' },
-        });
-      }
-      // Seed from request body only — the process-wide capture counter makes
-      // identical SMS payloads get different fake IDs across unrelated traffic.
-      const body = JSON.stringify({
-        id: mockSurgeMessageId(`capture:${requestBody ?? ''}`),
-      });
+      const response = buildMockSurgeFetchResponse(requestBody);
       entry.durationMs = Date.now() - start;
-      entry.responseStatus = 200;
-      entry.responseBody = body;
+      entry.responseStatus = response.status;
+      entry.responseBody = await response.clone().text();
       captures.push(entry);
-
-      return new globalThis.Response(body, {
-        status: 200,
-        statusText: 'OK',
-        headers: { 'content-type': 'application/json' },
-      });
+      return response;
     }
 
     if (

@@ -7,7 +7,6 @@
 import { useEffect, type RefObject } from 'react';
 
 interface VideoQualityCaps extends HTMLVideoElement {
-  getVideoPlaybackQuality?: () => { totalVideoFrames?: number; droppedVideoFrames?: number };
   webkitDecodedFrameCount?: number;
   webkitDroppedFrameCount?: number;
 }

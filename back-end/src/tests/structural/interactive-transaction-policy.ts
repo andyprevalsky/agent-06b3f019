@@ -128,12 +128,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'repeatable-read isolation is not exposed by the canonical wrapper',
   },
   {
-    file: 'providers/workflowDeploymentLease.ts',
-    scope: 'acquireWorkflowDeploymentLease',
-    fingerprint: '2b255be04f38f726',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'providers/workflowDeploymentManifest.ts',
     scope: 'loadOrCreateWorkflowDeploymentManifest',
     fingerprint: '29bf8bac5cdd0f63',

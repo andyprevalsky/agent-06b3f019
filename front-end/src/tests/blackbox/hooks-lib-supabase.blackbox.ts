@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Session } from '@supabase/supabase-js';
 
 import { server } from './msw/server';
 
@@ -23,7 +24,7 @@ import {
 const API_BASE = 'http://localhost:3001/api';
 
 function mockSession() {
-  const session = {
+  const session: Session = {
     access_token:
       'eyJhbGciOiJIUzI1NiJ9.' +
       btoa(JSON.stringify({ sub: 'user-12345678', role: 'authenticated' })) +
@@ -32,7 +33,14 @@ function mockSession() {
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
     token_type: 'bearer',
-    user: { id: 'user-12345678', is_anonymous: false },
+    user: {
+      id: 'user-12345678',
+      is_anonymous: false,
+      aud: 'authenticated',
+      app_metadata: {},
+      user_metadata: {},
+      created_at: '2026-01-01T00:00:00Z',
+    },
   };
   localStorage.setItem('rose-session', JSON.stringify(session));
   return session;

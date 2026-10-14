@@ -33,7 +33,8 @@ export function useRecordingPlayer(src: string | null): RecordingPlayerState {
     }
 
     const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
-    const handleDurationChange = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    const handleDurationChange = () =>
+      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const handleEnded = () => setIsPlaying(false);
 
     audio.addEventListener('timeupdate', handleTimeUpdate);

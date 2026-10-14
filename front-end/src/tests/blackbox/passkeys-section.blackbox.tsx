@@ -34,7 +34,7 @@ describe('PasswordsSection passkeys row', () => {
 
     renderWithProviders(<PasswordsSection {...baseProps} onPasskeysOpen={onPasskeysConnect} />);
 
-    const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
+    const passwordsSection = screen.getByText('Passwords').closest<HTMLElement>('.rounded-lg')!;
     expect(within(passwordsSection).getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
     expect(within(passwordsSection).queryByText('Apple Passwords')).not.toBeInTheDocument();
     expect(screen.queryByText(/enable rose in autofill/i)).not.toBeInTheDocument();

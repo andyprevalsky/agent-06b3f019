@@ -5,8 +5,13 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
+import { dragHandleTo, sidebarWidth } from './app-sidebar.fixtures';
 import Terminal from '@/pages/Terminal';
 import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
+import {
+  SIDEBAR_WIDTH_COLLAPSED,
+  SIDEBAR_WIDTH_EXPANDED,
+} from '@/features/terminal-component-group/config';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -122,15 +127,18 @@ describe('Terminal page', () => {
       });
     });
 
-    it('renders sidebar with agent list items', async () => {
-      const user = userEvent.setup({ delay: null });
+    it('renders minimized agent icons and reveals their titles when expanded', async () => {
       renderWithProviders(<Terminal />);
 
-      // The sidebar now renders expanded by default (drag-to-resize replaced
-      // the collapse toggle), so goal text is visible without any interaction.
       await waitFor(() => {
-        expect(screen.getByText('Test agent')).toBeInTheDocument();
+        expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
+        expect(document.querySelector('[data-sidebar-agent-icon]')).not.toBeNull();
       });
+      expect(screen.queryByText('Test agent')).not.toBeInTheDocument();
+
+      dragHandleTo(SIDEBAR_WIDTH_EXPANDED);
+
+      expect(await screen.findByText('Test agent')).toBeInTheDocument();
     });
 
     it('shows opening animation text when no agent is selected', async () => {
@@ -329,6 +337,7 @@ describe('Terminal page', () => {
       );
 
       renderWithProviders(<Terminal />);
+      dragHandleTo(SIDEBAR_WIDTH_EXPANDED);
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
@@ -460,12 +469,10 @@ describe('Terminal page', () => {
     });
 
     it('does not show Browse in the sidebar for regular users', async () => {
-      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
-      expect(await screen.findByText('Integrations')).toBeInTheDocument();
-      expect(screen.queryByText('Browse')).not.toBeInTheDocument();
-      expect(screen.getByText('Integrations')).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'Integrations' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Browse' })).not.toBeInTheDocument();
     });
   });
 

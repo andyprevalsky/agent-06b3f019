@@ -20,8 +20,8 @@ def native(pid):
 def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
     from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function, fleet_source_text
 
-    # Stress the fixture's publication boundary: a slow writer must never expose
-    # an empty health record to the real inventory consumer.
+    # The inventory producer publishes a complete generation atomically. Keep
+    # that contract when restoring the fixture even if its writer is delayed.
     write_text = Path.write_text
 
     def slow_health_write(path, data, *args, **kwargs):
@@ -32,6 +32,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
         return write_text(path, data, *args, **kwargs)
 
     monkeypatch.setattr(Path, "write_text", slow_health_write)
+
     BASE = tmp_path
     BASH = shutil.which("bash") or "bash"
     SOURCE = BASE / "subject.sh"
@@ -407,6 +408,10 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
                 "source_sha256": receipt["source_sha256"],
                 "control_sha256": receipt["control_sha256"],
                 "owners_absent": all(r["all_recorded_owners_absent"] for r in results),
+                "failed_cases": [
+                    {"mode": r["mode"], "error": r["error"], "scaler_rc": r["scaler_rc"]}
+                    for r in results if not r["passed"]
+                ],
             }
         )
     )
