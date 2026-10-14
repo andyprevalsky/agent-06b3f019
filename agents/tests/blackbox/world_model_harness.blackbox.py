@@ -2257,6 +2257,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[])),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2284,7 +2285,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     assert "4111111111111111" not in resumed_turns[-1]["content"]
 
 
-async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
+async def _exercise_simulated_browser_policy(*, active_feedback=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
 
     class FakeWorldModel:
@@ -2359,7 +2360,23 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
     )
-    policy = AsyncMock(side_effect=policy_results)
+    import copy
+    from datetime import datetime, timezone
+    correction = "Use the existing signed-in account, preserving the order ID deliverable."
+    rows = []
+    model_inputs = []
+    async def decide(**kwargs):
+        model_inputs.append(copy.deepcopy(kwargs["turn_messages"]))
+        if active_feedback and len(model_inputs) == 1:
+            rows.append({"id": "active-correction", "role": "USER", "text": correction,
+                         "timestamp": datetime.now(timezone.utc).isoformat()})
+        return policy_results[len(model_inputs) - 1]
+    async def poll(_agent_id, since):
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
+    schema = {"fields": [{"name": "order_id", "type": "string",
+                          "description": "Amazon order confirmation ID", "required": True}]}
+    generator = AsyncMock(return_value=(schema, None, {}))
+    policy = AsyncMock(side_effect=decide)
     verifier = AsyncMock(
         return_value={
             "score": 1,
@@ -2379,6 +2396,8 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(side_effect=poll)),
+        patch("helpers.llm._generate_response_schema_with_rose", generator),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2434,11 +2453,27 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
     verifier_actions = verifier.await_args.kwargs["action_entries"]
     assert [entry["step"] for entry in verifier_actions] == [1, 2, 3, 4, 5, 6]
 
+    if active_feedback:
+        assert {"role": "user", "content": correction} in model_inputs[1], "active simulated browser lost the actual USER correction"
+        assert verifier.await_args.kwargs.get("user_instruction_messages") == [{"role": "user", "content": correction}], "simulated verifier omitted the actual USER correction"
+        generator.assert_awaited_once()
+        assert all("Output schema revised" not in json.dumps(turns) for turns in model_inputs)
 
-async def test_simulated_browser_persists_post_approval_confirmation_state():
+
+async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
+    await _exercise_simulated_browser_policy()
+
+
+async def test_simulated_browser_preserves_active_user_input_without_narration():
+    await _exercise_simulated_browser_policy(active_feedback=True)
+
+
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
+    from datetime import datetime, timedelta, timezone
 
     confirmation_url = "https://amazon.example.test/gp/buy/thankyou/handlers/display.html"
+    executed_actions = []
 
     class FakeWorldModel:
         world_model_name = "rose-amazon"
@@ -2459,6 +2494,7 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
             assert tool_args["action"] == "evaluate"
             assert tool_args["approval"]["granted"] is True
             assert tool_call_id == "place-order:approved"
+            executed_actions.append(tool_args["action"])
             return {
                 "success": True,
                 "status": "completed",
@@ -2539,6 +2575,14 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         "simulated_reasoning_messages": [],
         "simulated_action_summary": ["evaluate: place order"],
     }
+    correction = "Do not place this order. Inspect the checkout instead."
+    now = datetime.now(timezone.utc)
+    resume_state["user_message_cursor"] = (now - timedelta(minutes=1)).isoformat()
+    rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
+             "timestamp": now.isoformat()}] if user_feedback else []
+    schema = {"fields": [{"name": "order_id", "type": "string",
+                          "description": "Amazon order confirmation ID", "required": True}]}
+    generation = AsyncMock(return_value=(schema, None, {}))
 
     with (
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
@@ -2551,6 +2595,8 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=rows)),
+        patch("helpers.llm._generate_response_schema_with_rose", generation),
         patch.object(browser_handler, "save_browser_action_message", saved_actions),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2588,6 +2634,15 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
         )
 
     assert result["status"] == "completed"
+    if user_feedback:
+        assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
+        assert {"role": "user", "content": correction} in policy.await_args.kwargs["turn_messages"]
+        assert verifier.await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": correction}]
+        assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
+        generation.assert_awaited_once()
+        return
+    assert executed_actions == ["evaluate"], "ordinary approval omitted its authorized queued action"
+    generation.assert_not_awaited()
     assert result["current_url"] == confirmation_url
     assert confirmation_url in result["message"]
     approval_event = next(
@@ -2598,6 +2653,14 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
     assert approval_evidence["browser_state"]["url"] == confirmation_url
     assert "Order placed, thanks Aman!" in approval_evidence["browser_state"]["dom_tree"]
     assert approval_event.kwargs["steps_taken"] == 6
+
+
+async def test_simulated_browser_persists_post_approval_confirmation_state():
+    await _exercise_simulated_browser_pending_approval()
+
+
+async def test_simulated_browser_user_feedback_invalidates_pending_approved_action():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True)
 
 
 async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
@@ -2995,6 +3058,18 @@ def test_write_eval_suite_matches_wmh_examples_shape():
         assert 'judge = "rubric"' in text
 
 
+def test_simulated_resume_preserves_full_user_instruction_tail():
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_resume_payload
+    correction = {"role": "user", "content": "A" * 8000}
+    turns = [correction] + [{"role": "tool", "content": "actual result"} for _ in range(30)]
+    state = _simulated_browser_resume_payload(
+        browser_state={}, action_entries=[], turn_messages=turns, recording_ref=None,
+        frame_count=0, visited_urls=[], reasoning_messages=[], action_summary=[],
+        world_model_session_id="simulated", total_input_tokens=0, total_output_tokens=0, usage_by_model={},
+    )
+    assert correction in state["simulated_turn_messages"], "resume discarded or truncated real USER input"
+
+
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
@@ -3103,6 +3178,8 @@ async def run_all_tests():
         test_wmh_http_clients_allow_slow_grounded_transitions,
     )
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
+    await r.record_async("simulated_browser_preserves_active_user_input_without_narration", test_simulated_browser_preserves_active_user_input_without_narration)
+    r.record("simulated_resume_preserves_full_user_instruction_tail", test_simulated_resume_preserves_full_user_instruction_tail)
     await r.record_async(
         "wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes
     )
@@ -3165,6 +3242,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_persists_post_approval_confirmation_state",
         test_simulated_browser_persists_post_approval_confirmation_state,
+    )
+    await r.record_async(
+        "simulated_browser_user_feedback_invalidates_pending_approved_action",
+        test_simulated_browser_user_feedback_invalidates_pending_approved_action,
     )
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",

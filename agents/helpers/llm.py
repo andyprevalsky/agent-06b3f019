@@ -425,6 +425,8 @@ class _GeneratedResponseSchemaNestedField(BaseModel):
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
     constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -446,6 +448,8 @@ class _GeneratedResponseSchemaField(BaseModel):
     )
     constraints: List[ResponseSchemaBound] = Field(default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings.")
     required: bool = Field(default=True, description="Defaults to true; false allows omission.")
+    description: Optional[str] = None
+    nullable: Optional[bool] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -703,13 +707,15 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
             "required": field.required,
         }
         item.update(bounds_from_entries(field.type, field.constraints))
-        if field.type in ("object", "list[object]") and field.properties:
+        item.update({key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None})
+        if field.properties is not None:
             item["properties"] = [
                 {
                     "name": prop.name,
                     "type": prop.type,
                     "required": prop.required,
                     **bounds_from_entries(prop.type, prop.constraints),
+                    **{key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None},
                 }
                 for prop in field.properties
             ]
