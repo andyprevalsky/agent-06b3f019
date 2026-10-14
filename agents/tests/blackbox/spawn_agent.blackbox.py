@@ -5116,7 +5116,7 @@ async def test_explore_empty_completion_preserves_atomic_source_values():
 
 
 def test_explore_source_handoff_keeps_atomic_results_and_bounded_payloads():
-    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+    from utils.explore_source_handoff import ExploreSourceHandoff
 
     handoff = ExploreSourceHandoff(1200)
     token = "exact-machine-value-" * 12
@@ -5146,7 +5146,7 @@ def test_explore_source_handoff_keeps_atomic_results_and_bounded_payloads():
 
 
 async def test_explore_native_metadata_is_not_filtered_as_stub_copy():
-    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+    from utils.explore_source_handoff import ExploreSourceHandoff
     from domains.spawn_agent.handler import _explore_chip_text
     from tools.base import MessageStatus
 
@@ -5163,7 +5163,7 @@ async def test_explore_native_metadata_is_not_filtered_as_stub_copy():
 
 
 async def test_explore_source_handoff_survives_timeout_parent_recovery():
-    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+    from utils.explore_source_handoff import ExploreSourceHandoff
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 

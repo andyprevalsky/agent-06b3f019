@@ -34,12 +34,12 @@ from domains.spawn_agent.repo import (
 from domains.spawn_agent.repo import (
     save_explore_message,
 )
-from domains.spawn_agent.source_handoff import ExploreSourceHandoff
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
+from utils.explore_source_handoff import ExploreSourceHandoff
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 

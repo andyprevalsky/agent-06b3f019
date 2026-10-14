@@ -737,9 +737,19 @@ assert any("no correctly attached recording" in f for f in failures), failures
 
 # Exercise actual socket timeouts at the public verifier boundary. A fresh GET
 # can recover a stalled response, while persistent/auth/JSON failures stay closed.
-for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
+for fault in (
+    "headers-once", "body-once", "always", "always-late-receipt",
+    "always-late-extra", "forbidden", "malformed",
+):
     requests: list[str | None] = []
+    receipt_condition = threading.Condition()
+    observe_requests = threading.Event()
+    if fault != "always-late-receipt":
+        observe_requests.set()
     release = threading.Event()
+    extra_arrived = threading.Event()
+    extra_thread = None
+    extra_result: list[Any] = []
     body = json.dumps(
         {
             "messages": [
@@ -755,9 +765,18 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         def do_GET(self) -> None:
             is_api = self.path.startswith("/api/benchmarks/shared-agent/")
             if is_api:
-                requests.append(self.headers.get("Authorization"))
+                if self.headers.get("Authorization") == "BenchmarkShare fixture.extra":
+                    extra_arrived.set()
+                    assert release.wait(5), "fixture extra receipt was not released"
+                # Model server scheduling after the client has already timed
+                # out. Receipt collection is asynchronous to verifier return.
+                assert observe_requests.wait(5), "fixture receipt observer was not released"
+                with receipt_condition:
+                    requests.append(self.headers.get("Authorization"))
+                    receipt_condition.notify_all()
             stalled = is_api and (
-                fault == "always" or (len(requests) == 1 and fault.endswith("-once"))
+                fault in {"always", "always-late-receipt", "always-late-extra"}
+                or (len(requests) == 1 and fault.endswith("-once"))
             )
             try:
                 if stalled and fault != "body-once":
@@ -812,18 +831,56 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         assert observed == (("verified in fresh browser", 1) if recovered else None), (
             fault
         )
-        expected_requests = 2 if recovered or fault == "always" else 1
-        assert requests == ["BenchmarkShare fixture.signature"] * expected_requests, (
-            fault,
-            requests,
-        )
+        if fault == "always-late-extra":
+            # This test-owned third request cannot be recorded until cleanup.
+            # A pre-join snapshot would incorrectly report only two receipts.
+            def extra_request() -> None:
+                request = urllib.request.Request(
+                    f"{origin}/api/benchmarks/shared-agent/{agent}",
+                    headers={"Authorization": "BenchmarkShare fixture.extra"},
+                )
+                try:
+                    with mod._opener().open(request, timeout=5) as response:
+                        response.read()
+                        extra_result.append(response.status)
+                except Exception as exc:
+                    extra_result.append(exc)
+
+            extra_thread = threading.Thread(target=extra_request)
+            extra_thread.start()
+            assert extra_arrived.wait(5), "fixture extra request did not arrive"
+        expected_requests = 2 if recovered or fault.startswith("always") else 1
+        # Client timeout does not join the server's receipt observer. Wait for
+        # that independent fixture work, then compare a stable observation.
+        with receipt_condition:
+            observe_requests.set()
+            assert receipt_condition.wait_for(lambda: len(requests) >= expected_requests, timeout=5), (
+                fault,
+                tuple(requests),
+            )
         assert len(browser_calls) == int(recovered), fault
     finally:
+        observe_requests.set()
         release.set()
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
         assert not thread.is_alive()
+        if extra_thread is not None:
+            extra_thread.join(timeout=5)
+            assert not extra_thread.is_alive()
+            assert extra_result == [200], extra_result
+
+    # server_close joins every non-daemon request handler, including a late
+    # extra request. Inspect the final immutable receipt only after that join.
+    observed_requests = tuple(requests)
+    expected_receipts = ("BenchmarkShare fixture.signature",) * expected_requests
+    if fault == "always-late-extra":
+        expected_receipts += ("BenchmarkShare fixture.extra",)
+    assert observed_requests == expected_receipts, (
+        fault,
+        observed_requests,
+    )
 
 print("publish_evidence_links browser validation checks passed")
 PY
