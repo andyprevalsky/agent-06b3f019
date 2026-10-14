@@ -446,11 +446,21 @@ _fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
         inventory_index_healthy || return $?
         [ -s "$f" ] || return 75
         cat "$f"
-        return 0
+        return $?
     fi
     "$@" 2>/dev/null
 }
 fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines list -a "$APP" --json; }
+fleet_admission_machines_json() {
+    # Borrow the original campaign publisher even during warm-source lookup;
+    # never retain app-wide inline boot payloads in each waiting controller.
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        [ -n "${SNAPSHOT_LOOP_PID:-}" ] || return 75
+        _fresh_snapshot_or "$INVENTORY_INDEX/current/admission-machines.json" FLY machines list -a "$APP" --json
+        return $?
+    fi
+    fleet_machines_json
+}
 fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
 
 machines_snapshot_identity() {

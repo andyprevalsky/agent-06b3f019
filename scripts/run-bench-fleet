@@ -1762,7 +1762,7 @@ warm_source_volume_size_from_inventory() {  # <exact-machine-id> <exact-volume-i
     esac
     while :; do
         status=0
-        machines="$(fleet_machines_json)" || status=$?
+        machines="$(fleet_admission_machines_json)" || status=$?
         if [ "$status" = 0 ]; then
             python3 -c '
 import json, sys
@@ -4204,7 +4204,8 @@ try:
             available += 1
     print(available)
 except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-    print(f"pool capacity classification failed: {exc}", file=sys.stderr)
+    position = getattr(exc, "pos", -1)
+    print(f"pool capacity classification failed: {type(exc).__name__} position={position}", file=sys.stderr)
     raise SystemExit(1)
 '
 }
@@ -12796,7 +12797,15 @@ if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     fi
     echo "🧊 independently owned immutable source: $WARM_ID (region $REGION)"
 else
-warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+    inventory_status=0
+    start_machines_snapshot_loop || inventory_status=$?
+    [ "$inventory_status" = 0 ] || {
+        echo "❌ campaign inventory unavailable before warm-source lookup" >&2
+        exit "$inventory_status"
+    }
+fi
+warm_json="$(fleet_admission_machines_json 2>/dev/null || echo '[]')"
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin) or []
@@ -12839,7 +12848,7 @@ if [ "$warm_state" != "stopped" ]; then
         echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
         exit 1
     }
-    warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+    warm_json="$(fleet_admission_machines_json 2>/dev/null || echo '[]')"
     warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
         echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
     }
@@ -13159,7 +13168,13 @@ reconcile_stale_fleet_registries || exit 1
 reap_orphaned_fleet_proxies
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
-warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+    refresh_machines_snapshot_after "$(machines_snapshot_identity)" || {
+        echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
+        exit 1
+    }
+fi
+warm_json="$(fleet_admission_machines_json 2>/dev/null)" || {
     echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
     exit 1
 }
@@ -13179,7 +13194,8 @@ enforce_app_capacity_guard() {
     local requested_pool_eligible_machines bench bench_vm_size bench_shared_units
     local replacement_slots reservation_machine_slots reservation_result reservation_status
     local reservation_outcome reserved_machines reserved_shared
-    local capacity_counts active_shared active_perf
+    local capacity_counts active_shared active_perf capacity_parse_status
+    local LC_ALL=C
     local running_machines stopped_machines total_machines projected_shared
     local projected_machines soft_line
 
@@ -13255,6 +13271,7 @@ enforce_app_capacity_guard() {
     requested_fresh_machines=$(( requested_machines - available_pool_machines ))
     reservation_machine_slots=$(( requested_fresh_machines + replacement_slots ))
 
+    capacity_parse_status=0
     capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
 import json, sys
 try:
@@ -13275,10 +13292,13 @@ try:
         else:
             active_perf += cpus
     print(active_shared, active_perf, running, stopped, len(machines))
-except Exception:
-    print("")
-' 2>/dev/null || true)"
-    if [ -z "$capacity_counts" ]; then
+except Exception as exc:
+    position = getattr(exc, "pos", -1)
+    print(f"capacity classification failed: {type(exc).__name__} position={position}", file=sys.stderr)
+    raise SystemExit(1)
+')" || capacity_parse_status=$?
+    if [ "$capacity_parse_status" -ne 0 ] || [ -z "$capacity_counts" ]; then
+        printf 'capacity classification diagnostic: exit=%s input_bytes=%s\n' "$capacity_parse_status" "${#warm_json}" >&2
         echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
         return 1
     fi
@@ -13365,7 +13385,7 @@ admit_app_capacity_with_wait() {
     while :; do
         inventory_status=0
         if [ "$refresh_inventory" = 1 ]; then
-            warm_json="$(fleet_machines_json)" || inventory_status=$?
+            warm_json="$(fleet_admission_machines_json)" || inventory_status=$?
         fi
         if [ "$inventory_status" = 0 ]; then
             enforce_app_capacity_guard && return 0
@@ -13455,7 +13475,7 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
     local worker_inventory inventory_status=0
     if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
-        worker_inventory="$(fleet_machines_json)" || inventory_status=$?
+        worker_inventory="$(fleet_admission_machines_json)" || inventory_status=$?
         # Healthy temporary absence stays pending; invalid ownership remains fatal.
         [ "$inventory_status" = 0 ] || return "$inventory_status"
     else

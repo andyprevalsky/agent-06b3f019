@@ -32745,3 +32745,123 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fe
         os.close(release_fd)
         sibling.terminate(); sibling.wait(timeout=FIXTURE_DRAIN_SECONDS)
         lock.close()
+
+
+def test_private_fleet_source_compact_admission_inventory_preserves_native_fields(tmp_path: Path) -> None:
+    """Inline boot payloads never enter each capacity consumer's shell copy."""
+    import importlib.util
+    helper = ROOT / "scripts/cloudbench-machine-readiness.py"
+    spec = importlib.util.spec_from_file_location("compact_readiness", helper)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    native = [{"id": "a1", "name": "warm", "state": "started", "region": "ord", "config": {"guest": {"cpu_kind": "shared", "cpus": 4, "memory_mb": 8192}, "mounts": [{"volume": "v1", "path": "/data", "size_gb": 40}], "metadata": {"proof": "exact"}, "init": {"cmd": ["sleep", "infinity"]}, "files": [{"raw_value": "x" * (24 * 1024 * 1024)}], "env": {"PRIVATE": "retained-only-in-native"}}}]
+    machines = tmp_path / "machines.json"; machines.write_text(json.dumps(native))
+    volumes = tmp_path / "volumes.json"; volumes.write_text('[{"id":"v1","state":"created"}]')
+    index = tmp_path / "index"
+    module.publish_index(machines, volumes, index)
+    compact = index / "current/admission-machines.json"
+    assert compact.is_file(), "publisher must provide a compact generation-bound native projection"
+    assert compact.stat().st_size < 4096
+    projected = json.loads(compact.read_text())
+    expected = json.loads(json.dumps(native))
+    del expected[0]["config"]["files"]; del expected[0]["config"]["env"]
+    assert projected == expected
+    assert json.loads(machines.read_text()) == native, "original inventory must remain exact"
+    # A single real consumer under a fixed memory ceiling demonstrates why
+    # retaining/parsing inline files is not a valid admission dependency.
+    if sys.platform.startswith("linux"):
+        import resource
+        def bounded_memory() -> None:
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, 64 * 1024 * 1024))
+        parser = "import json,sys; a=json.load(open(sys.argv[1])); print(sum((m.get('config') or {}).get('guest',{}).get('cpus',1) for m in a))"
+        full = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", parser, str(machines)], capture_output=True, preexec_fn=bounded_memory)
+        small = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", parser, str(compact)], capture_output=True, preexec_fn=bounded_memory)
+        assert full.returncode != 0 and b"MemoryError" in full.stderr
+        assert small.returncode == 0 and small.stdout.strip() == b"4"
+    for bad in [{"id": "a1", "state": "started", "config": []}, {"id":"a1", "state":"started", "config":{"guest":[]}}]:
+        machines.write_text(json.dumps([bad]))
+        with pytest.raises((ValueError, TypeError, AttributeError)):
+            module.publish_index(machines, volumes, index)
+        assert json.loads(compact.read_text()) == expected, "malformed input must not replace last proven generation"
+
+
+def test_private_fleet_source_compact_admission_refuses_unhealthy_or_failed_read(tmp_path: Path) -> None:
+    inventory = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text()
+    helpers = "\n".join(_extract_fleet_function(inventory, name) for name in ("_fresh_snapshot_or() {", "fleet_admission_machines_json() {"))
+    directory = tmp_path / "index/current"; directory.mkdir(parents=True)
+    (directory / "admission-machines.json").write_text('[{"id":"native"}]')
+    script = """set -uo pipefail
+SNAPSHOT_LOOP_PID=42
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=bound
+INVENTORY_INDEX="$INDEX"
+APP=owned
+inventory_index_healthy() { return "$HEALTH"; }
+FLY() { echo native-fallback >&2; return 99; }
+""" + helpers + "\nfleet_admission_machines_json\n"
+    for health in (0, 1, 75):
+        env = dict(os.environ, INDEX=str(tmp_path / "index"), HEALTH=str(health))
+        result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+        assert result.returncode == health
+        assert "native-fallback" not in result.stderr
+        assert (result.stdout.strip() == '[{"id":"native"}]') if health == 0 else not result.stdout
+    failed = script.replace("fleet_admission_machines_json\n", "cat() { return 1; }\nfleet_admission_machines_json\n")
+    result = subprocess.run(["bash", "-c", failed], env=dict(os.environ, INDEX=str(tmp_path / "index"), HEALTH="0"), capture_output=True)
+    assert result.returncode == 1 and not result.stdout
+
+
+def test_private_fleet_source_compact_inventory_binding_survives_caller_substitution(tmp_path: Path) -> None:
+    fleet = fleet_source_text()
+    start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('echo "🧊 independently owned immutable source:'))
+    stop = fleet.index('warm_pair=', start)
+    warm = fleet[start:stop]
+    inventory = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text()
+    helpers = "\n".join(_extract_fleet_function(inventory, name) for name in ("_fresh_snapshot_or() {", "fleet_admission_machines_json() {"))
+    directory = tmp_path / "index/current"; directory.mkdir(parents=True)
+    (directory / "admission-machines.json").write_text('[{"id":"native"}]')
+    script = """set -euo pipefail
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=bound
+INVENTORY_INDEX="$INDEX"
+APP=owned
+start_machines_snapshot_loop() { SNAPSHOT_LOOP_PID=42; SNAPSHOT_LOOP_TOKEN=original; }
+inventory_index_healthy() { [ "${SNAPSHOT_LOOP_TOKEN:-}" = original ]; }
+FLY() { echo unexpected-native-fanout >&2; return 99; }
+""" + helpers + "\n" + warm + """
+[ "$SNAPSHOT_LOOP_PID:$SNAPSHOT_LOOP_TOKEN" = 42:original ]
+[ "$warm_json" = '[{"id":"native"}]' ]
+refresh_machines_snapshot_after() { [ "$SNAPSHOT_LOOP_PID:$SNAPSHOT_LOOP_TOKEN" = 42:original ]; }
+refresh_machines_snapshot_after previous
+warm_json="$(fleet_admission_machines_json)"
+[ "$warm_json" = '[{"id":"native"}]' ]
+"""
+    result = subprocess.run(["bash", "-c", script], env=dict(os.environ, INDEX=str(tmp_path / "index")), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "unexpected-native-fanout" not in result.stderr
+
+
+def test_private_fleet_source_capacity_classification_diagnostic_has_no_payload(tmp_path: Path) -> None:
+    fleet = fleet_source_text()
+    support = _fleet_primary_shape_helpers(fleet) + "\n".join(_extract_fleet_function(fleet, name) for name in ("available_stopped_pool_machine_count() {", "enforce_app_capacity_guard() {"))
+    for raw in ('{"PRIVATE_PAYLOAD":"do-not-print"', '[{"id":"a1","config":[1]}]'):
+        script = f"""set -u
+warm_json={shlex.quote(raw)}
+BENCHES=(fixture)
+PROVISION_POOL=""
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+APP=owned
+FLEET_OWNER_TOKEN=original
+CLOUDBENCH_APP_MACHINE_CEILING=56
+CLOUDBENCH_SHARED_CPU_GOVERNOR=160
+CLOUDBENCH_SHARED_CPU_HEADROOM=20
+CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
+POOL_IDS_FILE={shlex.quote(str(tmp_path / "missing.ids"))}
+{support}
+capacity_reserve_slots() {{ echo forbidden-mutation >&2; return 99; }}
+enforce_app_capacity_guard
+"""
+        result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+        assert result.returncode == 1
+        assert "could not classify current machine states" in result.stderr
+        assert f"exit=1 input_bytes={len(raw.encode())}" in result.stderr
+        assert "do-not-print" not in result.stderr and "PRIVATE_PAYLOAD" not in result.stderr
+        assert "forbidden-mutation" not in result.stderr

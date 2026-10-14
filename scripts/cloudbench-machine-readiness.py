@@ -199,6 +199,24 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
         name_dir = generation / "names"
         machine_dir.mkdir()
         name_dir.mkdir()
+        # Keep native originals private and exact; admission consumers need no
+        # inline boot files or environment payload. Publish with this generation.
+        admission_machines = []
+        for machine in machines:
+            config = machine.get("config")
+            if config is not None and not isinstance(config, dict):
+                raise ValueError("invalid admission machine config")
+            guest = (config or {}).get("guest")
+            if guest is not None and not isinstance(guest, dict):
+                raise ValueError("invalid admission machine guest")
+            projected = dict(machine)
+            if config is not None:
+                projected["config"] = {key: value for key, value in config.items()
+                                       if key not in {"files", "env"}}
+            admission_machines.append(projected)
+        (generation / "admission-machines.json").write_text(
+            json.dumps(admission_machines, separators=(",", ":")) + "\n"
+        )
         for machine in machines:
             machine_id = _safe_index_value(machine.get("id"), "machine id")
             state = _safe_index_value(machine.get("state"), "machine state")
