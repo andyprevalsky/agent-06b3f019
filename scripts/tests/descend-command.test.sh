@@ -151,6 +151,22 @@ grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use ~~~ code blocks (approvals use the canonical text block)"
 grep -Fq '━' <<<"$RESPONSE_CONTRACT" || fail "response approvals must use the canonical Unicode frame"
 grep -Fq '🔐 APPROVAL' <<<"$RESPONSE_CONTRACT" || fail "response approvals must retain the canonical approval header"
+RESPONSE_PROSE=$(python3 - "$RESPONSE_CONTRACT" <<'PY'
+import sys
+outside = []
+in_text = False
+for line in sys.argv[1].splitlines():
+    if not in_text and line.strip() == "```text":
+        in_text = True
+    elif in_text and line.strip() == "```":
+        in_text = False
+    elif not in_text:
+        outside.append(line)
+assert not in_text, "response text examples must have balanced fences"
+print("\n".join(outside))
+PY
+)
+grep -Fq '━' <<<"$RESPONSE_PROSE" && fail "response header must not use an ASCII banner outside approved text blocks"
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"

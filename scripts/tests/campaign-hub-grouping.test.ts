@@ -320,6 +320,14 @@ function fixtureRoot(name: string) {
     recursive: true,
     mode: 0o700,
   });
+  mkdirSync(path.join(root, ".claude/shared"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  symlinkSync(
+    path.join(project, ".claude/shared/benchmark-report-format.txt"),
+    path.join(root, ".claude/shared/benchmark-report-format.txt"),
+  );
   for (const name of [
     "run-bench",
     "cloudbench_catalog.py",

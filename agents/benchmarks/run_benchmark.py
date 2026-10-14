@@ -1725,7 +1725,90 @@ def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None)
     if task_results is None:
         return True
     skipped_results = [result for result in task_results if result.status == "SKIPPED"]
-    return any(not _is_permitted_claude_code_skip(result) for result in skipped_results)
+    return any(
+        not (_is_permitted_claude_code_skip(result) or _is_permitted_agentcard_release_skip(result))
+        for result in skipped_results
+    )
+
+
+AGENTCARD_RELEASE_SKIP_ENV = "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL"
+AGENTCARD_RELEASE_SKIP_REASON = (
+    "AgentCard sandbox never released the closed card's org transfer (consumed, releasedCents=0); "
+    f"skipped by {AGENTCARD_RELEASE_SKIP_ENV}=1, see "
+    "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md"
+)
+
+
+class AgentCardReleaseStall(RuntimeError):
+    """The sandbox left a closed card's transfer consumed while Rose waits to reclaim it."""
+
+
+def _agentcard_release_skip_enabled() -> bool:
+    return os.environ.get(AGENTCARD_RELEASE_SKIP_ENV) == "1"
+
+
+def _agentcard_release_skip_task(task_name: str | None) -> bool:
+    """The release waiver belongs only to known, explicitly sandbox catalog tasks."""
+    try:
+        task = get_task_by_name(task_name)
+    except ValueError:
+        return False
+    lifecycle = task.expected_payment_lifecycle
+    transfer = lifecycle.get("orgTransfer") if isinstance(lifecycle, dict) else None
+    return (
+        task.production_only is False
+        and "agentcard-lifecycle-sandbox" in task.tags
+        and isinstance(transfer, dict)
+        and transfer.get("livemode") is False
+    )
+
+
+def _agentcard_release_stalled(lifecycle: object) -> bool:
+    """Only the AgentCard sandbox's release of a closed card's transfer is outstanding.
+
+    Rose has closed the card and is reclaiming; AgentCard still reports this card's
+    test-mode transfer as consumed with nothing released. Live transfers never match.
+    """
+    if not isinstance(lifecycle, dict):
+        return False
+    purchase = lifecycle.get("purchase")
+    funding = lifecycle.get("walletFunding")
+    card = lifecycle.get("agentCard")
+    transfer = lifecycle.get("orgTransfer")
+    return (
+        isinstance(purchase, dict)
+        and purchase.get("status") == "HELD"
+        and isinstance(funding, dict)
+        and funding.get("status") == "RECLAIMING"
+        and isinstance(card, dict)
+        and card.get("status") == "CLOSED"
+        and card.get("balanceCents") == 0
+        and not isinstance(card.get("balanceCents"), bool)
+        and isinstance(card.get("id"), str)
+        and bool(card["id"].strip())
+        and isinstance(transfer, dict)
+        and transfer.get("cardId") == card["id"]
+        and transfer.get("status") == "consumed"
+        and transfer.get("livemode") is False
+        and transfer.get("releasedCents") == 0
+        and not isinstance(transfer.get("releasedCents"), bool)
+    )
+
+
+def _is_permitted_agentcard_release_skip(result: TaskResult) -> bool:
+    return (
+        result.status == "SKIPPED"
+        and _agentcard_release_skip_task(result.name)
+        and _agentcard_release_skip_enabled()
+        and (result.failure_reason or "").startswith(AGENTCARD_RELEASE_SKIP_REASON)
+    )
+
+
+def _warn_agentcard_release_skip(name: str, detail: str) -> None:
+    print(
+        f"\n    ⚠️⚠️ SKIPPED {name}: {AGENTCARD_RELEASE_SKIP_REASON}\n"
+        f"    ⚠️⚠️ Its Stripe test charge stays captured until AgentCard releases the transfer: {detail}"
+    )
 
 
 def _apply_world_model_cli_env(args, parser: argparse.ArgumentParser) -> None:
@@ -2903,6 +2986,9 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
     if not isinstance(lifecycle, dict):
         return ""
     parts = []
+    purchase = lifecycle.get("purchase")
+    if isinstance(purchase, dict):
+        parts.append(f"purchase.status={purchase.get('status')!r}")
     wallet_funding = lifecycle.get("walletFunding")
     if isinstance(wallet_funding, dict):
         parts.append(f"walletFunding.status={wallet_funding.get('status')!r}")
@@ -2917,6 +3003,28 @@ def _payment_lifecycle_settlement_state(lifecycle: object) -> str:
     return f"; last observed {', '.join(parts)}" if parts else ""
 
 
+class _PaymentReconciliationDeadline(TimeoutError):
+    """The benchmark-owned reconciliation budget expired, rather than a failed lifecycle read."""
+
+
+def _payment_reconciliation_timeout(
+    error: str, lifecycle: object, *, task_name: str | None = None, allow_release_skip: bool = True
+) -> RuntimeError:
+    """Classify only the approved sandbox release state; keep the existing deadline owner."""
+    message = (
+        "Payment lifecycle did not reach the expected terminal state before timeout: "
+        f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
+    )
+    if (
+        allow_release_skip
+        and _agentcard_release_skip_task(task_name)
+        and _agentcard_release_skip_enabled()
+        and _agentcard_release_stalled(lifecycle)
+    ):
+        return AgentCardReleaseStall(message)
+    return RuntimeError(message)
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -2927,10 +3035,13 @@ async def _wait_for_expected_payment_lifecycle(
     poll_interval_seconds: float = 10,
     fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
     recover_lifecycle: Optional[Callable[[str, str], Awaitable[dict]]] = None,
+    resume_pending_after_seconds: Optional[float] = None,
 ) -> dict:
     """Observe durable recovery while AgentCard asynchronously releases a closed-card hold."""
     lifecycle = initial_lifecycle
-    deadline = time.monotonic() + timeout_seconds
+    started_at = time.monotonic()
+    deadline = started_at + timeout_seconds
+    next_resume_at = started_at + (resume_pending_after_seconds or 0)
     retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
     consecutive_fetch_errors = 0
     last_fetch_error: Optional[Exception] = None
@@ -2966,17 +3077,60 @@ async def _wait_for_expected_payment_lifecycle(
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
+                    f"{_payment_lifecycle_settlement_state(lifecycle)}"
                 ) from last_fetch_error
-            raise RuntimeError(
-                "Payment lifecycle did not reach the expected terminal state before timeout: "
-                f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
-            )
-        await asyncio.sleep(poll_interval_seconds)
+            raise _payment_reconciliation_timeout(error, lifecycle, task_name=task.name)
+        if recover_lifecycle is None:
+            await asyncio.sleep(poll_interval_seconds)
+        owned_timeout = None
         try:
-            lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+            if recover_lifecycle is None:
+                lifecycle = await fetch_lifecycle(base_url, agent_id)
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached before recovery")
+                # An owned recovery may take longer than a read. Keep its sleep,
+                # observation and idempotent POST inside the original deadline.
+                async with asyncio.timeout(remaining) as owned_timeout:
+                    await asyncio.sleep(poll_interval_seconds)
+                    if resume_pending_after_seconds is None:
+                        candidate = await recover_lifecycle(base_url, agent_id)
+                    else:
+                        candidate = await fetch_lifecycle(base_url, agent_id)
+                        now = time.monotonic()
+                        if now >= deadline:
+                            raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached after observation")
+                        candidate_error = _validate_payment_lifecycle(
+                            task, {"_benchmark": {"payment_lifecycle": candidate}}
+                        )
+                        candidate_purchase = candidate.get("purchase") if isinstance(candidate, dict) else None
+                        candidate_funding = candidate.get("walletFunding") if isinstance(candidate, dict) else None
+                        candidate_status = candidate_purchase.get("status") if isinstance(candidate_purchase, dict) else None
+                        resumable = candidate_status in retryable_statuses or (
+                            candidate_status == "HELD"
+                            and isinstance(candidate_funding, dict)
+                            and candidate_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
+                        )
+                        if candidate_error is not None and resumable and now >= next_resume_at:
+                            if time.monotonic() >= deadline:
+                                raise _PaymentReconciliationDeadline("Payment reconciliation deadline reached before resuming cleanup")
+                            # The backend still applies its stale-lease CAS and
+                            # purchase fencing. This resumes the same allocation.
+                            next_resume_at = now + resume_pending_after_seconds
+                            candidate = await recover_lifecycle(base_url, agent_id)
+                if time.monotonic() >= deadline:
+                    raise _PaymentReconciliationDeadline("Payment reconciliation response arrived after its deadline")
+                lifecycle = candidate
             consecutive_fetch_errors = 0
             last_fetch_error = None
         except Exception as fetch_error:
+            if isinstance(fetch_error, _PaymentReconciliationDeadline) or (
+                owned_timeout is not None and owned_timeout.expired()
+            ):
+                raise _payment_reconciliation_timeout(
+                    error, lifecycle, task_name=task.name, allow_release_skip=last_fetch_error is None
+                ) from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
@@ -2990,6 +3144,7 @@ async def _wait_for_expected_payment_lifecycle(
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
+                    f"{_payment_lifecycle_settlement_state(lifecycle)}"
                 ) from fetch_error
             print(
                 "    ⚠ Transient payment lifecycle read failed "
@@ -2998,6 +3153,9 @@ async def _wait_for_expected_payment_lifecycle(
 
 
 PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
+# Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
+# retry eligibility within the unchanged 420-second reconciliation window.
+PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
 
 
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
@@ -3175,6 +3333,8 @@ async def ensure_payment_lifecycle_cleanup(
             lifecycle,
             poll_interval_seconds=poll_interval_seconds,
             fetch_lifecycle=fetch_lifecycle,
+            recover_lifecycle=abandon_payment,
+            resume_pending_after_seconds=PAYMENT_RECLAIM_RETRY_AFTER_SECONDS,
         )
         lifecycle_error = _validate_payment_lifecycle(
             task,
@@ -4428,13 +4588,40 @@ async def _poll_agent(
                 for message in messages
             )
         ):
-            lifecycle = await _start_payment_abandonment_with_recovery(base_url, agent_id)
-            lifecycle = await _wait_for_expected_payment_lifecycle(
-                base_url,
-                agent_id,
-                task,
-                lifecycle,
+            remaining_task_budget = (
+                None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
             )
+            if remaining_task_budget is not None and remaining_task_budget <= 0:
+                raise RuntimeError(f"Payment reconciliation started after the task timeout ({resolved_timeout}s)")
+            try:
+                # Compensation after a failed task remains a separate owner;
+                # this success path must fit the task's remaining execution time.
+                async with asyncio.timeout(remaining_task_budget):
+                    lifecycle = await _start_payment_abandonment_with_recovery(base_url, agent_id)
+                    remaining_task_budget = (
+                        None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
+                    )
+                    if remaining_task_budget is not None and remaining_task_budget <= 0:
+                        raise TimeoutError("Payment abandonment response arrived after the task deadline")
+                    lifecycle = await _wait_for_expected_payment_lifecycle(
+                        base_url,
+                        agent_id,
+                        task,
+                        lifecycle,
+                        timeout_seconds=(
+                            420 if remaining_task_budget is None else min(420, remaining_task_budget)
+                        ),
+                        recover_lifecycle=abandon_test_payment,
+                        resume_pending_after_seconds=PAYMENT_RECLAIM_RETRY_AFTER_SECONDS,
+                    )
+            except TimeoutError as timeout_error:
+                raise RuntimeError(
+                    f"Payment reconciliation exceeded the task timeout ({resolved_timeout}s)"
+                ) from timeout_error
+            if not wall_clock_disabled and time.time() - start >= resolved_timeout:
+                raise RuntimeError(
+                    f"Payment reconciliation response arrived after the task timeout ({resolved_timeout}s)"
+                )
             payment_card_action_completed = True
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
@@ -6093,6 +6280,29 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
                 await asyncio.sleep(2)
 
 
+async def _owned_payments_release_stalled(base_url: str, evidence: dict) -> bool:
+    """Every still-pending owned purchase is waiting only on the AgentCard sandbox release."""
+    try:
+        pending = cloud_batch_cleanup.pending_root_payments(evidence.get("payment_snapshot") or {})
+    except Exception:
+        return False
+    lifecycles = {}
+    for agent_id in sorted({row["agent_id"] for row in pending}):
+        try:
+            lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
+        except Exception:
+            return False
+    evidence["agentcard_release_stall_lifecycles"] = lifecycles
+    return bool(pending) and all(
+        row["status"] == "HELD"
+        and row["funding_status"] == "RECLAIMING"
+        and _agentcard_release_stalled(lifecycles[row["agent_id"]])
+        and lifecycles[row["agent_id"]]["orgTransfer"].get("cardId") == row["card_id"]
+        for row in pending
+    )
+
+
+
 async def _wait_for_owned_root_seal(
     base_url: str,
     root_id: str,
@@ -6329,12 +6539,27 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(base_url, aid, evidence)
                 except Exception as error:
                     detail = str(error) or type(error).__name__
-                    evidence["errors"].append(f"payment: {detail}")
-                    failures.append(f"{aid}: {detail}")
-                    if result is not None:
-                        result.passed = False
-                        result.benchmark_status = "ERROR"
-                        result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                    if (
+                        isinstance(error, TimeoutError)
+                        and result is not None
+                        and _agentcard_release_skip_task(result.name)
+                        and _agentcard_release_skip_enabled()
+                        and await _owned_payments_release_stalled(base_url, evidence)
+                    ):
+                        evidence["warnings"].append(f"payment: {AGENTCARD_RELEASE_SKIP_REASON}")
+                        _warn_agentcard_release_skip(result.name if result is not None else aid, f"{aid}: {detail}")
+                        if result is not None and result.passed:
+                            result.passed = False
+                            result.status = "SKIPPED"
+                            result.benchmark_status = "SKIPPED"
+                            result.failure_reason = f"{AGENTCARD_RELEASE_SKIP_REASON}: {aid}: {detail}"
+                    else:
+                        evidence["errors"].append(f"payment: {detail}")
+                        failures.append(f"{aid}: {detail}")
+                        if result is not None:
+                            result.passed = False
+                            result.benchmark_status = "ERROR"
+                            result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
                 if result is not None:
                     if evidence["errors"] or evidence["warnings"]:
                         try:
@@ -14299,7 +14524,16 @@ async def _run_single_task_as_run_user(
 
     except Exception as e:
         duration = time.time() - start
-        print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
+        release_skip = (
+            isinstance(e, AgentCardReleaseStall)
+            and _agentcard_release_skip_task(task.name)
+            and _agentcard_release_skip_enabled()
+        )
+        error_status = "SKIPPED" if release_skip else "ERROR"
+        if release_skip:
+            _warn_agentcard_release_skip(task.name, str(e))
+        else:
+            print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -14316,21 +14550,22 @@ async def _run_single_task_as_run_user(
                 task.name,
                 force=True,
                 benchmark_passed=False,
-                benchmark_status="ERROR",
+                benchmark_status=error_status,
                 failure_reason=str(e),
             )
         result = TaskResult(
             name=task.name,
             passed=False,
             agent_id=agent_id,
-            status="ERROR",
-            benchmark_status="ERROR",
+            status=error_status,
+            benchmark_status=error_status,
             progress_score=0,
             duration_seconds=round(duration, 1),
             cost_cents=0,
             message_count=0,
             failure_reason=(
-                f"{e}"
+                (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
+                + f"{e}"
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),

@@ -2576,6 +2576,9 @@ exec "$@"
         repo / "scripts/run.sh",
         """#!/usr/bin/env bash
 set -u
+SCRIPT_DIR="""
+        + shlex.quote(str(ROOT / "scripts"))
+        + """
 source """
         + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
         + """
@@ -3922,6 +3925,158 @@ publish_cleanup_ack
     assert (tmp_path / "data/root.status").read_bytes() == root.read_bytes()
     assert (result.returncode == 0) == expected, result.stderr
     assert (tmp_path / "data/cleanup.ack").exists() == expected
+
+
+@pytest.mark.parametrize(
+    "native_field,captured_native,birth,state,token,pid,expected,version",
+    [
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42", True, "2"),
+        ("native-current", "native-current", "shifted-start", "clean", "fixture", "42", True, "2"),
+        ("native-foreign", "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("", "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("native-current", "", "this-start", "clean", "fixture", "42", False, "2"),
+        (None, "native-current", "this-start", "clean", "fixture", "42", True, "1"),
+        (None, "native-current", "shifted-start", "clean", "fixture", "42", False, "1"),
+        ("native-current", "native-current", "shifted-start", "clean", "foreign", "42", False, "2"),
+        ("native-current", "native-current", "shifted-start", "clean", "fixture", "41", False, "2"),
+        ("native-current", "native-current", "shifted-start", "pending", "fixture", "42", False, "2"),
+        ("native-current", "native-current", "shifted-start", "failed", "fixture", "42", False, "2"),
+        ("native-current\nstack_native_identity=native-foreign", "native-current", "this-start", "clean", "fixture", "42", False, "2"),        (None, "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42", False, "9"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42", False, "2\nversion=1"),
+        ("native-current", "native-current", "shifted-start", "clean", "fixture", "42", True, "1"),
+        ("native-current=foreign", "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42", False, "2=1"),
+        ("native-current", "native-current", "this-start", "clean=failed", "fixture", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture=foreign", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42=41", False, "2"),
+        (None, "native-current", "this-start=foreign", "clean", "fixture", "42", False, "1"),
+        ("native-current", "native-current", "this-start", "clean\nstate=failed", "fixture", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture\ntoken=foreign", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42\nstack_pid=41", False, "2"),
+        ("native-current\nmalformed-line", "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("native-current\noptional=value\noptional=foreign", "native-current", "this-start", "clean", "fixture", "42", False, "2"),
+        ("native-current\noptional=value=with-equals", "native-current", "this-start", "clean", "fixture", "42", True, "2"),
+        ("native-current", "native-current", None, "clean", "fixture", "42", True, "2"),
+        (None, "native-current", None, "clean", "fixture", "42", False, "1"),
+        ("native-current", "native-current", "this-start", None, "fixture", "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", None, "42", False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", None, False, "2"),
+        ("native-current", "native-current", "this-start", "clean", "fixture", "42", False, None),
+    ],
+)
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_native_identity(
+    tmp_path, native_field, captured_native, birth, state, token, pid, expected, version
+):
+    """New receipts bind native identity; missing fields preserve strict legacy compatibility."""
+    publish = _extract_fleet_function(DRIVER_SCRIPT.read_text(), "publish_cleanup_ack() {")
+    stack = tmp_path / "stack.status"
+    fields = {"version": version, "state": state, "token": token, "stack_pid": pid, "stack_birth": birth}
+    stack.write_text(
+        "".join(f"{key}={value}\n" for key, value in fields.items() if value is not None)
+        + (f"stack_native_identity={native_field}\n" if native_field is not None else "")
+    )
+    ack = tmp_path / "data/cleanup.ack"
+    result = subprocess.run(["bash", "-c", f"""set -uo pipefail
+log() {{ :; }}
+{publish}
+CLOUDBENCH_RUN_TOKEN=fixture
+ACTIVE_COMMAND_SIGNALLED=0
+STACK_PID=42
+STACK_BIRTH=this-start
+STACK_NATIVE_IDENTITY={shlex.quote(captured_native)}
+STACK_CLEANUP_STATUS_FILE={shlex.quote(str(stack))}
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(tmp_path / "absent-root.status"))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(tmp_path / "data/root.status"))}
+CLEANUP_ACK_FILE={shlex.quote(str(ack))}
+publish_cleanup_ack
+"""], text=True, capture_output=True, check=False)
+    assert (result.returncode == 0) == expected, result.stderr
+    assert ack.exists() == expected
+    if expected:
+        assert ack.read_text() == "fixture\n"
+
+
+@pytest.mark.parametrize("identity_read", ["native", "empty", "failed"])
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_captures_native(
+    tmp_path, identity_read
+):
+    """The actual post-launch block captures its original native owner or rejects failed observation."""
+    driver = DRIVER_SCRIPT.read_text()
+    start = driver.index("STACK_PID=$!\n")
+    end = driver.index('log "stack pid=$STACK_PID', start)
+    launch_identity = driver[start:end]
+    repo = ROOT
+    if identity_read != "native":
+        repo = tmp_path / "repo"
+        helper = repo / "scripts/process-identity.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("raise SystemExit(0)\n" if identity_read == "empty" else "raise SystemExit(1)\n")
+    result = subprocess.run(["bash", "-c", f"""set -uo pipefail
+log() {{ :; }}
+finish() {{ exit "$1"; }}
+CONTROL_DIR={shlex.quote(str(repo / "scripts"))}
+REPO_DIR={shlex.quote(str(tmp_path / "mutable-target"))}
+STACK_NATIVE_IDENTITY=""
+sleep 30 &
+trap 'kill -TERM "$!" 2>/dev/null || true; wait "$!" 2>/dev/null || true' EXIT
+{launch_identity}
+observed="$(python3 {shlex.quote(str(ROOT / "scripts/process-identity.py"))} "$STACK_PID")"
+[ -n "$STACK_NATIVE_IDENTITY" ] && [ "$STACK_NATIVE_IDENTITY" = "$observed" ]
+"""], text=True, capture_output=True, check=False, timeout=10)
+    assert (result.returncode == 0) == (identity_read == "native"), result.stderr
+
+
+@pytest.mark.parametrize(
+    "state,token,version,extra,expected_ack,expected_copy",
+    [
+        ("clean=failed", "fixture", "1", "", False, False),
+        ("clean", "fixture=foreign", "1", "", False, False),
+        ("clean\nstate=failed", "fixture", "1", "", False, False),
+        ("clean", "fixture\ntoken=foreign", "1", "", False, False),
+        ("clean", "fixture", "1", "malformed-line\n", False, False),
+        ("clean", "fixture", "1=2", "", False, False),
+        ("clean", "fixture", "2", "", False, False),
+        ("clean", "fixture", "1\nversion=1", "", False, False),
+        ("clean", "fixture", "1", "optional=value=preserved\n", True, True),
+        ("clean", "fixture", "1", "optional=value\noptional=foreign\n", False, False),
+        ("clean", "fixture", None, "", True, True),
+        ("pending", "fixture", "1", "", False, True),
+        ("failed", "fixture", None, "", False, True),
+        ("clean", "foreign", "1", "", False, False),
+    ],
+)
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_root_evidence(
+    tmp_path, state, token, version, extra, expected_ack, expected_copy
+):
+    """Root financial cleanup cannot be authorized by truncated or duplicate fields."""
+    publish = _extract_fleet_function(DRIVER_SCRIPT.read_text(), "publish_cleanup_ack() {")
+    root = tmp_path / "root.status"
+    raw = ((f"version={version}\n" if version is not None else "") + f"state={state}\ntoken={token}\n" + extra)
+    root.write_text(raw)
+    stack = tmp_path / "stack.status"
+    stack.write_text("version=2\nstate=clean\ntoken=fixture\nstack_pid=42\nstack_birth=cosmetic\nstack_native_identity=native-current\n")
+    copied = tmp_path / "data/root.status"; ack = tmp_path / "data/cleanup.ack"
+    result = subprocess.run(["bash", "-c", f"""set -uo pipefail
+log() {{ :; }}
+{publish}
+CLOUDBENCH_RUN_TOKEN=fixture
+ACTIVE_COMMAND_SIGNALLED=1
+STACK_PID=42
+STACK_BIRTH=cosmetic
+STACK_NATIVE_IDENTITY=native-current
+STACK_CLEANUP_STATUS_FILE={shlex.quote(str(stack))}
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(root))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(copied))}
+CLEANUP_ACK_FILE={shlex.quote(str(ack))}
+publish_cleanup_ack
+"""], text=True, capture_output=True, check=False)
+    assert (result.returncode == 0) == expected_ack, result.stderr
+    assert ack.exists() == expected_ack
+    assert copied.exists() == expected_copy
+    if expected_copy:
+        assert copied.read_bytes() == raw.encode()
+    assert root.read_bytes() == raw.encode(), "invalid or failed source evidence must stay retained"
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -19583,6 +19738,68 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)
+
+
+def test_boot_payload_fleet_snapshot_stages_native_identity_helper(tmp_path: Path) -> None:
+    """The public launcher must freeze the helper consumed by guest staging."""
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    owner = subprocess.Popen(
+        ["bash", str(FLEET_SCRIPT), "--help"],
+        env={
+            **os.environ,
+            "CLOUDBENCH_SCRIPT_SNAPSHOT": "",
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY": str(ready),
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE": str(release),
+            "TMPDIR": str(snapshot_root),
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not ready.exists():
+            if owner.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert ready.exists(), "launcher never entered its immutable snapshot"
+        snapshots = list(snapshot_root.glob("cloudbench-scripts.*"))
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
+        helper = snapshot / "process-identity.py"
+        assert helper.is_file(), "required guest identity helper absent from sealed snapshot"
+        assert helper.read_bytes() == (ROOT / "scripts/process-identity.py").read_bytes()
+        manifest = json.loads((snapshot / "cloudbench-controller-snapshot-manifest.json").read_text())
+        entry = next(row for row in manifest["files"] if row["path"] == helper.name)
+        assert entry["sha256"] == hashlib.sha256(helper.read_bytes()).hexdigest()
+        payload, guest = tmp_path / "payload.gz", tmp_path / "guest"
+        guest.mkdir()
+        encoder = snapshot / "cloudbench-boot-payload.py"
+        packed = subprocess.run(
+            [sys.executable, str(encoder), "pack", str(payload),
+             "--file-local", f"/process-identity.py={helper}"],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        assert packed.returncode == 0, packed.stderr
+        unpacked = subprocess.run(
+            [sys.executable, str(encoder), "unpack", str(payload), packed.stdout.strip(), str(guest)],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        assert unpacked.returncode == 0, unpacked.stderr
+        assert (guest / helper.name).read_bytes() == helper.read_bytes()
+        identity = subprocess.run(
+            [sys.executable, str(guest / helper.name), str(os.getpid())],
+            text=True, capture_output=True, check=False, timeout=5,
+        )
+        assert identity.returncode == 0, identity.stderr
+        assert identity.stdout.strip(), "transported helper cannot capture native identity"
+    finally:
+        release.touch(exist_ok=True)
+        stdout, stderr = owner.communicate(timeout=15)
+    assert owner.returncode == 0, (stdout, stderr)
+    assert not list(snapshot_root.glob("cloudbench-scripts.*")), "launcher leaked its exact snapshot"
 
 
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:

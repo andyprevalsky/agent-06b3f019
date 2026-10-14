@@ -144,9 +144,11 @@ esac
     env = {**os.environ, "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet)}
     for args in (["spawn-sub-agents", "--wait"], ["spawn-sub-agents", "-k", "2"],
                  ["--local", "spawn-sub-agents"], ["eval", "--list"],
-                 ["stability-proof", "-k", "2"]):
-        # Preserve actual stdout/stderr ordering: launch instructions may use stderr
-        # so machine-readable stability sampling keeps JSON stdout intact.
+                 ["stability-proof", "-k", "2"],
+                 ["stability-proof", "--pool-file", "--help"],
+                 ["stability-proof", "--exclude-file", "--dry-sample"]):
+        # Observe the actual launch contract order across stdout and stderr;
+        # read-only previews still retain their separate pure JSON stdout.
         result = subprocess.run(cli + args, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, timeout=10)
         assert result.returncode == 0, (args, result.stdout)
@@ -156,7 +158,9 @@ esac
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.count(expected) == 1 and "--prod" in result.stdout, "production route needs the contract"
-    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"]):
+    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"],
+                 ["stability-proof", "--dry-sample"], ["stability-proof", "--help"],
+                 ["stability-proof", "--pool-file", "--help", "--dry-sample"]):
         result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, (args, result.stderr)
         assert expected not in result.stdout, (args, "non-launch output must keep its format")

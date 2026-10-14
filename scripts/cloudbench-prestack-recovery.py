@@ -375,7 +375,7 @@ def native_recipe(meta: dict[str, str], config: dict) -> tuple[str, str, str]:
     controls = {}
     document = None
     for name, content in packed["files"].items():
-        if re.fullmatch(r"cloudbench[-_][A-Za-z0-9_.-]+", name) is None:
+        if name != "process-identity.py" and re.fullmatch(r"cloudbench[-_][A-Za-z0-9_.-]+", name) is None:
             raise ValueError("unsafe packed control name")
         data = base64.b64decode(content, validate=True)
         if name == "cloudbench-execution-provenance.json":

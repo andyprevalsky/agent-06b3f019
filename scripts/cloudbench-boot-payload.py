@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 def valid_name(name):
-    return isinstance(name, str) and re.fullmatch(r"cloudbench[-_][a-zA-Z0-9_.-]+", name) and name not in {
+    return isinstance(name, str) and (name == "process-identity.py" or re.fullmatch(r"cloudbench[-_][a-zA-Z0-9_.-]+", name)) and name not in {
         "cloudbench-boot.sh", "cloudbench-boot-payload.py",
         "cloudbench-boot-payload.json.gz", "cloudbench-status-server.py",
     }

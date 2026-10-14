@@ -15,6 +15,13 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
 import { currentTraceContext } from '../tracing';
+import { projectMessageBroadcastMetadata } from './messageBroadcastProjection';
+import {
+  CommittedMessageDelivery,
+  InitialBroadcastDispatcher,
+  MAX_COMMITTED_QUEUE_AGE_MS,
+  type BroadcastOutcome,
+} from './committedMessageDelivery';
 
 const log = createLogger('Broadcast');
 
@@ -28,7 +35,7 @@ function finiteEnvNumber(value: string | undefined, fallback: number): number {
 
 const BROADCAST_BATCH_SIZE = Math.max(
   1,
-  finiteEnvNumber(process.env.SUPABASE_BROADCAST_BATCH_SIZE, 100)
+  Math.min(100, Math.floor(finiteEnvNumber(process.env.SUPABASE_BROADCAST_BATCH_SIZE, 100)))
 );
 const BROADCAST_FLUSH_DELAY_MS = Math.max(
   0,
@@ -46,12 +53,29 @@ interface QueuedBroadcast {
   private: boolean;
   trace: ReturnType<typeof currentTraceContext>;
   enqueuedAt: number;
+  committedCohort?: {
+    enqueuedAt: number;
+    settle: (outcome: BroadcastOutcome) => Promise<void>;
+  };
 }
 
-const broadcastQueue: QueuedBroadcast[] = [];
+const initialDispatcher = new InitialBroadcastDispatcher<QueuedBroadcast>();
 let flushTimer: NodeJS.Timeout | null = null;
-let draining = false;
-const idleResolvers: Array<() => void> = [];
+const inFlightBatches = new Set<Promise<void>>();
+const MAX_IN_FLIGHT_BATCHES = 64;
+const committedDelivery = new CommittedMessageDelivery<QueuedBroadcast>(
+  (items, enqueuedAt, settle) => {
+    const committedCohort = { enqueuedAt, settle };
+    if (!initialDispatcher.enqueueGroup(items.map((item) => ({ ...item, committedCohort })))) {
+      void settle({ ok: false, retryable: false, status: 'error' });
+      return;
+    }
+    scheduleBroadcastDrain(BROADCAST_FLUSH_DELAY_MS);
+  },
+  (items) => sendBroadcastBatch(items),
+  BROADCAST_BATCH_SIZE,
+  (topic) => initialDispatcher.admissionBudget(topic)
+);
 
 interface AssistantStreamOptions {
   /** Remove a purely ephemeral stream at its terminal event. */
@@ -314,7 +338,7 @@ export async function broadcastMessageInsert(
       timestamp: message.timestamp.toISOString(),
       text: message.text,
       role: message.role,
-      metadata: message.metadata || null,
+      metadata: projectMessageBroadcastMetadata(message.role, message.metadata) || null,
       filePointer: message.filePointer || null,
     },
   });
@@ -344,18 +368,22 @@ async function broadcast(
   }
 
   const trace = currentTraceContext();
-  broadcastQueue.push({
+  const item: QueuedBroadcast = {
     ...params,
     private: process.env.NODE_ENV === 'production',
     trace,
     enqueuedAt: Date.now(),
-  });
+  };
+  if (params.event === 'INSERT') {
+    // Freeze caller-owned metadata so an uncertain send retries identical bytes.
+    const serialized = JSON.stringify(item.payload);
+    item.payload = JSON.parse(serialized) as Record<string, unknown>;
+    committedDelivery.enqueue(item, Buffer.byteLength(serialized) + Buffer.byteLength(item.topic));
+    return;
+  }
+  if (!initialDispatcher.enqueue(item)) return;
 
-  scheduleBroadcastDrain(
-    options.immediateDrain || broadcastQueue.length >= BROADCAST_BATCH_SIZE
-      ? 0
-      : BROADCAST_FLUSH_DELAY_MS
-  );
+  scheduleBroadcastDrain(options.immediateDrain ? 0 : BROADCAST_FLUSH_DELAY_MS);
 }
 
 function scheduleBroadcastDrain(delayMs: number): void {
@@ -372,29 +400,44 @@ function scheduleBroadcastDrain(delayMs: number): void {
 }
 
 async function drainBroadcastQueue(): Promise<void> {
-  if (draining) return;
-  draining = true;
-  try {
-    while (broadcastQueue.length > 0) {
-      const batch = broadcastQueue.splice(0, BROADCAST_BATCH_SIZE);
-      await sendBroadcastBatch(batch);
-    }
-  } finally {
-    draining = false;
-    if (broadcastQueue.length > 0) {
-      scheduleBroadcastDrain(0);
-    } else {
-      while (idleResolvers.length > 0) idleResolvers.shift()?.();
-    }
+  while (initialDispatcher.hasReady() && inFlightBatches.size < MAX_IN_FLIGHT_BATCHES) {
+    const lease = initialDispatcher.takeBatch(BROADCAST_BATCH_SIZE);
+    const batch = lease.items;
+    // Network waits are independent. One agent's retry cannot hold the drain.
+    const eligibilityAt = Date.now();
+    const active = batch.filter(
+      (item) =>
+        item.committedCohort === undefined ||
+        eligibilityAt - item.committedCohort.enqueuedAt < MAX_COMMITTED_QUEUE_AGE_MS
+    );
+    const task = sendBroadcastBatch(active)
+      .then((outcome) => {
+        lease.release();
+        const activeItems = new Set(active);
+        const settled = new Set<QueuedBroadcast['committedCohort']>();
+        for (const item of batch) {
+          const cohort = item.committedCohort;
+          if (cohort === undefined || settled.has(cohort)) continue;
+          settled.add(cohort);
+          void cohort.settle(
+            activeItems.has(item) ? outcome : { ok: false, retryable: false, status: 'error' }
+          );
+        }
+      })
+      .finally(() => {
+        inFlightBatches.delete(task);
+        if (initialDispatcher.hasReady()) scheduleBroadcastDrain(0);
+      });
+    inFlightBatches.add(task);
   }
 }
 
-async function sendBroadcastBatch(batch: QueuedBroadcast[]): Promise<void> {
-  if (batch.length === 0) return;
+async function sendBroadcastBatch(batch: QueuedBroadcast[]): Promise<BroadcastOutcome> {
+  if (batch.length === 0) return { ok: true, retryable: false, status: 202 };
 
   const url = `${SUPABASE_URL}/realtime/v1/api/broadcast`;
   const serviceRoleKey = SUPABASE_SERVICE_ROLE_KEY;
-  if (!serviceRoleKey) return;
+  if (!serviceRoleKey) return { ok: false, retryable: false, status: 'error' };
   const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BROADCAST_TIMEOUT_MS);
@@ -435,6 +478,11 @@ async function sendBroadcastBatch(batch: QueuedBroadcast[]): Promise<void> {
     if (!response.ok) {
       log.error('Failed', { status: response.status, body: await response.text() });
     }
+    return {
+      ok: response.ok,
+      retryable: response.status === 408 || response.status === 429 || response.status >= 500,
+      status: response.status,
+    };
   } catch (error: unknown) {
     log.info('broadcast.span', {
       span_name: 'broadcast',
@@ -449,6 +497,7 @@ async function sendBroadcastBatch(batch: QueuedBroadcast[]): Promise<void> {
       max_queue_delay_ms: Math.max(...batch.map((item) => started - item.enqueuedAt)),
     });
     log.error('Error', { err: error instanceof Error ? error.message : String(error) });
+    return { ok: false, retryable: true, status: 'error' };
   } finally {
     clearTimeout(timeout);
   }
@@ -459,7 +508,9 @@ export async function __flushBroadcastQueueForTests(): Promise<void> {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
-  await drainBroadcastQueue();
-  if (!draining && broadcastQueue.length === 0) return;
-  await new Promise<void>((resolve) => idleResolvers.push(resolve));
+  do {
+    await drainBroadcastQueue();
+    await Promise.all(inFlightBatches);
+    await committedDelivery.waitForSettlements();
+  } while (initialDispatcher.hasReady() || inFlightBatches.size > 0);
 }

@@ -109,6 +109,7 @@ CLOUDBENCH_GUEST_BOOT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot.sh
 CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot-payload.py"
 CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-codex-auth.py"
 CLOUDBENCH_GUEST_RUN_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-run.sh"
+CLOUDBENCH_GUEST_PROCESS_IDENTITY_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/process-identity.py"
 CLOUDBENCH_GUEST_FETCH_REF_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-fetch-ref.sh"
 CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-deps.sh"
 CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-prisma-client.sh"
@@ -4229,6 +4230,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     _boot_file_args=(
         --file-local "/cloudbench-boot.sh=$CLOUDBENCH_GUEST_BOOT_SCRIPT"
         --file-local "/cloudbench-run.sh=$CLOUDBENCH_GUEST_RUN_SCRIPT"
+        --file-local "/process-identity.py=$CLOUDBENCH_GUEST_PROCESS_IDENTITY_SCRIPT"
         --file-local "/cloudbench-codex-auth.py=$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT"
         --file-local "/cloudbench-fetch-ref.sh=$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT"
         --file-local "/cloudbench-sync-deps.sh=$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT"
@@ -4565,6 +4567,7 @@ if [ ! -f "$CLOUDBENCH_GUEST_RUN_SCRIPT" ]; then
     exit 1
 fi
 for helper_path in \
+    "$CLOUDBENCH_GUEST_PROCESS_IDENTITY_SCRIPT" \
     "$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT" \
     "$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT" \
     "$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT" \
@@ -4718,7 +4721,7 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/process-identity.py /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
@@ -4729,6 +4732,7 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     fi
     if [ "$provenance_stage_ok" = "1" ] \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RUN_SCRIPT" /data/cloudbench-run.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_PROCESS_IDENTITY_SCRIPT" /data/process-identity.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT" /data/cloudbench-codex-auth.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
