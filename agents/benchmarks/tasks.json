@@ -8632,7 +8632,7 @@
         }
       ],
       "web_search_fixture": {
-        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED \u2014 closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED \u2014 closed for kitchen renovations with no reopening date announced. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
       }
     },
     "environment": {
@@ -8929,7 +8929,7 @@
         "criteria": [
           "No SMS the assistant sent asks the user to provide a fact that is in their Travel docs note or their profile"
         ],
-        "judge_prompt": "The user's Travel docs note (in the world state) holds their passport number, issue and expiry dates, date of birth, place of birth, nationality, US visa type, number and expiry, trip dates, lodging and trip purpose. The assistant's profile context already held the user's name, email and phone. Score 0.0 if any SMS the assistant sent asks the user to send, type or provide any of those facts, in any wording (for example 'send me your passport number' or 'what's your date of birth?'). Asking only for things the note does not contain, such as the eTA background declarations or approval of the CAD $7 payment, is fine, and so is restating a fact it found. Otherwise score 1.0."
+        "judge_prompt": "The user's Travel docs note (in the world state) holds their passport number, issue and expiry dates, date of birth, place of birth, nationality, US visa type, number and expiry, trip dates, lodging and trip purpose. The assistant's available profile fields are supplied in user_profile_available_to_assistant; only nonempty values are known, and null or empty values are unavailable. Score 0.0 if any SMS the assistant sent asks the user to send, type or provide any of those facts, in any wording (for example 'send me your passport number' or 'what's your date of birth?'). Asking only for things neither the note nor the nonempty profile fields contain, such as the eTA background declarations or approval of the CAD $7 payment, is fine, and so is restating a fact it found. Otherwise score 1.0."
       }
     ],
     "enforce_declared_evaluators": true,

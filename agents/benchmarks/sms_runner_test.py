@@ -855,7 +855,7 @@ def test_closed_fixture_is_closed_regardless_of_when_it_runs():
     assert "temporarily closed" in lowered
     assert "not accepting orders" in lowered
     # No conditional-hours language the model must resolve against a clock.
-    for conditional in ["closed monday", "tue-sun", "check back during business hours", "opens at"]:
+    for conditional in ["closed monday", "tue-sun", "check back during business hours", "opens at", "through ", "until "]:
         assert conditional not in lowered, f"time-dependent phrasing in closed fixture: {conditional}"
 
 
@@ -1189,3 +1189,90 @@ def test_fill_form_task_replays_the_prod_supervisor_state():
     (children,) = root["children"]
     assert children["count"] == 50 and len(children["completion_summaries"]) == 4
     assert [r["question"] for r in script["seed_attention_requests"]] == ["Sign in to walmart.com"]
+
+
+# ── Available profile ground truth for the existing known-facts judge ─────────
+
+
+def judge_profile_row():
+    return {
+        "userId": "fixture-user", "name": "Fixture User", "email": None,
+        "phone": "+15555550100", "deliveryRecipientName": "Fixture Recipient",
+        "addressLine1": "100 Fixture Street", "addressLine2": None,
+        "city": "Fixture City", "state": "CA", "postalCode": "00000",
+        "country": "US", "systemName": "Rose",
+    }
+
+
+@pytest.mark.parametrize("email", [None, "", "fixture@example.invalid"])
+def test_judge_profile_preserves_available_and_unavailable_facts_without_internal_id(email):
+    from benchmarks.sms_runner import _read_user_profile
+
+    row = judge_profile_row()
+    row["email"] = email
+    deps, queries = _recording_deps({'row_to_json(profile)': json.dumps(row)})
+    profile = _read_user_profile(deps, "fixture'user")
+    assert profile == {key: value for key, value in row.items() if key != "userId"}
+    assert profile["email"] == email
+    assert profile["addressLine1"] == "100 Fixture Street"
+    assert "userId" not in profile
+    assert len(queries) == 1
+    assert "FROM \"User\" WHERE \"userId\" = 'fixture''user'" in queries[0]
+    assert queries[0].startswith("SELECT ")
+
+
+def test_judge_profile_reads_the_product_context_loader_fields():
+    import re
+    from benchmarks.sms_runner import _read_user_profile
+
+    source = (REPO_ROOT_FOR_TEST / "back-end/src/providers/smsSupervisor/contextBuilder.ts").read_text()
+    loader = source.split("async function fetchUserProfile(userId: string)", 1)[1].split(
+        "async function fetchSmsSession", 1
+    )[0]
+    selected = set(re.findall(r"^\s*([A-Za-z0-9_]+): true,", loader, re.MULTILINE))
+    row = judge_profile_row()
+    assert set(row) == selected
+    deps, queries = _recording_deps({'row_to_json(profile)': json.dumps(row)})
+    _read_user_profile(deps, "fixture-user")
+    columns = queries[0].split("FROM (SELECT ", 1)[1].split(' FROM "User"', 1)[0]
+    assert {column.strip().strip('"') for column in columns.split(",")} == selected
+
+
+@pytest.mark.parametrize("raw", ["", "not JSON", "null", "[]", "{}"])
+def test_judge_profile_unreadable_ground_truth_fails_closed(raw):
+    from benchmarks.sms_runner import _read_user_profile
+
+    deps, _ = _recording_deps({'row_to_json(profile)': raw})
+    with pytest.raises(SmsScriptError, match="profile ground truth"):
+        _read_user_profile(deps, "fixture-user")
+
+
+def test_judge_world_preserves_documents_and_agent_evidence_alongside_exact_profile_facts():
+    profile = {key: value for key, value in judge_profile_row().items() if key != "userId"}
+    script = {
+        "seed_documents": [{"source": "apple_notes", "title": "Travel", "content": "Passport fixture"}],
+        "seed_agents": [{"goal": "Existing authorized work", "price_limit_cents": 500}],
+        "web_search_fixture": {"results": [{"title": "Fixture result"}]},
+    }
+    before = build_judge_scenario(script)
+    after = build_judge_scenario(script, user_profile=profile)
+    assert after["user_profile_available_to_assistant"] == profile
+    assert after["user_profile_available_to_assistant"]["email"] is None
+    assert after["user_profile_available_to_assistant"]["addressLine1"] == "100 Fixture Street"
+    assert {key: value for key, value in after.items() if key != "user_profile_available_to_assistant"} == before
+
+
+def test_known_facts_judge_does_not_assert_an_email_exists_without_profile_evidence():
+    task = get_task_by_name("sms-supervisor-fill-form-searches-then-delegates")
+    judge = next(e for e in task.evaluators if e["id"] == "sms-fill-form-does-not-ask-for-known-facts")
+    assert judge["criteria"] == [
+        "No SMS the assistant sent asks the user to provide a fact that is in their Travel docs note or their profile"
+    ]
+    assert "already held the user's name, email and phone" not in judge["judge_prompt"]
+    assert "only nonempty values are known" in judge["judge_prompt"]
+    assert "Score 0.0 if any SMS the assistant sent asks" in judge["judge_prompt"]
+    profile = {key: value for key, value in judge_profile_row().items() if key != "userId"}
+    prompt = build_sms_verifier_prompt(task, judge, build_judge_scenario(parse_sms_script(task), profile))
+    assert '\"email\": null' in prompt
+    assert "100 Fixture Street" in prompt
+    assert judge["criteria"][0] in prompt

@@ -780,7 +780,31 @@ def build_report_transcript(turns: list[SmsTurn]) -> list[dict]:
     return transcript
 
 
-def build_judge_scenario(script: dict) -> dict:
+def _read_user_profile(deps: SmsRunnerDeps, user_id: str) -> dict:
+    """Read the same profile fields selected by SMS contextBuilder, without credentials."""
+    raw = deps.run_sql(
+        'SELECT row_to_json(profile) FROM (SELECT "userId", name, email, phone, '
+        '"deliveryRecipientName", "addressLine1", "addressLine2", city, state, '
+        '"postalCode", country, "systemName" FROM "User" WHERE "userId" = '
+        f'{deps.sql_literal(user_id)}) AS profile;'
+    ).strip()
+    if not raw:
+        raise SmsScriptError("SMS judge profile ground truth was not read back")
+    try:
+        profile = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise SmsScriptError("SMS judge profile ground truth was not valid JSON") from exc
+    expected = {
+        "userId", "name", "email", "phone", "deliveryRecipientName", "addressLine1",
+        "addressLine2", "city", "state", "postalCode", "country", "systemName",
+    }
+    if not isinstance(profile, dict) or set(profile) != expected:
+        raise SmsScriptError("SMS judge profile ground truth did not match the selected fields")
+    # The product uses userId to look up the profile but never renders it to the LLM.
+    return {key: value for key, value in profile.items() if key != "userId"}
+
+
+def build_judge_scenario(script: dict, user_profile: Optional[dict] = None) -> dict:
     """Ground truth the judge needs to separate "grounded" from "invented".
 
     Without the pre-existing agent state, a judge reads a correct reference to a
@@ -801,6 +825,7 @@ def build_judge_scenario(script: dict) -> dict:
     )
     return {
         **searchable,
+        **({"user_profile_available_to_assistant": user_profile} if user_profile is not None else {}),
         "agents_already_running_before_the_thread": [
             {
                 "goal": str(agent.get("goal", "")),
@@ -943,6 +968,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
     execution_error = False
     try:
         _apply_web_search_fixture(script.get("web_search_fixture"))
+        user_profile = _read_user_profile(deps, user_id)
         pre_existing_agents = _live_agent_ids(deps, user_id)
         _reset_session(deps, user_id)
         seed_messages = script.get("seed_messages", [])
@@ -993,7 +1019,9 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
                 for message in result.outbound:
                     print(f"       ↳ {message[:140]}")
 
-        passed, failure_reason, evaluator_results = await evaluate_sms_turns(task, turns, build_judge_scenario(script))
+        passed, failure_reason, evaluator_results = await evaluate_sms_turns(
+            task, turns, build_judge_scenario(script, user_profile)
+        )
     except Exception as exc:  # a harness error is a task failure, not a crash
         execution_error = True
         passed = False
