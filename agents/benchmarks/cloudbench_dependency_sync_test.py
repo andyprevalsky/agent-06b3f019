@@ -32812,9 +32812,10 @@ FLY() { echo native-fallback >&2; return 99; }
 
 def test_private_fleet_source_compact_inventory_binding_survives_caller_substitution(tmp_path: Path) -> None:
     fleet = fleet_source_text()
-    start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('echo "🧊 independently owned immutable source:'))
-    stop = fleet.index('warm_pair=', start)
-    warm = fleet[start:stop]
+    start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
+    stop = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', start)
+    binding = fleet[start:stop]
+    warm = binding + 'warm_json="$(fleet_admission_machines_json)"\n'
     inventory = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text()
     helpers = "\n".join(_extract_fleet_function(inventory, name) for name in ("_fresh_snapshot_or() {", "fleet_admission_machines_json() {"))
     directory = tmp_path / "index/current"; directory.mkdir(parents=True)
@@ -32865,3 +32866,35 @@ enforce_app_capacity_guard
         assert f"exit=1 input_bytes={len(raw.encode())}" in result.stderr
         assert "do-not-print" not in result.stderr and "PRIVATE_PAYLOAD" not in result.stderr
         assert "forbidden-mutation" not in result.stderr
+
+
+def test_private_fleet_source_compact_private_binding_and_standalone_refresh(tmp_path: Path) -> None:
+    fleet = fleet_source_text()
+    start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
+    stop = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', start)
+    binding = fleet[start:stop]
+    start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('reap_orphaned_fleet_proxies\n'))
+    stop = fleet.index('# ── App-wide capacity guard', start)
+    refresh = fleet[start:stop]
+    inventory = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text()
+    helpers = "\n".join(_extract_fleet_function(inventory, name) for name in ("_fresh_snapshot_or() {", "fleet_admission_machines_json() {"))
+    directory = tmp_path / "index/current"; directory.mkdir(parents=True)
+    (directory / "admission-machines.json").write_text('[{"id":"bound"}]')
+    for campaign in ("bound", ""):
+        script = """set -euo pipefail
+PRIVATE_SOURCE_FILE=exact-original-manifest
+SNAPSHOT_LOOP_PID=99
+SNAPSHOT_LOOP_TOKEN=previous
+INVENTORY_INDEX="$INDEX"
+APP=owned
+start_machines_snapshot_loop() { SNAPSHOT_LOOP_PID=42; SNAPSHOT_LOOP_TOKEN=original; }
+inventory_index_healthy() { [ "$SNAPSHOT_LOOP_TOKEN" = original ]; }
+fleet_machines_json() { echo forbidden-stale-local >&2; return 99; }
+machines_snapshot_identity() { printf generation; }
+refresh_machines_snapshot_after() { [ "$SNAPSHOT_LOOP_PID:$SNAPSHOT_LOOP_TOKEN" = 42:original ]; }
+FLY() { printf '[{"id":"fresh-native"}]'; }
+""" + helpers + "\n" + binding + refresh + '\nprintf "%s" "$warm_json"\n'
+        result = subprocess.run(["bash", "-c", script], env=dict(os.environ, INDEX=str(tmp_path / "index"), CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=campaign), capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ('[{"id":"bound"}]' if campaign else '[{"id":"fresh-native"}]')
+        assert "forbidden-stale-local" not in result.stderr
