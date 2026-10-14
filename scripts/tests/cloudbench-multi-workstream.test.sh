@@ -856,10 +856,11 @@ reset_fake_state() {
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",
-     "config": {"mounts": [{"volume": "vol_aaaa0001", "size_gb": 40}]}}
+     "config": {"mounts": [{"volume": "vol_aaaa0001", "path": "/data", "size_gb": 40}]}}
   ],
   "volumes": [
-    {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created", "size_gb": 40}
+    {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created", "size_gb": 40,
+     "attached_machine_id": "aaaa0000000001"}
   ],
   "snapshots": [
     {"id": "snap_0001", "status": "created",
@@ -2724,6 +2725,20 @@ if before_owner_ready:
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
+        parts = path.split("/")
+        if len(parts) == 4 and parts[1] == "run" and parts[3] == "report-card.json":
+            run_id = parts[2]
+            card = runs_root / run_id / "_batch" / "report-card.json"
+            if run_id in ("", ".", "..") or not card.is_file():
+                self.send_error(404)
+                return
+            body = card.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/hub-meta.json":
             body = json.dumps({
                 "root": str(runs_root.resolve()),

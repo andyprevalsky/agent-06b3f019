@@ -57,6 +57,7 @@ _CONFIG_SCALAR_KEYS = {
     "start_barrier_wait_seconds",
     "boot_launch",
     "boot_config_max_in_flight",
+    "campaign_mutation_admission",
     "boot_update_capacity_wait_seconds",
     "boot_config_barrier_wait_seconds",
     "primary_vm_size",

@@ -9948,7 +9948,31 @@ def test_execution_provenance_snapshot_stays_sealed_across_real_consumers(
 def test_execution_provenance_config_is_an_exact_nonsecret_allowlist(
     tmp_path: Path,
 ) -> None:
-    snapshot, manifest, _provenance = _make_execution_provenance(tmp_path)
+    snapshot, manifest, provenance_file = _make_execution_provenance(tmp_path)
+    provenance = json.loads(provenance_file.read_text())
+    helper = _load_reviewed_cloudbench_module(EXECUTION_PROVENANCE_SCRIPT)
+    emitter = FLEET_SCRIPT.read_text().split("PROVENANCE_CONFIG_ARGS=(", 1)[1].split("\n)", 1)[0]
+    keys = re.findall(r'--config-value "([a-z0-9_]+)=', emitter)
+    assert len(keys) == len(set(keys)) and "campaign_mutation_admission" in keys
+    for flag in ("0", "1"):
+        pairs = [f"{key}={flag if key == 'campaign_mutation_admission' else 'fixture'}" for key in keys]
+        config = helper.build_config("cloudbench-fleet-config-v1", pairs)
+        assert set(config["values"]) == set(keys)
+        assert config["values"]["campaign_mutation_admission"] == flag
+        stamped = copy.deepcopy(provenance)
+        stamped["config"] = config
+        assert helper.validate_provenance(stamped) == []
+    with pytest.raises(helper.ProvenanceError, match="duplicate"):
+        helper.build_config("cloudbench-fleet-config-v1", ["campaign_mutation_admission=0", "campaign_mutation_admission=1"])
+    for malformed in ("campaign_mutation_admission", "campaign_mutation_admission/=1"):
+        with pytest.raises(helper.ProvenanceError, match="invalid"):
+            helper.build_config("cloudbench-fleet-config-v1", [malformed])
+    for invalid in (True, 0, None):
+        stamped = copy.deepcopy(provenance)
+        stamped["config"]["values"]["campaign_mutation_admission"] = invalid
+        payload = {"schema_version": stamped["config"]["schema_version"], "values": stamped["config"]["values"]}
+        stamped["config"]["sha256"] = helper.canonical_sha256(payload)
+        assert helper.validate_provenance(stamped)
     for assignment in (
         "behavior_switch=arbitrary-future-value",
         "accesstoken=must-never-enter-artifact",
