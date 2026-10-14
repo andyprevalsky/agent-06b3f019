@@ -8554,6 +8554,17 @@ async def _spawn_browser_agent_activity_v3_real(
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
+            # Finish the already-owned inbox poll before transferring control,
+            # using the same bounded drain as activity shutdown. Admit any real
+            # eligible input it produced through the next ordinary model turn.
+            if action_name == "request_user_assistance_for_authentication":
+                await _drain_otp_poll(otp_poll_task)
+                otp_poll_task = None
+                if len(otp_user_messages) > otp_history_count:
+                    await browser_stream.finish_tools(status="ERROR")
+                    state_prefetch.discard()
+                    continue
+
             if thinking:
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(
