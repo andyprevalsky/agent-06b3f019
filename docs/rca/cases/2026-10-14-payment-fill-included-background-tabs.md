@@ -180,9 +180,49 @@ observations; the original purchase has not been replayed or proven to
 complete. The documented production mint cutoff remains unchanged. Changing that
 configuration requires explicit approval.
 
+The user-directed follow-up removes automatic payment entry completely. The
+agent now chooses an ordinary action and target for each field. A shared action
+boundary copies the model's arguments, resolves explicit `{{secret:<ref>}}`
+placeholders privately in every browser tool, and safely escapes JavaScript
+literals. Legacy whole-value references remain accepted for paused tasks.
+The shared boundary masks all four card values and password bindings in results,
+history, and errors. Activity-scoped logging also covers already-running browser
+event handlers, and retained prior-realm bindings protect later observations.
+Private resume bindings always use verified encrypted storage. Screenshots and
+media are withheld after private entry because text masking cannot validate
+raster contents. Trusted routing and geometry remain exact; page-controlled
+readbacks are still redacted. This implements the requested credential contract
+without selecting fields or injecting fabricated progress messages.
+
+Three permanent public-dispatch regressions cover ordinary text/key/evaluate
+resolution without mutating model arguments, all-card result/history/error
+redaction, and real Chromium field/tab selection with hostile JavaScript
+literal values. The same final tests fail on the pinned pre-change
+`32947aee57006a63d9232f77daf7725af70f32ff` source and pass with the follow-up.
+Additional owning-domain tests cover the absence of handoff mutation before the
+model's first decision, formatted and serialized readbacks, prior-realm secrets,
+prestarted browser-event logging, numeric metadata collisions, password origins,
+and encrypted resume failures. The new archive searches were `secret_refs
+evaluate input_text runtime replacement` and `autofill payment handoff automatic
+secrets model`; this is a deeper repair to the same incident following explicit
+human feedback, rather than a separate incident.
+
 ## Human feedback
 
-None recorded.
+The user rejected the automatic payment-entry layer after the narrow tab
+ownership repair shipped. Their intended contract is ordinary agent-selected
+credential entry: the model receives obfuscated references, and the harness
+privately replaces them in any chosen browser tool, including JavaScript
+evaluation. The model must never receive the underlying credential values.
+
+This feedback changes the repair scope. Restricting automatic discovery to the
+focused page fixes one ownership bug but preserves the unwanted automatic
+actions. The follow-up removes the synthetic fill, retries, multi-field fill,
+and fabricated submit-this-page message. It moves resolution and output
+redaction to the shared action boundary, preserving the agent's chosen target.
+New observations also cover all four card fields, errors, history, earlier
+realm credentials, and secret-bearing screenshots. The original checkout loss
+and authentication observations remain unresolved.
 
 ## Reusable lesson
 
