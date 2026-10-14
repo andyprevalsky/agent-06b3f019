@@ -12896,6 +12896,7 @@ async def test_execute_action_secret_refs_preserve_agent_selected_fields_and_jav
         "card_number": "4111111111111111", "card_name": "Synthetic Private Cardholder",
         "card_expiry": "12/31", "card_cvv": "739",
         "pwd:fixture": "single' double\" backtick` slash\\ newline\n${globalThis.secretInjection = true} card_number",
+        "pwd:unicode": "synthetic-unicode-\u2028-\u2029-🚀-credential",
     }
     fields = '<input id="chosen" name="card_number"><input id="name" autocomplete="cc-name"><input id="expiry" autocomplete="cc-exp"><input id="cvv" autocomplete="cc-csc"><textarea id="password"></textarea>'
     async with async_playwright() as playwright:
@@ -12907,8 +12908,10 @@ async def test_execute_action_secret_refs_preserve_agent_selected_fields_and_jav
             await background.set_content(fields)
             await page.bring_to_front()
             transport = await page.context.new_cdp_session(page)
+            expressions = []
 
             async def evaluate(*, params, session_id):
+                expressions.append(params["expression"])
                 return await transport.send("Runtime.evaluate", params)
 
             dom, history, humanizer, _evaluate = _private_secret_action_fixture(evaluate)
@@ -12947,6 +12950,31 @@ async def test_execute_action_secret_refs_preserve_agent_selected_fields_and_jav
                 assert await page.locator("#chosen").input_value() == refs["card_number"]
                 assert action["params"]["code"] == code
                 assert refs["pwd:fixture"] not in str(result)
+            cases = (
+                ("bare opaque", "(() => { document.querySelector('#password').value = {{secret:pwd:fixture}}; return true; })()", True, refs["pwd:fixture"]),
+                ("nested template", "(() => { document.querySelector('#password').value = `prefix-${`{{secret:pwd:fixture}}`}-suffix`; return true; })()", True, "prefix-" + refs["pwd:fixture"] + "-suffix"),
+                ("comments and regex", "(() => { /* {{secret:pwd:fixture}} */ document.querySelector('#password').value = '{{secret:pwd:fixture}}'; return {source: /card_number/.source, matches: /card_number/.test('card_' + 'number')}; })()", {"source": "card_number", "matches": True}, refs["pwd:fixture"]),
+                ("property names", "(() => { const item = {'card_number': 'kept'}; document.querySelector('#password').value = '{{secret:pwd:fixture}}'; return [item['card_number'], Object.keys(item)[0]]; })()", ["kept", "card_number"], refs["pwd:fixture"]),
+                ("unknown marker", "(() => { document.querySelector('#password').value = '{{secret:pwd:missing}}'; return true; })()", True, "{{secret:pwd:missing}}"),
+                ("Unicode string", "(() => { document.querySelector('#password').value = '{{secret:pwd:unicode}}'; return true; })()", True, refs["pwd:unicode"]),
+            )
+            for label, code, expected, entered in cases:
+                action = {"action": "evaluate", "params": {"code": code}}
+                result = await execute_action(dom, history, action, secret_refs=refs, write_lock_enabled=False)
+                assert result["success"] is True, (label, result)
+                assert result["value"] == expected, label
+                assert await page.locator("#password").input_value() == entered, label
+                assert action["params"]["code"] == code, label
+                assert await page.locator("#chosen").input_value() == refs["card_number"], label
+                if label == "comments and regex":
+                    assert "/* {{secret:pwd:fixture}} */" in expressions[-1], "a credential marker in a comment became private source data"
+            prior_evaluations = len(expressions)
+            refused = await execute_action(
+                dom, history, {"action": "evaluate", "params": {"code": "String.raw`{{secret:pwd:fixture}}`"}},
+                secret_refs=refs, write_lock_enabled=False,
+            )
+            assert refused["success"] is False and "tagged template" in refused["error"]
+            assert len(expressions) == prior_evaluations, "unsupported credential interpolation executed JavaScript"
             recorded = str([call.kwargs for call in history.record_action.await_args_list])
             assert all(secret not in recorded for secret in refs.values()), "private JS source reached ActionHistory"
             for other in ("#name", "#expiry", "#cvv"):
