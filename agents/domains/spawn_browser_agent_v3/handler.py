@@ -5625,7 +5625,8 @@ async def _spawn_browser_agent_activity_v3_simulated(
     resume = write_lock_resume_state or {}
     output_schema = resume.get("browser_output_schema") or output_schema
     instruction_state = dict(resume)
-    instruction_state.setdefault("user_message_cursor", datetime.now(timezone.utc).isoformat())
+    if not resume:
+        instruction_state["user_message_cursor"] = datetime.now(timezone.utc).isoformat()
     task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
     browser_url = "about:blank"
     browser_state = dict(resume.get("simulated_browser_state") or {})

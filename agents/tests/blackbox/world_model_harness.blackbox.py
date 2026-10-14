@@ -2468,7 +2468,7 @@ async def test_simulated_browser_preserves_active_user_input_without_narration()
     await _exercise_simulated_browser_policy(active_feedback=True)
 
 
-async def _exercise_simulated_browser_pending_approval(*, user_feedback=False):
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
     from datetime import datetime, timedelta, timezone
 
@@ -2577,9 +2577,14 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False):
     }
     correction = "Do not place this order. Inspect the checkout instead."
     now = datetime.now(timezone.utc)
-    resume_state["user_message_cursor"] = (now - timedelta(minutes=1)).isoformat()
+    if not legacy_resume:
+        resume_state["user_message_cursor"] = (now - timedelta(minutes=1)).isoformat()
     rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
-             "timestamp": now.isoformat()}] if user_feedback else []
+             "timestamp": (now - timedelta(seconds=30) if legacy_resume else now).isoformat()}] if user_feedback else []
+
+    async def poll(_agent_id, since):
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
+
     schema = {"fields": [{"name": "order_id", "type": "string",
                           "description": "Amazon order confirmation ID", "required": True}]}
     generation = AsyncMock(return_value=(schema, None, {}))
@@ -2595,7 +2600,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False):
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
-        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=rows)),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(side_effect=poll)),
         patch("helpers.llm._generate_response_schema_with_rose", generation),
         patch.object(browser_handler, "save_browser_action_message", saved_actions),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
@@ -2636,7 +2641,9 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False):
     assert result["status"] == "completed"
     if user_feedback:
         assert executed_actions == [], "resumed approval executed the queued write before reconsidering real USER feedback"
-        assert {"role": "user", "content": correction} in policy.await_args.kwargs["turn_messages"]
+        assert [message for message in policy.await_args.kwargs["turn_messages"] if message.get("role") == "user"] == [
+            {"role": "user", "content": correction}
+        ], "resumed policy lost or duplicated the authored correction"
         assert verifier.await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": correction}]
         assert result["browser_output_schema"] == schema, "unchanged deliverable changed the output contract"
         generation.assert_awaited_once()
@@ -2661,6 +2668,10 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
 
 async def test_simulated_browser_user_feedback_invalidates_pending_approved_action():
     await _exercise_simulated_browser_pending_approval(user_feedback=True)
+
+
+async def test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True, legacy_resume=True)
 
 
 async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
@@ -3246,6 +3257,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_user_feedback_invalidates_pending_approved_action",
         test_simulated_browser_user_feedback_invalidates_pending_approved_action,
+    )
+    await r.record_async(
+        "simulated_browser_legacy_resume_reads_feedback_sent_during_pause",
+        test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause,
     )
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",
