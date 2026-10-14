@@ -6048,3 +6048,5 @@
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 285.3, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "1cfaf45b-6833-402c-8251-712bd9e54ce6"}
 {"task": "agent-payment-abandonment", "duration_seconds": 198.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "51a21579-5c4d-4256-9554-bd1f1b65f38c"}
 {"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 78.2, "cost_cents": 0.0, "timestamp": "2026-10-14T01:55:01.149340+00:00", "agent_id": ""}
+{"task": "sms-supervisor-fill-form-searches-then-delegates", "duration_seconds": 41.1, "cost_cents": 0.0, "timestamp": "2026-10-14T19:23:32.947827+00:00", "agent_id": ""}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 26.0, "cost_cents": 0.0, "timestamp": "2026-10-14T19:23:32.947827+00:00", "agent_id": ""}

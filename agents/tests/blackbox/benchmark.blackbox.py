@@ -11346,7 +11346,19 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
             {"id": "sms-judge", "method": "single_turn_llm_judge", "criteria": ["Reply."], "pass_threshold": 1.0}
         ],
     )
-    deps = SimpleNamespace(is_local_base_url=lambda _: True, benchmark_user_id=lambda: "test-user")
+    user_profile = {
+        "userId": "test-user",
+        **dict.fromkeys((
+            "name", "email", "phone", "deliveryRecipientName", "addressLine1", "addressLine2",
+            "city", "state", "postalCode", "country", "systemName",
+        )),
+    }
+    deps = SimpleNamespace(
+        is_local_base_url=lambda _: True,
+        benchmark_user_id=lambda: "test-user",
+        run_sql=lambda _: json.dumps(user_profile),
+        sql_literal=lambda value: "'" + str(value).replace("'", "''") + "'",
+    )
     sms_results = {}
     for label, verdict_from_invocation in (("unavailable", None), ("recovered", 2)):
         with _scripted_judge_provider(verdict_from_invocation=verdict_from_invocation) as probe:
