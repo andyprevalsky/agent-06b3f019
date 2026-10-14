@@ -21020,6 +21020,96 @@ exit 0
     assert not cleanup_snapshot.exists(), "claimant resurrected a snapshot after parent cleanup won the lifecycle lock"
 
 
+
+def test_private_fleet_source_snapshot_publication_wins_deadline_race(tmp_path: Path) -> None:
+    """A real creator publishes while the shell checks liveness; keep that result.
+
+    The controlled SECONDS transition represents scheduler delay between the
+    initial result check and deadline check, not a historical CPU-cause claim.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index('    while [ ! -s "$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE" ]; do')
+    end = fleet.index('    helper_pending_signal=""', start)
+    validation_end = fleet.index('    CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE="owner"', end)
+    creation_loop = fleet[start:validation_end]
+    helper = SCRIPT_SNAPSHOT_OWNER
+    diagnostic = _extract_fleet_function(fleet, "script_snapshot_creation_timeout_diagnostic() {")
+    for mode in ("published", "missing", "invalid", "foreign"):
+        publish = mode != "missing"
+        root = tmp_path / mode
+        root.mkdir()
+        script = r'''
+set -uo pipefail
+owner_start="$(script_snapshot_current_pid_start)"
+[ -n "$owner_start" ] || exit 89
+token=0123456789abcdef0123456789abcdef
+SCRIPT_SNAPSHOT_EXPECTED_PATH="$TEST_ROOT/cloudbench-scripts.$token"
+SCRIPT_SNAPSHOT_CREATE_RESULT_FILE="$TEST_ROOT/.cloudbench-script-snapshot-create.$$.$token"
+SCRIPT_SNAPSHOT_CREATE_ADOPTION_FILE="$TEST_ROOT/.cloudbench-script-snapshot-adopt.$$.$token"
+SCRIPT_SNAPSHOT_CREATOR_PID_START=unknown
+SCRIPT_SNAPSHOT_PENDING_SIGNAL=
+export CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_INIT_READY="$TEST_ROOT/ready"
+export CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_INIT_RELEASE="$TEST_ROOT/release"
+python3 "$HELPER" create --path "$SCRIPT_SNAPSHOT_EXPECTED_PATH" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null &
+SCRIPT_SNAPSHOT_CREATOR_PID=$!
+stop_script_snapshot_creator() {
+    if kill -0 "$SCRIPT_SNAPSHOT_CREATOR_PID" 2>/dev/null; then
+        kill -s TERM "$SCRIPT_SNAPSHOT_CREATOR_PID"
+    fi
+    wait "$SCRIPT_SNAPSHOT_CREATOR_PID" 2>/dev/null || true
+}
+trap stop_script_snapshot_creator EXIT
+replay_deferred_script_snapshot_signal() { return 0; }
+wait_deadline=$((SECONDS + 10))
+while [ ! -s "$TEST_ROOT/ready" ]; do
+    [ "$SECONDS" -lt "$wait_deadline" ] || exit 90
+    sleep 0.01
+ done
+creation_deadline=$((SECONDS + 30))
+script_snapshot_creator_running() {
+    if [ "$PUBLISH" = 1 ]; then
+        : > "$TEST_ROOT/release"
+        wait_deadline=$((SECONDS + 10))
+        while [ ! -s "$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE" ]; do
+            [ "$SECONDS" -lt "$wait_deadline" ] || return 1
+            sleep 0.01
+        done
+    fi
+    if [ "$MODE" = foreign ]; then
+        printf '%s\n\n' "$TEST_ROOT/foreign-owned" > "$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE"
+    fi
+    SECONDS=$creation_deadline
+    kill -0 "$SCRIPT_SNAPSHOT_CREATOR_PID" 2>/dev/null
+}
+'''
+        script = _extract_fleet_function(fleet, "script_snapshot_current_pid_start() {") + "\n" + script
+        script += diagnostic + "\n" + creation_loop
+        script += r'''
+[ "$(head -n 1 "$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE")" = "$SCRIPT_SNAPSHOT_EXPECTED_PATH" ] || exit 91
+python3 "$HELPER" adopt --path "$SCRIPT_SNAPSHOT_EXPECTED_PATH" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null || exit 92
+wait "$SCRIPT_SNAPSHOT_CREATOR_PID" || exit 93
+trap - EXIT
+python3 "$HELPER" cleanup --path "$SCRIPT_SNAPSHOT_EXPECTED_PATH" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null || exit 94
+printf '%s\n' PUBLICATION_ACCEPTED
+'''
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={**os.environ, "TEST_ROOT": str(root), "HELPER": str(helper), "PUBLISH": "1" if publish else "0", "MODE": mode, "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_INVALID_RESULT": "1" if mode == "invalid" else "0"},
+            text=True, capture_output=True, timeout=15,
+        )
+        if mode == "published":
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert "PUBLICATION_ACCEPTED" in result.stdout
+        else:
+            assert result.returncode != 0
+            expected_error = "creator did not publish its path" if mode == "missing" else "helper published the wrong owned path"
+            assert expected_error in result.stderr
+            if mode == "missing":
+                assert "SNAPSHOT_CREATE_TIMEOUT creator_pid=" in result.stderr
+                assert "result_stat=absent adoption_stat=absent" in result.stderr
+        assert not list(root.glob("cloudbench-scripts.*")), "source-owned creator cleanup leaked"
+
+
 def test_script_snapshot_lifecycle_keeps_the_bash_32_portability_contract() -> None:
     fleet = fleet_source_text()
     bash_4_only = {

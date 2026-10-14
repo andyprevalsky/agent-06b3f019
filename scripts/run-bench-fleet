@@ -396,6 +396,41 @@ cleanup_owned_script_snapshot_on_exit() {
     exit "$ec"
 }
 
+script_snapshot_creation_timeout_diagnostic() {
+    # Preserve bounded native/file observations in the private controller log
+    # before rollback removes the creator's rendezvous and ownership marker.
+    local line boot actual_birth="unknown" wchan="unknown" item state
+    local result_stat="absent" adoption_stat="absent" marker_stat="absent"
+    local -a fields
+    if IFS= read -r line < "/proc/$SCRIPT_SNAPSHOT_CREATOR_PID/stat" 2>/dev/null \
+        && IFS= read -r boot < /proc/sys/kernel/random/boot_id 2>/dev/null; then
+        IFS=' ' read -r -a fields <<< "${line##*) }"
+        [ -z "${fields[19]:-}" ] || actual_birth="proc-start:$boot:${fields[19]}"
+    fi
+    IFS= read -r wchan < "/proc/$SCRIPT_SNAPSHOT_CREATOR_PID/wchan" 2>/dev/null || true
+    [ -n "$wchan" ] || wchan="unknown"
+    for item in result adoption marker; do
+        case "$item" in
+            result) state="$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE" ;;
+            adoption) state="$SCRIPT_SNAPSHOT_CREATE_ADOPTION_FILE" ;;
+            marker) state="$SCRIPT_SNAPSHOT_EXPECTED_PATH/.cloudbench-script-snapshot-owner.json" ;;
+        esac
+        if [ -L "$state" ]; then state="symlink"
+        elif [ -f "$state" ]; then
+            if [ -s "$state" ]; then state="regular-nonempty"; else state="regular-empty"; fi
+        elif [ -e "$state" ]; then state="nonregular"
+        else state="absent"; fi
+        case "$item" in
+            result) result_stat="$state" ;;
+            adoption) adoption_stat="$state" ;;
+            marker) marker_stat="$state" ;;
+        esac
+    done
+    printf 'SNAPSHOT_CREATE_TIMEOUT creator_pid=%s expected_birth=%s actual_birth=%s wchan=%s result_stat=%s adoption_stat=%s marker_stat=%s\n' \
+        "$SCRIPT_SNAPSHOT_CREATOR_PID" "${SCRIPT_SNAPSHOT_CREATOR_PID_START:-unknown}" \
+        "$actual_birth" "$wchan" "$result_stat" "$adoption_stat" "$marker_stat" >&2
+}
+
 script_snapshot_creator_running() {
     local job_pid
     [ -n "$SCRIPT_SNAPSHOT_CREATOR_PID" ] || return 1
@@ -636,6 +671,9 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
             exit 1
         fi
         if [ "$SECONDS" -ge "$creation_deadline" ]; then
+            # Publication may win while the shell checks liveness or is paused.
+            [ ! -s "$SCRIPT_SNAPSHOT_CREATE_RESULT_FILE" ] || break
+            script_snapshot_creation_timeout_diagnostic
             stop_script_snapshot_creator || true
             echo "FATAL: fleet script snapshot creator did not publish its path" >&2
             exit 1
