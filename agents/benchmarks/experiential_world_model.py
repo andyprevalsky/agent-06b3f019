@@ -10,6 +10,8 @@ used. Session locks cover only immutable snapshots, receipts and atomic commits.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import json
 import secrets
 import time
@@ -211,6 +213,7 @@ class NativeSession:
     receipts: dict = field(default_factory=dict)
     sampling_draws: dict = field(default_factory=dict)
     retirement: asyncio.Task | None = None
+    durability_failed: bool = False
     # Live invocations whose prediction was discarded, in conflict order. While
     # any exist only the oldest may predict and commit, so a slow prediction
     # cannot be rebased forever by a stream of faster commits.
@@ -225,6 +228,15 @@ class NativeSession:
 
 class RetiredWorldModelScope(ValueError):
     """A stale worker cannot reopen a retired root's world as an empty session."""
+
+
+class NativeOwnedCancellation(asyncio.CancelledError):
+    def __init__(self, result):
+        self.result = result
+
+
+class NativeDurabilityError(RuntimeError):
+    """An owned prediction writer failed before retirement could acknowledge it."""
 
 
 class ParallelWorldModel:
@@ -280,6 +292,8 @@ class ParallelWorldModel:
         self.retrieval_calls = 0
 
     def new_session(self, task: str, seed_state: dict, scope: str | None = None) -> NativeSession:
+        if getattr(self, "_closing", False):
+            raise ValueError("Native model is closing")
         if scope is not None and (not isinstance(scope, str) or not scope.strip() or len(scope) > 128):
             raise ValueError("Native session scope must be a nonempty bounded identity")
         if scope and scope in self.closed_scopes:
@@ -303,6 +317,8 @@ class ParallelWorldModel:
         return session
 
     async def step(self, session_id: str, action: dict, invocation: str | None = None) -> dict:
+        if getattr(self, "_closing", False):
+            raise ValueError("Native model is closing")
         session = self.sessions[session_id]
         candidate = action_from_canonical(action)
         # Timestamp is observation context, never native operation identity.
@@ -349,6 +365,51 @@ class ParallelWorldModel:
         # A lost HTTP response must not cancel an already admitted prediction.
         return deepcopy(await asyncio.shield(operation))
 
+    async def _owned_thread_call(self, function, *args):
+        # Existing WHM recovery opt-in only; ordinary callers keep their path.
+        if not (self.execution_identity or {}).get("runtime_config", {}).get("validation_recovery"):
+            return await asyncio.to_thread(function, *args)
+        # Keep the actual concurrent future, not a cancellable asyncio proxy.
+        try:
+            executor = getattr(self, "_owned_executor", None)
+            if executor is None:
+                executor = self._owned_executor = ThreadPoolExecutor()
+            context = copy_context()
+            operation = executor.submit(context.run, function, *args)
+        except BaseException as error:
+            if function is self.record_prediction or function is self.record_retirement:
+                raise NativeDurabilityError("Native durability owner admission failed") from error
+            raise
+        cancelled = False
+        while True:
+            proxy = asyncio.wrap_future(operation)
+            try:
+                result = await asyncio.shield(proxy)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if operation.done() and not operation.cancelled():
+                    try:
+                        result = operation.result()
+                    except BaseException as error:
+                        if function is self.record_prediction or function is self.record_retirement:
+                            raise NativeDurabilityError("Native prediction durability failed") from error
+                        raise
+                    break
+                if operation.cancelled():
+                    if function is self.record_prediction or function is self.record_retirement:
+                        raise NativeDurabilityError("Native prediction durability owner cancelled")
+                    raise RuntimeError("Native executor owner cancelled before execution")
+                # A cancelled asyncio proxy cannot attest actual thread join.
+                # Re-wrap the retained concurrent future until it really finishes.
+            except Exception as error:
+                if function is self.record_prediction or function is self.record_retirement:
+                    raise NativeDurabilityError("Native prediction durability failed") from error
+                raise
+        if cancelled:
+            raise NativeOwnedCancellation(result)
+        return result
+
     async def _step(self, session, key, action, candidate, draw):
         # No operation deadline: every provider call carries Rose's own deadline,
         # an operation rebases at most once and repairs its protocol once, and the
@@ -356,6 +417,9 @@ class ParallelWorldModel:
         # request timed out rejoins the same operation through its invocation.
         try:
             return await self._step_with_rebase(session, key, action, candidate, draw)
+        except NativeDurabilityError:
+            session.durability_failed = True
+            raise
         finally:
             # Synchronous on the session's loop, so a second cancellation cannot
             # strand the turn on a finished operation.
@@ -436,7 +500,7 @@ class ParallelWorldModel:
                 excluded_lineage_ids=(session.excluded_lineage,),
                 top_k=self.top_k,
             )
-            demos = await asyncio.to_thread(self.retriever.retrieve, query)
+            demos = await self._owned_thread_call(self.retriever.retrieve, query)
             if (self.execution_identity or {}).get("runtime_config", {}).get("exclude_failed_tool_examples"):
                 from benchmarks.wmh_grounding_filter import failed_tool_result
 
@@ -539,7 +603,7 @@ class ParallelWorldModel:
                             record["response"] = response
                         intervals.append(interval)
                         if self.record_prediction:
-                            await asyncio.to_thread(self.record_prediction, record)
+                            await self._owned_thread_call(self.record_prediction, record)
                     raw = response["content"] if isinstance(response, dict) else response
                     if self.execution_policy.response_protocol in DISTRIBUTION_PROTOCOLS:
                         try:
@@ -578,7 +642,7 @@ class ParallelWorldModel:
                         if self.record_prediction:
                             # A proposal record is not a commit receipt. The final
                             # history/retirement receipt establishes the commit.
-                            await asyncio.to_thread(
+                            await self._owned_thread_call(
                                 self.record_prediction,
                                 {
                                     "schema": "rose.wmh_outcome_selection.v1",
@@ -778,10 +842,20 @@ class ParallelWorldModel:
                 raise RuntimeError("Native provider retirement did not verify the exact session join")
             usage = provider.get("usage")
         if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=10)
-            if pending:
-                raise RuntimeError("Native session operations did not join during retirement")
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if (self.execution_identity or {}).get("runtime_config", {}).get("validation_recovery"):
+                # Fence/cancel inference first, then join its durable owners.
+                # Rose provider admission/deadlines remain unchanged.
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, NativeDurabilityError):
+                        raise result
+            else:
+                _, pending = await asyncio.wait(tasks, timeout=10)
+                if pending:
+                    raise RuntimeError("Native session operations did not join during retirement")
+                await asyncio.gather(*tasks, return_exceptions=True)
+        if session.durability_failed:
+            raise NativeDurabilityError("Native prediction durability failed before retirement")
         receipt = {
             "ended": session.id,
             "engine": "experiential",
@@ -797,7 +871,14 @@ class ParallelWorldModel:
             receipt["execution_identity"] = deepcopy(self.execution_identity)
         if self._timed:
             receipt["world_clock"] = session.clock.snapshot()
-        stored = await asyncio.to_thread(self.record_retirement, receipt) if self.record_retirement else receipt
+        cancelled = False
+        try:
+            stored = await self._owned_thread_call(self.record_retirement, receipt) if self.record_retirement else receipt
+        except NativeOwnedCancellation as error:
+            stored, cancelled = error.result, True
+        except NativeDurabilityError:
+            session.durability_failed = True
+            raise
         # Publication is synchronous on this loop after all owned work has joined.
         self.retired[session.id] = (stored, sha256_json(receipt))
         self.sessions.pop(session.id, None)
@@ -809,8 +890,57 @@ class ParallelWorldModel:
         session.initial_context = {}
         session.state = {}
         session.history = ()
+        if cancelled:
+            raise asyncio.CancelledError()
         return receipt
 
     async def close(self):
-        for session_id in list(self.sessions):
-            await self.end_session(session_id)
+        if not (self.execution_identity or {}).get("runtime_config", {}).get("validation_recovery"):
+            for session_id in list(self.sessions):
+                await self.end_session(session_id)
+            return
+        task = getattr(self, "_close_owner", None)
+        if task is None or (task.done() and task.cancelled()):
+            self._closing = True
+            task = self._close_owner = asyncio.create_task(self._close_owned())
+        return await asyncio.shield(task)
+
+    async def _close_owned(self):
+        cancelled = False
+        async def join(tasks):
+            nonlocal cancelled
+            while True:
+                proxy = asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+                try:
+                    return await asyncio.shield(proxy)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    # A canceled gather is only a proxy. Keep the actual task
+                    # owners and create a fresh wait; never spin on that proxy.
+                    proxy.cancel()
+                    def consume(future):
+                        try:
+                            future.exception()
+                        except asyncio.CancelledError:
+                            pass
+                    proxy.add_done_callback(consume)
+        retirements = [asyncio.create_task(self.end_session(sid)) for sid in list(self.sessions)]
+        results = await join(retirements) if retirements else []
+        errors = [result for result in results if isinstance(result, BaseException)]
+        pending = {item[1] for session in self.sessions.values() for item in session.receipts.values() if not item[1].done()}
+        pending.update(session.retirement for session in self.sessions.values() if session.retirement is not None and not session.retirement.done())
+        if pending:
+            await join(pending)
+        executor = getattr(self, "_owned_executor", None)
+        if executor is not None:
+            try:
+                executor.shutdown(wait=True)
+            except BaseException as error:
+                if errors:
+                    raise errors[0] from error
+                raise
+            self._owned_executor = None
+        if errors:
+            raise errors[0]
+        if cancelled:
+            raise asyncio.CancelledError()

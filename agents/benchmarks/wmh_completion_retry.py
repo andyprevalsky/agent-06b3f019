@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import math
 import ssl
+import sys
 import time
 from contextlib import aclosing
 from copy import deepcopy
@@ -242,7 +243,29 @@ async def scheduled_attempt(attempt, kwargs: dict, budget: CompletionRetryBudget
             yield StreamChunk(kind="restart", data={"reason": "wmh_transient_retry", "attempt": budget.attempts})
             continue
         finally:
-            FAILURE_OBSERVER.reset(observer)
+            original_error = sys.exception()
+            try:
+                if route_failures:
+                    # Quota classification can report the same HTTP response
+                    # again; coalesce only persisted observations, not policy.
+                    observations = {}
+                    for index, failure in enumerate(route_failures):
+                        key = failure.get("response_observation_id", ("event", index))
+                        observations[key] = failure
+                    await capture(
+                        {
+                            "kind": "provider_http_failures",
+                            "attempt_ordinal": budget.attempts,
+                            "request": prediction_request(current),
+                            "route_failures": deepcopy(list(observations.values())),
+                        }
+                    )
+            except Exception as capture_error:
+                if original_error is not None:
+                    raise capture_error from original_error
+                raise
+            finally:
+                FAILURE_OBSERVER.reset(observer)
         for chunk in held:
             if budget.remaining() <= 0:
                 raise WMHRetryBudgetError("WHM completion overall deadline exhausted")

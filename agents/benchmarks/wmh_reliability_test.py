@@ -467,7 +467,12 @@ def test_actual_rose_failure_retains_foundry_retry_floor_on_terminal_waterfall(m
 
     asyncio.run(run())
     assert len(requests) == 3 and sleeps == [4, 4]
-    assert len(captured) == 3 and "private-lease-marker" not in repr(captured)
+    transport = [row for row in captured if row["kind"] == "provider_http_failures"]
+    transient = [row for row in captured if row["kind"] == "transient_completion_failure"]
+    assert len(transport) == len(transient) == 3 and len(captured) == 6
+    assert "private-lease-marker" not in repr(captured)
+    assert [row["attempt_ordinal"] for row in transport] == [1, 2, 3]
+    assert [row["attempt_ordinal"] for row in transient] == [1, 2, 3]
     assert all(row["request"]["deadline_s"] <= 360 for row in captured)
 
 
@@ -1100,3 +1105,49 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
 
     asyncio.run(run())
     assert "private-wire-reply-marker" not in repr(logs) and secret not in repr(logs)
+
+
+def test_wmh_success_keeps_precontent_http_failure_evidence():
+    import asyncio
+    import hashlib
+
+    import httpx
+
+    from benchmarks.wmh_completion_retry import CompletionRetryBudget, scheduled_attempt
+    from providers.rose.types import StreamChunk
+    from providers.rose.whm_retry_observation import FAILURE_OBSERVER, observe_http_failure
+
+    body = b'{"error":{"code":"synthetic_bad_request","message":"offline"}}'
+    captured = []
+
+    async def attempt(**kwargs):
+        for model in ("gpt-5.6-luna", "qwen-3.8-27b"):
+            response = httpx.Response(
+                400,
+                content=body,
+                headers={"x-request-id": model + "-offline", "Authorization": "private-test-key"},
+            )
+            await observe_http_failure(model, response)
+        yield StreamChunk(kind="content", data={"text": "offline-valid-control"})
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1})
+        yield StreamChunk(kind="done", data={})
+
+    async def capture(row):
+        captured.append(row)
+
+    async def run():
+        budget = CompletionRetryBudget()
+        chunks = [chunk async for chunk in scheduled_attempt(attempt, {}, budget, capture)]
+        assert len(captured) == 1, "Successful fallback discarded pre-content HTTP response evidence"
+        assert captured[0]["kind"] == "provider_http_failures"
+        assert captured[0]["attempt_ordinal"] == 1
+        failures = captured[0]["route_failures"]
+        assert len(failures) == 2
+        assert all(row["response_body"].encode() == body for row in failures)
+        assert all(row["response_body_sha256"] == hashlib.sha256(body).hexdigest() for row in failures)
+        assert "private-test-key" not in repr(captured)
+        assert [chunk.kind for chunk in chunks] == ["content", "usage", "done"]
+        assert budget.attempts == 1 and budget.last_error is None
+        assert FAILURE_OBSERVER.get() is None
+
+    asyncio.run(run())

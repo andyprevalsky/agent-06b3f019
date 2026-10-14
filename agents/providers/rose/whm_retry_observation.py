@@ -4,7 +4,10 @@ Provider HTTP failure -> safe response metadata -> current WHM budget.
 No callback means no response inspection or routing/timing behavior change.
 """
 
+import hashlib
 import json
+import time
+import uuid
 import math
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -62,12 +65,31 @@ async def observe_http_failure(model, response, *, cooldown_seconds=None):
         "retry_after_s": delay,
         "permanent": response.status_code in (400, 401, 402, 403),
         "source": "provider_http_response",
+        "response_observation_id": uuid.uuid4().hex,
+        "response_headers": {
+            key: response.headers[key]
+            for key in (
+                "x-request-id", "request-id", "apim-request-id",
+                "x-ms-request-id", "cf-ray", "retry-after", "retry-after-ms",
+            )
+            if key in response.headers
+        },
+        "observed_at_ms": time.time_ns() // 1_000_000,
     }
     # Preserve headers even if the error-body read later fails or times out.
     callback(safe)
     quota = False
     try:
-        data = json.loads(await response.aread())
+        body = await response.aread()
+        # The observer exists only inside a WHM raw attempt. Keep this private
+        # row for the existing native writer; never emit it to ordinary logs.
+        safe.update(
+            response_body=body.decode("utf-8", errors="surrogateescape"),
+            response_body_encoding="utf-8-surrogateescape",
+            response_body_bytes=len(body),
+            response_body_sha256=hashlib.sha256(body).hexdigest(),
+        )
+        data = json.loads(body)
         error = data.get("error") if isinstance(data, dict) else None
         if isinstance(error, dict):
             quota = error.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}

@@ -2063,3 +2063,312 @@ def test_versioned_execution_overlay_precedes_public_packing_and_survives_repair
                         execution_identity(registered_name, "artifact-a", "a" * 64)
 
     asyncio.run(run())
+
+
+def test_retirement_no_ack_after_cancelled_writer_owner():
+    import threading
+    async def run():
+        ready = asyncio.Event()
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        async def complete(request):
+            ready.set()
+            await asyncio.Event().wait()
+        def writer(record):
+            entered.set(); release.wait(5); finished.set()
+        model = ParallelWorldModel(complete, Retriever(), record_prediction=writer,
+            execution_identity=json.loads(__import__("pathlib").Path(__file__).with_name("retirement_control_identity.json").read_text())["execution_identity"], execution_policy=json.loads(__import__("pathlib").Path(__file__).with_name("retirement_control_identity.json").read_text())["execution_identity"]["policy_id"])
+        session = model.new_session("ownership control", {"scratchpad": "", "structured": {}})
+        caller = asyncio.create_task(model.step(session.id, action(901), "inner-cancel"))
+        await ready.wait()
+        owned = next(iter(session.receipts.values()))[1]
+        owned.cancel()
+        while not entered.is_set(): await asyncio.sleep(.001)
+        try:
+            for task in asyncio.all_tasks():
+                if getattr(task.get_coro(), "__name__", "") == "to_thread": task.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+            receipt = None
+            try: receipt = await model.end_session(session.id)
+            except RuntimeError: pass
+            assert receipt is None or (finished.is_set() and owned.done()), "Verified ACK before durable writer finished"
+        finally:
+            release.set()
+            await asyncio.gather(caller, return_exceptions=True)
+    asyncio.run(run())
+
+
+def test_retirement_retains_writer_error_after_receipt_removal():
+    async def run():
+        ready = asyncio.Event()
+        async def complete(request):
+            ready.set(); await asyncio.Event().wait()
+        def writer(record): raise OSError("controlled durable writer failure")
+        model = ParallelWorldModel(complete, Retriever(), record_prediction=writer,
+            execution_identity=json.loads(__import__("pathlib").Path(__file__).with_name("retirement_control_identity.json").read_text())["execution_identity"], execution_policy=json.loads(__import__("pathlib").Path(__file__).with_name("retirement_control_identity.json").read_text())["execution_identity"]["policy_id"])
+        session = model.new_session("ownership control", {"scratchpad": "", "structured": {}})
+        caller = asyncio.create_task(model.step(session.id, action(900), "writer-error"))
+        await ready.wait()
+        owned = next(iter(session.receipts.values()))[1]; owned.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
+        assert owned.done() and not session.receipts
+        with pytest.raises(RuntimeError, match="durability"): await model.end_session(session.id)
+        assert session.id not in model.retired
+    asyncio.run(run())
+
+
+import pathlib, threading
+from concurrent.futures import ThreadPoolExecutor
+from benchmarks import experiential_world_model as m
+from benchmarks.wmh_native_prediction_writer import NativePredictionWriter
+_V3I=json.loads((pathlib.Path(__file__).with_name('retirement_control_identity.json')).read_text())['execution_identity']
+def _v3_model(c=None,r=None,**kw):return m.ParallelWorldModel(c,r,execution_policy=_V3I['policy_id'],execution_identity=_V3I,**kw)
+class _V3R:
+ def retrieve(self,q):return ()
+def _v3_action(n):return {'kind':'tool_call','name':'rose.browser.spawn_browser_agent','arguments':{'schema':'rose.canonical_action.v1','category':'browser','name':'spawn_browser_agent','arguments':{'goal':'PRIVATE'},'tool_call_id':f'call-{n}','timestamp_ms':0}}
+async def _v3_main():
+ results=[]
+ # Close drains later sessions and executor even if first publisher fails.
+ owner=None;bad=None;published=[]
+ def publish(r):
+  if r['session_id']==bad:raise OSError('controlled publisher failure')
+  published.append(r['session_id']);return r
+ owner=_v3_model(record_retirement=publish,load_retirement=lambda r:r);a=owner.new_session('PRIVATE',{},'a');b=owner.new_session('PRIVATE',{},'b');bad=a.id
+ for _ in range(2):
+  try:await owner.close()
+  except m.NativeDurabilityError:pass
+  else:raise AssertionError('close swallowed publication error')
+ assert owner._owned_executor is None and b.id in owner.retired and published==[b.id] and a.durability_failed
+ try:owner.new_session('LATE',{},'late')
+ except ValueError:pass
+ else:raise AssertionError('close admission reopened')
+ results.append('failedpublisher_multi_session_repeated_close_executor_drained PASS')
+ # Queued required writer proxy cancellation must fail closed before execution.
+ ready=asyncio.Event();block=threading.Event();entered=threading.Event();proxies=[];original=asyncio.wrap_future
+ async def complete(q):ready.set();await asyncio.Event().wait()
+ writer=NativePredictionWriter(_V3O/'queued-store',_V3I['base_world_model_id'],_V3I['base_protocol_sha256']);owner=_v3_model(complete,_V3R(),record_prediction=writer);a=owner.new_session('PRIVATE',{})
+ call=asyncio.create_task(owner.step(a.id,_v3_action(1),'queued'));await ready.wait();owner._owned_executor.shutdown(wait=True);owner._owned_executor=ThreadPoolExecutor(max_workers=1)
+ def busy():entered.set();block.wait(10)
+ seed=owner._owned_executor.submit(busy)
+ while not entered.is_set():await asyncio.sleep(.001)
+ def wrap(f,*a,**kw):p=original(f,*a,**kw);proxies.append(p);return p
+ asyncio.wrap_future=wrap;native=next(iter(a.receipts.values()))[1];native.cancel()
+ while not proxies:await asyncio.sleep(.001)
+ proxies[-1].cancel();await asyncio.gather(call,return_exceptions=True);asyncio.wrap_future=original;block.set();seed.result()
+ assert a.durability_failed and not list((_V3O/'queued-store').rglob('*.json'))
+ try:await owner.end_session(a.id)
+ except m.NativeDurabilityError:pass
+ else:raise AssertionError('queued writer failure ACK')
+ try:await owner.close()
+ except m.NativeDurabilityError:pass
+ assert owner._owned_executor is None;results.append('actualstep_queued_proxy_canceled_writer_no_execution_no_ACK PASS')
+ # Actual-step selection writer; repeated cancellation means no commit/sample reroll.
+ entered,release=threading.Event(),threading.Event();writes=[];draws=[]
+ async def response(req):
+  cid=json.loads(req.messages[1].content)['candidate_response']['tool_calls'][0]['call_id']
+  return json.dumps({'schema':'rose.wmh_timed_outcome_distribution.v1','outcomes':[{'probability':1.0,'description':'private control','elapsed_ms':0,'id':'privatecontrol','tool_results':[{'call_id':cid,'content':'CONTROL','is_error':False}],'state_patch':[]}]})
+ real=NativePredictionWriter(_V3O/'selection-store',_V3I['base_world_model_id'],_V3I['base_protocol_sha256'])
+ def writer(record):
+  if record['schema']=='rose.wmh_outcome_selection.v1':entered.set();release.wait(10)
+  real(record);writes.append(record['schema'])
+ def draw():draws.append(1);return .5
+ owner=_v3_model(response,_V3R(),record_prediction=writer,sample_uniform=draw);a=owner.new_session('PRIVATE',{},'selection');b=owner.new_session('PRIVATE',{},'other');call=asyncio.create_task(owner.step(a.id,_v3_action(2),'select'))
+ for _ in range(5000):
+  if entered.is_set() or call.done():break
+  await asyncio.sleep(.001)
+ assert entered.is_set(),str(await call) if call.done() else 'selection not reached'
+ native=next(iter(a.receipts.values()))[1];native.cancel();await asyncio.sleep(.01);native.cancel();await asyncio.sleep(.01);assert not native.done();release.set();await asyncio.gather(call,return_exceptions=True)
+ receipt=await owner.end_session(a.id);assert receipt['join_verified'] and a.revision==0 and len(draws)==1 and writes.count('rose.wmh_outcome_selection.v1')==1 and not b.closed;await owner.close();results.append('actualstep_selection_repeated_cancel_one_draw_no_commit_other_scope_preserved PASS')
+ (_V3O/'new-controls-result.json').write_text(json.dumps(results,indent=2));print(json.dumps(results))
+def test_v3_retirement_ownership_contracts(tmp_path):
+ global _V3O
+ _V3O=tmp_path
+ asyncio.run(_v3_main())
+
+from benchmarks.wmh_execution_policy import execution_identity
+from benchmarks.build_experiential_world_model import atomic_json
+def _extra_model(**kw):return m.ParallelWorldModel(None,None,execution_policy=_V3I['policy_id'],execution_identity=_V3I,**kw)
+async def _extra_main():
+ out=[]
+ # Attack the asyncio proxy while the actual executor future is running.
+ entered,release,finished=threading.Event(),threading.Event(),threading.Event();proxies=[];original=asyncio.wrap_future
+ def wrapped(f,*a,**kw):p=original(f,*a,**kw);proxies.append(p);return p
+ def writer(d):entered.set();release.wait(10);finished.set()
+ owner=_extra_model(record_prediction=writer);asyncio.wrap_future=wrapped
+ task=asyncio.create_task(owner._owned_thread_call(writer,{}))
+ while not entered.is_set():await asyncio.sleep(.001)
+ proxies[-1].cancel();await asyncio.sleep(.01);task.cancel();await asyncio.sleep(.01);proxies[-1].cancel();await asyncio.sleep(.01)
+ assert not task.done() and not finished.is_set();release.set()
+ try:await task
+ except asyncio.CancelledError:pass
+ assert finished.is_set();asyncio.wrap_future=original;await owner.close();out.append('actual_concurrent_future_proxy_and_repeated_outer_cancel PASS')
+ # Real durable retirement publication, repeated owner cancellation, no duplicate publication.
+ entered,release=threading.Event(),threading.Event();writes=[]
+ def publisher(r):entered.set();release.wait(10);path=_EXTRAO/'publisher-store'/('receipt.json');atomic_json(path,r);writes.append(path);return path
+ owner=_extra_model(record_retirement=publisher,load_retirement=lambda p:json.loads(p.read_text()));session=owner.new_session('PRIVATE',{},'publisher')
+ caller=asyncio.create_task(owner.end_session(session.id))
+ while not entered.is_set():await asyncio.sleep(.001)
+ session.retirement.cancel();await asyncio.sleep(.01);session.retirement.cancel();await asyncio.sleep(.01);assert not session.retirement.done();release.set()
+ await asyncio.gather(caller,return_exceptions=True);receipt=await owner.end_session(session.id);assert receipt['join_verified'] and len(writes)==1;await owner.close();out.append('actual_atomic_publisher_repeated_cancel_single_publication PASS')
+ def fail(r):raise OSError('controlled publication failure')
+ owner=_extra_model(record_retirement=fail,load_retirement=lambda p:None);session=owner.new_session('PRIVATE',{},'failedpublisher')
+ try:await owner.end_session(session.id)
+ except m.NativeDurabilityError:pass
+ else:raise AssertionError('failed publisher ACK')
+ assert session.durability_failed and session.id not in owner.retired
+ owner._owned_executor.shutdown(wait=True);out.append('publisher_failure_retained_no_ACK PASS')
+ # Actual step retrieval cancellation, unrelated session isolation.
+ entered,release=threading.Event(),threading.Event()
+ class Retriever:
+  def retrieve(self,q):entered.set();release.wait(10);return ()
+ owner=m.ParallelWorldModel(None,Retriever(),execution_policy=_V3I['policy_id'],execution_identity=_V3I);a=owner.new_session('PRIVATE',{},'A');b=owner.new_session('PRIVATE',{},'B')
+ action={'kind':'tool_call','name':'rose.browser.spawn_browser_agent','arguments':{'schema':'rose.canonical_action.v1','category':'browser','name':'spawn_browser_agent','arguments':{'goal':'privatecontrol'},'agent_id':'child','tool_call_id':'privatecall','timestamp_ms':0}}
+ call=asyncio.create_task(owner.step(a.id,action,'retrieve'))
+ while not entered.is_set():await asyncio.sleep(.001)
+ task=next(iter(a.receipts.values()))[1];task.cancel();await asyncio.sleep(.01);task.cancel();await asyncio.sleep(.01);assert not task.done();release.set();await asyncio.gather(call,return_exceptions=True)
+ receipt=await owner.end_session(a.id);assert receipt['join_verified'] and b.id in owner.sessions and not b.closed and a.revision==0;await owner.close();out.append('actual_step_retrieval_repeated_cancel_other_session_isolation PASS')
+ # Source default absence and false remain ordinary thread calls, no new executor.
+ for identity in [None,execution_identity(_V3I['policy_id'],_V3I['base_world_model_id'],_V3I['base_world_model_manifest_sha256'],runtime_config={**_V3I['runtime_config'],'validation_recovery':False})]:
+  owner=m.ParallelWorldModel(None,None,**({'execution_policy':_V3I['policy_id'],'execution_identity':identity} if identity else {}));assert await owner._owned_thread_call(lambda:42)==42 and not hasattr(owner,'_owned_executor');await owner.close()
+ out.append('absent_false_no_owned_executor PASS');(_EXTRAO/'extra-controls-result.json').write_text(json.dumps(out,indent=2));print(json.dumps(out))
+
+def test_final_five_extra_controls(tmp_path):
+ global _EXTRAO
+ _EXTRAO=tmp_path
+ asyncio.run(_extra_main())
+
+
+def test_final_close_proxy_public_waiter_and_fence_order(monkeypatch):
+    async def run():
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        fences, writes, proxies = [], [], []
+        first = None
+        def publisher(receipt):
+            if receipt['session_id'] == first:
+                entered.set(); release.wait(5); finished.set()
+            writes.append(receipt['session_id']); return receipt
+        owner = _v3_model(record_retirement=publisher, load_retirement=lambda r:r)
+        a=owner.new_session('PRIVATE',{},'first'); b=owner.new_session('PRIVATE',{},'second'); first=a.id
+        async def fence(sid):
+            fences.append(sid); return {'session_id':sid,'join_verified':True}
+        owner.retire_provider=fence
+        original=asyncio.gather
+        def gather(*tasks,**kw):
+            proxy=original(*tasks,**kw); proxies.append(proxy); return proxy
+        monkeypatch.setattr(asyncio,'gather',gather)
+        waiter=asyncio.create_task(owner.close())
+        while not entered.is_set() or b.id not in fences: await asyncio.sleep(.001)
+        actual=owner._close_owner
+        waiter.cancel()
+        await original(waiter,return_exceptions=True)
+        assert not actual.done() and not finished.is_set()
+        proxies[0].cancel(); actual.cancel(); await asyncio.sleep(.01); actual.cancel()
+        # A separate loop task progresses while actual owners remain blocked.
+        ticks=[]
+        for _ in range(10): ticks.append(1); await asyncio.sleep(.001)
+        assert len(ticks)==10 and not actual.done() and not finished.is_set()
+        release.set(); await original(actual,return_exceptions=True)
+        await owner.close()
+        assert finished.is_set() and sorted(writes)==sorted([a.id,b.id])
+        assert owner._owned_executor is None and not owner.sessions
+    asyncio.run(run())
+
+
+def test_final_close_owner_cancelled_before_start():
+    async def run():
+        owner=_v3_model(); a=owner.new_session('PRIVATE',{},'beforestart')
+        owner._closing=True
+        first=owner._close_owner=asyncio.create_task(owner._close_owned()); first.cancel()
+        await asyncio.gather(first,return_exceptions=True)
+        await asyncio.gather(owner.close(),owner.close())
+        assert owner._close_owner is not first and owner._close_owner.done()
+        assert a.id in owner.retired and not owner.sessions
+        with pytest.raises(ValueError): owner.new_session('LATE',{})
+    asyncio.run(run())
+
+
+def test_final_shutdown_error_preserves_session_error_and_owner():
+    async def run(prior):
+        class Executor(ThreadPoolExecutor):
+            def shutdown(self,*args,**kwargs):
+                super().shutdown(*args,**kwargs)
+                raise OSError('controlled shutdown failure')
+        def publisher(receipt):
+            if prior: raise OSError('controlled first session failure')
+            return receipt
+        owner=_v3_model(record_retirement=publisher,load_retirement=lambda r:r)
+        executor=owner._owned_executor=Executor(); a=owner.new_session('PRIVATE',{})
+        errors=[]
+        for _ in range(2):
+            try: await owner.close()
+            except BaseException as error: errors.append(error)
+            else: raise AssertionError('shutdown error erased')
+        assert owner._owned_executor is executor and errors[0] is errors[1]
+        if prior:
+            assert isinstance(errors[0],m.NativeDurabilityError)
+            assert isinstance(errors[0].__cause__,OSError) and 'shutdown' in str(errors[0].__cause__)
+            assert a.durability_failed and a.id not in owner.retired
+        else:
+            assert isinstance(errors[0],OSError) and 'shutdown' in str(errors[0])
+            assert a.id in owner.retired
+        assert all(not thread.is_alive() for thread in executor._threads)
+    asyncio.run(run(True)); asyncio.run(run(False))
+
+
+def test_final_actual_selection_writer_error(tmp_path):
+    async def run():
+        draws=[]
+        async def response(request):
+            cid=json.loads(request.messages[1].content)['candidate_response']['tool_calls'][0]['call_id']
+            return json.dumps({'schema':'rose.wmh_timed_outcome_distribution.v1','outcomes':[{'probability':1.0,'description':'private control','elapsed_ms':0,'id':'privatecontrol','tool_results':[{'call_id':cid,'content':'CONTROL','is_error':False}],'state_patch':[]}]})
+        real=NativePredictionWriter(tmp_path,_V3I['base_world_model_id'],_V3I['base_protocol_sha256'])
+        def writer(record):
+            if record['schema']=='rose.wmh_outcome_selection.v1': raise OSError('controlled selection writer failure')
+            real(record)
+        def draw(): draws.append(1); return .5
+        owner=_v3_model(response,_V3R(),record_prediction=writer,sample_uniform=draw)
+        a=owner.new_session('PRIVATE',{})
+        with pytest.raises(m.NativeDurabilityError): await owner.step(a.id,_v3_action(3),'selection-error')
+        assert a.durability_failed and not a.receipts and a.revision==0 and len(draws)==1
+        with pytest.raises(m.NativeDurabilityError): await owner.end_session(a.id)
+        assert a.id not in owner.retired
+        with pytest.raises(m.NativeDurabilityError): await owner.close()
+        assert owner._owned_executor is None
+    asyncio.run(run())
+
+
+def test_retirement_joins_actual_writer_beyond_original_ten_second_window(tmp_path):
+    async def run():
+        ready = asyncio.Event()
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        writes = []
+        writer = NativePredictionWriter(tmp_path, _V3I['base_world_model_id'], _V3I['base_protocol_sha256'])
+        async def complete(request):
+            ready.set()
+            await asyncio.Event().wait()
+        def record(row):
+            entered.set()
+            release.wait(30)
+            writer(row)
+            writes.append(row['prediction_id'])
+            finished.set()
+        owner = _v3_model(complete, _V3R(), record_prediction=record)
+        session = owner.new_session('PRIVATE writer ownership', {}, 'finite-writer-contract')
+        caller = asyncio.create_task(owner.step(session.id, _v3_action(999), 'finite-writer'))
+        await ready.wait()
+        operation = next(iter(session.receipts.values()))[1]
+        async def release_writer():
+            await asyncio.sleep(11)
+            release.set()
+        releaser = asyncio.create_task(release_writer())
+        receipt, error = None, None
+        try:
+            receipt = await owner.end_session(session.id)
+        except Exception as exc:
+            error = exc
+        observed = (finished.is_set(), len(writes), operation.done(), bool(receipt and receipt.get('join_verified')))
+        await releaser
+        await asyncio.gather(caller, return_exceptions=True)
+        await owner.close()
+        assert observed == (True, 1, True, True), (observed, repr(error))
+        assert session.revision == 0 and not session.receipts
+    asyncio.run(run())

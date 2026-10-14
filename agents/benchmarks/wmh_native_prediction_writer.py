@@ -75,7 +75,11 @@ class NativePredictionWriter:
             ordinal = rejected.get("attempt_ordinal")
             if type(ordinal) is not int or ordinal < 1:
                 raise ValueError("Rejected provider attempt requires its exact ordinal")
-            existing = [row for row in attempts if row["attempt_ordinal"] == ordinal]
+            existing = [
+                row for row in attempts
+                if row["attempt_ordinal"] == ordinal
+                and row.get("kind") == rejected.get("kind")
+            ]
             if existing:
                 if existing[0]["capture_sha256"] != digest:
                     raise ValueError("Native provider attempt ordinal reused for different evidence")
