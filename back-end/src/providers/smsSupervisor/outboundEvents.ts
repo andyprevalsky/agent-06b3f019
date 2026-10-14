@@ -1,8 +1,8 @@
 /**
  * SMS Outbound Lifecycle Events
  *
- * Template-based outbound SMS for agent lifecycle events. No LLM involved —
- * these are triggered directly by the agent workflow for speed.
+ * Template-based outbound SMS for agent lifecycle events, triggered directly
+ * by the agent workflow. Rejected messages use a bounded model correction loop.
  *
  * Fires for ROOT agents of any source (SMS, web, mac-app, API). Benchmark/eval
  * runs are suppressed centrally in the send-sms dispatcher (Agent.isBenchmark).
