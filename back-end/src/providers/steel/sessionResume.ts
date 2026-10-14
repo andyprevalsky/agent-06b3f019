@@ -163,6 +163,7 @@ export interface SteelSessionReplacementDependencies extends SteelReplacementPro
   withLifecycleClaim?: typeof withSteelLifecycleClaim;
   prepareCandidateCleanup?: typeof prepareSteelCandidateCleanup;
   settleCandidateCleanup?: typeof settleSteelCandidateCleanup;
+  resolveCandidateCustody?: (sessionId: string) => Promise<boolean>;
   createSession: (input: SteelSDK.SessionCreateParams) => Promise<{
     id: string;
     debugUrl: string;
@@ -191,7 +192,7 @@ export async function recreateSession(
   dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
 ): Promise<RecreatedSteelSession> {
   const claim = dependencies.withLifecycleClaim ?? withSteelLifecycleClaim;
-  return claim(taskId, async (assertTask, runTaskNative, mutateTask) => {
+  return claim(taskId, async (assertTask, runTaskNative, mutateTask, resolveTaskCustody) => {
     const row = await prisma.browserSession.findUnique({
       where: { id: taskId },
       include: { context: true },
@@ -220,13 +221,28 @@ export async function recreateSession(
     const run = (
       assertProfile?: () => Promise<void>,
       runProfileNative?: SteelNativeEffect,
-      mutateProfile?: SteelLifecycleMutation
+      mutateProfile?: SteelLifecycleMutation,
+      resolveProfileCustody?: import('./lifecycleClaim').SteelNativeCustodyResolver
     ) =>
       recreateSessionWithinClaim(
         taskId,
         options,
         {
           ...dependencies,
+          resolveCandidateCustody: resolveTaskCustody
+            ? async (id) => {
+                const inspect = () =>
+                  (
+                    dependencies.inspectSession ??
+                    ((nativeId: string) => steel.sessions.retrieve(nativeId))
+                  )(id);
+                const release = () =>
+                  (dependencies.releaseSession ?? releaseSteelRemoteSession)(id);
+                if (resolveProfileCustody && !(await resolveProfileCustody(id, inspect, release)))
+                  return false;
+                return resolveTaskCustody(id, inspect, release);
+              }
+            : dependencies.resolveCandidateCustody,
           mutateLifecycle: mutateTask
             ? (callback) =>
                 mutateTask((transaction) =>
@@ -482,7 +498,14 @@ async function recreateSessionWithinClaim(
         if (!createAcknowledged && createdSessionId !== null) {
           // Transport/5xx/408 failure can precede allocation. A release 404
           // cannot discharge this intent; exact native reconciliation owns it.
-          throw new SteelSessionCleanupError(createdSessionId, error);
+          const resolved = await dependencies.resolveCandidateCustody?.(createdSessionId);
+          if (resolved !== true) throw new SteelSessionCleanupError(createdSessionId, error);
+          await (dependencies.settleCandidateCleanup ?? settleSteelCandidateCleanup)(
+            createdSessionId,
+            'RELEASED'
+          );
+          unregisterInFlightSteelSession(createdSessionId);
+          createdSessionId = null;
         }
         if (!committed && createdSessionId !== null) {
           const uncommittedSessionId = createdSessionId;

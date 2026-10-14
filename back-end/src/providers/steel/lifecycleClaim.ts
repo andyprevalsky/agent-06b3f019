@@ -21,6 +21,12 @@ export type SteelLifecycleMutation = <T>(
   transaction?: Prisma.TransactionClient
 ) => Promise<T>;
 
+export type SteelNativeCustodyResolver = (
+  sessionId: string,
+  inspect: () => Promise<{ id: string; status: string }>,
+  release: () => Promise<void>
+) => Promise<boolean>;
+
 /** An expired native request remains custody until its exact resource is terminal. */
 async function recoverOutstandingNative(operationKey: string): Promise<void> {
   const row = await prisma.toolSideEffect.findUnique({ where: { operationKey } });
@@ -121,7 +127,8 @@ export async function withSteelLifecycleClaim<T>(
   callback: (
     assertOwned: () => Promise<void>,
     runNative: SteelNativeEffect,
-    mutateOwned: SteelLifecycleMutation
+    mutateOwned: SteelLifecycleMutation,
+    resolveNativeCustody: SteelNativeCustodyResolver
   ) => Promise<T>
 ): Promise<T> {
   const operationKey = `steel-browser-task-lifecycle:${taskId}`;
@@ -215,6 +222,7 @@ export async function withSteelLifecycleClaim<T>(
       : prisma.$transaction(lockedMutation);
   };
   let nativeOutstanding = false;
+  let outstandingSessionId: string | undefined;
   const runNative: SteelNativeEffect = async (sessionId, effect, nativeCallback) => {
     await assertOwned();
     if (nativeOutstanding)
@@ -233,6 +241,7 @@ export async function withSteelLifecycleClaim<T>(
     if (marked.count !== 1)
       throw new Error(`Steel browser lifecycle claim ownership changed for task ${taskId}`);
     nativeOutstanding = true;
+    outstandingSessionId = sessionId;
     let settled = false;
     let invoked = false;
     try {
@@ -286,9 +295,38 @@ export async function withSteelLifecycleClaim<T>(
         }
     }
   };
+  const resolveNativeCustody: SteelNativeCustodyResolver = async (sessionId, inspect, release) => {
+    await assertOwned();
+    if (!nativeOutstanding || outstandingSessionId !== sessionId) return false;
+    let observed = await inspect().catch(() => null);
+    if (observed?.id !== sessionId || !['live', 'released'].includes(observed.status)) return false;
+    if (observed.status !== 'released') {
+      // The unresolved create retains durable custody throughout exact cleanup.
+      // In particular, no other UUID may be allocated before terminal proof.
+      await assertOwned();
+      await release();
+      observed = await inspect().catch(() => null);
+    }
+    if (observed?.id !== sessionId || observed.status !== 'released') return false;
+    await mutateOwned(async (transaction) => {
+      await transaction.toolSideEffect.updateMany({
+        where: { operationKey, operationType: CLAIM_TYPE, status: 'STARTED', externalId: ownerId },
+        data: {
+          request: {
+            ...request,
+            nativeOutstanding: false,
+            nativeSessionId: sessionId,
+            nativeEffect: 'create',
+          },
+        },
+      });
+    });
+    nativeOutstanding = false;
+    return true;
+  };
   try {
     await assertOwned();
-    return await callback(assertOwned, runNative, mutateOwned);
+    return await callback(assertOwned, runNative, mutateOwned, resolveNativeCustody);
   } finally {
     if (!nativeOutstanding) {
       await prisma.toolSideEffect

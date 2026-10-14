@@ -50,6 +50,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
   let mutationHeld = false;
   let lateAllocated = false;
   let lateReleased = false;
+  const releasedCandidateIds = new Set<string>();
   const NativeDate = originals.date;
   const releases: string[] = [];
   const reset = (next: string) => {
@@ -219,6 +220,8 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     }) as typeof steel.sessions.release;
     steel.sessions.retrieve = (async (id: string) => {
       if (phase === 'clearNative') return { id, status: 'live' };
+      if (phase === 'transientLive')
+        return { id, status: releasedCandidateIds.has(id) ? 'released' : 'live' };
       if (phase === 'ambiguous') {
         if (!lateAllocated) throw Object.assign(new Error('not allocated yet'), { status: 404 });
         return { id, status: lateReleased ? 'released' : 'live' };
@@ -271,6 +274,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     prisma.browserContext.update = (async () => ({})) as typeof prisma.browserContext.update;
     const dependencies = {
       inspectSession: async (id: string) => {
+        if (id !== oldId) return steel.sessions.retrieve(id);
         return {
           id,
           profileId: phase === 'foreign' ? 'foreign-profile' : profileId,
@@ -280,6 +284,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
       },
       releaseSession: async (id: string) => {
         releases.push(id);
+        if (id !== oldId) releasedCandidateIds.add(id);
         if (id !== oldId && phase === 'cleanup') throw new Error('candidate cleanup rejected');
         if (id === oldId) {
           assert.equal(status, 'ERROR', 'must claim exact writer before release');
@@ -309,6 +314,8 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
         if (phase === 'create') throw Object.assign(new Error('create rejected'), { status: 400 });
         lastCandidateId = input.sessionId!;
         if (phase === 'ambiguous') throw new Error('native create transport timeout');
+        if (['transientResolved', 'transientLive'].includes(phase) && createCalls === 2)
+          throw new Error('Connection error');
         if (phase === 'unexpectedPrepare') {
           lastCandidateId = `${input.sessionId!.slice(0, -6)}abcdef`;
         }
@@ -377,6 +384,21 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     void invalidatedClaim;
     assert.deepEqual(releases, [], 'invalidated binding must claim the resolved context profile');
     recordedSource = 'new_user_persistent';
+
+    for (const transientPhase of ['transientResolved', 'transientLive']) {
+      reset(transientPhase);
+      const retried = await run();
+      assert.equal(createCalls, 3, 'retain the original transient Connection error retry contract');
+      assert.equal(sessionId, retried.sessionId);
+      assert.equal(status, 'ACTIVE');
+      assert(![...claims.values()].some((item) => item.request.nativeOutstanding));
+      assert(![...candidates.values()].some((item) => item.status === 'PENDING'));
+      if (transientPhase === 'transientLive')
+        assert(
+          releases.some((id) => id !== oldId),
+          'exact live candidate must be released before another UUID is allocated'
+        );
+    }
 
     reset('unexpectedPrepare');
     const intentsBeforeUnexpected = new Set(candidates.keys());

@@ -70,10 +70,23 @@ custody; absence during a pending create cannot prove no later allocation.
 The captured fixture is registered in the existing browser-provider suite and
 uses zero external fetches. It covers failure boundaries, stale owners, the
 post-check/pre-write takeover gap, invalidated profile resolution, durable
-restart cleanup, ambiguous late allocation, and postcommit bookkeeping failure.
-The earlier WIP canonical domain passed with exact native Steel-to-Steel same
-profile attachment and released/deleted cleanup receipts. Final corrected live
-verification and independent review remain pending; this case stays open.
+restart cleanup, ambiguous late allocation, postcommit bookkeeping failure, and
+original transient Connection error retries after exact terminal cleanup proof.
+The WIP and d6ecd611 correction canonical domains passed with exact native
+Steel-to-Steel same-profile attachment and released/deleted cleanup receipts.
+The exact e576 native baseline failed the same uploading boundary. Broader owning
+fingerprint tests exposed an overly conservative transient-create failstop; the
+next correction retries only after exact candidate released proof, preserving
+all original assertions. Final verification/review of that delta remains pending;
+this case stays open.
+
+A newly owned SDK duplicate-ID experiment returned first-create201/live, second
+create Error without an HTTP status, and exact native reads of the same live ID
+and profile before cleanup200/released. A later native read still found released.
+This does not prove duplicate-create idempotence or unique hidden allocations.
+The trial to repeat an ambiguous create UUID was therefore discarded. Native
+404 stays unresolved; successful exact cleanup is the prerequisite for creating
+another UUID. No provider guarantees were invented.
 
 ## Human feedback
 

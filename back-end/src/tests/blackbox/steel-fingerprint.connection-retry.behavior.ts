@@ -4,7 +4,23 @@
  */
 import { prisma } from '../../providers/database';
 import { validateSessionConnectionWithReason } from '../../providers/steel/sessionConnection';
+import type { withSteelLifecycleClaim } from '../../providers/steel/lifecycleClaim';
 import { recreateSession } from '../../providers/steel/sessionResume';
+
+// These legacy cases mock DB/provider effects; ambiguity still needs exact terminal evidence.
+export const withReleasedFixtureLifecycleClaim: typeof withSteelLifecycleClaim = async (
+  _taskId,
+  callback
+) =>
+  callback(undefined!, undefined!, undefined!, async (id, inspect) => {
+    const native = await inspect();
+    return native.id === id && native.status === 'released';
+  });
+
+export const fixtureCandidateCleanup = {
+  prepareCandidateCleanup: async () => {},
+  settleCandidateCleanup: async () => {},
+};
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -93,17 +109,17 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       'replacement-connection-retry-task',
       { forceManagedRotation: true },
       {
-        withLifecycleClaim: async (_taskId, callback) => callback(),
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
         releaseSession: async () => {},
-        prepareCandidateCleanup: async () => {},
-        settleCandidateCleanup: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           connectionInputs.push(input as unknown as Record<string, unknown>);
           if (connectionInputs.length < 3) {
             throw new Error('Connection error');
           }
           return {
-            id: 'steel-after-connection-retry',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
             proxySource: 'steel',
@@ -113,7 +129,7 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       }
     );
     assert(
-      connectionResult.sessionId === 'steel-after-connection-retry',
+      connectionResult.sessionId === connectionInputs[2]?.sessionId,
       'connection-error retry did not succeed'
     );
     assert(
@@ -149,16 +165,16 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         'replacement-connection-retry-task',
         { forceManagedRotation: true },
         {
-          withLifecycleClaim: async (_taskId, callback) => callback(),
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
           releaseSession: async () => {},
-          prepareCandidateCleanup: async () => {},
-          settleCandidateCleanup: async () => {},
+          ...fixtureCandidateCleanup,
           createSession: async (input) => {
             const geo = (input as { useProxy?: { geolocation?: Record<string, unknown> } }).useProxy
               ?.geolocation;
             consecutiveStates.push(geo?.state);
             return {
-              id: `steel-rotation-${position}`,
+              id: input.sessionId!,
               debugUrl: 'https://steel.example/debug',
               profileId: null,
               proxySource: 'steel',
@@ -179,14 +195,14 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       'replacement-connection-retry-task',
       { forceManagedRotation: false },
       {
-        withLifecycleClaim: async (_taskId, callback) => callback(),
+        withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+        inspectSession: async (id) => ({ id, status: 'released' }),
         releaseSession: async () => {},
-        prepareCandidateCleanup: async () => {},
-        settleCandidateCleanup: async () => {},
+        ...fixtureCandidateCleanup,
         createSession: async (input) => {
           resumeInputs.push(input as unknown as Record<string, unknown>);
           return {
-            id: 'steel-after-resume',
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
             proxySource: 'steel',
@@ -215,11 +231,11 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         'replacement-connection-retry-task',
         { forceManagedRotation: true },
         {
-          withLifecycleClaim: async (_taskId, callback) => callback(),
-          prepareCandidateCleanup: async () => {},
-          settleCandidateCleanup: async () => {},
-          createSession: async () => ({
-            id: `steel-validation-timeout-${releasedSessions}`,
+          withLifecycleClaim: withReleasedFixtureLifecycleClaim,
+          inspectSession: async (id) => ({ id, status: 'released' }),
+          ...fixtureCandidateCleanup,
+          createSession: async (input) => ({
+            id: input.sessionId!,
             debugUrl: 'https://steel.example/debug',
             profileId: null,
           }),
