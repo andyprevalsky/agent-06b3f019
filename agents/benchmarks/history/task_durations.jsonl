@@ -6001,3 +6001,6 @@
 {"task": "agent-payment-abandonment", "duration_seconds": 198.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "51a21579-5c4d-4256-9554-bd1f1b65f38c"}
 {"task": "people-search-targeted", "duration_seconds": 134.9, "cost_cents": 3.0, "timestamp": "2026-10-14T04:59:00.699701+00:00", "agent_id": "287ddef3-69df-4620-8fe3-52e7e7b34016"}
 {"task": "people-search-criteria", "duration_seconds": 183.8, "cost_cents": 20.0, "timestamp": "2026-10-14T04:59:00.699701+00:00", "agent_id": "c3708301-8403-45ad-868a-3d9350d3f34e"}
+{"task": "lantern-people-pagination", "duration_seconds": 88.3, "cost_cents": 0.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "8f1c3e98-8c89-4439-832f-7dc33b96ca6d"}
+{"task": "lantern-people-enrichment", "duration_seconds": 111.0, "cost_cents": 0.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "dffafb89-7ba1-4c46-82dd-bbad2ab5456f"}
+{"task": "lantern-people-discovery", "duration_seconds": 146.4, "cost_cents": 3.0, "timestamp": "2026-10-14T19:38:55.314260+00:00", "agent_id": "d96f415a-e738-4ec9-ad1c-d3cc8db5a26c"}

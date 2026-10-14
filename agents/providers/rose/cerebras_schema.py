@@ -6,6 +6,7 @@ are omitted only from this provider grammar; open JSON shapes are never closed.
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from typing import Any
 
@@ -33,6 +34,28 @@ _LOCAL_CONSTRAINTS = {"pattern", "format", "minLength", "maxLength", "minItems",
 _PRIMITIVES = {"string", "number", "integer", "boolean", "null"}
 
 
+def _validate_numeric_bounds(node: dict) -> None:
+    lower = []
+    upper = []
+    for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+        if key not in node:
+            continue
+        value = node[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("invalid numeric constraint: " + key)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("nonfinite numeric constraint: " + key)
+        if key == "multipleOf":
+            if value <= 0:
+                raise ValueError("multipleOf must be positive")
+        elif key in {"minimum", "exclusiveMinimum"}:
+            lower.append((value, key == "exclusiveMinimum"))
+        else:
+            upper.append((value, key == "exclusiveMaximum"))
+    if any(lo > hi or (lo == hi and (lo_open or hi_open)) for lo, lo_open in lower for hi, hi_open in upper):
+        raise ValueError("impossible numeric bounds")
+
+
 class _SchemaProjection:
     def __init__(self) -> None:
         self.counted_text = 0
@@ -48,6 +71,8 @@ class _SchemaProjection:
         required = node.get("required", [])
         if not isinstance(required, list) or any(not isinstance(key, str) or key not in props for key in required):
             raise ValueError("invalid required properties")
+        if len(required) != len(set(required)):
+            raise ValueError("duplicate required properties")
         self.properties_count += len(props)
         self.counted_text += sum(len(key) for key in props)
         # Cerebras supports omitted optional properties. Preserve required
@@ -96,6 +121,7 @@ class _SchemaProjection:
             if not isinstance(branches, list) or not branches:
                 raise ValueError("invalid union")
             result["anyOf"] = [self.walk(branch, depth + 1) for branch in branches]
+        _validate_numeric_bounds(node)
         self.count_values(node)
         return result
 

@@ -201,15 +201,21 @@ def build_cerebras_body(
     effort: Optional[str],
 ) -> Dict[str, Any]:
     openrouter_tools = _openrouter_tools(tools)
-    for tool in openrouter_tools or []:
+    projections = [project_cerebras_tool_schema(tool["function"].get("parameters")) for tool in openrouter_tools or []]
+    strict_toolset = all(projected is not None for projected, _ in projections)
+    for tool, (projected, reason) in zip(openrouter_tools or [], projections, strict=True):
         function = tool["function"]
-        projected, reason = project_cerebras_tool_schema(function.get("parameters"))
-        if projected is not None:
+        function["strict"] = strict_toolset
+        if strict_toolset:
             function["parameters"] = projected
-            function["strict"] = True
-        else:
-            function["strict"] = False
+        elif reason:
             logger.warning("cerebras.tool_schema.non_strict", tool_name=function.get("name"), reason=reason)
+    if openrouter_tools and not strict_toolset:
+        # Actual API rejects mixed strict flags. Never close an open schema to
+        # satisfy the uniform request contract; retain all original schemas.
+        logger.warning(
+            "cerebras.toolset.non_strict", reason="provider_requires_uniform_strict", tool_count=len(openrouter_tools)
+        )
     body: Dict[str, Any] = {
         "model": model,
         "messages": _strip_cerebras_cache_control(

@@ -10,6 +10,7 @@ Covers the units that aren't already exercised end-to-end via llm.blackbox.py:
   - pools (registry lookup, all_pool_names)
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -88,7 +89,7 @@ from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 
 # Speed-pool tests opt back in with patch.dict. A live CEREBRAS_API_KEY would
 # make every flash complete() hit Cerebras before OpenRouter.
-os.environ.pop("CEREBRAS_API_KEY", None)
+_LIVE_CEREBRAS_API_KEY = os.environ.pop("CEREBRAS_API_KEY", "")
 
 
 # =====================================================================
@@ -350,6 +351,31 @@ def test_cerebras_native_tools_keep_incompatible_schemas_visible():
             "additionalProperties": False,
         },
     ]
+    schemas.append(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"x": {"type": "integer"}},
+            "required": ["x", "x"],
+        }
+    )
+    invalid_bounds = [
+        {"minimum": "invalid"},
+        {"maximum": True},
+        {"exclusiveMinimum": float("nan")},
+        {"exclusiveMaximum": float("inf")},
+        {"multipleOf": 0},
+        {"multipleOf": -1},
+        {"multipleOf": False},
+        {"minimum": 5, "maximum": 4},
+        {"minimum": 2, "exclusiveMaximum": 2},
+        {"exclusiveMinimum": 2, "maximum": 2},
+        {"exclusiveMinimum": 3, "exclusiveMaximum": 2},
+    ]
+    schemas.extend(
+        {"type": "object", "additionalProperties": False, "properties": {"value": {"type": "number", **bounds}}}
+        for bounds in invalid_bounds
+    )
     supported = {
         "type": "object",
         "additionalProperties": False,
@@ -380,14 +406,97 @@ def test_cerebras_native_tools_keep_incompatible_schemas_visible():
         effort=None,
     )
     functions = [tool["function"] for tool in body["tools"]]
-    assert functions[0]["strict"] is True
-    assert functions[0]["parameters"]["properties"]["pattern"] == {"type": "string"}
-    assert functions[0]["parameters"]["required"] == ["pattern"]
-    assert functions[0]["parameters"]["properties"]["nested"] == supported["properties"]["nested"]
-    for function, schema in zip(functions[1:], schemas, strict=True):
+    for function, schema in zip(functions, [supported, *schemas], strict=True):
         assert function["strict"] is False
         assert function["parameters"] == schema
+    # Test each incompatible schema alone too: a different open-map tool must
+    # not conceal a numeric/required validation regression in the mixed set.
+    for tool in tools[1:]:
+        isolated = build_cerebras_body(
+            model="qwen-3.8-27b",
+            messages=[],
+            tools=[tool],
+            tool_choice="any",
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            effort=None,
+        )
+        assert isolated["tools"][0]["function"]["strict"] is False
+        assert isolated["tools"][0]["function"]["parameters"] == tool["input_schema"]
+    supported_body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools[:1],
+        tool_choice="any",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        effort=None,
+    )
+    function = supported_body["tools"][0]["function"]
+    assert function["strict"] is True
+    assert function["parameters"]["properties"]["pattern"] == {"type": "string"}
+    assert function["parameters"]["required"] == ["pattern"]
+    assert function["parameters"]["properties"]["nested"] == supported["properties"]["nested"]
     assert tools == original
+
+
+async def test_cerebras_mixed_toolset_uses_valid_request_contract():
+    """Replay the actual Cerebras 400 contract through builder and transport."""
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transport import get_error_body, post_cerebras_stream
+
+    tools = [
+        {
+            "name": "typed",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"labels": {"type": "array", "items": {"type": "string"}}},
+            },
+        },
+        {
+            "name": "open_map",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"filters": {"type": "object", "additionalProperties": {"type": "string"}}},
+            },
+        },
+    ]
+    captured_error = {
+        "message": "Tools with mixed values for 'strict' are not allowed. Please set all tools to 'strict: true' or 'strict: false'",
+        "type": "invalid_request_error",
+        "param": "tools",
+        "code": "wrong_api_format",
+        "id": "",
+    }
+
+    def handler(request):
+        body = json.loads(request.content)
+        assert [tool["function"]["name"] for tool in body["tools"]] == ["typed", "open_map"]
+        if len({tool["function"]["strict"] for tool in body["tools"]}) > 1:
+            return httpx.Response(400, json=captured_error)
+        assert all(tool["function"]["strict"] is False for tool in body["tools"])
+        assert [tool["function"]["parameters"] for tool in body["tools"]] == [tool["input_schema"] for tool in tools]
+        return httpx.Response(200, text="data: [DONE]\n", headers={"content-type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[],
+        tools=tools,
+        tool_choice="any",
+        response_format=None,
+        temperature=None,
+        max_tokens=128,
+        effort=None,
+    )
+    async with post_cerebras_stream(
+        body=body, cerebras_key="offline-placeholder", request_id="captured-mixed-contract"
+    ) as response:
+        assert response.status_code == 200, get_error_body(response)
 
 
 async def test_cerebras_strict_native_response_retains_parser_retry():
@@ -8205,6 +8314,7 @@ async def run_all_tests():
     r.record("pool_registry_lookup", test_pool_registry_lookup)
     r.record("cerebras_native_tools_enforce_shapes", test_cerebras_native_tools_enforce_representable_shapes)
     r.record("cerebras_native_tools_incompatible_visible", test_cerebras_native_tools_keep_incompatible_schemas_visible)
+    await r.record_async("cerebras_mixed_toolset_contract", test_cerebras_mixed_toolset_uses_valid_request_contract)
     await r.record_async(
         "cerebras_strict_native_parser_retry", test_cerebras_strict_native_response_retains_parser_retry
     )
@@ -8740,5 +8850,53 @@ async def run_all_tests():
     return r.summary()
 
 
+async def probe_cerebras_native_contract(dump_path: str) -> None:
+    """Explicit paid opt-in: one bounded native request, never a waterfall."""
+    from helpers.httpx_capture import install_capture, uninstall_capture
+    from providers.rose.cerebras import build_cerebras_body
+    from providers.rose.transport import get_error_body, post_cerebras_stream
+
+    if not _LIVE_CEREBRAS_API_KEY:
+        raise RuntimeError("Configured Cerebras credential is missing")
+    dump = json.loads(Path(dump_path).read_text())
+    body = build_cerebras_body(
+        model=get_pool("rose-1-flash").cerebras_model,
+        messages=dump["messages"],
+        tools=dump["tools"],
+        tool_choice="any",
+        response_format=None,
+        temperature=1,
+        max_tokens=128,
+        effort="high",
+    )
+    print("PROBE_TOOL_CONTRACT", [(t["function"]["name"], t["function"]["strict"]) for t in body["tools"]])
+    uninstall_capture()
+    try:
+        async with asyncio.timeout(30):
+            async with post_cerebras_stream(
+                body=body,
+                cerebras_key=_LIVE_CEREBRAS_API_KEY,
+                request_id="offline-owner-opt-in-native-contract",
+                call_site="native_contract_probe",
+            ) as response:
+                print("PROBE_STATUS", response.status_code)
+                if response.status_code >= 400:
+                    error = json.loads(get_error_body(response))
+                    print("PROBE_ERROR", json.dumps(error))
+                    return
+                chunks = [chunk async for chunk in parse_openai_sse(response, request_id="native-contract-probe")]
+                print(
+                    "PROBE_RESULT", [(c.kind, c.data.get("name")) for c in chunks if c.kind in {"tool_call", "usage"}]
+                )
+    finally:
+        install_capture()
+
+
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cerebras-native-contract-probe")
+    args = parser.parse_args()
+    if args.cerebras_native_contract_probe:
+        asyncio.run(probe_cerebras_native_contract(args.cerebras_native_contract_probe))
+    else:
+        asyncio.run(run_all_tests())
