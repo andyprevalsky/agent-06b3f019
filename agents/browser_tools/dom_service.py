@@ -740,6 +740,7 @@ class DOMService:
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
         self._selector_map: Dict[int, Any] = {}
+        self._runtime_current_url = ""
         # Execution bindings may change realms. Retain every prior value only
         # for output redaction, scoped to this browser activity/session.
         self._secret_redaction_refs: Dict[str, str] = {}
@@ -2178,12 +2179,19 @@ class DOMService:
             page = await self._session.get_current_page()
             page_url = getattr(page, "url", None)
             if page_url:
-                return str(page_url)
+                self._runtime_current_url = str(page_url)
+                return self._runtime_current_url
             evaluated = await page.evaluate("() => location.href")
-            return str(evaluated or fallback)
+            if evaluated:
+                self._runtime_current_url = str(evaluated)
+            return self.runtime_current_url(fallback=fallback)
         except Exception as error:
             logger.warning(f"Failed to read current URL: {error}")
             return fallback
+
+    def runtime_current_url(self, *, fallback: str = "") -> str:
+        """Return private browser identity for navigation/auth mechanics only."""
+        return self._runtime_current_url or fallback
 
     async def get_page_identity(self) -> Dict[str, Any]:
         """Return ``{url, title}`` of the focused tab without touching the renderer.
@@ -2199,8 +2207,9 @@ class DOMService:
             raise RuntimeError("Not connected. Call connect() first.")
         if not self._session.agent_focus_target_id:
             raise RuntimeError("No focused target")
+        self._runtime_current_url = str(await self._session.get_current_page_url() or "")
         return {
-            "url": str(await self._session.get_current_page_url() or ""),
+            "url": self._runtime_current_url,
             "title": str(await self._session.get_current_page_title() or ""),
         }
 
@@ -2227,6 +2236,7 @@ class DOMService:
 
         capture_screenshot = include_screenshot and not self.secret_values_used
         state = await self._session.get_browser_state_summary(include_screenshot=capture_screenshot)
+        self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
         geometry = self._page_geometry(state)

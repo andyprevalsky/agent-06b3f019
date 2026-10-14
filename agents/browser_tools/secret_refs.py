@@ -217,7 +217,7 @@ class _EvaluateResolver:
                 decoded = _decode_js_string(content)
                 next_index = self._next_non_comment(end)
                 object_key = possible_object_key and self.code[next_index:next_index + 1] == ":"
-                if decoded in self.refs and not property_key and not object_key:
+                if decoded.startswith("pwd:") and decoded in self.refs and not property_key and not object_key:
                     self.used.add(decoded)
                     resolved = self.refs[decoded]
                 else:
@@ -277,7 +277,7 @@ class _EvaluateResolver:
                     raw = self.code[start + 1:index]
                     if any(ref in raw for ref in self.refs) or "secret:" in raw:
                         decoded = _decode_js_string(raw)
-                        if decoded in self.refs:
+                        if decoded.startswith("pwd:") and decoded in self.refs:
                             self.used.add(decoded)
                             resolved = self.refs[decoded]
                         else:
@@ -420,6 +420,8 @@ def resolve_evaluate_secret_refs(code: str, refs: Optional[Mapping[str, str]]) -
     """Resolve credential literals in JavaScript with escaping appropriate to JS.
 
     Comments, regexes, identifiers, and legacy property names are untouched.
+    Bare card field names remain ordinary JavaScript data; only explicit
+    markers or unambiguous legacy ``pwd:`` literals resolve credentials.
     This lexical transform does not execute source and introduces no global
     variables or browser state. Explicit markers can also be literal expressions.
     """
@@ -450,6 +452,9 @@ def mask_secret_values(value: Any, secret_refs: Optional[Mapping[str, str]]) -> 
     Outer dictionary keys belong to the tool protocol; nested page-supplied
     keys are redacted along with their values. Booleans remain protocol values.
     Exact numeric echoes of numeric credentials are also replaced by their ref.
+    A larger digit sequence is a different numeric value: a CVV of ``234``
+    matches ``cvv234`` but does not rewrite DOM index ``1234``. Nonnumeric
+    credentials retain substring masking, including inside surrounding labels.
     Replacement text is never rescanned, including when refs contain secrets.
     """
     bindings = _string_refs(secret_refs)
@@ -507,7 +512,11 @@ def mask_secret_values(value: Any, secret_refs: Optional[Mapping[str, str]]) -> 
         r"(?P<public_ref>\{\{secret:(?:" + aliases + r")\}\}"
         r"|(?<![\w:@.+-])(?:" + aliases + r")(?![\w:@.+-]))"
     )
-    literals = [re.escape(form) for form in sorted(forms, key=len, reverse=True)]
+    literals = [
+        (r"(?<![0-9])" + re.escape(form) + r"(?![0-9])")
+        if re.fullmatch(r"[0-9]+", form) else re.escape(form)
+        for form in sorted(forms, key=len, reverse=True)
+    ]
     pattern = re.compile("|".join([protected, *formatted_patterns, *literals]))
 
     def replacement(match: re.Match[str]) -> str:
