@@ -174,6 +174,10 @@ class _FakeWFModule:
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
+        if name == "notify_sms_event_activity":
+            from datetime import timedelta
+
+            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=300)
         self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})
         if name in self._activity_results:
             value = self._activity_results[name]
@@ -1083,9 +1087,7 @@ async def test_direct_cancel_preserves_unanswered_resume_only():
     for decision in (None, "Approved", REJECTION_SENTINEL):
         request_id = "req-cancel-resume"
         question = "Approve the existing request?"
-        wf = PersistedWF(
-            MessageStatus.IN_PROGRESS if decision is None else MessageStatus.FINISHED
-        )
+        wf = PersistedWF(MessageStatus.IN_PROGRESS if decision is None else MessageStatus.FINISHED)
         if decision is not None:
             wf._pending_approval_resume = {
                 "request_id": request_id,
@@ -1099,9 +1101,7 @@ async def test_direct_cancel_preserves_unanswered_resume_only():
             }
         )
         restore = _patch_service_workflow(fake)
-        task = asyncio.create_task(
-            request_user_approval_direct(wf, question, close_on_cancel=True)
-        )
+        task = asyncio.create_task(request_user_approval_direct(wf, question, close_on_cancel=True))
         try:
             await asyncio.wait_for(wf.persisted.wait(), timeout=10)
             task.cancel()
@@ -1113,10 +1113,7 @@ async def test_direct_cancel_preserves_unanswered_resume_only():
                 raise AssertionError("The original caller must remain canceled")
             stash_pending_approvals_from_context(wf)
             assert request_id not in wf._signal_responses
-            assert not any(
-                c["name"] == "resolve_attention_request_activity"
-                for c in fake.activity_calls
-            )
+            assert not any(c["name"] == "resolve_attention_request_activity" for c in fake.activity_calls)
             if decision is None:
                 assert getattr(wf, "_pending_approval_resume", None) == {
                     "request_id": request_id,
@@ -1126,51 +1123,23 @@ async def test_direct_cancel_preserves_unanswered_resume_only():
                 assert closed.title == "Approval interrupted"
                 assert closed.metadata["excludeFromModel"] is True
                 wf._signal_responses[request_id] = "Approved"
-                resumed = await request_user_approval_direct(
-                    wf, question, close_on_cancel=True
-                )
+                resumed = await request_user_approval_direct(wf, question, close_on_cancel=True)
                 assert resumed["attention_request_id"] == request_id
                 assert resumed["response"] == "Approved"
                 assert wf._pending_approval_resume is None
-                assert (
-                    sum(
-                        c["name"] == "create_approval_request_activity"
-                        for c in fake.activity_calls
-                    )
-                    == 1
-                )
-                assert (
-                    sum(
-                        c["name"] == "notify_sms_event_activity"
-                        for c in fake.activity_calls
-                    )
-                    == 1
-                )
+                assert sum(c["name"] == "create_approval_request_activity" for c in fake.activity_calls) == 1
+                assert sum(c["name"] == "notify_sms_event_activity" for c in fake.activity_calls) == 1
             else:
-                assert wf._pending_approval_resume is None, (
-                    "Consumed decisions must never be re-stashed"
-                )
-                terminal_events = [
-                    e
-                    for e, _, _ in wf.handled_events
-                    if e.status == MessageStatus.FINISHED
-                ]
+                assert wf._pending_approval_resume is None, "Consumed decisions must never be re-stashed"
+                terminal_events = [e for e, _, _ in wf.handled_events if e.status == MessageStatus.FINISHED]
                 assert len(terminal_events) == 2
                 assert terminal_events[0] == terminal_events[1]
                 expected_title = (
-                    "✗ User rejected action"
-                    if decision == REJECTION_SENTINEL
-                    else "✓ User approval received"
+                    "✗ User rejected action" if decision == REJECTION_SENTINEL else "✓ User approval received"
                 )
                 assert terminal_events[-1].title == expected_title
-                assert not any(
-                    c["name"] == "create_approval_request_activity"
-                    for c in fake.activity_calls
-                )
-                assert not any(
-                    c["name"] == "notify_sms_event_activity"
-                    for c in fake.activity_calls
-                )
+                assert not any(c["name"] == "create_approval_request_activity" for c in fake.activity_calls)
+                assert not any(c["name"] == "notify_sms_event_activity" for c in fake.activity_calls)
         finally:
             if not task.done():
                 task.cancel()

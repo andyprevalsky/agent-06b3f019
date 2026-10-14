@@ -32,7 +32,8 @@ import { testWorkerHardwareConcurrencyMatchesPage as runWorkerHardwareConcurrenc
 import {
   testSteelAlreadyReleasedWriterIsIdempotent,
   testSteelWriterProfileHandoff,
-} from './steel-fingerprint.profile-handoff.behavior';
+} from './steel-fingerprint.profile-readiness.behavior';
+import { testWritableSteelProfileHandoffRetainsRecoveryCustody } from './steel-fingerprint.profile-handoff.behavior';
 
 function makeFingerprint(): FingerprintData {
   return {
@@ -546,7 +547,15 @@ async function main(): Promise<void> {
       name: 'Steel writer releases and reaches native profile readiness before replacement',
       fn: testSteelWriterProfileHandoff,
     },
-    ...(['failed-profile', 'failed-release', 'failed-create', 'lost-cas'] as const).map((mode) => ({
+    ...(
+      [
+        'failed-profile',
+        'failed-release',
+        'failed-create',
+        'lost-cas',
+        'lost-lease-during-profile-read',
+      ] as const
+    ).map((mode) => ({
       name: `Steel profile handoff preserves custody on ${mode}`,
       fn: () => testSteelWriterProfileHandoff(mode),
     })),
@@ -597,6 +606,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries transient Connection error',
       fn: testConnectionErrorRetriesOnReplacement,
+    },
+    {
+      name: 'Steel writable profile handoff keeps durable custody across failure and recovery',
+      fn: testWritableSteelProfileHandoffRetainsRecoveryCustody,
     },
     {
       name: 'raw Steel CDP failures retain timeout and authentication categories',

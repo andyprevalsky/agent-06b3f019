@@ -107,6 +107,21 @@ handoff, with no profile-list scans, shared-resource deletion, extra session
 allocation, new retry loop, or expanded timeout. A failed dependent create
 retains the original profile and resumable row instead of discarding auth.
 
+### Upstream custody integration
+
+The PR #1515 upstream handoff now owns the shared exact-source release path:
+one durable source-key lease, PAUSED checkpoint before any remote release,
+status/profile snapshot comparison, and ownership checks before create and
+publication. Integration retains the native READY/FAILED read within the same
+five-attempt budget and rechecks ownership after that awaited profile read.
+The wrapper uses upstream previousSessionReleased to avoid a second release.
+Both owning causal test families remain registered. The earlier failed-release
+fixture expected ACTIVE because its release preceded its checkpoint; that
+expectation is superseded by upstream's PAUSED custody before any release.
+The integrated assertion requires PAUSED while preserving exact binding,
+no-create, release, failure and candidate cleanup assertions. No fallback or
+product policy rollback was added.
+
 ## Human feedback
 
 None recorded.
