@@ -10,7 +10,10 @@ import { createLogger } from '../../providers/logger';
 import {
   markGptApiKeyOnCooldown,
   markGptIntegrationRateLimited,
+  markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
+
+import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -197,13 +200,6 @@ async function detectAndMarkCodexExhaustion(
 ): Promise<void> {
   const exhaustionPattern =
     /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing/i;
-  if (
-    credentialFeedback !== undefined
-      ? credentialFeedback.length === 0
-      : !exhaustionPattern.test(output)
-  ) {
-    return;
-  }
 
   const session = await repo.findSessionById(taskId);
   if (session === null) {
@@ -214,11 +210,18 @@ async function detectAndMarkCodexExhaustion(
   const hasOAuthCredential = (session.claudeTokenIntegrationId ?? '') !== '';
   let oauthReason = '';
   let fundedKeyReason = '';
+  const isRevoked = (reason: string) =>
+    reason === 'oauth_refresh_invalid' ||
+    reason
+      .split('\n')
+      .some((body) => classifyComputeGrantFailure({ status: 401, body }).verdict === 'revoked');
+  const fundingPattern =
+    /no credits remaining|add credits to continue|credit_balance_exhausted|credit balance is too low/i;
 
-  if (credentialFeedback !== undefined) {
+  if (credentialFeedback !== undefined && credentialFeedback.length > 0) {
     for (const feedback of credentialFeedback) {
       if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
-        oauthReason ||= feedback.reason;
+        if (isRevoked(feedback.reason) || !oauthReason) oauthReason = feedback.reason;
       } else if (
         feedback.source === 'funded_api_key' ||
         (feedback.source === 'initial' && !hasOAuthCredential)
@@ -241,14 +244,24 @@ async function detectAndMarkCodexExhaustion(
         : hasOAuthCredential
           ? ''
           : output;
-    if (exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
-    if (exhaustionPattern.test(fundedKeySegment)) fundedKeyReason = fundedKeySegment;
+    if (isRevoked(oauthSegment) || exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
+    if (exhaustionPattern.test(fundedKeySegment) || fundingPattern.test(fundedKeySegment))
+      fundedKeyReason = fundedKeySegment;
   }
 
   if (oauthReason !== '') {
     const integrationId = session.claudeTokenIntegrationId ?? '';
     if (integrationId === '') {
       log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
+    } else if (isRevoked(oauthReason)) {
+      const integration = await repo.findCredentialIntegration(integrationId);
+      if (integration) {
+        await markGptUserTokenRateLimited(integration.userId, {
+          integrationId,
+          accountId: integration.accountId,
+          failureReason: 'auth_error',
+        });
+      }
     } else {
       const resetAt = parseCodexResetTime(oauthReason);
       await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: resetAt });
@@ -260,7 +273,7 @@ async function detectAndMarkCodexExhaustion(
     }
   }
 
-  if (fundedKeyReason !== '') {
+  if (exhaustionPattern.test(fundedKeyReason) || fundingPattern.test(fundedKeyReason)) {
     await markGptApiKeyOnCooldown('codex_code_insufficient_quota');
     log.warn(`Codex funded API key backed off for session ${taskId}`);
   }
