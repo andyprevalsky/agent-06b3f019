@@ -6052,3 +6052,4 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 156.4, "cost_cents": 0.0, "timestamp": "2026-10-14T21:40:53.852736+00:00", "agent_id": "1cc8d564-f216-47dd-92ff-e2d6c3b5a408"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 294.2, "cost_cents": 0.0, "timestamp": "2026-10-14T21:40:53.852736+00:00", "agent_id": "804f1a10-2381-47f3-a34e-6017462803b7"}
 {"task": "agent-payment-abandonment", "duration_seconds": 269.5, "cost_cents": 0.0, "timestamp": "2026-10-14T21:40:53.852736+00:00", "agent_id": "c5debd54-1a1d-4682-831b-6c9098c3606c"}
+{"task": "lantern-people-pagination", "duration_seconds": 80.7, "cost_cents": 0.0, "timestamp": "2026-10-14T23:30:26.071349+00:00", "agent_id": "f3f950a7-5e2e-49c6-b96c-b3f4a833acbd"}
