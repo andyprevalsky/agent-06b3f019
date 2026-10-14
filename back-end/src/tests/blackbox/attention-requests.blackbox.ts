@@ -12,6 +12,9 @@
 
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
+import { execFile } from 'node:child_process';
+import { resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { appendGateWaiter, findPendingByGateKey } from '../../domains/attention-requests/repo';
@@ -43,6 +46,7 @@ if (!Number.isInteger(CASE_CONCURRENCY) || CASE_CONCURRENCY <= 0) {
 const trackedRealAgentIds = new Set<string>();
 const trackedRequestAgentIds = new Set<string>();
 const trackedUserIds = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 const ErrorResponse = z.object({
   error: z.string(),
@@ -782,6 +786,55 @@ async function testCreate_preservesLegitimateWorkerAndExternalWorkflowBindings()
       assertStatus(result.status, 200, result.data);
     }
   }
+}
+
+async function testCreate_actualWorkerProducerAuthenticates(
+  producer: 'gate' | 'approval',
+  caller: 'owned' | 'foreign' | 'missing-key'
+) {
+  const fixture = await createFixture(`worker-${producer}-${caller}`);
+  const agentsDir = resolve(__dirname, '../../../../agents');
+  const userId = caller === 'foreign' ? fixture.otherUserId : fixture.ownerUserId;
+  const { stdout } = await execFileAsync(
+    resolve(agentsDir, 'venv/bin/python'),
+    [
+      resolve(agentsDir, 'tests/blackbox/attention_request_http_fixture.py'),
+      producer,
+      userId,
+      fixture.realAgentId,
+      fixture.realAgentId,
+    ],
+    {
+      cwd: agentsDir,
+      env: {
+        ...process.env,
+        PYTHONPATH: agentsDir,
+        BACKEND_API_URL: BASE_URL,
+        BACKEND_API_KEY: caller === 'missing-key' ? '' : API_KEY,
+      },
+    }
+  );
+  const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
+    request_id?: string;
+    status: number;
+  };
+  assertStatus(result.status, caller === 'owned' ? 200 : caller === 'foreign' ? 403 : 401, result);
+  const rows = await prisma.agentAttentionRequest.findMany({
+    where: { agentId: fixture.realAgentId },
+  });
+  if (caller !== 'owned') {
+    assert(rows.length === 0, 'Rejected worker request must not create attention state');
+    return;
+  }
+  assert(
+    rows.length === 1 &&
+      rows[0]?.id === result.request_id &&
+      rows[0]?.userId === userId &&
+      rows[0]?.workflowId === fixture.realAgentId &&
+      rows[0]?.userResponse === null,
+    'Actual worker producer must preserve its owned pending request'
+  );
+  if (producer === 'gate') assert(rows[0]?.gateKey === 'subscription', 'Credit gate identity lost');
 }
 
 async function testAuthCompletion_legacyForeignAgentIsForbiddenAtomically(
@@ -2043,6 +2096,12 @@ async function runAll() {
     {
       name: 'POST /:id/respond',
       tests: [
+        ...(['gate', 'approval'] as const).flatMap((producer) =>
+          (['owned', 'foreign', 'missing-key'] as const).map((caller) => ({
+            name: `actual ${producer} worker create preserves ${caller} authority`,
+            fn: () => testCreate_actualWorkerProducerAuthenticates(producer, caller),
+          }))
+        ),
         {
           name: 'legacy foreign auth completion is forbidden atomically',
           fn: () => testAuthCompletion_legacyForeignAgentIsForbiddenAtomically(),

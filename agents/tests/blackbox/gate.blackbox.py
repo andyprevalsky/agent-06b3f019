@@ -17,7 +17,7 @@ import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from _test_utils import BlackboxResult
+from _test_utils import BlackboxResult, assert_captured_call, setup_mock, teardown_mock
 
 
 def _clear_flag():
@@ -109,6 +109,27 @@ async def test_raise_gate_direct_noop_on_sentinel():
     fake_wf.execute_activity.assert_awaited_once()
 
 
+async def test_activity_sends_authenticated_owner():
+    """A real gate producer supplies the configured credential and body owner."""
+    import json
+    from domains.gate import repo, service
+
+    setup_mock({"/api/attention-requests": {"status": 200, "json": {"id": "req-owned-gate"}}})
+    try:
+        request_id = await repo.create_gate_request_activity(
+            "gate-owner", "gate-agent", "gate-workflow", "Subscribe to continue",
+            service.build_subscription_gate(), "subscription",
+        )
+        assert request_id == "req-owned-gate"
+        call = assert_captured_call(url_contains="/api/attention-requests", method="POST")
+        body = json.loads(call["requestBody"])
+        headers = {key.lower(): value for key, value in call["requestHeaders"].items()}
+        assert headers.get("x-api-key")
+        assert headers.get("x-user-id") == body["userId"] == "gate-owner"
+    finally:
+        teardown_mock()
+
+
 async def test_raise_gate_direct_blocks_on_real_request():
     """A real request id (purchase gate) parks the workflow and returns the resolution."""
     from domains.gate import service
@@ -166,6 +187,7 @@ async def test_raise_gate_direct_unwinds_on_pause_without_closing_gate():
 async def run_all_tests():
     print("gate blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("activity_sends_authenticated_owner", test_activity_sends_authenticated_owner)
     await r.record_async("suppressible_allowlist_defaults_off", test_suppressible_allowlist_defaults_off)
     await r.record_async("flag_reenables_suppressible", test_flag_reenables_suppressible)
     await r.record_async("kyc_gate_uses_canonical_detection_contract", test_kyc_gate_uses_canonical_detection_contract)
