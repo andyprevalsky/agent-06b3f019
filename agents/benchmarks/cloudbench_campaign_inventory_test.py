@@ -328,7 +328,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
             ' fixture_capacity_calls=$((fixture_capacity_calls + 1))\n'
             ' CAPACITY_ADMISSION_RETRYABLE=1\n'
             + (' [ "$fixture_capacity_calls" -gt 1 ] || return 1\n' if admission_wait else '')
-            + ' test "$warm_json" = "$(cat "$FIXTURE_MACHINES")"\n'
+            + ' python3 -c \'import json,sys; assert json.load(sys.stdin) == json.load(open(sys.argv[1]))\' "$FIXTURE_MACHINES" <<< "$warm_json"\n'
             '}\n'
         )
         boundary = admission + boundary
@@ -2108,7 +2108,10 @@ else
 fi
 ''')
     if fault == 'malformed-snapshot':
-        script.write_text(script.read_text().replace('printf "[]" > "$MACHINES_SNAPSHOT"', 'printf "[42]" > "$MACHINES_SNAPSHOT"'))
+        script.write_text(script.read_text()
+            .replace('printf "[]" > "$MACHINES_SNAPSHOT"', 'printf "[42]" > "$MACHINES_SNAPSHOT"')
+            .replace('printf "[]" > "$INVENTORY_INDEX/current/admission-machines.json"',
+                     'printf "[42]" > "$INVENTORY_INDEX/current/admission-machines.json"'))
     result = subprocess.run(['bash', str(script), str(tmp_path), fault], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode == 0, result.stdout + result.stderr
     assert int((tmp_path / 'worker-status').read_text()) == expected
