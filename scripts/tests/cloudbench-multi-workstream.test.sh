@@ -5009,7 +5009,7 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
     autoscaler-worker-required --timeout 240 || autoscale_status=$?
 [ "$autoscale_status" -ne 0 ] ||
     fail "a fleet must fail when an autoscaled worker clone cannot launch"
-grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* could not be staged and launched)' \
+grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* could not be staged and launched|worker [0-9a-f]+ cancellation cleanup failed; exact ownership retained)' \
     "$TMP_ROOT/controller-autoscaler-worker-required.log" ||
     fail "an unready autoscaled worker must produce a stable explicit failure"
 python3 - "$FAKE_DIR" <<'PY_INERT_CLONE' || fail "worker clones must carry the controller's inert init.cmd override"
@@ -5029,6 +5029,15 @@ grep -qF "launch worker wrapper failed rc=1" "$stage_log" ||
     fail "autoscaled-worker stage log must identify the failing launch command"
 grep -qF "injected autoscaled-worker launch failure" "$stage_log" ||
     fail "autoscaled-worker stage log must preserve the provider command stderr"
+if grep -Eq 'mandatory autoscaler.*worker [0-9a-f]+ cancellation cleanup failed; exact ownership retained' \
+    "$TMP_ROOT/controller-autoscaler-worker-required.log"; then
+    cleanup_marker="${stage_log%.stage.log}.cleanup-failed"
+    failed_worker="${cleanup_marker##*/worker-}"; failed_worker="${failed_worker%.cleanup-failed}"
+    [ -f "${cleanup_marker%.cleanup-failed}.pending" ] && \
+        grep -Fxq "$failed_worker" "$(dirname "$cleanup_marker")/worker-clones.ids" && \
+        grep -Fxq "worker $failed_worker cancellation cleanup failed; exact ownership retained" "$cleanup_marker" ||
+        fail "worker cleanup failure must retain its exact tracked pending owner and positive failure marker"
+fi
 clone_count="$(grep -c '^machine clone ' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
 [ "$clone_count" -ge 2 ] ||
     fail "the scale-up regression must allocate both a primary and an autoscaled worker"
