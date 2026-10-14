@@ -31411,7 +31411,7 @@ CLEANUP_DISK_RESERVE_FILE="$1"
 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
 CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
 CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
-df() {{ printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fixture 10000 5904 4096 60% /fixture'; }}
+df() {{ printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fixture 10000 2832 7168 28% /fixture'; }}
 export -f df
 {reserve}
 reserve_cleanup_disk_space
@@ -32364,3 +32364,82 @@ registry_owner_alive() { return 1; }
     finally:
         resume.set();thread.join(10)
         second.release();first.release()
+
+
+@pytest.mark.parametrize("caller", ["1", "foreign", "unknown-parent"])
+def test_fleet_cleanup_releases_emergency_disk_reserve_for_nested_canary_after_full_cohort(tmp_path: Path, caller: str) -> None:
+    """The actual preflight owns one extra controller after all fifty parents reserve."""
+    driver = ROOT / "agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+    result = subprocess.run([sys.executable, str(driver), str(FLEET_SCRIPT), str(tmp_path / "cohort")],
+        env={**os.environ, "RESERVE_FIXTURE_NESTED": caller}, text=True, capture_output=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS + 2 * FIXTURE_DRAIN_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((tmp_path / "cohort/receipt.safe.json").read_text())
+    assert receipt["admitted"] == 50 and receipt["failed"] == 0
+    assert (receipt["nested_canary_exit"] == 0) == (caller == "1")
+    assert all(receipt["assertions"].values())
+    assert receipt["provider_calls"] == receipt["task_executions"] == 0
+    drained = json.loads((tmp_path / "cohort/child-drain.safe.json").read_text())
+    assert drained["created"] == 50 and drained["all_reaped"]
+
+
+@pytest.mark.parametrize('fault', ['valid', 'unrelated-descendant', 'stale-parent-birth', 'same-pid', 'unknown-ancestry', 'foreign-parent', 'foreign-manifest-pid'])
+def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fences(tmp_path: Path, monkeypatch, fault: str) -> None:
+    """Exercise the actual budget evaluator with native born parent/child identities."""
+    reserve = _extract_fleet_function(fleet_source_text(), 'reserve_cleanup_disk_space() {')
+    body = reserve.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+    definitions = body.split('\ntry:\n    parent = directory(path.parent)', 1)[0]
+    helper = ROOT/'scripts/cloudbench-infra-canary-preflight.py'
+    transaction = tmp_path/'canary.lock'
+    ready, release = tmp_path/'nested.pid', tmp_path/'nested.release'
+    os.mkfifo(release, 0o600)
+    release_fd = os.open(release, os.O_RDWR)
+    callback = tmp_path/'canary.sh'
+    callback.write_text('printf "%s\\n" "$$" > "$RESERVE_READY"\nread -r release < "$RESERVE_RELEASE"\n')
+    monkeypatch.setattr(sys, 'argv', ['reserve', str(tmp_path/'reserve'), '512', '256', '32', '', '', '', str(os.getpid()), str(helper), str(transaction)])
+    subject = {}; exec(compile(definitions, str(FLEET_SCRIPT)+':reserve', 'exec'), subject)
+    barrier = tmp_path/'barriers/cohort'; barrier.mkdir(parents=True)
+    lock = (barrier.parent/'parent.lock').open('w')
+    import fcntl
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    child = subprocess.Popen([sys.executable, str(helper), '--stamp', str(tmp_path/'stamp'),
+        '--lock', str(transaction), '--ttl-seconds', '3600', '--width', '2',
+        '--canary', str(callback), '--nested-controller-lock', 'owning-native-context'],
+        env={**os.environ, 'RESERVE_READY':str(ready), 'RESERVE_RELEASE':str(release)},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sibling = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
+    try:
+        deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+        while not ready.exists():
+            assert child.poll() is None, 'actual preflight exited before nested live boundary'
+            assert time.monotonic() < deadline, 'actual preflight never reached nested live boundary'
+            time.sleep(0.01)
+        nested_pid = int(ready.read_text())
+        subject['birth_snapshot'] = subject['capture_births']()
+        subject['parent_snapshot'] = subject['capture_parents']()
+        births = subject['birth_snapshot']; parent = os.getpid()
+        members = ['r001-j0001', 'r001-j0002']; observed = os.fstat(lock.fileno())
+        cohort = {'directory':str(barrier), 'parent_lock_identity':[observed.st_dev,observed.st_ino], 'members':members,
+                  'consumed':{members[0]:{'pid':parent,'birth':births[parent]},members[1]:{'pid':sibling.pid,'birth':births[sibling.pid]}},
+                  'preferred':512,'headroom':256,'minimum':32}
+        (barrier/'manifest.json').write_text(json.dumps({'cohort_id':'c001','jobs':dict(zip(members,[parent,sibling.pid]))}))
+        standalone_id = 'a'*64; standalone_member = 'standalone-'+standalone_id
+        standalone_pid = nested_pid
+        if fault == 'unrelated-descendant': standalone_pid = sibling.pid
+        if fault == 'stale-parent-birth': cohort['consumed'][members[0]]['birth'] = 'stale-original-birth'
+        if fault == 'same-pid': standalone_pid = parent
+        if fault == 'unknown-ancestry': subject['parent_snapshot'] = {}
+        if fault == 'foreign-parent': standalone_pid = os.getppid()
+        if fault == 'foreign-manifest-pid':
+            (barrier/'manifest.json').write_text(json.dumps({'cohort_id':'c001','jobs':dict(zip(members,[os.getppid(),sibling.pid]))}))
+        standalone = {'directory':None,'parent_lock_identity':None,'members':[standalone_member],
+                      'consumed':{standalone_member:{'pid':standalone_pid,'birth':births[standalone_pid]}},
+                      'preferred':512,'headroom':256,'minimum':32}
+        result = subject['future_nested_liability']({'cohort':cohort,standalone_id:standalone}, 'not-current', parent)
+        assert result == ((0,0,0) if fault == 'valid' else (256,32,1))
+    finally:
+        os.write(release_fd, b"\n")
+        child.wait(timeout=FIXTURE_DRAIN_SECONDS)
+        os.close(release_fd)
+        sibling.terminate(); sibling.wait(timeout=FIXTURE_DRAIN_SECONDS)
+        lock.close()

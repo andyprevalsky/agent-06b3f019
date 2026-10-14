@@ -723,6 +723,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
@@ -1540,7 +1541,17 @@ private_source_allows_provider_call() {
             done ;;
     esac
 }
-FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
+FLY() {
+    private_source_allows_provider_call "$@" || return $?
+    case "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" in 0|1) ;; *) return 1 ;; esac
+    if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ] \
+        && [ "${1:-}:${2:-}" = machine:clone ]; then
+        cloudbench_mutation_admission "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-campaign-mutation.py" pace \
+            --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+            --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" --wait-seconds "$clone_timeout" || return 1
+    fi
+    flyctl "$@"
+}
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
 primary_clone_storage_mode() {
@@ -1701,7 +1712,53 @@ print(volumes[0])
 ' <<< "$config"
 }
 
-machine_volume_size_gb() {  # machine_volume_size_gb <machine-id> → exact mounted volume size
+warm_source_volume_size_from_inventory() {  # <exact-machine-id> <exact-volume-id>
+    # Warm admission already owns a birth/token/freshness-fenced inventory feed.
+    # Do not fan out one status read per controller after that admission. Unknown
+    # generations may recover, but spend only the remainder of its existing clock.
+    local machines status remaining interval
+    [ -n "${SNAPSHOT_LOOP_PID:-}" ] || return 1
+    interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
+    case "${CAPACITY_ADMISSION_DEADLINE:-}:$interval" in
+        ''|:*|*[!0-9:]*|*:0) return 1 ;;
+    esac
+    while :; do
+        status=0
+        machines="$(fleet_machines_json)" || status=$?
+        if [ "$status" = 0 ]; then
+            python3 -c '
+import json, sys
+try:
+    inventory = json.load(sys.stdin)
+    if not isinstance(inventory, list) or any(not isinstance(m, dict) for m in inventory): raise ValueError
+    matches = [m for m in inventory if isinstance(m, dict) and m.get("id") == sys.argv[1]]
+    if len(matches) != 1: raise ValueError
+    mounts = matches[0]["config"]["mounts"]
+    if not isinstance(mounts, list) or len(mounts) != 1: raise ValueError
+    mount = mounts[0]
+    if mount.get("volume") != sys.argv[2] or mount.get("path") != "/data": raise ValueError
+    size = mount.get("size_gb")
+    if type(size) is not int or size <= 0: raise ValueError
+except (TypeError, ValueError, KeyError, AttributeError):
+    raise SystemExit(1)
+print(size)
+' "$1" "$2" <<< "$machines"
+            return $?
+        fi
+        [ "$status" = 75 ] || return 1
+        remaining=$((CAPACITY_ADMISSION_DEADLINE - SECONDS))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$interval" -le "$remaining" ] || interval="$remaining"
+        echo "⏳ warm volume inventory temporarily unknown; withholding admission within the existing capacity clock" >&2
+        sleep "$interval"
+    done
+}
+
+machine_volume_size_gb() {  # machine_volume_size_gb <machine-id> [expected-warm-volume-id]
+    if [ -n "${2:-}" ]; then
+        warm_source_volume_size_from_inventory "$1" "$2"
+        return $?
+    fi
     machine_config_exact_read "$1" | python3 -c '
 import json, sys
 try:
@@ -5626,7 +5683,9 @@ reserve_cleanup_disk_space() {
         "$headroom_mb" "$minimum_mb" \
         "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" \
         "${RUN_BENCH_CAMPAIGN_JOB_ID:-}" \
-        "${RUN_BENCH_CAMPAIGN_COHORT:-}" "$$" <<'PY'
+        "${RUN_BENCH_CAMPAIGN_COHORT:-}" "$$" \
+        "${INFRA_CANARY_PREFLIGHT_SCRIPT:-}" \
+        "${FLEET_INFRA_CANARY_LOCK:-${ROOT_DIR:-}/.context/fleet-infra-canary-preflight.transaction.lock}" <<'PY'
 import errno
 import fcntl
 import hashlib
@@ -5642,7 +5701,8 @@ import tempfile
 
 path = Path(sys.argv[1]).absolute()
 preferred, headroom, minimum = map(int, sys.argv[2:5])
-cohort_path, job, cohort_id, owner_pid = sys.argv[5:]
+cohort_path, job, cohort_id, owner_pid = sys.argv[5:9]
+canary_script, canary_lock = (sys.argv[9:11] if len(sys.argv) == 11 else ("", ""))
 owner_pid = int(owner_pid)
 MB = 1048576
 opened_reserve = None
@@ -5682,6 +5742,61 @@ def capture_births():
 
 def native_birth(pid):
     return birth_snapshot.get(pid, "")
+
+
+def capture_parents():
+    result = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=True)
+    return {int(fields[0]): int(fields[1]) for line in result.stdout.splitlines()
+            if len(fields := line.split()) == 2 and all(field.isdigit() for field in fields)}
+
+
+def descendant_of(pid, ancestor):
+    # A same-PID hint is not a nested controller. Unknown/reparented ancestry
+    # retains the future liability rather than borrowing another owner's floor.
+    seen = {pid}
+    while (pid := parent_snapshot.get(pid)) is not None and pid > 0 and pid not in seen:
+        if pid == ancestor:
+            return True
+        seen.add(pid)
+    return False
+
+
+def canary_descendant(pid, ancestor):
+    # Only the source-owned preflight holding the exact transaction lock may
+    # exchange the future slot for its real nested controller. Other descendants
+    # retain that liability, even when their native ancestry is genuine.
+    if not canary_script or not canary_lock or not descendant_of(pid, ancestor):
+        return False
+    import shlex
+    seen = {pid}
+    while (pid := parent_snapshot.get(pid)) and pid != ancestor and pid not in seen:
+        seen.add(pid)
+        if not native_birth(pid):
+            return False
+        observed = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                                  capture_output=True, text=True, check=False)
+        try:
+            args = shlex.split(observed.stdout.strip())
+            if len(args) < 3 or args[1] != canary_script or args[args.index("--lock") + 1] != canary_lock:
+                continue
+            lock = Path(canary_lock)
+            before = regular(lock)
+            descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "r") as handle:
+                opened = os.fstat(handle.fileno())
+                if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(opened.st_mode):
+                    return False
+                if handle.read().strip() != str(pid):
+                    return False
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return False
+        except (ValueError, IndexError, OSError):
+            continue
+    return False
 
 
 def live_consumers(group):
@@ -5805,6 +5920,36 @@ def validate_group(identifier, group):
         raise ValueError("invalid cleanup cohort storage floor")
 
 
+def future_nested_liability(live, key, owner_pid):
+    extra_floor = extra_needed = extra_pending = 0
+    standalone = []
+    for identifier, group in live.items():
+        if group["directory"] is None:
+            standalone.extend((group, owner["pid"]) for owner in live_consumers(group).values())
+            if identifier == key:
+                standalone.append((group, owner_pid))
+    for identifier, group in live.items():
+        if group["directory"] is None:
+            continue
+        consumers = live_consumers(group)
+        remaining = pending_members(group) if parent_active(group) else 0
+        if not remaining and not consumers:
+            continue
+        manifest = Path(group["directory"]) / "manifest.json"
+        regular(manifest)
+        members = json.loads(manifest.read_text())["jobs"]
+        bound_consumers = [owner for member, owner in consumers.items()
+                           if type(members.get(member)) is int and members[member] == owner["pid"]]
+        joined = any(child["headroom"] >= group["headroom"] and child["minimum"] >= group["minimum"]
+                     and any(canary_descendant(pid, owner["pid"]) for owner in bound_consumers)
+                     for child, pid in standalone)
+        if not joined:
+            extra_floor += group["headroom"]
+            extra_needed += group["minimum"]
+            extra_pending += 1
+    return extra_floor, extra_needed, extra_pending
+
+
 def persist(state_file, groups):
     descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=state_file.parent)
     try:
@@ -5900,6 +6045,7 @@ try:
         regular(lock)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         birth_snapshot = capture_births()
+        parent_snapshot = capture_parents()
         initial_owner_birth = native_birth(owner_pid)
         if not initial_owner_birth:
             raise ValueError("cleanup reserve initial owner identity is unavailable")
@@ -5947,6 +6093,15 @@ try:
             floor += peers * group["headroom"]
             pending += remaining
             needed += remaining * group["minimum"]
+        # Every sealed cohort invokes the same root-owned canary transaction
+        # lock: N=2 runs in ONE extra fleet controller, not two campaign jobs.
+        # Keep its future working/cleanup floor in the adaptive distribution.
+        # When that exact live descendant joins as a standalone controller, its
+        # real floor replaces the virtual one; do not count the liability twice.
+        extra_floor, extra_needed, extra_pending = future_nested_liability(live, key, owner_pid)
+        floor += extra_floor
+        needed += extra_needed
+        pending += extra_pending
         available = free_mb() - floor
         if available < needed or pending < 1:
             raise OSError(errno.ENOSPC, "insufficient physical cleanup floors for pending controllers")
@@ -13166,6 +13321,7 @@ admit_app_capacity_with_wait() {
     fi
     [ "$refresh_inventory" != 1 ] || phase="after infra canary"
     deadline=$((SECONDS + wait_seconds))
+    CAPACITY_ADMISSION_DEADLINE="$deadline"
     while :; do
         inventory_status=0
         if [ "$refresh_inventory" = 1 ]; then
@@ -13257,7 +13413,18 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     local reserved_machines reserved_shared projected_machines projected_shared
     app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
-    if ! current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
+    local worker_inventory inventory_status=0
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
+        worker_inventory="$(fleet_machines_json)" || inventory_status=$?
+        # Healthy temporary absence stays pending; invalid ownership remains fatal.
+        [ "$inventory_status" = 0 ] || return "$inventory_status"
+    else
+        worker_inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+            echo "⚠️ worker capacity inventory unavailable; admission pending" >&2
+            return 75
+        }
+    fi
+    if ! current_machines="$(printf '%s' "$worker_inventory" | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
@@ -13272,6 +13439,10 @@ except Exception:
     fi
     case "$current_machines" in
         ''|*[!0-9]*)
+            if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
+                echo "❌ worker shared capacity inventory malformed; refusing admission" >&2
+                return 1
+            fi
             echo "⚠️ worker capacity inventory invalid; admission pending" >&2
             return 75
             ;;
@@ -13350,6 +13521,7 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "start_barrier_wait_seconds=$START_BARRIER_WAIT_SECONDS"
     --config-value "boot_launch=${CLOUDBENCH_BOOT_LAUNCH:-1}"
     --config-value "boot_config_max_in_flight=${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
+    --config-value "campaign_mutation_admission=${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}"
     --config-value "boot_update_capacity_wait_seconds=$BOOT_UPDATE_CAPACITY_WAIT_SECONDS"
     --config-value "boot_config_barrier_wait_seconds=$BOOT_CONFIG_BARRIER_WAIT_SECONDS"
     --config-value "primary_vm_size=$FLEET_PRIMARY_VM_SIZE"
@@ -14819,7 +14991,7 @@ echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machi
 # is not admissible for a 20 GB pool primary. Cut one exact pool-volume snapshot
 # on first use and cache its immutable ID across slices. This happens before
 # any task starts, never once per autoscaled worker or benchmark.
-WARM_SOURCE_SIZE_GB="$(machine_volume_size_gb "$WARM_ID")" || WARM_SOURCE_SIZE_GB=""
+WARM_SOURCE_SIZE_GB="$(machine_volume_size_gb "$WARM_ID" "$VOL_ID")" || WARM_SOURCE_SIZE_GB=""
 case "$WARM_SOURCE_SIZE_GB" in ''|0|*[!0-9]*)
     echo "❌ could not verify warm source volume size for worker clones" >&2; exit 1 ;;
 esac

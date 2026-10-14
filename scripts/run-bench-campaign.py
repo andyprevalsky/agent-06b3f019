@@ -21,6 +21,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 
 def utc_now() -> str:
@@ -195,6 +196,135 @@ def publish_campaign_group(
     return completed
 
 
+def stress_default_requirements(root: Path, rows: list[dict[str, object]], *, peak: int,
+                                baseline: list[dict[str, object]] | None, autoscale_max: int = 15, repetitions: int = 1) -> dict[str, object]:
+    """Derive opt-in operator defaults; unknown native quotas never grant admission."""
+    if type(repetitions) is not int or repetitions < 1:
+        raise ValueError("invalid stress repetitions")
+    if type(peak) is not int or peak < 1 or peak > len(rows) * repetitions:
+        raise ValueError("invalid stress peak")
+    if type(autoscale_max) is not int or autoscale_max < 2:
+        raise ValueError("invalid per-task worker ceiling")
+    names = [row["name"] for row in rows]
+    if len(set(names)) != len(names) or any(not isinstance(name, str) for name in names):
+        raise ValueError("invalid distinct stress tasks")
+    if any(type(row.get("requires_browser_agent", False)) is not bool for row in rows):
+        raise ValueError("invalid browser profile")
+    source_path = root / "scripts/run-bench-fleet"
+    source_bytes = source_path.read_bytes()
+    ref = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    if source_bytes != subprocess.check_output(["git", "-C", str(root), "show", ref + ":scripts/run-bench-fleet"]):
+        raise ValueError("stress VM profile source differs from immutable Git bytes")
+    source = source_bytes.decode()
+    assignments = []
+    for key in ("FLEET_PRIMARY_VM_SIZE", "FLEET_PRIMARY_VM_MEMORY",
+                "FLEET_BUNDLED_FRONTEND_VM_SIZE", "FLEET_BUNDLED_FRONTEND_VM_MEMORY"):
+        matches = [line for line in source.splitlines() if line.startswith(key + "=")]
+        if len(matches) != 1:
+            raise ValueError("ambiguous actual VM profile")
+        assignments.extend(matches)
+    functions = []
+    for name in ("bench_needs_large_primary", "primary_vm_size_for_bench", "primary_vm_memory_for_bench"):
+        start = source.index(name + "() {")
+        functions.append(source[start:source.index("\n}\n", start) + 3])
+    browser_names = [row["name"] for row in rows if row.get("requires_browser_agent")]
+    script = "set -euo pipefail\nINFRA_PROBE=0\n" + "\n".join(assignments + functions)
+    script += "\nCATALOG_BROWSER_REQUIRED_TASKS=(" + " ".join(shlex.quote(name) for name in browser_names) + ")\n"
+    for name in names:
+        script += "printf '%s\\t%s\\n' \"$(primary_vm_size_for_bench " + shlex.quote(name) + ")\" \"$(primary_vm_memory_for_bench " + shlex.quote(name) + ")\"\n"
+    profiles = subprocess.check_output(["bash", "-s"], input=script, text=True).splitlines()
+    shared, memory, perf = [], [], []
+    for profile in profiles:
+        size, ram = profile.split("\t")
+        if size.startswith("shared-cpu-") and size.endswith("x"):
+            shared.append(int(size.removeprefix("shared-cpu-").removesuffix("x"))); perf.append(0)
+        elif size.startswith("performance-") and size.endswith("x"):
+            shared.append(0); perf.append(int(size.removeprefix("performance-").removesuffix("x")))
+        else:
+            raise ValueError("unknown actual primary CPU shape")
+        memory.append(int(ram))
+    # Count each simultaneously admitted copy; queued repetitions add no width.
+    shared *= repetitions
+    perf *= repetitions
+    memory *= repetitions
+    planned_shared = sum(sorted(shared, reverse=True)[:peak])
+    planned_perf = sum(sorted(perf, reverse=True)[:peak])
+    result = {"planned_peak": peak, "planned_shared_cpu_units": planned_shared,
+              "planned_performance_cpu_units": planned_perf,
+              "planned_memory_mib": sum(sorted(memory, reverse=True)[:peak]),
+              "local_shared_cpu_governor_minimum": None, "local_machine_ceiling_minimum": None,
+              "worker_slots": "dynamically-serialized-under-global-ceiling",
+              "per_task_autoscale_max": autoscale_max, "worker_reservation_slots": peak * (autoscale_max - 1), "disk_floor_mib": peak * (256 + 32),
+              "admission": "withheld-unknown-native-capacity", "native_org_quota_proven": False}
+    if baseline is None:
+        return result
+    if not isinstance(baseline, list) or any(not isinstance(machine, dict) for machine in baseline):
+        raise ValueError("invalid native baseline")
+    headroom = int(os.environ.get("CLOUDBENCH_SHARED_CPU_HEADROOM", "20"))
+    if headroom < 0:
+        raise ValueError("invalid shared CPU headroom")
+    ids = [machine.get("id") for machine in baseline]
+    if any(not isinstance(identifier, str) or not identifier for identifier in ids) or len(set(ids)) != len(ids):
+        raise ValueError("invalid native baseline identity")
+    baseline_shared = 0
+    for machine in baseline:
+        if machine.get("state") in ("stopped", "destroyed"):
+            continue
+        config = machine.get("config")
+        if not isinstance(config, dict) or not isinstance(config.get("guest"), dict):
+            raise ValueError("unknown native baseline configuration")
+        guest = config["guest"]
+        if type(guest.get("cpus")) is not int or guest["cpus"] < 1 or guest.get("cpu_kind") not in ("shared", "performance"):
+            raise ValueError("unknown native baseline CPU")
+        if guest["cpu_kind"] == "shared":
+            baseline_shared += guest["cpus"]
+    result.update(local_shared_cpu_governor_minimum=planned_shared + baseline_shared + headroom,
+                  # Narrow campaign controllers each reserve their own one replacement.
+                  local_machine_ceiling_minimum=len(baseline) + peak + peak + peak * (autoscale_max - 1),
+                  admission="local-defaults-derived-native-guards-required")
+    return result
+
+
+def stress_default_environment(requirements: dict[str, object], environment: dict[str, str]) -> dict[str, str]:
+    """Operator limits only: actual native guards and provider refusals remain authoritative."""
+    if requirements["local_shared_cpu_governor_minimum"] is None or requirements["local_machine_ceiling_minimum"] is None:
+        raise ValueError("unknown native baseline cannot admit stress defaults")
+    result = dict(environment)
+    result.setdefault("CLOUDBENCH_SHARED_CPU_GOVERNOR", str(max(160, int(requirements["local_shared_cpu_governor_minimum"]))))
+    result.setdefault("CLOUDBENCH_APP_MACHINE_CEILING", str(max(56, int(requirements["local_machine_ceiling_minimum"]))))
+    result.setdefault("CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION", "1")
+    return result
+
+
+def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
+    """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
+    expected = json.loads(authority)
+    directory = Path(expected["directory"])
+    owner = directory / "owner"
+    if owner.is_symlink() or not owner.is_file():
+        raise ValueError("stress inventory owner unavailable")
+    pairs = [line.split("=", 1) for line in owner.read_text().splitlines()]
+    if len(dict(pairs)) != len(pairs) or dict(pairs) != expected["owner"]:
+        raise ValueError("stress inventory authority changed")
+    checked = []
+    ref = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    for relative in ("scripts/lib/cloudbench-env.sh", "scripts/lib/cloudbench-inventory.sh"):
+        bound = subprocess.check_output(["git", "-C", str(root), "show", ref + ":" + relative])
+        if (root / relative).read_bytes() != bound:
+            raise ValueError("stress inventory interpreter differs from immutable source")
+        checked.append(bound.decode())
+    environment = {**os.environ, "CLOUDBENCH_CAMPAIGN_INVENTORY_DIR": str(directory)}
+    script = ('set -euo pipefail\nAPP=navi-whisper-lux-bench\nFLEET_DIR=' + shlex.quote(str(directory))
+              + '\nFLEET_OWNER_HOST="$(hostname)"\n' + "\n".join(checked)
+              + '\nstart_machines_snapshot_loop\nfleet_machines_json\n')
+    result = subprocess.run(["bash", "-s"], input=script, text=True, env=environment, capture_output=True)
+    if result.returncode == 75:
+        return 75, None
+    if result.returncode:
+        raise ValueError("stress parent inventory admission refused")
+    return 0, json.loads(result.stdout)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -203,6 +333,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", action="append", default=[])
     parser.add_argument("--forward-arg", action="append", default=[])
     parser.add_argument("--retry-infra", type=int, default=0)
+    parser.add_argument("--stress-defaults", action="store_true", help="derive local capacity defaults for the authorized 200-distinct-task k3 profile at peak200 or peak600; native quotas remain unknown")
+    parser.add_argument("--stress-defaults-plan", action="store_true", help="derive opt-in stress defaults without launching controllers")
     parser.add_argument("--e2e-timeout", type=float)
     parser.add_argument("--e2e-started-at", type=float)
     return parser.parse_args()
@@ -345,6 +477,42 @@ def start_shared_inventory(
     return process, log, directory
 
 
+def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -> str:
+    """Mint the expected feed identity in its actual owning campaign parent."""
+    source_root = Path(__file__).resolve().parent.parent
+    source_ref = subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
+    hashes = {}
+    checked = {}
+    for name in ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py", "run-bench-campaign.py", "cloudbench-port-lease.py", "lib/cloudbench-env.sh"):
+        bound = subprocess.check_output(["git", "-C", str(source_root), "show", source_ref + ":scripts/" + name])
+        if (source_root / "scripts" / name).read_bytes() != bound:
+            raise ValueError("mutation authority differs from immutable controller source")
+        hashes[name] = hashlib.sha256(bound).hexdigest()
+        checked[name] = bound
+    # Interpret only the immutable bytes just compared, never a reopened file
+    # or import cache that could execute a substituted identity implementation.
+    identity_path = source_root / "scripts/cloudbench-port-lease.py"
+    identity = ModuleType("mutation_parent_identity")
+    identity.__file__ = str(identity_path)
+    exec(compile(checked["cloudbench-port-lease.py"], str(identity_path), "exec"), identity.__dict__)
+    source = directory / "owner"
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("unsafe mutation inventory owner")
+    pairs = [line.split("=", 1) for line in source.read_text().splitlines()]
+    fields = dict(pairs)
+    if len(fields) != len(pairs) or set(fields) != {"app", "pid", "pid_start", "token", "parent_pid", "parent_start"}:
+        raise ValueError("invalid mutation inventory owner")
+    if fields["app"] != "navi-whisper-lux-bench" or not fields["token"]:
+        raise ValueError("foreign mutation inventory app")
+    if int(fields["parent_pid"]) != os.getpid() or not identity._process_start_matches(os.getpid(), fields["parent_start"]):
+        raise ValueError("mutation inventory belongs to another parent")
+    pid = int(fields["pid"])
+    if publisher.poll() is not None or os.getpgid(pid) != publisher.pid or not identity._process_start_matches(pid, fields["pid_start"]):
+        raise ValueError("mutation inventory belongs to another publisher session")
+    return json.dumps({"directory": str(directory.resolve()), "owner": fields,
+                       "source": {"ref": source_ref, "sha256": hashes}}, sort_keys=True)
+
+
 def stop_shared_inventory(
     process: subprocess.Popen, log: object, directory: Path
 ) -> bool:
@@ -385,6 +553,13 @@ def main() -> int:
         return e2e_deadline is not None and time.monotonic() >= e2e_deadline
 
     root = args.root.resolve()
+    if args.stress_defaults and (args.concurrency not in (200, 600) or args.runs != 3 or len(args.task) != 200 or len(set(args.task)) != 200):
+        raise SystemExit("--stress-defaults requires 200 distinct tasks, k3, peak200 or peak600")
+    if args.stress_defaults_plan:
+        from cloudbench_catalog import get_task_metadata
+        rows = get_task_metadata(root / "agents/benchmarks/tasks.json", args.task)
+        print(json.dumps(stress_default_requirements(root, rows, peak=args.concurrency, baseline=None, repetitions=args.runs if args.concurrency == 600 else 1), indent=2))
+        return 2  # Planning only: baseline unknown, no campaign/provider mutation.
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
     campaign_id = (
         requested_id
@@ -663,6 +838,9 @@ def main() -> int:
     inventory_process = None
     inventory_log = None
     inventory_directory = None
+    mutation_authority = None
+    stress_requirements = None
+    stress_environment = None
     inventory_failure_signalled = False
     try:
         if not os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID") and not os.environ.get(
@@ -686,6 +864,8 @@ def main() -> int:
                 inventory_process, inventory_log, inventory_directory = (
                     start_shared_inventory(root, campaign_dir)
                 )
+                if args.stress_defaults or os.environ.get("CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION", "0") == "1":
+                    mutation_authority = mutation_inventory_authority(inventory_directory, inventory_process)
                 print(
                     "Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live"
                 )
@@ -724,6 +904,31 @@ def main() -> int:
                             process.terminate()
                             job["_aborted_by_campaign"] = True
                     inventory_failure_signalled = True
+            if args.stress_defaults and stress_environment is None and not barrier_failure and not stop_signal:
+                try:
+                    if mutation_authority is None:
+                        raise ValueError("stress defaults require the existing parent-owned native inventory")
+                    observation, baseline = stress_inventory_baseline(root, mutation_authority)
+                    if observation == 75:
+                        # Re-observe under the original whole-experiment clock, no native fallback.
+                        time.sleep(0.1)
+                        continue
+                    from cloudbench_catalog import get_task_metadata
+                    rows = get_task_metadata(root / "agents/benchmarks/tasks.json", args.task)
+                    autoscale_max = 15
+                    for index, argument in enumerate(args.forward_arg):
+                        if argument == "--autoscale-max":
+                            autoscale_max = int(args.forward_arg[index + 1])
+                    stress_requirements = stress_default_requirements(root, rows, peak=args.concurrency, baseline=baseline, autoscale_max=autoscale_max, repetitions=args.runs if args.concurrency == 600 else 1)
+                    stress_environment = stress_default_environment(stress_requirements, os.environ)
+                    state["stress_defaults"] = stress_requirements
+                    write_json_atomic(summary_path, state)
+                    print("Stress local defaults derived from actual profiles and parent native baseline; org quotas remain unverified and native admission/refusal stays authoritative")
+                except (OSError, ValueError, IndexError, RuntimeError):
+                    barrier_failure = True
+                    first_failure = first_failure or 1
+                    state["stress_defaults_failed"] = True
+                    write_json_atomic(summary_path, state)
             if strict_start and not active and not barrier_failure and not (pending and pending[0].get("_independent_retry")):
                 current_cohort = pending[0]["_cohort"] if pending else None
                 if current_cohort:
@@ -800,7 +1005,7 @@ def main() -> int:
                 and (not strict_start or pending[0].get("_independent_retry") or pending[0]["_cohort"] is current_cohort)
             ):
                 job = pending.popleft()
-                environment = os.environ.copy()
+                environment = dict(stress_environment) if stress_environment is not None else os.environ.copy()
                 # Group membership is distinct from publication ownership. Each
                 # child still registers, publishes and acknowledges its own run;
                 # the Hub projects these durable members as one campaign.
@@ -829,6 +1034,10 @@ def main() -> int:
                     )
                 else:
                     environment.pop("CLOUDBENCH_CAMPAIGN_INVENTORY_DIR", None)
+                if mutation_authority is not None:
+                    environment["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"] = mutation_authority
+                else:
+                    environment.pop("CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY", None)
                 environment.pop("CLOUDBENCH_CAMPAIGN_SEED_PROOF", None)
                 if strict_start and not job.get("_independent_retry"):
                     if current_cohort.get("_seed_proof"):

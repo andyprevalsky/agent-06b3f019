@@ -178,7 +178,7 @@ class BootstrapRecoveryTest(unittest.TestCase):
 
     def configure_bound_source(self):
         self.config["env"]["REF"] = REF
-        self.source = {p: digest(git_blob(p)) for p in recovery.RECIPE_PATHS}
+        self.source = {p: digest(git_blob(p)) for p in recovery.recipe_paths(git_blob)}
         with (self.registry / "meta").open("a") as stream:
             stream.write("workspace_root=" + str(REPO) + "\n")
         owner_spec = importlib.util.spec_from_file_location(
@@ -214,6 +214,8 @@ class BootstrapRecoveryTest(unittest.TestCase):
             "cloudbench-sync-prisma-client.sh",
             "cloudbench_catalog.py",
         )
+        if b"process-identity.py" not in git_blob("scripts/run-bench-cloud"):
+            names = tuple(name for name in names if name != "process-identity.py")
         packed = {}
         for name in names:
             path = (
@@ -273,6 +275,44 @@ class BootstrapRecoveryTest(unittest.TestCase):
                 }
             ),
         )
+
+
+    def test_native_recipe_binds_only_mutation_helper_change_into_source_fingerprint(self):
+        meta = recovery.fields(self.registry / "meta")
+        original = recovery.native_recipe(meta, self.config)[2]
+        actual_run = recovery.subprocess.run
+
+        def altered_helper(arguments, *args, **kwargs):
+            result = actual_run(arguments, *args, **kwargs)
+            if arguments[:2] == ["git", "-C"] and arguments[-1] == REF + ":scripts/cloudbench-campaign-mutation.py":
+                return subprocess.CompletedProcess(arguments, 0, result.stdout + b"\n# independently changed mutation authority\n", result.stderr)
+            return result
+
+        with patch.object(recovery.subprocess, "run", side_effect=altered_helper):
+            changed = recovery.native_recipe(meta, self.config)[2]
+        self.assertNotEqual(original, changed, "helper-only change escaped immutable source approval fingerprint")
+
+
+    def test_historical_recipe_retains_exact_original_control_set_and_fingerprint(self):
+        with patch.dict(globals(), {"REF": "2819fe4f62f04fe8ace829da79c1b72e6fdd7a35"}):
+            self.assertEqual(recovery.recipe_paths(git_blob), recovery.RECIPE_PATHS)
+            meta_path = self.registry / "meta"
+            write(meta_path, "\n".join(line for line in meta_path.read_text().splitlines() if not line.startswith("workspace_root=")) + "\n")
+            self.configure_bound_source()
+            # native_recipe correctly requires its local provenance validator
+            # to equal the bound historical blob. Supply that actual old blob,
+            # rather than weakening the validator's source equality check.
+            historical = self.base / "historical-validator"
+            historical.mkdir()
+            shutil_source = (ROOT / "cloudbench-prestack-recovery.py").read_bytes()
+            write(historical / "cloudbench-prestack-recovery.py", shutil_source)
+            write(historical / "cloudbench_execution_provenance.py", git_blob("scripts/cloudbench_execution_provenance.py"))
+            spec = importlib.util.spec_from_file_location("historical_recipe_subject", historical / "cloudbench-prestack-recovery.py")
+            subject = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(subject)
+            fingerprint = subject.native_recipe(subject.fields(self.registry / "meta"), self.config)[2]
+        self.assertEqual(fingerprint, "481f3dc3a58354c2a70c4f0e10f9bf76e845348c44210fc0d63126ef9ba64e5d")
+
 
     def test_acknowledged_before_stack_has_a_separate_absence_boundary(self):
         self.original["bench.log"] = (

@@ -242,6 +242,8 @@ Campaign options:
   --e2e-timeout SEC   Whole experiment limit, including evidence and full release.
   --e2e-started-at EPOCH
                       Original first image-build epoch; never reset for retries.
+  --stress-defaults   Opt-in local resource defaults for200distinct tasks at-k3;
+                      native capacity/disk guards remain authoritative.
   --demo-cache        Read-only task replay for existing DEMO workloads. Declared
                       LLM judges still run and may spend. Zero LIVE proof credit.
 
@@ -287,6 +289,7 @@ CONCURRENCY_EXPLICIT=0
 RETRY_INFRA=0
 E2E_ARGS=()
 CAMPAIGN_REQUESTED=0
+STRESS_DEFAULTS=0
 INTERNAL_OPERATION=0
 DEMO_CACHE_PROBE=0
 SELECTORS=()
@@ -320,6 +323,9 @@ while [ "$#" -gt 0 ]; do
             ;;
         --e2e-timeout=*|--e2e-started-at=*)
             E2E_ARGS+=("$1"); CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --stress-defaults)
+            STRESS_DEFAULTS=1; CAMPAIGN_REQUESTED=1; shift
             ;;
         --demo-cache)
             DEMO_CACHE_PROBE=1; shift
@@ -437,7 +443,7 @@ fi
 benchmark_agent_instructions
 
 if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
-    if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ]; }; then
+    if [ "$CONCURRENCY_EXPLICIT" -eq 0 ] && { [ "$RETRY_INFRA" -gt 0 ] || [ "${#E2E_ARGS[@]}" -gt 0 ] || [ "$STRESS_DEFAULTS" -eq 1 ]; }; then
         CONCURRENCY="${#RESOLVED_TASKS[@]}"
     fi
     CAMPAIGN_ARGS=(
@@ -446,6 +452,9 @@ if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
         "--concurrency=$CONCURRENCY"
         "--retry-infra=$RETRY_INFRA"
     )
+    if [ "$STRESS_DEFAULTS" -eq 1 ]; then
+        CAMPAIGN_ARGS+=("--stress-defaults")
+    fi
     if [ "${#E2E_ARGS[@]}" -gt 0 ]; then
         CAMPAIGN_ARGS+=("${E2E_ARGS[@]}")
     fi

@@ -7,6 +7,7 @@ import os
 import contextlib
 import importlib.util
 import io
+import json
 import re
 import signal
 import subprocess
@@ -261,7 +262,7 @@ class LinuxGateFailedStepTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "steps:[0]"), result.stderr)
 
     def test_remote_runner_numbers_its_start_markers(self) -> None:
-        self.assertIn('echo "GATE_STEP_START #$n %s"', self.GATE.read_text())
+        self.assertIn('GATE_STEP_START #%%s %%s', self.GATE.read_text())
 
 
 class StructuralGateRunnerTests(unittest.TestCase):
@@ -432,6 +433,427 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
 
             self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
             self.assertFalse(never_started.exists(), "signal must not launch pending gates")
+
+
+class LinuxGateStorageRetentionTests(unittest.TestCase):
+    'Run the actual wrapper with a bounded native-provider transport.'
+
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None):
+        temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        transport = root / "bin"
+        transport.mkdir()
+        calls = root / "calls.jsonl"
+        fly = transport / "flyctl"
+        fly.write_text("#!" + sys.executable + "\n" + r'''
+import json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+with Path(os.environ['GATE_TEST_CALLS']).open('a') as out: out.write(json.dumps(args)+'\n')
+if args[:2]==['volumes','create']:
+    fault=os.environ.get('GATE_TEST_VOLUME_FAULT','')
+    if fault=='create-failed': print('incomplete native response'); raise SystemExit(5)
+    value={'id':'vol_fixture123','name':args[2],'region':args[args.index('--region')+1],'size_gb':int(args[args.index('--size')+1]),'encrypted':True,'attached_machine_id':None}
+    if fault=='wrong-region': value['region']='foreign'
+    if fault=='wrong-name': value['name']='foreign'
+    if fault=='wrong-size': value['size_gb']=1
+    if fault=='false-size': value['size_gb']=True
+    if fault=='attached': value['attached_machine_id']='foreign'
+    if fault=='unencrypted': value['encrypted']=False
+    if fault=='bad-id': value['id']='foreign/unsafe'
+    print(json.dumps(value))
+elif args[:2]==['machine','run']:
+    import subprocess
+    uploaded=dict(arg.split('=',1) for i,arg in enumerate(args) if i and args[i-1]=='--file-local')
+    subprocess.run(['bash','-n',uploaded['/tmp/gate.sh']],check=True)
+    if os.environ.get('GATE_TEST_VOLUME_FAULT')=='machine-failed': print('provider refused VM');raise SystemExit(6)
+
+    if os.environ.get('GATE_TEST_EXPORT')=='1':
+        import types,tarfile
+        from argparse import Namespace
+        remote=Path(os.environ['GATE_TEST_REMOTE']);repo=remote/'repo';repo.mkdir(parents=True)
+        (repo/'.context').mkdir();(repo/'scripts').mkdir();(repo/'.git').mkdir()
+        (repo/'.context/original.log').write_bytes(b'original remote controller evidence')
+        files=dict(arg.split('=',1) for i,arg in enumerate(args) if i and args[i-1]=='--file-local')
+        helper=Path(files['/tmp/controller-host-export.py'])
+        if '/tmp/controller-host-workspace.json' in files:
+            import subprocess,hashlib
+            env=dict(os.environ)
+            for i,arg in enumerate(args):
+                if i and args[i-1]=='-e':
+                    key,value=arg.split('=',1);env[key]=value
+            env['GATE_REF']='a'*40;env['FLY_APP_NAME']=args[args.index('-a')+1]
+            os.environ.update({key:value for key,value in env.items() if key.startswith('GATE_WORKSPACE_')})
+            script=Path(files['/tmp/gate.sh']).read_text()
+            assert 'mountpoint -q /tmp/gate' in script
+            code=script.split("<<'PY_WORKSPACE_CUSTODY'\n",1)[1].split('\nPY_WORKSPACE_CUSTODY',1)[0]
+            code=code.replace('/tmp/controller-host-workspace.json',files['/tmp/controller-host-workspace.json']).replace('/tmp/gate/repo',str(repo))
+            subprocess.run([sys.executable,'-I','-B','-c',code],env=env,check=True)
+            assert (repo/'.context/controller-workspace-volume/ownership.json').read_bytes()==Path(files['/tmp/controller-host-workspace.json']).read_bytes()
+
+        original_iter=Path.iterdir
+        def bounded_proc(path):
+            if str(path)!='/proc': return original_iter(path)
+            selected=[]
+            for process in original_iter(path):
+                try:
+                    if process.name.isdecimal() and process.stat().st_uid==os.getuid():
+                        status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
+                        if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
+                except FileNotFoundError: continue
+            return iter(selected)
+        Path.iterdir=bounded_proc
+        subject={'__name__':'fake_native_collector','__file__':str(helper)}
+        exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
+        subject['record_temp_roots']=lambda repo,common:[str(remote/'owned-temp-state')]
+        os.environ['FLY_MACHINE_ID']='abcdef12345678';os.environ['FLY_APP_NAME']=args[args.index('-a')+1]
+        subject['launch'](Namespace(repo=repo,record=remote/'launch.json',driver_pid=os.getpid(),caller=Path(files['/tmp/controller-host-caller.json']),ref='a'*40,image='fixture/immutable@sha256:'+'b'*64))
+        if os.environ.get('GATE_TEST_VOLUME_FAULT')=='exchanged-owner': (repo/'.context/controller-workspace-volume/ownership.json').write_text('{}')
+        if os.environ.get('GATE_TEST_VOLUME_FAULT')=='missing-owner': (repo/'.context/controller-workspace-volume/ownership.json').unlink()
+        rc=subject['export'](Namespace(record=remote/'launch.json',archive=remote/'originals.tar.gz',manifest=remote/'manifest.json',pending=remote/'pending.json'))
+        if rc: raise SystemExit(rc)
+    print('Machine ID: abcdef12345678')
+elif args[0]=='logs':
+    outcome=os.environ['GATE_TEST_OUTCOME']
+    if outcome!='timeout': print('GATE_RESULT exit='+outcome)
+elif args[:2]==['machines','list']: print('[{"id":"abcdef12345678","state":"started"}]')
+elif args[:3]==['ssh','sftp','get']:
+    if os.environ.get('GATE_TEST_EXPORT')=='1':
+        import shutil
+        shutil.copyfile(Path(os.environ['GATE_TEST_REMOTE'])/Path(args[-2]).name,args[-1])
+    else: Path(args[-1]).write_text('fixture original log\n')
+''')
+        fly.chmod(0o700)
+        git_transport = transport/"git"
+        git_transport.write_text("#!"+sys.executable+"\n"+"""import os,sys
+from pathlib import Path
+args=sys.argv[1:]
+if 'show' in args:
+    if os.environ.get('GATE_TEST_BAD_COLLECTOR')=='1': sys.stdout.write('substituted bytes')
+    else: sys.stdout.buffer.write(Path(os.environ['GATE_TEST_SOURCE']).read_bytes())
+elif '--git-common-dir' in args: print(str(Path(os.environ['GATE_TEST_REMOTE'])/'repo/.git'))
+elif 'diff' in args: pass
+elif 'rev-parse' in args: print('a'*40)
+else: print('origin/fixture')
+""")
+        git_transport.chmod(0o700)
+        for name, text in {
+            "sleep": "#!/bin/sh\nexit 0\n",
+        }.items():
+            path = transport / name
+            path.write_text(text)
+            path.chmod(0o700)
+        env = {**os.environ, "PATH": str(transport)+os.pathsep+os.environ["PATH"],
+               "FLY_API_TOKEN":"offline-fixture", "GITHUB_TOKEN":"offline-fixture",
+               "CLOUDBENCH_GATE_REF":"a"*40, "WARM_IMAGE_REF":"fixture/immutable@sha256:"+"b"*64,
+               "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
+               "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
+               "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
+               "GATE_TEST_CALLS":str(calls), "GATE_TEST_OUTCOME":outcome,
+               "CLOUDBENCH_GATE_EXPORT_HOST":export,"CLOUDBENCH_GATE_EXPORT_DIR":str(root/"custody"),
+               "GATE_TEST_EXPORT":export,"GATE_TEST_REMOTE":str(root/"remote"),
+               "GATE_TEST_BAD_COLLECTOR":"1" if bad_collector else "0",
+               "GATE_TEST_SOURCE":str(ROOT/"scripts/cloudbench-controller-export.py"),
+               "CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB":workspace,"GATE_TEST_VOLUME_FAULT":volume_fault}
+        env.pop("CLOUDBENCH_GATE_SELF_COPY", None)
+        env.pop("CLOUDBENCH_GATE_ROOT_DIR", None)
+        result = subprocess.run(["bash",str(ROOT/"scripts/run-cloudbench-controller-gate"),"--",*(command or ["true"])],
+                                cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+        records = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        return result, records
+
+    def test_stress200_existing_allocator_requires_sealed_minimum_plan(self):
+        driver=ROOT/"agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py"
+        with tempfile.TemporaryDirectory(prefix="stress200-owning-") as temporary:
+            for sealed in (False,True):
+                with self.subTest(sealed=sealed):
+                    work=Path(temporary)/("sealed" if sealed else "unsealed")
+                    env={**os.environ,"RESERVE_FIXTURE_OWNER_COUNT":"200","RESERVE_FIXTURE_CAPACITY_MB":"72705","RESERVE_FIXTURE_UNSEALED":"0" if sealed else "1","RESERVE_FIXTURE_NESTED":"1" if sealed else "","PYTHONDONTWRITEBYTECODE":"1"}
+                    result=subprocess.run([sys.executable,"-B",str(driver),str(ROOT/"scripts/run-bench-fleet"),str(work)],env=env,capture_output=True,text=True,timeout=120)
+                    receipt=json.loads((work/"receipt.safe.json").read_text())
+                    self.assertEqual(receipt["owner_count"],200)
+                    self.assertEqual(receipt["provider_calls"],0)
+                    self.assertEqual(result.returncode==0,sealed)
+                    if sealed:
+                        self.assertEqual(receipt["admitted"],200);self.assertEqual(receipt["nested_canary_exit"],0)
+                        self.assertTrue(all(receipt["assertions"].values()))
+                    else:self.assertLess(receipt["admitted"],200);self.assertGreater(receipt["failed"],0)
+                    self.assertTrue(json.loads((work/"child-drain.safe.json").read_text())["all_reaped"])
+
+    def test_gate_bootstrap_real_git_preserves_origin_main_ancestry(self):
+        with tempfile.TemporaryDirectory(prefix="gate-real-origin-") as temporary:
+            root=Path(temporary);origin=root/"origin";origin.mkdir()
+            subprocess.run(["git","init","-qb","main",str(origin)],check=True)
+            (origin/"original").write_text("main")
+            subprocess.run(["git","-C",str(origin),"add","original"],check=True)
+            subprocess.run(["git","-C",str(origin),"-c","user.name=fixture","-c","user.email=f@example.invalid","commit","-qm","main"],check=True)
+            base=subprocess.check_output(["git","-C",str(origin),"rev-parse","HEAD"],text=True).strip()
+            subprocess.run(["git","-C",str(origin),"checkout","-qb","feature"],check=True)
+            (origin/"original").write_text("feature")
+            subprocess.run(["git","-C",str(origin),"-c","user.name=fixture","-c","user.email=f@example.invalid","commit","-qam","feature"],check=True)
+            ref=subprocess.check_output(["git","-C",str(origin),"rev-parse","HEAD"],text=True).strip()
+            gate=(ROOT/"scripts/run-cloudbench-controller-gate").read_text()
+            start=gate.index("  echo 'git init -q repo && cd repo'");end=gate.index("  echo '# Dependencies",start)
+            producer=gate[start:end]
+            script=subprocess.check_output(["bash","-c",producer],text=True)
+            host=root/"host";host.mkdir()
+            subprocess.run(["bash","-c",script],cwd=host,env={**os.environ,"GATE_REPO_URL":origin.as_uri(),"GATE_REF":ref,"token":"offline"},check=True)
+            repo=host/"repo"
+            self.assertEqual(subprocess.check_output(["git","-C",str(repo),"remote","get-url","origin"],text=True).strip(),origin.as_uri())
+            self.assertEqual(subprocess.check_output(["git","-C",str(repo),"merge-base",ref,"origin/main"],text=True).strip(),base)
+
+    def test_generated_gate_multiline_command_labels_are_shell_safe(self):
+        body="set -euo pipefail\npython3 -c \"import site;site.addsitedir('/app/agents/venv/lib/python3.11/site-packages')\"\n"
+        result,_=self._run(retain="1",command=["bash","-c",body,"fixture","1791923515.9527698"])
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_controller_export_real_foreign_uid_git_is_command_scoped(self):
+        with tempfile.TemporaryDirectory(prefix="gate-foreign-uid-") as temporary:
+            repo=Path(temporary)/"repo";repo.mkdir()
+            subprocess.run(["git","init","-q",str(repo)],check=True)
+            (repo/"original").write_text("retained original")
+            subprocess.run(["git","-C",str(repo),"add","original"],check=True)
+            subprocess.run(["git","-C",str(repo),"-c","user.name=fixture","-c","user.email=fixture@example.invalid","commit","-qm","original"],check=True)
+            expected=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+            Path(temporary).chmod(0o755)
+            repo.chmod(0o755)
+            for item in repo.rglob("*"): item.chmod(0o755 if item.is_dir() else 0o644)
+            subprocess.run(["sudo","-n","chown","-R","0:0",str(repo)],check=True)
+            try:
+                refused=subprocess.run(["git","-C",str(repo),"rev-parse","HEAD"],capture_output=True,text=True)
+                self.assertNotEqual(refused.returncode,0);self.assertIn("dubious ownership",refused.stderr)
+                spec=importlib.util.spec_from_file_location("collector_foreign",ROOT/"scripts/cloudbench-controller-export.py")
+                module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+                baseline=subprocess.check_output(["git","-C",str(ROOT),"show","d1a87a9c2c3c1731171f056057729edde8fff396:scripts/cloudbench-controller-export.py"])
+                original={"__name__":"original_collector","__file__":str(ROOT/"scripts/cloudbench-controller-export.py")}
+                exec(compile(baseline,"original-exporter","exec"),original)
+                with self.assertRaises(subprocess.CalledProcessError): original["git"](repo,"rev-parse","HEAD")
+                self.assertEqual(module.git(repo,"rev-parse","HEAD"),expected)
+                gate=(ROOT/"scripts/run-cloudbench-controller-gate").read_text()
+                self.assertIn("'safe.directory=/tmp/gate/repo'",gate)
+            finally:
+                subprocess.run(["sudo","-n","chown","-R",str(os.getuid())+":"+str(os.getgid()),str(repo)],check=True)
+
+    def test_workspace_volume_uses_actual_repo_mount_and_retains_both_resources(self):
+        result,calls=self._run(retain="1",size="50",export="1",workspace="80")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertTrue(any(row[:2]==["volumes","create"] for row in calls), "actual gate did not allocate the declared persistent workspace")
+        create=next(row for row in calls if row[:2]==["volumes","create"])
+        self.assertEqual(create[create.index("--size")+1],"80")
+        self.assertEqual(create[create.index("--region")+1],"iad")
+        run=next(row for row in calls if row[:2]==["machine","run"])
+        self.assertEqual(run[run.index("--volume")+1],"vol_fixture123:/tmp/gate")
+        self.assertIn("GATE_WORKSPACE_VOLUME_ID=vol_fixture123",run)
+        self.assertFalse(any(row[:2] in (["machine","destroy"],["volumes","destroy"]) for row in calls))
+        self.assertIn("GATE_WORKSPACE_VOLUME_RETAINED",result.stdout+result.stderr)
+
+    def test_workspace_volume_changed_original_owner_refuses_export_and_retains(self):
+        for fault in ("exchanged-owner","missing-owner"):
+            with self.subTest(fault=fault):
+                result,calls=self._run(retain="1",size="50",export="1",workspace="80",volume_fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn("original workspace ownership changed",result.stdout+result.stderr)
+                self.assertFalse(any(row[:2] in (["machine","destroy"],["volumes","destroy"]) for row in calls))
+
+    def test_workspace_volume_rejects_foreign_or_unknown_native_binding_before_host(self):
+        for fault in ("wrong-region","wrong-name","wrong-size","false-size","attached","unencrypted","bad-id"):
+            with self.subTest(fault=fault):
+                result,calls=self._run(retain="1",size="50",export="1",workspace="80",volume_fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(sum(row[:2]==["volumes","create"] for row in calls),1)
+                self.assertFalse(any(row[:2]==["machine","run"] for row in calls))
+                self.assertFalse(any(row[:2]==["volumes","destroy"] for row in calls))
+
+    def test_workspace_volume_partial_allocation_or_host_failure_retains_intent(self):
+        for fault in ("create-failed","machine-failed"):
+            with self.subTest(fault=fault):
+                result,calls=self._run(retain="1",size="50",export="1",workspace="80",volume_fault=fault)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn("GATE_WORKSPACE_VOLUME_RETAINED",result.stdout+result.stderr)
+                self.assertEqual(sum(row[:2]==["volumes","create"] for row in calls),1)
+                self.assertFalse(any(row[:2] in (["volumes","destroy"],["machine","destroy"]) for row in calls))
+
+    def test_workspace_volume_requires_retain_export_and_strict_size_before_native(self):
+        for retain,export,size in (("0","0","80"),("1","0","80"),("1","1","0"),("1","1","80gb")):
+            with self.subTest(retain=retain,export=export,size=size):
+                result,calls=self._run(retain=retain,export=export,workspace=size)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(calls,[])
+
+    def test_default_gate_still_removes_its_machine(self):
+        result,calls = self._run()
+        self.assertEqual(result.returncode,0,result.stderr)
+        run=next(row for row in calls if row[:2]==["machine","run"])
+        self.assertIn("--rm",run)
+        self.assertNotIn("--rootfs-size",run)
+        self.assertTrue(any(row[:2]==["machine","destroy"] for row in calls))
+
+    def test_opt_in_storage_and_retention_preserve_host_on_terminal_boundaries(self):
+        for outcome in ("0","7","timeout"):
+            with self.subTest(outcome=outcome):
+                result,calls = self._run(retain="1",size="80",outcome=outcome)
+                self.assertEqual(result.returncode,0 if outcome=="0" else (1 if outcome=="timeout" else 7),result.stderr)
+                run=next(row for row in calls if row[:2]==["machine","run"])
+                self.assertNotIn("--rm",run)
+                self.assertEqual(run[run.index("--rootfs-size")+1],"80gb")
+                self.assertEqual(run[run.index("--rootfs-persist")+1],"always")
+                self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+                self.assertIn("GATE_HOST_RETAINED",result.stdout+result.stderr)
+
+    def test_export_retrieves_and_verifies_actual_original_members_without_destroy(self):
+        result,calls=self._run(retain="1",size="80",export="1")
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertEqual(sum(row[:3]==["ssh","sftp","get"] for row in calls),3)
+
+    def test_failed_command_exports_custody_without_stopping_or_acknowledging_host(self):
+        result,calls=self._run(retain="1",size="80",export="1",outcome="7")
+        self.assertEqual(result.returncode,7,result.stdout+result.stderr)
+        self.assertIn("GATE_EXPORT_VERIFIED",result.stdout)
+        self.assertFalse(any(row[:2]==["machine","destroy"] for row in calls))
+        self.assertFalse(any(row[:2]==["ssh","console"] for row in calls))
+
+    def test_changed_collector_is_rejected_before_interpretation_and_launch(self):
+        result,calls=self._run(retain="1",size="80",export="1",bad_collector=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("authority differs",result.stderr)
+        self.assertEqual(calls,[])
+
+    def test_invalid_opt_in_values_refuse_before_native_launch(self):
+        for retain,size in (("invalid","80"),("1","80gb"),("1","0"),("1","-1"),("1","80;false")):
+            with self.subTest(retain=retain,size=size):
+                result,calls = self._run(retain=retain,size=size)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(calls,[])
+
+
+
+class LinuxControllerExportTests(unittest.TestCase):
+    def _fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="controller-original-export-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        repo = root/"repo"; repo.mkdir()
+        subprocess.run(["git","init","-q",str(repo)],check=True)
+        (repo/"scripts").mkdir()
+        (repo/"scripts/fixture.py").write_bytes(b"original source bytes\n")
+        subprocess.run(["git","-C",str(repo),"add","scripts"],check=True)
+        subprocess.run(["git","-C",str(repo),"-c","user.name=fixture","-c","user.email=fixture@example.invalid","commit","-qm","source"],check=True)
+        ref=subprocess.check_output(["git","-C",str(repo),"rev-parse","HEAD"],text=True).strip()
+        context=repo/".context"; context.mkdir()
+        (context/"original.log").write_bytes(b"actual original fixture bytes\n")
+        (repo/"agents").mkdir(); (repo/"agents/.env").write_bytes(b"PRIVATE_FIXTURE=preserved\n")
+        reserve=repo/".git/cloudbench-fleet-ownership/fixture/cleanup-disk-reserve"
+        reserve.parent.mkdir(parents=True)
+        reserve.write_bytes(b"reserve payload must never enter archive")
+        helper=ROOT/"scripts/cloudbench-controller-export.py"
+        caller,record=root/"caller.json",root/"launch.json"
+        self._call(helper,"caller","--record",caller,"--driver-pid",os.getpid())
+        self._call(helper,"launch","--repo",repo,"--record",record,"--driver-pid",os.getpid(),
+                   "--caller",caller,"--ref",ref,"--image","fixture@sha256:"+"a"*64)
+        return root,repo,helper,record,reserve
+
+    def _call(self, helper, *args, expected=0):
+        # Bound /proc enumeration to the fake host's native process namespace.
+        # Birth ticks, cwd and fd observations remain the real kernel values;
+        # the production guest collector is root and observes every host UID.
+        harness = """from pathlib import Path
+import os,sys
+original=Path.iterdir
+def namespace(path):
+    if str(path)=='/proc':
+        selected=[]
+        for process in original(path):
+            try:
+                if process.name.isdecimal() and process.stat().st_uid==os.getuid():
+                    status=Path(str(process)+'/stat').read_text();fields=status[status.rfind(')')+2:].split()
+                    if int(process.name) in (os.getpid(),os.getppid()) or int(fields[1])==os.getppid(): selected.append(process)
+            except FileNotFoundError: continue
+        return iter(selected)
+    return original(path)
+Path.iterdir=namespace
+helper=Path(sys.argv[1]);sys.argv=sys.argv[1:]
+subject={'__name__':'fake_native_host','__file__':str(helper)}
+exec(compile(helper.read_bytes(),str(helper),'exec'),subject)
+subject['record_temp_roots']=lambda repo,common:[str(repo.parent/'owned-temp-state')]
+try: raise SystemExit(subject['main']())
+except (OSError,ValueError,KeyError): raise SystemExit(75)
+"""
+        result=subprocess.run([sys.executable,"-c",harness,str(helper),*[str(a) for a in args]],text=True,capture_output=True,timeout=30)
+        self.assertEqual(result.returncode,expected,result.stderr)
+        return result
+
+    def test_original_members_verify_without_reading_or_removing_cleanup_reserve(self):
+        root,repo,helper,record,reserve=self._fixture()
+        archive,manifest=root/"originals.tar.gz",root/"manifest.json"
+        self._call(helper,"export","--record",record,"--archive",archive,"--manifest",manifest,"--pending",root/"pending.json")
+        self._call(helper,"verify","--archive",archive,"--manifest",manifest)
+        value=json.loads(manifest.read_text())
+        self.assertFalse(value["resource_release_verified"])
+        self.assertEqual(value["files"]["context/original.log"]["sha256"],__import__("hashlib").sha256((repo/".context/original.log").read_bytes()).hexdigest())
+        self.assertIn("source/agents/.env",value["files"])
+        self.assertEqual(len(value["excluded"]),1)
+        self.assertNotIn("git-common/cloudbench-fleet-ownership/fixture/cleanup-disk-reserve",value["files"])
+        self.assertEqual(reserve.read_bytes(),b"reserve payload must never enter archive")
+        self.assertEqual((repo/".context/original.log").read_bytes(),b"actual original fixture bytes\n")
+        archive.write_bytes(archive.read_bytes()+b"changed")
+        self._call(helper,"verify","--archive",archive,"--manifest",manifest,expected=75)
+
+    def test_unknown_manifest_kind_refuses_and_unrelated_reserve_basename_is_preserved(self):
+        root,repo,helper,record,reserve=self._fixture()
+        (repo/".context/cleanup-disk-reserve").write_bytes(b"ordinary evidence, not physical reserve")
+        archive,manifest=root/"originals.tar.gz",root/"manifest.json"
+        self._call(helper,"export","--record",record,"--archive",archive,"--manifest",manifest,"--pending",root/"pending.json")
+        value=json.loads(manifest.read_text())
+        self.assertIn("context/cleanup-disk-reserve",value["files"])
+        self.assertEqual(len(value["excluded"]),1)
+        value["files"]["context/original.log"]["kind"]="unknown"
+        manifest.write_text(json.dumps(value))
+        self._call(helper,"verify","--archive",archive,"--manifest",manifest,expected=75)
+
+    def test_writable_mapping_without_file_descriptor_reports_pending(self):
+        root,repo,helper,record,reserve=self._fixture()
+        ready=root/"ready"
+        command="""import ctypes,os,sys,time
+from pathlib import Path
+lib=ctypes.CDLL(None,use_errno=True);lib.mmap.restype=ctypes.c_void_p
+fd=os.open(sys.argv[1],os.O_RDWR)
+address=lib.mmap(None,os.fstat(fd).st_size,3,1,fd,0);os.close(fd)
+assert address not in (None,ctypes.c_void_p(-1).value)
+Path(sys.argv[2]).touch();time.sleep(30)
+"""
+        writer=subprocess.Popen([sys.executable,"-c",command,str(repo/".context/original.log"),str(ready)])
+        try:
+            deadline=time.monotonic()+10
+            while not ready.exists():
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            self.assertFalse(any(str(repo) in os.readlink(fd) for fd in Path(f"/proc/{writer.pid}/fd").iterdir()))
+            archive,manifest,pending=root/"originals.tar.gz",root/"manifest.json",root/"pending.json"
+            self._call(helper,"export","--record",record,"--archive",archive,"--manifest",manifest,"--pending",pending,expected=75)
+            self.assertFalse(archive.exists());self.assertEqual(json.loads(pending.read_text())["status"],"pending")
+        finally:
+            writer.terminate();writer.wait(timeout=10)
+
+    def test_live_writer_keeps_originals_and_reports_pending_without_archive(self):
+        root,repo,helper,record,reserve=self._fixture()
+        ready=root/"ready"
+        writer=subprocess.Popen([sys.executable,"-c",
+            "from pathlib import Path;import sys,time;f=open(sys.argv[1],'ab');Path(sys.argv[2]).touch();time.sleep(30)",
+            str(repo/".context/original.log"),str(ready)])
+        try:
+            deadline=time.monotonic()+10
+            while not ready.exists():
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            archive,manifest,pending=root/"originals.tar.gz",root/"manifest.json",root/"pending.json"
+            self._call(helper,"export","--record",record,"--archive",archive,"--manifest",manifest,"--pending",pending,expected=75)
+            self.assertFalse(archive.exists());self.assertFalse(manifest.exists())
+            self.assertEqual(json.loads(pending.read_text())["status"],"pending")
+            self.assertEqual((repo/".context/original.log").read_bytes(),b"actual original fixture bytes\n")
+            self.assertTrue(reserve.exists())
+        finally:
+            writer.terminate();writer.wait(timeout=10)
 
 
 if __name__ == "__main__":

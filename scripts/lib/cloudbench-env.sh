@@ -2168,3 +2168,23 @@ cloudbench_git_auth_header_from_tokens() {
   [ -n "$token" ] || return 1
   printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 }
+
+# Checked bytes are executed directly, so an altered authority cannot run its
+# own verification code (or change between verification and interpretation).
+cloudbench_mutation_launch_code() {
+  cat <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+helper = Path(sys.argv[1])
+code = helper.read_bytes()
+expected = json.loads(os.environ['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'])['source']['sha256']['cloudbench-campaign-mutation.py']
+if hashlib.sha256(code).hexdigest() != expected:
+    raise ValueError('native mutation authority changed before execution')
+sys.argv = sys.argv[1:]
+exec(compile(code, str(helper), 'exec'), {'__name__': '__main__', '__file__': str(helper)})
+PY
+}
+
+cloudbench_mutation_admission() {
+  python3 -c "$(cloudbench_mutation_launch_code)" "$@"
+}

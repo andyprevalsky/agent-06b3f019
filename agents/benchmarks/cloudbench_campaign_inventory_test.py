@@ -159,7 +159,8 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
 
 
 @pytest.mark.parametrize('explicit_concurrency', (False, True))
-def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry(tmp_path, explicit_concurrency):
+@pytest.mark.parametrize('stress_defaults', (False, True))
+def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry(tmp_path, explicit_concurrency, stress_defaults):
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
     (tmp_path / 'agents').mkdir()
@@ -176,12 +177,16 @@ def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry
                  '--e2e-started-at', '1791410000', '--timeout', '1200']
     if explicit_concurrency:
         arguments += ['--concurrency', '1']
+    if stress_defaults:
+        arguments += ['--stress-defaults', '-k', '3']
     result = subprocess.run(['bash', str(scripts / 'run-bench'), *arguments], capture_output=True, text=True,
                             env={**os.environ, 'FIXTURE_DISPATCH': str(receipt),
                                  'RUN_BENCH_CATALOG_UNDER_TEST': str(ROOT / 'agents/benchmarks/tasks.json')},
                             timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode == 0, result.stdout + result.stderr
     actual = json.loads(receipt.read_text())
+    assert ('--stress-defaults' in actual) == stress_defaults
+    assert f'--runs={3 if stress_defaults else 1}' in actual
     assert '--retry-infra=1' in actual and '--e2e-timeout=5400' in actual and '--e2e-started-at=1791410000' in actual
     assert f'--concurrency={1 if explicit_concurrency else 2}' in actual
     assert '--task=demo-fleet-alpha' in actual and '--task=demo-fleet-beta' in actual
@@ -257,7 +262,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -341,6 +346,9 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
         + "start_machines_snapshot_loop\n"
+        'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
+        ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
+        'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
         '  while [ "$(python3 -c \'import json,os;print(sum(json.loads(s)["kind"]=="machines" for s in open(os.environ["FIXTURE_CALLS"])))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
@@ -380,6 +388,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         FIXTURE_REFRESH=str(int(refresh)),
         FIXTURE_POST_CANARY=str(int(post_canary)),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=str(int(shared)),
+        CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=str(int(mutation)),
         CLOUDBENCH_SNAPSHOT_POLL_SECONDS="60",
     )
     if auth:
@@ -1553,3 +1562,652 @@ def test_campaign_inventory_post_canary_live_feed_recovers_before_admission(tmp_
         if process.poll() is None:
             process.terminate()
         process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize('fault', ['none', 'recovering', 'expired', 'foreign-volume', 'foreign-machine', 'multiple-mounts', 'boolean-size', 'malformed-json', 'foreign-token', 'missing-publisher', 'wrong-path'])
+def test_campaign_inventory_warm_volume_read_uses_exact_fresh_feed(tmp_path, fault):
+    """A lost native status response must not defeat the owned inventory feed."""
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    definitions = []
+    for name in ['machine_config_exact_read', 'warm_source_volume_size_from_inventory', 'machine_volume_size_gb', 'admit_app_capacity_with_wait']:
+        marker = name + '() {'
+        if marker in source:
+            start = source.index(marker)
+            definitions.append(source[start:source.index('\n}\n', start) + 3])
+    start = source.index('WARM_SOURCE_SIZE_GB="$(machine_volume_size_gb')
+    warm_admission = source[start:source.index('\nWORKER_POOL_SNAPSHOT_SIZE_GB=', start)]
+    inventory = tmp_path / 'inventory'
+    (inventory / 'current').mkdir(parents=True)
+    stat = Path(f'/proc/{os.getpid()}/stat').read_text()
+    birth = f"proc-start:{Path('/proc/sys/kernel/random/boot_id').read_text().strip()}:{stat[stat.rfind(')') + 2:].split()[19]}"
+    machines = [{'id': 'aaaaaaaaaaaaaa', 'config': {'mounts': [{'volume': 'vol_fixture', 'path': '/data', 'size_gb': 40}]}}]
+    if fault == 'foreign-volume': machines[0]['config']['mounts'][0]['volume'] = 'vol_foreign'
+    if fault == 'foreign-machine': machines[0]['id'] = 'bbbbbbbbbbbbbb'
+    if fault == 'multiple-mounts': machines[0]['config']['mounts'] *= 2
+    if fault == 'boolean-size': machines[0]['config']['mounts'][0]['size_gb'] = True
+    if fault == 'wrong-path': machines[0]['config']['mounts'][0]['path'] = '/foreign'
+    snapshot = tmp_path / 'machines.json'
+    snapshot.write_text(json.dumps(machines))
+    if fault == 'malformed-json': snapshot.write_text('{invalid')
+    health = inventory / 'current/health'
+    valid = f'publisher_token=fixture\nvalid_until={int(time.time()) + 60}\n'
+    health.write_text('publisher_token=fixture\nvalid_until=1\n' if fault in ['recovering', 'expired'] else valid)
+    if fault == 'foreign-token': health.write_text(valid.replace('publisher_token=fixture', 'publisher_token=foreign'))
+    if fault == 'recovering':
+        import threading
+        updater = threading.Thread(target=lambda: (time.sleep(0.2), health.write_text(valid)))
+        updater.start()
+    subject = tmp_path / 'subject.sh'
+    subject.write_text('set -uo pipefail\n'
+        + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n'
+        + 'APP=fixture-app\nFLEET_DIR="' + str(tmp_path) + '"\n'
+        + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}\n'
+        + 'FLY() { echo native-status-attempt >> "$FIXTURE_CALLS"; return 75; }\n'
+        + 'enforce_app_capacity_guard() { return 0; }\n'
+        + 'CAPACITY_ADMISSION_RETRYABLE=1\n'
+        + 'WARM_ID=aaaaaaaaaaaaaa\nVOL_ID=vol_fixture\n'
+        + '\n'.join(definitions)
+        + '\nadmit_app_capacity_with_wait || exit 1\n'
+        + ('CAPACITY_ADMISSION_DEADLINE=$SECONDS\n' if fault == 'expired' else '')
+        + warm_admission + '\nprintf "%s\\n" "$WARM_SOURCE_SIZE_GB"\n')
+    environment = os.environ.copy()
+    environment.update(SNAPSHOT_LOOP_PID=str(os.getpid()), SNAPSHOT_LOOP_PID_START=birth,
+        SNAPSHOT_LOOP_TOKEN='fixture', INVENTORY_INDEX=str(inventory), MACHINES_SNAPSHOT=str(snapshot),
+        CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS='1', FIXTURE_CALLS=str(tmp_path / 'native-calls'))
+    if fault == 'missing-publisher': environment['SNAPSHOT_LOOP_PID'] = ''
+    # The sourced inventory owns these paths, using this explicit private feed.
+    environment['CLOUDBENCH_CAMPAIGN_INVENTORY_DIR'] = str(tmp_path)
+    (tmp_path / 'inventory').mkdir(exist_ok=True)
+    result = subprocess.run(['bash', str(subject)], env=environment, capture_output=True, text=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS)
+    if fault == 'recovering': updater.join()
+    if fault in ['none', 'recovering']:
+        assert result.returncode == 0 and result.stdout.strip() == '40', result.stdout + result.stderr
+    else:
+        assert result.returncode != 0, 'unknown or foreign warm volume evidence was admitted'
+    assert not (tmp_path / 'native-calls').exists(), 'warm size read fanned out past the parent feed'
+
+
+
+def test_campaign_inventory_stress_boot_slots_are_shared_across_independent_fleets(tmp_path):
+    """Two actual owning shell subjects must share one provider update permit."""
+    source = (ROOT / 'scripts/run-bench-cloud').read_text()
+    acquire = source[source.index('acquire_boot_config_update_slot() {'):source.index('\nboot_update_with_capacity_recovery() {')]
+    release_start = source.index('release_boot_config_update_slot() {')
+    release = source[release_start:source.index('\n}\n', release_start) + 3]
+    shared = tmp_path / 'inventory'
+    (shared / 'inventory/current').mkdir(parents=True)
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    stat = Path(f'/proc/{os.getpid()}/stat').read_text()
+    birth = f"proc-start:{boot}:{stat[stat.rfind(')') + 2:].split()[19]}"
+    (shared / 'owner').write_text(f'app=fixture-app\npid={os.getpid()}\npid_start={birth}\ntoken=fixture\nparent_pid={os.getpid()}\nparent_start={birth}\n')
+    (shared / 'inventory/current/health').write_text(f'publisher_token=fixture\nvalid_until={int(time.time()) + 120}\n')
+    (shared / 'machines.json').write_text('[]')
+    subject = tmp_path / 'subject.sh'
+    timeout_start = source.index('_with_timeout() {')
+    timeout = source[timeout_start:source.index('\n}\n', timeout_start) + 3]
+    event = tmp_path / 'event.py'
+    event.write_text('import os,time\nwith open(os.environ["FIXTURE_EVENTS"],"a") as f: f.write(f"start {os.getpid()} {time.monotonic()}\\n")\ntime.sleep(0.4)\nwith open(os.environ["FIXTURE_EVENTS"],"a") as f: f.write(f"end {os.getpid()} {time.monotonic()}\\n")\n')
+    subject.write_text('set -euo pipefail\n' + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n' + 'MUTATION_OWNER_PID_START="$(cloudbench_pid_start_time $$)"\nBOOT_CONFIG_UPDATE_SLOT=""\n' + acquire + '\n' + release + '\n' + timeout
+        + '\nacquire_boot_config_update_slot\n' + f'_with_timeout 3 python3 {shlex.quote(str(event))}\n'
+        + 'BOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1\nrelease_boot_config_update_slot\n')
+    processes = []
+    for number in range(2):
+        environment = os.environ.copy()
+        environment.update(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1', CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(shared),
+            CLOUDBENCH_CAPACITY_RESERVATION_ROOT=str(tmp_path / 'capacity'), APP='fixture-app', ROOT_DIR=str(ROOT),
+            CLOUDBENCH_RUNTIME_SCRIPT_ROOT=str(ROOT / 'scripts'), CLOUDBENCH_BOOT_CONFIG_BARRIER=str(tmp_path / f'fleet{number}'),
+            CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT='1', CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS='5', FIXTURE_EVENTS=str(tmp_path / 'events'))
+        environment['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'] = json.dumps({'directory': str(shared.resolve()), 'owner': dict(line.split('=', 1) for line in (shared / 'owner').read_text().splitlines()), 'source': stress_source_binding()})
+        processes.append(subprocess.Popen(['bash', str(subject)], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert process.returncode == 0, stdout + stderr
+    active = peak = 0
+    for event in (tmp_path / 'events').read_text().splitlines():
+        active += 1 if event.split()[0] == 'start' else -1
+        peak = max(peak, active)
+    assert peak == 1, f'independent fleet gates admitted {peak} overlapping native updates'
+    assert active == 0
+
+
+
+def stress_source_binding():
+    import hashlib
+    return {'ref': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+            'sha256': {name: hashlib.sha256((ROOT / 'scripts' / name).read_bytes()).hexdigest()
+                       for name in ['cloudbench-campaign-mutation.py', 'cloudbench-script-snapshot.py', 'run-bench-campaign.py', 'cloudbench-port-lease.py', 'lib/cloudbench-env.sh']}}
+
+
+
+def stress_mutation_feed(tmp_path):
+    directory = tmp_path / 'inventory'
+    (directory / 'inventory/current').mkdir(parents=True)
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    stat = Path(f'/proc/{os.getpid()}/stat').read_text()
+    birth = f"proc-start:{boot}:{stat[stat.rfind(')') + 2:].split()[19]}"
+    (directory / 'owner').write_text(f'app=fixture-app\npid={os.getpid()}\npid_start={birth}\ntoken=fixture\nparent_pid={os.getpid()}\nparent_start={birth}\n')
+    (directory / 'inventory/current/health').write_text(f'publisher_token=fixture\nvalid_until={int(time.time()) + 120}\n')
+    (directory / 'machines.json').write_text('[]')
+    environment = os.environ.copy()
+    environment.update(CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION='1', CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(directory),
+        CLOUDBENCH_CAPACITY_RESERVATION_ROOT=str(tmp_path / 'capacity'), APP='fixture-app', ROOT_DIR=str(ROOT))
+    owner = dict(line.split('=', 1) for line in (directory / 'owner').read_text().splitlines())
+    environment['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'] = json.dumps({'directory': str(directory.resolve()), 'owner': owner, 'source': stress_source_binding()})
+    environment['CLOUDBENCH_MUTATION_CALLER_START'] = birth
+    return environment, directory
+
+
+
+def test_campaign_inventory_stress_create_dispatch_is_shared_and_retry_is_paced(tmp_path):
+    """Independent real FLY wrappers and repeated calls share app CREATE pacing."""
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    start = source.index('FLY() {')
+    if source[start:source.index('\n', start)].endswith('}'):
+        definition = source[start:source.index('\n', start)]
+    else:
+        definition = source[start:source.index('\n}', start) + 3]
+    subject = tmp_path / 'create.sh'
+    subject.write_text('set -euo pipefail\n' + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n' + 'FLEET_OWNER_PID_START="$(cloudbench_pid_start_time $$)"\nclone_timeout=6\nprivate_source_allows_provider_call() { return 0; }\n'
+        'flyctl() { python3 -c \'import os,time;open(os.environ["FIXTURE_EVENTS"],"a").write(str(time.monotonic())+"\\n")\'; }\n'
+        + definition + '\nFLY machine clone source\nFLY machine clone source\n')
+    environment, _ = stress_mutation_feed(tmp_path)
+    environment['FIXTURE_EVENTS'] = str(tmp_path / 'events')
+    processes = [subprocess.Popen(['bash', str(subject)], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert process.returncode == 0, stdout + stderr
+    times = sorted(float(line) for line in (tmp_path / 'events').read_text().splitlines())
+    assert len(times) == 4
+    assert all(second - first >= 0.9 for first, second in zip(times, times[1:])), times
+
+
+
+@pytest.mark.parametrize('fault', ['foreign-token', 'foreign-parent-birth', 'malformed-inventory', 'missing-health', 'expired-health'])
+def test_campaign_inventory_stress_mutation_unknown_feed_never_grants(tmp_path, fault):
+    environment, directory = stress_mutation_feed(tmp_path)
+    if fault == 'foreign-token':
+        (directory / 'inventory/current/health').write_text(f'publisher_token=foreign\nvalid_until={int(time.time()) + 120}\n')
+    elif fault == 'foreign-parent-birth':
+        owner = directory / 'owner'
+        owner.write_text(owner.read_text().replace('parent_start=proc-start:', 'parent_start=foreign:'))
+    elif fault == 'malformed-inventory':
+        (directory / 'machines.json').write_text('{}')
+    elif fault == 'missing-health':
+        (directory / 'inventory/current/health').unlink()
+    else:
+        (directory / 'inventory/current/health').write_text('publisher_token=fixture\nvalid_until=1\n')
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/cloudbench-campaign-mutation.py'), 'acquire',
+        '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'), '--owner-pid', str(os.getpid()), '--wait-seconds', '1'],
+        env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode != 0
+    assert not list((tmp_path / 'capacity').rglob('lease-*.json'))
+
+
+
+def stress_owned_actor(tmp_path, environment, *, launch=True):
+    actor = tmp_path / 'owner-actor.py'
+    actor.write_text("""import json,os,subprocess,sys
+from pathlib import Path
+stat=Path(f'/proc/{os.getpid()}/stat').read_text()
+boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+birth=f"proc-start:{boot}:{stat[stat.rfind(')')+2:].split()[19]}"
+common=[sys.executable,sys.argv[1],'--app','fixture-app','--root',sys.argv[2],'--owner-pid',str(os.getpid()),'--owner-start',birth]
+def call(action,extra):
+ result=subprocess.run([common[0],common[1],action,*common[2:],*extra],capture_output=True,text=True,check=True)
+ return result.stdout.strip()
+token=call('acquire',['--slots','1','--wait-seconds','2'])
+print(token,flush=True)
+for command in sys.stdin:
+ command=command.strip()
+ if command=='join':
+  for action in ['start-native','join-native']:call(action,['--lease',token,'--native-owner-pid',str(os.getpid())])
+ elif command=='release':call('release',['--lease',token])
+ else:raise ValueError('unknown actor request')
+ print('ok',flush=True)
+if os.environ.get('FIXTURE_PARENT_DEATH_RESULT'):
+ result=subprocess.run([common[0],common[1],'start-native',*common[2:],'--lease',token,'--native-owner-pid',str(os.getpid())],capture_output=True,text=True)
+ Path(os.environ['FIXTURE_PARENT_DEATH_RESULT']).write_text(json.dumps({'returncode':result.returncode}))
+""")
+    if not launch:
+        return actor
+    process = subprocess.Popen([sys.executable, str(actor), str(ROOT / 'scripts/cloudbench-campaign-mutation.py'), str(tmp_path / 'capacity')],
+        env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    token = process.stdout.readline().strip()
+    assert token, process.stderr.read()
+    return process, token
+
+
+
+def stress_actor_request(process, action):
+    process.stdin.write(action + '\n')
+    process.stdin.flush()
+    assert process.stdout.readline().strip() == 'ok'
+
+
+
+@pytest.mark.parametrize('owner_dies', [False, True])
+def test_campaign_inventory_stress_update_lease_requires_exact_cleanup_owner(tmp_path, owner_dies):
+    environment, _ = stress_mutation_feed(tmp_path)
+    owner, token = stress_owned_actor(tmp_path, environment)
+    helper = [sys.executable, str(ROOT / 'scripts/cloudbench-campaign-mutation.py')]
+    common = ['--app', 'fixture-app', '--root', str(tmp_path / 'capacity')]
+    try:
+        lease = tmp_path / 'capacity/campaign-native-mutations' / f'lease-{token}.json'
+        wrong_release = subprocess.run(helper + ['release', *common, '--owner-pid', str(os.getpid()), '--lease', token],
+            env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert wrong_release.returncode != 0
+        assert lease.exists()
+        if owner_dies:
+            owner.terminate()
+            owner.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        blocked = subprocess.run(helper + ['acquire', *common, '--owner-pid', str(os.getpid()), '--slots', '1', '--wait-seconds', '1'],
+            env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert blocked.returncode != 0
+        assert lease.exists(), 'caller death cannot prove its native child stopped'
+        if not owner_dies:
+            stress_actor_request(owner, 'join')
+            stress_actor_request(owner, 'release')
+            assert not lease.exists()
+    finally:
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+
+def test_campaign_inventory_stress_native_wrapper_cancellation_joins_before_slot_release(tmp_path):
+    """TERM of the real timeout wrapper cannot release while its child lives."""
+    import signal
+
+    source = (ROOT / 'scripts/run-bench-cloud').read_text()
+    definitions = []
+    for name in ['acquire_boot_config_update_slot', 'release_boot_config_update_slot', '_with_timeout']:
+        start = source.index(name + '() {')
+        definitions.append(source[start:source.index('\n}\n', start) + 3])
+    native = tmp_path / 'native.py'
+    native.write_text('import json,os,signal,time\nfrom pathlib import Path\n'
+        'def close(*_):\n time.sleep(0.2)\n Path(os.environ["FIXTURE_CLOSED"]).touch()\n raise SystemExit(0)\n'
+        'signal.signal(signal.SIGTERM,close)\nPath(os.environ["FIXTURE_READY"]).write_text(json.dumps({"pid":os.getpid(),"wrapper":os.getppid()}))\ntime.sleep(30)\n')
+    subject = tmp_path / 'cancel.sh'
+    subject.write_text('set -euo pipefail\n' + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n' + 'MUTATION_OWNER_PID_START="$(cloudbench_pid_start_time $$)"\nBOOT_CONFIG_UPDATE_SLOT=""\n' + '\n'.join(definitions)
+        + '\nacquire_boot_config_update_slot\n' + f'rc=0; _with_timeout 3 python3 {shlex.quote(str(native))} || rc=$?\n'
+        + 'test "$rc" = 143\nBOOT_CONFIG_UPDATE_SLOT_NATIVE_JOINED=1\nrelease_boot_config_update_slot\n')
+    environment, _ = stress_mutation_feed(tmp_path)
+    environment.update(CLOUDBENCH_RUNTIME_SCRIPT_ROOT=str(ROOT / 'scripts'), CLOUDBENCH_BOOT_CONFIG_BARRIER=str(tmp_path / 'fleet'),
+        CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT='1', CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS='5',
+        FIXTURE_READY=str(tmp_path / 'ready'), FIXTURE_CLOSED=str(tmp_path / 'closed'))
+    process = subprocess.Popen(['bash', str(subject)], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'ready').exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert (tmp_path / 'ready').exists()
+        ready = json.loads((tmp_path / 'ready').read_text())
+        os.kill(ready['wrapper'], signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert process.returncode == 0, stdout + stderr
+        assert (tmp_path / 'closed').exists()
+        assert not list((tmp_path / 'capacity').rglob('lease-*.json'))
+        with pytest.raises(ProcessLookupError):
+            os.kill(ready['pid'], 0)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+
+def test_campaign_inventory_stress_exact_joined_receipt_recovers_dead_owner_for_next_cohort(tmp_path):
+    environment, _ = stress_mutation_feed(tmp_path)
+    helper = [sys.executable, str(ROOT / 'scripts/cloudbench-campaign-mutation.py')]
+    common = ['--app', 'fixture-app', '--root', str(tmp_path / 'capacity')]
+    owner, old_token = stress_owned_actor(tmp_path, environment)
+    try:
+        stress_actor_request(owner, 'join')
+        owner.terminate()
+        owner.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        next_cohort = subprocess.run(helper + ['acquire', *common, '--owner-pid', str(os.getpid()), '--slots', '1', '--wait-seconds', '2'],
+            env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert next_cohort.returncode == 0, next_cohort.stderr
+        leases = list((tmp_path / 'capacity').rglob('lease-*.json'))
+        assert len(leases) == 1 and old_token not in leases[0].name
+    finally:
+        if owner.poll() is None:
+            owner.terminate()
+            owner.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+
+def test_campaign_inventory_stress_parent_dies_after_admission_withholds_native_start(tmp_path):
+    environment, directory = stress_mutation_feed(tmp_path)
+    environment['FIXTURE_PARENT_DEATH_RESULT'] = str(tmp_path / 'parent-death-result.json')
+    actor = stress_owned_actor(tmp_path, environment, launch=False)
+    parent_script = tmp_path / 'actual-parent.py'
+    parent_script.write_text("""import json,os,subprocess,sys
+from pathlib import Path
+stat=Path(f'/proc/{os.getpid()}/stat').read_text()
+boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+print(json.dumps({'pid':os.getpid(),'birth':f"proc-start:{boot}:{stat[stat.rfind(')')+2:].split()[19]}"}),flush=True)
+environment=os.environ.copy()
+environment['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY']=sys.stdin.readline().strip()
+actor=subprocess.Popen([sys.executable,*sys.argv[1:]],env=environment,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+print(actor.stdout.readline().strip(),flush=True)
+for _ in sys.stdin:pass
+""")
+    parent = subprocess.Popen([sys.executable, str(parent_script), str(actor), str(ROOT / 'scripts/cloudbench-campaign-mutation.py'), str(tmp_path / 'capacity')],
+        env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        identity = json.loads(parent.stdout.readline())
+        owner = directory / 'owner'
+        fields = dict(line.split('=', 1) for line in owner.read_text().splitlines())
+        fields.update(parent_pid=str(identity['pid']), parent_start=identity['birth'])
+        owner.write_text(''.join(f'{key}={value}\n' for key, value in fields.items()))
+        parent.stdin.write(json.dumps({'directory': str(directory.resolve()), 'owner': fields, 'source': stress_source_binding()}) + '\n')
+        parent.stdin.flush()
+        token = parent.stdout.readline().strip()
+        assert token
+        parent.terminate()
+        parent.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'parent-death-result.json').exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        result = json.loads((tmp_path / 'parent-death-result.json').read_text())
+        assert result['returncode'] != 0
+        record = json.loads((tmp_path / 'capacity/campaign-native-mutations' / f'lease-{token}.json').read_text())
+        assert record['native_pid'] is None and record['joined'] is False
+    finally:
+        if parent.poll() is None:
+            parent.terminate()
+            parent.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+
+@pytest.mark.parametrize('fault', ['entire-foreign-feed', 'reused-caller-birth'])
+def test_campaign_inventory_stress_rejects_substituted_authority(tmp_path, fault):
+    environment, directory = stress_mutation_feed(tmp_path)
+    owner = dict(line.split('=', 1) for line in (directory / 'owner').read_text().splitlines())
+    environment['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'] = json.dumps({'directory': str(directory.resolve()), 'owner': owner, 'source': stress_source_binding()})
+    environment['CLOUDBENCH_MUTATION_CALLER_START'] = owner['pid_start']
+    if fault == 'entire-foreign-feed':
+        foreign = tmp_path / 'foreign'
+        shutil.copytree(directory, foreign)
+        (foreign / 'owner').write_text((foreign / 'owner').read_text().replace('token=fixture', 'token=foreign'))
+        (foreign / 'inventory/current/health').write_text(f'publisher_token=foreign\nvalid_until={int(time.time()) + 120}\n')
+        environment['CLOUDBENCH_CAMPAIGN_INVENTORY_DIR'] = str(foreign)
+    else:
+        environment['CLOUDBENCH_MUTATION_CALLER_START'] = owner['pid_start'].rsplit(':', 1)[0] + ':1'
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/cloudbench-campaign-mutation.py'), 'acquire',
+        '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'), '--owner-pid', str(os.getpid()), '--wait-seconds', '1'],
+        env=environment, text=True, capture_output=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode != 0, 'substituted authority granted a native mutation permit'
+    assert not list((tmp_path / 'capacity').rglob('lease-*.json'))
+
+
+
+def test_campaign_inventory_stress_parent_mints_exact_authority_for_both_controllers(tmp_path):
+    result, _, summary, _ = run_consumers(tmp_path, mutation=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    first = json.loads((tmp_path / 'r001-j0001/authority.json').read_text())
+    second = json.loads((tmp_path / 'r001-j0002/authority.json').read_text())
+    assert first == second
+    assert first['directory'] == summary['shared_inventory']['directory']
+    assert first['owner']['app'] == 'navi-whisper-lux-bench'
+    assert int(first['owner']['parent_pid']) > 1 and first['owner']['parent_start']
+
+
+
+def test_campaign_inventory_stress_rejects_live_nonancestor_as_original_caller(tmp_path):
+    environment, _ = stress_mutation_feed(tmp_path)
+    foreign = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    try:
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        stat = Path(f'/proc/{foreign.pid}/stat').read_text()
+        environment['CLOUDBENCH_MUTATION_CALLER_START'] = f"proc-start:{boot}:{stat[stat.rfind(')') + 2:].split()[19]}"
+        helper = os.environ.get('CLOUDBENCH_MUTATION_HELPER_UNDER_TEST', str(ROOT / 'scripts/cloudbench-campaign-mutation.py'))
+        result = subprocess.run([sys.executable, helper, 'acquire', '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'),
+            '--owner-pid', str(foreign.pid), '--wait-seconds', '1'], env=environment, capture_output=True, text=True,
+            timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert result.returncode != 0, 'live unrelated PID was accepted as the original caller'
+        assert not list((tmp_path / 'capacity').rglob('lease-*.json'))
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+
+def test_campaign_inventory_stress_changed_helper_bytes_are_rejected_before_admission(tmp_path):
+    environment, _ = stress_mutation_feed(tmp_path)
+    altered = tmp_path / 'altered-source'
+    altered.mkdir()
+    for name in ['cloudbench-campaign-mutation.py', 'cloudbench-script-snapshot.py']:
+        source = Path(os.environ.get('CLOUDBENCH_MUTATION_HELPER_UNDER_TEST', str(ROOT / 'scripts' / name))) if name == 'cloudbench-campaign-mutation.py' else ROOT / 'scripts' / name
+        shutil.copyfile(source, altered / name)
+    helper = altered / 'cloudbench-campaign-mutation.py'
+    helper.write_bytes(helper.read_bytes() + b'\n# changed authority byte\n')
+    result = subprocess.run([sys.executable, str(helper), 'acquire', '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'),
+        '--owner-pid', str(os.getpid()), '--wait-seconds', '1'], env=environment, capture_output=True, text=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode != 0
+    assert not (tmp_path / 'capacity').exists(), 'changed executable allocated admission state before source verification'
+
+
+
+def test_campaign_inventory_stress_helper_preserves_sealed_snapshot_bytes(tmp_path):
+    environment, _ = stress_mutation_feed(tmp_path)
+    sealed = tmp_path / 'sealed-snapshot'
+    sealed.mkdir()
+    names = ['cloudbench-campaign-mutation.py', 'cloudbench-script-snapshot.py']
+    for name in names:
+        shutil.copyfile(ROOT / 'scripts' / name, sealed / name)
+    result = subprocess.run([sys.executable, str(sealed / names[0]), 'acquire', '--app', 'fixture-app', '--root', str(tmp_path / 'capacity'),
+        '--owner-pid', str(os.getpid()), '--wait-seconds', '1'], env=environment, capture_output=True, text=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in sealed.iterdir()) == sorted(names), 'helper wrote into its sealed executable snapshot'
+
+
+
+def test_campaign_inventory_stress_controller_rejects_entire_executable_substitution(tmp_path):
+    source_path = Path(os.environ.get('CLOUDBENCH_MUTATION_FLEET_UNDER_TEST', str(ROOT / 'scripts/run-bench-fleet')))
+    source = source_path.read_text()
+    start = source.index('FLY() {')
+    definition = source[start:source.index('\n}\n', start) + 3]
+    altered = tmp_path / 'altered-source'
+    altered.mkdir()
+    (altered / 'cloudbench-campaign-mutation.py').write_text('import os\nfrom pathlib import Path\nPath(os.environ["FIXTURE_MUTATION"]).touch()\n')
+    subject = tmp_path / 'substituted.sh'
+    subject.write_text('set -euo pipefail\n' + f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n'
+        + 'FLEET_OWNER_PID_START="$(cloudbench_pid_start_time $$)"\nclone_timeout=3\nprivate_source_allows_provider_call() { return 0; }\n'
+        + 'flyctl() { touch "$FIXTURE_MUTATION"; }\n' + definition + '\nFLY machine clone source\n')
+    environment, _ = stress_mutation_feed(tmp_path)
+    environment.update(CLOUDBENCH_SCRIPT_SNAPSHOT=str(altered), FIXTURE_MUTATION=str(tmp_path / 'mutation'))
+    result = subprocess.run(['bash', str(subject)], env=environment, capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode != 0, 'substituted executable ran before caller verified its bytes'
+    assert not (tmp_path / 'mutation').exists()
+
+
+
+def test_campaign_inventory_stress_parent_rejects_identity_before_interpretation(tmp_path):
+    """An entire substituted identity module must not execute before rejection."""
+    import importlib.util
+
+    checkout = tmp_path / 'controller'
+    names = ('run-bench-campaign.py', 'cloudbench-campaign-mutation.py',
+             'cloudbench-script-snapshot.py', 'cloudbench-port-lease.py', 'lib/cloudbench-env.sh')
+    for name in names:
+        destination = checkout / 'scripts' / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / 'scripts' / name, destination)
+    for args in (['init', '-q'], ['add', 'scripts'],
+                 ['-c', 'user.name=Offline fixture', '-c', 'user.email=fixture@invalid',
+                  '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Exact controller fixture']):
+        subprocess.run(['git', '-C', str(checkout), *args], check=True, capture_output=True)
+    marker = tmp_path / 'interpreted-untrusted-identity'
+    (checkout / 'scripts/cloudbench-port-lease.py').write_text(
+        f'from pathlib import Path\nPath({str(marker)!r}).touch()\n')
+    spec = importlib.util.spec_from_file_location('stress_parent_subject', checkout / 'scripts/run-bench-campaign.py')
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    with pytest.raises(ValueError):
+        campaign.mutation_inventory_authority(tmp_path / 'absent-owner', None)
+    assert not marker.exists(), 'parent interpreted substituted identity before immutable source comparison'
+
+
+
+@pytest.mark.parametrize('fault,expected', [('valid', 0), ('missing-health', 75), ('expired-health', 75), ('missing-snapshot', 75), ('wrong-token', 1), ('publisher-birth', 1), ('parent-birth', 1), ('wrong-app', 1), ('missing-owner', 1), ('malformed-snapshot', 1)])
+def test_campaign_inventory_stress_worker_admission_uses_validated_parent_feed(tmp_path, fault, expected):
+    """Actual worker admission may not fan out when its parent feed is unknown."""
+    script = post_canary_boundary_subject(tmp_path)
+    fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+    boundary = fleet.split('fleet_infra_canary_preflight || exit $?\n', 1)[1].split('# ── Clone one machine per bench', 1)[0]
+    body = script.read_text(); assert body.endswith(boundary)
+    def function(name):
+        start = fleet.index(name + '() {')
+        return fleet[start:fleet.index('\n}\n', start) + 3]
+    script.write_text(body[:-len(boundary)] + '\n' + '\n'.join(function(n) for n in (
+        'fleet_pid_start_time', 'fleet_pid_matches_start', 'capacity_reserve_slots', 'reserve_worker_machine_slot')) + '''
+FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+RUN_ID=fixture-run
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNERSHIP_ROOT="$FLEET_DIR/ownership"
+CAPACITY_RESERVATION_ROOT="$FLEET_DIR/capacity"
+CLOUDBENCH_APP_MACHINE_CEILING=1
+status=0
+start_machines_snapshot_loop || status=$?
+if [ "$status" = 0 ] || [ "$status" = 75 ]; then
+ status=0
+ reserve_worker_machine_slot fixture-first || status=$?
+fi
+printf '%s' "$status" > "$FLEET_DIR/worker-status"
+if [ "$status" = 0 ]; then
+ status=0; reserve_worker_machine_slot fixture-second || status=$?
+ test "$status" = 1
+ test "$(find "$CAPACITY_RESERVATION_ROOT/reservations" -type f | wc -l)" = 1
+else
+ test ! -d "$CAPACITY_RESERVATION_ROOT/reservations" || test -z "$(ls -A "$CAPACITY_RESERVATION_ROOT/reservations")"
+fi
+''')
+    if fault == 'malformed-snapshot':
+        script.write_text(script.read_text().replace('printf "[]" > "$MACHINES_SNAPSHOT"', 'printf "[42]" > "$MACHINES_SNAPSHOT"'))
+    result = subprocess.run(['bash', str(script), str(tmp_path), fault], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert int((tmp_path / 'worker-status').read_text()) == expected
+    assert not (tmp_path / 'native-read').exists(), 'worker admission fanned out into provider API'
+
+
+
+def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withhold_unknown_capacity(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress_campaign_defaults', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    rows = [{'name': 'browser-fixture', 'requires_browser_agent': True}, {'name': 'plain-fixture', 'requires_browser_agent': False}]
+    result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=None)
+    assert result['planned_shared_cpu_units'] == 6
+    assert result['planned_memory_mib'] == 12288
+    assert result['local_shared_cpu_governor_minimum'] is None
+    assert result['local_machine_ceiling_minimum'] is None
+    assert result['admission'] == 'withheld-unknown-native-capacity'
+    known_inventory = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
+    result = module.stress_default_requirements(ROOT, rows, peak=2, baseline=known_inventory)
+    assert result['local_shared_cpu_governor_minimum'] == 27  # actual6+baseline1+original20
+    assert result['local_machine_ceiling_minimum'] == 33  # baseline1+twofresh+two replacements+28 bounded worker slots
+    assert result['worker_slots'] == 'dynamically-serialized-under-global-ceiling'
+    assert result['admission'] == 'local-defaults-derived-native-guards-required'
+
+    env = module.stress_default_environment(result, {})
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
+    assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
+    with pytest.raises(ValueError, match='unknown native baseline'):
+        module.stress_default_environment(module.stress_default_requirements(ROOT, rows, peak=2, baseline=None), {})
+
+
+
+@pytest.mark.parametrize('fault,expected', [('valid', 0), ('missing-health', 75), ('expired-health', 75), ('foreign-owner', 1), ('wrong-health-token', 1), ('malformed-snapshot', 1)])
+def test_campaign_inventory_stress_default_baseline_preserves_feed_authority(tmp_path, fault, expected):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress_default_feed', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    directory = tmp_path / 'feed'; (directory / 'inventory/current').mkdir(parents=True)
+    birth = subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='], text=True).strip()
+    fields = {'app': 'navi-whisper-lux-bench', 'pid': str(os.getpid()), 'pid_start': birth,
+              'token': 'fixture-stress-defaults', 'parent_pid': str(os.getpid()), 'parent_start': birth}
+    owner = directory / 'owner'; owner.write_text(''.join(k+'='+v+'\n' for k,v in fields.items()))
+    health = directory / 'inventory/current/health'; health.write_text('publisher_token='+fields['token']+'\nvalid_until='+str(int(time.time())+120)+'\n')
+    machines = directory / 'machines.json'; machines.write_text('[]')
+    authority = json.dumps({'directory': str(directory), 'owner': fields})
+    if fault == 'missing-health': health.unlink()
+    if fault == 'expired-health': health.write_text('publisher_token='+fields['token']+'\nvalid_until=1\n')
+    if fault == 'foreign-owner': owner.write_text(owner.read_text().replace(fields['token'], 'foreign'))
+    if fault == 'wrong-health-token': health.write_text('publisher_token=foreign\nvalid_until='+str(int(time.time())+120)+'\n')
+    if fault == 'malformed-snapshot': machines.write_text('{')
+    if expected == 1:
+        with pytest.raises(ValueError): module.stress_inventory_baseline(ROOT, authority)
+    else:
+        status, baseline = module.stress_inventory_baseline(ROOT, authority)
+        assert status == expected
+        assert baseline == ([] if expected == 0 else None)
+    assert owner.exists() and not (directory / 'native-read').exists()
+
+
+
+def test_campaign_inventory_stress_defaults_refuses_wrong_load_before_controller_dispatch(tmp_path):
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/run-bench-campaign.py'), '--root', str(tmp_path), '--runs', '3', '--concurrency', '2', '--task', 'demo-fleet-alpha', '--task', 'demo-fleet-beta', '--stress-defaults'], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode != 0
+    assert 'requires 200 distinct tasks' in result.stderr
+    assert not (tmp_path / '.context').exists()
+
+
+
+@pytest.mark.parametrize('baseline', [[{'id':'bad','state':'started','config':3}], [{'id':'bad','state':'started','config':{'guest':{'cpu_kind':'shared','cpus':True}}}], [{'id':'duplicate','state':'stopped'},{'id':'duplicate','state':'stopped'}]])
+def test_campaign_inventory_stress_defaults_invalid_native_baseline_refuses(tmp_path, baseline):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress_invalid_baseline', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    with pytest.raises(ValueError):
+        module.stress_default_requirements(ROOT, [{'name':'plain-fixture','requires_browser_agent':False}], peak=1, baseline=baseline)
+
+
+
+def test_campaign_inventory_stress_defaults_count_three_simultaneous_copies():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stress600_defaults', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    rows = [{'name': 'browser-fixture', 'requires_browser_agent': True}, {'name': 'plain-fixture', 'requires_browser_agent': False}]
+    baseline = [{'id': 'existing', 'state': 'started', 'config': {'guest': {'cpu_kind': 'shared', 'cpus': 1}}}]
+    result = module.stress_default_requirements(ROOT, rows, peak=6, repetitions=3, baseline=baseline)
+    assert result['planned_peak'] == 6
+    assert result['planned_shared_cpu_units'] == 18
+    assert result['planned_memory_mib'] == 36864
+    assert result['disk_floor_mib'] == 6 * 288
+    assert result['worker_reservation_slots'] == 84
+    assert result['local_shared_cpu_governor_minimum'] == 39
+    assert result['local_machine_ceiling_minimum'] == 97
+    with pytest.raises(ValueError, match='invalid stress peak'):
+        module.stress_default_requirements(ROOT, rows, peak=7, repetitions=3, baseline=None)
+    with pytest.raises(ValueError, match='invalid stress repetitions'):
+        module.stress_default_requirements(ROOT, rows, peak=6, repetitions=True, baseline=None)
+
+
+
+def test_campaign_inventory_stress600_plan_cli_counts_actual_three_copies(monkeypatch, capsys):
+    import importlib.util
+    import types
+    spec = importlib.util.spec_from_file_location('stress600_cli', ROOT / 'scripts/run-bench-campaign.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    rows = [{'name': f'fixture-{i}', 'requires_browser_agent': i < 185} for i in range(200)]
+    catalog = types.ModuleType('cloudbench_catalog')
+    catalog.get_task_metadata = lambda path, names: rows
+    monkeypatch.setitem(sys.modules, 'cloudbench_catalog', catalog)
+    monkeypatch.setattr(sys, 'argv', ['campaign', '--root', str(ROOT), '--concurrency', '600', '--runs', '3', '--stress-defaults', '--stress-defaults-plan', *[arg for row in rows for arg in ('--task', row['name'])]])
+    assert module.main() == 2
+    plan = json.loads(capsys.readouterr().out)
+    assert plan['planned_peak'] == 600
+    assert plan['planned_shared_cpu_units'] == 2310
+    assert plan['planned_memory_mib'] == 4730880
+    assert plan['disk_floor_mib'] == 172800
+    assert plan['worker_reservation_slots'] == 8400
+    assert plan['native_org_quota_proven'] is False
+    assert plan['local_machine_ceiling_minimum'] is None
