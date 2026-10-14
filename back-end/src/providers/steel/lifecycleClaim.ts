@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { createLogger } from '../logger';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import {
@@ -219,7 +219,7 @@ export async function withSteelLifecycleClaim<T>(
     };
     return existingTransaction
       ? lockedMutation(existingTransaction)
-      : prisma.$transaction(lockedMutation);
+      : runTransactionWithRetry(lockedMutation);
   };
   let nativeOutstanding = false;
   let outstandingSessionId: string | undefined;
