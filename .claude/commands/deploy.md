@@ -45,7 +45,7 @@ agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
 composing the request. Its code-block presentation and its Before Behavior,
-After Behavior, TL;DR, Evidence, Detail, and Downstream Implications sections
+After Behavior, How, TL;DR, Evidence, Detail, and Downstream Implications sections
 are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
