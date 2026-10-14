@@ -2268,3 +2268,39 @@ def test_campaign_inventory_seed_preflight_refuses_deadline_changed_during_get(t
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("fault", ["legacy", "deadline", "unknown", "bool", "nan", "infinite", "zero", "negative", "string", "null", "member-pid", "foreign-member"])
+@pytest.mark.parametrize("consumer", ["capture", "pending"])
+def test_campaign_inventory_cleanup_manifest_declared_deadline(tmp_path, fault, consumer):
+    import ast, fcntl, hashlib, math, re, stat
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    block = source[source.index("import errno\n", source.index("reserve_cleanup_disk_space()")):].split("\nPY\n", 1)[0]
+    tree = ast.parse(block)
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    scope = dict(Path=Path, os=os, json=json, math=math, fcntl=fcntl, hashlib=hashlib, re=re, stat=stat, subprocess=subprocess)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "actual-cleanup-allocator", "exec"), scope)
+    cohort = tmp_path / "startup-cohorts/c001"
+    cohort.mkdir(parents=True)
+    lock = (cohort.parent / "parent.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    job = "r001-j0001"
+    value = {"cohort_id": "c001", "jobs": {job: os.getpid()}}
+    if fault == "unknown": value["foreign_deadline"] = 1
+    elif fault not in ("legacy", "member-pid", "foreign-member"):
+        value["e2e_deadline_monotonic"] = {"deadline": time.monotonic()+60, "bool": True, "nan": float("nan"), "infinite": float("inf"), "zero": 0, "negative": -1, "string": "60", "null": None}[fault]
+    if fault == "member-pid": value["jobs"][job] = True
+    if fault == "foreign-member": value["jobs"] = {"r001-j0002": os.getpid()}
+    (cohort / "manifest.json").write_text(json.dumps(value))
+    scope.update(cohort_path=str(cohort), cohort_id="c001", job=job, owner_pid=os.getpid(), path=tmp_path/"reserve", preferred=512, headroom=256, minimum=32, birth_snapshot=scope["capture_births"]())
+    info = (cohort.parent / "parent.lock").stat()
+    group = {"directory": str(cohort), "members": [job], "consumed": {}, "parent_lock_identity": [info.st_dev, info.st_ino]}
+    try:
+        invoke = (lambda: scope["capture_cohort"]()) if consumer == "capture" else (lambda: scope["pending_members"](group))
+        if fault in ("legacy", "deadline"):
+            result = invoke()
+            assert (result[1]["members"] == [job]) if consumer == "capture" else result == 1
+        else:
+            with pytest.raises(ValueError): invoke()
+    finally:
+        lock.close()

@@ -5729,6 +5729,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -5852,8 +5853,12 @@ def pending_members(group):
     if manifest.stat().st_size > 1048576:
         raise ValueError("oversized cleanup cohort manifest")
     value = json.loads(manifest.read_text())
-    if set(value) != {"cohort_id", "jobs"} or not isinstance(value["jobs"], dict):
+    if not isinstance(value, dict) or not {"cohort_id", "jobs"} <= set(value) or set(value) - {"cohort_id", "jobs", "e2e_deadline_monotonic"} or not isinstance(value["jobs"], dict):
         raise ValueError("malformed cleanup cohort manifest")
+    if "e2e_deadline_monotonic" in value:
+        deadline = value["e2e_deadline_monotonic"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline) or deadline <= 0:
+            raise ValueError("invalid cleanup cohort deadline")
     members = value["jobs"]
     if sorted(members) != group["members"]:
         raise ValueError("cleanup cohort membership changed")
@@ -5908,8 +5913,12 @@ def capture_cohort():
     if manifest.stat().st_size > 1048576:
         raise ValueError("oversized cleanup cohort manifest")
     value = json.loads(manifest.read_text())
-    if set(value) != {"cohort_id", "jobs"} or value["cohort_id"] != cohort_id:
+    if not isinstance(value, dict) or not {"cohort_id", "jobs"} <= set(value) or set(value) - {"cohort_id", "jobs", "e2e_deadline_monotonic"} or value["cohort_id"] != cohort_id:
         raise ValueError("cleanup cohort identity mismatch")
+    if "e2e_deadline_monotonic" in value:
+        deadline = value["e2e_deadline_monotonic"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline) or deadline <= 0:
+            raise ValueError("invalid cleanup cohort deadline")
     members = value["jobs"]
     if not isinstance(members, dict) or not members or job not in members:
         raise ValueError("cleanup reserve member is absent from its sealed cohort")
