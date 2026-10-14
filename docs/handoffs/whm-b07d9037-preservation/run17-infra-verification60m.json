@@ -219,6 +219,12 @@
       "members": 42,
       "manifest_sha256": "2fdf6ee9118916217ef92a710981eb4f9ceadf77193e71e1a2f3069c0d230e2e",
       "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-continued-offline-private-receipt.json",
+      "members": 381,
+      "manifest_sha256": "e91053607ddc3cd5cd99561b0bbf1cf0c20988b889195ebd72c99e730ad379c0",
+      "full_authenticated_decrypted_member_readback": true
     }
   ],
   "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished",
@@ -239,5 +245,65 @@
     "post_repair_paid_benchmark_executed": false,
     "nineteen_repeat_prevention_proved": false,
     "ambiguous_repeated_invocation_exactly_once_proved": false
+  },
+  "continued_offline_at_utc": "2026-10-14T19:17:45.169291+00:00",
+  "continued_offline": {
+    "source_snapshot": "ca26e9eae727b1def05852f2ed4929f7a69a000e",
+    "source_changes_applied": false,
+    "paid_trials_started": 0,
+    "remote_prior_receipt_byte_match": true,
+    "native_python_verified": "3.12.3",
+    "agents_python_verified": "3.11.9",
+    "storage": {
+      "frozen_history_pairs_preserved": 57,
+      "recovered_bytes": 1429741568,
+      "free_after_bytes": 2549342208,
+      "all_original_paths_and_contents_preserved": true,
+      "permissions_owners_unchanged": true,
+      "distinct_restore_mtimes_recorded_privately": true,
+      "usable_native_runtime_and_protected_instructions_unchanged": true
+    },
+    "retained_cache": {
+      "owner_database": "victoria_wmh_recording_e9afcffd_20261013",
+      "oid": 69016,
+      "rows": 1659,
+      "all1103_prior_fullrows_unchanged": true,
+      "new_agent_rows": 305,
+      "new_native_rows": 251,
+      "all556_source_payload_key_projection_matches": true,
+      "nineteen_native_error_keys_absent": true,
+      "readonly_query_only": true,
+      "review_result_sha256": "825b9cb601dc064d3072c4a1189557aec57388db1c742a8c8bd8e651736ee011"
+    },
+    "agent_dumps_preserved": {
+      "additional_original_files": 305,
+      "original_bytes": 25882368,
+      "all_authenticated_decrypted_per_member_in_supplement": true,
+      "core1160_did_not_cover_these_files": true
+    },
+    "context_proposal": {
+      "applied": false,
+      "bounded_offline_review_pass": true,
+      "diff_path": "docs/handoffs/whm-b07d9037-preservation/run17-foundry-instruction-proposal.diff",
+      "diff_sha256": "499131b3b8f76d6b5668e49ebffb44af51e7429c40516dd45bf82771a64fdcf6",
+      "result_sha256": "df8a54ddb558db2e37e942d14fc3eef0388a927196965f5a10eccf5110b5fac4",
+      "root_same_registered_test_sha256": "f0499e92d9ff772f0f50661e79cfed833741223bb34cf6a0967909d750c26494",
+      "root_baseline_exit": 1,
+      "root_private_candidate_exit": 0,
+      "model_visible_change": "Move existing exact aggregated instructions once from top instructions to first system input; no synthetic text, no context trimming or acquisition change",
+      "ordinary_default_false_nonJSON_samebody": true,
+      "mocked_foundry_cases": 14,
+      "pure_serializer_controls": 2,
+      "requires_user_context_approval": true,
+      "live_Azure_cache_behavior_and_benchmark_PASS_open": true
+    },
+    "next_slice": {
+      "pending_decision": "R17-NEXT-SLICE-1",
+      "infra_failed": 1,
+      "terminal_attempts": 2,
+      "held_by_original_policy": true,
+      "resource_preflight_complete": false,
+      "original_verdict_preserved": true
+    }
   }
 }
