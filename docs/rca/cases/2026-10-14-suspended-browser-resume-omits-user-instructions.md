@@ -185,6 +185,14 @@ stores authored input in the same transaction as gate resolution, then
 broadcasts and signals after commit. Request-linked source identity and the
 existing attention lock cover retries and waiters joining during resolution;
 the browser continues using the same durable message stream.
+The same transport includes auth completion and accepts the first authored
+reply when an automatic control event resolved the gate first. Identical
+retries reuse its canonical row; a different later reply receives HTTP 409
+instead of a success response that discards text. The unchanged final backend
+reproduction fails five attention cases and two authored-auth cases on the
+previous implementation, then passes both owning domains (42 attention cases;
+3.691 and 2.215 seconds). Durable insertion and gate resolution roll back
+together on failure, before signaling.
 
 New keyed signals distinguish authored user_message from an explicit null
 protocol-only value. The root keeps the gate response unchanged and uses only
