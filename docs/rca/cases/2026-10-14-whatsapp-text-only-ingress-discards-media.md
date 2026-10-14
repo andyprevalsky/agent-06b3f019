@@ -115,6 +115,16 @@ owned backend/port-lock teardown. Coverage passed at 89.59% statements/lines,
 81.01% branches and 92.58% functions. Its log is
 `.context/deploy-runs/20261014-220120-4186766/logs/backend-coverage-blackbox-20261014-224814-689775.log`.
 
+The complete pre-deploy smoke invocation then passed all eight selected tasks,
+including the 51-agent mass run. UI semantics passed 8/8; the clock check and
+all four chat paths passed, with five independent lifecycle samples per path.
+The largest measured lifecycle was 2,374 ms. The mandatory real Claude Code E2B
+smoke passed, and its owning domain passed 56/56. Every owned smoke and semantic
+stack retired through its exact-owner cleanup; the unrelated managed stack
+was preserved. These release checks supplement the direct media regressions;
+they do not establish a native signed WhatsApp media roundtrip. The exact
+reviewed code HEAD was `d8459af78b8bdc40703a4f1317830c01406b3514`.
+
 10k-agent behavior: two bounded Meta requests per attachment and the existing
 per-turn image upload or transcription. No scan or resource cost grows with
 the user's agent count; the existing bounded message-ID dedup is preserved.
