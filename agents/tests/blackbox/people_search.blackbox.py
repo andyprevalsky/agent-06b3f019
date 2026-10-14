@@ -321,6 +321,24 @@ async def test_oauth_refresh_in_progress_preserves_wait_details():
     assert len(get_captured_requests()) == 1
 
 
+async def test_oauth_matches_equivalent_configured_origins():
+    for configured in ("https://PEOPLE.LANTERN.MD", "https://people.lantern.md:443"):
+        teardown_mock()
+        setup_mock(
+            {
+                "localhost:3001/api/integrations/lantern-people/credentials/token": {
+                    "status": 200,
+                    "json": {"apiUrl": "https://people.lantern.md", "accessToken": "private-lantern-token"},
+                },
+                LANTERN_URL + "find_people": {"status": 200, "json": {"ok": True, "data": {"people": _people(1)}}},
+            }
+        )
+        result = await _run(config=_fake_config(token="", api_url=configured), user_id="user-1")
+        assert result["provider_used"] == "lantern"
+        assert len(get_captured_requests()) == 2
+        assert get_captured_requests()[1]["url"].startswith("https://people.lantern.md/")
+
+
 async def test_oauth_origin_mismatch_never_sends_token_to_other_host():
     from temporalio.exceptions import ApplicationError
 
@@ -510,6 +528,7 @@ async def run_all_tests():
         test_oauth_uses_owner_credentials_and_never_exposes_tokens,
         test_oauth_reconnect_failure_never_calls_search,
         test_oauth_refresh_in_progress_preserves_wait_details,
+        test_oauth_matches_equivalent_configured_origins,
         test_oauth_origin_mismatch_never_sends_token_to_other_host,
         test_current_roles_and_nested_person,
         test_legacy_providers_use_only_lantern,

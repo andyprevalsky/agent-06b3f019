@@ -43,7 +43,13 @@ def validate_api_origin(api_url: str) -> str:
         )
         if not valid:
             raise lantern_error("INVALID_API_ORIGIN")
-        return f"{parsed.scheme}://{parsed.netloc}"
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        port = parsed.port
+        if port is not None and port != (443 if parsed.scheme == "https" else 80):
+            hostname += f":{port}"
+        return f"{parsed.scheme}://{hostname}"
     except ValueError as error:
         raise lantern_error("INVALID_API_ORIGIN") from error
 

@@ -4,6 +4,7 @@ import {
   decodeLanternConnection,
   encodeLanternConnection,
   LanternCredentialError,
+  lanternSharedUserId,
   refreshLanternConnection,
 } from '../../providers/lanternCredentials';
 import * as repo from './repo.lantern';
@@ -92,7 +93,10 @@ const staleRefreshes = new Map<
   { version: unknown; promise: Promise<ReturnType<typeof tokenResult>> }
 >();
 
-export async function getLanternToken(userId: string) {
+export async function getLanternToken(actorUserId: string) {
+  // Selection is exclusively server-owned, never a model or request-body parameter.
+  // An explicitly selected shared owner never falls back to a personal grant.
+  const userId = lanternSharedUserId() ?? actorUserId;
   const row = await repo.findLanternIntegration(userId);
   const connection = readConnection(row, true);
   if (

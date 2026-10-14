@@ -21,6 +21,15 @@ export class LanternCredentialError extends Error {
   }
 }
 
+/** Optional app-wide credential owner. Blank leaves actor-specific selection enabled. */
+export function lanternSharedUserId(): string | undefined {
+  const configured = process.env.LANTERN_PEOPLE_SHARED_USER_ID?.trim();
+  if (configured === undefined || configured === '') return undefined;
+  if (!/^[\x21-\x7e]{1,200}$/.test(configured))
+    throw new LanternCredentialError(503, 'LANTERN_SERVER_CONFIGURATION');
+  return configured;
+}
+
 export function allowedLanternOrigin(): string {
   const configured = process.env.LANTERN_PEOPLE_API_ORIGIN ?? 'https://people.lantern.md';
   try {

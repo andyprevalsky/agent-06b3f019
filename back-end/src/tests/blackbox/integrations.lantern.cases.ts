@@ -23,6 +23,7 @@ async function listen(server: Server): Promise<string> {
 export async function testLanternCredentials(): Promise<void> {
   assertLocalDatabase();
   const original = { ...process.env };
+  delete process.env.LANTERN_PEOPLE_SHARED_USER_ID;
   const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const privateKey = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString();
@@ -187,6 +188,64 @@ export async function testLanternCredentials(): Promise<void> {
     assert.equal(refreshes, 0);
     assert.equal((await find()).updatedAt.getTime(), row.updatedAt.getTime());
     assert.equal((await token({ ...headers, 'x-user-id': users[1] })).status, 404);
+    // Shared selection is server configuration only; caller identity remains required.
+    process.env.LANTERN_PEOPLE_SHARED_USER_ID = `  ${users[0]}  `;
+    const shared = await token({ ...headers, 'x-user-id': users[1] });
+    assert.equal(shared.status, 200);
+    assert.equal(
+      ((await shared.json()) as { accessToken: string }).accessToken,
+      'fixture-original-access'
+    );
+    assert.equal(refreshes, 0, 'Fresh shared credentials require no provider refresh');
+    assert.equal((await token({ 'x-api-key': headers['x-api-key'] })).status, 400);
+    assert.equal(
+      (
+        await upload(
+          { ...connection(), token: 'fixture-actor-access', connectionId: 'grant_actor' },
+          { ...headers, 'x-user-id': users[1] }
+        )
+      ).status,
+      200
+    );
+    const selected = await token({ ...headers, 'x-user-id': users[1] });
+    assert.equal(
+      ((await selected.json()) as { accessToken: string }).accessToken,
+      'fixture-original-access',
+      'Actor upload must not replace shared owner credentials'
+    );
+    process.env.LANTERN_PEOPLE_SHARED_USER_ID = `lantern-missing-${randomUUID()}`;
+    assert.equal(
+      (await token()).status,
+      404,
+      'Missing configured shared connection must not fall back to actor credentials'
+    );
+    process.env.LANTERN_PEOPLE_SHARED_USER_ID = 'x'.repeat(201);
+    assert.equal((await token()).status, 503, 'Invalid shared owner must fail closed');
+    delete process.env.LANTERN_PEOPLE_SHARED_USER_ID;
+    const personal = await token({ ...headers, 'x-user-id': users[1] });
+    assert.equal(
+      ((await personal.json()) as { accessToken: string }).accessToken,
+      'fixture-actor-access'
+    );
+    const actorSession = generateSupabaseSession(users[1], '');
+    process.env.LANTERN_PEOPLE_SHARED_USER_ID = users[0];
+    const deletedPersonal = await fetch(`${base}/api/integrations/lantern_people`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${actorSession.access_token}` },
+    });
+    assert.equal(
+      deletedPersonal.status,
+      200,
+      'CRUD must continue to target the actor while shared mode is enabled'
+    );
+    assert.equal(
+      (await token()).status,
+      200,
+      'Deleting actor credentials must preserve the shared connection'
+    );
+    delete process.env.LANTERN_PEOPLE_SHARED_USER_ID;
+    assert.equal((await token({ ...headers, 'x-user-id': users[1] })).status, 404);
+    assert.equal(refreshes, 0);
     const session = generateSupabaseSession(users[0], '');
     const ownerHeaders = {
       'content-type': 'application/json',
@@ -348,6 +407,7 @@ export async function testLanternCredentials(): Promise<void> {
       'CLAUDE_CREDENTIAL_DECRYPTION_KEY',
       'BACKEND_API_KEY',
       'LANTERN_PEOPLE_API_ORIGIN',
+      'LANTERN_PEOPLE_SHARED_USER_ID',
     ]) {
       if (original[key] === undefined) delete process.env[key];
       else process.env[key] = original[key];
