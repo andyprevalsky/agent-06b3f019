@@ -724,5 +724,13 @@
     "archive_file_manifest_sha256": "512f19403cf1e9c3b04cc007c0d06740f9bc4588a5a77d4bdacdbbe24cc84b47",
     "checked_utc": "2026-10-14T21:04:27.142661+00:00"
   },
-  "current_live_SMS_open": "ERROR29.8s even though evaluatorPASS: durablecleanup pending; no task PASS or dischargedoutbox claimed"
+  "current_live_SMS_open": "ERROR29.8s even though evaluatorPASS: durablecleanup pending; no task PASS or dischargedoutbox claimed",
+  "current_runtime_proof": {
+    "source_head": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "proof": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-current-validation-20261014.json",
+    "all_tests_green": false,
+    "closed_store_behavior_failure_retained": true,
+    "fresh_normal_open_pass": true,
+    "main_integration_pending": true
+  }
 }

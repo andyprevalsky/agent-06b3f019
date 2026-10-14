@@ -534,7 +534,29 @@
     "archived_at": "2026-10-14T21:12:43.993052+00:00",
     "scope_note": "Native workflow/browser/profile closure is known; durable terminal/trace outbox generation rows were not captured before database stop, so administrative discharge is NOT_PROVEN"
   },
-  "durable_outbox_correction": "PRIVATE_UNAPPLIED_SOURCE_RCA_AND_EXISTING_CONSUMER_BRIDGE_IN_PROGRESS; pending guard retained",
+  "durable_outbox_correction": {
+    "status": "APPLIED; fresh normal focused open owning run PASS",
+    "source_commit": "8268388a393cf89676073f02d8e1415e291e8d67",
+    "runtime_head": "f5c3c84238240ae457acabc9d9973f5145086889",
+    "normal_short_database_identity": true,
+    "normal_terminal_and_archive_obligations_before_hard_delete": {
+      "before": [
+        1,
+        1
+      ],
+      "after": [
+        0,
+        0
+      ]
+    },
+    "original_native_generation_and_queue_matched_terminated": true,
+    "real_terminal_trace_reference_forced": true,
+    "child_handles_retired": true,
+    "independent_before_stack_stop_SQL_empty": true,
+    "current_three_task_behavior_all_pass": false,
+    "prior_name_guard_failure_retained": true,
+    "proof": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-current-validation-20261014.json"
+  },
   "worktree_attempt_eligibility_metadata": {
     "first_actual_open434": true,
     "second_actual_open_ead": true,
