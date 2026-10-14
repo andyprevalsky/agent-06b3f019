@@ -2594,7 +2594,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
+    && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -3639,6 +3640,84 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
     exit 0
 fi
 
+readiness_retry_contract() {
+# Allocation and launch do not prove queue readiness. While genuine work is
+# pending, a replaceable failure must capture/reap its exact worker, then retry
+# healthy capacity. A genuinely finished task cannot consume unused capacity.
+for readiness_boundary in active-retry finished-unused; do
+    reset_fake_state
+    : > "$FAKE_DIR/journal.log"
+    : > "$FAKE_DIR/desired-two"
+    : > "$FAKE_DIR/worker-never-ready"
+    if [ "$readiness_boundary" = active-retry ]; then
+        : > "$FAKE_DIR/worker-readiness-retry"
+    fi
+    python3 - "$WS_A/.context/fleet/runs" > "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_BEFORE'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+print(json.dumps(sorted(str(p.relative_to(root)) for p in root.glob("*/autoscaler-worker-never-ready"))))
+PY_UNREADY_BEFORE
+    autoscale_status=0
+    CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
+        CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
+        CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=30 \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" \
+        autoscaler-worker-never-ready --timeout 240 || autoscale_status=$?
+    [ "$autoscale_status" -eq 0 ] ||
+        fail "readiness $readiness_boundary must preserve completed task and exact worker retirement"
+    grep -qF "1/1 passed" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" ||
+        fail "readiness $readiness_boundary did not preserve real task PASS"
+    find "$FAKE_DIR/markers" -maxdepth 1 -name 'worker-launch-succeeded-*' -print -quit |
+        grep -q . || fail "readiness $readiness_boundary never crossed the actual worker launch boundary"
+    if [ "$readiness_boundary" = active-retry ]; then
+        [ -f "$FAKE_DIR/markers/worker-readiness-retry-proven" ] ||
+            fail "active readiness failure was not captured/reaped before healthy retry"
+    else
+        grep -qF "task finished before future worker demand was needed: 0/1 queue-ready" \
+            "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" ||
+            fail "a launched-but-unready worker must be reported as zero queue-ready capacity"
+        if grep -qF "joined queue navi-agent-tasks-" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log"; then
+            fail "a launched-but-unready worker was counted as queue-ready capacity"
+        fi
+    fi
+    python3 - "$WS_A/.context/fleet/runs" "$readiness_boundary" "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_CAPTURE' || fail "readiness worker was released without its captured runtime evidence"
+import json, sys
+from pathlib import Path
+boundary = sys.argv[2]
+root = Path(sys.argv[1])
+before = set(json.loads(Path(sys.argv[3]).read_text()))
+outputs = [p for p in root.glob("*/autoscaler-worker-never-ready") if str(p.relative_to(root)) not in before]
+assert len(outputs) == 1
+output = outputs[0]
+if boundary == "finished-unused":
+    assert not (output / "worker-ready.ids").exists() or not (output / "worker-ready.ids").read_text().strip()
+launched = [p.name[len("worker-"):-len(".launch-attempted")] for p in output.glob("worker-*.launch-attempted")]
+assert launched
+for machine_id in launched:
+    capture = output / "worker-runtime-evidence" / machine_id / "capture"
+    terminal = json.loads((capture / "receipts/terminal.json").read_text())
+    assert terminal["machine_id"] == machine_id
+    if boundary == "finished-unused":
+        assert terminal["worker_started"] is False
+    assert terminal["quiescent"] and terminal["children_reaped"] and terminal["streams_closed"]
+PY_UNREADY_CAPTURE
+    remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+    [ "$remaining" = "cloudbench-warm" ] ||
+        fail "readiness $readiness_boundary teardown leaked machines: $remaining"
+    if find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -type f -print -quit 2>/dev/null | grep -q .; then
+        fail "readiness $readiness_boundary teardown retained a durable clone record"
+    fi
+    rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-never-ready" "$FAKE_DIR/worker-readiness-retry"
+done
+echo "PASS: scenario 2e — active readiness failure retries healthy capacity; finished tasks retire unused capacity"
+
+}
+
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ]; then
 hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
@@ -3652,6 +3731,11 @@ for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
         sleep 0.1
     done
 done
+
+if [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" = "1" ]; then
+    readiness_retry_contract
+    exit 0
+fi
 
 # A numeric PID is never hub ownership. Both a reused PID (birth mismatch) and
 # an exact live hub belonging to another workspace must be refused without
@@ -4931,80 +5015,7 @@ assert_and_reset_retained_fake_benchmark autoscaler-worker-required ||
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/fail-worker-launch"
 echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet closed"
 
-# Allocation and launch do not prove queue readiness. While genuine work is
-# pending, a replaceable failure must capture/reap its exact worker, then retry
-# healthy capacity. A genuinely finished task cannot consume unused capacity.
-for readiness_boundary in active-retry finished-unused; do
-    reset_fake_state
-    : > "$FAKE_DIR/journal.log"
-    : > "$FAKE_DIR/desired-two"
-    : > "$FAKE_DIR/worker-never-ready"
-    if [ "$readiness_boundary" = active-retry ]; then
-        : > "$FAKE_DIR/worker-readiness-retry"
-    fi
-    python3 - "$WS_A/.context/fleet/runs" > "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_BEFORE'
-import json, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-print(json.dumps(sorted(str(p.relative_to(root)) for p in root.glob("*/autoscaler-worker-never-ready"))))
-PY_UNREADY_BEFORE
-    autoscale_status=0
-    CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
-        CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
-        CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=30 \
-        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" \
-        autoscaler-worker-never-ready --timeout 240 || autoscale_status=$?
-    [ "$autoscale_status" -eq 0 ] ||
-        fail "readiness $readiness_boundary must preserve completed task and exact worker retirement"
-    grep -qF "1/1 passed" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" ||
-        fail "readiness $readiness_boundary did not preserve real task PASS"
-    find "$FAKE_DIR/markers" -maxdepth 1 -name 'worker-launch-succeeded-*' -print -quit |
-        grep -q . || fail "readiness $readiness_boundary never crossed the actual worker launch boundary"
-    if [ "$readiness_boundary" = active-retry ]; then
-        [ -f "$FAKE_DIR/markers/worker-readiness-retry-proven" ] ||
-            fail "active readiness failure was not captured/reaped before healthy retry"
-    else
-        grep -qF "task finished before future worker demand was needed: 0/1 queue-ready" \
-            "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log" ||
-            fail "a launched-but-unready worker must be reported as zero queue-ready capacity"
-        if grep -qF "joined queue navi-agent-tasks-" "$TMP_ROOT/controller-autoscaler-worker-never-ready-$readiness_boundary.log"; then
-            fail "a launched-but-unready worker was counted as queue-ready capacity"
-        fi
-    fi
-    python3 - "$WS_A/.context/fleet/runs" "$readiness_boundary" "$TMP_ROOT/readiness-outputs-$readiness_boundary.json" <<'PY_UNREADY_CAPTURE' || fail "readiness worker was released without its captured runtime evidence"
-import json, sys
-from pathlib import Path
-boundary = sys.argv[2]
-root = Path(sys.argv[1])
-before = set(json.loads(Path(sys.argv[3]).read_text()))
-outputs = [p for p in root.glob("*/autoscaler-worker-never-ready") if str(p.relative_to(root)) not in before]
-assert len(outputs) == 1
-output = outputs[0]
-if boundary == "finished-unused":
-    assert not (output / "worker-ready.ids").exists() or not (output / "worker-ready.ids").read_text().strip()
-launched = [p.name[len("worker-"):-len(".launch-attempted")] for p in output.glob("worker-*.launch-attempted")]
-assert launched
-for machine_id in launched:
-    capture = output / "worker-runtime-evidence" / machine_id / "capture"
-    terminal = json.loads((capture / "receipts/terminal.json").read_text())
-    assert terminal["machine_id"] == machine_id
-    if boundary == "finished-unused":
-        assert terminal["worker_started"] is False
-    assert terminal["quiescent"] and terminal["children_reaped"] and terminal["streams_closed"]
-PY_UNREADY_CAPTURE
-    remaining="$(python3 -c '
-import json, sys
-machines = json.load(open(sys.argv[1]))["machines"]
-print(" ".join(sorted(m["name"] for m in machines)))
-' "$FAKE_DIR/state.json")"
-    [ "$remaining" = "cloudbench-warm" ] ||
-        fail "readiness $readiness_boundary teardown leaked machines: $remaining"
-    if find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -type f -print -quit 2>/dev/null | grep -q .; then
-        fail "readiness $readiness_boundary teardown retained a durable clone record"
-    fi
-    rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-never-ready" "$FAKE_DIR/worker-readiness-retry"
-done
-echo "PASS: scenario 2e — active readiness failure retries healthy capacity; finished tasks retire unused capacity"
+readiness_retry_contract
 
 # Pending provider work still requires causal autoscaler terminal completion.
 # The completed task remains PASS, but the existing two-second terminal budget
