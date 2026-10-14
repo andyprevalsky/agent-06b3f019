@@ -1227,6 +1227,8 @@ def test_campaign_inventory_publication_retirement_distinguishes_owned_zombie():
             _assert_publication_process_retired(child.pid, birth + "-foreign")
         _assert_publication_process_retired(child.pid, birth)
     finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
         child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
 
 
