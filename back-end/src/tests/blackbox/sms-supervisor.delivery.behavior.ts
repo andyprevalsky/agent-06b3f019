@@ -2,7 +2,6 @@ import {
   testSendUserMessage_rejectsEmojiOnlySms,
   testSmsQuotedReplies,
 } from './sms-supervisor.reply.behavior';
-import assert from 'node:assert/strict';
 import type { PrismaClient } from '@prisma/client';
 import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
