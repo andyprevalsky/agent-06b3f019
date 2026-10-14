@@ -24,6 +24,7 @@ import {
 } from '../../providers/smsSupervisor/environmentMessages';
 import type { ToolCall, ToolResult } from '../../providers/smsSupervisor/supervisorTools';
 import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
+import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
 
 const HANDLER_SOURCE = readFileSync(
   join(__dirname, '../../providers/smsSupervisor/supervisorHandler.ts'),
@@ -63,6 +64,22 @@ test('pairs the tool result with the assistant turn that requested it', () => {
 test('carries both the results and the guidance to the model', () => {
   assert.ok(feedback[1].content.includes('[grep] OK: 2 hits'));
   assert.ok(feedback[1].content.includes('Incorporate these results.'));
+});
+
+test('teaches the complete SMS body limit in the prompt and both tool schema surfaces', () => {
+  const sendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+  const structuredSchema = JSON.stringify(SUPERVISOR_RESPONSE_SCHEMA);
+  for (const contract of [
+    SMS_SURFACE_OVERLAY,
+    sendUserMessage?.parameters.properties.message.description ?? '',
+    structuredSchema,
+  ]) {
+    assert.match(contract, /at most 1600 characters/i);
+    assert.match(contract, /spaces, line breaks, and URLs/i);
+    assert.match(contract, /actual delivery error/i);
+    assert.match(contract, /retry/i);
+    assert.match(contract, /do not claim delivery until the send succeeds/i);
+  }
 });
 
 test('omits the empty results header when a round produced no tool calls', () => {

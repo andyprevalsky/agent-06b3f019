@@ -29,6 +29,8 @@ sources:
   - agent d60c486a-4d41-43b1-bee5-487f59ce1f2a
   - agent d3eb5e85-170b-4fcf-a7d6-dcf4f9f33fcc
   - PR #1459
+  - PR #1512
+  - agent dfe1f6b1-5caa-4ba6-a5fe-2c155401083e
   - agent 5b7dd06e-81d9-4bc0-88f7-e65355f75b7c
   - task agent-payment-production-abandonment
   - task agent-payment-abandonment
@@ -473,3 +475,38 @@ The main definitions and the branch SMS scoring case remain intact; exact
 original source, warning commit ancestry and lossless preservation snapshots
 remain unchanged. This repair supplies no historical failed run or live lane
 acceptance credit.
+
+### Recurrence on 2026-10-14 during PR #1512 production verification
+
+The unchanged production-only `agent-payment-production-abandonment` task ran
+against merged source `1d77217cbe8136029400cc794cd7386039024c19`, benchmark run
+`4752fbb8-2469-46b2-a702-f7f26a70dadd`, fixture agent
+`dfe1f6b1-5caa-4ba6-a5fe-2c155401083e`. It captured exactly 100 cents and left
+merchant checkout unsubmitted. The original stock task returned `ERROR` after
+580.9 seconds when its unchanged reconciliation window expired: purchase
+`HELD`, funding `RECLAIMING`, card `CLOSED` with balance zero, and the exact live
+organization transfer consumed with transferred=100/released=0. The controller
+also failed final cleanup and exited 1; its observed join receipt is
+2026-10-14 21:04:39 UTC. This failed verdict is preserved independently of any
+later financial recovery.
+
+Purchase-scoped production logs retained three genuine release-observation
+passes beginning at 20:49:17, 20:52:23, and 20:54:33 UTC. All 18 observations
+through 20:55:37 matched the exact provider transfer (masked suffix `…1922`)
+and returned consumed/transferred=100/released=0. These are actual provider
+reads after exact-ID matching, rather than a stale stored snapshot or an
+omitted filtered-list result. Each pass ended in typed release-pending. The
+underlying reason for nonrelease remains unproved; the prior live recurrence
+is relative evidence, and no outage, throttling, shared-cardholder netting, or
+repeated-close clock-reset explanation is established for this attempt.
+
+After joining the original controller and preserving its exit/run receipts,
+a separate owner began bounded idempotent reconciliation of the same
+purchase/card/transfer/Stripe identities using the unchanged stock cleanup
+and validation functions. No new mint or merchant purchase is used to close
+this allocation. Its terminal reclaim/refund receipt remains pending at this
+archive checkpoint; the strict production gate is incomplete. No vendor
+message was sent. A concrete vendor-report draft and the sanitized provider
+timeline remain private under `.context/production/agentcard/`, alongside the
+original failure, controller exit receipt, and any separate recovery receipts.
+The case remains open.

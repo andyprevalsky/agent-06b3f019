@@ -153,12 +153,32 @@ production surface. Two old CDP fixtures gained realistic focused-root and
 parent metadata without weakening their assertions. Independent adversarial
 review passed the narrowly stated diagnosis and repair.
 
-The narrow CDP ownership repair is implemented and reproduced above and is
-carried by [PR #1512](https://github.com/Rose-Ai-Labs/rose/pull/1512). Its shipping
-gates and actual production rollout are recorded in the deployment scorecard. This case stays open for the unresolved checkout and
-authentication observations; the original purchase has not been replayed or
-proven to complete. The static mint cutoff remains a documented production
-configuration; changing it requires explicit approval.
+The narrow CDP ownership repair was merged by
+[PR #1512](https://github.com/Rose-Ai-Labs/rose/pull/1512) at
+`1d77217cbe8136029400cc794cd7386039024c19`. Production verification confirmed
+Fly generation `274914954ab9 → be53b25fc65a`, zero forced migrations, retirement
+of all eight old machines, and 45/45 cold migration assertions including fixture
+cleanup. Vercel's production alias and signed/notarized Mac release `v1.1.218`
+were verified against that merge. The explicit production semantic workflow
+[38634981287](https://github.com/Rose-Ai-Labs/rose/actions/runs/38634981287)
+passed six UI tests (two existing local-fixture guards) and all five latency
+tests/20 lifecycle samples; all four paths had smoothness 1.000. Local semantics
+separately passed all eight UI tests, including the local-only login and browser
+control fixtures.
+
+The broader deployment remains incomplete because its separate strict $1 live
+AgentCard abandonment task failed after 580.9 seconds. The card closed with
+zero balance, but the same live organization transfer remained consumed with
+100 cents transferred and zero released; Stripe refund is behind that release
+boundary. The original failure and cleanup failure are retained, and recovery
+is confined to idempotent reconciliation of that same allocation. The ongoing
+financial state and exact receipts are tracked in the deployment evidence and
+the existing [AgentCard release case](2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md).
+
+This case stays open for the unresolved checkout and authentication
+observations; the original purchase has not been replayed or proven to
+complete. The documented production mint cutoff remains unchanged. Changing that
+configuration requires explicit approval.
 
 ## Human feedback
 

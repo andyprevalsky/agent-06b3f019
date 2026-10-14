@@ -94,7 +94,7 @@ export async function callSupervisorLlm(
     })),
   });
 
-  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId);
+  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId, messages);
   if (blackboxFixture) {
     if (blackboxFixture.delayMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, blackboxFixture.delayMs));

@@ -35,6 +35,7 @@ import {
 } from './sessionIdentity';
 import { steelCdpConnectionUrl } from './urls';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
+import { prepareWritableSteelProfileHandoff } from './sessionProfileHandoff';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
@@ -99,13 +100,7 @@ async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLo
 
 async function fingerprintUserAgent(userId: string): Promise<string | undefined> {
   const fingerprint = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId,
-        name: 'browser_fingerprint',
-        accountId: '',
-      },
-    },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });
   const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
   return hasValue(fp?.navigator?.userAgent) ? fp.navigator.userAgent : undefined;
@@ -236,194 +231,210 @@ export async function recreateSession(
           persistProfile: oldSession.providerProfilePersist ?? true,
         }
       : undefined;
-  // A newly persisted Steel profile stays UPLOADING while its source session
-  // is active. Reattaching it before release makes every create retry fail.
-  // Keep the exact profile binding; record the released source honestly even
-  // if replacement creation subsequently fails.
-  const previousSessionReleased =
-    boundProfile?.persistProfile === true && previousProvider === 'steel';
-  if (previousSessionReleased) {
-    await (dependencies.releaseSession ?? releaseSteelRemoteSession)(oldSession.sessionId);
-    const released = await prisma.browserSession.updateMany({
-      where: { id: taskId, sessionId: oldSession.sessionId },
-      data: { status: 'CLOSED', closedAt: new Date() },
-    });
-    if (released.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
-  }
-  let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
+  const handoffLease = await prepareWritableSteelProfileHandoff(
+    oldSession,
+    boundProfile,
+    dependencies.releaseSession ?? releaseSteelRemoteSession
+  );
+  const previousSessionReleased = handoffLease !== null;
+  let validationBrowserForHandoff: Browser | undefined;
+  try {
+    let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
-  let lastError: Error | null = null;
-  let attemptsMade = 0;
-  let consecutiveCdpTimeouts = 0;
-  for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
-    attemptsMade = attempt;
-    log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
-    let createdSessionId: string | null = null;
-    let committed = false;
-    let attemptCdpTimedOut = false;
-    let validationBrowser: Browser | undefined;
-    try {
-      const proxySettings = buildSteelProxySettings(
-        proxyGeo,
-        dropProxyCity,
-        options.forceManagedRotation
-      );
-      const profile = resolveSteelProfileForSession(
-        options.forceFreshProfile ? null : oldSession.agentId,
-        persistedProfileId,
-        null,
-        boundProfile
-      );
-      const session = await dependencies.createSession({
-        sessionId: newOwnedSteelSessionId(),
-        profileId: profile.profileId,
-        persistProfile: profile.persistProfile,
-        userAgent:
-          userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
-            ? userAgent
-            : undefined,
-        useProxy: proxySettings.config,
-        solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
-        debugConfig: { systemCursor: false },
-        stealthConfig: {
-          humanizeInteractions: false,
-          skipFingerprintInjection: true,
-        },
-        timeout: steelSessionTimeoutMs(),
-        dimensions: { width: 1288, height: 891 },
-      });
-      createdSessionId = session.id;
-      registerInFlightSteelSession(session.id);
-
-      if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
-        throw new Error(
-          `Steel loaded profile ${session.profileId ?? 'NONE'} instead of bound profile ${profile.profileId}`
+    let lastError: Error | null = null;
+    let attemptsMade = 0;
+    let consecutiveCdpTimeouts = 0;
+    for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+      await handoffLease?.assertOwned();
+      attemptsMade = attempt;
+      log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
+      let createdSessionId: string | null = null;
+      let committed = false;
+      let attemptCdpTimedOut = false;
+      let validationBrowser: Browser | undefined;
+      try {
+        const proxySettings = buildSteelProxySettings(
+          proxyGeo,
+          dropProxyCity,
+          options.forceManagedRotation
         );
-      }
+        const profile = resolveSteelProfileForSession(
+          options.forceFreshProfile ? null : oldSession.agentId,
+          persistedProfileId,
+          null,
+          boundProfile
+        );
+        const session = await dependencies.createSession({
+          sessionId: newOwnedSteelSessionId(),
+          profileId: profile.profileId,
+          persistProfile: profile.persistProfile,
+          userAgent:
+            userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
+              ? userAgent
+              : undefined,
+          useProxy: proxySettings.config,
+          solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
+          debugConfig: { systemCursor: false },
+          stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+          timeout: steelSessionTimeoutMs(),
+          dimensions: { width: 1288, height: 891 },
+        });
+        createdSessionId = session.id;
+        registerInFlightSteelSession(session.id);
 
-      log.info(`  Created new Steel session: ${session.id}`);
-      if (profile.profileSource.startsWith('benchmark_anon')) {
-        rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
-      }
-      const debugUrl = steelDebugUrl(session.debugUrl);
-      const wsUrl = steelCdpUrl(session.id);
+        if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
+          throw new Error(
+            `Steel loaded profile ${session.profileId ?? 'NONE'} instead of bound profile ${profile.profileId}`
+          );
+        }
 
-      const validation = await dependencies.validateConnection(wsUrl, session.id);
-      const validationFailure =
-        typeof validation === 'object' && validation !== null ? validation.failure : validation;
-      validationBrowser =
-        typeof validation === 'object' && validation !== null
-          ? (validation.browser ?? undefined)
-          : undefined;
-      if (!options.keepValidationConnection) {
-        await validationBrowser?.close().catch(() => {});
-        validationBrowser = undefined;
-      }
-      if (validationFailure !== null) {
-        attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
-        throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
-      }
+        log.info(`  Created new Steel session: ${session.id}`);
+        if (profile.profileSource.startsWith('benchmark_anon')) {
+          rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
+        }
+        const debugUrl = steelDebugUrl(session.debugUrl);
+        const wsUrl = steelCdpUrl(session.id);
 
-      await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
-      const replaced = await prisma.browserSession.updateMany({
-        where: { id: taskId, sessionId: oldSession.sessionId },
-        data: {
-          sessionId: session.id,
+        const validation = await dependencies.validateConnection(wsUrl, session.id);
+        const validationFailure =
+          typeof validation === 'object' && validation !== null ? validation.failure : validation;
+        validationBrowser =
+          typeof validation === 'object' && validation !== null
+            ? (validation.browser ?? undefined)
+            : undefined;
+        if (!options.keepValidationConnection) {
+          await validationBrowser?.close().catch(() => {});
+          validationBrowser = undefined;
+        }
+        validationBrowserForHandoff = validationBrowser;
+        if (validationFailure !== null) {
+          attemptCdpTimedOut = validationFailure === STEEL_CDP_TIMEOUT_MESSAGE;
+          throw new Error(`Session validation failed on attempt ${attempt}: ${validationFailure}`);
+        }
+
+        await navigateToSavedUrl(wsUrl, savedUrl, connectSteelBrowser, validationBrowser);
+        await handoffLease?.assertOwned();
+        const replaced = await prisma.browserSession.updateMany({
+          where: {
+            id: taskId,
+            sessionId: oldSession.sessionId,
+            ...(handoffLease !== null
+              ? {
+                  status: 'PAUSED',
+                  closedAt: null,
+                  provider: 'steel',
+                  providerProfileId: oldSession.providerProfileId,
+                  providerProfileSource: oldSession.providerProfileSource,
+                  providerProfilePersist: oldSession.providerProfilePersist,
+                }
+              : {}),
+          },
+          data: {
+            sessionId: session.id,
+            debugUrl,
+            wsUrl,
+            status: 'ACTIVE',
+            closedAt: null,
+            provider: 'steel',
+            kernelProxySource: null,
+            providerProfileId: session.profileId ?? profile.profileId ?? null,
+            providerProfileSource: profile.profileSource,
+            providerProfilePersist: profile.persistProfile,
+            ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
+          },
+        });
+        if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
+        committed = true;
+        unregisterInFlightSteelSession(session.id);
+        await announceBrowserSessionBinding({ id: taskId });
+
+        if (
+          profile.persistProfile &&
+          session.profileId &&
+          !profile.profileSource.startsWith('benchmark_anon')
+        ) {
+          await rememberProviderProfile(oldSession.contextId, 'steel', session.profileId).catch(
+            (profileError) => {
+              log.warn('Failed to persist Steel provider profile after session replacement', {
+                taskId,
+                profileId: session.profileId,
+                error: profileError instanceof Error ? profileError.message : String(profileError),
+              });
+            }
+          );
+        }
+
+        log.info(`Task moved to Steel session ${session.id}`);
+        return {
+          ...(validationBrowser ? { validationBrowser } : {}),
           debugUrl,
+          sessionId: session.id,
           wsUrl,
-          status: 'ACTIVE',
-          closedAt: null,
-          provider: 'steel',
-          kernelProxySource: null,
-          providerProfileId: session.profileId ?? profile.profileId ?? null,
-          providerProfileSource: profile.profileSource,
-          providerProfilePersist: profile.persistProfile,
-          ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
-        },
-      });
-      if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
-      committed = true;
-      unregisterInFlightSteelSession(session.id);
-      await announceBrowserSessionBinding({ id: taskId });
-
-      if (
-        profile.persistProfile &&
-        session.profileId &&
-        !profile.profileSource.startsWith('benchmark_anon')
-      ) {
-        await rememberProviderProfile(oldSession.contextId, 'steel', session.profileId).catch(
-          (profileError) => {
-            log.warn('Failed to persist Steel provider profile after session replacement', {
-              taskId,
-              profileId: session.profileId,
-              error: profileError instanceof Error ? profileError.message : String(profileError),
-            });
+          savedUrl,
+          proxySource:
+            (session as { proxySource?: string | null }).proxySource ?? proxySettings.source,
+          proxyLocation: proxyGeo,
+          steelProfileId: session.profileId ?? profile.profileId ?? null,
+          profileSource: profile.profileSource,
+          previousSessionId: oldSession.sessionId,
+          previousProvider,
+          previousSessionReleased,
+        };
+      } catch (error) {
+        await validationBrowser?.close().catch(() => {});
+        validationBrowserForHandoff = undefined;
+        if (!committed && createdSessionId !== null) {
+          const uncommittedSessionId = createdSessionId;
+          try {
+            await (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
+            createdSessionId = null;
+          } catch (releaseError) {
+            throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
           }
-        );
-      }
+        }
+        await handoffLease?.assertOwned();
+        if (error instanceof ConcurrentSessionReplacementError) throw error;
 
-      log.info(`Task moved to Steel session ${session.id}`);
-      return {
-        ...(validationBrowser ? { validationBrowser } : {}),
-        debugUrl,
-        sessionId: session.id,
-        wsUrl,
-        savedUrl,
-        proxySource:
-          (session as { proxySource?: string | null }).proxySource ?? proxySettings.source,
-        proxyLocation: proxyGeo,
-        steelProfileId: session.profileId ?? profile.profileId ?? null,
-        profileSource: profile.profileSource,
-        previousSessionId: oldSession.sessionId,
-        previousProvider,
-        previousSessionReleased,
-      };
-    } catch (error) {
-      await validationBrowser?.close().catch(() => {});
-      if (!committed && createdSessionId !== null) {
-        const uncommittedSessionId = createdSessionId;
-        try {
-          await (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
-          createdSessionId = null;
-        } catch (releaseError) {
-          throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
+        const status =
+          (error as Record<string, unknown>)?.status ??
+          (error as Record<string, unknown>)?.statusCode;
+        if (status === 429) {
+          const message =
+            error instanceof Error ? error.message : 'Steel session rate limit exceeded';
+          throw new SteelRateLimitError(message);
+        }
+        lastError = error instanceof Error ? error : new Error('Unknown error');
+        log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
+        consecutiveCdpTimeouts =
+          attemptCdpTimedOut || lastError.message === STEEL_CDP_TIMEOUT_MESSAGE
+            ? consecutiveCdpTimeouts + 1
+            : 0;
+        // Each timeout already includes three CDP handshakes against a distinct
+        // new session. Two in a row indicate a provider transport outage; leave
+        // the old session intact and let browser recovery try another provider.
+        if (consecutiveCdpTimeouts >= 2) break;
+        if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
+          dropProxyCity = true;
+          rememberRejectedProxyCity(proxyGeo);
+          log.info('  Dropping unsupported Steel proxy city during replacement retry');
+        }
+        if (attempt < MAX_SESSION_RETRIES) {
+          await sleepBeforeSteelRetry(attempt);
         }
       }
-      if (error instanceof ConcurrentSessionReplacementError) throw error;
+    }
 
-      const status =
-        (error as Record<string, unknown>)?.status ??
-        (error as Record<string, unknown>)?.statusCode;
-      if (status === 429) {
-        const message =
-          error instanceof Error ? error.message : 'Steel session rate limit exceeded';
-        throw new SteelRateLimitError(message);
-      }
-      lastError = error instanceof Error ? error : new Error('Unknown error');
-      log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
-      consecutiveCdpTimeouts =
-        attemptCdpTimedOut || lastError.message === STEEL_CDP_TIMEOUT_MESSAGE
-          ? consecutiveCdpTimeouts + 1
-          : 0;
-      // Each timeout already includes three CDP handshakes against a distinct
-      // new session. Two in a row indicate a provider transport outage. The
-      // old session stays intact unless its persisted profile required release;
-      // in that case its binding remains honestly CLOSED for browser recovery.
-      if (consecutiveCdpTimeouts >= 2) break;
-      if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
-        dropProxyCity = true;
-        rememberRejectedProxyCity(proxyGeo);
-        log.info('  Dropping unsupported Steel proxy city during replacement retry');
-      }
-      if (attempt < MAX_SESSION_RETRIES) {
-        await sleepBeforeSteelRetry(attempt);
-      }
+    throw new Error(
+      `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
+    );
+  } finally {
+    try {
+      await handoffLease?.release();
+    } catch (error) {
+      await validationBrowserForHandoff?.close().catch(() => {});
+      throw error;
     }
   }
-
-  throw new Error(
-    `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
-  );
 }
 
 export async function resumeSession(

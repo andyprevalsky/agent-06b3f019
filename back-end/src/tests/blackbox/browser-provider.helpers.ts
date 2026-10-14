@@ -286,6 +286,7 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
+    closedAt: null as Date | null,
     context: { userId: 'offline-user' },
   };
   let ready = false;
@@ -313,7 +314,7 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
   }) as typeof release;
   steel.sessions.create = (async (input: { profileId?: string }) => {
     nodeAssert.strictEqual(ready, true);
-    nodeAssert.strictEqual(row.status, 'CLOSED');
+    nodeAssert.strictEqual(row.status, 'PAUSED');
     nodeAssert.strictEqual(input.profileId, 'offline-profile');
     if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
     return {
@@ -333,7 +334,7 @@ export async function assertSteelSameProfileReplacement(retryClosed: boolean): P
         () => recreateSession('offline-task', { forceManagedRotation: true }),
         /offline create failed/
       );
-      nodeAssert.strictEqual(row.status, 'CLOSED');
+      nodeAssert.strictEqual(row.status, 'PAUSED');
       nodeAssert.strictEqual(row.sessionId, 'offline-source');
       failCreate = false;
       const recovered = await recreateSession('offline-task', { forceManagedRotation: true });

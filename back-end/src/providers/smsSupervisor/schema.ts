@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { buildOpenAiResponseFormat, responseModel } from '../rose';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
+import { SMS_DELIVERY_INSTRUCTIONS } from '../smsDeliveryContract';
 
 const replyToAgentCallSchema = z.object({
   tool: z.literal('reply_to_agent'),
@@ -59,7 +60,7 @@ const sendUserMessageCallSchema = z.object({
       .string()
       .describe(
         userFacingTextDescription(
-          'The exact SMS message to send to the user. Sending does not end the run.'
+          `The exact SMS message to send to the user. Sending does not end the run. ${SMS_DELIVERY_INSTRUCTIONS}`
         )
       ),
   }),
