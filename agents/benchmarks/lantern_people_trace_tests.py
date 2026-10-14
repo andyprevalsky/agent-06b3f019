@@ -230,6 +230,24 @@ def test_lantern_discovery_constraint_and_provenance_rejections():
 
 
 def test_lantern_enrichment_requires_native_lineage_and_fresh_values():
+    for missing_fields in (False, True):
+        check, data, tools, _ = _fixture("enrichment")
+        early = deepcopy(tools)
+        if missing_fields:
+            _rewrite(
+                early[-1],
+                change_params=lambda p: p.update(fields=None),
+                change_result=lambda r: r.update(results=[_normalize_person(p["profile"], None) for p in r["results"]]),
+            )
+        else:
+            _rewrite(early[0], change_params=lambda p: p.update(titles=None))
+        for number, row in enumerate(tools, 3):
+            row["timestamp"] = f"2026-10-14T00:00:{number:02d}Z"
+            row["metadata"]["toolCallId"] = f"call-{number}"
+        tools[:] = early + tools
+        assert _run(check, data)[0], "a later fully grounded native chain can recover an earlier incomplete chain"
+        tools[:] = early
+        assert not _run(check, data)[0], "the earlier incomplete chain alone cannot qualify"
     for mutate in (
         lambda p: p.update(source_record_id="https://example.test/fabricated"),
         lambda p: p.update(generation="other-generation"),

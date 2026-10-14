@@ -289,7 +289,9 @@ def check_lantern_people_trace(data: dict, check: dict) -> tuple[bool, str]:
                     or (source_id, params.get("generation")) not in discovered
                     or result.get("generation") != params.get("generation")
                 ):
-                    raise ValueError("Enrichment lacks prior native ID and matching generation")
+                    # An earlier incomplete attempt cannot qualify, but must not
+                    # hide a later valid discovery/enrichment recovery.
+                    continue
                 fields = params.get("fields")
                 attrs = result["results"][0].get("attributes")
                 if (
@@ -297,7 +299,7 @@ def check_lantern_people_trace(data: dict, check: dict) -> tuple[bool, str]:
                     or not set(check["required_fields"]).issubset(fields)
                     or not isinstance(attrs, dict)
                 ):
-                    raise ValueError("Enrichment lacks requested-field evidence")
+                    continue
                 aliases = {
                     "current_title": "current_title",
                     "current_company": "current_company",
