@@ -7,7 +7,6 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -104,36 +103,12 @@ def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
     return {}
 
 
-def _explore_source_envelope(result: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Only service-owned payloads may supply machine evidence."""
-    if result.get("source_owned_handoff") is not True:
-        return None
-    try:
-        envelope = json.loads(result.get("source_handoff") or result.get("result") or "")
-    except (TypeError, ValueError):
-        return None
-    if (
-        isinstance(envelope, dict)
-        and isinstance(envelope.get("source_results"), list)
-        and isinstance(envelope.get("model_summary"), str)
-    ):
-        return envelope
-    return None
-
-
 def _explore_chip_text(result: Dict[str, Any]) -> str:
-    envelope = _explore_source_envelope(result)
-    if envelope is not None:
-        return envelope["model_summary"]
-    raw = result.get("result") or result.get("final_response") or result.get("summary") or ""
-    return user_facing_explore_result(compile_explore_wrap_up(raw, result.get("tool_call_results") or []))
-
-
-def _explore_machine_result(result: Dict[str, Any], chip_text: str) -> str:
-    return (
-        (result.get("source_handoff") or result["result"])
-        if _explore_source_envelope(result) is not None
-        else chip_text
+    return user_facing_explore_result(
+        compile_explore_wrap_up(
+            result.get("result") or result.get("final_response") or result.get("summary") or "",
+            result.get("tool_call_results") or [],
+        )
     )
 
 
@@ -147,7 +122,9 @@ _EXPLORE_SYNTHESIS_CHECKPOINT = (
 
 
 def _source_linked_explore_text(text: str) -> bool:
-    return len(text.strip()) >= 200 and any(marker in text for marker in ("https://", "http://", "@ref:", "grep:"))
+    return len(text.strip()) >= 200 and any(
+        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
+    )
 
 
 def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
@@ -164,8 +141,9 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
         if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
             continue
         metadata = message.get("metadata") or {}
-        if metadata.get("toolName") == "spawn_agent" and _EXPLORE_SYNTHESIS_CHECKPOINT in str(
-            message.get("text") or ""
+        if (
+            metadata.get("toolName") == "spawn_agent"
+            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
         ):
             return False  # Persist the one-time choice through continue-as-new.
         if (
@@ -197,7 +175,9 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
     return False
 
 
-def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: bool) -> tuple[Dict[str, Any], bool]:
+def _explore_result_after_activity_failure(
+    exc: BaseException, *, user_paused: bool
+) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
@@ -214,8 +194,7 @@ def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: b
     if recovered.get("tool_call_results") and recovered_text:
         return {
             "status": "completed",
-            "result": _explore_machine_result(recovered, recovered_text),
-            "source_owned_handoff": recovered.get("source_owned_handoff") is True,
+            "result": recovered_text,
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -332,8 +311,7 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
             continue
         explore_result = _explore_chip_text(result)
         if not explore_result and recovered:
-            result = recovered
-            explore_result = _explore_chip_text(result)
+            explore_result = _explore_chip_text(recovered)
         if not explore_result:
             continue
         ui_goal = str(item.get("ui_goal") or "")
@@ -347,13 +325,8 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
                     "agentType": "explore",
                     "taskId": item.get("task_id"),
                     "fullGoal": ui_goal,
-                    **(
-                        {"structured_response": _explore_source_envelope(result), "source_owned_handoff": True}
-                        if _explore_source_envelope(result) is not None
-                        else {}
-                    ),
                 },
-                data={"result": _explore_machine_result(result, explore_result)},
+                data={"result": explore_result},
             ),
             item.get("tool_call_id"),
             "spawn_agent",
@@ -933,7 +906,7 @@ class SpawnAgentManager(ToolManager):
                     "llm": combined_llm,
                     "service": combined_service,
                 },
-                "result": _explore_machine_result(result, explore_result),
+                "result": explore_result,
                 "unavailable_sources": unavailable_sources,
             }
             event_metadata: Dict[str, Any] = {
@@ -941,12 +914,6 @@ class SpawnAgentManager(ToolManager):
                 "taskId": task_id,
                 "fullGoal": ui_goal,
             }
-            source_projection = _explore_source_envelope(result)
-            if source_projection is not None:
-                # Existing message builders project structured_response into the
-                # parent LLM context, including after persisted-context reload.
-                event_metadata["structured_response"] = source_projection
-                event_metadata["source_owned_handoff"] = True
             if explore_error_reason:
                 event_data["error_reason"] = explore_error_reason
                 event_metadata["error_reason"] = explore_error_reason
@@ -962,7 +929,9 @@ class SpawnAgentManager(ToolManager):
                 and not explore_failed
                 and _grounded_explore_text(explore_result, explore_tool_call_results)
                 and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
-                and _has_prior_grounded_explore_batch(getattr(workflow_instance, "context", None), tool_call_id)
+                and _has_prior_grounded_explore_batch(
+                    getattr(workflow_instance, "context", None), tool_call_id
+                )
             ):
                 # One advisory after a grounded follow-up round. It must not
                 # replace evidence or prevent another necessary targeted search.
