@@ -200,6 +200,40 @@ The peer separately rendered and published dump 56a48ebda7ec; its expiring
 private evidence URL is kept outside this archive. No signed access credential
 is committed here.
 
+### Runtime handoff and legacy simulated-resume follow-up
+
+The coordinated runtime-only handoff is commit
+2735cb0fc1fd82f7b41512737e0e6b54c7858655 on
+fix/browser-feedback-native-runtime, based on c65baa4f4. PR #1511 owns its atomic
+integration, full gates, review and rollout together with its source-persistence
+and mobile fixes. PR #1513 now owns only the user-requested How/template change.
+The complete earlier native snapshot ab4d262ef remains preserved separately.
+
+The receiving owner identified another instance of missing input: a nonempty
+legacy simulated-browser resume had no saved cursor, but initialization seeded
+it with the current time. A USER correction sent while it was suspended was
+therefore older than that cursor and skipped by the actual incremental read.
+The permanent owning fixture
+ test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause
+uses a timestamp-filtered durable source and fails on the handed-off runtime:
+"resumed approval executed the queued write before reconsidering real USER
+feedback" (exit 1, 0.453s). The identical assertion passes (exit 0, 0.429s) after initialization
+seeds a current watermark only for a brand-new simulated activity. Legacy
+snapshots use the existing epoch/source-ID fallback; no second transport is
+introduced. The no-input approved-action control remains unchanged. The complete
+world-model-harness owning domain passes all 49 checks in 3.5s; its new
+legacy-resume test is registered in that deploy-owned runner.
+
+Exact command, from the activated agents environment at the native worktree:
+
+    python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root . --runtime domains.spawn_browser_agent_v3.handler world_model_harness test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause test_simulated_browser_user_feedback_invalidates_pending_approved_action test_simulated_browser_persists_post_approval_confirmation_state
+
+The audit found that all production persist_resume_context producers are in the
+real activity, while simulated payment/write suspensions return inline state.
+There is no proved production simulated pointer-backed producer, so this
+follow-up adds no speculative hydration path. The runtime owner will integrate
+the follow-up before the single PR #1511 rollout.
+
 ## Human feedback
 
 The user required schema updates only when needed and the same standard for
