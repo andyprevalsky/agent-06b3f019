@@ -1,6 +1,6 @@
 {
   "schema": "rose.whm.run16.continuation.v1",
-  "recorded_at_utc": "2026-10-14T01:24:51.383508+00:00",
+  "recorded_at_utc": "2026-10-14T01:33:39.157367+00:00",
   "original_checkpoint": "677068533e050195c62afc8118f3d35a8511f5ea",
   "original_restore_receipt": "docs/handoffs/swap-harness-b07d9037-81f9-4c97-80d7-6f4d42b7adc1-resumed.json",
   "replacement": {
@@ -438,6 +438,20 @@
       "original_bytes": 1796672,
       "manifest_sha256": "ae94ff65fa32eb859ff73637d1e7b4e3259667fc1d0b2047dbaaeb6b8807c18d",
       "full_readback_verified": true
+    },
+    "final-root-qualification": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "private/whm-e9afcffd/run16-final-root-qualification-20261014.enc",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "fbdc833eac5b7ba620c967d3da43ece8ca09c2021ea8a9d8fe2bb052050d3499",
+      "gzip_sha256": "9906d5101be59f2fd98c497dcebbb2dbc38bab00c0778428f52f5a2d905bd5ab",
+      "stored_bytes": 1043132,
+      "frames": 1,
+      "files": 133,
+      "original_bytes": 4170558,
+      "manifest_sha256": "73f8053df23d71d1db7de48e027e5f1d38e1a7852e4cc3203f3c04b32e55c220",
+      "full_readback_verified": true
     }
   },
   "rca_clusters": {
@@ -475,7 +489,26 @@
         ],
         "result_sha256": "509eae2bff866d959fa81597fc650d2fef480cc3bf4ee0fc233579375bd70728",
         "application": false
-      }
+      },
+      "final_deadline_regression": {
+        "utc": "2026-10-14T01:32:01.570038+00:00",
+        "source_checkpoint": "5011265ba0d101516062e9b37c8d9e017cfbe590",
+        "same_registered_assertion": true,
+        "baseline": "1 failed,67 deselected; (finished,writes,operation_done,join_verified)=(False,0,False,False); Native session operations did not join during retirement;11.42s including release",
+        "final_candidate": "68 passed,2 warnings,17.91s",
+        "runtime_candidate_sha256": "f9900c4088087b382d7e5353212b7c85700f499e7700ada7d9a33b630e965d32",
+        "source_patch_sha256": "f1d15317f6ea52d4d3892ad8642fba4716ec4a20a45c5c935cf7d5a7dcde8178",
+        "test_patch_sha256": "62e7812b03aa54bd9d5d4848897e41949dce4d290afc8cffc69bbaceabe2e653",
+        "combined_patch_sha256": "d2e91c93c6eca2cc02d9e779d9ece9a2cf4b569ea52a5f8145e9ace4ed6d5f82",
+        "fixture": "minimal nonsensitive execution identity; actual NativePredictionWriter, actual model.step and end_session",
+        "future_suite": "new test appended to existing complete owning module; unchanged registered blackbox delegates this entire module",
+        "production_application": false,
+        "original_R16_cause": "OPEN; controlled boundary and original timer matched, historical pending stacks unavailable",
+        "original_outcome": "ERROR preserved; no fundraising PASS",
+        "source_changes": 0,
+        "paid_calls": 0
+      },
+      "final_focused_review_sha256": "d2ac2b35a0e9c9c10b4984a4b1c2bcdf68475f82d8daba459ee9ab3c8601ea6f"
     },
     "protocol": "304predictions:238valid outputs/51protocol errors/14cancellations/1internal500/0pending.155strict rejection and4partial captures exact replay verified; no causal producer/model-only proof or source fix.",
     "metering": "627logged provider rows,155completed rejections already uniquely metered,4partial attempts billing unknown. Conditional projection preserves legacy Gemini/Qwen assumptions and assumes11newOR billable cachewrites.",
@@ -522,7 +555,17 @@
       "R16-NATIVE-OWNER-JOIN-1 final ownership policy proposal, unapproved",
       "Typed receipt/source provenance guard design, no exact candidate or approval-ready proof"
     ],
-    "active_followup": "All dispatched offline RCA turns complete; runtime ownership repair is privately qualified, unbounded filesystem-join decision awaits user approval. Next paid slice remains infrastructure HOLD."
+    "active_followup": "All dispatched offline RCA turns complete; runtime ownership repair is privately qualified, unbounded filesystem-join decision awaits user approval. Next paid slice remains infrastructure HOLD.",
+    "ownership_approval_snapshot": {
+      "approval_id": "R16-NATIVE-OWNER-JOIN-1",
+      "combined_patch_sha256": "d2e91c93c6eca2cc02d9e779d9ece9a2cf4b569ea52a5f8145e9ace4ed6d5f82",
+      "status": "Unapproved; source application HOLD",
+      "ordinary_absent_false": "Previously qualified original behavior unchanged; runtime candidate scoped to existing WHM validation_recovery opt-in",
+      "outer_WMH_HTTP_timeout_seconds": 660,
+      "provider_attempt_seconds": 360,
+      "provider_shared_seconds": 590,
+      "filesystem_join": "No independent hard bound on owned filesystem/retrieval drain; explicit approval requested."
+    }
   },
   "preservation": {
     "Freedom_preserved": true,
