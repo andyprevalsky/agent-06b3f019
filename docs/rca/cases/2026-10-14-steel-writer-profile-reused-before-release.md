@@ -129,3 +129,27 @@ None recorded.
 ## Reusable lesson
 
 Finalize the captured writer and verify its artifact's native readiness before creating a successor that must reuse that artifact.
+
+### Final combined custody and readiness validation
+
+Integration with upstream `cdbe16c54ac36e369cc019967390fbc5528a46f5`
+retains its leased handoff, complete publication CAS predicates and PAUSED
+recovery checkpoint. Native profile readiness remains inside the same five
+attempts. The added await creates an ownership-loss boundary, so lease ownership
+is checked again after READY and before replacement allocation.
+
+The permanent test revokes the real handoff lease inside the injected READY
+response. With only that post-read ownership assertion removed, the identical
+stronger owning suite produced 20 passes and one failure in 21.5 seconds: the
+stale owner allocated a replacement and then released it during cleanup.
+Restoring the exact runtime produced 21/21 passes in 21.7 seconds, with zero
+replacement creates after lease loss. Both custody/readiness test families and
+the idempotent404 control ran. The readiness fixture now honors every persisted
+row predicate; its assertions remain unchanged.
+
+Combined backend coverage on frozen `7ac20e2356148e1c667f127b82e98227bf5bfd0c`
+passed 196 blackbox domains and 267 unit files in 665.9 seconds, with 89.64%
+line and 81.12% branch coverage. All actual direct test children used matching
+loopback database URLs. The separate accidental schema-setup operation and its
+read-only attribution limits are recorded as an operational recurrence in the
+June27 stray-db-push case; that failed setup is not counted as a test result.
