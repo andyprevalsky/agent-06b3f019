@@ -162,7 +162,8 @@
     "publication_owning_cases_passed": 46,
     "publication_adversarial_extra_controls_passed": 6,
     "publication_browser_validation_and_composite_checks": "PASS",
-    "registered_projection_blackbox_callback": "PASS"
+    "registered_projection_blackbox_callback": "PASS",
+    "registered_phone_domain_passed": 28
   },
   "archives": [
     {
@@ -206,11 +207,37 @@
       "members": 525,
       "manifest_sha256": "f7ec65da25f41b5e1899513209833ccfaa998a50c8df7ece3d88ccaaddf3a150",
       "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-final-reviewed-packets-private-receipt.json",
+      "members": 43,
+      "manifest_sha256": "2d709fcae09a5384c9327ffe8437d0125b1da464c74a937a0e3471d434f5fe24",
+      "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-phone-delivery-infrastructure-private-receipt.json",
+      "members": 42,
+      "manifest_sha256": "2fdf6ee9118916217ef92a710981eb4f9ceadf77193e71e1a2f3069c0d230e2e",
+      "full_authenticated_decrypted_member_readback": true
     }
   ],
   "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished",
   "publication_repair_scope": "Only outgoing duplicated native diagnostic projection, after actual full encrypted archive verification; ordinary publication without option unchanged; no WHM context or runtime acquisition changes",
-  "remaining_issue": "Simulated phone completion is not persisted into caller DB polling;19repeatvoicemails. Private owningpreFAIL/postPASS candidate remains unapplied pending semantic qualification/user boundary; fundraiserPASS stillOPEN",
+  "remaining_issue": "Fundraising outcome unverified afterdeliveryrepair; Azure model-visible system-policy placement candidate remains unapplied; nextslice gate retains1/2 infra failures",
   "slice_attempts_cost_estimate": 93.7668367262,
-  "slice_attempts_direct_Azure_estimate": 32.48759164
+  "slice_attempts_direct_Azure_estimate": 32.48759164,
+  "phone_delivery_repair": {
+    "scope": "Only already selected simulated tool completion transport through existing correlated terminal event",
+    "world_model_context_acquisition_changed": false,
+    "real_shadow_completion_owner_changed": false,
+    "normal_approval_requirement_unchanged": true,
+    "user_authority": "Explicit infrastructure autoapproval, verified by independent exact source/consumer scope review",
+    "original_owning_assertion": "FAIL lenterminal0 on180358508; PASS unchanged assertions afterrepair",
+    "full_mocked_registered_phone_domain_passed": 28,
+    "private_exact_original_repro_preserved": true,
+    "permanent_test_sanitized": true,
+    "post_repair_paid_benchmark_executed": false,
+    "nineteen_repeat_prevention_proved": false,
+    "ambiguous_repeated_invocation_exactly_once_proved": false
+  }
 }

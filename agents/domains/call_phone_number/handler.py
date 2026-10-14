@@ -131,6 +131,26 @@ class CallPhoneNumberManager(ToolManager):
                 ),
             )
 
+            if result.get("world_model_simulated"):
+                simulated_error = bool(result.get("error") or result.get("success") is False)
+                await handle_tool_event(
+                    event=ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="Call failed" if simulated_error else "Call completed",
+                        message=result.get("message", ""),
+                        status=MessageStatus.ERROR if simulated_error else MessageStatus.FINISHED,
+                        metadata={
+                            "world_model_simulated": True,
+                            "phoneCall": {"status": "error" if simulated_error else "ended", "to": formatted_phone},
+                        },
+                    ),
+                    agent_id=agent_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="call_phone_number",
+                    execute_activity=execute_activity,
+                    user_id=user_id,
+                )
+
             # 3. Report usage based on call duration
             duration_seconds = result.get("duration", 0)
             hold_seconds = result.get("hold_seconds", 0)
