@@ -21111,6 +21111,67 @@ printf '%s\n' PUBLICATION_ACCEPTED
         assert not list(root.glob("cloudbench-scripts.*")), "source-owned creator cleanup leaked"
 
 
+
+def test_private_fleet_source_snapshot_stdlib_launcher_skips_image_sdk_scan(tmp_path: Path) -> None:
+    """Use the real controller .pth bridge and real snapshot ownership handshake."""
+    venv = tmp_path / "controller-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True, timeout=15)
+    site_packages = next(venv.glob("lib/python*/site-packages"))
+    image_packages = tmp_path / "image-packages"
+    image_packages.mkdir()
+    (image_packages / "sdk-namespace").mkdir()
+    scan_marker = tmp_path / "image-sdk-directory-scanned"
+    # Exactly the existing reviewed controller bridge; no healthy dependency edits.
+    (site_packages / "image-packages.pth").write_text(f"import site;site.addsitedir({str(image_packages)!r})\n")
+    (image_packages / "sdk-scan.pth").write_text(
+        "import os;os.listdir(" + repr(str(image_packages / "sdk-namespace")) + ");open(" + repr(str(scan_marker)) + ", 'w').write('image SDK scan executed')\n"
+    )
+    fleet = FLEET_SCRIPT.read_text()
+    match = re.search(r'^\s*python3(?P<flags>(?:\s+-\S+)*) "\$ROOT_DIR/scripts/\$SCRIPT_SNAPSHOT_OWNER_HELPER" create', fleet, re.MULTILINE)
+    assert match is not None
+    launcher = "python3" + match.group("flags")
+    owner_birth = _extract_fleet_function(fleet, "script_snapshot_current_pid_start() {")
+    root = tmp_path / "owned"
+    root.mkdir()
+    script = owner_birth + r'''
+set -uo pipefail
+owner_start="$(script_snapshot_current_pid_start)"
+[ -n "$owner_start" ] || exit 89
+token=0123456789abcdef0123456789abcdef
+snapshot="$TEST_ROOT/cloudbench-scripts.$token"
+result="$TEST_ROOT/.cloudbench-script-snapshot-create.$$.$token"
+'''
+    script += f'{launcher} "$HELPER" create --path "$snapshot" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null &\n'
+    script += r'''
+creator=$!
+cleanup() {
+    if kill -0 "$creator" 2>/dev/null; then kill -s TERM "$creator"; fi
+    wait "$creator" 2>/dev/null || true
+}
+trap cleanup EXIT
+deadline=$((SECONDS + 30))
+while [ ! -s "$result" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 90
+    sleep 0.01
+done
+[ "$(head -n 1 "$result")" = "$snapshot" ] || exit 91
+'''
+    script += f'if {launcher} "$HELPER" cleanup --path "$snapshot" --temp-root "$TEST_ROOT" --token ffffffffffffffffffffffffffffffff --pid "$$" --pid-start "$owner_start" >/dev/null 2>&1; then exit 95; fi\n'
+    script += f'if {launcher} "$HELPER" cleanup --path "$snapshot" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start foreign-owner-birth >/dev/null 2>&1; then exit 96; fi\n'
+    script += '[ -f "$snapshot/.cloudbench-script-snapshot-owner.json" ] || exit 97\n'
+    script += f'{launcher} "$HELPER" adopt --path "$snapshot" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null || exit 92\n'
+    script += 'wait "$creator" || exit 93\ntrap - EXIT\n'
+    script += f'{launcher} "$HELPER" cleanup --path "$snapshot" --temp-root "$TEST_ROOT" --token "$token" --pid "$$" --pid-start "$owner_start" >/dev/null || exit 94\n'
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "PATH": str(venv / "bin") + os.pathsep + os.environ["PATH"], "TEST_ROOT": str(root), "HELPER": str(SCRIPT_SNAPSHOT_OWNER)},
+        text=True, capture_output=True, timeout=40,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not list(root.glob("cloudbench-scripts.*")), "exact owned cleanup must remain functional"
+    assert not scan_marker.exists(), "stdlib-only snapshot lifecycle imported the image SDK .pth namespace"
+
+
 def test_script_snapshot_lifecycle_keeps_the_bash_32_portability_contract() -> None:
     fleet = fleet_source_text()
     bash_4_only = {
