@@ -207,7 +207,7 @@ evaluate input_text runtime replacement` and `autofill payment handoff automatic
 secrets model`; this is a deeper repair to the same incident following explicit
 human feedback, rather than a separate incident.
 
-The final public regressions use test-file SHA-256
+The pre-review public regressions use test-file SHA-256
 `1c4d5aab20b7fc262613d70ae40751411bcc154440d80ca7b4c2491f909e5f2e`:
 the pinned baseline fails all three in 1.790 seconds, while the repaired source
 passes all three in 1.890 seconds. Independent review also found a literal
@@ -224,6 +224,25 @@ a synthetic CVV matching digits in an agent UUID previously detached its logs
 from their owner. The unchanged owning credential test fails against `66bd51637`
 and passes after preserving only those identity fields; nested payloads and
 exception text still redact the same digits.
+
+
+PR review found three additional contract edges. JavaScript literals naming
+card fields are selectors unless they contain explicit opaque references;
+legacy `pwd:` literals remain unambiguous. Purely numeric secret forms now
+match complete digit sequences, preserving a DOM index such as `[1234]` when
+the synthetic CVV is `234`, while still redacting `cvv234`, the exact numeric
+value, and encoded echoes. Non-numeric short passwords retain substring
+masking. Browser routing uses a private observed URL, independently of the
+redacted URL presented to the model, including when replaying an approved
+write action. Finally, the activity recognizes the advertised
+`{{secret:pwd:new}}` form when saving a successfully entered minted password.
+The unchanged full-activity persistence regression fails before that guard
+repair in 1.253 seconds and passes after it in 0.771 seconds. Registered owning
+credential regressions separately reproduce selector corruption, numeric
+collisions, and loss of the private URL across approved-action preparation.
+The requested all-tool resolution contract remains in place; restricting entry
+to an action allowlist would contradict the explicit human instruction and
+would not establish network-egress isolation for JavaScript evaluation.
 
 ## Human feedback
 
