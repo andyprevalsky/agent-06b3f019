@@ -1927,6 +1927,12 @@ elif args[:1] == ["proxy"]:
     if fail_metrics and remote_port == 3003:
         print("injected metrics data-plane failure", file=sys.stderr)
         sys.exit(1)
+    if remote_port == 8011 and os.path.exists(os.path.join(FAKE_DIR, "delay-status-proxy")):
+        # A metrics-negative fixture must not spend its short target budget on
+        # the independently healthy status channel before autoscaler admission.
+        with locked_state() as state:
+            status_not_before = state.setdefault("status_proxy_not_before", time.monotonic() + 6)
+        time.sleep(max(0, status_not_before - time.monotonic()))
     remote_host = args[2]
     if os.path.exists(os.path.join(FAKE_DIR, "require-private-ip-proxy")) and ".vm." in remote_host:
         print(f"{remote_host}: host was not found in DNS", file=sys.stderr)
@@ -2595,7 +2601,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ]; then
+    && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_MANDATORY_METRICS_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -3640,6 +3647,39 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
     exit 0
 fi
 
+mandatory_metrics_failure_contract() {
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/fail-metrics-proxy"
+: > "$FAKE_DIR/delay-status-proxy"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS=4 \
+    CLOUDBENCH_FAKE_FAIL_METRICS_PROXY=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-required.log" \
+    autoscaler-must-start --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail when its mandatory autoscaler cannot attach"
+grep -Eq "mandatory autoscaler (failed to start|startup timed out)" \
+    "$TMP_ROOT/controller-autoscaler-required.log" ||
+    fail "mandatory autoscaler startup failure must be explicit"
+grep -Fq "1/1 isolated stacks reached the barrier (0 excluded as infra failures)" \
+    "$TMP_ROOT/controller-autoscaler-required.log" ||
+    fail "metrics failure fixture must first admit its healthy primary status channel"
+autoscaler_out="$(find "$WS_A/.context/fleet/runs" -mindepth 2 -maxdepth 2 \
+    -type d -name autoscaler-must-start)"
+[ -f "$autoscaler_out/barrier.ready.observed" ] ||
+    fail "metrics failure fixture must observe the genuine primary readiness marker"
+grep -Fq "injected metrics data-plane failure" "$autoscaler_out/autoscaler-metrics-proxy.log" ||
+    fail "mandatory autoscaler rejection must follow the intended metrics fault"
+if grep -Fq "status data-plane proxy did not become ready" "$autoscaler_out/fleet-child.log"; then
+    fail "metrics failure fixture may not fail at primary status admission"
+fi
+assert_and_reset_retained_fake_benchmark autoscaler-must-start ||
+    fail "autoscaler-must-start: missing runtime evidence must retain exact ownership"
+rm -f "$FAKE_DIR/fail-metrics-proxy" "$FAKE_DIR/delay-status-proxy"
+echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
+}
+
 readiness_retry_contract() {
 # Allocation and launch do not prove queue readiness. While genuine work is
 # pending, a replaceable failure must capture/reap its exact worker, then retry
@@ -3731,6 +3771,11 @@ for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
         sleep 0.1
     done
 done
+
+if [ "${CLOUDBENCH_TEST_MANDATORY_METRICS_ONLY:-0}" = "1" ]; then
+    mandatory_metrics_failure_contract
+    exit 0
+fi
 
 if [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" = "1" ]; then
     readiness_retry_contract
@@ -4905,23 +4950,7 @@ echo "PASS: scenario 2a — post-config starts and data-plane tunnels ignore sta
 # attach. A successful benchmark running on one primary is not acceptance: the
 # fleet contract requires the per-bench autoscaler to be operational.
 # ═════════════════════════════════════════════════════════════════════════════
-reset_fake_state
-: > "$FAKE_DIR/journal.log"
-: > "$FAKE_DIR/fail-metrics-proxy"
-autoscale_status=0
-CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=4 \
-    CLOUDBENCH_FAKE_FAIL_METRICS_PROXY=1 \
-    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-required.log" \
-    autoscaler-must-start --timeout 240 || autoscale_status=$?
-[ "$autoscale_status" -ne 0 ] ||
-    fail "a fleet must fail when its mandatory autoscaler cannot attach"
-grep -Eq "mandatory autoscaler (failed to start|startup timed out)" \
-    "$TMP_ROOT/controller-autoscaler-required.log" ||
-    fail "mandatory autoscaler startup failure must be explicit"
-assert_and_reset_retained_fake_benchmark autoscaler-must-start ||
-    fail "autoscaler-must-start: missing runtime evidence must retain exact ownership"
-rm -f "$FAKE_DIR/fail-metrics-proxy"
-echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
+mandatory_metrics_failure_contract
 
 # The synchronized boot-config barrier deliberately keeps every primary
 # stopped until the whole fleet is configured. A mandatory metrics proxy must
