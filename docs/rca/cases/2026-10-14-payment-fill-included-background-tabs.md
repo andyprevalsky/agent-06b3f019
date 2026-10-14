@@ -153,10 +153,12 @@ production surface. Two old CDP fixtures gained realistic focused-root and
 parent metadata without weakening their assertions. Independent adversarial
 review passed the narrowly stated diagnosis and repair.
 
-Deployment and broader authentication investigation remain pending; status
-stays open until the repair's shipping gates finish. This is not proof that
-the original purchase completes. The static mint cutoff remains a documented
-production configuration; changing it requires explicit approval.
+The narrow CDP ownership repair is implemented and reproduced above. Its
+shipping gates and production rollout are tracked separately in this change's
+deploy scorecard. This case stays open for the unresolved checkout and
+authentication observations; the original purchase has not been replayed or
+proven to complete. The static mint cutoff remains a documented production
+configuration; changing it requires explicit approval.
 
 ## Human feedback
 
