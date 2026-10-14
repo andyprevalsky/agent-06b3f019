@@ -17,6 +17,11 @@ import { SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
 import { appendLifecycleSms } from './sessionStore';
 import {
+  deliverNotificationMessage,
+  MAX_NOTIFICATION_CORRECTIONS,
+  NotificationDeliveryError,
+} from './notificationDelivery';
+import {
   formatPaymentApprovalBody,
   getPaymentCardMediaUrl,
   getRequestPaymentCard,
@@ -69,23 +74,38 @@ async function deliverAcrossChannels(
   phone: string,
   message: string,
   channels: readonly SupervisorChannel[],
-  send: (channel: SupervisorChannel) => Promise<ChannelSendResult>
-): Promise<ChannelSendResult> {
-  let anchor: ChannelSendResult | undefined;
-  let firstSuccess: ChannelSendResult | undefined;
+  send: (channel: SupervisorChannel, message: string) => Promise<ChannelSendResult>,
+  options?: SmsArchiveOptions
+): Promise<ChannelSendResult & { message: string }> {
+  let anchor: (ChannelSendResult & { message: string }) | undefined;
+  let firstSuccess: (ChannelSendResult & { message: string }) | undefined;
+  let channelMessage = message;
+  const correctionBudget = { remaining: MAX_NOTIFICATION_CORRECTIONS };
+  let allFailuresDefinitive = true;
   for (const channel of channels) {
-    const result = await send(channel);
+    const result = await deliverNotificationMessage({
+      channel,
+      message: channelMessage,
+      agentId: options?.archiveRootAgentId,
+      eventType: options?.archiveContext?.event_type,
+      correctionBudget,
+      send: (candidate) => send(channel, candidate),
+    });
     if (channel === 'WHATSAPP') {
       if (result.recipientUnreachable === true) await markWhatsAppUnreachable(userId);
       else if (result.success) await markWhatsAppReachable(userId);
     }
     if (result.success && firstSuccess === undefined) firstSuccess = result;
+    if (!result.success && result.definitiveFailure !== true) allFailuresDefinitive = false;
+    if (result.success) channelMessage = result.message;
     if (channel === 'SMS' || anchor === undefined) anchor = result;
   }
   // A mirrored send succeeded if ANY channel delivered — so a successful result
   // anchors the transcript append + completion outcome even when another channel
   // (e.g. SMS) failed. Fall back to the SMS/first result when all channels fail.
-  return firstSuccess ?? anchor ?? { success: false, error: 'no delivery channels' };
+  if (firstSuccess) return firstSuccess;
+  if (anchor) return { ...anchor, definitiveFailure: allFailuresDefinitive };
+  return { success: false, error: 'no delivery channels', message };
 }
 
 async function sendLifecycleSms(
@@ -95,10 +115,19 @@ async function sendLifecycleSms(
   options?: SmsArchiveOptions,
   channels: readonly SupervisorChannel[] = ['SMS']
 ): Promise<SmsSendResult> {
-  const result = await deliverAcrossChannels(userId, phone, message, channels, (channel) =>
-    sendOnChannel(channel, phone, message, options)
+  const result = await deliverAcrossChannels(
+    userId,
+    phone,
+    message,
+    channels,
+    (channel, candidate) =>
+      sendOnChannel(channel, phone, candidate, {
+        ...options,
+        abortSignal: AbortSignal.timeout(30_000),
+      }),
+    options
   );
-  await recordLifecycleTurn(userId, message, result);
+  await recordLifecycleTurn(userId, result.message, result);
   return result;
 }
 
@@ -113,13 +142,26 @@ async function sendLifecycleMms(
   // WhatsApp Cloud API sends are text-only in v1 (media is a follow-up); the
   // message body already carries the deep link, so WhatsApp degrades to text
   // while SMS keeps the MMS attachment.
-  const result = await deliverAcrossChannels(userId, phone, message, channels, (channel) =>
-    channel === 'WHATSAPP'
-      ? sendOnChannel('WHATSAPP', phone, message, options)
-      : sendMms(phone, message, mediaUrl, options)
+  const result = await deliverAcrossChannels(
+    userId,
+    phone,
+    message,
+    channels,
+    (channel, candidate) =>
+      channel === 'WHATSAPP'
+        ? sendOnChannel('WHATSAPP', phone, candidate, options)
+        : sendMms(phone, candidate, mediaUrl, {
+            ...options,
+            abortSignal: AbortSignal.timeout(30_000),
+          }),
+    options
   );
-  await recordLifecycleTurn(userId, message, result);
+  await recordLifecycleTurn(userId, result.message, result);
   return result;
+}
+
+function requireNotificationDelivery(result: SmsSendResult): void {
+  if (!result.success) throw new NotificationDeliveryError(result);
 }
 
 const MAX_MMS_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -279,6 +321,7 @@ export async function notifyAgentStarted(
     error: result.error,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }
 
 /**
@@ -330,6 +373,7 @@ export async function notifyPlannerMessage(
     messageSid: result.messageSid,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }
 
 /**
@@ -415,6 +459,7 @@ export async function notifyWriteLock(
     error: result.error,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }
 
 /**
@@ -462,6 +507,7 @@ export async function notifyAuthAssistance(
     messageSid: result.messageSid,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }
 
 /**
@@ -498,6 +544,7 @@ export async function notifyAgentCardSetup(
     messageSid: result.messageSid,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }
 
 /**
@@ -604,4 +651,5 @@ export async function notifyCostLimit(
     messageSid: result.messageSid,
     durationMs: Date.now() - startTime,
   });
+  requireNotificationDelivery(result);
 }

@@ -49,6 +49,7 @@
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
+import { notificationFixtureKey } from '../../providers/smsSupervisor/notificationLlm';
 import {
   listArchivedObjects,
   readArchivedArtifact,
@@ -1124,6 +1125,181 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
   }
 }
 
+async function testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent() {
+  const token = captureToken('notify-started-long-goal');
+  // Match the captured incident's 1670-character internal task without real credentials.
+  const privateInstruction = 'INTERNAL_TASK_CREDENTIAL_SENTINEL';
+  const goal = `${privateInstruction}\n${'Account setup instructions. '.repeat(70)}`.slice(0, 1670);
+  assert(goal.length === 1670, 'Expected the captured incident goal length');
+  const agent = await createNotifyAgent(goal);
+  const agentLink = `https://roselabs.ai/?agent-id=${agent.id}`;
+  const corrected = `I'm on it: Set up the requested accounts.\nFollow along: ${agentLink}`;
+  try {
+    await setNotificationFixture(agent.id, [
+      {
+        expected_tool_result_substrings: ['1762', 'should be at most 1600 character(s)'],
+        message: 'x'.repeat(1601),
+      },
+      {
+        expected_tool_result_substrings: ['1601', 'should be at most 1600 character(s)'],
+        message: corrected,
+      },
+    ]);
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'agent_started',
+        agent_id: agent.id,
+        payload: { goal },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(calls.length === 1, `Expected one kickoff SMS, got ${calls.length}`);
+    const body = JSON.parse(calls[0].requestBody!);
+    assert(
+      body.body.length <= 1600,
+      `Kickoff SMS exceeds captured Surge limit: ${body.body.length} > 1600`
+    );
+    assert(
+      !body.body.includes(privateInstruction),
+      'Kickoff SMS leaked internal task instructions'
+    );
+    assertAgentLinkPresent(body.body, agent.id);
+    assertLinkShorteningDisabled(body);
+    assert(body.body === corrected, 'Expected the corrected model notification');
+    const persisted = await prisma.agent.findUnique({ where: { id: agent.id } });
+    assert(persisted?.goal === goal, 'Notification formatting changed the full agent goal');
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function setNotificationFixture(agentId: string, fixture: unknown): Promise<void> {
+  const response = await request(`${BASE_URL}/api/test/sms-supervisor-fixture`, {
+    method: 'POST',
+    body: JSON.stringify({
+      userId: notificationFixtureKey(agentId),
+      fixture: JSON.stringify(fixture),
+    }),
+  });
+  assertStatus(response.status, 200, response.data);
+}
+
+async function clearNotificationFixture(agentId: string): Promise<void> {
+  await request(
+    `${BASE_URL}/api/test/sms-supervisor-fixture?userId=${encodeURIComponent(notificationFixtureKey(agentId))}`,
+    { method: 'DELETE' }
+  );
+}
+
+async function testBoundary_notificationRepairsProviderRejection(): Promise<void> {
+  const token = captureToken('notify-provider-rejection');
+  const goal = 'Set up the requested account. __BLACKBOX_SURGE_422__';
+  const agent = await createNotifyAgent(goal);
+  const corrected = `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`;
+  try {
+    await setNotificationFixture(agent.id, {
+      expected_tool_result_substrings: ['Surge API error: 422', 'body rejected by provider'],
+      message: corrected,
+    });
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(calls.length === 2, `Expected rejected then corrected send, got ${calls.length}`);
+    assert(calls[0].responseStatus === 422, 'Expected explicit provider rejection');
+    assert(calls[1].responseStatus === 200, 'Expected corrected send accepted');
+    assert(JSON.parse(calls[1].requestBody!).body === corrected, 'Expected model correction sent');
+    const session = await prisma.smsSession.findUnique({ where: { userId: TEST_USER_ID } });
+    const stored = JSON.parse(session!.messages) as Array<{
+      content: string;
+      providerMessageId?: string;
+    }>;
+    assert(
+      stored.some((entry) => entry.content === corrected),
+      'Corrected receipt missing from transcript'
+    );
+    assert(
+      !stored.some((entry) => entry.content.includes('__BLACKBOX_SURGE_422__')),
+      'Rejected receipt entered transcript'
+    );
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notificationDoesNotRetryAmbiguousFailure(): Promise<void> {
+  const token = captureToken('notify-ambiguous-failure');
+  const goal = 'Set up the requested account. __BLACKBOX_SURGE_502__';
+  const agent = await createNotifyAgent(goal);
+  try {
+    await setNotificationFixture(agent.id, {
+      message: 'This must not be sent after a gateway failure.',
+    });
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 500, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(calls.length === 1, `Ambiguous failure must not trigger a resend; got ${calls.length}`);
+    assert(calls[0].responseStatus === 502, 'Expected gateway failure fixture');
+  } finally {
+    await clearNotificationFixture(agent.id);
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testRealLlm_notificationKeepsDeliveryContract(): Promise<void> {
+  if (process.env.BLACKBOX_SMS_NOTIFICATION_REAL_LLM !== '1') return;
+  const token = captureToken('notify-real-llm');
+  const goal = `Prepare the quarterly marketing report and email the recommendations after completion.\n${'Internal planning: collect metrics, compare campaigns, and check the conclusions.\n'.repeat(35)}`;
+  const agent = await createNotifyAgent(goal);
+  try {
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        agent_id: agent.id,
+        event_type: 'agent_started',
+        payload: { goal },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    const calls = filterSurgeCalls(await readCapturesForToken(token));
+    assert(
+      calls.length === 1,
+      `Expected one accepted model-written notification, got ${calls.length}`
+    );
+    const body = JSON.parse(calls[0].requestBody!);
+    assert(body.body.length <= 1600, `Real model violated SMS length limit: ${body.body.length}`);
+    assertAgentLinkPresent(body.body, agent.id);
+    console.log(`    Live notification model accepted: ${body.body.length} characters`);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
 async function testBoundary_notifyCostLimitIncludesTaskGoal() {
   const token = captureToken('notify-cost-limit');
   const goal = 'boundary cost limit dinner booking task';
@@ -2020,6 +2196,22 @@ async function runAll() {
         {
           name: 'notify agent_started calls Surge API',
           fn: testBoundary_notifyAgentStartedCallsSurgeApi,
+        },
+        {
+          name: 'notify agent_started keeps long goal inside agent',
+          fn: testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent,
+        },
+        {
+          name: 'notify feeds provider rejection to model and sends correction',
+          fn: testBoundary_notificationRepairsProviderRejection,
+        },
+        {
+          name: 'notify does not retry ambiguous gateway failure',
+          fn: testBoundary_notificationDoesNotRetryAmbiguousFailure,
+        },
+        {
+          name: 'real notification model keeps delivery contract (opt-in)',
+          fn: testRealLlm_notificationKeepsDeliveryContract,
         },
         {
           name: 'notify cost_limit includes task goal',

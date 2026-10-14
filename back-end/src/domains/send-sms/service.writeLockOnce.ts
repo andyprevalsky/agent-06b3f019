@@ -11,6 +11,7 @@ import {
   reclaimFailedToolSideEffect,
 } from '../../providers/toolSideEffects';
 import { notifyWriteLock } from '../../providers/smsSupervisor/outboundEvents';
+import { NotificationDeliveryError } from '../../providers/smsSupervisor/notificationDelivery';
 import type { SupervisorChannel } from '../../providers/smsSupervisor/channelDelivery';
 import type { NotifyInput } from './types';
 
@@ -74,10 +75,11 @@ export async function dispatchWriteLockOnce(
         externalId: `${attentionRequestId}:initial`,
       });
     } catch (error) {
-      await markToolSideEffectFailed({
-        operationKey,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      // Only a known rejection can be retried safely. A timeout or an error
+      // recording an accepted send keeps the original claim non-reclaimable.
+      if (error instanceof NotificationDeliveryError && error.definitiveFailure) {
+        await markToolSideEffectFailed({ operationKey, error: error.message });
+      }
       throw error;
     }
     return;

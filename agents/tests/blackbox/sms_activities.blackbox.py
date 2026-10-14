@@ -7,33 +7,38 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
     get_captured_requests,
     setup_mock,
+    setup_mock_fn,
     teardown_mock,
 )
 
 
 def _setup():
-    setup_mock({
-        "/api/agents/": {
-            "status": 200,
-            "json": {
-                "agent": {"id": "agent-1", "source": "SMS"},
-                "messages": [],
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {
+                    "agent": {"id": "agent-1", "source": "SMS"},
+                    "messages": [],
+                },
             },
-        },
-        "/api/send-sms/direct": {
-            "status": 200,
-            "json": {"success": True},
-        },
-        "/api/send-sms/notify": {
-            "status": 200,
-            "json": {"success": True},
-        },
-    })
+            "/api/send-sms/direct": {
+                "status": 200,
+                "json": {"success": True},
+            },
+            "/api/send-sms/notify": {
+                "status": 200,
+                "json": {"success": True},
+            },
+        }
+    )
 
 
 async def test_get_source_happy_path():
@@ -122,12 +127,31 @@ async def test_notify_event():
     assert body["payload"]["goal"] == "Research AI trends"
 
 
+async def test_notify_event_budget_owns_model_corrections():
+    """The real HTTP request owns two channel sends and two model correction retries."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "/api/send-sms/notify" in str(request.url)
+        read_budget = request.extensions["timeout"]["read"]
+        assert read_budget >= 2 * 60 + 4 * 30, f"Notification HTTP read budget was {read_budget}s; needs 240s"
+        return httpx.Response(200, json={"success": True})
+
+    setup_mock_fn(handler)
+    with patch("temporalio.activity.heartbeat"), patch("helpers.sms_activities.archive_json"):
+        from helpers.sms_activities import notify_sms_event_activity
+
+        result = await notify_sms_event_activity("user-99", "agent_started", "agent-5", {"goal": "Research"})
+    assert result["success"] is True, result
+    assert_captured_call(url_contains="/api/send-sms/notify", method="POST")
+
+
 async def run_all_tests():
     print("sms-activities blackbox tests:")
     r = BlackboxResult()
     await r.record_async("get_source_happy_path", test_get_source_happy_path)
     await r.record_async("send_direct_sms", test_send_direct_sms)
     await r.record_async("notify_event", test_notify_event)
+    await r.record_async("notify_event_budget_owns_model_corrections", test_notify_event_budget_owns_model_corrections)
     teardown_mock()
     return r.all_passed
 

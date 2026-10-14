@@ -74,9 +74,7 @@ async def test_validation_missing_message():
     from tools.base import MessageStatus
 
     manager = SendMessageToUserManager()
-    events = await _collect_events(
-        manager.execute_tool(workflow_instance=None, tool_call={}, tool_call_id="tc-m1")
-    )
+    events = await _collect_events(manager.execute_tool(workflow_instance=None, tool_call={}, tool_call_id="tc-m1"))
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
     assert "non-empty" in events[0].message
@@ -146,11 +144,13 @@ def test_validate_tool_call_execute_phase_forces_false():
     """Execute-phase variant forces is_question=False regardless of payload."""
     from domains.send_message_to_user.service import validate_tool_call
 
-    result = validate_tool_call({
-        "tool": "send_message_to_user_execute_phase",
-        "message": "hello",
-        "is_question": True,
-    })
+    result = validate_tool_call(
+        {
+            "tool": "send_message_to_user_execute_phase",
+            "message": "hello",
+            "is_question": True,
+        }
+    )
     assert result["ok"] is True
     assert result["is_question"] is False
 
@@ -194,6 +194,7 @@ class _FakeWorkflowModule:
         self.logger = type("Logger", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
         # preserve unsafe since handler uses it; real module-level `with` already executed
         import temporalio.workflow as real
+
         self.unsafe = real.unsafe
 
     def now(self):
@@ -203,6 +204,10 @@ class _FakeWorkflowModule:
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
+        if name == "notify_sms_event_activity":
+            from datetime import timedelta
+
+            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=270)
         if name in self._activity_results:
             value = self._activity_results[name]
             if isinstance(value, Exception):

@@ -40,6 +40,7 @@ interface SurgeMessageResponse {
 interface SmsArchiveOptions {
   archiveRootAgentId?: string;
   archiveContext?: Record<string, unknown>;
+  abortSignal?: AbortSignal;
 }
 
 async function archiveSmsTransportBoundary(params: {
@@ -152,6 +153,7 @@ export async function sendSms(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
+      signal: options.abortSignal,
     });
 
     if (!response.ok) {
@@ -172,8 +174,9 @@ export async function sendSms(
       });
       return {
         success: false,
-        error: `Surge API error: ${response.status}`,
-        definitiveFailure: true,
+        error: `Surge API error: ${response.status}: ${errorText}`,
+        definitiveFailure:
+          response.status >= 400 && response.status < 500 && response.status !== 408,
       };
     }
 
@@ -216,7 +219,7 @@ export async function sendMms(
   message: string,
   mediaUrl: string,
   options: SmsArchiveOptions = {}
-): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+): Promise<{ success: boolean; messageSid?: string; error?: string; definitiveFailure?: boolean }> {
   const requestBody = {
     to: phoneNumber,
     body: message,
@@ -263,7 +266,7 @@ export async function sendMms(
 
   if (!apiKey || !accountId) {
     log.error('Surge credentials not configured');
-    return { success: false, error: 'Surge not configured' };
+    return { success: false, error: 'Surge not configured', definitiveFailure: true };
   }
 
   try {
@@ -274,6 +277,7 @@ export async function sendMms(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
+      signal: options.abortSignal,
     });
 
     if (!response.ok) {
@@ -287,7 +291,12 @@ export async function sendMms(
         success: false,
         context: options.archiveContext,
       });
-      return { success: false, error: `Surge API error: ${response.status}` };
+      return {
+        success: false,
+        error: `Surge API error: ${response.status}: ${errorText}`,
+        definitiveFailure:
+          response.status >= 400 && response.status < 500 && response.status !== 408,
+      };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;
