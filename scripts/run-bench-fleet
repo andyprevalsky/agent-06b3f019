@@ -10746,6 +10746,34 @@ worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
     WORKER_LEDGER_LOCK_TOKEN=""
 }
 
+fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...>
+    # The transport override exists only in this source-owned subshell, after
+    # genuine admission. No ambient flag can skip pacing in FLY or other calls.
+    (
+        local native_seconds="$1" ledger_path="$2" remaining
+        shift 2
+        [ "${1:-}:${2:-}" = machine:clone ] || exit 2
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" != 1 ] \
+            || [ -z "${RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC:-}" ] \
+            || [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] \
+            || [ -z "${RUN_BENCH_CAMPAIGN_COHORT:-}" ] \
+            || [ -z "${RUN_BENCH_CAMPAIGN_JOB_ID:-}" ] \
+            || [ "${ledger_path##*/}" != primary.ids ]; then
+            fly_with_timeout "$native_seconds" "$@"
+            exit $?
+        fi
+        private_source_allows_provider_call "$@" || exit $?
+        remaining="$(cloudbench_mutation_admission "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-campaign-mutation.py" pace \
+            --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+            --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" \
+            --wait-seconds "$native_seconds" --strict-primary --task-root "${ledger_path%/*}")" || exit $?
+        case "$remaining" in ''|*[!0-9]*|0) exit 1 ;; esac
+        [ "$remaining" -le "$native_seconds" ] || exit 1
+        FLY() { private_source_allows_provider_call "$@" || return $?; flyctl "$@"; }
+        fly_with_timeout "$remaining" "$@"
+    )
+}
+
 clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
@@ -10805,7 +10833,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             return 1
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
-        clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
+        clone_out="$(fleet_clone_with_queue_admission "$clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
             "${snapshot_args[@]}" --region "$REGION" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" \
             --override-cmd "sleep infinity" --detach 2>&1)"

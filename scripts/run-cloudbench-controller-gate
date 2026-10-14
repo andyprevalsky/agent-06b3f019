@@ -46,10 +46,12 @@ VM_MEMORY="${CLOUDBENCH_GATE_VM_MEMORY:-8192}"
 ROOTFS_SIZE_GB="${CLOUDBENCH_GATE_ROOTFS_SIZE_GB:-}"
 RETAIN_HOST="${CLOUDBENCH_GATE_RETAIN_HOST:-0}"
 EXPORT_HOST="${CLOUDBENCH_GATE_EXPORT_HOST:-0}"
+KEEP_FIXTURE_ON_FAILURE="${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}"
 WORKSPACE_VOLUME_SIZE_GB="${CLOUDBENCH_GATE_WORKSPACE_VOLUME_SIZE_GB:-}"
 WORKSPACE_VOLUME_ID=""; WORKSPACE_VOLUME_INTENT=""
 WORKSPACE_VOLUME_ARGS=()
 case "$EXPORT_HOST" in 0|1) ;; *) echo "invalid CLOUDBENCH_GATE_EXPORT_HOST" >&2; exit 2 ;; esac
+case "$KEEP_FIXTURE_ON_FAILURE" in 0|1) ;; *) echo "invalid CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE" >&2; exit 2 ;; esac
 [ "$EXPORT_HOST" != 1 ] || [ "$RETAIN_HOST" = 1 ] || { echo "controller export requires retain-host mode" >&2; exit 2; }
 case "$RETAIN_HOST" in 0|1) ;; *) echo "invalid CLOUDBENCH_GATE_RETAIN_HOST" >&2; exit 2 ;; esac
 MACHINE_LIFETIME_ARGS=(--rm)
@@ -373,6 +375,7 @@ flyctl machine run "$IMAGE_REF" \
   --file-local "/tmp/gate.sh=$GATE_SCRIPT" \
   --file-local "/tmp/gate-github-token=$GATE_TOKEN_FILE" \
   -e "GATE_REF=$GATE_REF" -e "GATE_REPO_URL=$REPO_URL" -e "GATE_NODE_VERSION=$GATE_NODE_VERSION" \
+  -e "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=$KEEP_FIXTURE_ON_FAILURE" \
   "/tmp/gate.sh" 2>&1 | tee "$RUN_LOG"
 set -e
 MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"

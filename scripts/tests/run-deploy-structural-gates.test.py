@@ -438,7 +438,7 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
 class LinuxGateStorageRetentionTests(unittest.TestCase):
     'Run the actual wrapper with a bounded native-provider transport.'
 
-    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None):
+    def _run(self, retain="0", size="", outcome="0", export="0", bad_collector=False, workspace="", volume_fault="", command=None, keep_tmp="0"):
         temporary = tempfile.TemporaryDirectory(prefix="gate-storage-retention-")
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -550,6 +550,7 @@ else: print('origin/fixture')
                "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
                "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
+               "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,
                "GATE_TEST_CALLS":str(calls), "GATE_TEST_OUTCOME":outcome,
                "CLOUDBENCH_GATE_EXPORT_HOST":export,"CLOUDBENCH_GATE_EXPORT_DIR":str(root/"custody"),
                "GATE_TEST_EXPORT":export,"GATE_TEST_REMOTE":str(root/"remote"),
@@ -720,6 +721,21 @@ else: print('origin/fixture')
         self.assertNotEqual(result.returncode,0)
         self.assertIn("authority differs",result.stderr)
         self.assertEqual(calls,[])
+
+    def test_fixture_failure_retention_reaches_native_env_and_refuses_invalid_values(self):
+        for keep in ("0", "1"):
+            with self.subTest(keep=keep):
+                result, calls = self._run(retain="1", export="1", keep_tmp=keep)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                run = next(row for row in calls if row[:2] == ["machine", "run"])
+                forwarded = [run[i + 1] for i, arg in enumerate(run[:-1]) if arg == "-e"]
+                self.assertIn("CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE=" + keep, forwarded)
+                self.assertFalse(any(row[:2] == ["machine", "destroy"] for row in calls))
+        for keep in ("yes", "-1", "1;false"):
+            with self.subTest(keep=keep):
+                result, calls = self._run(retain="1", export="1", keep_tmp=keep)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
 
     def test_invalid_opt_in_values_refuse_before_native_launch(self):
         for retain,size in (("invalid","80"),("1","80gb"),("1","0"),("1","-1"),("1","80;false")):

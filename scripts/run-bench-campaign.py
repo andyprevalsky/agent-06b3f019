@@ -658,6 +658,7 @@ def main() -> int:
                 "_manifest": {
                     "cohort_id": cohort_id,
                     "jobs": {str(job["job_id"]): None for job in members},
+                    **({"e2e_deadline_monotonic": e2e_deadline} if e2e_deadline is not None else {}),
                 },
             }
             cohorts.append(cohort)
@@ -1052,6 +1053,7 @@ def main() -> int:
                             "RUN_BENCH_CAMPAIGN_COHORT": str(
                                 current_cohort["cohort_id"]
                             ),
+                            **({"RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC": str(e2e_deadline)} if e2e_deadline is not None else {}),
                         }
                     )
                 else:
@@ -1059,6 +1061,7 @@ def main() -> int:
                     # diagnostic rendezvous from the calling shell.
                     environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
+                    environment.pop("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC", None)
                 command = [
                     "bash",
                     str(root / "scripts" / "run-bench"),

@@ -32899,3 +32899,100 @@ FLY() { printf '[{"id":"fresh-native"}]'; }
         assert result.returncode == 0, result.stderr
         assert result.stdout == ('[{"id":"bound"}]' if campaign else '[{"id":"fresh-native"}]')
         assert "forbidden-stale-local" not in result.stderr
+
+
+@pytest.mark.parametrize("case", ["all", "limited", "hung", "expired", "foreign", "stale", "abort", "finished", "bool_deadline", "queued_abort", "queued_finished", "changed_deadline", "unheld", "badsource", "nested", "changed_owner", "bad_parent_birth", "foreign_barrier"])
+def test_private_fleet_source_clone_queue_uses_original_strict_deadline(tmp_path: Path, case: str) -> None:
+    """Real authority/pacing/FIFO: queue consumes parent clock, RPC keeps 2s."""
+    import fcntl
+    workspace = tmp_path / "workspace"
+    campaign = workspace / ".context/benchmarks/campaigns/owned"
+    feed = campaign / "shared-inventory"
+    (feed / "inventory/current").mkdir(parents=True)
+    barrier = campaign / "startup-cohorts/c001"; barrier.mkdir(parents=True)
+    helper_dir = tmp_path / "helpers"; helper_dir.mkdir()
+    names = ("cloudbench-campaign-mutation.py", "cloudbench-script-snapshot.py")
+    for name in names:
+        (helper_dir / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+    publisher = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time;time.sleep(30)"])
+    lock = (barrier.parent / "parent.lock").open("w"); fcntl.flock(lock, fcntl.LOCK_EX)
+    children = []
+    try:
+        owner = dict(app="offline-owned", pid=str(publisher.pid), pid_start=_pid_start_identity(publisher.pid), token="owned-token", parent_pid=str(os.getpid()), parent_start=_pid_start_identity(os.getpid()))
+        if case == "bad_parent_birth": owner['parent_start'] = 'wrong-original-birth'
+        (feed / "owner").write_text("".join(key + "=" + value + "\n" for key, value in owner.items())); (feed / "owner").chmod(0o600)
+        (feed / "machines.json").write_text("[]\n"); (feed / "machines.json").chmod(0o600)
+        expiry = int(time.time() + 30) if case != "stale" else int(time.time() - 1)
+        (feed / "inventory/current/health").write_text(f"publisher_token=owned-token\nvalid_until={expiry}\n"); (feed / "inventory/current/health").chmod(0o600)
+        authority = dict(directory=str(feed.resolve()), owner=owner, source=dict(ref="fixture-checked-source", sha256={name: hashlib.sha256((helper_dir / name).read_bytes()).hexdigest() for name in names}))
+        fleet = fleet_source_text(); library = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text(); envlib = (ROOT / "scripts/lib/cloudbench-env.sh").read_text()
+        functions = "\n".join(_extract_fleet_function(text, signature) for text, signature in ((library, "fly_with_timeout() {"), (fleet, "private_source_allows_provider_call() {"), (fleet, "FLY() {"), (envlib, "cloudbench_mutation_launch_code() {"), (envlib, "cloudbench_mutation_admission() {"), (fleet, "fleet_clone_with_queue_admission() {")))
+        count = 3 if case in ("all", "limited", "queued_abort", "queued_finished", "changed_deadline", "changed_owner") else 1
+        release = tmp_path / "release"
+        native_pids = {}
+        deadline = True if case == "bool_deadline" else time.monotonic() + (2 if case in ("limited", "stale") else 4)
+        if case == "expired": deadline = time.monotonic() - 1
+        for index in range(count):
+            job = f"r001-j{index + 1:04d}"; task = f"task-{index}"; task_root = workspace / ".context/fleet/runs/original" / task; task_root.mkdir(parents=True)
+            if case == "finished": (task_root / "benchmark-child.finished").touch()
+            ready = tmp_path / f"ready-{index}"; marker = tmp_path / f"rpc-{index}"
+            script = f"""set -uo pipefail
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}
+APP=offline-owned
+clone_timeout=2
+FLEET_OWNER_PID_START="$(cloudbench_pid_start_time $$)"
+{functions}
+flyctl() {{ touch {shlex.quote(str(marker))}; sleep {4 if case == "hung" else .05}; printf native-ok; }}
+touch {shlex.quote(str(ready))}
+while [ ! -f {shlex.quote(str(release))} ]; do sleep .01; done
+fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))} machine clone exact-source
+"""
+            environment = dict(os.environ, CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY=json.dumps(authority), CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=str(feed), CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION="1", CLOUDBENCH_CAPACITY_RESERVATION_ROOT=str(tmp_path / "admission"), CLOUDBENCH_SCRIPT_SNAPSHOT=str(helper_dir), RUN_BENCH_CAMPAIGN_BARRIER_DIR=str(barrier), RUN_BENCH_CAMPAIGN_COHORT="c001", RUN_BENCH_CAMPAIGN_JOB_ID=job, RUN_BENCH_CAMPAIGN_TASK=task, RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC=str(deadline))
+            if case == "badsource":
+                altered = json.loads(json.dumps(authority)); altered['source']['sha256']['cloudbench-campaign-mutation.py'] = '0' * 64
+                environment['CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY'] = json.dumps(altered)
+            if case == "foreign_barrier": environment['RUN_BENCH_CAMPAIGN_BARRIER_DIR'] = str(tmp_path / 'foreign/c001')
+            if case == "nested":
+                for key in ("RUN_BENCH_CAMPAIGN_BARRIER_DIR", "RUN_BENCH_CAMPAIGN_COHORT", "RUN_BENCH_CAMPAIGN_JOB_ID"):
+                    environment.pop(key, None)
+            process = subprocess.Popen(["bash", "-c", script], env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            children.append(process); native_pids[job] = process.pid + (99999 if case == "foreign" else 0)
+        until = time.monotonic() + 10
+        while not all((tmp_path / f"ready-{index}").exists() for index in range(count)):
+            assert time.monotonic() < until
+            time.sleep(.01)
+        (barrier / "manifest.json").write_text(json.dumps(dict(cohort_id="c001", jobs=native_pids, e2e_deadline_monotonic=deadline))); (barrier / "manifest.json").chmod(0o600)
+        if case == "abort": (barrier / "abort.json").touch()
+        if case == "unheld": fcntl.flock(lock, fcntl.LOCK_UN)
+        release.touch()
+        if case in ("queued_abort", "queued_finished", "changed_deadline", "changed_owner"):
+            until = time.monotonic() + 3
+            while not any((tmp_path / f"rpc-{index}").exists() for index in range(count)):
+                assert time.monotonic() < until
+                time.sleep(.01)
+            if case == "queued_abort": (barrier / "abort.json").touch()
+            elif case == "queued_finished":
+                for index in range(count):
+                    (workspace / ".context/fleet/runs/original" / f"task-{index}" / "benchmark-child.finished").touch()
+            elif case == "changed_owner":
+                altered_owner = dict(owner, token="changed-owner")
+                (feed / "owner").write_text("".join(key + "=" + value + "\n" for key, value in altered_owner.items()))
+            else:
+                (barrier / "manifest.json").write_text(json.dumps(dict(cohort_id="c001", jobs=native_pids, e2e_deadline_monotonic=deadline + 100)))
+        results = [process.communicate(timeout=10) for process in children]
+        dispatched = [(tmp_path / f"rpc-{index}").exists() for index in range(count)]
+        if case in ("all", "nested"):
+            assert all(process.returncode == 0 for process in children), results
+            assert all(dispatched)
+        elif case == "hung":
+            assert children[0].returncode == 142 and dispatched == [True], results
+        elif case in ("limited", "queued_abort", "queued_finished", "changed_deadline", "changed_owner"):
+            assert any(process.returncode != 0 for process in children)
+            assert not all(dispatched)
+        else:
+            assert all(process.returncode != 0 for process in children), results
+            assert not any(dispatched), results
+    finally:
+        for process in children:
+            if process.poll() is None: process.terminate(); process.wait(timeout=5)
+        publisher.terminate(); publisher.wait(timeout=5); lock.close()
