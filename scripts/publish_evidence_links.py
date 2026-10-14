@@ -251,13 +251,15 @@ def verified_zero_session_tasks(bundle: dict, agent_id: str) -> set[str]:
     return set(task_map.get(agent_id, []))
 
 
-def upload_run_json(run_json: Path, agent_id: str) -> str:
+def upload_run_json(run_json: Path, agent_id: str, *, forensic_archive_receipt: Path | None = None) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
     from benchmarks.hub_upload import upload_run_bundle
 
-    bundle = evidence_bundle_for_agent(
-        json.loads(run_json.read_text(encoding="utf-8")), agent_id
-    )
+    original = json.loads(run_json.read_text(encoding="utf-8"))
+    if forensic_archive_receipt is not None:
+        from benchmarks.archived_diagnostics import project_verified_diagnostics
+        original = project_verified_diagnostics(original, run_json, forensic_archive_receipt)
+    bundle = evidence_bundle_for_agent(original, agent_id)
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
     if not (os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY")):
         raise SystemExit(
@@ -761,6 +763,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--run-json", type=Path, help="Upload this run bundle to the durable Hub")
+    parser.add_argument("--forensic-archive-receipt", type=Path,
+                        help="Authenticate all forensic originals before projecting duplicated native diagnostics")
     parser.add_argument("--run-id", help="Existing Hub run ID when --run-json is unavailable")
     parser.add_argument("--dump", type=Path, help="Specific LLM dump JSON (default: latest)")
     parser.add_argument("--skip-hub-upload", action="store_true")
@@ -782,7 +786,7 @@ def main() -> int:
         if args.skip_hub_upload:
             run_id = str(evidence_bundle_for_agent(bundle, agent_id).get("run_id") or "")
         else:
-            run_id = upload_run_json(run_path, agent_id)
+            run_id = upload_run_json(run_path, agent_id, forensic_archive_receipt=args.forensic_archive_receipt)
             dual_write_claude_code_sessions(run_path, agent_id)
     if not _AGENT_ID_RE.fullmatch(run_id):
         raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")

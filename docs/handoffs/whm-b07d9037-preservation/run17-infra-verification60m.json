@@ -28,8 +28,8 @@
     "all251_body_callID_requestSHA_draw_joins": true
   },
   "trajectory": {
-    "approximate_progress_percent": 25,
-    "confidence": "Uncalibrated initial outreach; final root literal joins verified; managed final stage review ended without sealed result",
+    "approximate_progress_percent": 26,
+    "confidence": "Low uncalibrated initial-outreach band25\u201326; final251 joins/census independently reviewed",
     "verified_midrun_commit_coverage": 142,
     "midrun_native_email_actions": 10,
     "midrun_literal_addresses": 13,
@@ -42,7 +42,11 @@
     "final_native_pending_wires": 0,
     "final_native_settled_proceeds_cents": 0,
     "delivery_qualification": "Native simulated receipts; external delivery not independently proven",
-    "scheduled_events_qualification": "One sent-email event and two conditional possible replies, not scheduled meetings"
+    "scheduled_events_qualification": "One sent-email event and two conditional possible replies, not scheduled meetings",
+    "final_native_email_actions": 13,
+    "final_literal_email_addresses": 15,
+    "final_native_form_actions": 14,
+    "final_distinct_form_organizations": 13
   },
   "fixture": {
     "source_database": "whm_gen1_e9afcffd_fixture_20261012",
@@ -127,12 +131,18 @@
     "root_signals_sent": 0
   },
   "publication": {
-    "status": "BLOCKED_HTTP413",
+    "status": "VERIFIED_AFTER_ARCHIVE_BOUND_PROJECTION",
     "attempted_viewer": "https://www.roselabs.ai/?agent-id=bb938dbe-1cc2-437c-80e7-faf31f300ce2",
-    "viewer_browser_verified": false,
+    "viewer_browser_verified": true,
     "prepared_compact_http_bytes": 107214710,
     "owned_http_limit_bytes": 94371840,
-    "whole_original_preserved": true
+    "whole_original_preserved": true,
+    "message_count": 175,
+    "repaired_prepared_http_bytes": 6605816,
+    "publisher_exit_code": 0,
+    "publisher_finished_at": "2026-10-14T18:28:13.422144Z",
+    "every1160_original_members_authenticated_again_before_projection": true,
+    "source_change_infrastructure_authorization": "User explicitly auto-approved infrastructure; independently reviewed optional evidence transport projection leaves WHM context/runtime acquisition unchanged"
   },
   "source_approvals": {
     "infra_autoapproved": true,
@@ -148,7 +158,11 @@
     "registered_native_blackbox_passed": 68,
     "actual_run_retirement_join_passed": true,
     "fundraising_benchmark_passed": false,
-    "private_HTTP_candidate_isolation_exception": "One private local service/fixture-build test executed before TCPguard rejected;114othercontrols passed; no fullsuitepass/lifecyclezero claim"
+    "private_HTTP_candidate_isolation_exception": "One private local service/fixture-build test executed before TCPguard rejected;114othercontrols passed; no fullsuitepass/lifecyclezero claim",
+    "publication_owning_cases_passed": 46,
+    "publication_adversarial_extra_controls_passed": 6,
+    "publication_browser_validation_and_composite_checks": "PASS",
+    "registered_projection_blackbox_callback": "PASS"
   },
   "archives": [
     {
@@ -186,7 +200,17 @@
       "members": 40,
       "manifest_sha256": "a2c15b77b00541c1a0d336e111fe3efd6bdc2da1bca0c22e4ced2d88c9e92c6b",
       "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-publication-infrastructure-private-receipt.json",
+      "members": 525,
+      "manifest_sha256": "f7ec65da25f41b5e1899513209833ccfaa998a50c8df7ece3d88ccaaddf3a150",
+      "full_authenticated_decrypted_member_readback": true
     }
   ],
-  "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished"
+  "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished",
+  "publication_repair_scope": "Only outgoing duplicated native diagnostic projection, after actual full encrypted archive verification; ordinary publication without option unchanged; no WHM context or runtime acquisition changes",
+  "remaining_issue": "Simulated phone completion is not persisted into caller DB polling;19repeatvoicemails. Private owningpreFAIL/postPASS candidate remains unapplied pending semantic qualification/user boundary; fundraiserPASS stillOPEN",
+  "slice_attempts_cost_estimate": 93.7668367262,
+  "slice_attempts_direct_Azure_estimate": 32.48759164
 }

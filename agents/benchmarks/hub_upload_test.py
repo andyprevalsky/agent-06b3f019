@@ -783,3 +783,17 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_archived_diagnostic_projection_requires_authenticated_bindings():
+ from benchmarks.hub_upload import project_archived_diagnostics
+ import copy, hashlib
+ diagnostic={'history':['private control']};bundle={'run_id':'run','tasks':[{'agent_id':'root','passed':False,'logs':{'messages':[{'text':'kept'}],'tree':{},'wmh_retirement':diagnostic}}]}
+ canonical={'path':'canonical.json','size':1,'sha256':'a'*64};native={'path':'native.json','size':1,'sha256':'b'*64};manifest=[canonical,native];digest=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest();receipt={'full_readback_verified':True,'files':2,'bucket':'trace-archive','key':'private/control.enc','encryption_key_id':'control','ciphertext_sha256':'c'*64,'manifest_sha256':digest};binding={'run_id':'run','member':native,'diagnostic_sha256':hashlib.sha256(json.dumps(diagnostic,sort_keys=True,separators=(',',':')).encode()).hexdigest()};ref={k:receipt[k] for k in ['bucket','key','encryption_key_id','ciphertext_sha256','manifest_sha256']};ref.update(canonical=canonical,retirements={'root':binding});trusted=copy.deepcopy({'bundle_sha256':hashlib.sha256(json.dumps(bundle,sort_keys=True,separators=(',',':')).encode()).hexdigest(),'canonical':canonical,'run_id':'run','retirements':{'root':binding}})
+ def verify(_):return receipt,manifest,trusted
+ before=json.dumps(bundle,sort_keys=True);out=project_archived_diagnostics(bundle,ref,verify_archive=verify);assert json.dumps(bundle,sort_keys=True)==before and out['tasks'][0]['logs']['messages']==bundle['tasks'][0]['logs']['messages'] and out['tasks'][0]['passed'] is False
+ attacked=copy.deepcopy(bundle);attacked['tasks'][0]['logs']['wmh_retirement']={'changed':'unarchived'};bad=copy.deepcopy(ref);bad['retirements']['root']['diagnostic_sha256']=hashlib.sha256(json.dumps({'changed':'unarchived'},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ try:project_archived_diagnostics(attacked,bad,verify_archive=verify)
+ except HubVisibilityError:pass
+ else:raise AssertionError('Caller cannot selfattest unarchived substitution')
+ print('PASS small owning immutable projection + changed-inline/matchingdigest substitution rejection')

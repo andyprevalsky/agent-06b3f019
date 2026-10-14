@@ -263,6 +263,12 @@ def test_hub_requests_preserve_external_proxy_routing():
         control(monkeypatch)
 
 
+
+
+def test_archived_diagnostic_projection_requires_authenticated_bindings():
+    from benchmarks.hub_upload_test import test_archived_diagnostic_projection_requires_authenticated_bindings as control
+    control()
+
 def test_hub_upload_rejection_retains_safe_response_identity_without_retry():
     """A forbidden upload stays failed while preserving upstream correlation."""
     from benchmarks.hub_upload import HubVisibilityError, upload_run_bundle
@@ -21344,6 +21350,7 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("archived_diagnostic_projection_requires_authenticated_bindings", test_archived_diagnostic_projection_requires_authenticated_bindings)
     await r.record_async(
         "benchmark_native_checks_overlap_judges_without_losing_ownership",
         test_benchmark_native_checks_overlap_judges_without_losing_ownership,
