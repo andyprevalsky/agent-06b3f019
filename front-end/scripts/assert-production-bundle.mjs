@@ -59,12 +59,12 @@ for (const entry of await readdir(assetsDir, { withFileTypes: true })) {
   const source = await readFile(path.join(assetsDir, entry.name), 'utf8');
   if (devToolMarkers.some((marker) => source.includes(marker))) offenders.push(entry.name);
   for (const match of source.matchAll(/JSON\.parse\(\s*(['"])/g)) {
-    const literal = readStringLiteral(source, match.index + match[0].length - 1);
-    let closing = literal.end;
-    while (/\s/.test(source[closing] ?? '')) closing++;
-    if (source[closing] !== ')') continue;
     let payload;
     try {
+      const literal = readStringLiteral(source, match.index + match[0].length - 1);
+      let closing = literal.end;
+      while (/\s/.test(source[closing] ?? '')) closing++;
+      if (source[closing] !== ')') continue;
       payload = JSON.parse(literal.value);
     } catch {
       continue;
