@@ -28,6 +28,10 @@
       "before-stack-launch",
       "agent-network-index-bootstrap"
     ],
+    "29b25bb1d5d86266243cc41d60831b2f4692818b99d4dedba4870b5ef7f62bff": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
     "2a2c06917022913d205570818dc794a35a68fccd10e74c9b93b61dffc86f4a37": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
