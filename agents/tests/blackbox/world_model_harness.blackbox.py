@@ -2251,6 +2251,8 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     )
     pricing = AsyncMock(return_value={})
     with (
+        patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(
+            scheduled_time=browser_handler.datetime.now(browser_handler.timezone.utc))),
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
         patch.object(browser_handler, "get_model_pricing_with_fallback", pricing),
         patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
@@ -2285,7 +2287,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     assert "4111111111111111" not in resumed_turns[-1]["content"]
 
 
-async def _exercise_simulated_browser_policy(*, active_feedback=False):
+async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_feedback=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
 
     class FakeWorldModel:
@@ -2361,9 +2363,14 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False):
         }
     )
     import copy
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     correction = "Use the existing signed-in account, preserving the order ID deliverable."
-    rows = []
+    scheduled_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+    rows = [{"id": "prior-task", "role": "USER", "text": "Historical task input",
+             "timestamp": (scheduled_time - timedelta(seconds=1)).isoformat()}]
+    if startup_feedback:
+        rows.append({"id": "queued-correction", "role": "USER", "text": correction,
+                     "timestamp": (scheduled_time + timedelta(seconds=1)).isoformat()})
     model_inputs = []
     async def decide(**kwargs):
         model_inputs.append(copy.deepcopy(kwargs["turn_messages"]))
@@ -2386,6 +2393,7 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False):
     )
     world_model = FakeWorldModel()
     with (
+        patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(scheduled_time=scheduled_time)),
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
         patch.object(
             browser_handler,
@@ -2453,11 +2461,14 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False):
     verifier_actions = verifier.await_args.kwargs["action_entries"]
     assert [entry["step"] for entry in verifier_actions] == [1, 2, 3, 4, 5, 6]
 
-    if active_feedback:
-        assert {"role": "user", "content": correction} in model_inputs[1], "active simulated browser lost the actual USER correction"
+    assert all("Historical task input" not in json.dumps(turns) for turns in model_inputs), "fresh browser replayed prior history"
+    if active_feedback or startup_feedback:
+        assert {"role": "user", "content": correction} in model_inputs[0 if startup_feedback else 1], "active simulated browser lost the actual USER correction"
         assert verifier.await_args.kwargs.get("user_instruction_messages") == [{"role": "user", "content": correction}], "simulated verifier omitted the actual USER correction"
         generator.assert_awaited_once()
         assert all("Output schema revised" not in json.dumps(turns) for turns in model_inputs)
+    else:
+        generator.assert_not_awaited()
 
 
 async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
@@ -2466,6 +2477,10 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
 
 async def test_simulated_browser_preserves_active_user_input_without_narration():
     await _exercise_simulated_browser_policy(active_feedback=True)
+
+
+async def test_simulated_browser_preserves_user_input_queued_before_activity_execution():
+    await _exercise_simulated_browser_policy(startup_feedback=True)
 
 
 async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False):
@@ -3190,6 +3205,7 @@ async def run_all_tests():
     )
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
     await r.record_async("simulated_browser_preserves_active_user_input_without_narration", test_simulated_browser_preserves_active_user_input_without_narration)
+    await r.record_async("simulated_browser_preserves_user_input_queued_before_activity_execution", test_simulated_browser_preserves_user_input_queued_before_activity_execution)
     r.record("simulated_resume_preserves_full_user_instruction_tail", test_simulated_resume_preserves_full_user_instruction_tail)
     await r.record_async(
         "wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes

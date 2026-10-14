@@ -234,6 +234,33 @@ There is no proved production simulated pointer-backed producer, so this
 follow-up adds no speculative hydration path. The runtime owner will integrate
 the follow-up before the single PR #1511 rollout.
 
+### Fresh simulated activity scheduling follow-up
+
+A fresh simulated activity used its execution-time wall clock as the initial
+USER cursor. With the real timestamp-filtered source, a correction committed
+after Temporal scheduled the activity but before a worker executed it was
+skipped. The real browser activity already starts from
+`activity.info().scheduled_time`; the simulator now uses that same boundary.
+
+The permanent owning test
+`test_simulated_browser_preserves_user_input_queued_before_activity_execution`
+sets scheduling to 30 seconds before execution and queues actual USER text one
+second after scheduling. The unchanged fixture fails before the fix because
+the first policy input omits that correction, and passes afterward with the
+same bytes also present for verification. A USER row from before scheduling
+remains excluded; the no-input fresh control performs no schema generation,
+and the existing legacy-resume controls remain intact. No epoch replay for
+fresh activities, prompt, transport, or fallback was added.
+
+Full owning command from `agents/`:
+
+    venv/bin/python scripts/run_blackbox_tests.py world-model-harness
+
+The exact before/after console artifacts are retained privately as
+`.context/rca-ae17b024/sim-startup-{before,after}.txt`. This is a deterministic
+startup custody reproduction, not a claim that the deleted production run
+was observed using simulator mode.
+
 ## Human feedback
 
 The user required schema updates only when needed and the same standard for
