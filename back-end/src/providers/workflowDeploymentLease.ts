@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 
 export const WORKFLOW_DEPLOYMENT_LEASE_KEY = 'deployment:temporal-workflow-cutover';
 const LEASE_OPERATION_TYPE = 'TEMPORAL_WORKFLOW_DEPLOYMENT_LEASE';
@@ -13,33 +13,40 @@ export interface WorkflowDeploymentLease {
 }
 
 export async function acquireWorkflowDeploymentLease(
-  options: { leaseMs?: number; heartbeatMs?: number } = {}
+  options: {
+    leaseMs?: number;
+    heartbeatMs?: number;
+    operationKey?: string;
+    operationType?: string;
+  } = {}
 ): Promise<WorkflowDeploymentLease> {
+  const operationKey = options.operationKey ?? WORKFLOW_DEPLOYMENT_LEASE_KEY;
+  const operationType = options.operationType ?? LEASE_OPERATION_TYPE;
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   if (leaseMs < 1_000 || heartbeatMs < 100 || heartbeatMs >= leaseMs) {
     throw new Error('Workflow deployment lease timings are invalid');
   }
   const ownerId = randomUUID();
-  const acquired = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${WORKFLOW_DEPLOYMENT_LEASE_KEY}))`;
+  const acquired = await runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${operationKey}))`;
     const cutoff = new Date(Date.now() - leaseMs);
     const existing = await tx.toolSideEffect.findUnique({
-      where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
+      where: { operationKey },
       select: { status: true, externalId: true, updatedAt: true },
     });
     if (existing?.status === 'STARTED' && existing.updatedAt >= cutoff) return false;
     await tx.toolSideEffect.upsert({
-      where: { operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY },
+      where: { operationKey },
       create: {
-        operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY,
-        operationType: LEASE_OPERATION_TYPE,
+        operationKey,
+        operationType,
         status: 'STARTED',
         externalId: ownerId,
         request: { leaseMs },
       },
       update: {
-        operationType: LEASE_OPERATION_TYPE,
+        operationType,
         status: 'STARTED',
         externalId: ownerId,
         request: { leaseMs },
@@ -50,7 +57,11 @@ export async function acquireWorkflowDeploymentLease(
     return true;
   });
   if (!acquired) {
-    throw new Error('Another Temporal workflow deployment currently owns the production cutover');
+    throw new Error(
+      operationKey === WORKFLOW_DEPLOYMENT_LEASE_KEY
+        ? 'Another Temporal workflow deployment currently owns the production cutover'
+        : `Another operation currently owns lease ${operationKey}`
+    );
   }
 
   let released = false;
@@ -59,8 +70,8 @@ export async function acquireWorkflowDeploymentLease(
     if (released || leaseLost) return false;
     const renewed = await prisma.toolSideEffect.updateMany({
       where: {
-        operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY,
-        operationType: LEASE_OPERATION_TYPE,
+        operationKey,
+        operationType,
         status: 'STARTED',
         externalId: ownerId,
       },
@@ -80,7 +91,11 @@ export async function acquireWorkflowDeploymentLease(
     ownerId,
     assertOwned: async () => {
       if (!(await renew())) {
-        throw new Error('Temporal workflow deployment lost its production cutover lease');
+        throw new Error(
+          operationKey === WORKFLOW_DEPLOYMENT_LEASE_KEY
+            ? 'Temporal workflow deployment lost its production cutover lease'
+            : `Operation lost lease ${operationKey}`
+        );
       }
     },
     release: async () => {
@@ -89,8 +104,8 @@ export async function acquireWorkflowDeploymentLease(
       clearInterval(heartbeat);
       await prisma.toolSideEffect.updateMany({
         where: {
-          operationKey: WORKFLOW_DEPLOYMENT_LEASE_KEY,
-          operationType: LEASE_OPERATION_TYPE,
+          operationKey,
+          operationType,
           status: 'STARTED',
           externalId: ownerId,
         },

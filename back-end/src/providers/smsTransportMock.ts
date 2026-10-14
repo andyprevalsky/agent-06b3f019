@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { isBenchmarkAgent } from './benchmarkAgent';
 import { createLogger } from './logger';
 import { isBenchmarkRuntime } from './plannerMemoryDefaults';
+import { SMS_MAX_BODY_CHARACTERS } from './smsDeliveryContract';
 
 const log = createLogger('SmsTransportMock');
 
@@ -26,6 +27,56 @@ export function isLocalBenchmarkWhatsAppTransportMockEnabled(): boolean {
 export function mockSurgeMessageId(seed: string): string {
   const digest = createHash('sha256').update(seed).digest('hex').slice(0, 26);
   return `msg_01${digest}`;
+}
+
+/** Captured Surge responses, including the real SMS body validation contract. */
+export function buildMockSurgeFetchResponse(requestBody: string | null): Response {
+  const sms = JSON.parse(requestBody ?? '{}') as { body?: unknown };
+  for (const status of [400, 401, 403, 404, 429]) {
+    if (typeof sms.body === 'string' && sms.body.includes(`__BLACKBOX_SURGE_${status}__`)) {
+      return new Response(JSON.stringify({ error: 'body rejected by provider' }), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+  }
+  if (
+    typeof sms.body === 'string' &&
+    (sms.body.length > SMS_MAX_BODY_CHARACTERS || sms.body.includes('__BLACKBOX_SURGE_422__'))
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: 'Could not perform the request with the provided parameters.',
+          type: 'validation_error',
+          detail: {
+            body: [
+              sms.body.length > SMS_MAX_BODY_CHARACTERS
+                ? `should be at most ${SMS_MAX_BODY_CHARACTERS} character(s)`
+                : 'body rejected by provider',
+            ],
+          },
+        },
+      }),
+      { status: 422, headers: { 'content-type': 'application/json' } }
+    );
+  }
+  if (requestBody?.includes('__BLACKBOX_SURGE_THROW__')) {
+    throw new Error('blackbox fake Surge network failure');
+  }
+  if (requestBody?.includes('__BLACKBOX_SURGE_502__')) {
+    return new Response('blackbox fake Surge upstream unavailable', {
+      status: 502,
+      statusText: 'Bad Gateway',
+      headers: { 'content-type': 'text/plain' },
+    });
+  }
+  // Stable ids depend on the payload, never on unrelated capture traffic.
+  return new Response(JSON.stringify({ id: mockSurgeMessageId(`capture:${requestBody ?? ''}`) }), {
+    status: 200,
+    statusText: 'OK',
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 export function mockAgentPhoneMessageId(seed: string): string {
