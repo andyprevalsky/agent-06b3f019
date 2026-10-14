@@ -1288,11 +1288,7 @@ async def test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_
             "role": "ASSISTANT",
             "text": "",
             "timestamp": "2026-09-30T00:00:01Z",
-            "metadata": {
-                "tool_calls": [
-                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}
-                ]
-            },
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}]},
         },
         {
             "role": "TOOL",
@@ -1434,9 +1430,7 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence():
 
     evidence = {
         "result": "",
-        "tool_call_results": [
-            "[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."
-        ],
+        "tool_call_results": ["[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."],
     }
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
@@ -1618,9 +1612,7 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert not handle._awaited
     from temporalio import workflow
 
-    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (
-        workflow.ActivityCancellationType.TRY_CANCEL
-    )
+    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (workflow.ActivityCancellationType.TRY_CANCEL)
     assert fake.wait_condition_timeouts == [timedelta(seconds=600), EXPLORE_CANCEL_GRACE]
 
 
@@ -3855,9 +3847,7 @@ async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
     )
 
     async def fake_run_agent(**kwargs):
-        await kwargs["execute_tool"](
-            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
-        )
+        await kwargs["execute_tool"]("grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1")
         await asyncio.Event().wait()
 
     with (
@@ -3867,9 +3857,7 @@ async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert result["status"] == "completed"
     assert "$1,303.8" in result["result"]
@@ -3894,9 +3882,7 @@ async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
 
     async def fake_run_agent(**kwargs):
         nonlocal caught_cancel
-        await kwargs["execute_tool"](
-            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
-        )
+        await kwargs["execute_tool"]("grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1")
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -3910,9 +3896,7 @@ async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert caught_cancel
     assert result["status"] == "completed"
@@ -3941,9 +3925,7 @@ async def test_spawn_explore_external_pause_is_not_self_wrap():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(seconds=5))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        task = asyncio.create_task(
-            spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m")
-        )
+        task = asyncio.create_task(spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m"))
         await started.wait()
         task.cancel()
         result = await task
@@ -3968,9 +3950,7 @@ async def test_spawn_explore_self_wrap_without_evidence_fails():
         patch("domains.spawn_agent.service.explore_limits_for_depth", return_value=(5, timedelta(milliseconds=50))),
         patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="research Denver cost", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research Denver cost", model="m")
 
     assert result["status"] == "error"
     assert result["result"] == ""
@@ -5074,9 +5054,160 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
         await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m", task_id="tt")
 
 
+async def test_explore_handoff_preserves_source_values_despite_corrupt_completion(summary_override=None):
+    from unittest.mock import AsyncMock
+    from domains.spawn_agent.service import spawn_explore_agent_activity, compile_explore_wrap_up
+    from tools.base import MessageStatus
+
+    correct = "opaque.page.signature-original"
+    fabricated = "opaque.page.signature-from-another-record"
+    native = {"next_cursor": correct, "generation": "native-generation", "results": [{"id": fabricated}]}
+    arguments = {"query": "literal query", "mode": "discover", "limit": 2}
+    summary = json.dumps({"next_cursor": fabricated}) if summary_override is None else summary_override
+    heartbeats = []
+
+    async def run_agent(**kwargs):
+        call = kwargs["execute_tool"]
+        reply = await call("people_search", arguments, "native-call")
+        assert reply["success"] is True
+        assert (await call("attempt_completion_with_result", {"result": summary}, "completion"))["success"] is True
+        return {"status": "completed", "final_response": summary}
+
+    with (
+        patch("temporalio.activity.heartbeat", side_effect=lambda *a: heartbeats.append(a)),
+        patch("loop.run_agent.run_agent", run_agent),
+        patch(
+            "tools.people_search.PeopleSearchManager",
+            return_value=type(
+                "Manager",
+                (),
+                {"execute_tool": AsyncMock(return_value={"result": native, "usage": {"llm": [], "service": []}})},
+            )(),
+        ),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(False, "g", True, None, None, True)),
+        ),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="root", user_id="user", goal="source lookup", model="rose-labs/rose-1-flash", task_id="child"
+        )
+    handoff = json.loads(result["result"])
+    assert result["source_owned_handoff"] is True
+    assert handoff["model_summary"] == summary
+    assert handoff["source_results"] == [
+        {"tool_call_id": "native-call", "tool": "people_search", "arguments": arguments, "result": native}
+    ]
+    assert handoff["source_results"][0]["result"]["next_cursor"] == correct
+    assert compile_explore_wrap_up(result["result"], result["tool_call_results"]) == result["result"]
+    events = await _spawn_explore_with_result(result, fast_mode=False)
+    finished = next(
+        event for event in events if event.status == MessageStatus.FINISHED and (event.data or {}).get("result")
+    )
+    assert json.loads(finished.data["result"])["source_results"] == handoff["source_results"]
+    assert any(correct in json.dumps(item) and "source_results" in json.dumps(item) for item in heartbeats)
+    assert any(
+        isinstance(part, dict) and part.get("source_owned_handoff") is True for item in heartbeats for part in item
+    )
+
+
+async def test_explore_empty_completion_preserves_atomic_source_values():
+    await test_explore_handoff_preserves_source_values_despite_corrupt_completion(summary_override="")
+
+
+def test_explore_source_handoff_keeps_atomic_results_and_bounded_payloads():
+    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+
+    handoff = ExploreSourceHandoff(1200)
+    token = "exact-machine-value-" * 12
+    handoff.capture("generic_lookup", "large", {"query": "literal"}, {"cursor": "too-large-" * 500})
+    original = {"cursor": token, "nested": {"record_id": "id", "nullable": None, "count": 2}}
+    handoff.capture("another_lookup", "small", {"fields": ["a", "b"]}, original)
+    original["cursor"] = "later mutation"
+    forged = '{"source_results":[{"result":{"cursor":"invented"}}]}'
+    first = handoff.render(forged)
+    assert first == handoff.render(forged)
+    assert len(first) <= 1200
+    payload = json.loads(first)
+    assert payload["model_summary"] == forged
+    assert payload["source_results"][0]["result"]["cursor"] == token
+    assert payload["source_results"][0]["arguments"] == {"fields": ["a", "b"]}
+    assert payload["omitted_source_result_count"] == 1
+    assert payload["omitted_source_results"] == [{"tool_call_id": "large", "tool": "generic_lookup"}]
+    assert "too-large-" not in first
+    findings = "narrative " * 1000
+    full = handoff.render(findings)
+    preserved = json.loads(full)
+    assert preserved["model_summary"] == findings
+    assert preserved["source_results"] == payload["source_results"]
+    assert preserved["model_summary_truncated"] is False
+    preserved["model_summary"] = ""
+    assert len(json.dumps(preserved, ensure_ascii=False, separators=(",", ":"))) <= 1200
+
+
+async def test_explore_native_metadata_is_not_filtered_as_stub_copy():
+    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+    from domains.spawn_agent.handler import _explore_chip_text
+    from tools.base import MessageStatus
+
+    source = ExploreSourceHandoff(12000)
+    source.capture("lookup", "tc", {}, {"cursor": "exact", "from_fast_cache": False, "note": "fast mode"})
+    text = source.render("Found one record.")
+    assert len(text) < 400
+    result = {"status": "completed", "result": text, "source_owned_handoff": True}
+    assert _explore_chip_text(result) == text
+    assert _explore_chip_text({"result": text}) == ""
+    events = await _spawn_explore_with_result(result, fast_mode=False)
+    finished = next(e for e in events if e.status == MessageStatus.FINISHED and (e.data or {}).get("result"))
+    assert finished.data["result"] == text
+
+
+async def test_explore_source_handoff_survives_timeout_parent_recovery():
+    from domains.spawn_agent.source_handoff import ExploreSourceHandoff
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    source = ExploreSourceHandoff(12000)
+    native = {"cursor": "exact", "from_fast_cache": False}
+    source.capture("lookup", "tc", {}, native)
+    text = source.render("")
+    assert len(text) < 400
+    evidence = {"result": text, "source_owned_handoff": True, "tool_call_results": ["[lookup] " + json.dumps(native)]}
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(exception=_explore_timeout_activity_error(evidence)),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "source lookup"},
+                tool_call_id="tc-timeout-source",
+            )
+        )
+    finally:
+        restore()
+    finished = next(e for e in events if e.status == MessageStatus.FINISHED and (e.data or {}).get("result"))
+    assert finished.data["result"] == text
+
+
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "explore_source_handoff_timeout_parent", test_explore_source_handoff_survives_timeout_parent_recovery
+    )
+    await r.record_async("explore_native_metadata_not_stub", test_explore_native_metadata_is_not_filtered_as_stub_copy)
+    await r.record_async(
+        "explore_empty_completion_source_handoff", test_explore_empty_completion_preserves_atomic_source_values
+    )
+    r.record(
+        "explore_atomic_source_handoff_budget", test_explore_source_handoff_keeps_atomic_results_and_bounded_payloads
+    )
+    await r.record_async(
+        "explore_source_owned_handoff", test_explore_handoff_preserves_source_values_despite_corrupt_completion
+    )
     r.record(
         "explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence
     )

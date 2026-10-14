@@ -34,6 +34,7 @@ from domains.spawn_agent.repo import (
 from domains.spawn_agent.repo import (
     save_explore_message,
 )
+from domains.spawn_agent.source_handoff import ExploreSourceHandoff
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
@@ -230,11 +231,7 @@ def compile_explore_wrap_up(
 
 def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
     """Keep bounded, original grep results beside an explore agent's summary."""
-    grep_results = [
-        str(item).strip()
-        for item in tool_call_results
-        if str(item).lstrip().startswith("[grep]")
-    ]
+    grep_results = [str(item).strip() for item in tool_call_results if str(item).lstrip().startswith("[grep]")]
     return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
 
 
@@ -448,9 +445,7 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
     insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
     any later replay that re-materializes items from cached JSON.
     """
-    item_text = (
-        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
-    )
+    item_text = json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 
@@ -538,6 +533,7 @@ async def spawn_explore_agent_activity(
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
+    source_handoff = ExploreSourceHandoff(EXPLORE_FALLBACK_PAYLOAD_BUDGET)
     # The local summary is fetched by a trusted backend activity before this
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
@@ -554,8 +550,12 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        compiled = compile_explore_wrap_up("", tool_call_results)
-        resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        compiled = source_handoff.render("") or compile_explore_wrap_up("", tool_call_results)
+        resume_details.update(
+            result=compiled,
+            tool_call_results=list(tool_call_results[-8:]),
+            source_owned_handoff=bool(source_handoff.records or source_handoff.omitted_count),
+        )
         return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
@@ -797,12 +797,8 @@ async def spawn_explore_agent_activity(
                     if (
                         source
                         and normalized
-                        and _unavailable_source_is_required(
-                            source, goal, tool_args.get("require_source_access")
-                        )
-                        and not any(
-                            u.get("source") == source for u in unavailable_sources_collected
-                        )
+                        and _unavailable_source_is_required(source, goal, tool_args.get("require_source_access"))
+                        and not any(u.get("source") == source for u in unavailable_sources_collected)
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "api_request":
@@ -833,9 +829,7 @@ async def spawn_explore_agent_activity(
 
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():
-                    evidence_tools = (
-                        "web_search, people_search, web_fetch, grep, or api_request"
-                    )
+                    evidence_tools = "web_search, people_search, web_fetch, grep, or api_request"
                 return {
                     "error": True,
                     "message": (
@@ -860,6 +854,7 @@ async def spawn_explore_agent_activity(
 
         if _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
+        source_handoff.capture(tool_name, tool_call_id, tool_args, actual_result)
         result_str = _render_explore_tool_result(tool_name, actual_result)
 
         # Keep readable tool evidence for heartbeat, completion fallback, and
@@ -892,16 +887,14 @@ async def spawn_explore_agent_activity(
             # toolCallId, so both must respect that chip's ordering invariant.
             _dispatch_fe_post(
                 tool_call_id,
-                lambda: (
-                    save_explore_message(
-                        agent_id=agent_id,
-                        title=title,
-                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                        status=message_status,
-                        task_id=task_id,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                    )
+                lambda: save_explore_message(
+                    agent_id=agent_id,
+                    title=title,
+                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                    status=message_status,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
                 ),
             )
         await _maybe_drain_pending_fe_posts()
@@ -932,13 +925,11 @@ async def spawn_explore_agent_activity(
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
         initial_user_text = (
-            initial_user_text
-            + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
+            initial_user_text + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
             "use these directly and use grep only for missing message-level details). "
             "A thread label is a valid contact identifier. If it contains only a phone number, "
             "report that identifier exactly; do not guess or use unrelated web, email, or document "
-            "searches to invent a person's identity. Search only sources relevant to the goal:\n"
-            + local_data_summary
+            "searches to invent a person's identity. Search only sources relevant to the goal:\n" + local_data_summary
         )
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
@@ -991,8 +982,7 @@ async def spawn_explore_agent_activity(
                     # The parent waits this depth's whole activity timeout
                     # (quick/medium 600s, deep 1800s); wrap up just inside it.
                     async with asyncio.timeout(
-                        explore_limits_for_depth(effective_depth)[1].total_seconds()
-                        - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                        explore_limits_for_depth(effective_depth)[1].total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
                     ) as deadline:
                         result = await run_agent_coro
                 except asyncio.TimeoutError:
@@ -1016,9 +1006,7 @@ async def spawn_explore_agent_activity(
         # shielded posts must finish before a final drain or activity return.
         drain_error: BaseException | None = None
         if _inflight_fe_drains:
-            results = await asyncio.shield(
-                asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
-            )
+            results = await asyncio.shield(asyncio.gather(*_inflight_fe_drains, return_exceptions=True))
             drain_error = next((item for item in results if isinstance(item, BaseException)), None)
         # Flush posts queued after the last threshold drain as well.
         try:
@@ -1035,6 +1023,9 @@ async def spawn_explore_agent_activity(
         result.get("final_response", "") or "",
         tool_call_results,
     )
+
+    model_summary = compile_explore_wrap_up(result.get("final_response", "") or "", [])
+    final_response = source_handoff.render(model_summary) or final_response
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -1067,6 +1058,7 @@ async def spawn_explore_agent_activity(
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
         "status": "completed" if run_completed else "error",
+        "source_owned_handoff": bool(source_handoff.records or source_handoff.omitted_count),
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,

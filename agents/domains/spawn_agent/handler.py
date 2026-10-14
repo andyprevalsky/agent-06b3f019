@@ -7,6 +7,7 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -104,12 +105,19 @@ def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
 
 
 def _explore_chip_text(result: Dict[str, Any]) -> str:
-    return user_facing_explore_result(
-        compile_explore_wrap_up(
-            result.get("result") or result.get("final_response") or result.get("summary") or "",
-            result.get("tool_call_results") or [],
-        )
-    )
+    raw = result.get("result") or result.get("final_response") or result.get("summary") or ""
+    if result.get("source_owned_handoff") is True:
+        try:
+            envelope = json.loads(raw)
+        except (TypeError, ValueError):
+            envelope = None
+        if (
+            isinstance(envelope, dict)
+            and isinstance(envelope.get("source_results"), list)
+            and isinstance(envelope.get("model_summary"), str)
+        ):
+            return raw
+    return user_facing_explore_result(compile_explore_wrap_up(raw, result.get("tool_call_results") or []))
 
 
 _EXPLORE_SYNTHESIS_CHECKPOINT = (
@@ -122,9 +130,7 @@ _EXPLORE_SYNTHESIS_CHECKPOINT = (
 
 
 def _source_linked_explore_text(text: str) -> bool:
-    return len(text.strip()) >= 200 and any(
-        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
-    )
+    return len(text.strip()) >= 200 and any(marker in text for marker in ("https://", "http://", "@ref:", "grep:"))
 
 
 def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
@@ -141,9 +147,8 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
         if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
             continue
         metadata = message.get("metadata") or {}
-        if (
-            metadata.get("toolName") == "spawn_agent"
-            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
+        if metadata.get("toolName") == "spawn_agent" and _EXPLORE_SYNTHESIS_CHECKPOINT in str(
+            message.get("text") or ""
         ):
             return False  # Persist the one-time choice through continue-as-new.
         if (
@@ -175,9 +180,7 @@ def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -
     return False
 
 
-def _explore_result_after_activity_failure(
-    exc: BaseException, *, user_paused: bool
-) -> tuple[Dict[str, Any], bool]:
+def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: bool) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
@@ -195,6 +198,7 @@ def _explore_result_after_activity_failure(
         return {
             "status": "completed",
             "result": recovered_text,
+            "source_owned_handoff": recovered.get("source_owned_handoff") is True,
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -929,9 +933,7 @@ class SpawnAgentManager(ToolManager):
                 and not explore_failed
                 and _grounded_explore_text(explore_result, explore_tool_call_results)
                 and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
-                and _has_prior_grounded_explore_batch(
-                    getattr(workflow_instance, "context", None), tool_call_id
-                )
+                and _has_prior_grounded_explore_batch(getattr(workflow_instance, "context", None), tool_call_id)
             ):
                 # One advisory after a grounded follow-up round. It must not
                 # replace evidence or prevent another necessary targeted search.
