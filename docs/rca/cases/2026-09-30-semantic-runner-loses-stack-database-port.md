@@ -10,10 +10,9 @@ first_bad_boundary: front-end/scripts/run-semantic-tests.sh::apply_local_semanti
 symptoms:
   - 'The column BrowserSession.kernelProxySource does not exist in the current database.'
   - 'PrismaClientKnownRequestError P2022 in seed-browser-take-control-e2e.ts'
-  - 'browser-take-control semantic test failed while other seven UI specs passed'
   - 'Hand back control absent after Take control'
   - '404 Session not found from POST /api/browser-session/task/:taskId/control'
-  - 'semantic seed DB victoria differs from backend manifest victoria_bench_*'
+  - 'semantic runner must preserve the active stack database name'
 tags:
   - semantic
   - take-control
