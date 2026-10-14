@@ -25,6 +25,7 @@ import {
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { withSteelLifecycleClaim } from './lifecycleClaim';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import {
   newOwnedSteelSessionId,
@@ -437,6 +438,36 @@ export async function createSessionWithContext(
 export async function closeSession(
   sessionId: string,
   pause: boolean = false,
+  currentUrl?: string
+): Promise<void> {
+  if (sessionId.startsWith('local-')) {
+    return closeSessionWithinClaim(sessionId, pause, currentUrl);
+  }
+  const session = await prisma.browserSession.findUnique({
+    where: { sessionId },
+    select: { id: true, providerProfileId: true, providerProfilePersist: true },
+  });
+  if (session === null) throw new Error(`Browser session not found: ${sessionId}`);
+  await withSteelLifecycleClaim(session.id, async () => {
+    const current = await prisma.browserSession.findUnique({
+      where: { id: session.id },
+      select: { sessionId: true },
+    });
+    if (current?.sessionId !== sessionId) {
+      throw new Error(`Browser session changed before closing task ${session.id}`);
+    }
+    const close = () => closeSessionWithinClaim(sessionId, pause, currentUrl);
+    if (session.providerProfileId && session.providerProfilePersist) {
+      await withSteelLifecycleClaim(`profile:${session.providerProfileId}`, close);
+    } else {
+      await close();
+    }
+  });
+}
+
+async function closeSessionWithinClaim(
+  sessionId: string,
+  pause: boolean,
   currentUrl?: string
 ): Promise<void> {
   log.info(`${pause ? 'Pausing' : 'Closing'} Steel session ${sessionId}...`);
