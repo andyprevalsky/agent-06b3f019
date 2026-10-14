@@ -12,7 +12,7 @@ from benchmarks.wmh_grounding_filter import failed_tool_result
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from providers.rose.client import RoseClient
 from providers.rose.errors import RoseStallError
-from providers.rose.types import StreamChunk
+from providers.rose.types import RoseResponse, StreamChunk
 
 
 def _grounded_retry_control(
@@ -971,7 +971,7 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
 
     cached_client = SimpleNamespace(
         collect=AsyncMock(
-            return_value=SimpleNamespace(
+            return_value=RoseResponse(
                 content=rejected,
                 usage=leased_usage,
                 actual_model="offline-model",
@@ -1003,6 +1003,8 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
         assert response.status_code == 422
         detail = response.json()["detail"]
         assert detail["kind"] == "invalid_prediction"
+        sent_model = cached_client.collect.await_args.kwargs["response_model"]
+        assert sent_model.__name__ == "TimedOutcomeDistribution"
         assert detail["rejected_response"] == {
             "content": rejected,
             "actual_model": "offline-model",
@@ -1017,6 +1019,11 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
                 "result_required": True,
                 "prefer_azure": False,
                 "retry_partial_errors": True,
+                "response_model": {
+                    "name": "TimedOutcomeDistribution",
+                    "schema": sent_model.model_json_schema(),
+                    "rose_openai_strict": False,
+                },
             },
         }
         assert marker not in detail["reason"]
@@ -1044,7 +1051,7 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
     rejected = '{"private-wire-reply-marker":'
     client = SimpleNamespace(
         collect=AsyncMock(
-            return_value=SimpleNamespace(
+            return_value=RoseResponse(
                 content=rejected,
                 usage={"prompt_tokens": 10, "completion_tokens": 1},
                 actual_model="offline-model",
@@ -1096,6 +1103,11 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
             "prefer_azure": True,
             "retry_partial_errors": True,
             "json_mode": True,
+            "response_model": {
+                "name": "TimedOutcomeDistribution",
+                "schema": sent["response_model"].model_json_schema(),
+                "rose_openai_strict": False,
+            },
         }
         assert STREAM_GUIDE in sent["messages"][0]["content"]
         assert any(isinstance(message["content"], list) for message in sent["messages"])

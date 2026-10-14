@@ -5596,6 +5596,7 @@ def test_native_rose_provider_regressions():
             "pytest",
             "-q",
             str(root / "agents/benchmarks/wmh_rose_provider_test.py"),
+            str(root / "agents/benchmarks/wmh_structured_cache_test.py"),
             str(root / "agents/benchmarks/wmh_reliability_test.py"),
             str(root / "agents/benchmarks/wmh_validation_recovery_test.py"),
             str(root / "agents/benchmarks/wmh_recording_test.py"),

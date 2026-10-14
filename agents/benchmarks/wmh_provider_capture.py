@@ -190,6 +190,9 @@ def prediction_request(kwargs: dict) -> dict:
         "idle_timeout_s",
     )
     request = deepcopy({key: kwargs[key] for key in fields if key in kwargs})
+    response_model = kwargs.get("response_model")
+    if response_model is not None:
+        request["response_model"] = {"name": response_model.__name__, "schema": response_model.model_json_schema(), "rose_openai_strict": bool(getattr(response_model, "rose_openai_strict", True))}
     if "_skip_models" in kwargs:
         request["_skip_models"] = sorted(kwargs["_skip_models"])
     return request

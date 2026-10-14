@@ -8408,6 +8408,109 @@ async def test_rose_client_preserves_native_tools_for_waterfall():
 # =====================================================================
 
 
+async def test_wmh_native_response_model_reaches_foundry_http():
+    """Sanitized WHM owning call must carry its declared native output schema."""
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from providers.rose.client import RoseClient
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    class Captured(BaseException):
+        pass
+
+    seen = []
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        assert request.url.host == "offline.invalid"
+        body = json.loads(request.content)
+        seen.append(body)
+        assert body.get("text", {}).get("format", {}).get("type") == "json_schema", "Actual WHM request must carry its typed native output schema"
+        assert body["text"]["format"]["strict"] is False
+        schema = body["text"]["format"]["schema"]
+        assert schema["properties"]["schema"]["const"] == "rose.wmh_timed_outcome_distribution.v1"
+        assert "outcomes" in schema["properties"]
+        patches = schema["properties"]["outcomes"]["items"]["properties"]["state_patch"]["items"]["anyOf"]
+        setter = next(branch for branch in patches if "value" in branch["properties"])
+        remove = next(branch for branch in patches if "value" not in branch["properties"])
+        assert setter["properties"]["value"] == {"title": "Value"}
+        assert set(remove["required"]) == {"op", "path"}
+        raise Captured()
+
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline-test", "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol"}
+    with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda key, default=None: env.get(key, default))), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(foundry, "_cooldown_until", {}):
+        rose = RoseClient(openrouter_key="offline-test")
+        for json_mode in (False, True):
+            owner = RoseWMHProvider(pool="rose-1-ultra", client=rose, user_id="offline", protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=json_mode, prefer_azure=True)
+            owner._streams = None
+            owner._lease_auth = AsyncMock(return_value=(None, None))
+            count = len(seen)
+            try:
+                await owner._complete_async("Existing policy.", [types.SimpleNamespace(role="user", content="Inspect unchanged fixture.")], max_tokens=16384)
+            except Captured:
+                pass
+            assert len(seen) == count + 1
+        # Ordinary non-WHM calls retain their original JSON object transport.
+        def ordinary(request):
+            body = json.loads(request.content)
+            assert body["text"]["format"] == {"type": "json_object"}
+            raise Captured()
+        with patch.object(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(ordinary), trust_env=False)):
+            try:
+                await rose.collect(pool="rose-1-ultra", messages=[{"role": "user", "content": "Existing JSON request."}], json_mode=True, prefer_azure=True, dump_context=False)
+            except Captured:
+                pass
+
+
+def test_wmh_response_schema_preserves_native_json_values():
+    import json
+    import math
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL, parse_distribution
+    from benchmarks.wmh_response_schema import NativeTransition, OutcomeDistribution, TimedOutcomeDistribution, response_model_for_protocol
+    from benchmarks.wmh_provider_capture import prediction_request
+    from providers.rose.schema import build_openai_response_format
+
+    values = [None, False, True, 0, -1, 1.5, "", "text", [], {}, [None, {"nested": [False, 2]}], {"key/with~escape": {"all": [1, True, None]}}]
+    for timed, model, protocol in [(False, OutcomeDistribution, DISTRIBUTION_PROTOCOL), (True, TimedOutcomeDistribution, TIMED_DISTRIBUTION_PROTOCOL)]:
+        assert response_model_for_protocol(protocol) is model
+        for value in values:
+            item = {"id": "existing", "probability": 1, "description": "existing result", "tool_results": [{"call_id": "exact", "content": "complete observation", "is_error": False}], "state_patch": [{"op": "add", "path": "/value", "value": value}]}
+            if timed:
+                item["elapsed_ms"] = 0
+            payload = {"schema": "rose.wmh_timed_outcome_distribution.v1" if timed else "rose.wmh_outcome_distribution.v1", "outcomes": [item]}
+            roundtrip = model.model_validate_json(json.dumps(payload)).model_dump(mode="json")
+            assert roundtrip == payload
+            assert parse_distribution(json.dumps(roundtrip), base_state={}, expected_call_ids=("exact",), timed=timed) == parse_distribution(json.dumps(payload), base_state={}, expected_call_ids=("exact",), timed=timed)
+        assert build_openai_response_format(model)["json_schema"]["strict"] is False
+        metadata = prediction_request({"response_model": model})
+        json.dumps(metadata, allow_nan=False)
+        assert metadata["response_model"] == {"name": model.__name__, "schema": model.model_json_schema(), "rose_openai_strict": False}
+    assert response_model_for_protocol("legacy") is None
+    assert response_model_for_protocol("unknown") is None
+    native = {"message": "", "tool_results": [{"call_id": "c", "content": "complete", "is_error": False}], "state": {"open": values}, "terminal": False}
+    assert NativeTransition.model_validate_json(json.dumps(native)).model_dump(mode="json") == native
+    assert build_openai_response_format(NativeTransition)["json_schema"]["schema"]["properties"]["state"]["additionalProperties"] is True
+    for invalid in [0, 1, None, "false"]:
+        try:
+            NativeTransition.model_validate({**native, "terminal": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Native false terminal must not coerce")
+    for invalid in [float("nan"), float("inf"), {"nested": [float("nan")]}]:
+        try:
+            NativeTransition.model_validate({**native, "state": {"invalid": invalid}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Nonfinite state JSON is forbidden")
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
@@ -8982,6 +9085,8 @@ async def run_all_tests():
     teardown_mock()
     r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
 
+    await r.record_async("wmh_native_response_model_reaches_foundry_http", test_wmh_native_response_model_reaches_foundry_http)
+    r.record("wmh_response_schema_preserves_native_json_values", test_wmh_response_schema_preserves_native_json_values)
     return r.summary()
 
 

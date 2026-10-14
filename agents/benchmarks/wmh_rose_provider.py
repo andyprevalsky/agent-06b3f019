@@ -51,6 +51,7 @@ from benchmarks.wmh_outcomes import (
     parse_distribution,
 )
 from benchmarks.wmh_provider_capture import REJECTION_RECORDER
+from benchmarks.wmh_response_schema import response_model_for_protocol
 from benchmarks.wmh_wire_stream import STREAM_GUIDE, StreamBook, completed_batch_ends, fold_stream
 from providers.fast_cache.context import FastCacheContext
 from providers.rose import (
@@ -61,7 +62,9 @@ from providers.rose import (
 from providers.rose.errors import RoseError
 from providers.rose.pricing import get_model_pricing
 from providers.rose.truncation import USAGE_COUNTERS, recover_truncated
-from providers.rose.types import StreamChunk
+from providers.rose.types import RoseResponse, StreamChunk
+from providers.rose.client import _fold
+from providers.rose.structured_output import StructuredOutputAccumulator
 from utils.world_model_observation import effective_world_model_content
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -490,6 +493,83 @@ class RetryablePrediction(_WMHInvalidPrediction, RoseError):
     """WHM validation admitted to the existing Rose whole-result retry policy."""
 
 
+def _wmh_response_content(response, response_model, *, structured_output=None, request=None):
+    """Use Rose's canonical item selector and synthetic-output tool decoder."""
+    if response_model is None:
+        return response.content
+    from helpers.llm import _content_from_structured_rose_response
+
+    content = response.content
+    try:
+        if structured_output is not None and structured_output.is_ambiguous():
+            raise ValueError("Ambiguous structured output items")
+        decoded = _content_from_structured_rose_response(response.tool_calls, response_model, preserve_original=True)
+        if decoded is not None:
+            competing = structured_output.current_text() if structured_output is not None else response.content
+            if competing and competing != decoded:
+                raise ValueError("Competing structured content and synthetic output tool")
+            content = decoded
+        elif structured_output is not None:
+            content = structured_output.current_text()
+        from benchmarks.wmh_outcomes import _unique_object
+
+        original = json.loads(content, object_pairs_hook=_unique_object)
+        json.dumps(original, allow_nan=False)
+        response_model.model_validate_json(content)
+        return content
+    except ValueError as error:
+        raise _WMHInvalidPrediction(
+            f"Invalid structured WMH response ({type(error).__name__})",
+            response.usage,
+            response.actual_model,
+            content,
+            request,
+        ) from error
+
+
+async def _store_validated_wmh_response(response, prediction_request, cache_context):
+    """Record structured output only after schema and native correlation validation."""
+    if (
+        prediction_request.get("response_model") is None
+        or cache_context is None
+        or not cache_context.active
+        or not cache_context.should_write
+        or response.usage.get("from_fast_cache")
+    ):
+        return
+    from providers.fast_cache import client as cache_client
+    from providers.fast_cache.rose_cache import request_key_material
+
+    key_material = {
+        **prediction_request,
+        "provider_fast_mode": bool(cache_context.provider_fast_mode),
+    }
+    key = cache_context.llm_key(prediction_request["call_site"], request_key_material(key_material))
+    stored = await cache_client.cache_set(
+        key,
+        "llm",
+        cache_context.goal_hash,
+        {
+            "actual_model": response.actual_model,
+            "pool_name": response.pool_name,
+            "request_id": response.request_id,
+            "content": response.content,
+            "reasoning": response.reasoning,
+            "tool_calls": response.tool_calls,
+            "codex_reasoning_items": response.codex_reasoning_items,
+            "usage": response.usage,
+        },
+        goal=cache_context.goal,
+        root_goal=cache_context.root_goal,
+    )
+    logger.info(
+        "llm.cache.stored" if stored else "llm.cache.store_skipped",
+        call_site=prediction_request["call_site"],
+        key=key,
+        structured=True,
+    )
+
+
 class _WMHCacheSafeRoseClient(RoseClient):
     """Keep leased credentials out of WMH's persisted DEMO response stream."""
 
@@ -508,7 +588,9 @@ class _WMHCacheSafeRoseClient(RoseClient):
         budget = CompletionRetryBudget(total_seconds=min(590.0, float(kwargs.get("deadline_s", 590.0))))
 
         async def validated_attempt(**attempt_kwargs):
-            parts, usage, model = [], {}, ""
+            usage, model = {}, ""
+            response = RoseResponse()
+            structured_output = StructuredOutputAccumulator() if attempt_kwargs.get("response_model") is not None else None
             async with aclosing(
                 scheduled_attempt(
                     lambda **args: RoseClient._complete_once(self, **args),
@@ -519,17 +601,21 @@ class _WMHCacheSafeRoseClient(RoseClient):
             ) as stream:
                 async for chunk in stream:
                     if chunk.kind == "restart":
-                        parts, usage, model = [], {}, ""
-                    elif chunk.kind == "content":
-                        parts.append(chunk.data.get("text", ""))
-                    elif chunk.kind == "metadata":
+                        usage, model = {}, ""
+                        response = RoseResponse()
+                        structured_output = StructuredOutputAccumulator() if attempt_kwargs.get("response_model") is not None else None
+                    if chunk.kind == "content" and structured_output is not None:
+                        structured_output.add_chunk(chunk)
+                    else:
+                        _fold(response, chunk)
+                    if chunk.kind == "metadata":
                         model = chunk.data.get("actual_model", "")
                     elif chunk.kind == "usage":
                         usage = dict(chunk.data)
                     elif chunk.kind == "done":
                         try:
                             _require_wmh_prediction(
-                                "".join(parts),
+                                _wmh_response_content(response, attempt_kwargs.get("response_model"), structured_output=structured_output, request=budget.latest_request),
                                 usage,
                                 model,
                                 protocol=protocol,
@@ -554,7 +640,7 @@ class _WMHCacheSafeRoseClient(RoseClient):
                                 str(error).removeprefix("WMH prediction rejected: "),
                                 usage,
                                 model,
-                                "".join(parts),
+                                error.rejected_response.get("content", ""),
                                 attempt_kwargs,
                             )
                             raise retryable from error
@@ -598,17 +684,22 @@ class _WMHCacheSafeRoseClient(RoseClient):
         call_site = kwargs.get("call_site")
         is_wmh = call_site in _WMH_CALL_SITES.values()
         protocol = next((name for name, site in _WMH_CALL_SITES.items() if site == call_site), "legacy")
-        content_parts = []
+        response = RoseResponse()
+        structured_output = StructuredOutputAccumulator() if kwargs.get("response_model") is not None else None
         usage = {}
         actual_model = ""
         async for chunk in super()._complete_impl(**kwargs):
             if is_wmh:
                 if chunk.kind == "restart":
                     # Rose abandoned a cut-off attempt; validate only its replacement.
-                    content_parts, usage, actual_model = [], {}, ""
-                elif chunk.kind == "content":
-                    content_parts.append(chunk.data.get("text", ""))
-                elif chunk.kind == "metadata":
+                    usage, actual_model = {}, ""
+                    response = RoseResponse()
+                    structured_output = StructuredOutputAccumulator() if kwargs.get("response_model") is not None else None
+                if chunk.kind == "content" and structured_output is not None:
+                    structured_output.add_chunk(chunk)
+                else:
+                    _fold(response, chunk)
+                if chunk.kind == "metadata":
                     actual_model = chunk.data.get("actual_model", "")
                 elif chunk.kind == "usage":
                     usage = chunk.data
@@ -616,7 +707,7 @@ class _WMHCacheSafeRoseClient(RoseClient):
                     # Rose writes the DEMO cache on done. Reject unusable output
                     # before that marker, and before WMH can commit a step.
                     _require_wmh_prediction(
-                        "".join(content_parts),
+                        _wmh_response_content(response, kwargs.get("response_model"), structured_output=structured_output, request=kwargs),
                         usage,
                         actual_model,
                         protocol=protocol,
@@ -1019,6 +1110,9 @@ class RoseWMHProvider:
                 "retry_partial_errors": True,
                 **({"json_mode": True} if self._json_mode else {}),
             }
+            response_model = response_model_for_protocol(self._protocol)
+            if response_model is not None:
+                prediction_request["response_model"] = response_model
             response = await self._client.collect(
                 **prediction_request,
                 claude_auth=claude_auth,
@@ -1031,11 +1125,13 @@ class RoseWMHProvider:
                 self._record_usage(exc.usage, exc.actual_model)
             raise
         finally:
+            completed_cache_context = current_context()
             if cache_token is not None:
                 reset_context(cache_token)
 
         usage = response.usage or {}
         input_tokens, output_tokens = self._record_usage(usage, response.actual_model or "")
+        response.content = _wmh_response_content(response, prediction_request.get("response_model"), request=prediction_request)
         # Cached responses bypass _complete_impl; validate them at the provider
         # boundary as well. A rejected prediction never reaches parse_observation.
         _require_wmh_prediction(
@@ -1047,6 +1143,8 @@ class RoseWMHProvider:
             base_state=_native_environment_state(rose_messages) if self._protocol in DISTRIBUTION_PROTOCOLS else None,
             request=prediction_request,
         )
+
+        await _store_validated_wmh_response(response, prediction_request, completed_cache_context)
 
         completion_type = _NativeCompletion if self._protocol in _NATIVE_WMH_PROTOCOLS else Completion
         extra = {"actual_model": response.actual_model or ""} if self._protocol in _NATIVE_WMH_PROTOCOLS else {}

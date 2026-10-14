@@ -201,6 +201,22 @@ that captures a rejection through the preserved local client path, followed by
 the unchanged benchmark outcome proof. Do not report this benchmark fixed from
 the capture or JSON-mode contract tests.
 
+### 2026-10-14 typed-schema integration privacy recurrence
+
+The new structured-response boundary initially interpolated Pydantic's
+ValidationError into the public invalid-prediction reason. The permanent
+`wmh_structured_cache_test.py::test_wmh_schema_rejection_preserves_private_bytes_without_public_values`
+reproduced a private fixture value appearing in that reason before the repair,
+then passed with a static reason and error type. Original reply bytes remain in
+the private rejected-response capture. No native acceptance rule was relaxed.
+Independent runtime review passed; eight existing capture controls were updated
+to return real RoseResponse objects and explicitly expect captured schema
+metadata, retaining their original exact-byte and credential-redaction checks.
+The complete final offline WHM checks passed 242 cases, with one native
+service/build case excluded. Provider and fundraising outcome gates remain open.
+The two focused archive searches for this privacy recurrence occurred after its
+local reproduction; their original logs are retained, not backdated.
+
 ## Human feedback
 
 The user required Rose completion on Flash, one Azure-first routing flag,

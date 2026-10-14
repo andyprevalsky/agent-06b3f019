@@ -4262,13 +4262,23 @@ async def call_llm(
 def _content_from_structured_rose_response(
     tool_calls: List[Dict[str, Any]],
     response_model: Type[BaseModel],
+    *,
+    preserve_original: bool = False,
 ) -> Optional[str]:
+    if preserve_original:
+        matching = [call for call in tool_calls if call.get("name") == SYNTHETIC_OUTPUT_TOOL_NAME]
+        if len(matching) != len(tool_calls):
+            raise ValueError("Unexpected tool alongside structured output")
+        if len(matching) > 1:
+            raise ValueError("Expected one synthetic structured output tool call")
     for tool_call in tool_calls:
         if tool_call.get("name") != SYNTHETIC_OUTPUT_TOOL_NAME:
             continue
         arguments = tool_call.get("arguments") or ""
         if not isinstance(arguments, str) or not arguments:
             continue
+        if preserve_original:
+            return arguments
         try:
             validated = response_model.model_validate_json(arguments)
             return validated.model_dump_json()
