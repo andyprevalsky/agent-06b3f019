@@ -2746,10 +2746,21 @@ async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_
 
     async def refresh(rows, snapshot=owner):
         logs = {}
+        original_to_thread = bench.asyncio.to_thread
+
+        async def mocked_owner_read(function, *args, **kwargs):
+            if function is exact_snapshot:
+                assert args == ("http://localhost:1", root) and not kwargs
+                return function(*args, **kwargs)
+            return await original_to_thread(function, *args, **kwargs)
+
         with (
             patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
             patch.object(bench, "get_agent", AsyncMock(return_value={"messages": rows})),
-            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot),
+            patch.object(
+                bench.cloud_batch_cleanup, "exact_root_sessions", return_value=snapshot
+            ) as exact_snapshot,
+            patch.object(bench.asyncio, "to_thread", mocked_owner_read),
         ):
             await bench._refresh_browser_archive_snapshot(
                 "http://localhost:1", root, {}, logs, expected_agent_ids={root},
@@ -2829,6 +2840,45 @@ async def test_paused_browser_before_session_allocation_archives_with_exact_zero
         "archive_browser_sessions": [],
     }
     assert logs["tree"][root]["messages"][-1]["metadata"]["task_id"] == task
+
+
+def test_cancelled_preparation_owner_proof_is_executor_independent():
+    repo_root = Path(__file__).resolve().parents[3]
+    child = (
+        'import asyncio, concurrent.futures, runpy, sys, threading\n'
+        'from pathlib import Path\n'
+        'repo = Path(sys.argv[1])\n'
+        'sys.path[:0] = [str(repo / "agents/tests/blackbox"), str(repo / "agents")]\n'
+        'namespace = runpy.run_path(sys.argv[2])\n'
+        'import benchmarks.run_benchmark\n'
+        'import benchmarks.browser_zero_allocation\n'
+        'release = threading.Event()\n'
+        'executor = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="owned-proof-control")\n'
+        'ready = [threading.Event() for _ in range(executor._max_workers)]\n'
+        'def occupy(signal):\n'
+        '    signal.set()\n'
+        '    release.wait()\n'
+        'async def run():\n'
+        '    asyncio.get_running_loop().set_default_executor(executor)\n'
+        '    for signal in ready:\n'
+        '        executor.submit(occupy, signal)\n'
+        '    try:\n'
+        '        assert all(signal.wait(5) for signal in ready), "owned blockers did not start"\n'
+        '        await namespace["test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof"]()\n'
+        '        assert not release.is_set(), "executor contention removed before ownership proof"\n'
+        '    finally:\n'
+        '        release.set()\n'
+        'asyncio.run(run())\n'
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(repo_root), str(Path(__file__).resolve())],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_agent_messages_have_browser_terminal_requires_explicit_close():
@@ -23228,6 +23278,10 @@ async def run_all_tests():
     await r.record_async(
         "cancelled_preparation_archives_only_with_positive_task_and_owner_proof",
         test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof,
+    )
+    r.record(
+        "cancelled_preparation_owner_proof_is_executor_independent",
+        test_cancelled_preparation_owner_proof_is_executor_independent,
     )
     r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",

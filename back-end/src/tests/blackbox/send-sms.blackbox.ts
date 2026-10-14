@@ -1269,11 +1269,29 @@ async function testBoundary_notificationRequiresCanonicalActionLink(): Promise<v
   }
 }
 
+/** Isolate SMS rejection controls from shared-user WhatsApp reachability. */
+async function createSmsOnlyNotifyFixture(goal: string) {
+  const userId = crypto.randomUUID();
+  const phone = `+1555${String(parseInt(userId.replaceAll('-', '').slice(0, 8), 16) % 10_000_000).padStart(7, '0')}`;
+  await prisma.user.create({
+    data: { userId, phone, isAnonymous: true, whatsappReachable: false },
+  });
+  try {
+    const agent = await prisma.agent.create({
+      data: { userId, goal, status: 'ACTIVE', source: 'SMS', progress: 0.25 },
+    });
+    return { userId, agent };
+  } catch (error) {
+    await prisma.user.deleteMany({ where: { userId } });
+    throw error;
+  }
+}
+
 async function testBoundary_notificationDoesNotRewriteNonContentRejections(): Promise<void> {
   for (const status of [401, 403, 404, 429]) {
     const token = captureToken(`notify-noncontent-${status}`);
     const goal = `Set up the requested account. __BLACKBOX_SURGE_${status}__`;
-    const agent = await createNotifyAgent(goal);
+    const { agent, userId } = await createSmsOnlyNotifyFixture(goal);
     try {
       await setNotificationFixture(agent.id, {
         message: `I'm on it: Set up the requested account.\nFollow along: https://roselabs.ai/?agent-id=${agent.id}`,
@@ -1282,7 +1300,7 @@ async function testBoundary_notificationDoesNotRewriteNonContentRejections(): Pr
         method: 'POST',
         headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
         body: JSON.stringify({
-          user_id: TEST_USER_ID,
+          user_id: userId,
           agent_id: agent.id,
           event_type: 'agent_started',
           payload: { goal },
@@ -1296,8 +1314,15 @@ async function testBoundary_notificationDoesNotRewriteNonContentRejections(): Pr
       );
       assert(calls[0].responseStatus === status, `Expected HTTP ${status} replay`);
     } finally {
-      await clearNotificationFixture(agent.id);
-      await prisma.agent.deleteMany({ where: { id: agent.id } });
+      try {
+        await clearNotificationFixture(agent.id);
+      } finally {
+        try {
+          await prisma.agent.deleteMany({ where: { id: agent.id } });
+        } finally {
+          await prisma.user.deleteMany({ where: { userId } });
+        }
+      }
     }
   }
 }
@@ -1394,7 +1419,7 @@ async function testBoundary_notificationRepairsProviderRejection(): Promise<void
 async function testBoundary_notificationDoesNotRetryAmbiguousFailure(): Promise<void> {
   const token = captureToken('notify-ambiguous-failure');
   const goal = 'Set up the requested account. __BLACKBOX_SURGE_502__';
-  const agent = await createNotifyAgent(goal);
+  const { agent, userId } = await createSmsOnlyNotifyFixture(goal);
   try {
     await setNotificationFixture(agent.id, {
       message: 'This must not be sent after a gateway failure.',
@@ -1403,7 +1428,7 @@ async function testBoundary_notificationDoesNotRetryAmbiguousFailure(): Promise<
       method: 'POST',
       headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
       body: JSON.stringify({
-        user_id: TEST_USER_ID,
+        user_id: userId,
         agent_id: agent.id,
         event_type: 'agent_started',
         payload: { goal },
@@ -1414,8 +1439,15 @@ async function testBoundary_notificationDoesNotRetryAmbiguousFailure(): Promise<
     assert(calls.length === 1, `Ambiguous failure must not trigger a resend; got ${calls.length}`);
     assert(calls[0].responseStatus === 502, 'Expected gateway failure fixture');
   } finally {
-    await clearNotificationFixture(agent.id);
-    await prisma.agent.deleteMany({ where: { id: agent.id } });
+    try {
+      await clearNotificationFixture(agent.id);
+    } finally {
+      try {
+        await prisma.agent.deleteMany({ where: { id: agent.id } });
+      } finally {
+        await prisma.user.deleteMany({ where: { userId } });
+      }
+    }
   }
 }
 
