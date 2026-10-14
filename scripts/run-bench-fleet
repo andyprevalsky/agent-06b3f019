@@ -11964,7 +11964,7 @@ require_central_hub_visibility() {
         # The exact run is already served by the owned hub. Reading its card
         # avoids rescanning every run for each concurrent controller's probe.
         page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/run/$RUN_ID/report-card.json" 2>/dev/null || true)"
-        if printf '%s' "$page" | jq -e --arg run "$RUN_ID" 'type == "object" and .run_id == $run' >/dev/null 2>&1; then
+        if printf '%s' "$page" | python3 -c 'import json, sys; card = json.load(sys.stdin); sys.exit(not (isinstance(card, dict) and card.get("run_id") == sys.argv[1]))' "$RUN_ID" >/dev/null 2>&1; then
             echo "✅ central hub registration verified: run=$RUN_ID"
             return 0
         fi

@@ -21069,6 +21069,14 @@ def test_private_fleet_source_hub_visibility_uses_exact_run_when_index_busy(
     tmp_path: Path,
 ) -> None:
     """A busy aggregate index cannot hide an independently served owned run."""
+    controller_bin = tmp_path / "controller-bin"
+    controller_bin.mkdir()
+    for command in ("bash", "curl", "python3", "seq", "sleep"):
+        executable = shutil.which(command)
+        assert executable is not None, f"missing controller prerequisite: {command}"
+        (controller_bin / command).symlink_to(executable)
+    controller_env = {**os.environ, "PATH": str(controller_bin)}
+    assert shutil.which("jq", path=controller_env["PATH"]) is None
     hub = _load_reviewed_cloudbench_module(AGENT_LINK_SERVER)
     runs = tmp_path / "runs"
     for index in range(600):
@@ -21106,6 +21114,7 @@ CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=1
 {visibility}
 require_central_hub_visibility
 """],
+            env=controller_env,
             capture_output=True, text=True, check=False, timeout=5,
         )
 
