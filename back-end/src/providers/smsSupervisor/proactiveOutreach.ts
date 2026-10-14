@@ -193,6 +193,7 @@ async function runOutreachForUser(
     userId: candidate.userId,
     phoneNumber: candidate.phone,
     inboundMessage: triggeredInbound,
+    trigger: 'scheduled',
     mySeq: session.lastInboundSeq,
     commitGuard: async () => {
       if (control?.isAborted()) return false;

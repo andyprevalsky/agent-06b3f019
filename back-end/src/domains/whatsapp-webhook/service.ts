@@ -68,9 +68,10 @@ async function routeToSupervisor(
   userId: string,
   fromPhone: string,
   messageBody: string,
+  messageId: string,
   requestStart: number
 ): Promise<void> {
-  const mySeq = await recordInboundSms(userId, messageBody);
+  const mySeq = await recordInboundSms(userId, messageBody, messageId);
 
   log.info('Routing to supervisor (WhatsApp)', {
     userId,
@@ -84,6 +85,7 @@ async function routeToSupervisor(
     userId,
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
+    inboundMessageId: messageId,
     mySeq,
     inboundAlreadyPersisted: true,
     channel: 'WHATSAPP',
@@ -267,7 +269,7 @@ export async function handleInboundWhatsApp(
         await markWhatsAppReachable(userId);
       }
 
-      await routeToSupervisor(userId, fromPhone, messageBody, requestStart);
+      await routeToSupervisor(userId, fromPhone, messageBody, messageId, requestStart);
     } catch (error) {
       // Processing failed (e.g. DB error) → release the dedup reservation so
       // Meta's retry reprocesses this message instead of skipping it as a dup.

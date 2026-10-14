@@ -167,7 +167,12 @@ export function parseSurgePayload(body: Record<string, unknown>): ParsedSurgeMes
     return null;
   }
 
-  return { fromPhone, messageBody, attachments };
+  return {
+    fromPhone,
+    messageBody,
+    attachments,
+    ...(typeof data.id === 'string' && data.id !== '' ? { messageId: data.id } : {}),
+  };
 }
 
 function parseSurgeAttachments(data: Record<string, unknown> | undefined): SurgeAttachment[] {
