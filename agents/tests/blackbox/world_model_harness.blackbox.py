@@ -2287,7 +2287,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
     assert "4111111111111111" not in resumed_turns[-1]["content"]
 
 
-async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_feedback=False):
+async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_feedback=False, poll_failure_calls=(), schema_failures=0, permanent_schema_failure=False, schema_invalid=False, return_replay=False, emit_tool_stream=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
 
     class FakeWorldModel:
@@ -2374,15 +2374,31 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
     model_inputs = []
     async def decide(**kwargs):
         model_inputs.append(copy.deepcopy(kwargs["turn_messages"]))
+        if emit_tool_stream:
+            from providers.rose import StreamChunk
+            await kwargs["rose_client"].stream.on_chunk(StreamChunk(kind="tool_call", data={
+                "id": f"native-action-{len(model_inputs)}", "name": "attempt_completion" if len(model_inputs) == 6 else "click", "arguments": {},
+            }))
         if active_feedback and len(model_inputs) == 1:
             rows.append({"id": "active-correction", "role": "USER", "text": correction,
                          "timestamp": datetime.now(timezone.utc).isoformat()})
         return policy_results[len(model_inputs) - 1]
+    poll_calls = 0
     async def poll(_agent_id, since):
+        nonlocal poll_calls
+        poll_calls += 1
+        if poll_calls in poll_failure_calls:
+            raise TimeoutError("instruction backend unavailable")
         return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
     schema = {"fields": [{"name": "order_id", "type": "string",
                           "description": "Amazon order confirmation ID", "required": True}]}
-    generator = AsyncMock(return_value=(schema, None, {}))
+    async def generate_schema(*args, **kwargs):
+        if schema_invalid:
+            return {"fields": []}, None, {"prompt_tokens": 7, "completion_tokens": 2, "actual_model": "schema-test-model"}
+        if permanent_schema_failure or generator.await_count <= schema_failures:
+            raise TimeoutError("schema provider unavailable")
+        return schema, None, {}
+    generator = AsyncMock(side_effect=generate_schema)
     policy = AsyncMock(side_effect=decide)
     verifier = AsyncMock(
         return_value={
@@ -2392,6 +2408,8 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
         }
     )
     world_model = FakeWorldModel()
+    tool_events = AsyncMock()
+    native_stream = browser_handler.BrowserThinkingStream
     with (
         patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(scheduled_time=scheduled_time)),
         patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
@@ -2400,7 +2418,9 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
             "get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
-        patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
+        patch.object(browser_handler, "BrowserThinkingStream", native_stream if emit_tool_stream else FakeStream),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", tool_events),
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
@@ -2442,6 +2462,10 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
             world_model=world_model,
         )
 
+    if return_replay:
+        return {"result": result, "model_inputs": model_inputs, "policy": policy,
+                "generator": generator, "verifier": verifier, "correction": correction,
+                "actions": world_model.actions, "poll_calls": poll_calls, "tool_events": tool_events}
     assert result["status"] == "completed"
     assert result["world_model_simulated"] is True
     assert result["simulated_browser_steps"] == 6
@@ -2475,6 +2499,49 @@ async def test_simulated_browser_runs_five_policy_steps_then_verified_completion
     await _exercise_simulated_browser_policy()
 
 
+async def test_simulated_browser_instruction_poll_recovers_before_actor():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, poll_failure_calls=(2,), return_replay=True)
+    assert replay["result"]["status"] == "completed"
+    assert replay["policy"].await_count == 6
+    assert [m["content"] for m in replay["model_inputs"][-1] if m.get("role") == "user"] == [replay["correction"]]
+    assert replay["verifier"].await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": replay["correction"]}]
+
+
+async def test_simulated_browser_failed_schema_retries_at_completion():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, schema_failures=1, return_replay=True)
+    assert replay["result"]["status"] == "completed"
+    assert replay["generator"].await_count == 2
+    assert replay["policy"].await_count == 6
+    assert replay["verifier"].await_args.kwargs["user_instruction_messages"] == [{"role": "user", "content": replay["correction"]}]
+
+
+async def test_simulated_browser_permanent_schema_failure_exits_without_iteration_burn():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, permanent_schema_failure=True, return_replay=True, emit_tool_stream=True)
+    assert replay["result"]["status"] == "failed"
+    assert replay["result"].get("browser_error_type") == "TimeoutError"
+    assert "schema provider unavailable" in replay["result"]["message"]
+    assert replay["policy"].await_count == 6
+    replay["verifier"].assert_not_awaited()
+    assert any(call.kwargs.get("tool_call_id") == "native-action-6" and call.kwargs.get("status") == "ERROR" for call in replay["tool_events"].await_args_list), "actual announced simulated completion tool remained unresolved"
+
+
+async def test_simulated_browser_unconfirmed_input_blocks_actual_click_transition():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, poll_failure_calls=(2, 3), return_replay=True)
+    assert replay["result"]["status"] == "failed" and replay["result"].get("browser_error_type") == "TimeoutError"
+    assert replay["actions"] == []
+    replay["policy"].assert_not_awaited()
+    replay["verifier"].assert_not_awaited()
+
+
+async def test_simulated_browser_failed_schema_keeps_known_usage():
+    replay = await _exercise_simulated_browser_policy(active_feedback=True, schema_invalid=True, return_replay=True)
+    assert replay["result"]["status"] == "failed"
+    assert replay["policy"].await_count == 6 and replay["generator"].await_count == 2
+    llm = [row for row in replay["result"]["usage_items"] if row["type"] == "llm"]
+    assert sum(row["input_tokens"] for row in llm) == 74
+    assert sum(row["output_tokens"] for row in llm) == 16
+
+
 async def test_simulated_browser_preserves_active_user_input_without_narration():
     await _exercise_simulated_browser_policy(active_feedback=True)
 
@@ -2483,7 +2550,7 @@ async def test_simulated_browser_preserves_user_input_queued_before_activity_exe
     await _exercise_simulated_browser_policy(startup_feedback=True)
 
 
-async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False):
+async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, legacy_resume=False, initial_poll_failure=False):
     from domains.spawn_browser_agent_v3 import handler as browser_handler
     from datetime import datetime, timedelta, timezone
 
@@ -2597,7 +2664,12 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
     rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
              "timestamp": (now - timedelta(seconds=30) if legacy_resume else now).isoformat()}] if user_feedback else []
 
+    pending_poll_calls = 0
     async def poll(_agent_id, since):
+        nonlocal pending_poll_calls
+        pending_poll_calls += 1
+        if initial_poll_failure and pending_poll_calls == 1:
+            raise TimeoutError("resume input backend unavailable")
         return [row for row in rows if datetime.fromisoformat(row["timestamp"]) >= since]
 
     schema = {"fields": [{"name": "order_id", "type": "string",
@@ -2683,6 +2755,10 @@ async def test_simulated_browser_persists_post_approval_confirmation_state():
 
 async def test_simulated_browser_user_feedback_invalidates_pending_approved_action():
     await _exercise_simulated_browser_pending_approval(user_feedback=True)
+
+
+async def test_simulated_browser_resume_poll_miss_disqualifies_pending_write():
+    await _exercise_simulated_browser_pending_approval(user_feedback=True, initial_poll_failure=True)
 
 
 async def test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause():
@@ -3099,6 +3175,12 @@ def test_simulated_resume_preserves_full_user_instruction_tail():
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("simulated_browser_resume_poll_miss_disqualifies_pending_write", test_simulated_browser_resume_poll_miss_disqualifies_pending_write)
+    await r.record_async("simulated_browser_unconfirmed_input_blocks_actual_click_transition", test_simulated_browser_unconfirmed_input_blocks_actual_click_transition)
+    await r.record_async("simulated_browser_failed_schema_keeps_known_usage", test_simulated_browser_failed_schema_keeps_known_usage)
+    await r.record_async("simulated_browser_instruction_poll_recovers_before_actor", test_simulated_browser_instruction_poll_recovers_before_actor)
+    await r.record_async("simulated_browser_failed_schema_retries_at_completion", test_simulated_browser_failed_schema_retries_at_completion)
+    await r.record_async("simulated_browser_permanent_schema_failure_exits_without_iteration_burn", test_simulated_browser_permanent_schema_failure_exits_without_iteration_burn)
     r.record(
         "exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs",
         test_exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs,

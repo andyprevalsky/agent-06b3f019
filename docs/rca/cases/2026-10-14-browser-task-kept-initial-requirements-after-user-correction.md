@@ -261,6 +261,54 @@ The exact before/after console artifacts are retained privately as
 startup custody reproduction, not a claim that the deleted production run
 was observed using simulator mode.
 
+## Cycle 2 availability and completion follow-up
+
+Review comments 4277021231 and 4277021245 exposed two availability defects in
+the same input/schema boundary. A backend poll error escaped the ordinary
+step loop and ended the browser task. A failed schema generation marked its
+instruction revision attempted, but completion repeatedly continued without
+retrying that revision or changing the model context. Both real and simulated
+browsers could consume their remaining iterations without an accepted contract.
+
+Archive searches were `schema provider unavailable browser instruction poll`
+and `browser correction completion max iterations retry schema`. They identify
+this existing case and the linked suspended-browser case; this is a follow-up
+to the same native instruction custody boundary, not a separate model defect.
+
+The repair keeps the latest successfully admitted input, cursor, accepted
+schema and known usage even if the next poll fails. A poll miss triggers one
+conditional confirming read before actor execution; a second miss returns a
+native failure before any click, script evaluation or payment action. A
+startup miss disqualifies the old queued approved action. Generation sealing
+and cancellation continue to propagate.
+
+Completion makes at most two actual schema attempts for an unaccepted revision:
+the ordinary attempt plus one completion retry, or two conditional attempts
+when the input first appears at completion. A persistent failure returns the
+actual error through the native failed-result/cleanup path, with no structured
+response, stale-schema approval, repeated actor turn or generated conversation
+message. Actual announced tool streams resolve ERROR. Known actor and schema
+usage reaches the manager once; recording cleanup remains independent of a
+failed realtime tool-stream write. Final max-step verification uses the same
+input freshness and accepted-revision requirements.
+
+Permanent owning tests cover real and simulated transient recovery, permanent
+failure, first-seen-at-completion retry, partial-success/second-poll failure,
+pending approved writes, generation sealing, actual tool-stream closure and
+known usage through the manager. The identical focused runner against the
+original `1ed6269b3ee79e2b41bcc3bb44717d4515d10e6c` handler and the candidate
+retains `browser-transient-final-before.txt` and
+`browser-transient-final-after.txt` under the isolated worktree's
+`agents/.context/`; `browser-transient-frozen-blobs.json` records the exact code
+and test hashes for the final owning run. Existing successful actor/judge,
+authorization, compute-auth and no-input approval controls remain applicable.
+
+Final focused results were 15 failures and one preserved generation-seal control
+on the original handler, followed by all 16 passing with identical assertions
+on the candidate. Both complete owning domains passed in 60.4 seconds against
+the unchanged recorded blobs (`browser-transient-owning-frozen-final.txt`).
+Scoped Ruff, compilation, diff checks and archive validation passed.
+
 ## Human feedback
 
 The user required schema updates only when needed and the same standard for

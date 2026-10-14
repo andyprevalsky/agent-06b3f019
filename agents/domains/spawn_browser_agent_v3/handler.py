@@ -1017,7 +1017,9 @@ async def _refresh_browser_output_schema(
             agent_id=agent_id,
             error=extract_error_message(error),
         )
+        state["_schema_refresh_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
         return response_schema, usage
+    state.pop("_schema_refresh_error", None)
     state["schema_user_instruction_count"] = len(messages)
     return schema, usage
 
@@ -1030,20 +1032,42 @@ async def _sync_browser_user_instructions(
     instruction_state: Dict[str, Any],
     turn_messages: List[Dict[str, Any]],
     compute_auth: Optional[Dict[str, Any]],
+    require_current_schema: bool = False,
+    require_confirmed_read: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
     """Use the resume transport for live input and accept only its latest contract."""
     state = instruction_state
     usages = []
+    schema_attempts_left: Dict[int, int] = {}
+    retry_poll = (require_current_schema or require_confirmed_read) and state.get("_user_instruction_poll_confirmed") is not False
     while True:
-        state = await _load_browser_resume_user_instructions(agent_id, state)
+        try:
+            state = await _load_browser_resume_user_instructions(agent_id, state)
+        except WorkflowGenerationSealed:
+            raise
+        except Exception as error:
+            if retry_poll:
+                retry_poll = False
+                continue
+            state["_user_instruction_poll_confirmed"] = False
+            state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+            logger.warning("Browser instruction read failed", agent_id=agent_id, error=extract_error_message(error))
+            break
+        state["_user_instruction_poll_confirmed"] = True
+        state.pop("_user_instruction_poll_error", None)
         count = len(state.get("user_instruction_messages") or [])
         _append_browser_user_instructions(state, turn_messages)
         state["delivered_user_instruction_count"] = count
-        if count <= max(
-            int(state.get("schema_user_instruction_count") or 0),
-            int(state.get("schema_attempted_user_instruction_count") or 0),
-        ):
+        if count <= int(state.get("schema_user_instruction_count") or 0):
             break
+        previously_attempted = count <= int(state.get("schema_attempted_user_instruction_count") or 0)
+        if not require_current_schema and previously_attempted:
+            break
+        if require_current_schema:
+            remaining = schema_attempts_left.setdefault(count, 1 if previously_attempted else 2)
+            if remaining == 0:
+                break
+            schema_attempts_left[count] = remaining - 1
         # This activity attempts a failed revision once. The accepted count alone
         # survives suspension, so a fresh activity can retry without losing input.
         state["schema_attempted_user_instruction_count"] = count
@@ -1053,10 +1077,29 @@ async def _sync_browser_user_instructions(
         )
         if usage:
             usages.append(usage)
+        if require_current_schema and schema_attempts_left[count] == 0 and count > int(state.get("schema_user_instruction_count") or 0):
+            break
         # A correction can arrive while schema generation awaits its provider.
         # The same cursor and source-ID ledger admit it before publishing state.
     state["browser_output_schema"] = response_schema
     return state, response_schema, usages
+
+
+class BrowserInstructionUnavailableError(RuntimeError):
+    """A real input/schema dependency remained unavailable at an action boundary."""
+
+    def __init__(self, failure: Dict[str, str]):
+        super().__init__(failure["message"])
+        self.original_error_type = failure["type"]
+
+
+def _require_browser_instruction_state(state: Dict[str, Any], *, current_schema: bool) -> None:
+    if state.get("_user_instruction_poll_confirmed") is not True:
+        failure = state.get("_user_instruction_poll_error") or {"type": "RuntimeError", "message": "Browser instruction read is unconfirmed"}
+        raise BrowserInstructionUnavailableError(failure)
+    if current_schema and int(state.get("schema_user_instruction_count") or 0) < len(state.get("user_instruction_messages") or []):
+        failure = state.get("_schema_refresh_error") or {"type": "RuntimeError", "message": "Browser output schema revision is unaccepted"}
+        raise BrowserInstructionUnavailableError(failure)
 
 
 def _append_browser_user_instructions(
@@ -5682,17 +5725,19 @@ async def _spawn_browser_agent_activity_v3_simulated(
     )
     rose_client = BrowserStreamingRoseClient()
     recorder: Optional[SimulatedBrowserRecorder] = None
+    browser_stream: Optional[BrowserThinkingStream] = None
     resumed_unread_user_input = len(instruction_state.get("user_instruction_messages") or []) > int(instruction_state.get("delivered_user_instruction_count") or 0)
     _append_browser_user_instructions(instruction_state, turn_messages)
     instruction_state["delivered_user_instruction_count"] = len(instruction_state.get("user_instruction_messages") or [])
 
-    async def sync_user_instructions() -> None:
+    async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
         nonlocal instruction_state, output_schema, dynamic_system_context
         nonlocal total_input_tokens, total_output_tokens
         previous_schema = output_schema
         instruction_state, output_schema, usages = await _sync_browser_user_instructions(
             agent_id=agent_id, goal=goal, response_schema=output_schema,
             instruction_state=instruction_state, turn_messages=turn_messages,
+            require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
             compute_auth={
                 "type": "gpt" if gpt_token else "claude", "accessToken": gpt_token or token_state.access_token,
                 "accountId": gpt_account_id if gpt_token else None,
@@ -5720,6 +5765,10 @@ async def _spawn_browser_agent_activity_v3_simulated(
                 from_fast_cache=bool(usage.get("from_fast_cache")),
                 cache_sequence_id=usage.get("cache_sequence_id"),
             )
+
+        if require_current_schema or require_confirmed_read:
+            _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
+        return instruction_state.get("_user_instruction_poll_confirmed") is True
 
     def resume_payload() -> Dict[str, Any]:
         return {key: instruction_state.get(key) for key in (
@@ -5849,9 +5898,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
             )
 
         previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
-        await sync_user_instructions()
+        initial_read_confirmed = await sync_user_instructions()
         new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
-        pending_action = None if new_user_input else resume.get("pending_action")
+        pending_action = None if new_user_input or not initial_read_confirmed else resume.get("pending_action")
         if isinstance(pending_action, dict):
             pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
             approved_action_name = str(pending_action.get("action") or "unknown")
@@ -5903,7 +5952,8 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
-            await sync_user_instructions()
+            if not await sync_user_instructions():
+                await sync_user_instructions(require_confirmed_read=True)
             with contextlib.suppress(Exception):
                 browser_activity_checkpoint(f"Simulated browser step {iteration}")
             if recorder:
@@ -6022,12 +6072,8 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     "result": {"success": True, "verification_requested": True},
                 }
                 action_entries.append(completion_entry)
-                await sync_user_instructions()
+                await sync_user_instructions(require_current_schema=True)
                 verification_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
-                if int(instruction_state.get("schema_user_instruction_count") or 0) < verification_instruction_count:
-                    completion_entry["schema_refresh_pending"] = True
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
                 progress = await _verify_simulated_browser_completion(
                     goal=goal,
                     output_schema=output_schema,
@@ -6044,7 +6090,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
                     gpt_token_pool_id=gpt_token_pool_id,
                     user_instruction_messages=instruction_state.get("user_instruction_messages"),
                 )
-                await sync_user_instructions()
+                await sync_user_instructions(require_current_schema=True)
                 if (
                     verification_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
                     or int(instruction_state.get("schema_user_instruction_count") or 0) < len(instruction_state.get("user_instruction_messages") or [])
@@ -6236,7 +6282,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
             "simulated_browser_steps": iteration,
             "simulated_latest_frame": latest_frame,
         }
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, WorkflowGenerationSealed):
         raise
     except Exception as exc:
         logger.error(
@@ -6247,12 +6293,25 @@ async def _spawn_browser_agent_activity_v3_simulated(
             traceback=traceback.format_exc(),
         )
         with contextlib.suppress(Exception):
+            if isinstance(exc, BrowserInstructionUnavailableError) and browser_stream is not None:
+                await browser_stream.finish_tools(status="ERROR")
+        with contextlib.suppress(Exception):
             await finalize_recording()
         return {
             "status": "failed",
             "success": False,
             "error": True,
             "message": f"Simulated browser automation failed: {extract_error_message(exc)}",
+            **({
+                "usage_items": _simulated_browser_usage_items(
+                    total_input_tokens, total_output_tokens, model_pricing,
+                    usage_by_model, pricing_pool=browser_pool,
+                ),
+                "browser_error_type": exc.original_error_type,
+                "browser_error_message": extract_error_message(exc),
+                "browser_output_schema": output_schema,
+                "structured_response": None,
+            } if isinstance(exc, BrowserInstructionUnavailableError) else {}),
             "task_id": task_id,
             "session_id": world_model_session_id or None,
             "world_model_simulated": True,
@@ -6441,9 +6500,17 @@ async def _spawn_browser_agent_activity_v3_real(
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
         if write_lock_resume_state.get("approval_type") != AUTH_ASSISTANCE_DECLINED:
-            write_lock_resume_state = await _load_browser_resume_user_instructions(
-                agent_id, write_lock_resume_state
-            )
+            try:
+                write_lock_resume_state = await _load_browser_resume_user_instructions(
+                    agent_id, write_lock_resume_state
+                )
+                write_lock_resume_state["_user_instruction_poll_confirmed"] = True
+            except WorkflowGenerationSealed:
+                raise
+            except Exception as error:
+                write_lock_resume_state["_user_instruction_poll_confirmed"] = False
+                write_lock_resume_state["_user_instruction_poll_error"] = {"type": type(error).__name__, "message": extract_error_message(error)}
+                logger.warning("Browser resume instruction read failed", agent_id=agent_id, error=extract_error_message(error))
 
     from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
@@ -6540,7 +6607,7 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         # An approved queued action predates this input. The actor must decide
         # what to do after reading it, even when write permission remains valid.
-        if not has_new_user_input:
+        if not has_new_user_input and write_lock_resume_state.get("_user_instruction_poll_confirmed") is not False:
             pending_write_lock_action = write_lock_resume_state.get("pending_action")
             pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
         write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
@@ -7723,7 +7790,7 @@ async def _spawn_browser_agent_activity_v3_real(
             "schema_attempted_user_instruction_count": len(user_instruction_messages),
         }
 
-        async def sync_user_instructions() -> None:
+        async def sync_user_instructions(*, require_current_schema=False, require_confirmed_read=False) -> bool:
             nonlocal instruction_state, response_schema, user_instruction_messages
             nonlocal user_message_cursor, user_instruction_message_ids, dynamic_system_context
             nonlocal latest_structured_response, total_input_tokens, total_output_tokens
@@ -7733,6 +7800,7 @@ async def _spawn_browser_agent_activity_v3_real(
             instruction_state, response_schema, usages = await _sync_browser_user_instructions(
                 agent_id=agent_id, goal=goal, response_schema=response_schema,
                 instruction_state=instruction_state, turn_messages=browser_turn_messages,
+                require_current_schema=require_current_schema, require_confirmed_read=require_confirmed_read,
                 compute_auth={
                     "type": "gpt" if gpt_token else "claude",
                     "accessToken": gpt_token or token_state.access_token,
@@ -7768,6 +7836,13 @@ async def _spawn_browser_agent_activity_v3_real(
                     from_fast_cache=bool(usage.get("from_fast_cache")),
                     cache_sequence_id=usage.get("cache_sequence_id"),
                 )
+
+            if instruction_state.get("_user_instruction_poll_confirmed") is False:
+                pending_write_lock_action = None
+                pending_write_lock_target = None
+            if require_current_schema or require_confirmed_read:
+                _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
+            return instruction_state.get("_user_instruction_poll_confirmed") is True
 
         if (
             (write_lock_resume_state or {}).get("approval_type") == "payment"
@@ -8134,7 +8209,8 @@ async def _spawn_browser_agent_activity_v3_real(
             )
             step_timer.mark("tab_rebind")
 
-            await sync_user_instructions()
+            if not await sync_user_instructions():
+                await sync_user_instructions(require_confirmed_read=True)
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -9716,10 +9792,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"
                 try:
-                    await sync_user_instructions()
+                    await sync_user_instructions(require_current_schema=True)
                     verification_instruction_count = len(user_instruction_messages)
-                    if int(instruction_state.get("schema_user_instruction_count") or 0) < verification_instruction_count:
-                        continue
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="\u2696\ufe0f Verifying completion",
@@ -9823,7 +9897,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
 
-                    await sync_user_instructions()
+                    await sync_user_instructions(require_current_schema=True)
                     if (
                         verification_instruction_count != len(user_instruction_messages)
                         or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
@@ -10063,6 +10137,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         thinking_preview=verifier_feedback_thinking[:200],
                     )
 
+                except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                    raise
                 except Exception as verifier_error:
                     completion_tool_status = "ERROR"
                     logger.error(f"Verifier failed: {verifier_error}")
@@ -10804,7 +10880,7 @@ Based on this feedback, I need to continue working on the task and address the i
         # than before) and never blocks the terminal return.
         if latest_structured_response is None and response_schema and dom_service:
             try:
-                await sync_user_instructions()
+                await sync_user_instructions(require_current_schema=True)
                 # Re-read the FINAL-state DOM before grading: browser_state was
                 # captured before the last action, so verifying against it evaluates
                 # stale ground truth and can misreport a last-step completion. Fall
@@ -10890,13 +10966,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     from_fast_cache=bool(fv_usage.get("from_fast_cache")),
                     cache_sequence_id=fv_usage.get("cache_sequence_id"),
                 )
-                await sync_user_instructions()
+                await sync_user_instructions(require_current_schema=True)
                 if (
                     verification_instruction_count == len(user_instruction_messages)
                     and int(instruction_state.get("schema_user_instruction_count") or 0) >= len(user_instruction_messages)
                     and final_progress.get("structured_response") is not None
                 ):
                     latest_structured_response = final_progress["structured_response"]
+            except (BrowserInstructionUnavailableError, WorkflowGenerationSealed):
+                raise
             except Exception as final_verifier_error:
                 logger.warning(
                     "[BrowserAgent] Final max-steps verifier pass failed; returning best-effort text only",
@@ -11092,7 +11170,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     is_completion_message=True,
                     output_schema=response_schema,
                     extra_metadata={
-                        "browser_error_type": type(e).__name__,
+                        "browser_error_type": e.original_error_type if isinstance(e, BrowserInstructionUnavailableError) else type(e).__name__,
                         "browser_error_message": extract_error_message(e),
                         "browser_error_context": error_context,
                         "browser_last_action": last_action,
@@ -11115,6 +11193,22 @@ Based on this feedback, I need to continue working on the task and address the i
                     error=extract_error_message(propagation_error),
                 )
 
+        if isinstance(e, BrowserInstructionUnavailableError):
+            execution_time_ms = (safe_time() - start_time) * 1000
+            return {
+                "status": "failed", "success": False, "error": True,
+                "message": error_message, "task_id": task_id, "session_id": session_id,
+                "browser_error_type": e.original_error_type,
+                "browser_error_message": extract_error_message(e),
+                "browser_output_schema": response_schema, "structured_response": None,
+                "usage_items": build_usage_items(
+                    total_input_tokens, total_output_tokens, model_pricing,
+                    execution_time_ms, usage_by_model, pricing_pool=browser_pool,
+                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                    provider=browser_session_metadata.get("provider"),
+                ),
+                "execution_time_ms": execution_time_ms,
+            }
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
@@ -12454,6 +12548,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
+                "browser_error_type",
+                "browser_error_message",
                 "world_model_simulated",
                 "world_model_session_id",
                 "world_model_name",
