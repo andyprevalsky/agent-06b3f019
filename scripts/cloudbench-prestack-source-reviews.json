@@ -219,6 +219,10 @@
     "4ae25d77138286e70e300650ea60d259dc8968589f070d38c5b7c3349d92bee9": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "149f84a076bd263fd7f309e5c3098bc0af62a6cdf4a9b9320dcadffa35202dd7": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   },
   "schema_version": 1

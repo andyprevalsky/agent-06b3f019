@@ -6314,6 +6314,8 @@ if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or
 }
 
 reconcile_stale_fleet_registries() {
+    FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=0
+    export -n FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED 2>/dev/null || true
     local registry meta version app policy cleanup_state host owner_status recovery_lock_status unresolved=0
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
     for registry in "$FLEET_OWNERSHIP_ROOT"/*; do
@@ -6372,6 +6374,7 @@ reconcile_stale_fleet_registries() {
             continue
         fi
         echo "🧭 recovering stale fleet registry $(basename "$registry") (same-host controller identity is dead)"
+        FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
         if ! recover_registry_audit_only_fresh "$registry"; then
             release_registry_recovery_lock "$registry"
             # Registries are independent ownership scopes. Preserve this one
@@ -11501,15 +11504,27 @@ pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=inv
 POOL_INVENTORY_JSON=""
 reconcile_pool() {
     local pool_file id st presence claim_path claim_host claim_pid claim_start claim_token
-    local owner_status runner_count machines cleanup_status claim_digest
-    export -n machines POOL_INVENTORY_JSON 2>/dev/null || true
+    local owner_status runner_count machines cleanup_status claim_digest has_pool_ids=0
+    FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=0
+    export -n machines POOL_INVENTORY_JSON FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED 2>/dev/null || true
+    POOL_INVENTORY_JSON="[]"
+    for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
+        [ -s "$pool_file" ] && { has_pool_ids=1; break; }
+    done
+    [ "$has_pool_ids" = 1 ] || return 0
     # Normal reconciliation is one shared inventory read, not one Machines-API
     # list per pooled box. Only the rare stop-and-recover branch re-reads live
     # state for the single machine being changed.
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
-        echo "❌ could not read pool inventory before refresh" >&2
-        return 1
-    }
+    if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        # Borrow in this shell; command substitution cannot bind its parent.
+        start_machines_snapshot_loop || return 1
+        machines="$(fleet_admission_machines_json 2>/dev/null)" || return 1
+    else
+        machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+            echo "❌ could not read pool inventory before refresh" >&2
+            return 1
+        }
+    fi
     POOL_INVENTORY_JSON="$machines"
     for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
       [ -f "$pool_file" ] || continue
@@ -11571,6 +11586,7 @@ reconcile_pool() {
                         echo "❌ dead-claimed pool machine $id still has runner count=$runner_count; refusing to provision" >&2
                         return 1
                     }
+                    FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=1
                     echo "↩️  recovering dead-claimed idle pool machine $id"
                     if [ -n "$claim_token" ]; then
                         recover_one_exact_pool_claim "$claim_path" "$claim_token" \
@@ -11639,7 +11655,7 @@ normalize_current_pool_shape() {
     local large_cpus large_kind
     local -a resize_ids=() resize_pids=()
     export -n inventory POOL_INVENTORY_JSON 2>/dev/null || true
-    [ -f "$POOL_IDS_FILE" ] || return 0
+    [ -s "$POOL_IDS_FILE" ] || return 0
     target_cpus="$(printf '%s' "$FLEET_PRIMARY_VM_SIZE" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
     large_cpus="$(printf '%s' "${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
     large_kind="${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}"
@@ -11647,7 +11663,14 @@ normalize_current_pool_shape() {
     case "$FLEET_PRIMARY_VM_SIZE" in performance-*) target_kind="performance" ;; esac
     [ -n "$target_cpus" ] || { echo "❌ invalid fleet primary VM size: $FLEET_PRIMARY_VM_SIZE" >&2; return 1; }
     inventory="$POOL_INVENTORY_JSON"
-    [ -n "$inventory" ] || inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+    if [ -z "$inventory" ]; then
+        if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+            start_machines_snapshot_loop || return 1
+            inventory="$(fleet_admission_machines_json 2>/dev/null)" || return 1
+        else
+            inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        fi
+    fi
     while read -r id; do
         [ -n "$id" ] || continue
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
@@ -11668,6 +11691,7 @@ normalize_current_pool_shape() {
         fi
     done < "$POOL_IDS_FILE"
     [ "${#resize_ids[@]}" -gt 0 ] || return 0
+    FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=1
     echo "🧮 resizing ${#resize_ids[@]} stopped pool machine(s) to capacity-safe $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB..."
     mkdir -p "$FLEET_DIR"
     for id in "${resize_ids[@]}"; do
@@ -13206,10 +13230,13 @@ reap_orphaned_fleet_proxies
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
-    refresh_machines_snapshot_after "$(machines_snapshot_identity)" || {
-        echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
-        exit 1
-    }
+    if [ "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ] \
+        || [ "${FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED:-1}" != 0 ]; then
+        refresh_machines_snapshot_after "$(machines_snapshot_identity)" || {
+            echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
+            exit 1
+        }
+    fi
     warm_json="$(fleet_admission_machines_json 2>/dev/null)" || {
         echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
         exit 1
