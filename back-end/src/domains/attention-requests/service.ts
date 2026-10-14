@@ -13,7 +13,10 @@ import {
 } from '../../providers/gateResolution';
 
 const log = createLogger('Attention');
-export { AttentionUserMessageConflictError } from '../../providers/attentionUserMessages';
+export {
+  AttentionUserMessageConflictError,
+  AttentionUserMessageForbiddenError,
+} from '../../providers/attentionUserMessages';
 
 export class NotFoundError extends Error {
   constructor(msg: string) {
@@ -29,6 +32,14 @@ export class BadRequestError extends Error {
   constructor(msg: string) {
     super(msg);
   }
+}
+
+export async function validateCreateOwnership(
+  data: CreateAttentionRequestInput,
+  userId: string
+): Promise<void> {
+  if (data.userId !== userId) throw new ForbiddenError('Not authorized');
+  await repo.validateCreateOwnership(data);
 }
 
 /**
@@ -52,6 +63,7 @@ async function joinGateAsWaiter(
 }
 
 export async function create(data: CreateAttentionRequestInput) {
+  await repo.validateCreateOwnership(data);
   log.info('Received attention request', {
     agent_id: data.agentId,
     body: logJson(data),

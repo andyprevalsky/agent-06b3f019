@@ -1,5 +1,11 @@
 import { randomUUID } from 'crypto';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import { retryWithBackoff } from '../../providers/retry';
+import {
+  DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+  lockAgentWorkflowGeneration,
+} from '../../providers/workflowGeneration';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
@@ -140,7 +146,15 @@ async function createLiveViewRequest(fixture: Fixture, authRealm: string): Promi
   });
   const data = await response.json();
   assertStatus({ status: response.status, data }, 201);
-  return String(asRecord(asRecord(data).request).id);
+  const requestId = String(asRecord(asRecord(data).request).id);
+  const attention = await prisma.agentAttentionRequest.findUniqueOrThrow({
+    where: { id: requestId },
+  });
+  assert(
+    attention.workflowId === fixture.agentId,
+    'Null-current auth handoff must use its legitimate legacy root workflow identity'
+  );
+  return requestId;
 }
 
 async function assertNoSteelCredential(fixture: Fixture): Promise<void> {
@@ -367,7 +381,89 @@ async function testAuthoredCompletion(controlFirst: boolean): Promise<void> {
   });
 }
 
+async function testCompletedAuthRetryReadsFenceAfterGenerationLock(): Promise<void> {
+  await withFixture('completed-retry-fence', 'kernel', async (fixture) => {
+    const requestId = await createLiveViewRequest(fixture, 'example.com');
+    // Legacy completed credentials can still have an unanswered attention row.
+    await prisma.userAuthAssistanceRequest.update({
+      where: { id: requestId },
+      data: { completedAt: new Date() },
+    });
+    let release!: () => void;
+    let announce!: (pid: number) => void;
+    let rejectLock!: (error: unknown) => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const locked = new Promise<number>((resolve, reject) => {
+      announce = resolve;
+      rejectLock = reject;
+    });
+    const cleanup = runTransactionWithRetry(async (tx) => {
+      await lockAgentWorkflowGeneration(tx, fixture.agentId);
+      const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+      announce(session.pid);
+      await released;
+      await tx.agentAttentionRequest.update({
+        where: { id: requestId },
+        data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
+      });
+    });
+    void cleanup.catch(rejectLock);
+    const pid = await locked;
+    let signals = 0;
+    let resumes = 0;
+    const text = '  Use the current signed-in account.  ';
+    const retry = completeAuthAssistanceForUser(
+      requestId,
+      fixture.userId,
+      new Date(),
+      {
+        signalCompleted: async () => {
+          signals++;
+        },
+        resumeAgent: async () => {
+          resumes++;
+        },
+      },
+      text
+    );
+    try {
+      const { blocked } = await retryWithBackoff(
+        async () => {
+          const [result] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))) AS blocked`;
+          return result;
+        },
+        {
+          maxRetries: 100,
+          fixedDelays: Array(100).fill(25),
+          shouldRetryResult: (result) => !result.blocked,
+        }
+      );
+      assert(blocked, 'Completed auth retry never reached the generation lock');
+    } finally {
+      release();
+      await cleanup;
+    }
+    const result = await retry;
+    assert(
+      result.status === 'already_completed' && result.interrupted,
+      'Completed retry used a control snapshot read before the generation lock'
+    );
+    assert(
+      signals === 0 && resumes === 1,
+      'Completed retry must resume the survivor without signaling the fenced generation'
+    );
+    await assertAuthoredCompletionMessages(fixture.agentId, text);
+  });
+}
+
 export const authAssistanceProviderCompletionTests: TestCase[] = [
+  [
+    'completed auth retry refreshes its fence after the generation lock',
+    testCompletedAuthRetryReadsFenceAfterGenerationLock,
+  ],
   ['auth completion preserves explicit authored input once', () => testAuthoredCompletion(false)],
   [
     'authored input survives an automatic auth completion winning first',

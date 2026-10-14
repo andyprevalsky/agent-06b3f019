@@ -4,7 +4,13 @@ import type { CreateAttentionRequestInput } from './types';
 import {
   broadcastAttentionUserMessages,
   persistAttentionUserMessages,
+  attentionRequestWorkflowTargets,
 } from '../../providers/attentionUserMessages';
+import { assertAttentionWorkflowTargets } from '../../providers/attentionWorkflowTargets';
+
+export async function validateCreateOwnership(data: CreateAttentionRequestInput): Promise<void> {
+  await assertAttentionWorkflowTargets(prisma, data.userId, attentionRequestWorkflowTargets(data));
+}
 
 export async function create(data: CreateAttentionRequestInput) {
   return prisma.agentAttentionRequest.create({
@@ -59,9 +65,36 @@ export async function appendGateWaiter(
 
     const row = await tx.agentAttentionRequest.findUnique({
       where: { id },
-      select: { userResponse: true, workflowId: true, agentId: true, metadata: true },
+      select: { userId: true, userResponse: true, workflowId: true, agentId: true, metadata: true },
     });
     if (row === null) return { pending: false, response: null };
+    await assertAttentionWorkflowTargets(tx, row.userId, [
+      ...attentionRequestWorkflowTargets(row),
+      { agentId, workflowId },
+    ]);
+    // A protocol-only resolution can precede its first authored reply. Keep
+    // late waiters registered so that later input reaches the same fan-out.
+    if (row.workflowId !== workflowId) {
+      const base =
+        row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+          ? { ...(row.metadata as Record<string, unknown>) }
+          : {};
+      const waiters = Array.isArray(base.gateWaiters) ? [...(base.gateWaiters as unknown[])] : [];
+      const already = waiters.some(
+        (w) =>
+          w !== null &&
+          typeof w === 'object' &&
+          (w as { workflowId?: unknown }).workflowId === workflowId
+      );
+      if (!already) {
+        waiters.push({ workflowId, agentId });
+        base.gateWaiters = waiters;
+        await tx.agentAttentionRequest.update({
+          where: { id },
+          data: { metadata: base as Prisma.InputJsonValue },
+        });
+      }
+    }
     if (row.userResponse !== null) {
       // Resolution may win after findPendingByGateKey but before this row lock.
       // Fan the same committed authored row into the late waiter's durable stream.
@@ -71,27 +104,6 @@ export async function appendGateWaiter(
         targetAgentIds: [agentId],
       });
       return { pending: false, response: row.userResponse, ...authored };
-    }
-    if (row.workflowId === workflowId) return { pending: true, response: null };
-
-    const base =
-      row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
-        ? { ...(row.metadata as Record<string, unknown>) }
-        : {};
-    const waiters = Array.isArray(base.gateWaiters) ? [...(base.gateWaiters as unknown[])] : [];
-    const already = waiters.some(
-      (w) =>
-        w !== null &&
-        typeof w === 'object' &&
-        (w as { workflowId?: unknown }).workflowId === workflowId
-    );
-    if (!already) {
-      waiters.push({ workflowId, agentId });
-      base.gateWaiters = waiters;
-      await tx.agentAttentionRequest.update({
-        where: { id },
-        data: { metadata: base as Prisma.InputJsonValue },
-      });
     }
     return { pending: true, response: null };
   });
