@@ -5,12 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 PIDS=()
 
-# Each fixture is spawned as `( cd ...; python3 ... ) &`, so $! is the SUBSHELL,
-# not the python process it forks. Signalling only the recorded PID orphaned every
-# surviving fixture to init, where it kept this test's inherited stdout open: a
-# `bash this-test.sh | tail` pipeline never saw EOF and hung indefinitely, and the
-# stubs accumulated across runs (observed: pairs still alive 13h later). Always
-# reap descendants before the recorded PID.
+# Cleanup owns each fixture's complete tree, including wrapper grandchildren.
 kill_pid_tree() {
   local pid="$1" child
   for child in $(pgrep -P "$pid" 2>/dev/null); do
@@ -49,14 +44,16 @@ assert_required_service_exit_code() {
 
 wait_for_process() {
   local pid="$1"
+  local ready_file="$2"
   local attempt
   for attempt in $(seq 1 30); do
-    if kill -0 "$pid" 2>/dev/null; then
+    if [ -f "$ready_file" ] && kill -0 "$pid" 2>/dev/null; then
       return 0
     fi
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  echo "FAIL: process $pid did not stay alive" >&2
+  echo "FAIL: process $pid did not publish fixture readiness" >&2
   exit 1
 }
 
@@ -125,30 +122,33 @@ mkdir -p "$workspace/agents" "$other_workspace/agents"
 queue="navi-agent-tasks-salvador-v1"
 expected_backend="http://localhost:55070"
 stale_backend="http://localhost:55010"
+stale_ready="$TMP_ROOT/stale-ready"
+current_ready="$TMP_ROOT/current-ready"
+other_ready="$TMP_ROOT/other-ready"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" exec python3 -c 'from pathlib import Path; import signal, sys; Path(sys.argv[1]).touch(); signal.pause()' "$stale_ready" worker.py
 ) &
 stale_pid="$!"
 PIDS+=("$stale_pid")
-wait_for_process "$stale_pid"
+wait_for_process "$stale_pid" "$stale_ready"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import signal; signal.pause()' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" exec python3 -c 'from pathlib import Path; import signal, sys; Path(sys.argv[1]).touch(); signal.pause()' "$current_ready" worker.py
 ) &
 current_pid="$!"
 PIDS+=("$current_pid")
-wait_for_process "$current_pid"
+wait_for_process "$current_pid" "$current_ready"
 
 (
   cd "$other_workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" exec python3 -c 'from pathlib import Path; import signal, sys; Path(sys.argv[1]).touch(); signal.pause()' "$other_ready" worker.py
 ) &
 other_pid="$!"
 PIDS+=("$other_pid")
-wait_for_process "$other_pid"
+wait_for_process "$other_pid" "$other_ready"
 
 run_kill_stale_same_task_queue_workers "$workspace" "$queue" "$expected_backend" "999999"
 
@@ -300,11 +300,12 @@ sweep_ws="$(cd "$sweep_ws" && pwd -P)"
 SWEEP_FIXTURE_PID=""
 spawn_sweep_fixture() {
   local dir="$1"
+  local ready_file="$TMP_ROOT/sweep-ready-${#PIDS[@]}"
   shift
-  ( cd "$dir" && exec python3 -c 'import signal; signal.pause()' "$@" ) &
+  ( cd "$dir" && exec python3 -c 'from pathlib import Path; import signal, sys; Path(sys.argv[1]).touch(); signal.pause()' "$ready_file" "$@" ) &
   SWEEP_FIXTURE_PID="$!"
   PIDS+=("$SWEEP_FIXTURE_PID")
-  wait_for_process "$SWEEP_FIXTURE_PID"
+  wait_for_process "$SWEEP_FIXTURE_PID" "$ready_file"
 }
 
 spawn_sweep_fixture "$sweep_ws/front-end" "$sweep_ws/node_modules/.bin/vitest" run --coverage --maxWorkers=3

@@ -12,6 +12,7 @@ import {
 } from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
 import {
+  assertSteelSameProfileReplacement,
   assert,
   assertBrowserUseDownloadFetchIsBounded,
   assertBrowserUseRolloutOptIn,
@@ -46,6 +47,14 @@ const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
+  [
+    'Steel same-profile rotation releases before attachment and avoids duplicate cleanup',
+    () => assertSteelSameProfileReplacement(false),
+  ],
+  [
+    'Steel CLOSED replacement failure recovers through release404',
+    () => assertSteelSameProfileReplacement(true),
+  ],
   [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
     assertAuthPersistFailedInitCustody,

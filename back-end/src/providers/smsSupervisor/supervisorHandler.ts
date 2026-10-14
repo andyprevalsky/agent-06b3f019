@@ -16,7 +16,7 @@
 import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
-import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
+import { processInboundAttachments, type InboundMediaAttachment } from './inboundMedia';
 import {
   commitPendingWrites,
   dispatchToolCall,
@@ -166,7 +166,7 @@ export async function handleSmsSupervisorMessage(config: {
   inboundMessage: string;
   mySeq: number;
   inboundAlreadyPersisted?: boolean;
-  attachments?: SurgeAttachment[];
+  attachments?: InboundMediaAttachment[];
   abortSignal?: AbortSignal;
   commitGuard?: () => Promise<boolean>;
   /**
