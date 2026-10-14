@@ -5999,3 +5999,5 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 173.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "8fac6081-4d52-4929-bc02-01c5d790b1c2"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 285.3, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "1cfaf45b-6833-402c-8251-712bd9e54ce6"}
 {"task": "agent-payment-abandonment", "duration_seconds": 198.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "51a21579-5c4d-4256-9554-bd1f1b65f38c"}
+{"task": "people-search-targeted", "duration_seconds": 134.9, "cost_cents": 3.0, "timestamp": "2026-10-14T04:59:00.699701+00:00", "agent_id": "287ddef3-69df-4620-8fe3-52e7e7b34016"}
+{"task": "people-search-criteria", "duration_seconds": 183.8, "cost_cents": 20.0, "timestamp": "2026-10-14T04:59:00.699701+00:00", "agent_id": "c3708301-8403-45ad-868a-3d9350d3f34e"}
