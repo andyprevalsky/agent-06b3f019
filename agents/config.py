@@ -6,7 +6,7 @@ This allows the module to be safely imported in Temporal workflow context.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 # Lazy initialization - NO side effects at import time
@@ -198,6 +198,14 @@ class ExaConfig:
 
 
 @dataclass
+class LanternConfig:
+    """Lantern People API connection for workers; tokens stay out of repr/logs."""
+
+    api_url: str = "https://people.lantern.md"
+    api_token: str = field(default="", repr=False)
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
 
@@ -218,6 +226,8 @@ class AppConfig:
     e2b: E2BConfig
     anthropic: AnthropicConfig
     exa: ExaConfig
+
+    lantern: LanternConfig = field(default_factory=LanternConfig)
 
     health_check_port: int = 3000
     log_level: str = "INFO"
@@ -361,6 +371,10 @@ def load_config() -> AppConfig:
         e2b=e2b,
         anthropic=anthropic,
         exa=exa,
+        lantern=LanternConfig(
+            api_url=os.getenv("PEOPLE_API_URL", "https://people.lantern.md"),
+            api_token=os.getenv("PEOPLE_API_TOKEN", ""),
+        ),
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         environment=os.getenv("ENVIRONMENT", "production"),

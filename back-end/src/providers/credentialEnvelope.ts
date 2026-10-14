@@ -10,7 +10,10 @@ import { RSA_PUBLIC_KEY_PEM } from './encryptionKeys';
 /**
  * Encrypt a password using RSA-2048 + AES-256-GCM hybrid encryption.
  */
-export function encryptPasswordForStorage(password: string): string {
+export function encryptPasswordForStorage(
+  password: string,
+  publicKey: string = RSA_PUBLIC_KEY_PEM
+): string {
   const aesKey = randomBytes(32);
   const iv = randomBytes(12);
 
@@ -21,7 +24,7 @@ export function encryptPasswordForStorage(password: string): string {
 
   const encryptedAesKey = publicEncrypt(
     {
-      key: RSA_PUBLIC_KEY_PEM,
+      key: publicKey,
       padding: constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: 'sha256',
     },

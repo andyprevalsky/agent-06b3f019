@@ -1,8 +1,7 @@
 """People search domain -- public API.
 
-Read-only people search for explore agents. Routes intent-based between Exa
-people search (targeted lookup) and Parallel Fast Entity Search (criteria
-search), normalizing both into one shape.
+Read-only Lantern people discovery and source-profile retrieval for explore
+agents, with normalized results and original source provenance.
 """
 
 from tools.people_search.handler import (

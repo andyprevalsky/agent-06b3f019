@@ -1,6 +1,7 @@
 """Blackbox tests for run_agent assistant/tool persistence invariants."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +25,20 @@ class _DummyLLMResult:
         self.tool_calls = [_DummyToolCall(tc) for tc in tool_calls]
 
 
+@asynccontextmanager
+async def _owned_realtime_fixture():
+    from helpers.messages import flush_realtime_broadcasts_for_tests
+
+    client = MagicMock()
+    client.post = AsyncMock(return_value=MagicMock(status_code=200))
+    with patch("helpers.messages._get_broadcast_client", return_value=client):
+        try:
+            yield
+        finally:
+            await flush_realtime_broadcasts_for_tests()
+
+
+@_owned_realtime_fixture()
 async def _run_single_iteration(
     tool_calls,
     detected_tools_ordered,
@@ -192,6 +207,18 @@ async def _run_single_iteration(
         )
 
     return result, posted_messages, executed_tools
+
+
+async def test_iteration_fixture_retires_its_realtime_sender():
+    from helpers import messages
+
+    await _run_single_iteration(
+        [{"tool": "web_search", "query": "latest updates"}],
+        [("web_search", "tc-realtime-owner", 1.0)],
+    )
+    assert not messages._broadcast_queue, "iteration fixture left queued realtime work"
+    assert not messages._broadcast_draining, "iteration fixture left an active realtime sender"
+    assert messages._broadcast_flush_task is None, "iteration fixture left a realtime task"
 
 
 async def test_iteration_offset_is_reported_with_each_billed_llm_turn():
@@ -2451,9 +2478,11 @@ async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
     )
 
 
+@_owned_realtime_fixture()
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("iteration_fixture_retires_realtime", test_iteration_fixture_retires_its_realtime_sender)
     await r.record_async(
         "iteration_offset_reported_with_usage",
         test_iteration_offset_is_reported_with_each_billed_llm_turn,
@@ -2640,7 +2669,10 @@ async def run_all_tests():
         test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
     )
     teardown_mock()
-    await r.record_async("verifier_infra_soft_fail_trips_circuit_breaker_without_schema", test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema)
+    await r.record_async(
+        "verifier_infra_soft_fail_trips_circuit_breaker_without_schema",
+        test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema,
+    )
 
     return r.summary()
 

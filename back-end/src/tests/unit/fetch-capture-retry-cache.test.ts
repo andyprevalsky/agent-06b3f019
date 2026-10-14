@@ -2,7 +2,8 @@
 
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { unlinkSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
+import express from 'express';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -12,7 +13,142 @@ import {
   shouldBypassOutboundReplay,
 } from '../../providers/fetchCapture';
 
+async function testCredentialExchanges(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const previousReplay = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+  const secret = `fake-capture-secret-${randomUUID()}`;
+  const calls = new Map<string, number>();
+  const files = new Set<string>();
+  const body = new URLSearchParams({ refresh_token: secret });
+  globalThis.fetch = (async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (new URL(url).hostname === '127.0.0.1') return originalFetch(input, init);
+    if (new URL(url).pathname === '/v1/operations/people_search') {
+      calls.set(url, (calls.get(url) ?? 0) + 1);
+      return new Response(JSON.stringify({ results: [{ name: 'Ada' }] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    assert.equal(
+      String(init?.body),
+      body.toString(),
+      'credential request must pass through unchanged'
+    );
+    assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${secret}`);
+    const count = (calls.get(url) ?? 0) + 1;
+    calls.set(url, count);
+    return new Response(
+      JSON.stringify({ access_token: `${secret}-${count}`, refresh_token: secret }),
+      {
+        headers: { 'content-type': 'application/json' },
+      }
+    );
+  }) as typeof fetch;
+  process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = '1';
+  const app = express();
+  app.use('/captures', installFetchCapture());
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  assert(address !== null && typeof address === 'object');
+  const base = `http://127.0.0.1:${address.port}`;
+  let cleanupError: unknown;
+  try {
+    for (const path of [
+      '/oauth/token',
+      '/api/integrations/lantern-people/credentials/token',
+      '/api/integrations/lantern-people/credentials/upload',
+    ]) {
+      const url = `https://credential-${randomUUID()}.example.test${path}?refresh_hint=${secret}`;
+      const legacyKey = `call:${JSON.stringify([url, 'POST', body.toString()])}`;
+      const safeKey = outboundReplayCacheKey(url, 'POST', body.toString());
+      for (const key of [legacyKey, safeKey]) {
+        files.add(
+          resolve(
+            __dirname,
+            '../../../../.context/fast-forward-cache/outbound-fetch',
+            `${createHash('sha256').update(key).digest('hex')}.json`
+          )
+        );
+      }
+      const init = { method: 'POST', body, headers: { Authorization: `Bearer ${secret}` } };
+      const first = (await (await fetch(url, init)).json()) as { access_token: string };
+      const metadata = await (await originalFetch(`${base}/captures`)).json();
+      assert(
+        !JSON.stringify(metadata).includes(secret),
+        'credential material entered capture metadata'
+      );
+      const second = (await (await fetch(url, init)).json()) as { access_token: string };
+      assert.equal(first.access_token, `${secret}-1`);
+      assert.equal(second.access_token, `${secret}-2`, 'rotating token exchange was replayed');
+      assert.equal(calls.get(url), 2);
+      assert(!safeKey.includes(secret), 'credential material entered replay cache key');
+    }
+    const searchUrl = `https://people-${randomUUID()}.example.test/v1/operations/people_search?next=/oauth/token`;
+    const searchBody = JSON.stringify({ query: 'founders' });
+    const searchKey = outboundReplayCacheKey(searchUrl, 'POST', searchBody);
+    const searchFile = resolve(
+      __dirname,
+      '../../../../.context/fast-forward-cache/outbound-fetch',
+      `${createHash('sha256').update(searchKey).digest('hex')}.json`
+    );
+    for (let i = 0; i < 2; i++) {
+      assert.deepEqual(
+        await (
+          await fetch(searchUrl, {
+            method: 'POST',
+            body: searchBody,
+            headers: { Authorization: `Bearer ${secret}` },
+          })
+        ).json(),
+        { results: [{ name: 'Ada' }] }
+      );
+    }
+    assert.equal(calls.get(searchUrl), 1, 'ordinary people search replay changed');
+    const searchCaptures = (await (await originalFetch(`${base}/captures`)).json()) as {
+      captures: Array<{
+        url: string;
+        requestBody: string | null;
+        responseBody: string | null;
+        requestHeaders: Record<string, string>;
+      }>;
+    };
+    const searchCapture = searchCaptures.captures.find((item) => item.url === searchUrl);
+    assert.equal(searchCapture?.requestBody, searchBody);
+    assert.equal(searchCapture?.responseBody, JSON.stringify({ results: [{ name: 'Ada' }] }));
+    assert.equal(searchCapture?.requestHeaders.Authorization, '[redacted]');
+    const captured = (await (await originalFetch(`${base}/captures`)).json()) as {
+      captures: unknown[];
+    };
+    assert(
+      !JSON.stringify(captured).includes(secret),
+      'credential material entered capture metadata'
+    );
+    await delay(100);
+    for (const file of files)
+      assert(!existsSync(file), 'credential exchange persisted to disk cache');
+    files.add(searchFile);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousReplay === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = previousReplay;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+    await delay(100);
+    for (const file of files) {
+      try {
+        unlinkSync(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupError = error;
+      }
+    }
+  }
+  if (cleanupError !== undefined) throw cleanupError;
+}
+
 async function run(): Promise<void> {
+  await testCredentialExchanges();
   assert.strictEqual(isRetryableOutboundResponseStatus(429), true);
   assert.strictEqual(isRetryableOutboundResponseStatus(500), true);
   assert.strictEqual(isRetryableOutboundResponseStatus(503), true);

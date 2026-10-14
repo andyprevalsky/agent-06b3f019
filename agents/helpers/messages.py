@@ -106,6 +106,8 @@ def _schedule_broadcast_flush(delay_s: float) -> None:
     if _broadcast_flush_task is not None and not _broadcast_flush_task.done():
         if _broadcast_flush_task is asyncio.current_task():
             return
+        if _broadcast_draining:
+            return
         if delay_s > 0:
             return
         _broadcast_flush_task.cancel()
@@ -199,6 +201,7 @@ async def _flush_broadcast_queue_after(delay_s: float) -> None:
     if _broadcast_draining:
         return
     _broadcast_draining = True
+    cancelled = False
     try:
         while True:
             async with _get_broadcast_batch_lock():
@@ -211,14 +214,20 @@ async def _flush_broadcast_queue_after(delay_s: float) -> None:
                         _broadcast_coalesce_items.pop(item.coalesce_key, None)
 
             await _send_realtime_batch(batch)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     finally:
         _broadcast_draining = False
         if _broadcast_flush_task is asyncio.current_task():
             _broadcast_flush_task = None
         async with _get_broadcast_batch_lock():
             if _broadcast_queue:
-                _schedule_broadcast_flush(0)
-            else:
+                # Cancellation retires this owner, including during loop shutdown.
+                # A successor would escape asyncio.run's cancellation snapshot.
+                if not cancelled:
+                    _schedule_broadcast_flush(0)
+            if not _broadcast_queue or cancelled:
                 waiters = list(_broadcast_idle_waiters)
                 _broadcast_idle_waiters.clear()
                 for waiter in waiters:

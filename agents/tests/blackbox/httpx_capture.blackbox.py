@@ -4,6 +4,7 @@ Tests the capture harness public API directly (not through _test_utils wrapper).
 """
 
 import asyncio
+import json
 import os
 
 from _test_utils import (
@@ -22,6 +23,7 @@ def test_install_and_uninstall():
 
     # Capture should already be installed by _test_utils import
     import helpers.httpx_capture as hc
+
     assert hc._installed is True, "Capture should be installed"
 
     # Uninstall
@@ -51,6 +53,7 @@ def test_set_and_clear_mock_handler():
 
     def my_handler(request):
         import httpx
+
         return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(my_handler)
@@ -131,9 +134,54 @@ async def test_mock_handler_wraps_proxy_mount_transports():
                 os.environ[key] = value
 
 
+async def test_credential_exchanges_keep_wire_data_but_not_captures():
+    import httpx
+    from helpers.httpx_capture import clear_captures, get_captures
+
+    secret = "fake-capture-credential-9d1c5ea72a"
+    for path in (
+        "/oauth/token",
+        "/api/integrations/lantern-people/credentials/token",
+        "/api/integrations/lantern-people/credentials/upload",
+    ):
+        clear_captures()
+        received = []
+        payload = "refresh_token=" + secret
+
+        def handler(request):
+            received.append((request.content.decode(), request.headers["authorization"]))
+            return httpx.Response(200, json={"accessToken": secret, "refresh_token": secret})
+
+        setup_mock_fn(handler)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://credential.example.test" + path + "?refresh_hint=" + secret,
+                content=payload,
+                headers={"Authorization": "Bearer " + secret},
+            )
+        assert received == [(payload, "Bearer " + secret)]
+        assert response.json()["accessToken"] == secret
+        captured = get_captures()
+        assert len(captured) == 1
+        assert secret not in json.dumps(captured), "credential exchange leaked into capture"
+        assert captured[0]["requestBody"] is None
+        assert captured[0]["responseBody"] is None
+        assert captured[0]["responseStatus"] == 200
+        assert captured[0]["requestHeaders"] == {}
+    clear_captures()
+    setup_mock_fn(lambda request: httpx.Response(200, json={"results": [{"name": "Ada"}]}))
+    async with httpx.AsyncClient() as client:
+        await client.post("https://people.example.test/v1/operations/people_search", json={"query": "founders"})
+    assert json.loads(get_captures()[0]["requestBody"]) == {"query": "founders"}
+    assert json.loads(get_captures()[0]["responseBody"]) == {"results": [{"name": "Ada"}]}
+
+
 async def run_all_tests():
     print("httpx-capture blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "credential_exchange_capture_privacy", test_credential_exchanges_keep_wire_data_but_not_captures
+    )
     r.record("install_and_uninstall", test_install_and_uninstall)
     r.record("get_captures_empty", test_get_captures_empty)
     r.record("set_and_clear_mock_handler", test_set_and_clear_mock_handler)
