@@ -176,6 +176,10 @@
       "before-stack-launch",
       "agent-network-index-bootstrap"
     ],
+    "e142c49baa58575f9376ec746acf4e5a358aeb33c06b3ae46426baaecee7ba76": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
     "e5fee2656bd28102bcfc160c17a61391ec7e3ab7ede1605aa8102075f44ddd9b": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
