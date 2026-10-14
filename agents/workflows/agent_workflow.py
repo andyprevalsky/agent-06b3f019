@@ -69,6 +69,7 @@ with workflow.unsafe.imports_passed_through():
         call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
+        persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
     )
@@ -1365,21 +1366,24 @@ class AgentWorkflow:
                 actual_response = data.get("response", "")
                 self._signal_responses[req_id] = actual_response
                 workflow.logger.info(f"💬 Stored response for request {req_id}")
-                if (
-                    isinstance(actual_response, str)
-                    and actual_response.strip()
-                    and actual_response not in ATTENTION_CONTROL_RESPONSES
-                ):
-                    self._record_response_schema_feedback(actual_response)
+                # New producers distinguish authored input from protocol-only
+                # responses. Missing keys retain legacy response-as-input behavior.
+                self._record_response_schema_feedback(data.get("user_message", actual_response))
                 return
         except (ValueError, TypeError, KeyError):
             pass
         # Legacy: plain string (from chat messages, SMS, etc.)
         self._last_signal_response = response
+        self._has_new_messages = True
         self._record_response_schema_feedback(response)
 
-    def _record_response_schema_feedback(self, response: str) -> None:
-        """Queue genuine user input for the next typed output-schema revision."""
+    def _record_response_schema_feedback(self, response: Any) -> None:
+        """Queue genuine user input without treating protocol markers as feedback."""
+        if not isinstance(response, str):
+            return
+        normalized = response.strip()
+        if not normalized or normalized in ATTENTION_CONTROL_RESPONSES:
+            return
         self._response_schema_feedback.append(response)
         self._response_schema_revision += 1
         self._response_schema_refresh_error = None
@@ -1957,7 +1961,10 @@ class AgentWorkflow:
         response_schema = self.output_schema
         fetched_parent_agent_id = None
         if agent_config:
-            response_schema = agent_config.get("response_schema") or response_schema
+            # Continuation state owns the accepted contract. The database may
+            # lag if its write failed or its acknowledgement was lost.
+            if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
+                response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
@@ -2611,6 +2618,8 @@ class AgentWorkflow:
                             user_messages,
                             self._active_compute_token_payload(),
                             self.fast_mode_cache_enabled,
+                            False,
+                            False,
                         ],
                         start_to_close_timeout=timedelta(seconds=90),
                         retry_policy=RetryPolicy(maximum_attempts=3),
@@ -2620,9 +2629,8 @@ class AgentWorkflow:
                     self._record_response_schema_refresh_failure(target_revision, str(e))
                     return
 
-                # More feedback arrived while this activity was running. Its
-                # persisted result is immediately superseded by the next pass,
-                # so do not accept an obsolete schema into workflow state.
+                # Generation has no schema-write side effects. Discard an
+                # obsolete result before accepting or persisting it.
                 if target_revision < self._response_schema_revision:
                     self._response_schema_applied_revision = target_revision
                     continue
@@ -2642,6 +2650,20 @@ class AgentWorkflow:
                         target_revision,
                         "schema generation returned no fields",
                     )
+                    return
+
+                # Acceptance happens before the persistence await. New input or
+                # a lost write acknowledgement cannot turn an accepted contract
+                # into a discarded candidate; continuation keeps this schema.
+                try:
+                    await workflow.execute_activity(
+                        persist_response_schema_activity,
+                        args=[self.agent_id, schema],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                except Exception as e:
+                    self._record_response_schema_refresh_failure(target_revision, str(e))
                     return
 
                 self._response_schema_applied_revision = target_revision

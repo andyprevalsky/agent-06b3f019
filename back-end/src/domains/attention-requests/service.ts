@@ -1,7 +1,6 @@
 import * as repo from './repo';
 import { gateSchema, type CreateAttentionRequestInput, type RespondInput } from './types';
 import { REJECTED_RESPONSE } from './config';
-import { createMessage } from '../../providers/messages';
 import { createLogger } from '../../providers/logger';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
@@ -14,6 +13,7 @@ import {
 } from '../../providers/gateResolution';
 
 const log = createLogger('Attention');
+export { AttentionUserMessageConflictError } from '../../providers/attentionUserMessages';
 
 export class NotFoundError extends Error {
   constructor(msg: string) {
@@ -41,7 +41,13 @@ async function joinGateAsWaiter(
 ): Promise<void> {
   const joined = await repo.appendGateWaiter(existingId, data.workflowId, data.agentId);
   if (!joined.pending && joined.response !== null) {
-    await signalWorkflow(data.workflowId, data.agentId, existingId, joined.response);
+    await signalWorkflow(
+      data.workflowId,
+      data.agentId,
+      existingId,
+      joined.response,
+      joined.userMessage ?? null
+    );
   }
 }
 
@@ -161,7 +167,13 @@ export async function respond(id: string, userId: string, data: RespondInput) {
   // A decline is an answer like any other gate's: it must reach the agent as a
   // decline, never be recorded as the user having signed in.
   if (request.authAssistance !== null && data.response.trim() !== REJECTED_RESPONSE) {
-    const result = await completeAuthAssistanceForUser(id, userId);
+    const result = await completeAuthAssistanceForUser(
+      id,
+      userId,
+      new Date(),
+      {},
+      data.user_message
+    );
     if (result.status === 'not_found') throw new NotFoundError('Attention request not found');
     if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
     if (result.status === 'missing_steel_context') {
@@ -170,7 +182,7 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     return { success: true, request_id: id };
   }
 
-  await resolveAndSignalForUser(request, data.response);
+  await resolveAndSignalForUser(request, data.response, data.user_message);
 
   return { success: true, request_id: id };
 }
@@ -182,9 +194,10 @@ export async function respond(id: string, userId: string, data: RespondInput) {
  */
 async function resolveAndSignalForUser(
   request: ResolvableGateRequest,
-  response: string
+  response: string,
+  userMessage?: string
 ): Promise<void> {
-  const { resolved } = await resolveAndSignal(request, response);
+  const { resolved } = await resolveAndSignal(request, response, userMessage);
   if (resolved) await resumePausedAgentForUserMessage(request.agentId);
 }
 
@@ -203,16 +216,7 @@ export async function reject(id: string, userId: string, message: string | undef
   if (request === null) throw new NotFoundError('Attention request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
 
-  const trimmed = typeof message === 'string' ? message.trim() : '';
-  if (trimmed.length > 0) {
-    await createMessage({
-      agentId: request.agentId,
-      text: trimmed,
-      role: 'USER',
-    });
-  }
-
-  await resolveAndSignalForUser(request, REJECTED_RESPONSE);
+  await resolveAndSignalForUser(request, REJECTED_RESPONSE, message);
 
   return { success: true, request_id: id };
 }

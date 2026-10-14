@@ -8,7 +8,7 @@
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
  *
  * INPUT ROUTING:
- *   shared recording / inspection → show read-only notice, omit mutation controls
+ *   shared recording / inspection / selected detail loading → omit mutation controls
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
  *
@@ -81,7 +81,9 @@ export function AgentChatArea({
     ? 'Read-only benchmark recording'
     : a.inspectionContext
       ? 'Read-only account inspection. Switch to this account to control the agent.'
-      : null;
+      : a.selectedAgentId && a.isLoadingAgent
+        ? 'Loading agent details. Controls will be available when loading finishes.'
+        : null;
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,

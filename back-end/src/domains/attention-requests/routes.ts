@@ -4,7 +4,12 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import * as service from './service';
-import { BadRequestError, NotFoundError, ForbiddenError } from './service';
+import {
+  AttentionUserMessageConflictError,
+  BadRequestError,
+  NotFoundError,
+  ForbiddenError,
+} from './service';
 import { createAttentionRequestSchema, respondSchema } from './types';
 
 const log = createLogger('Attention');
@@ -15,6 +20,10 @@ function errMsg(error: unknown): string {
 }
 
 function mapError(error: unknown, res: Response): void {
+  if (error instanceof AttentionUserMessageConflictError) {
+    res.status(409).json({ error: error.message });
+    return;
+  }
   if (error instanceof BadRequestError) {
     res.status(400).json({ error: error.message });
     return;
@@ -125,7 +134,8 @@ router.post(
       if (
         error instanceof BadRequestError ||
         error instanceof NotFoundError ||
-        error instanceof ForbiddenError
+        error instanceof ForbiddenError ||
+        error instanceof AttentionUserMessageConflictError
       ) {
         mapError(error, res);
         return;
@@ -174,7 +184,11 @@ router.post(
       const result = await service.reject(req.params.id, userId, message);
       res.json(result);
     } catch (error) {
-      if (error instanceof NotFoundError || error instanceof ForbiddenError) {
+      if (
+        error instanceof NotFoundError ||
+        error instanceof ForbiddenError ||
+        error instanceof AttentionUserMessageConflictError
+      ) {
         mapError(error, res);
         return;
       }

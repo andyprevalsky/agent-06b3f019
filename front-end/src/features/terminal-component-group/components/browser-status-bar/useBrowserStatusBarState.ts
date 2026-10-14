@@ -122,7 +122,7 @@ function extractPendingAuthAssistance(
 }
 
 export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewModel {
-  const { messages, inspectionContext } = useAgentContext();
+  const { messages, inspectionContext, selectedAgentId, isLoadingAgent } = useAgentContext();
 
   const browserMessages = useMemo(
     () => messages.filter((m) => m.metadata?.task_id === taskId),
@@ -181,7 +181,7 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
   );
 
   return {
-    readOnly: inspectionContext != null,
+    readOnly: inspectionContext != null || (selectedAgentId !== null && isLoadingAgent),
     browserMessages,
     lastActionType,
     lastActionTitle,

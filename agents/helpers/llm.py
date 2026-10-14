@@ -6557,6 +6557,47 @@ async def _persist_mass_agent_root_title(
         )
 
 
+async def _persist_response_schema(
+    client: httpx.AsyncClient,
+    agent_id: str,
+    schema: Dict[str, Any],
+    backend_url: str,
+    api_key: str,
+    title: Optional[str] = None,
+) -> None:
+    """Save an accepted schema through the existing generation-fenced API."""
+    try:
+        response = await client.patch(
+            f"{backend_url}/api/agents/{agent_id}",
+            headers={**backend_api_headers(api_key), **workflow_generation_headers()},
+            json={"response_schema": schema, **({"generated_title": title} if title else {})},
+        )
+    except httpx.HTTPError as e:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+        ) from e
+    if not response.is_success:
+        raise ResponseSchemaPersistenceError(
+            f"Failed to save response schema for agent {agent_id}: HTTP {response.status_code}"
+        )
+    logger.info("Saved response schema to agent", agent_id=agent_id)
+
+
+@activity.defn
+@traced("persist_response_schema_activity")
+async def persist_response_schema_activity(agent_id: str, schema: Dict[str, Any]) -> None:
+    """Persist a schema after the owning workflow has accepted its revision."""
+    config = load_config()
+    api_key = config.backend.api_key
+    if not api_key or not isinstance(schema, dict) or not schema.get("fields"):
+        raise ResponseSchemaPersistenceError("Cannot persist response schema without credentials and fields")
+    _safe_heartbeat("Saving accepted response schema")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        await _persist_response_schema(
+            client, agent_id, schema, config.backend.api_url.rstrip("/"), api_key
+        )
+
+
 @activity.defn
 @traced("set_response_schema_activity")
 async def set_response_schema_activity(
@@ -6565,6 +6606,7 @@ async def set_response_schema_activity(
     compute_auth: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     include_title: bool = False,
+    persist: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -6578,6 +6620,8 @@ async def set_response_schema_activity(
         compute_auth: Optional selected compute token from the workflow cache
         include_title: Generate a sidebar title in the same LLM response. This is
             true only for the initial schema of a top-level agent.
+        persist: Save immediately for startup callers. Background refreshes
+            defer persistence until the workflow accepts the generated revision.
 
     Returns:
         The generated schema dict with 'fields' array, or None on failure
@@ -6709,36 +6753,11 @@ async def set_response_schema_activity(
             if not schema.get("fields"):
                 raise ValueError("LLM returned no response schema content")
 
-            # 2. Save schema to agent record
-            save_start = time.perf_counter()
-            try:
-                save_response = await client.patch(
-                    f"{backend_url}/api/agents/{agent_id}",
-                    headers={
-                        **backend_api_headers(api_key),
-                        **workflow_generation_headers(),
-                    },
-                    json={
-                        "response_schema": schema,
-                        **({"generated_title": title} if title else {}),
-                    },
-                )
-            except httpx.HTTPError as e:
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
-                ) from e
-            save_elapsed = time.perf_counter() - save_start
-            logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
-
-            if not save_response.is_success:
-                logger.warning(
-                    "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
-                )
-                raise ResponseSchemaPersistenceError(
-                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
-                )
-
-            logger.info("Saved response schema to agent", agent_id=agent_id)
+            if persist:
+                save_start = time.perf_counter()
+                await _persist_response_schema(client, agent_id, schema, backend_url, api_key, title)
+                save_elapsed = time.perf_counter() - save_start
+                logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -6761,13 +6780,15 @@ async def set_response_schema_activity(
             status_code=e.response.status_code,
             response_text=e.response.text[:500],
         )
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
         return None
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
-        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
+        if persist:
+            await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
         return None
 
 

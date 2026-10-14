@@ -1,6 +1,10 @@
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import type { CreateAttentionRequestInput } from './types';
+import {
+  broadcastAttentionUserMessages,
+  persistAttentionUserMessages,
+} from '../../providers/attentionUserMessages';
 
 export async function create(data: CreateAttentionRequestInput) {
   return prisma.agentAttentionRequest.create({
@@ -47,18 +51,27 @@ export async function appendGateWaiter(
   id: string,
   workflowId: string,
   agentId: string
-): Promise<{ pending: boolean; response: string | null }> {
-  return runTransactionWithRetry(async (tx) => {
+): Promise<{ pending: boolean; response: string | null; userMessage?: string }> {
+  const result = await runTransactionWithRetry(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "AgentAttentionRequest" WHERE id = ${id} FOR UPDATE`;
     if (locked.length === 0) return { pending: false, response: null };
 
     const row = await tx.agentAttentionRequest.findUnique({
       where: { id },
-      select: { userResponse: true, workflowId: true, metadata: true },
+      select: { userResponse: true, workflowId: true, agentId: true, metadata: true },
     });
     if (row === null) return { pending: false, response: null };
-    if (row.userResponse !== null) return { pending: false, response: row.userResponse };
+    if (row.userResponse !== null) {
+      // Resolution may win after findPendingByGateKey but before this row lock.
+      // Fan the same committed authored row into the late waiter's durable stream.
+      const authored = await persistAttentionUserMessages(tx, {
+        requestId: id,
+        agentId: row.agentId,
+        targetAgentIds: [agentId],
+      });
+      return { pending: false, response: row.userResponse, ...authored };
+    }
     if (row.workflowId === workflowId) return { pending: true, response: null };
 
     const base =
@@ -82,6 +95,12 @@ export async function appendGateWaiter(
     }
     return { pending: true, response: null };
   });
+  if ('userMessages' in result && result.userMessages !== undefined)
+    broadcastAttentionUserMessages(result.userMessages);
+  return {
+    ...result,
+    userMessage: 'userMessage' in result ? (result.userMessage ?? undefined) : undefined,
+  };
 }
 
 /** Source of the agent that raised a request (SMS agents get a gate SMS). */

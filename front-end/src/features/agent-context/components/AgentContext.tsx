@@ -42,6 +42,7 @@
  *     |
  *     v (setSelectedAgentId) -> UPDATE LIVE ID -> SYNC URL -> KILL -> FLUSH
  * [LOADING_AGENT] <-- fetch agent detail + subscribe, URL: ?agent-id=X
+ *     | composer/browser controls remain read-only until detail establishes access
  *     |
  *     v (benchmark dev preview without auth) -> fetch retained run only, skip realtime
  *     |   (preview fetch FAILS without full access -> KEEP selection + URL;
