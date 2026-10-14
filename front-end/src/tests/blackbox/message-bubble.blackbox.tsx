@@ -48,6 +48,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
+    inspectionContext: null,
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }
@@ -388,7 +392,7 @@ describe('MessageBubble', () => {
       metadata: {
         toolCallId: 'tc-7',
         toolName: 'some_tool',
-        requestUserApproval: { toolApproval: true },
+        requestUserApproval: { toolApproval: true, attentionRequestId: 'approval-fixture' },
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} />);
@@ -1087,7 +1091,7 @@ describe('MessageBubble', () => {
       metadata: {
         toolCallId: 'tc-ap-type',
         toolName: 'some_tool',
-        requestUserApproval: { toolApproval: true },
+        requestUserApproval: { toolApproval: true, attentionRequestId: 'approval-fixture' },
       },
     });
     renderBubble(

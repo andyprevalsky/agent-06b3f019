@@ -1,3 +1,4 @@
+import type { PlaidItem } from '@/features/integrations/types';
 /**
  * Blackbox tests for the Plaid integration feature.
  *

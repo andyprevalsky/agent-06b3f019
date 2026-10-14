@@ -1,4 +1,5 @@
-export function makeTerminalHookAgent(overrides: Record<string, unknown> = {}) {
+import type { AgentDetail } from '@/lib/api';
+export function makeTerminalHookAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',

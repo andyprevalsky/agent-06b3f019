@@ -262,27 +262,6 @@ def safe_time() -> float:
         return 0.0
 
 
-def build_auth_assistance_resume_user_message(
-    *,
-    auth_realm: Optional[str],
-    handoff_mode: Optional[str],
-) -> Dict[str, str]:
-    """Build the post-human-auth cue injected into resumed browser-use calls."""
-    realm = auth_realm or "the current site"
-    mode = handoff_mode or "live browser session"
-    return {
-        "role": "user",
-        "content": (
-            "The user has completed the requested authentication assistance for "
-            f"{realm} in the same {mode}. Continue from the current page state exactly as it is now. "
-            "Do not call request_user_assistance_for_authentication again for this same auth realm unless "
-            "the page presents a new authentication blocker that still requires human input. "
-            "Do not undo user-entered changes made during assistance; inspect the current DOM/state and "
-            "continue toward the task from that state."
-        ),
-    }
-
-
 # ========================================
 # CONTEXT SUMMARY BUILDER
 # ========================================

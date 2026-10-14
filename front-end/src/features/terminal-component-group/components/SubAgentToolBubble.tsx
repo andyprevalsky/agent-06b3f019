@@ -14,12 +14,13 @@
 import { ChevronRight } from 'lucide-react';
 import { memo, useMemo, useCallback } from 'react';
 import { cn } from '@/lib/utils';
+import type { ToolStatus } from '@/lib/realtime-types';
 
 interface SubAgentToolBubbleProps {
   toolCallId: string;
   title: string;
   message: string;
-  status: 'IN_PROGRESS' | 'FINISHED';
+  status: ToolStatus;
   progress: number; // Progress from metadata (0.0-1.0)
   agentId?: string; // Sub-agent ID from metadata
   onNavigate: (agentId: string) => void;

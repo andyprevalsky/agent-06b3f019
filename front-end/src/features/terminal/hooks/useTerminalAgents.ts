@@ -1,3 +1,4 @@
+import type { ClientSource } from '@/lib/clientSource';
 /**
  * Terminal feature — composed agent management hook.
  *
@@ -157,7 +158,7 @@ export function useTerminalAgents(
 type BuildArgs = {
   auth: ReturnType<typeof useAuth>;
   canSubmitGoals: boolean;
-  clientSource: string;
+  clientSource: ClientSource;
   ctx: ReturnType<typeof useAgentContext>;
   agentList: ReturnType<typeof useAgentList>;
   actions: ReturnType<typeof useAgentActions>;

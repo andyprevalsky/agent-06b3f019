@@ -76,6 +76,10 @@ function makeContext(): AgentContextValue {
     isLoadingAgent: false,
     forceResubscribe: () => undefined,
     isChatMode: false,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
   };
 }
 

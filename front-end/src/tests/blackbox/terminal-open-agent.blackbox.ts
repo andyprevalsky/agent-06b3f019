@@ -7,6 +7,8 @@ import { openAgentInCurrentClient } from '@/lib/openAgent';
 
 function makeDeps(): QuickQueryDeps {
   return {
+    authReady: true,
+    messageInput: '',
     selectedModel: 'rose-1-flash',
     canSubmitGoals: true,
     clientSource: 'MAC_APP',

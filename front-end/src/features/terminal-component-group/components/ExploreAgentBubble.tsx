@@ -116,7 +116,7 @@ function buildCarouselItems(
   showThinking: boolean = thinkingStreamTokenCount > 0,
 ): ExploreActiveToolCarouselItem[] {
   const actionItems = actions
-    .map((action, index) => {
+    .map((action, index): ExploreActiveToolCarouselItem | null => {
       const text = action.title?.replace(/\n/g, ' ').trim();
       if (!text) return null;
       return {

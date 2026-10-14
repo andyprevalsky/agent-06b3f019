@@ -1,4 +1,5 @@
-import { afterEach, it, vi } from 'vitest';
+import type { HubRunTask } from '@/lib/api/benchmarksHub';
+import { afterEach, it, vi, expect } from 'vitest';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
@@ -349,7 +350,7 @@ const owningMixedInfra = {
     tokens_out: 3,
     agents: 0,
   },
-} as const;
+};
 const owningMixedCancelled = {
   run_id: 'group-a',
   timestamp: '2026-10-06T20:00:00+00:00',
@@ -431,7 +432,7 @@ const owningMixedCancelled = {
     tokens_out: 3,
     agents: 0,
   },
-} as const;
+};
 
 it.each([
   { label: 'one PASS and an infrastructure-only terminal copy', kind: 'infra', expected: 'failed' },
@@ -443,9 +444,9 @@ it.each([
     'rose-session',
     JSON.stringify({ access_token: 'fixture-token', user: { id: 'fixture-admin' } }),
   );
-  const group = structuredClone(
+  const group: Omit<typeof owningMixedInfra, 'tasks'> & { tasks: HubRunTask[] } = structuredClone(
     kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra,
-  ) as any;
+  );
   if (kind === 'passed' || kind === 'failed') {
     group.tasks[1] = {
       ...group.tasks[1],

@@ -3,7 +3,7 @@ import {
   type BrowserContext,
   type ConsoleMessage,
   type Page,
-  type Response,
+  type Response as BrowserResponse,
 } from '@playwright/test';
 
 function resolveLocalSemanticBackendUrl(): string {
@@ -45,7 +45,7 @@ export const TEST_OTP = process.env.TEST_OTP ?? '191919';
 
 let resolvedLocalUserId: Promise<string> | null = null;
 
-async function parseJsonResponse(res: Response): Promise<Record<string, unknown>> {
+async function parseJsonResponse(res: Pick<BrowserResponse, 'text'>): Promise<Record<string, unknown>> {
   const raw = await res.text();
   try {
     return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
@@ -124,7 +124,7 @@ export function attachRecorder(page: Page): Recorder {
   const rec: Recorder = { console: [], pageErrors: [], authResponses: [] };
   page.on('console', (m: ConsoleMessage) => rec.console.push({ type: m.type(), text: m.text() }));
   page.on('pageerror', (e: Error) => rec.pageErrors.push(String(e)));
-  page.on('response', (r: Response) => {
+  page.on('response', (r: BrowserResponse) => {
     const u = r.url();
     if (u.includes('/api/auth/')) rec.authResponses.push({ url: u, status: r.status() });
   });

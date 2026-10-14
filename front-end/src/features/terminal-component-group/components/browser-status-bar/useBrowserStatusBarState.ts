@@ -161,7 +161,7 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
   }, [browserMessages]);
 
   const outputSchema = useMemo<OutputSchemaRef | undefined>(() => {
-    const initMessage = browserMessages.find((m) => m.metadata?.output_schema);
+    const initMessage = [...browserMessages].reverse().find((m) => m.metadata?.output_schema);
     const raw = initMessage?.metadata?.output_schema;
     if (raw && typeof raw === 'object') {
       return raw as OutputSchemaRef;

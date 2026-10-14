@@ -133,17 +133,7 @@ export interface Message {
   timestamp: string;
   text: string;
   role: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
-  metadata?: {
-    toolCallId?: string;
-    toolName?: string;
-    toolStatus?: 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
-    title?: string;
-    subAgentId?: string;
-    progress?: number;
-    progressComplete?: number; // 0-100 or 0-1, optional - if present shows progress bar
-    error?: boolean;
-    [key: string]: unknown;
-  };
+  metadata?: import('../realtime-types/message-metadata').MessageMetadata;
   file_pointer?: FilePointer; // File attachment (OAI-style: one file per message)
 }
 

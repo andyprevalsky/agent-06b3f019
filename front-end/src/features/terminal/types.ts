@@ -133,6 +133,9 @@ export interface TerminalUIState {
 // ── AgentChatArea slices ──────────────────────────────────────────────────
 
 export interface AgentSlice {
+  isAuthenticated: boolean;
+  isAnonymous: boolean;
+  handleJoinWaitlist: () => void;
   selectedAgentId: string | null;
   agentDetail: AgentDetail | null;
   inspectionContext?: InspectionContext | null;

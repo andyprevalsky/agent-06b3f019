@@ -13,7 +13,7 @@ export async function submitWaitlist(payload: WaitlistPayload): Promise<Waitlist
   const data: WaitlistResponse = await response.json();
 
   if (!response.ok) {
-    throw new Error((data as Record<string, string>).error || 'Failed to join waitlist');
+    throw new Error(('error' in data && typeof data.error === 'string' && data.error) || 'Failed to join waitlist');
   }
 
   return data;

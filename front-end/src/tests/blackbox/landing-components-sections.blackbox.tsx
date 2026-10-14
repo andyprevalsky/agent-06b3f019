@@ -266,7 +266,7 @@ describe('ProgressiveImage', () => {
         return this._src;
       }
     }
-    (global as never).Image = FakeImage;
+    vi.stubGlobal('Image', FakeImage);
   }
 
   it('progresses from low → med → high src', async () => {
@@ -500,10 +500,12 @@ describe('features/index/hooks', () => {
     });
 
     it('handleSubmit with valid email sets loading → success and calls onSuccess', async () => {
-      let captured: unknown = null;
+      let captured: Record<string, unknown> | null = null;
       server.use(
         http.post(`${API_BASE}/waitlist`, async ({ request }) => {
-          captured = await request.json();
+          const value = await request.json();
+          if (!value || typeof value !== 'object') throw new Error('Expected waitlist object');
+          captured = { ...value };
           return HttpResponse.json({ success: true, message: 'ok' });
         }),
       );

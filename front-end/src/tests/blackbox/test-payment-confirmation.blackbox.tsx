@@ -110,6 +110,9 @@ describe('test-payment Confirmation receipt', () => {
           id: line.id,
           name: line.name,
           description: `${line.name} description`,
+          productUrl: 'https://www.roselabs.ai/test_payment',
+          rating: '0 stars',
+          reviewCount: '0 reviews',
           imageUrl: line.imageUrl,
           priceCents: line.unitPriceCents,
         }))}

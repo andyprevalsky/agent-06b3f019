@@ -113,9 +113,9 @@ function installStaticAssetFetch() {
     }
     return originalFetch(input as RequestInfo, init);
   });
-  (global as never).fetch = stubbedFetch;
+  globalThis.fetch = stubbedFetch;
   return () => {
-    (global as never).fetch = originalFetch;
+    globalThis.fetch = originalFetch;
   };
 }
 

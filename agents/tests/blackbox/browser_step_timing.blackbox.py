@@ -547,7 +547,7 @@ def test_resumed_transcript_observe_wired_once_per_activity():
     source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     setup, loop = source.split("while iteration < MAX_ITERATIONS:", 1)
     assert "restored_transcript_unobserved = bool(browser_turn_messages)" in setup
-    assert setup.index("browser_turn_messages.extend(resume_user_messages)") < setup.index(
+    assert setup.index("user_instruction_messages = _append_browser_user_instructions(") < setup.index(
         "restored_transcript_unobserved = bool(browser_turn_messages)"
     )
     observe = loop[loop.index("observe_needs_dom = _step_observe_needs_dom(") :]

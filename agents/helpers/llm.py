@@ -731,7 +731,7 @@ async def _generate_response_schema_with_rose(
     agent_id: str,
     compute_auth: Optional[Dict[str, Any]] = None,
     include_title: bool = False,
-) -> Tuple[Dict[str, Any], Optional[str], Dict[str, int]]:
+) -> Tuple[Dict[str, Any], Optional[str], Dict[str, Any]]:
     claude_auth_context, gpt_auth_context = _build_compute_auth_context_from_payload(compute_auth)
     response_model = _GeneratedResponseSchemaWithTitle if include_title else _GeneratedResponseSchema
     system_prompt = _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else "")
@@ -796,6 +796,11 @@ async def _generate_response_schema_with_rose(
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+                        "actual_model": usage.get("actual_model"),
+                        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                        "from_fast_cache": bool(usage.get("from_fast_cache")),
+                        "cache_sequence_id": usage.get("cache_sequence_id"),
                     },
                 )
             except RoseError as exc:

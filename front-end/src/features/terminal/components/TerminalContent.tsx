@@ -17,7 +17,7 @@
  *   agents + inspectionContext     → compact read-only pill in global control rail
  */
 
-import { useState, useMemo, lazy } from 'react';
+import { useState, useMemo, useEffect, lazy } from 'react';
 
 import {
   AppSidebar,
@@ -58,7 +58,7 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
-export function TerminalContent() {
+export function TerminalContent({ loadAgentsRef }: { loadAgentsRef?: React.MutableRefObject<(() => void) | null> }) {
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
@@ -67,6 +67,12 @@ export function TerminalContent() {
   const initialView = useMemo<TerminalView>(resolveInitialTerminalView, []);
   const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
+  const loadAgents = agents.loadAgents;
+  useEffect(() => {
+    if (!loadAgentsRef) return;
+    loadAgentsRef.current = () => { void loadAgents(); };
+    return () => { loadAgentsRef.current = null; };
+  }, [loadAgents, loadAgentsRef]);
   const { models, modelsLoading } = useAppData();
   const derived = useTerminalDerivedState(agents);
 

@@ -13,7 +13,7 @@
  * In each window the user saw a closed session instead of the browser.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, renderHook } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -34,6 +34,7 @@ vi.mock('@/components/ThinkingAnimation', () => ({
 }));
 
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+import { useBrowserStatusBarState } from '@/features/terminal-component-group/components/browser-status-bar/useBrowserStatusBarState';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
@@ -185,6 +186,18 @@ const authCompleted = browserMessage('auth-done', '2026-10-09T20:34:10.619Z', {
 });
 
 describe('live view follows the backend session binding', () => {
+  it('projects the latest accepted schema for the same browser task', () => {
+    const firstSchema = { fields: [{ name: 'events', type: 'str', required: true, description: 'Events' }] };
+    const latestSchema = { fields: [{ name: 'auth_blocker', type: 'str', required: true, description: 'Authentication blocker' }] };
+    const messages = [
+      { ...sessionInit(REBOUND_STEEL), metadata: { ...sessionInit(REBOUND_STEEL).metadata, output_schema: firstSchema } },
+      browserMessage('schema-revision', '2026-10-14T17:33:50Z', { output_schema: latestSchema }),
+    ];
+    const { result } = renderHook(() => useBrowserStatusBarState(TASK_ID), {
+      wrapper: ({ children }) => <AgentContext.Provider value={agentContext(messages)}>{children}</AgentContext.Provider>,
+    });
+    expect(result.current.outputSchema).toEqual(latestSchema);
+  });
   let viewportWidth: number;
   beforeEach(() => {
     viewportWidth = window.innerWidth;

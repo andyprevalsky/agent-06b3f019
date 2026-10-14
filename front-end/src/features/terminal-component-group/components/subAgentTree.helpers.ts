@@ -115,8 +115,8 @@ export function getTreeDepth(
 
 // Extended_Pictographic covers the full pictographic-emoji block; we pair it
 // with the ZWJ and VS16 codepoints that stitch sequences (family, flags, etc.)
-// and use the `v` flag so ESLint's `no-misleading-character-class` is happy.
-const EMOJI_REGEX = /^(\p{Extended_Pictographic}(?:\p{Extended_Pictographic}|\u200D|\uFE0F)*)\s*/v;
+// Each continuation is a separate alternative; Unicode set syntax is unnecessary.
+const EMOJI_REGEX = /^(\p{Extended_Pictographic}(?:\p{Extended_Pictographic}|\u200D|\uFE0F)*)\s*/u;
 
 /** Extract leading emoji run from text, returning the emoji and remaining text. */
 export function extractEmoji(text: string): { emoji: string; text: string } {

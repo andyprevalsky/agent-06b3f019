@@ -76,6 +76,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
+    inspectionContext: null,
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }
@@ -386,6 +390,8 @@ describe('MessageList', () => {
       streamingBubbles: new Map([['sb-1', { text: 'streaming...', sequence: 1, done: false }]]),
       streamingAttention: {
         stream_id: 'str-a',
+        sequence: 0,
+        done: false,
         tool_call_id: 'sa-1',
         message: 'please respond',
         is_question: true,

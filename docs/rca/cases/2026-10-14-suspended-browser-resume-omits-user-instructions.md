@@ -78,7 +78,9 @@ evaluation. The next more general class, preserving all mutable session/task
 state across every external suspension, is not a coherent repair here: those
 states have different owners and contracts, and this evidence concerns actual
 user instructions. The repair transports original user content rather than
-adding task-specific coaching or rewriting the goal/schema.
+adding task-specific coaching. The original incident proves missing input; it does
+not prove the original calendar-events schema was wrong. Schema refresh is
+covered separately because the user explicitly requested it.
 
 ## Solution
 
@@ -88,8 +90,8 @@ preserve message order and include distinct rows with the same timestamp while
 preventing duplicate delivery. Hidden generated schema context is excluded.
 The browser actor and both verifier paths receive the same actual user
 instructions, with the original delegated goal retained. Real task feedback
-no longer creates a false authentication-completed cue; only the explicit
-backend completion marker does. Declined authentication still ends without
+is preserved verbatim. The auth-resume cue and its synthetic USER-message
+helper are removed entirely, including on explicit backend completion. Declined authentication still ends without
 fetching input or making another model call.
 
 The final owning reproduction drives the actual resumed activity and verifier
@@ -115,6 +117,31 @@ continuity. Legacy snapshots without a cursor read the complete durable USER
 history once; this can repeat pre-task instructions. New snapshots use the
 activity's scheduled-time watermark and continue from its persisted cursor.
 
+
+The revised schema contract uses each delegated task's own current schema and
+actual user messages with the existing schema generator. It preserves selected
+compute credentials and native usage/cache identity. No input means no schema
+generation; declined authentication makes no additional model call. Updated
+schemas persist in continuity state and reach the actor, both browser verifiers,
+and terminal metadata. The root workflow now queues genuine keyed replies for
+its native schema refresh and updates its system contract directly, without a
+hidden USER row. Exact auth-completion and rejection protocol responses do not
+become user schema feedback.
+
+Three permanent root workflow tests failed before the revision: keyed feedback
+left its schema stale, the actor retained an old contract, and a new instruction
+fabricated a USER row. The identical three assertions pass afterward. Full
+workflow blackbox passed in 41.0 seconds and workflow determinism passed all five
+checks in 0.6 seconds. The final frozen browser, timing, and shared LLM domains all passed in 65.7
+seconds, including all 226 LLM checks. The new no-input auth and delegated-schema
+regressions failed before their revisions (1.249 and 0.865 seconds) and passed
+unchanged afterward (0.995 and 0.981 seconds). Stronger controls cover native
+compute auth, real usage/cache identity, archived schema deduplication, and
+declined auth. Infrastructure gate markers (RESOLVED, SOURCE_CONNECTED, and
+SUBSCRIPTION_ACTIVE) also remain control state: the expanded owning assertion
+failed before and passed after parsing the observed reserved protocol values.
+Whole-repository deployment coverage is pending.
+
 Golden references read: codex/codex-rs/core/src/session/input_queue.rs:389
 drains pending typed input; hermes-agent/agent/agent_runtime_helpers.py:3758
 appends actual steering as a standalone user row after a tool batch;
@@ -123,14 +150,17 @@ the next model call; claude-code-src/src/query.ts:1570 drains scoped queued
 commands. The repair converges on preserving original user input at the next
 execution boundary rather than manufacturing a recovery nudge.
 
-The case remains open pending snapshot-scoped runtime-context approval and
-deployment. The trajectory-injection guard explicitly requires approval. No
+The case remains open pending deployment. The user explicitly directed removal
+of harness injections, preservation of sent user messages, and schema updates
+when needed. That direction authorizes this scoped runtime change; the normal
+trajectory guard is satisfied with recorded user-direction provenance. No
 production agent was resumed, rerun or modified during this RCA. At 10,000
 agents the design adds one scoped durable-tail read per resumed task, with no
 new per-step polling or shared user fan-in. Existing auth, write-permission,
 payment and generation snapshots preserve the same instruction custody.
 Draft PR #1511 contains the reviewed code. The normal deploy prompt and agent
-terminal-behavior guards passed; Step 0c stopped on the runtime-context diff.
+terminal-behavior guards passed; Step 0c initially stopped on the runtime-context
+diff, then passed under the user's explicit revised implementation direction.
 The evidence publisher could not produce a share viewer for this deleted
 non-benchmark agent because its current CLI requires a Hub run UUID. The final
 verifier dump 56a48ebda7ec was rendered and published separately with a 7-day
@@ -140,7 +170,11 @@ validated or that production verification has occurred.
 ## Human feedback
 
 The user asked to continue the RCA and reported "failed to pause agent" on
-mobile. No implementation approval or gate override was recorded.
+mobile. The user then directed: "We shouldn’t have any harness injections, we
+should just perserve the user message if sent & update output schemas if needed".
+The revision removes synthetic auth-resume and hidden schema-update USER rows,
+keeps genuine messages, and updates native output contracts. No gate override
+was requested or inferred.
 
 ## Reusable lesson
 

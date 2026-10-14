@@ -100,8 +100,8 @@ git diff --check passed. No frontend source changed during that final run.
 The additional app-tsconfig check reported the same 218 diagnostics on HEAD
 and the candidate; no added or removed diagnostic keys. It is not a passing
 typecheck and is retained as a deploy-verification limitation. This case remains
-open pending deployment; the combined worktree also requires human approval for
-the browser instruction-context repair. No live agent was paused or modified.
+open pending deployment. The user's subsequent direction authorizes preserving
+actual messages and native schema updates in the combined browser repair. No live agent was paused or modified.
 
 At 10,000 agents, deriving view interactivity from the already-loaded selected
 agent context adds no query, subscription, polling loop or shared contention.
@@ -116,7 +116,10 @@ searched for an admin-inspection analogue and none was found.
 ## Human feedback
 
 The user reported the mobile pause error and asked to continue. No request to
-weaken account ownership or grant cross-account mutation was recorded.
+weaken account ownership or grant cross-account mutation was recorded. The user
+subsequently asked for genuine-message preservation and schema updates without
+harness injections; frontend schema display is checked against accepted native
+schema revisions.
 
 ## Reusable lesson
 

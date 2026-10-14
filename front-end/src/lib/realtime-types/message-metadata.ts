@@ -1,4 +1,5 @@
 import type { BROWSER_EMITTED_ACTION_TYPES } from '../backendToolNames';
+import type { RequestUserApprovalMetadata } from './tool-metadata';
 
 // =============================================================================
 // Agent Channel Events (agent:{agentId})
@@ -49,7 +50,9 @@ export type BrowserActionType =
   | 'navigate'
   | 'type'
   | 'scroll'
-  | 'hover';
+  | 'hover'
+  | 'session_started'
+  | 'write_lock_rejected';
 
 /**
  * Code agent action types.
@@ -106,11 +109,18 @@ export interface MessageMetadata {
   /** Browser agent current URL */
   browser_url?: string;
   /** Action type for browser/code agents */
-  action_type?: BrowserActionType | CodeActionType;
+  action_type?: string;
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */
   preview_url?: string;
+  auxiliary?: Record<string, unknown>;
+  imageUrl?: string;
+  requestUserApproval?: RequestUserApprovalMetadata['requestUserApproval'];
+  subAgentIds?: string[];
+  busId?: string;
+  spawnGroupId?: string;
+  forEachAggregate?: boolean;
   /** Allow additional fields for extensibility */
   [key: string]: unknown;
 }

@@ -265,7 +265,7 @@ function buildMergedMessages(
     const cached = prevCache.get(key);
     const cacheMatchesCurrentMessage =
       cached &&
-      cached.content === merged.content &&
+      cached.text === merged.text &&
       cached.role === merged.role &&
       cached.metadata?.toolStatus === merged.metadata?.toolStatus &&
       cached.metadata?.toolCallId === merged.metadata?.toolCallId &&

@@ -6285,24 +6285,6 @@ def test_auth_runtime_state_does_not_block_on_disabled_passwords():
     assert snapshot["password"]["exhausted_or_unavailable"] is True
     assert snapshot["password"]["remaining_ids"] == []
 
-def test_auth_assistance_resume_user_message_preserves_live_state():
-    from domains.spawn_browser_agent_v3.service import (
-        build_auth_assistance_resume_user_message,
-    )
-
-    message = build_auth_assistance_resume_user_message(
-        auth_realm="selenium.dev",
-        handoff_mode="same_steel_session_live_view",
-    )
-
-    assert message["role"] == "user"
-    content = message["content"]
-    assert "selenium.dev" in content
-    assert "same_steel_session_live_view" in content
-    assert "same auth realm" in content
-    assert "Do not undo user-entered changes" in content
-
-
 def test_payment_card_approval_finishes_original_browser_tool_result():
     from domains.spawn_browser_agent_v3.handler import (
         _append_browser_turn_messages,
@@ -20138,7 +20120,9 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
     close_mock = AsyncMock()
     fetch_mock = AsyncMock(return_value={"session_id": "session-refreshed-by-auth-page"})
     resume_mock = AsyncMock()
+    schema_mock = AsyncMock(side_effect=AssertionError("refusal must not call a model"))
     with (
+        patch("helpers.llm._generate_response_schema_with_rose", schema_mock),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
@@ -20157,6 +20141,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
             use_claude_mode=False,
             write_lock_resume_state={
                 "approval_type": AUTH_ASSISTANCE_DECLINED,
+                "user_instruction_messages": [{"role": "user", "content": "Include account notes."}],
                 "task_id": "task-1",
                 "session_id": "session-1",
                 "cdp_url": "ws://old",
@@ -20172,6 +20157,7 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
     assert close_mock.await_args.kwargs == {"pause": False}
     assert fetch_mock.await_count == 1 and fetch_mock.await_args.args[1] == "task-1"
     resume_mock.assert_not_awaited()
+    schema_mock.assert_not_awaited()
 
 
 @_in_browser_activity_context
@@ -20669,7 +20655,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks"):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -20740,15 +20726,29 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         {"action": {"action": "attempt_completion", "thinking": "The signed-in page confirms completion.", "params": {"reasoning": "confirmed"}}, "usage": {}, "mode": "waterfall"},
     ]
     captured_turns = []
+    captured_system_context = []
 
     async def capture_actor(**kwargs):
         captured_turns.append(copy.deepcopy(kwargs["turn_messages"]))
+        captured_system_context.append(kwargs["dynamic_system_context"])
         return actor_responses[len(captured_turns) - 1]
 
     actor_call = AsyncMock(side_effect=capture_actor)
     actor_call.captured_turns = captured_turns
+    actor_call.captured_system_context = captured_system_context
     judge_call = AsyncMock(return_value={"score": 1.0, "reasoning": "completed", "structured_response": {"result": "ride requested"}, "usage": {}})
+    schema_generator = AsyncMock(return_value=(
+        generated_schema or {"fields": [{"name": "result", "type": "string"}]},
+        None, {"prompt_tokens": 10, "completion_tokens": 5},
+    ))
+    schema_client = AsyncMock(return_value=SimpleNamespace(
+        content=json.dumps({"reasoning": "The requested output contract follows the real user input.", **(generated_schema or {"fields": [{"name": "result", "type": "str"}]})}),
+        tool_calls=[], usage={"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "gpt-5.6-luna", "cache_read_input_tokens": 8, "cache_sequence_id": "schema-generation-1"},
+    ))
+    actor_call.schema_generator = schema_client if real_schema_generator else schema_generator
     patch_targets = [
+        *( [patch("helpers.llm.RoseClient.collect", schema_client)] if real_schema_generator else
+            [patch("helpers.llm._generate_response_schema_with_rose", schema_generator)] ),
         patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_credential_ref_message", AsyncMock()),
@@ -20830,8 +20830,11 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             is_resume=True,
             output_schema={"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
+            gpt_token=selected_gpt_token,
+            gpt_account_id="fixture-gpt-account" if selected_gpt_token else None,
+            gpt_token_source="user" if selected_gpt_token else None,
             write_lock_resume_state={
-                "approval_type": "manual_pause",
+                "approval_type": approval_type,
                 "task_id": "task-1",
                 "user_message_cursor": "2026-10-14T17:21:35.438+00:00",
             },
@@ -20867,6 +20870,49 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     await _exercise_browser_resume_user_input()
+
+
+async def test_browser_auth_resume_preserves_real_input_without_fabricated_user_cue():
+    actor, _judge = await _exercise_browser_resume_user_input(approval_type="auth_assistance")
+    actor.schema_generator.assert_not_awaited()
+    for turns in actor.captured_turns:
+        assert not any(message.get("role") == "user" for message in turns), (
+            "Authentication resume fabricated a USER message without actual user input"
+        )
+
+
+async def test_browser_resume_recomputes_its_own_schema_for_real_user_feedback():
+    correction = "Return the notes for each confirmed entry."
+    row = {"id": "schema-correction", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER", "text": correction}
+    replacement = {"fields": [{"name": "notes", "type": "str", "required": True}]}
+    actor, judge = await _exercise_browser_resume_user_input([row], generated_schema=replacement)
+    requested_schema = judge.await_args.kwargs["args"][3]
+    assert requested_schema == replacement, (
+        "Resumed browser verifier kept a stale delegated schema after a genuine user requirement"
+    )
+    assert all("notes" in context for context in actor.captured_system_context), (
+        "Actor retained an older typed output contract than its verifier"
+    )
+    generator = actor.schema_generator
+    assert generator.await_count == 1
+    generator_goal = generator.await_args.args[0]
+    assert generator_goal.startswith("Buy socks\n\n")
+    assert correction in generator_goal
+    assert '"output_schema"' in generator_goal and '"result"' in generator_goal
+
+
+async def test_browser_schema_generation_preserves_selected_compute_auth_at_client_boundary():
+    replacement = {"fields": [{"name": "notes", "type": "str", "required": True}]}
+    row = {"id": "auth-schema-correction", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER", "text": "Include confirmed entry notes."}
+    actor, _judge = await _exercise_browser_resume_user_input(
+        [row], generated_schema=replacement, selected_gpt_token="fixture-gpt-token",
+        real_schema_generator=True,
+    )
+    actual_schema_call = actor.schema_generator.await_args.kwargs
+    assert actual_schema_call["claude_auth"] is None
+    auth = actual_schema_call["gpt_auth"]
+    assert auth is not None, "schema generation dropped the browser's selected compute credentials"
+    assert auth.token == "fixture-gpt-token" and auth.account_id == "fixture-gpt-account"
 
 
 async def test_browser_resumed_call_and_judge_receive_durable_captured_user_correction():
@@ -22973,7 +23019,7 @@ async def test_manager_auth_response_does_not_claim_completed_login():
     calls = await _exercise_manager_auth_assistance_resume(corrections)
     resumed = calls[1][1]["args"]
     assert resumed[2] == "Buy socks", "transport must preserve the original delegated goal"
-    assert resumed[12]["auth_assistance_completed"] is False, (
+    assert "auth_assistance_completed" not in resumed[12], (
         "A task correction was misreported as completed authentication"
     )
 
@@ -23033,6 +23079,50 @@ async def test_browser_resume_loads_ordered_durable_input_after_archived_hydrati
     assert next_turns == [*turns, {"role": "user", "content": late["text"]}], (
         "repeated resume lost a late same-timestamp reply or repeated earlier input"
     )
+
+
+async def test_browser_schema_refresh_survives_repeated_resume_without_new_user_input():
+    import hashlib
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    initial = {"fields": [{"name": "result", "type": "str", "required": True}]}
+    replacement = {"fields": [{"name": "notes", "type": "str", "required": True}]}
+    correction = {"role": "user", "content": "Include entry notes."}
+    compute_auth = {"type": "gpt", "accessToken": "fixture-token", "accountId": "fixture-account"}
+    generation = AsyncMock(return_value=(replacement, None, {"prompt_tokens": 12, "completion_tokens": 6}))
+    with patch("helpers.llm._generate_response_schema_with_rose", generation):
+        unchanged, usage = await h._refresh_browser_output_schema(
+            goal="Read the shared calendar", agent_id="agent-1", response_schema=initial,
+            resume_state=None, compute_auth=compute_auth,
+        )
+        assert unchanged is initial and usage == {}
+        generation.assert_not_awaited()
+        accepted, usage = await h._refresh_browser_output_schema(
+            goal="Read the shared calendar", agent_id="agent-1", response_schema=initial,
+            resume_state={"user_instruction_messages": [correction]}, compute_auth=compute_auth,
+        )
+        assert accepted == replacement and usage == {"prompt_tokens": 12, "completion_tokens": 6}
+        assert generation.await_args.kwargs["compute_auth"] == compute_auth
+        parked = h._browser_resume_continuity_state(
+            action_history=SimpleNamespace(get_entries=lambda: []), visited_urls=[], verifier_checkpoints=[],
+            browser_turn_messages=[correction], user_instruction_messages=[correction], response_schema=accepted,
+        )
+        carried = {}
+        h._copy_browser_resume_continuity_fields(parked, carried)
+        body = json.dumps(carried).encode()
+        ref = {"paths": ["schema-resume-fixture"], "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+        with patch.object(resume_store, "_load_part", return_value=body):
+            carried = await resume_store.hydrate_resume_context(
+                agent_id="agent-1", resume_state={"browser_resume_context_ref": ref}
+            )
+        assert carried["browser_output_schema"] == replacement
+        resumed, resumed_usage = await h._refresh_browser_output_schema(
+            goal="Read the shared calendar", agent_id="agent-1", response_schema=carried["browser_output_schema"],
+            resume_state=carried, compute_auth=compute_auth,
+        )
+        assert resumed == replacement and resumed_usage == {}
+        assert generation.await_count == 1, "duplicate resume regenerated an already accepted schema"
 
 
 async def test_browser_resume_delivers_user_corrections_once_to_actor_and_verifier():
@@ -26018,10 +26108,6 @@ async def run_all_tests():
         test_auth_runtime_state_does_not_block_on_disabled_passwords,
     )
     r.record(
-        "auth_assistance_resume_user_message",
-        test_auth_assistance_resume_user_message_preserves_live_state,
-    )
-    r.record(
         "payment_card_approval_finishes_original_browser_tool_result",
         test_payment_card_approval_finishes_original_browser_tool_result,
     )
@@ -27755,6 +27841,22 @@ async def run_all_tests():
     await r.record_async(
         "browser_resumed_call_and_judge_receive_durable_captured_user_correction",
         test_browser_resumed_call_and_judge_receive_durable_captured_user_correction,
+    )
+    await r.record_async(
+        "browser_auth_resume_preserves_real_input_without_fabricated_user_cue",
+        test_browser_auth_resume_preserves_real_input_without_fabricated_user_cue,
+    )
+    await r.record_async(
+        "browser_resume_recomputes_its_own_schema_for_real_user_feedback",
+        test_browser_resume_recomputes_its_own_schema_for_real_user_feedback,
+    )
+    await r.record_async(
+        "browser_schema_generation_preserves_selected_compute_auth_at_client_boundary",
+        test_browser_schema_generation_preserves_selected_compute_auth_at_client_boundary,
+    )
+    await r.record_async(
+        "browser_schema_refresh_survives_repeated_resume_without_new_user_input",
+        test_browser_schema_refresh_survives_repeated_resume_without_new_user_input,
     )
     await r.record_async(
         "manager_write_approval_hour_wait_resume",

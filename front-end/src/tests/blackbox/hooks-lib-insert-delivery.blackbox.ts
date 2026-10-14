@@ -46,7 +46,7 @@ describe('committed INSERT delivery', () => {
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
     act(() => handlers.onInsert?.(insert));
-    deps.setStreamingPlan.mockClear();
+    vi.mocked(deps.setStreamingPlan).mockClear();
     act(() => handlers.onInsert?.(insert));
     expect(deps.dispatchMessage).toHaveBeenCalledOnce();
     expect(deps.setStreamingPlan).not.toHaveBeenCalled();
@@ -211,7 +211,7 @@ describe('committed INSERT delivery', () => {
     });
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
-    const browser = (id: string, toolStatus: string): InsertMessagePayload => ({
+    const browser = (id: string, toolStatus: import('@/lib/realtime-types').ToolStatus): InsertMessagePayload => ({
       ...insert,
       id,
       metadata: { toolName: 'spawn_browser_agent', toolCallId: 'browser-a', toolStatus },

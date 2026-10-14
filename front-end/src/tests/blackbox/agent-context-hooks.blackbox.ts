@@ -1,3 +1,4 @@
+import type { AgentDetail } from '@/lib/api';
 /**
  * Blackbox tests for @/features/agent-context/hooks.ts — useAgentProvider +
  * useAgentContext.
@@ -55,7 +56,7 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
-function makeAgent(overrides: Record<string, unknown> = {}) {
+function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',

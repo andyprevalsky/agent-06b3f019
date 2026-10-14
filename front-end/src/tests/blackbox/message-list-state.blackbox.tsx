@@ -50,6 +50,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
+    inspectionContext: null,
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }
