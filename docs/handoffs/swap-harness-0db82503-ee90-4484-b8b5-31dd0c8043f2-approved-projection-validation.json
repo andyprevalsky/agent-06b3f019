@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-14T02:14:36.430474+00:00",
+  "runtime_source": "4310587e0e57ad35582e03232c91b3306e90a08b",
+  "current_checkpoint": "e87ac65479b0ff20aad069dfe49a8f6214dfea44",
+  "approval": "TAMY-CEREBRAS-1 approved and applied exactly",
+  "native_owning_gate": "PASS",
+  "fresh_SMS": {
+    "run_id": "65f3f4d0-3490-4793-b314-eb03a7c52586",
+    "triggered_at_utc": "2026-10-14T01:54:27.848791+00:00",
+    "catalog_sha256": "330f865234e1472aa899fff95940499490f05dcf278afe89ac7e0c6e86b6aee9",
+    "original_timeouts": {
+      "sms-supervisor-open-spawns-agent": 420,
+      "sms-supervisor-closed-no-spawn": 420,
+      "sms-supervisor-fill-form-searches-then-delegates": 420
+    },
+    "task_outcomes": [
+      {
+        "name": "sms-supervisor-fill-form-searches-then-delegates",
+        "passed": false,
+        "duration_seconds": 45.7
+      },
+      {
+        "name": "sms-supervisor-open-spawns-agent",
+        "passed": true,
+        "duration_seconds": 78.2
+      },
+      {
+        "name": "sms-supervisor-closed-no-spawn",
+        "passed": false,
+        "duration_seconds": 31.5
+      }
+    ],
+    "passed": 1,
+    "failed": 2,
+    "reported_cost_cents": 0.0,
+    "direct_SMS_provider_cost": "Not metered by zero-cost benchmark summary",
+    "argument_type_failure": "Absent in20 captured dispatcher records; numeric/boolean/object types valid",
+    "remaining_failure": "Closed fixture led to unexpected committed agent; fill-form declared LLM judge failed despite static contract passing; evaluator interpretation under audit",
+    "runner_process_owners_absent": true,
+    "cleanup_receipts_clean": true
+  },
+  "fresh_static": "PASS full backend TypeScript/structural443-file affected lint/fullformat",
+  "fresh_structural": "PASS46/46 suites;623 fixture cases+4existing skips; separate seed gates PASS",
+  "fresh_frontend": "PASS160files2736tests+3existing skips; lint/build PASS; formatter failure repaired with identical emitted JavaScript; final appTSC+11phone-card tests PASS",
+  "backend_coverage": {
+    "domains": 197,
+    "passed": 194,
+    "failed": 3,
+    "failed_domains": [
+      "browser-provider",
+      "browser-session-credential-injection",
+      "treasury-rails"
+    ],
+    "coverage_threshold_result": "Not established because blackbox phase failed"
+  },
+  "agents_coverage": {
+    "domains": 110,
+    "passed": 109,
+    "failed": 1,
+    "cause": "Duplicate original test copies shadow main strengthened fixture/flag setup",
+    "repair": "Applied duplicate-only test repair with all canonical assertions preserved; fresh full coverage running"
+  },
+  "non_author_finite_recipe_review": {
+    "fingerprint": "a6a1b58b4d679a971332ace36d66333549c62eb87c13e7209aa92a662b671933",
+    "input_count": 40,
+    "main_identical_inputs": 39,
+    "sole_other_input": "Previously independently approved frontend coverage manifest",
+    "registered_phases": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ]
+  },
+  "deployment_complete": false,
+  "PR_merged": false,
+  "raw_transcripts_and_values": "PRIVATE; not included in this receipt"
+}
