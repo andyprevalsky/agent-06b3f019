@@ -6327,7 +6327,7 @@ def test_payment_card_approval_finishes_original_browser_tool_result():
     result = json.loads(turns[1]["content"])
     assert result["success"] is True
     assert result["status"] == "payment_card_ready"
-    assert result["card_secret_refs"] == {key: key for key in refs}
+    assert result["card_secret_refs"] == {key: "{{secret:" + key + "}}" for key in refs}
     assert result["card_last4"] == "1111"
     assert "4111111111111111" not in turns[1]["content"]
     assert "123" not in turns[1]["content"]
@@ -25472,7 +25472,7 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
     result = json.loads(resumed[-1]["content"])
     assert result["status"] == "approved"
     assert result["card_last4"] == "7406"
-    assert result["card_secret_refs"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert result["card_secret_refs"] == ["{{secret:" + key + "}}" for key in ("card_number", "card_name", "card_expiry", "card_cvv")]
     assert result["payment_request"] == {"merchant": "Test Shop"}
     assert action_history.get_entries()[0]["result"] == result
     assert "PAN-secret" not in resumed[-1]["content"]
