@@ -3242,7 +3242,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -3296,6 +3302,117 @@
     "source": ["user-request:auth-critical-path-e2e"]
   },
   {
+    "name": "browser-auth-password-app-approval",
+    "title": "Hosted Sign-In: Password Then App Approval",
+    "description": "A saved password leads to a number-matching approval on the user's separate device; the agent must request that action, keep the browser session, verify sign-in and finish the task.",
+    "prompt": "Tell me my member number for {auth_test_site_url}",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth", "browser-auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "password_app_approval",
+        "user_response": "approve_app"
+      },
+      "context_notes": "Rose Shop is a CAPTCHA-free synthetic test site served by the local backend and reached through the public frontend proxy, on a per-run realm rose-shop-<siteId>. One saved password belongs to the same Rose user that owns the task. After accepting it, the site explains that the user must approve a numbered sign-in request in the Rose Authenticator app on another device. When the agent raises auth_assistance, the harness plays the user in a separate browser context on the helper-only device page, selects the matching number and approves. The task browser must preserve its pending challenge and verify the resulting authenticated account before returning the member number. This models app approval without contacting Google or a real device."
+    },
+    "evaluators": [
+      {
+        "id": "password-app-approval-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "Exactly one authentication assistance request is raised",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "password-app-approval-outcome",
+        "method": "static_check",
+        "criteria": [
+          "One saved password creates a pending second-factor challenge",
+          "One app approval precedes completion of that challenge",
+          "The authenticated session uses password_app_approval",
+          "The final answer reports the member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password_app_approval",
+            "deliverable_contains_member_number": true,
+            "trail": [
+              { "kind": "password", "outcome": "pending" },
+              { "kind": "second_factor", "outcome": "pending" },
+              { "kind": "app_approval", "outcome": "approved" },
+              { "kind": "second_factor", "outcome": "signed_in" }
+            ],
+            "counts": [
+              { "kind": "password", "min": 1, "max": 1 },
+              { "kind": "second_factor", "min": 2, "max": 2 },
+              { "kind": "app_approval", "min": 1, "max": 1 }
+            ]
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user-request:auth-critical-path-e2e",
+      "user-request:app-approval-2fa"
+    ]
+  },
+  {
     "name": "browser-auth-account-locked",
     "title": "Hosted Sign-In: Locked Account",
     "description": "The saved login's account is locked; the browser agent must stop trying and ask the user for sign-in help.",
@@ -3327,7 +3444,12 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "auth_test_site": {
@@ -3414,7 +3536,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -3540,7 +3668,10 @@
       {
         "id": "code-never-arrives-outcome",
         "method": "static_check",
-        "criteria": ["The code was requested and then requested again", "No session was ever signed in"],
+        "criteria": [
+          "The code was requested and then requested again",
+          "No session was ever signed in"
+        ],
         "checks": [
           {
             "type": "auth_test_site_outcome",
@@ -3589,7 +3720,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -3775,7 +3912,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -3857,7 +4000,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "gmail", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "gmail",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -3941,7 +4090,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -4024,7 +4179,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -4110,7 +4271,12 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "auth_test_site": {
@@ -4212,7 +4378,12 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "auth_test_site": {
@@ -4298,7 +4469,12 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "auth_test_site": {
@@ -4384,7 +4560,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4549,7 +4731,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4708,7 +4896,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -4866,7 +5060,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5031,7 +5231,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5438,7 +5644,10 @@
       {
         "id": "signup-fails-purchase-assistance-outcome",
         "method": "static_check",
-        "criteria": ["Sign-up was attempted and refused", "No account, no session and no order exist"],
+        "criteria": [
+          "Sign-up was attempted and refused",
+          "No account, no session and no order exist"
+        ],
         "checks": [
           {
             "type": "auth_test_site_outcome",
@@ -5473,7 +5682,13 @@
       "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
-    "tags": ["browser", "auth", "browser-auth", "payment", "agentcard-lifecycle-sandbox"],
+    "tags": [
+      "browser",
+      "auth",
+      "browser-auth",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -5764,7 +5979,13 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [],
-      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "services": [
+        "browser_agent",
+        "auth_test_site",
+        "auth_options",
+        "minted_identity",
+        "primitive_email"
+      ],
       "secrets": ["PRIMITIVE_API_KEY"],
       "live_targets": [],
       "auth_test_site": {
@@ -7865,7 +8086,7 @@
         "criteria": [
           "The voice agent parked the call with wait_for_human for at least 90% of the 2.5 hour queue instead of keeping a live voice assistant on the hold music"
         ],
-        "checks": [{"type": "phone_call_parked_on_hold", "min_seconds": 8100}]
+        "checks": [{ "type": "phone_call_parked_on_hold", "min_seconds": 8100 }]
       }
     ],
     "enforce_declared_evaluators": true,
@@ -8193,8 +8414,12 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
-    "min_tool_counts": {"grep": 1},
-    "forbidden_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "message_person"],
+    "min_tool_counts": { "grep": 1 },
+    "forbidden_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person"
+    ],
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
@@ -8240,7 +8465,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:calendar-drive-read-2026-10-05", "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"],
+    "source": [
+      "user:calendar-drive-read-2026-10-05",
+      "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"
+    ],
     "deploy_category": "grep"
   },
   {
@@ -8259,8 +8487,12 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "min_tool_counts": {"grep": 1},
-    "forbidden_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "message_person"],
+    "min_tool_counts": { "grep": 1 },
+    "forbidden_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person"
+    ],
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
@@ -8307,7 +8539,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:calendar-drive-read-2026-10-05", "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"],
+    "source": [
+      "user:calendar-drive-read-2026-10-05",
+      "fixture:back-end/scripts/google-workspace-benchmark-fixture.ts"
+    ],
     "deploy_category": "grep"
   },
   {
@@ -8989,9 +9224,7 @@
     "is_chat_mode": false,
     "start_phase": "execute",
     "expected_tools": [],
-    "tags": [
-      "grep"
-    ],
+    "tags": ["grep"],
     "group": "daily",
     "deploy_category": "grep",
     "status": "ready",
@@ -9009,21 +9242,15 @@
     },
     "environment": {
       "mode": "synthetic",
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "db_fixtures": [],
-      "services": [
-        "grep"
-      ],
+      "services": ["grep"],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
     },
     "enforce_declared_evaluators": true,
-    "source": [
-      "feature:agent-trajectories"
-    ],
+    "source": ["feature:agent-trajectories"],
     "evaluators": [
       {
         "id": "prior-browser-and-code-facts",
@@ -9047,9 +9274,7 @@
     "is_chat_mode": false,
     "start_phase": "execute",
     "expected_tools": [],
-    "tags": [
-      "grep"
-    ],
+    "tags": ["grep"],
     "group": "daily",
     "deploy_category": "grep",
     "status": "ready",
@@ -9067,21 +9292,15 @@
     },
     "environment": {
       "mode": "synthetic",
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "db_fixtures": [],
-      "services": [
-        "grep"
-      ],
+      "services": ["grep"],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
     },
     "enforce_declared_evaluators": true,
-    "source": [
-      "feature:agent-trajectories"
-    ],
+    "source": ["feature:agent-trajectories"],
     "evaluators": [
       {
         "id": "prior-city-comparison-facts",
@@ -9105,9 +9324,7 @@
     "is_chat_mode": false,
     "start_phase": "execute",
     "expected_tools": [],
-    "tags": [
-      "grep"
-    ],
+    "tags": ["grep"],
     "group": "daily",
     "deploy_category": "grep",
     "status": "ready",
@@ -9125,21 +9342,15 @@
     },
     "environment": {
       "mode": "synthetic",
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "db_fixtures": [],
-      "services": [
-        "grep"
-      ],
+      "services": ["grep"],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
     },
     "enforce_declared_evaluators": true,
-    "source": [
-      "feature:agent-trajectories"
-    ],
+    "source": ["feature:agent-trajectories"],
     "evaluators": [
       {
         "id": "prior-coding-request",
@@ -9327,8 +9538,8 @@
           "The final completion card has all seven answer fields, connected account and final disconnected state. No subagent, coding agent, browser agent, fixture database request, or Google API is used."
         ],
         "checks": [
-          {"type": "google_oauth_demo_trace"},
-          {"type": "fully_cached_agent"}
+          { "type": "google_oauth_demo_trace" },
+          { "type": "fully_cached_agent" }
         ]
       }
     ],

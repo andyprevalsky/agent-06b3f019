@@ -19,6 +19,7 @@
  *   signed_out ──password | passkey | code | link | saved session──► signed_in
  *       │  └────any of them rejected──► signed_out (attempt recorded)
  *       ├──password ok + second factor──► code_pending ──code ok──► signed_in
+ *       ├──password ok + app approval──► approval_pending ──separate app confirms──► signed_in
  *       └──sign-up──► verify_pending ──code ok──► signed_in
  *   signed_in | guest ──checkout──► order placed (exactly once per submit)
  */
@@ -34,6 +35,7 @@ export const AUTH_TEST_SITE_SCENARIOS = [
   'passkey',
   'passkey_rejected',
   'password_email_2fa',
+  'password_app_approval',
   'account_locked',
   'code_never_arrives',
   'expired_code',
@@ -58,6 +60,7 @@ export type AuthTestSiteScenario = (typeof AUTH_TEST_SITE_SCENARIOS)[number];
 export type SignInMethod =
   | 'password'
   | 'password_email_2fa'
+  | 'password_app_approval'
   | 'email_code'
   | 'sms_code'
   | 'magic_link'
@@ -76,6 +79,7 @@ export type AttemptKind =
   | 'passkey'
   | 'session'
   | 'second_factor'
+  | 'app_approval'
   | 'signup'
   | 'signup_verify'
   | 'guest'
@@ -90,6 +94,7 @@ export type AttemptOutcome =
   | 'code_delivery_failed'
   | 'resumed'
   | 'pending'
+  | 'approved'
   | 'started'
   | 'placed';
 
@@ -99,6 +104,7 @@ export type RejectionReason =
   | 'no_password'
   | 'invalid_code'
   | 'expired_code'
+  | 'expired_challenge'
   | 'locked'
   | 'expired_session'
   | 'passkey_not_recognized'
@@ -118,7 +124,7 @@ export interface SiteBehavior {
   emailSignIn: 'off' | 'code' | 'code_withheld' | 'code_first_expired' | 'link';
   smsSignIn: 'off' | 'code';
   passkey: 'off' | 'accept' | 'reject';
-  secondFactor: 'none' | 'email_code';
+  secondFactor: 'none' | 'email_code' | 'app_approval';
   signUp: 'off' | 'open' | 'error';
   /** browse: guests see the shop only; checkout: guests can also buy. */
   guest: 'off' | 'browse' | 'checkout';
@@ -188,6 +194,15 @@ export interface SiteSession {
   /** Seeded as the user's saved browser session; first use is logged as "resumed". */
   seeded: boolean;
   resumed: boolean;
+}
+
+export interface AppApprovalChallenge {
+  token: string;
+  email: string;
+  number: string;
+  expiresAtMs: number;
+  approvedAt: string | null;
+  consumed: boolean;
 }
 
 export interface SitePasskey {
@@ -265,6 +280,9 @@ export interface AuthTestSite {
   attempts: SignInAttempt[];
   sessions: SiteSession[];
   codes: IssuedCode[];
+  appApprovalDeviceKey: string | null;
+  appApprovalNumber: string;
+  appApprovals: AppApprovalChallenge[];
   linkTokens: Array<{ token: string; email: string; expiresAtMs: number; consumed: boolean }>;
   carts: Record<string, CartLine[]>;
   /** Carts whose owner chose to check out without an account. */
@@ -304,6 +322,12 @@ export interface AuthTestSiteManifest {
   namedAccountEmail: string | null;
   /** What the user themself would type when asked to sign in; never offered to the agent. */
   userSignIn: { email: string; password: string } | null;
+  /** Separate app/device capability for the stand-in user; never part of the agent goal. */
+  appApprovalUser: {
+    deviceUrl: string;
+    expectedNumber: string;
+    challengeLifetimeSeconds: number;
+  } | null;
   savedSession: 'valid' | 'expired' | null;
   savedBrowserAuthHidden: boolean;
   /** What /api/auth-options returns for the realm — the ladder the agent will see. */
@@ -342,6 +366,7 @@ export interface AuthTestSiteReport {
 export type PasswordSignInResult =
   | { ok: true; token: string }
   | { ok: 'second_factor' }
+  | { ok: 'app_approval'; challengeToken: string }
   | { ok: false; reason: Exclude<RejectionReason, null> };
 
 export type CodeVerifyResult =

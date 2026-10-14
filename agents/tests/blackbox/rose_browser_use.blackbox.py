@@ -331,7 +331,10 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
     assert "  - 6. Guest/anonymous completion, if viable" in prompt
-    assert "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n" in prompt
+    assert (
+        "- If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.\n"
+        in prompt
+    )
     assert "  - 7. Minted account\n" in prompt
     assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
@@ -348,10 +351,10 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
 
 
 def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery():
-    """Cement: the auth handoff lands the user on the sign-in form, so they never navigate."""
+    """A handoff preserves the current auth step, including an accepted-password challenge."""
     rule = (
-        "leave the site's sign-in form (username/password or code entry) open and visible, "
-        "so the user can sign in without navigating."
+        "Keep the current sign-in or verification step open and visible when requesting help. "
+        "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form."
     )
     for disable_recover in ("", "1"):
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": disable_recover}):
@@ -360,9 +363,12 @@ def test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_r
                 ["request_user_assistance_for_authentication", "recover_from_challenge"]
             )
         assert rule in auth_help["description"], f"tool description missing rule (disable={disable_recover!r})"
-        assert f"- Before calling request_user_assistance_for_authentication, {rule}" in prompt, (
-            f"system prompt missing rule (disable={disable_recover!r})"
+        assert rule in prompt, f"system prompt missing rule (disable={disable_recover!r})"
+        assert (
+            "When the current step requires an action only the user can perform, request assistance "
+            in auth_help["description"]
         )
+        assert "username/password or code entry" not in auth_help["description"]
 
 
 def test_build_browser_use_system_prompt_reuses_main_grading_prompt():

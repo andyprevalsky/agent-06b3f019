@@ -5999,3 +5999,4 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 173.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "8fac6081-4d52-4929-bc02-01c5d790b1c2"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 285.3, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "1cfaf45b-6833-402c-8251-712bd9e54ce6"}
 {"task": "agent-payment-abandonment", "duration_seconds": 198.0, "cost_cents": 0.0, "timestamp": "2026-10-13T21:42:49.413980+00:00", "agent_id": "51a21579-5c4d-4256-9554-bd1f1b65f38c"}
+{"task": "browser-auth-password-app-approval", "duration_seconds": 97.6, "cost_cents": 0.0, "timestamp": "2026-10-14T19:19:29.669953+00:00", "agent_id": "54357a4d-02ac-4836-bc7b-4bb2a20df38c"}

@@ -3486,6 +3486,18 @@ async def _respond_as_user_to_auth_assistance(base_url: str, agent_id: str, req:
             await auth_test_site.mark_run(base_url, headers, site_id, "user-declined")
         print(f"    🙅 Declined sign-in-help request {req_id}")
         return
+    if user_response == "approve_app":
+        if _attention_request_kind(req) != "auth_assistance":
+            raise RuntimeError("app approval requires an auth-assistance request")
+        app_approval = (auth_test_site.active_manifest() or {}).get("appApprovalUser")
+        if not isinstance(app_approval, dict):
+            raise RuntimeError("the site manifest carries no approval app for the user")
+        task_id = await _browser_task_for_auth_assistance(base_url, agent_id, req)
+        await auth_assistance_user.approve_app_as_user(base_url, headers, req, task_id, app_approval)
+        print(f"    🙋 Approved sign-in in the user's app for sign-in-help request {req_id}")
+        return
+    if user_response != "sign_in":
+        raise RuntimeError(f"unsupported sign-in-help user response: {user_response}")
     credentials = (auth_test_site.active_manifest() or {}).get("userSignIn")
     if not isinstance(credentials, dict):
         raise RuntimeError("the site manifest carries no password for the user to type")

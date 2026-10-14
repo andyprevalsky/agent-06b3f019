@@ -210,8 +210,12 @@ function allFailPlan(ctx: PlanContext): ScenarioPlan {
 }
 
 /** One member account whose saved password works, plus whatever else the scenario saves. */
-function workingLoginPlan(ctx: PlanContext, overrides: Partial<ScenarioPlan>): ScenarioPlan {
-  const [email] = savedLoginEmails(ctx.holderName, ctx.siteId);
+function workingLoginPlan(
+  ctx: PlanContext,
+  overrides: Partial<ScenarioPlan>,
+  accountEmail?: string
+): ScenarioPlan {
+  const email = accountEmail ?? savedLoginEmails(ctx.holderName, ctx.siteId)[0];
   const password = randomPassword();
   const member = account(ctx, email, password);
   return plan({
@@ -241,19 +245,6 @@ function mintedAccountPlan(ctx: PlanContext, behavior: Partial<SiteBehavior>): S
     behavior: { ...BASE_BEHAVIOR, ...behavior },
     accounts: [member],
     minted: 'account',
-    expectedSignInEmail: member.email,
-    expectedMemberNumber: member.memberNumber,
-  });
-}
-
-/** An account the agent made earlier under its own inbox; the password was saved, the site wants a code too. */
-function passwordEmail2faPlan(ctx: PlanContext): ScenarioPlan {
-  const password = randomPassword();
-  const member = account(ctx, ctx.mintedEmail ?? '', password);
-  return plan({
-    behavior: { ...BASE_BEHAVIOR, secondFactor: 'email_code' },
-    accounts: [member],
-    savedPasswords: [{ username: member.email, password, lastUsedDaysAgo: 1 }],
     expectedSignInEmail: member.email,
     expectedMemberNumber: member.memberNumber,
   });
@@ -325,7 +316,16 @@ const PLANNERS: Record<AuthTestSiteScenario, (ctx: PlanContext) => ScenarioPlan>
   stale_session: (ctx) => sessionPlan(ctx, 'expired'),
   passkey: (ctx) => passkeyPlan(ctx, 'accept'),
   passkey_rejected: (ctx) => passkeyPlan(ctx, 'reject'),
-  password_email_2fa: passwordEmail2faPlan,
+  password_email_2fa: (ctx) =>
+    workingLoginPlan(
+      ctx,
+      { behavior: { ...BASE_BEHAVIOR, secondFactor: 'email_code' } },
+      ctx.mintedEmail ?? ''
+    ),
+  password_app_approval: (ctx) =>
+    workingLoginPlan(ctx, {
+      behavior: { ...BASE_BEHAVIOR, emailSignIn: 'off', secondFactor: 'app_approval' },
+    }),
   account_locked: accountLockedPlan,
   // The account exists but cannot be reached: its only way in is a code that never comes.
   code_never_arrives: (ctx) => ({

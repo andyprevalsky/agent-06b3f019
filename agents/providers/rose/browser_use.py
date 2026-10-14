@@ -33,6 +33,13 @@ from utils.prompts import VERIFICATION_RULES
 
 logger = structlog.get_logger()
 
+AUTH_ASSISTANCE_HANDOFF_RULE = (
+    "Keep the current sign-in or verification step open and visible when requesting help. "
+    "Do not go back, restart sign-in, or repeat a successful step merely to show a password or code form. "
+    "When the current step requires an action only the user can perform, request assistance "
+    "promptly instead of waiting for an action you have not asked the user to take."
+)
+
 
 def recover_from_challenge_enabled() -> bool:
     """Temp kill-switch for challenge recovery (bench A/B).
@@ -217,9 +224,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "available, the minted agent account when it has an email, and guest/anonymous completion when the "
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
-            "Before calling, leave the site's sign-in form (username/password or code entry) open and "
-            "visible, so the user can sign in without navigating. "
-            "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
+            + AUTH_ASSISTANCE_HANDOFF_RULE
+            + " "
+            + "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
             "those instead of trying to solve them yourself."
         ),
@@ -705,9 +712,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     from browser_tools.schemas import BROWSER_TOOL_MODELS, create_browser_agent_action_model
 
     if not recover_from_challenge_enabled():
-        available_actions = [
-            name for name in available_actions if name != "recover_from_challenge"
-        ]
+        available_actions = [name for name in available_actions if name != "recover_from_challenge"]
 
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
@@ -722,10 +727,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
         generated_tool = by_name[action_name]
         prompt_metadata = BROWSER_USE_TOOLS.get(action_name) or {}
         description = prompt_metadata.get("description") or generated_tool["description"]
-        if (
-            action_name == "request_user_assistance_for_authentication"
-            and not recover_from_challenge_enabled()
-        ):
+        if action_name == "request_user_assistance_for_authentication" and not recover_from_challenge_enabled():
             description = (
                 "Waterfall step 8: request user help signing in only after steps 1-7 are "
                 "exhausted or unavailable. Before calling, you must have tried every saved "
@@ -733,9 +735,9 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "account when it has an email, and guest/anonymous completion when the page "
                 "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
                 "Cookie and Steel-session auth are applied automatically before you start. "
-                "Before calling, leave the site's sign-in form (username/password or code entry) "
-                "open and visible, so the user can sign in without navigating. "
-                "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
+                + AUTH_ASSISTANCE_HANDOFF_RULE
+                + " "
+                + "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
                 "of trying to solve them yourself."
@@ -761,10 +763,7 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
-    recover_enabled = (
-        recover_from_challenge_enabled()
-        and "recover_from_challenge" in set(available_actions or [])
-    )
+    recover_enabled = recover_from_challenge_enabled() and "recover_from_challenge" in set(available_actions or [])
     if recover_enabled:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
@@ -865,7 +864,7 @@ action envelope in text; use the provided tool call.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 6 first.
 - If members pay less than guests and membership is free, sign up with the minted account instead of checking out as a guest; if sign-up fails, check out as a guest.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- Before calling request_user_assistance_for_authentication, leave the site's sign-in form (username/password or code entry) open and visible, so the user can sign in without navigating.
+- {AUTH_ASSISTANCE_HANDOFF_RULE}
 {challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
@@ -1210,10 +1209,7 @@ def normalize_browser_use_tool_calls(
 
         keys = [call.get("params", {}).get("key") for call in normalized_calls]
         if normalized_calls and all(
-            call.get("action") == "press_key"
-            and isinstance(key, str)
-            and len(key) == 1
-            and key.isprintable()
+            call.get("action") == "press_key" and isinstance(key, str) and len(key) == 1 and key.isprintable()
             for call, key in zip(normalized_calls, keys)
         ):
             return {
@@ -1231,10 +1227,7 @@ def normalize_browser_use_tool_calls(
             normalized_calls
             and len(set(indexes)) == 1
             and all(
-                call.get("action") == "input_text"
-                and isinstance(text, str)
-                and len(text) == 1
-                and text.isprintable()
+                call.get("action") == "input_text" and isinstance(text, str) and len(text) == 1 and text.isprintable()
                 for call, text in zip(normalized_calls, texts)
             )
         ):
