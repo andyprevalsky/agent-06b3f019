@@ -184,7 +184,7 @@ inherited from the same parent shell after the UI invocation. Its provenance
 links to the original full parent shell invocation; it is not a direct snapshot
 of the already-completed UI process environment.
 
-The private permanent patch resolves manifest database name and runtime port
+The permanent runner repair resolves manifest database name and runtime port
 together whenever a manifest exists, including when LOCAL_DB_PORT is supplied;
 it rejects stopped/mismatched/malformed manifest metadata and conflicting caller ports.
 Explicit DATABASE/DIRECT URL precedence remains. Extend the existing owning
@@ -194,9 +194,9 @@ That suite is already registered in `scripts/run-deploy-structural-gates.py`
 and `/deploy` Step 4. No new suite or product prompt/schema changes are needed.
 The helper checks manifest metadata only; it does not validate PID liveness
 for a running manifest reusing the same backend URL. Independent adversarial
-review passed with these wording/fixture corrections. The patch remains
-private pending parent acceptance and stabilization batch shipment; this
-recurrence is mitigated, not shipped/fixed.
+review passed with these wording/fixture corrections. The repair is included in this deployment stabilization batch. Default-runner
+UI verification and production rollout remain gates before shipment; this
+recurrence is mitigated pending those results.
 
 The wrong-DB row was snapshotted before cleanup. Parent deleted only the exact
 session using task, agent, context, provider session, debug URL and ACTIVE/AGENT
