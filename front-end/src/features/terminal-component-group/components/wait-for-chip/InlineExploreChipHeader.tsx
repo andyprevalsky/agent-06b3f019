@@ -63,7 +63,7 @@ function buildCarouselItems(
   showThinking: boolean,
 ): ExploreActiveToolCarouselItem[] {
   const actionItems = actions
-    .map((action, index) => {
+    .map<ExploreActiveToolCarouselItem | null>((action, index) => {
       const text = action.title?.replace(/\n/g, ' ').trim();
       if (!text) return null;
       return {

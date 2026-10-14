@@ -13,7 +13,9 @@ import {
 
 vi.mock('@/features/terminal-component-group/api', async (importActual) => ({
   ...(await importActual<typeof import('@/features/terminal-component-group/api')>()),
-  fetchPhoneCallRecording: vi.fn(async () => new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46])], { type: 'audio/wav' })),
+  fetchPhoneCallRecording: vi.fn(
+    async () => new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46])], { type: 'audio/wav' }),
+  ),
 }));
 
 import { fetchPhoneCallRecording } from '@/features/terminal-component-group/api';

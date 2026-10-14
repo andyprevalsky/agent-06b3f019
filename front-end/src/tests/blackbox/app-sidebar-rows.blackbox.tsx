@@ -12,11 +12,17 @@ import { http, HttpResponse } from 'msw';
 import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
+import {
+  SIDEBAR_WIDTH_EXPANDED,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+} from '@/features/terminal-component-group/config';
 import { defaultProps, makeAgent, mockSession, openRowMenu } from './app-sidebar.fixtures';
 
 describe('AppSidebar rows', () => {
   beforeEach(() => {
     mockSession();
+    // Row titles, search and actions are exercised in the expanded layout.
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(SIDEBAR_WIDTH_EXPANDED));
   });
   afterEach(() => {
     localStorage.clear();

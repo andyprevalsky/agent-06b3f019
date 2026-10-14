@@ -7,6 +7,7 @@
 
 import type { useAuth } from '@/features/auth';
 import type { useAgentContext } from '@/features/agent-context';
+import type { ClientSource } from '@/lib/clientSource';
 
 import type { TerminalView } from '../types';
 
@@ -18,7 +19,7 @@ import type { useLoadingNetwork } from './useLoadingNetwork';
 export interface UseAgentOpsArgs {
   auth: ReturnType<typeof useAuth>;
   canSubmitGoals: boolean;
-  clientSource: string;
+  clientSource: ClientSource;
   ctx: ReturnType<typeof useAgentContext>;
   agentList: ReturnType<typeof useAgentList>;
   loading: ReturnType<typeof useLoadingNetwork>;

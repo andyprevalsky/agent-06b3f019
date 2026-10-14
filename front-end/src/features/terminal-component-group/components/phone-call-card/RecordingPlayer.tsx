@@ -57,11 +57,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
     } else {
       setSrc(null);
       setLoading(false);
-      setError(
-        recordingUrl || callId
-          ? 'Recording is not playable from the provider URL.'
-          : null,
-      );
+      setError(recordingUrl || callId ? 'Recording is not playable from the provider URL.' : null);
     }
 
     return () => {
@@ -79,9 +75,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
     seekToFraction(clickX / rect.width);
   };
 
-  if (error) {
-    return <p className="text-xs text-red-500">{error}</p>;
-  }
+  if (error) return <p className="text-xs text-red-500">{error}</p>;
   if (loading || !src) {
     return <p className="text-xs text-muted-foreground">Loading recording…</p>;
   }

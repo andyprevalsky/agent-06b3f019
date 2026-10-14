@@ -55,7 +55,7 @@ interface AdminImpersonationResponse {
     refresh_token: string;
     expires_in: number;
     expires_at: number;
-    token_type: string;
+    token_type: Session['token_type'];
   };
   user: ImpersonatedAccount;
 }
