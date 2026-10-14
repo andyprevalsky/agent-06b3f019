@@ -1110,7 +1110,15 @@ class RoseWMHProvider:
                 "retry_partial_errors": True,
                 **({"json_mode": True} if self._json_mode else {}),
             }
-            response_model = response_model_for_protocol(self._protocol)
+            # Missing/malformed identities retain the old static request shape;
+            # the existing post-generation native boundary still rejects them.
+            try:
+                schema_call_ids = _prediction_call_ids(rose_messages, self._protocol)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                schema_call_ids = None
+            response_model = response_model_for_protocol(
+                self._protocol, expected_call_ids=schema_call_ids
+            )
             if response_model is not None:
                 prediction_request["response_model"] = response_model
             response = await self._client.collect(

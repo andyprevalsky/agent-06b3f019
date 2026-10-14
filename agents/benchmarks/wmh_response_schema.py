@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, create_model
 
 from benchmarks.wmh_outcomes import (
     DISTRIBUTION_PROTOCOL, DISTRIBUTION_SCHEMA, TIMED_DISTRIBUTION_PROTOCOL,
@@ -51,7 +51,7 @@ Patch = Union[SetPatch, RemovePatch]
 
 class Outcome(_Contract):
     id: str
-    probability: Annotated[Union[int, float], Field(ge=0, le=1)]
+    probability: Union[Annotated[int, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]
     description: str
     tool_results: list[ToolResult]
     state_patch: list[Patch]
@@ -91,9 +91,38 @@ class NativeTransition(_Contract):
         return value
 
 
-def response_model_for_protocol(protocol: str) -> type[BaseModel] | None:
-    return {
+def response_model_for_protocol(
+    protocol: str, *, expected_call_ids: tuple[str, ...] | None = None
+) -> type[BaseModel] | None:
+    model = {
         DISTRIBUTION_PROTOCOL: OutcomeDistribution,
         TIMED_DISTRIBUTION_PROTOCOL: TimedOutcomeDistribution,
         "text-world-model-v3": NativeTransition,
     }.get(protocol)
+    if (model is None or not expected_call_ids or not isinstance(expected_call_ids, tuple)
+            or any(not isinstance(value, str) or not value for value in expected_call_ids)):
+        return model
+
+    result_model = create_model(
+        "CandidateToolResult", __base__=ToolResult,
+        call_id=(Literal[expected_call_ids], ...),
+    )
+
+    def ordered_call_ids(cls, results):
+        if tuple(result.call_id for result in results) != expected_call_ids:
+            raise ValueError("Native result call IDs differ from the candidate action")
+        return results
+
+    results_field = (
+        Annotated[list[result_model], Field(min_length=len(expected_call_ids), max_length=len(expected_call_ids))],
+        ...,
+    )
+    validators = {"ordered_call_ids": field_validator("tool_results")(ordered_call_ids)}
+    if model is NativeTransition:
+        return create_model("CandidateNativeTransition", __base__=model,
+                            __validators__=validators, tool_results=results_field)
+    outcome = TimedOutcome if model is TimedOutcomeDistribution else Outcome
+    outcome_model = create_model("Candidate" + outcome.__name__, __base__=outcome,
+                                 __validators__=validators, tool_results=results_field)
+    return create_model("Candidate" + model.__name__, __base__=model,
+                        outcomes=(Annotated[list[outcome_model], Field(min_length=1, max_length=6)], ...))

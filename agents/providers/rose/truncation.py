@@ -180,10 +180,9 @@ async def recover_truncated(
                 **({"usage_complete": bool(usage_data), "error_type": type(failure).__name__} if failure else {}),
             }
         )
-        # Preserve the existing next-model cutoff policy for Responses routes.
-        # The subscription route ignores output limits; public API wrappers
-        # forward caller limits, but retain this recovery policy.
-        if "larger_limit" in remaining and actual_model.endswith(("-gpt", "-openai", "-foundry")):
+        # Subscription Responses ignores output limits. Public API wrappers
+        # honor the caller cap and use the existing larger-limit stage.
+        if "larger_limit" in remaining and actual_model.endswith("-gpt"):
             remaining.remove("larger_limit")
             if not remaining:
                 for chunk in held:

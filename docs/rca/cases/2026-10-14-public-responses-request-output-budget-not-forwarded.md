@@ -74,8 +74,14 @@ case was excluded; these checks used the pinned agents Python 3.11.9 environment
 
 Restoring the requested cap can expose incomplete replies sooner than the old
 provider default. The 32000 case proves direct caller propagation, not same-model
-larger-limit recovery. Existing truncation policy still advances to another model
-for these Responses routes; only its stale explanatory comment was corrected.
+larger-limit recovery. A subsequent owning reproduction showed the old subscription-style skip also
+prevented the configured larger-limit stage on newly capped public wrappers.
+`test_public_responses_uses_existing_larger_limit_stage` fails on that source
+(root 0.037265s) and passes with a narrow route-capability repair (worker
+0.024332s): public Foundry and funded OpenAI retry the same model at the existing
+32000 limit before fallback. Subscription behavior remains unchanged. This changes
+the executed public retry sequence and can incur an extra paid attempt within
+existing configured limits/deadlines; no numerical budget is increased.
 Exact Azure non-strict open-schema admission, live cap enforcement and unchanged
 fundraising benchmark PASS remain open. No paid qualification was performed.
 

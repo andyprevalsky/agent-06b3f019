@@ -74,6 +74,31 @@ checks passed 242 WHM cases and Rose's 228 cases, plus cache/stream suites; the
 native service/build case was deliberately excluded. Proofs are privately archived
 through the schema-integration handoff receipt.
 
+## Request-contract follow-through, 2026-10-14
+
+The first typed integration still exported unconstrained call IDs. The existing
+native parser required the exact candidate IDs and order. The same registered
+`test_wmh_response_schema_binds_exact_candidate_call_ids` now proves the actual
+WHM -> Rose -> Foundry HTTP schema carries those already-present IDs and exact
+cardinality: root baseline FAIL 0.390303s, worker PASS 0.151459s. The local model
+also validates exact order. All 251 original valid outputs remain unchanged;
+native validation, probabilities, messages and sampling remain authoritative.
+
+A separate producer defect emitted union-level `ge`/`le` rather than standard
+JSON Schema numeric bounds. The actual serialized schema accepted -1 and 2.
+The same registered `test_wmh_probability_bounds_reach_provider_schema` fails
+before the repair (root 0.396793s) and passes afterward (worker 0.259363s).
+Applying the existing bounds to each integer/float union member exports
+minimum 0 and maximum 1 without changing accepted JSON values or numeric types.
+No global adapter change or historical provider-causation claim is made.
+
+Final owning suites: 242 WHM, 234 Rose, 10 cache-client and 2 stream cases,
+488 total, passed with real sockets/DNS/default HTTPX denied. Eight capture-test
+expectations were updated to the bound model name and strengthened to assert
+exact candidate constants/cardinality; original byte and privacy assertions
+remain. The native service/build case remains excluded from these offline checks.
+Exact live Azure admission and fundraiser outcome still require the canonical run.
+
 ## Human feedback
 
 The user asked why WHM requested generic JSON instead of a defined output schema,

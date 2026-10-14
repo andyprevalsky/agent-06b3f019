@@ -8628,6 +8628,237 @@ async def test_funded_openai_preserves_requested_output_budget():
     assert seen_foundry == [foundry_reference]
 
 
+async def test_wmh_response_schema_binds_exact_candidate_call_ids():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    expected_ids = ["call_exact_A", "call_exact_B"]
+    packet = {"candidate_response": {"tool_calls": [{"call_id": value} for value in expected_ids]}, "environment_state": {}}
+    seen = []
+    observed_wire = []
+    class Captured(BaseException):
+        pass
+    def handler(request):
+        body = json.loads(request.content)
+        results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert body["text"]["format"]["strict"] is False
+        from providers.rose.gpt_auth import build_codex_responses_body
+        wire_messages, namespace = observed_wire[-1]
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override=foundry_model(get_pool("rose-1-flash")), messages=wire_messages, response_format=None, request_id="irrelevant-to-held-cache-namespace", cache_namespace=namespace, cache_breakpoints=True)
+        assert body["input"] == reference["input"]
+        assert body["instructions"] == reference["instructions"]
+        assert body["prompt_cache_key"] == reference["prompt_cache_key"]
+        seen.append(body)
+        raise Captured()
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        original_wire = owner._wire_messages
+        async def inspect_wire(*args, **kwargs):
+            result = await original_wire(*args, **kwargs)
+            observed_wire.append(result)
+            return result
+        owner._wire_messages = inspect_wire
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 1
+
+
+def test_wmh_candidate_id_schema_preserves_native_json_contract():
+    import copy
+    import json
+    from benchmarks.wmh_response_schema import response_model_for_protocol
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.schema import build_openai_response_format
+    from benchmarks.wmh_provider_capture import prediction_request
+
+    ids = ("call_A", "call_B")
+    results = [{"call_id": value, "content": "complete original observation", "is_error": False} for value in ids]
+    for protocol in (DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL, "text-world-model-v3"):
+        model = response_model_for_protocol(protocol, expected_call_ids=ids)
+        for value in (None, True, 0, 1.5, "", [], {}, {"arbitrary/key": [False, None]}):
+            if protocol == "text-world-model-v3":
+                obj = {"message": "", "tool_results": results, "state": {"value": value}, "terminal": False}
+            else:
+                outcome = {"id": "model_chosen", "probability": 1, "description": "existing possibility", "tool_results": results, "state_patch": [{"op": "add", "path": "/value", "value": value}]}
+                if protocol == TIMED_DISTRIBUTION_PROTOCOL:
+                    outcome["elapsed_ms"] = 0
+                obj = {"schema": "rose.wmh_timed_outcome_distribution.v1" if protocol == TIMED_DISTRIBUTION_PROTOCOL else "rose.wmh_outcome_distribution.v1", "outcomes": [outcome]}
+            assert model.model_validate_json(json.dumps(obj)).model_dump(mode="json") == obj
+        for replacement in ([{**results[0], "call_id": "wrong"}, results[1]], results[:1], results[::-1], [results[0], results[0]]):
+            bad = copy.deepcopy(obj)
+            if protocol == "text-world-model-v3":
+                bad["tool_results"] = replacement
+            else:
+                bad["outcomes"][0]["tool_results"] = replacement
+            try:
+                model.model_validate_json(json.dumps(bad))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Existing candidate identity/cardinality/order must hold")
+        assert build_openai_response_format(model)["json_schema"]["strict"] is False
+        metadata = prediction_request({"response_model": model})
+        assert metadata["response_model"]["schema"] == model.model_json_schema()
+        json.dumps(metadata)
+        assert response_model_for_protocol(protocol, expected_call_ids=None) is response_model_for_protocol(protocol)
+        assert response_model_for_protocol(protocol, expected_call_ids=()) is response_model_for_protocol(protocol)
+    assert response_model_for_protocol("unknown", expected_call_ids=ids) is None
+    assert response_model_for_protocol("legacy", expected_call_ids=ids) is None
+
+async def test_public_responses_uses_existing_larger_limit_stage():
+    import json
+    import types
+    import httpx
+    from unittest.mock import patch, AsyncMock
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+    import providers.rose.transport as transport
+
+    real = httpx.AsyncClient
+    def sse(events):
+        return "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
+    for route in ("foundry", "funded"):
+        requests = []
+        expected_host = "offline.invalid" if route == "foundry" else "api.openai.com"
+        def callback(request):
+            body = json.loads(request.content)
+            assert request.url.host == expected_host, "Public Responses must use existing same-model larger-limit stage before fallback"
+            requests.append(body)
+            assert body["max_output_tokens"] == (16384 if len(requests) == 1 else 32000)
+            if len(requests) == 1:
+                events = [{"type": "response.output_text.delta", "delta": "partial fixture"}, {"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": {"input_tokens": 1, "output_tokens": 1}}}]
+            else:
+                events = [{"type": "response.output_text.delta", "delta": "complete fixture"}, {"type": "response.completed", "response": {"usage": {"input_tokens": 1, "output_tokens": 1}}}]
+            return httpx.Response(200, text=sse(events))
+        pool = get_pool("rose-1-ultra")
+        env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(pool)}
+        module_httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real(transport=httpx.MockTransport(callback), trust_env=False), Timeout=httpx.Timeout, Headers=httpx.Headers, TransportError=httpx.TransportError)
+        async with real(transport=httpx.MockTransport(callback), trust_env=False) as mock_client:
+            with patch.object(transport, "get_streaming_http_client", return_value=mock_client), patch.object(foundry, "httpx", module_httpx), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.), patch.object(client, "_openai_api_key", return_value="offline-key" if route == "funded" else ""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "_gpt_api_key_on_cooldown", AsyncMock(return_value=False)), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))):
+                response = await RoseClient(openrouter_key="offline").collect(pool="rose-1-ultra", messages=[{"role": "user", "content": "Unchanged synthetic fixture."}], max_tokens=16384, result_required=True, dump_context=False, prefer_azure=route == "foundry")
+        assert [body["max_output_tokens"] for body in requests] == [16384, 32000]
+        assert requests[0]["model"] == requests[1]["model"]
+        assert response.content == "complete fixture"
+
+    # Subscription backend still omits output limits and skips larger-limit recovery.
+    from providers.rose.types import StreamChunk
+    calls = []
+    async def subscription_attempt(**kwargs):
+        calls.append(kwargs)
+        first = len(calls) == 1
+        yield StreamChunk(kind="metadata", data={"actual_model": "same-gpt" if first else "other-openai"})
+        yield StreamChunk(kind="content", data={"text": "partial" if first else "complete"})
+        yield StreamChunk(kind="usage", data={"finish_reason": "length" if first else "stop", "prompt_tokens": 1, "completion_tokens": 1})
+        yield StreamChunk(kind="done", data={})
+    chunks = [chunk async for chunk in client.recover_truncated(subscription_attempt, {"max_tokens": 16384, "result_required": True, "deadline_s": 590})]
+    assert len(calls) == 2 and calls[1]["max_tokens"] == 32000
+    assert calls[1].get("_skip_models")
+
+
+async def test_wmh_probability_bounds_reach_provider_schema():
+    import json
+    import types
+    import httpx
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_outcomes import TIMED_DISTRIBUTION_PROTOCOL
+    from providers.rose.client import RoseClient
+    from providers.rose.pools import get_pool, foundry_model
+    import providers.rose.client as client
+    import providers.rose.foundry as foundry
+
+    expected_ids = ["call_exact_A", "call_exact_B"]
+    packet = {"candidate_response": {"tool_calls": [{"call_id": value} for value in expected_ids]}, "environment_state": {}}
+    seen = []
+    observed_wire = []
+    class Captured(BaseException):
+        pass
+    def handler(request):
+        body = json.loads(request.content)
+        results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+        assert results["minItems"] == results["maxItems"] == len(expected_ids)
+        assert body["text"]["format"]["strict"] is False
+        from jsonschema import Draft202012Validator
+        probability = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]
+        validator = Draft202012Validator(probability)
+        assert not validator.is_valid(-1), "Serialized existing probability lower bound must reject -1"
+        assert not validator.is_valid(2), "Serialized existing probability upper bound must reject 2"
+        for value in (0, 1, 0.0, 0.5, 1.0):
+            assert validator.is_valid(value)
+        assert not validator.is_valid(True)
+        assert not validator.is_valid("0.5")
+        from providers.rose.gpt_auth import build_codex_responses_body
+        wire_messages, namespace = observed_wire[-1]
+        reference = build_codex_responses_body(pool_spec=get_pool("rose-1-flash"), model_override=foundry_model(get_pool("rose-1-flash")), messages=wire_messages, response_format=None, request_id="irrelevant-to-held-cache-namespace", cache_namespace=namespace, cache_breakpoints=True)
+        assert body["input"] == reference["input"]
+        assert body["instructions"] == reference["instructions"]
+        assert body["prompt_cache_key"] == reference["prompt_cache_key"]
+        seen.append(body)
+        raise Captured()
+    real = httpx.AsyncClient
+    env = {"AZURE_FOUNDRY_ENDPOINT": "https://offline.invalid", "AZURE_FOUNDRY_API_KEY": "offline", "AZURE_FOUNDRY_DEPLOYMENTS": foundry_model(get_pool("rose-1-flash"))}
+    with patch.object(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), trust_env=False)), patch.object(client, "_openai_api_key", return_value=""), patch.object(client, "_cerebras_api_key", return_value=""), patch.object(client, "load_config", return_value=types.SimpleNamespace(anthropic=types.SimpleNamespace(api_key=""))), patch.object(foundry, "os", types.SimpleNamespace(environ=env, getenv=lambda k, v=None: env.get(k, v))), patch.object(foundry, "_cooldown_until", {}), patch.object(foundry, "_auth_cooldown_until", 0.):
+        owner = RoseWMHProvider(pool="rose-1-flash", client=RoseClient(openrouter_key="offline"), protocol=TIMED_DISTRIBUTION_PROTOCOL, json_mode=True, prefer_azure=True, user_id="offline")
+        owner._streams = None
+        original_wire = owner._wire_messages
+        async def inspect_wire(*args, **kwargs):
+            result = await original_wire(*args, **kwargs)
+            observed_wire.append(result)
+            return result
+        owner._wire_messages = inspect_wire
+        owner._lease_auth = AsyncMock(return_value=(None, None))
+        try:
+            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
+        except Captured:
+            pass
+        assert len(seen) == 1
+
+    from benchmarks.wmh_response_schema import response_model_for_protocol
+    from benchmarks.wmh_outcomes import DISTRIBUTION_PROTOCOL
+    from providers.rose.schema import build_openai_response_format
+    from jsonschema import Draft202012Validator
+    for protocol in (DISTRIBUTION_PROTOCOL, TIMED_DISTRIBUTION_PROTOCOL):
+        for ids in (None, ("call_exact_A",)):
+            model = response_model_for_protocol(protocol, expected_call_ids=ids)
+            probability_schema = build_openai_response_format(model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]
+            validator = Draft202012Validator(probability_schema)
+            assert not validator.is_valid(-1), "Serialized existing probability lower bound must reject -1"
+            assert not validator.is_valid(2), "Serialized existing probability upper bound must reject 2"
+            assert not validator.is_valid(True)
+            assert not validator.is_valid("0.5")
+            for value in (0, 1, 0.0, 0.25, 1.0):
+                assert validator.is_valid(value)
+                result = {"call_id": "call_exact_A", "content": "fixture", "is_error": False}
+                outcome = {"id": "fixture", "probability": value, "description": "fixture", "tool_results": [result], "state_patch": []}
+                if protocol == TIMED_DISTRIBUTION_PROTOCOL:
+                    outcome["elapsed_ms"] = 0
+                obj = {"schema": "rose.wmh_timed_outcome_distribution.v1" if protocol == TIMED_DISTRIBUTION_PROTOCOL else "rose.wmh_outcome_distribution.v1", "outcomes": [outcome]}
+                validated = model.model_validate_json(json.dumps(obj))
+                decoded = json.loads(validated.model_dump_json())["outcomes"][0]["probability"]
+                assert type(decoded) is type(value), "Preserve original JSON integer/float type"
+                assert type(validated.outcomes[0].probability) is type(value)
+
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
@@ -9206,6 +9437,10 @@ async def run_all_tests():
     r.record("wmh_response_schema_preserves_native_json_values", test_wmh_response_schema_preserves_native_json_values)
     await r.record_async("wmh_foundry_preserves_requested_output_budget", test_wmh_foundry_preserves_requested_output_budget)
     await r.record_async("funded_openai_preserves_requested_output_budget", test_funded_openai_preserves_requested_output_budget)
+    await r.record_async("wmh_response_schema_binds_exact_candidate_call_ids", test_wmh_response_schema_binds_exact_candidate_call_ids)
+    r.record("wmh_candidate_id_schema_preserves_native_json_contract", test_wmh_candidate_id_schema_preserves_native_json_contract)
+    await r.record_async("public_responses_uses_existing_larger_limit_stage", test_public_responses_uses_existing_larger_limit_stage)
+    await r.record_async("wmh_probability_bounds_reach_provider_schema", test_wmh_probability_bounds_reach_provider_schema)
     return r.summary()
 
 

@@ -1004,7 +1004,11 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
         detail = response.json()["detail"]
         assert detail["kind"] == "invalid_prediction"
         sent_model = cached_client.collect.await_args.kwargs["response_model"]
-        assert sent_model.__name__ == "TimedOutcomeDistribution"
+        assert sent_model.__name__ == "CandidateTimedOutcomeDistribution"
+        from providers.rose.schema import build_openai_response_format
+        result_schema = build_openai_response_format(sent_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert result_schema["items"]["properties"]["call_id"]["const"] == "call-1"
+        assert result_schema["minItems"] == result_schema["maxItems"] == 1
         assert detail["rejected_response"] == {
             "content": rejected,
             "actual_model": "offline-model",
@@ -1020,7 +1024,7 @@ def test_rejected_distribution_capture_keeps_exact_bytes_private_and_validation_
                 "prefer_azure": False,
                 "retry_partial_errors": True,
                 "response_model": {
-                    "name": "TimedOutcomeDistribution",
+                    "name": "CandidateTimedOutcomeDistribution",
                     "schema": sent_model.model_json_schema(),
                     "rose_openai_strict": False,
                 },
@@ -1092,6 +1096,10 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
         assert response.status_code == 422
         capture = response.json()["detail"]["rejected_response"]
         sent = client.collect.await_args.kwargs
+        from providers.rose.schema import build_openai_response_format
+        result_schema = build_openai_response_format(sent["response_model"])["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+        assert result_schema["items"]["properties"]["call_id"]["const"] == "wire-call"
+        assert result_schema["minItems"] == result_schema["maxItems"] == 1
         assert capture["request"] == {
             "pool": "rose-1-flash",
             "messages": sent["messages"],
@@ -1104,7 +1112,7 @@ def test_rejected_prediction_captures_actual_streamed_wire_request_without_auth(
             "retry_partial_errors": True,
             "json_mode": True,
             "response_model": {
-                "name": "TimedOutcomeDistribution",
+                "name": "CandidateTimedOutcomeDistribution",
                 "schema": sent["response_model"].model_json_schema(),
                 "rose_openai_strict": False,
             },
