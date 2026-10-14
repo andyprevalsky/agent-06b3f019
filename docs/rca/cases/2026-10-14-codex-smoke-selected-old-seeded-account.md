@@ -26,7 +26,7 @@ sources:
   - task .context/test-runs/backend-coverage-failed-20261014-232329-525786/runner.log
   - task .context/test-runs/1792020736-868664-28621/codex-code.log
 repro: back-end/src/tests/blackbox/codex-code.blackbox.ts; explicit CODEX_TOKEN_USER_ID and CODEX_BLACKBOX_USER_ID fixture binding
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -102,10 +102,13 @@ used a non-UUID fixture ID and was rejected by request validation before sandbox
 creation; its artifacts remain under `1792020689-860427-28505` and prove no
 provider outcome.
 
-The complete backend coverage gate must still pass with this explicit fixture
-binding before the deployment can proceed. This focused pass is not a full
-coverage claim, and the older account's provider authorization remains a
-separate state; status stays mitigated pending full-gate verification.
+The complete backend coverage gate subsequently passed with this explicit
+fixture binding: 197/197 API domains, all 270 unit files, 89.61% line coverage,
+and both normal-exit and SIGTERM backend retirement checks. Durable stage output
+is `.context/deploy-backend-coverage-r3.log`. The older account's provider
+authorization remains separate; its observed revocation feedback is repaired
+and covered by the companion permanent-revocation case. Remaining deployment
+lanes are tracked by the deploy run, rather than by this fixture repair.
 
 ## Human feedback
 
