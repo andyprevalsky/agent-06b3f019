@@ -5917,7 +5917,7 @@ def test_build_auth_options_prompt_section_demo_site_ref_does_not_expose_plainte
 
     section, refs, origins, credential_refs = build_auth_options_prompt_section(auth_options, session_passwords)
 
-    assert "ref: pwd:student" in section
+    assert "ref: {{secret:pwd:student}}" in section
     assert "Password123" not in section
     assert "encrypted-password-not-plaintext" not in section
     assert refs == {"pwd:student": "encrypted-password-not-plaintext"}
@@ -6100,7 +6100,8 @@ def test_build_auth_options_prompt_section_dedupes_identical_refs_without_overwr
     assert origins[second_ref] == "https://amazon.com/login"
     assert credential_refs[first_ref] == {"kind": "password", "id": "pwd-amz-first"}
     assert credential_refs[second_ref] == {"kind": "password", "id": "pwd-amz-second"}
-    assert section.count(f"ref: {duplicate_ref}") == 2
+    assert section.count("ref: {{secret:" + first_ref + "}}") == 1
+    assert section.count("ref: {{secret:" + second_ref + "}}") == 1
 
 def test_auth_realm_from_url():
     from domains.spawn_browser_agent_v3.service_crypto import auth_realm_from_url

@@ -28,24 +28,26 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
         "card_number": "4242424242424242",
         "card_cvv": "123",
         "card_name": "Avery Ross",
+        "card_expiry": "12/31",
     }
     result = {
         "success": True,
         "result": 'email=avery@example.com password="hunter2-correct#7a"',
-        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross"}],
+        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross expiry 12/31"}],
         "count": 3,
         # A page script can echo the typed value back as a dictionary KEY too;
         # what a tool read from the page sits beneath the result's own fields.
         "page": {"entered-hunter2-correct#7a": True},
     }
     masked = mask_secret_values(result, secret_refs)
-    assert masked["page"] == {"entered-pwd:avery@example.com": True}, (
+    assert masked["page"] == {"entered-{{secret:pwd:avery@example.com}}": True}, (
         "secret in a page-supplied key must be masked too: %r" % masked["page"]
     )
-    assert masked["result"] == 'email=avery@example.com password="pwd:avery@example.com"', masked
-    assert masked["nested"][0]["value"] == "card card_number cvv 123 for Avery Ross", masked
+    assert masked["result"] == 'email=avery@example.com password="{{secret:pwd:avery@example.com}}"', masked
+    assert masked["nested"][0]["value"] == "card {{secret:card_number}} cvv {{secret:card_cvv}} for {{secret:card_name}} expiry {{secret:card_expiry}}", masked
     assert masked["count"] == 3 and masked["success"] is True
     assert result["result"].endswith('hunter2-correct#7a"'), "the caller's result is not mutated"
+    assert result["nested"][0]["value"] == "card 4242424242424242 cvv 123 for Avery Ross expiry 12/31"
     assert mask_secret_values("nothing secret here", secret_refs) == "nothing secret here"
     assert mask_secret_values({"result": "x"}, None) == {"result": "x"}
 
@@ -58,7 +60,7 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
         {"pwd:avery@example.com": "success"},
     )
     assert failed["success"] is False and failed["status"] == "blocked", failed
-    assert failed["page"] == {"pwd:avery@example.com": "typed pwd:avery@example.com"}, failed
+    assert failed["page"] == {"{{secret:pwd:avery@example.com}}": "typed {{secret:pwd:avery@example.com}}"}, failed
 
 
 async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed() -> None:
@@ -86,7 +88,7 @@ async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_t
     )
     assert MINTED_NEW_PASSWORD_REF == "pwd:new"
     assert (
-        "- Minted account: Email -> rose.cedar11@mail.example (codes mailed here reach you automatically) | Sign-up password ref (new accounts only): pwd:new | enabled" in section
+        "- Minted account: Email -> rose.cedar11@mail.example (codes mailed here reach you automatically) | Sign-up password ref (new accounts only): {{secret:pwd:new}} | enabled" in section
     ), section
     assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
     assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}
