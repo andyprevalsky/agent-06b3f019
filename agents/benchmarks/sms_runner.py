@@ -27,8 +27,11 @@ import os
 import pathlib
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
@@ -70,6 +73,12 @@ class SmsRunnerDeps:
     sql_literal: Callable[[str], str]
     is_local_base_url: Callable[[str], bool]
     benchmark_user_id: Callable[[], str]
+    cleanup_agents: Callable[[str, str, set[str], set[str], dict], Awaitable[dict]] | None = None
+    committed_agent_ids: set[str] = field(default_factory=set)
+    root_provenance_errors: list[str] = field(default_factory=list)
+    other_task_roots: Callable[[], set[str]] | None = None
+    on_agent_created: Callable[[str, str], None] | None = None
+    task_name: str = ""
 
 
 @dataclass
@@ -106,6 +115,15 @@ class SmsTurn:
     tool_calls: list[dict] = field(default_factory=list)
     # Goals of the agents this turn started, read from the Agent rows it created.
     started_agent_goals: list[str] = field(default_factory=list)
+    owned_agent_ids: set[str] = field(default_factory=set)
+
+
+class SmsCleanupError(RuntimeError):
+    """Keep exact custody evidence attached to an unsuccessful cleanup."""
+
+    def __init__(self, message: str, receipt: dict):
+        super().__init__(message)
+        self.receipt = receipt
 
 
 class SmsScriptError(RuntimeError):
@@ -514,6 +532,48 @@ def _tool_trace_after(marker: int) -> list[dict]:
     return _parse_tool_trace_log(_backend_log_after(marker))
 
 
+def _remember_sms_committed_roots(deps: SmsRunnerDeps, ids: set[str]) -> None:
+    new = ids - deps.committed_agent_ids
+    deps.committed_agent_ids.update(ids)
+    if deps.on_agent_created is not None:
+        for agent_id in sorted(new):
+            deps.on_agent_created(deps.task_name, agent_id)
+
+
+def _committed_sms_root_ids_after(marker: int, user_id: str, inbound_seq: int) -> set[str]:
+    """Read full committed IDs only from this user's exact persisted webhook sequence."""
+    matches = []
+    for raw in _backend_log_after(marker).splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+        if "[SmsSupervisor] TOOL_TRACE" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+            same = entry.get("userId") == user_id and entry.get("mySeq") == inbound_seq
+        except json.JSONDecodeError:
+            same = (re.search(r"(?:^|\s)userId=" + re.escape(user_id) + r"(?=\s|$)", line) is not None
+                    and re.search(r"(?:^|\s)mySeq=" + str(inbound_seq) + r"(?=\s|$)", line) is not None)
+        if same:
+            matches.append(_parse_tool_trace_log(line))
+    if len(matches) != 1:
+        raise RuntimeError("SMS committed-root trace is missing or ambiguous for the owning turn")
+    owned = set()
+    for entry in matches[0]:
+        if entry.get("tool") != "start_new_agent" or entry.get("phase") != "commit":
+            continue
+        if entry.get("success") is not True or entry.get("resultTruncated") is True:
+            raise RuntimeError("SMS root creation outcome is not fully proved")
+        tracks = [line[len("Track: "):] for line in str(entry.get("result", "")).splitlines()
+                  if line.startswith("Track: ")]
+        if len(tracks) != 1:
+            raise RuntimeError("SMS successful commit lacks a complete root tracking URL")
+        ids = parse_qs(urlparse(tracks[0]).query).get("agent-id", [])
+        if len(ids) != 1 or str(uuid.UUID(ids[0])) != ids[0]:
+            raise RuntimeError("SMS committed root tracking identity is invalid")
+        owned.add(ids[0])
+    return owned
+
+
 def _backend_log_size() -> int:
     path = _backend_log_path()
     return path.stat().st_size if path is not None else 0
@@ -524,33 +584,70 @@ def _live_agent_ids(deps: SmsRunnerDeps, user_id: str) -> set[str]:
     return {line.strip() for line in rows.splitlines() if line.strip()}
 
 
-def _cleanup(
+async def _cleanup(
     deps: SmsRunnerDeps,
     user_id: str,
     agent_ids: list[str],
     pre_existing: set[str] | None = None,
     document_ids: list[str] | None = None,
     attention_request_ids: list[str] | None = None,
-) -> None:
-    """Reap every agent this run is responsible for, seeded or supervisor-made.
+    *,
+    base_url: str = "",
+    outcome: dict | None = None,
+) -> dict:
+    """Retire seeded rows and positively committed SMS roots.
 
-    Seeded rows are not the whole story: a task whose whole point is that the
-    supervisor calls start_new_agent produces agents the runner never recorded.
-    Deleting only the seeded list leaves those behind — with a live Temporal
-    workflow — on any stack whose database outlives the run. So diff against the
-    agents that existed before the run and remove the difference. Seeded
-    documents are removed by id so the next task's grep never sees them.
+    The user-row delta detects unattributed rows; it never grants cleanup authority.
+    The canonical callback must preserve exact ownership and native terminal proof
+    before any Agent row is removed. Seeded documents are then removed by exact id.
     """
-    doomed = set(agent_ids)
-    if pre_existing is not None:
-        doomed |= _live_agent_ids(deps, user_id) - pre_existing
-    for agent_id in doomed:
-        deps.run_sql(f'DELETE FROM "Agent" WHERE id = {deps.sql_literal(agent_id)};')
-    for document_id in document_ids or []:
-        deps.run_sql(f'DELETE FROM "UserDataDocument" WHERE id = {deps.sql_literal(document_id)};')
-    for request_id in attention_request_ids or []:
-        deps.run_sql(f'DELETE FROM "AgentAttentionRequest" WHERE id = {deps.sql_literal(request_id)};')
-    _reset_session(deps, user_id)
+    receipt = {"verified": False, "owned_agent_ids": sorted(agent_ids)}
+    try:
+        # An early failure before the baseline read owns no discovered rows.
+        if pre_existing is None:
+            if agent_ids or document_ids or attention_request_ids:
+                raise RuntimeError("SMS cleanup ownership baseline was not captured")
+            return {"verified": True, "root_agent_ids": [], "native_workflows": []}
+        discovered = _live_agent_ids(deps, user_id) - pre_existing
+        foreign = deps.other_task_roots() if deps.other_task_roots is not None else set()
+        doomed = set(agent_ids) | deps.committed_agent_ids
+        if doomed & (pre_existing | foreign):
+            raise RuntimeError("SMS committed root conflicts with a pre-existing or another task owner")
+        unattributed = discovered - doomed - foreign
+        receipt = {"verified": False, "owned_agent_ids": sorted(doomed), "root_agent_ids": [], "native_workflows": []}
+        if doomed:
+            if deps.cleanup_agents is None:
+                raise RuntimeError("SMS exact-root cleanup dependency is missing")
+            receipt = await deps.cleanup_agents(base_url, user_id, doomed, set(agent_ids), outcome or {
+                "name": "sms-cleanup-only", "passed": False, "failure_reason": "Cleanup-only fixture",
+            })
+            if receipt.get("verified") is not True:
+                raise RuntimeError("SMS native owned-root closure was not verified")
+        else:
+            receipt["verified"] = True
+        if deps.root_provenance_errors:
+            receipt["root_provenance_errors"] = list(deps.root_provenance_errors)
+            raise RuntimeError("SMS interrupted root provenance is incomplete; identities retained")
+        covered = {row["id"] for row in receipt.get("after_rows", [])} | doomed
+        unattributed -= covered
+        if unattributed:
+            receipt["unattributed_observed_agent_ids"] = sorted(unattributed)
+            raise RuntimeError("SMS new-agent attribution is incomplete; observed rows retained")
+        # Preserve every workflow/provider identity until the durable native proof exists.
+        for agent_id in doomed:
+            deps.run_sql(f'DELETE FROM "Agent" WHERE id = {deps.sql_literal(agent_id)};')
+        for document_id in document_ids or []:
+            deps.run_sql(f'DELETE FROM "UserDataDocument" WHERE id = {deps.sql_literal(document_id)};')
+        for request_id in attention_request_ids or []:
+            deps.run_sql(f'DELETE FROM "AgentAttentionRequest" WHERE id = {deps.sql_literal(request_id)};')
+        _reset_session(deps, user_id)
+        return receipt
+    except Exception as exc:
+        if isinstance(exc, SmsCleanupError):
+            receipt = exc.receipt
+        receipt["verified"] = False
+        receipt["error"] = str(exc) or type(exc).__name__
+        raise SmsCleanupError(receipt["error"], receipt) from exc
 
 
 # ── Driving one turn ─────────────────────────────────────────────────────────
@@ -586,52 +683,79 @@ async def _drive_turn(
     agents_before = _live_agent_ids(deps, user_id)
     started = time.monotonic()
 
-    async with session.post(
-        f"{base_url}/api/sms/inbound",
-        json=_surge_inbound_payload(phone, inbound),
-        timeout=aiohttp.ClientTimeout(total=30),
-    ) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Inbound SMS webhook returned {response.status}: {(await response.text())[:300]}")
+    inbound_seq = None
+    ownership_captured = False
+    try:
+        async with session.post(
+            f"{base_url}/api/sms/inbound",
+            json=_surge_inbound_payload(phone, inbound),
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Inbound SMS webhook returned {response.status}: {(await response.text())[:300]}")
 
-    outbound: list[str] = []
-    lifecycle: list[str] = []
-    last_change = time.monotonic()
-    while True:
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
-        # Both kinds of text reach the same phone, but they answer different
-        # questions. `outbound` is what the SUPERVISOR chose to say — that is
-        # what the per-turn budget governs. `lifecycle` is an agent announcing
-        # itself on its own channel; scoring those against the supervisor's
-        # budget marks correct behavior as spam (it did, before this split).
-        fresh = [entry for entry in _read_transcript(deps, user_id)[baseline:] if entry.get("role") == "assistant"]
-        current = [str(e.get("content") or "") for e in fresh if e.get("origin") != "agent-lifecycle"]
-        current_lifecycle = [str(e.get("content") or "") for e in fresh if e.get("origin") == "agent-lifecycle"]
-        if len(current) != len(outbound) or len(current_lifecycle) != len(lifecycle):
-            outbound = current
-            lifecycle = current_lifecycle
-            last_change = time.monotonic()
-        elapsed = time.monotonic() - started
-        quiet_for = time.monotonic() - last_change
-        if outbound and quiet_for >= settle_seconds:
-            break
-        if elapsed >= turn_timeout_seconds:
-            break
+        inbound_rows = [entry for entry in _read_transcript(deps, user_id)[baseline:]
+                        if entry.get("role") == "user" and entry.get("content") == inbound]
+        if len(inbound_rows) != 1 or not isinstance(inbound_rows[0].get("inboundSeq"), int):
+            raise RuntimeError("SMS webhook turn lacks a unique persisted inbound sequence")
+        inbound_seq = inbound_rows[0]["inboundSeq"]
+        outbound: list[str] = []
+        lifecycle: list[str] = []
+        last_change = time.monotonic()
+        while True:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            # Both kinds of text reach the same phone, but they answer different
+            # questions. `outbound` is what the SUPERVISOR chose to say — that is
+            # what the per-turn budget governs. `lifecycle` is an agent announcing
+            # itself on its own channel; scoring those against the supervisor's
+            # budget marks correct behavior as spam (it did, before this split).
+            fresh = [entry for entry in _read_transcript(deps, user_id)[baseline:] if entry.get("role") == "assistant"]
+            current = [str(e.get("content") or "") for e in fresh if e.get("origin") != "agent-lifecycle"]
+            current_lifecycle = [str(e.get("content") or "") for e in fresh if e.get("origin") == "agent-lifecycle"]
+            if len(current) != len(outbound) or len(current_lifecycle) != len(lifecycle):
+                outbound = current
+                lifecycle = current_lifecycle
+                last_change = time.monotonic()
+            elapsed = time.monotonic() - started
+            quiet_for = time.monotonic() - last_change
+            if outbound and quiet_for >= settle_seconds:
+                break
+            if elapsed >= turn_timeout_seconds:
+                break
 
-    return SmsTurn(
-        inbound=inbound,
-        outbound=outbound,
-        lifecycle=lifecycle,
-        completion_accepted=_completion_accepted_after(log_marker),
-        duration_seconds=time.monotonic() - started,
-        max_outbound=int(turn.get("max_outbound", DEFAULT_MAX_OUTBOUND)),
-        min_outbound=int(turn.get("min_outbound", 1)),
-        spend_before=spend_before,
-        spend_after=_read_spend_state(deps, user_id),
-        allow_spend=bool(turn.get("allow_spend", False)),
-        tool_calls=_tool_trace_after(log_marker),
-        started_agent_goals=_started_agent_goals(deps, user_id, agents_before),
-    )
+        owned_ids = _committed_sms_root_ids_after(log_marker, user_id, inbound_seq)
+        _remember_sms_committed_roots(deps, owned_ids)
+        ownership_captured = True
+        return SmsTurn(
+            inbound=inbound,
+            outbound=outbound,
+            lifecycle=lifecycle,
+            completion_accepted=_completion_accepted_after(log_marker),
+            duration_seconds=time.monotonic() - started,
+            max_outbound=int(turn.get("max_outbound", DEFAULT_MAX_OUTBOUND)),
+            min_outbound=int(turn.get("min_outbound", 1)),
+            spend_before=spend_before,
+            spend_after=_read_spend_state(deps, user_id),
+            allow_spend=bool(turn.get("allow_spend", False)),
+            tool_calls=_tool_trace_after(log_marker),
+            started_agent_goals=_started_agent_goals(deps, user_id, agents_before),
+            owned_agent_ids=owned_ids,
+        )
+    finally:
+        # A cancelled poll can still follow a fully committed native tool result.
+        # Recover only the same exact user/sequence audit; never adopt a user-row delta.
+        if not ownership_captured:
+            try:
+                if inbound_seq is None:
+                    inbound_rows = [entry for entry in _read_transcript(deps, user_id)[baseline:]
+                                    if entry.get("role") == "user" and entry.get("content") == inbound]
+                    if len(inbound_rows) != 1 or not isinstance(inbound_rows[0].get("inboundSeq"), int):
+                        raise RuntimeError("SMS interrupted webhook sequence is unproved")
+                    inbound_seq = inbound_rows[0]["inboundSeq"]
+                _remember_sms_committed_roots(deps, _committed_sms_root_ids_after(log_marker, user_id, inbound_seq))
+            except Exception as exc:
+                deps.root_provenance_errors.append(str(exc) or type(exc).__name__)
+
 
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
@@ -964,12 +1088,18 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
     # Bound before the try: the finally-block cleanup reads it, so an exception
     # raised by the very first statement inside must not surface as a NameError
     # that hides the real failure.
-    pre_existing_agents: set[str] = set()
+    pre_existing_agents: set[str] | None = None
+    cleanup_receipt: dict | None = None
+    cleanup_error: str | None = None
+    cancellation: asyncio.CancelledError | None = None
+    passed = False
+    failure_reason: str | None = None
+    evaluator_results: list[dict] = []
     execution_error = False
     try:
+        pre_existing_agents = _live_agent_ids(deps, user_id)
         _apply_web_search_fixture(script.get("web_search_fixture"))
         user_profile = _read_user_profile(deps, user_id)
-        pre_existing_agents = _live_agent_ids(deps, user_id)
         _reset_session(deps, user_id)
         seed_messages = script.get("seed_messages", [])
         _seed_transcript(deps, user_id, seed_messages)
@@ -1012,6 +1142,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
                     turn_timeout_seconds,
                 )
                 turns.append(result)
+                _remember_sms_committed_roots(deps, result.owned_agent_ids)
                 print(
                     f"    📨 turn {index}: {result.inbound!r} → {len(result.outbound)} SMS "
                     f"in {result.duration_seconds:.1f}s"
@@ -1022,13 +1153,34 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         passed, failure_reason, evaluator_results = await evaluate_sms_turns(
             task, turns, build_judge_scenario(script, user_profile)
         )
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+        execution_error = True
+        failure_reason = "SMS runner cancelled"
+        raise
     except Exception as exc:  # a harness error is a task failure, not a crash
         execution_error = True
         passed = False
         failure_reason = f"SMS runner error: {exc}"
         evaluator_results = []
     finally:
-        _cleanup(deps, user_id, seeded_agent_ids, pre_existing_agents, seeded_document_ids, seeded_request_ids)
+        try:
+            cleanup_receipt = await _cleanup(
+                deps, user_id, seeded_agent_ids, pre_existing_agents,
+                seeded_document_ids, seeded_request_ids, base_url=base_url,
+                outcome={"name": task.name, "passed": passed, "failure_reason": failure_reason},
+            )
+        except Exception as exc:
+            cleanup_error = str(exc) or type(exc).__name__
+            if isinstance(exc, SmsCleanupError):
+                cleanup_receipt = exc.receipt
+            execution_error = True
+            passed = False
+            failure_reason = "; ".join(filter(None, [failure_reason, f"SMS cleanup failed: {cleanup_error}"]))
+
+        if cancellation is not None:
+            cancellation.owned_cleanup_receipt = cleanup_receipt
+            cancellation.owned_cleanup_error = cleanup_error
 
     total_outbound = sum(len(turn.outbound) for turn in turns)
     return TaskResult(
@@ -1044,18 +1196,172 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         failure_reason=failure_reason,
         stop_metadata={
             "runner": "sms",
-            "owned_cleanup_verified": True,
+            "owned_cleanup_verified": cleanup_receipt is not None and cleanup_receipt.get("verified") is True,
+            "owned_cleanup_receipt": cleanup_receipt,
+            "owned_cleanup_error": cleanup_error,
             "turns": build_report_transcript(turns),
             "declared_evaluators": evaluator_results,
         },
     )
 
 
-def build_deps_from_module(module: Any) -> SmsRunnerDeps:
+async def _cleanup_owned_sms_roots(
+    module: Any, base_url: str, user_id: str, owned_ids: set[str], seeded_ids: set[str], outcome: dict
+) -> dict:
+    """Retain SMS identities until canonical exact-tree cleanup and native closure agree."""
+    from temporalio.client import Client, WorkflowExecutionStatus
+    from config import load_config
+    from temporal_connection import temporal_connect_options
+
+    evidence = {"verified": False, "owned_agent_ids": sorted(owned_ids), "root_agent_ids": []}
+    receipt_path = None
+    try:
+        if module.cloud_batch_cleanup.contract() is None:
+            raise RuntimeError("SMS native cleanup requires an owned isolated stack")
+        queue = module._local_benchmark_task_queue(base_url)
+        if not queue or not owned_ids or not seeded_ids.issubset(owned_ids):
+            raise RuntimeError("SMS exact-root cleanup ownership is incomplete")
+        if any(str(uuid.UUID(aid)) != aid for aid in owned_ids):
+            raise RuntimeError("SMS exact-root identity is invalid")
+
+        def read_rows(ids: set[str]) -> list[dict]:
+            literals = ",".join(module._sql_literal(aid) for aid in sorted(ids))
+            rows = json.loads(module._run_local_victoria_sql(
+                'SELECT COALESCE(json_agg(json_build_object('
+                "'id',id,'user_id',\"userId\",'parent_id',\"parentAgentId\","
+                "'workflow_id',\"temporalWorkflowId\",'first_run_id',\"temporalFirstExecutionRunId\","
+                "'queue',\"workflowTaskQueue\",'start_pending',\"temporalWorkflowStartPending\","
+                "'cleanup_pending',\"temporalCleanupPending\",'stale_workflow_id',\"staleTemporalWorkflowId\","
+                "'stale_first_run_id',\"staleTemporalFirstExecutionRunId\")), '[]'::json)::text "
+                f'FROM "Agent" WHERE id IN ({literals});'
+            ))
+            if {row["id"] for row in rows} != ids or any(row["user_id"] != user_id for row in rows):
+                raise RuntimeError("SMS exact-root rows or owner changed")
+            return rows
+
+        context = pathlib.Path(os.environ["BENCHMARK_CONTEXT_DIR"])
+        receipt_path = context / ("sms-owned-cleanup-" + sorted(owned_ids)[0] + ".json")
+        evidence["receipt_path"] = str(receipt_path)
+
+        def save() -> None:
+            temporary = receipt_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(evidence, indent=2) + "\n")
+            temporary.chmod(0o600)
+            temporary.replace(receipt_path)
+
+        save()
+        rows = read_rows(owned_ids)
+        if any(row["parent_id"] is not None and row["parent_id"] not in owned_ids for row in rows):
+            raise RuntimeError("SMS newly observed child belongs to a pre-existing owner")
+        roots = {row["id"] for row in rows if row["parent_id"] is None}
+        if not roots:
+            raise RuntimeError("SMS native cleanup lacks a positively owned root")
+        evidence.update({"root_agent_ids": sorted(roots), "before_rows": rows,
+                         "native_workflows": [], "canonical_cleanup": {}})
+        bindings = {}
+
+        def bind(workflow_id: str, first_run_id: str, agent_id: str) -> None:
+            key = (workflow_id, first_run_id)
+            if key in bindings and bindings[key] != agent_id:
+                raise RuntimeError("SMS workflow generation is bound to multiple agents")
+            bindings[key] = agent_id
+        for row in rows:
+            if row["start_pending"]:
+                raise RuntimeError("SMS workflow creation outcome is not yet known")
+            if row["workflow_id"]:
+                if not row["first_run_id"] or row["queue"] != queue:
+                    raise RuntimeError("SMS workflow generation or owned queue is unproved")
+                bind(row["workflow_id"], row["first_run_id"], row["id"])
+            elif row["id"] not in seeded_ids:
+                raise RuntimeError("SMS spawned root lacks a persisted workflow generation")
+            if row["stale_workflow_id"]:
+                if not row["stale_first_run_id"]:
+                    raise RuntimeError("SMS stale generation is unproved")
+                bind(row["stale_workflow_id"], row["stale_first_run_id"], row["id"])
+        client = None
+        if bindings:
+            cfg = load_config().temporal
+            async with asyncio.timeout(15):
+                client = await Client.connect(cfg.address, **temporal_connect_options(cfg.address, cfg.namespace, cfg.api_key))
+            for workflow_id, first_run_id in bindings:
+                description = await client.get_workflow_handle(workflow_id).describe(rpc_timeout=timedelta(seconds=15))
+                evidence.setdefault("native_before", []).append({"workflow_id": workflow_id,
+                    "first_run_id": description.raw_info.first_run_id, "queue": description.task_queue,
+                    "status": description.status.name if description.status is not None else None})
+                if description.task_queue != queue or description.raw_info.first_run_id != first_run_id:
+                    raise RuntimeError("SMS native workflow generation or queue is unproved")
+        save()
+        # The callback never introduces a second termination path or a queue-wide reaper.
+        results = [TaskResult(name=outcome["name"], passed=outcome["passed"], agent_id=aid,
+                              status="COMPLETED" if outcome["passed"] else "FAILED",
+                              progress_score=1.0 if outcome["passed"] else 0.0, duration_seconds=0,
+                              cost_cents=0, message_count=0, failure_reason=outcome.get("failure_reason"),
+                              logs={}) for aid in sorted(roots)]
+        try:
+            await module._finalize_owned_cloud_batch(base_url, results, {})
+        finally:
+            evidence["canonical_cleanup"] = {row.agent_id: row.logs for row in results}
+            save()
+        final_ids = set(owned_ids)
+        for row in results:
+            final_ids.update(row.logs["cloud_cleanup_evidence"]["final"]["tree_agent_ids"])
+        after = read_rows(final_ids)
+        evidence["after_rows"] = after
+        save()
+        if any(row["start_pending"] or row["cleanup_pending"] for row in after):
+            save()
+            raise RuntimeError("SMS terminal generation cleanup is still pending")
+        for row in after:
+            if row["workflow_id"]:
+                if not row["first_run_id"] or row["queue"] != queue:
+                    raise RuntimeError("SMS terminal generation or queue changed")
+                bind(row["workflow_id"], row["first_run_id"], row["id"])
+            if row["stale_workflow_id"]:
+                if not row["stale_first_run_id"]:
+                    raise RuntimeError("SMS stale terminal generation is unproved")
+                bind(row["stale_workflow_id"], row["stale_first_run_id"], row["id"])
+        if bindings:
+            if client is None:
+                cfg = load_config().temporal
+                async with asyncio.timeout(15):
+                    client = await Client.connect(cfg.address, **temporal_connect_options(cfg.address, cfg.namespace, cfg.api_key))
+            for (workflow_id, first_run_id), aid in sorted(bindings.items()):
+                description = await client.get_workflow_handle(workflow_id, first_execution_run_id=first_run_id).describe(
+                    rpc_timeout=timedelta(seconds=15)
+                )
+                if (description.task_queue != queue or description.raw_info.first_run_id != first_run_id
+                        or description.status is None or description.status in {WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW}):
+                    raise RuntimeError("SMS native workflow terminal generation is unproved")
+                evidence["native_workflows"].append({"agent_id": aid, "workflow_id": workflow_id,
+                    "first_run_id": first_run_id, "run_id": description.run_id, "queue": queue,
+                    "status": description.status.name, "observed_at": datetime.now(timezone.utc).isoformat()})
+        evidence["verified"] = True
+        save()
+        return evidence
+
+    except Exception as exc:
+        evidence["verified"] = False
+        evidence["error"] = str(exc) or type(exc).__name__
+        if receipt_path is not None:
+            try:
+                save()
+            except Exception as save_error:
+                evidence["receipt_write_error"] = str(save_error) or type(save_error).__name__
+        raise SmsCleanupError(evidence["error"], evidence) from exc
+
+
+def build_deps_from_module(
+    module: Any, other_task_roots: Callable[[], set[str]] | None = None,
+    on_agent_created: Callable[[str, str], None] | None = None, task_name: str = "",
+) -> SmsRunnerDeps:
     """Bind the runner to run_benchmark's local-stack helpers."""
     return SmsRunnerDeps(
         run_sql=module._run_local_victoria_sql,
         sql_literal=module._sql_literal,
         is_local_base_url=module._is_local_base_url,
         benchmark_user_id=module._current_benchmark_user_id,
+        cleanup_agents=lambda *args: _cleanup_owned_sms_roots(module, *args),
+        other_task_roots=other_task_roots,
+        on_agent_created=on_agent_created,
+        task_name=task_name,
     )

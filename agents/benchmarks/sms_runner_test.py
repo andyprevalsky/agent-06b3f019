@@ -575,8 +575,20 @@ def test_cleanup_reaps_agents_the_supervisor_created():
     """
     from benchmarks.sms_runner import SmsRunnerDeps, _cleanup
 
+    import asyncio
+    import inspect
+
     live = {"pre-existing-1", "spawned-by-supervisor", "seeded-1"}
     executed = []
+    retired = set()
+
+    async def cleanup_agents(base_url, user_id, owned, seeded, outcome):
+        assert base_url == "" and user_id == "u1"
+        assert owned == {"spawned-by-supervisor", "seeded-1"}
+        assert seeded == {"seeded-1"}
+        assert not any('DELETE FROM "Agent"' in query for query in executed)
+        retired.update(owned)
+        return {"verified": True, "root_agent_ids": sorted(owned)}
 
     def fake_sql(query: str) -> str:
         executed.append(query)
@@ -590,7 +602,13 @@ def test_cleanup_reaps_agents_the_supervisor_created():
         is_local_base_url=lambda _u: True,
         benchmark_user_id=lambda: "u1",
     )
-    _cleanup(deps, "u1", ["seeded-1"], {"pre-existing-1"})
+    deps.cleanup_agents = cleanup_agents
+    deps.committed_agent_ids = {"spawned-by-supervisor"}
+    receipt = _cleanup(deps, "u1", ["seeded-1"], {"pre-existing-1"})
+    if inspect.isawaitable(receipt):
+        receipt = asyncio.run(receipt)
+    assert retired == {"spawned-by-supervisor", "seeded-1"}
+    assert receipt["verified"] is True
 
     deletes = " ".join(q for q in executed if "DELETE FROM \"Agent\"" in q)
     assert "spawned-by-supervisor" in deletes
@@ -1017,7 +1035,8 @@ def test_seeded_document_lands_where_documents_grep_reads_and_is_reaped():
     # deletedAt stays NULL: the documents grep filters on deletedAt IS NULL.
     assert "deletedAt" not in insert
 
-    _cleanup(deps, "u1", [], set(), ids)
+    import asyncio
+    asyncio.run(_cleanup(deps, "u1", [], set(), ids))
     assert any(f"DELETE FROM \"UserDataDocument\" WHERE id = '{DOC_ID}'" in q for q in executed)
 
 
@@ -1157,7 +1176,8 @@ def test_orphan_attention_request_is_seeded_and_reaped():
     assert "'Sign in to walmart.com'" in insert and "auth_assistance" in insert
     # No userResponse: it must read as pending to the context builder.
     assert "userResponse" not in insert
-    _cleanup(deps, "u1", [], set(), [], ids)
+    import asyncio
+    asyncio.run(_cleanup(deps, "u1", [], set(), [], ids))
     assert any(f"DELETE FROM \"AgentAttentionRequest\" WHERE id = '{ATTN_ID}'" in q for q in executed)
 
 
@@ -1276,3 +1296,359 @@ def test_known_facts_judge_does_not_assert_an_email_exists_without_profile_evide
     assert '\"email\": null' in prompt
     assert "100 Fixture Street" in prompt
     assert judge["criteria"][0] in prompt
+
+
+# Exact native retirement for SMS-owned roots.
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from benchmarks import run_benchmark as bench
+from benchmarks.sms_runner import SmsRunnerDeps, _cleanup
+from benchmarks import sms_runner as sms_cleanup_module
+from temporalio.client import Client, WorkflowExecutionStatus
+
+_cleanup_owned_sms_roots = getattr(sms_cleanup_module, '_cleanup_owned_sms_roots', None)
+
+ROOT='00000000-0000-4000-8000-000000000001'
+CHILD='00000000-0000-4000-8000-000000000002'
+OWNER='00000000-0000-4000-8000-000000000003'
+FOREIGN='00000000-0000-4000-8000-000000000004'
+FIRST='00000000-0000-4000-8000-000000000005'
+QUEUE='navi-agent-tasks-exact-owning-fixture'
+
+
+def _row(aid=ROOT,parent=None,**overrides):
+    value={'id':aid,'user_id':OWNER,'parent_id':parent,'workflow_id':aid,'first_run_id':FIRST,
+           'queue':QUEUE,'start_pending':False,'cleanup_pending':False,
+           'stale_workflow_id':None,'stale_first_run_id':None}
+    value.update(overrides)
+    return value
+
+
+def test_early_baseline_failure_does_not_discover_or_delete_foreign_rows():
+    seen=[]
+    deps=SmsRunnerDeps(lambda q:seen.append(q) or FOREIGN,lambda v:repr(v),lambda _:True,lambda:OWNER)
+    receipt=asyncio.run(_cleanup(deps,OWNER,[],None))
+    assert receipt['verified'] and receipt['root_agent_ids']==[]
+    assert seen==[]
+
+
+def test_unverified_native_cleanup_retains_rows_and_fixture_identity():
+    seen=[]
+    async def unproved(*args):return {'verified':False}
+    deps=SmsRunnerDeps(lambda q:seen.append(q) or ROOT,lambda v:repr(v),lambda _:True,lambda:OWNER,unproved)
+    deps.committed_agent_ids={ROOT}
+    with pytest.raises(RuntimeError,match='native owned-root closure'):
+        asyncio.run(_cleanup(deps,OWNER,[],{FOREIGN},document_ids=['exact-document']))
+    assert not any('DELETE' in q for q in seen)
+
+
+@pytest.mark.parametrize('failure',[None,'native-running','wrong-native-queue','wrong-first-run','provider-failure','foreign-parent','unknown-start','continued-as-new'])
+def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_proof(tmp_path,monkeypatch,failure):
+    events=[];state={'status':WorkflowExecutionStatus.RUNNING};rows=[_row()]
+    if failure=='foreign-parent':rows=[_row(parent=FOREIGN)]
+    if failure=='unknown-start':rows=[_row(start_pending=True)]
+    monkeypatch.setenv('BENCHMARK_CONTEXT_DIR',str(tmp_path))
+    monkeypatch.setattr(bench.cloud_batch_cleanup,'contract',lambda:(tmp_path/'status','exact-token'))
+    monkeypatch.setattr(bench,'_local_benchmark_task_queue',lambda _:QUEUE)
+    monkeypatch.setattr(bench,'_run_local_victoria_sql',lambda _:json.dumps(rows))
+    monkeypatch.setattr(bench,'load_config',lambda:None,raising=False)
+    import config
+    monkeypatch.setattr(config,'load_config',lambda:SimpleNamespace(temporal=SimpleNamespace(address='localhost:7233',namespace='default',api_key='')))
+
+    async def describe(**kwargs):
+        events.append('native-read')
+        assert kwargs['rpc_timeout'].total_seconds()==15
+        return SimpleNamespace(task_queue='foreign-queue' if failure=='wrong-native-queue' else QUEUE,
+            raw_info=SimpleNamespace(first_run_id='different' if failure=='wrong-first-run' else FIRST),
+            status=state['status'],run_id=FIRST)
+    handle_calls=[]
+    def get_handle(*args,**kwargs):
+        assert args==(ROOT,) and "run_id" not in kwargs
+        assert kwargs.get("first_execution_run_id") in (None,FIRST)
+        handle_calls.append(kwargs)
+        return SimpleNamespace(describe=describe)
+    client=SimpleNamespace(get_workflow_handle=get_handle)
+    monkeypatch.setattr(Client,'connect',AsyncMock(return_value=client))
+
+    async def finalize(url,results,live):
+        events.append('canonical-finalizer')
+        assert url=='http://localhost:39999' and [r.agent_id for r in results]==[ROOT] and live=={}
+        assert results[0].passed is False and results[0].failure_reason=='SMS contract'
+        if failure=='provider-failure':raise RuntimeError('provider release failed')
+        if failure=='continued-as-new':state['status']=WorkflowExecutionStatus.CONTINUED_AS_NEW
+        elif failure!='native-running':state['status']=WorkflowExecutionStatus.TERMINATED
+        results[0].logs={'cloud_cleanup_evidence':{'final':{'tree_agent_ids':[ROOT]}},'cloud_provider_cleanup':{'tree_sealed':True}}
+    monkeypatch.setattr(bench,'_finalize_owned_cloud_batch',finalize)
+    run=lambda:asyncio.run(_cleanup_owned_sms_roots(bench,'http://localhost:39999',OWNER,{ROOT},set(), {"name":"fixture", "passed":False, "failure_reason":"SMS contract"}))
+    if failure:
+        with pytest.raises(RuntimeError):run()
+        if failure in ('wrong-native-queue','wrong-first-run','foreign-parent','unknown-start'):
+            assert 'canonical-finalizer' not in events
+        for p in tmp_path.glob('sms-owned-cleanup-*.json'):
+            assert json.loads(p.read_text())['verified'] is False
+    else:
+        receipt=run()
+        assert events==['native-read','canonical-finalizer','native-read']
+        assert handle_calls==[{}, {'first_execution_run_id':FIRST}]
+        assert receipt['verified'] is True
+        assert receipt['root_agent_ids']==[ROOT]
+        assert receipt['native_workflows'][0]['status']=='TERMINATED'
+        disk=json.loads(next(tmp_path.glob('sms-owned-cleanup-*.json')).read_text())
+        assert disk==receipt
+        assert disk['before_rows'][0]['first_run_id']==FIRST
+
+
+def test_initial_baseline_error_does_not_clean_foreign_rows(monkeypatch):
+    from benchmarks import sms_runner as sms
+    statements=[]
+    deps=SmsRunnerDeps(lambda q:statements.append(q) or FOREIGN,repr,lambda _:True,lambda:OWNER)
+    monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
+    def baseline_error(*args):raise RuntimeError('baseline read failed')
+    monkeypatch.setattr(sms,'_live_agent_ids',baseline_error)
+    result=asyncio.run(sms.run_sms_task('http://localhost:39999',get_task_by_name(CLOSED_TASK_NAME),deps))
+    assert result.passed is False and result.benchmark_status=='ERROR'
+    assert 'baseline read failed' in result.failure_reason
+    assert statements==[]
+    assert result.stop_metadata['owned_cleanup_receipt']['root_agent_ids']==[]
+
+
+def test_profile_error_is_after_baseline_and_excludes_foreign_agents(monkeypatch):
+    from benchmarks import sms_runner as sms
+    events=[]
+    deps=SmsRunnerDeps(lambda q:events.append(q) or '',repr,lambda _:True,lambda:OWNER)
+    monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
+    def baseline(*args):events.append('baseline');return {FOREIGN}
+    def profile_error(*args):events.append('profile');raise RuntimeError('profile read failed')
+    monkeypatch.setattr(sms,'_live_agent_ids',baseline)
+    monkeypatch.setattr(sms,'_apply_web_search_fixture',lambda *args:events.append('fixture'))
+    monkeypatch.setattr(sms,'_read_user_profile',profile_error)
+    result=asyncio.run(sms.run_sms_task('http://localhost:39999',get_task_by_name(CLOSED_TASK_NAME),deps))
+    assert events[:3]==['baseline','fixture','profile']
+    assert result.passed is False and result.benchmark_status=='ERROR'
+    assert 'profile read failed' in result.failure_reason
+    assert not any('DELETE FROM "Agent"' in q for q in events)
+    assert result.stop_metadata['owned_cleanup_receipt']['root_agent_ids']==[]
+
+
+def test_concurrent_same_user_queue_root_is_never_owned_or_deleted():
+    calls=[];retired=[]
+    async def retire(url,user,owned,seeded,outcome):
+        retired.extend(owned)
+        return {'verified':True,'root_agent_ids':sorted(owned),'after_rows':[{'id':ROOT}]}
+    def sql(q):calls.append(q);return '\n'.join([ROOT,CHILD,FOREIGN]) if q.startswith('SELECT id FROM') else ''
+    deps=SmsRunnerDeps(sql,repr,lambda _:True,lambda:OWNER,retire)
+    deps.committed_agent_ids={ROOT}
+    deps.other_task_roots=lambda:{CHILD}
+    receipt=asyncio.run(_cleanup(deps,OWNER,[],{FOREIGN}))
+    assert retired==[ROOT] and receipt['root_agent_ids']==[ROOT]
+    assert not any('DELETE FROM "Agent"' in q and CHILD in q for q in calls)
+    assert not any('DELETE FROM "Agent"' in q and FOREIGN in q for q in calls)
+
+
+def test_unattributed_same_queue_sibling_is_retained_without_owner_claim():
+    from benchmarks.sms_runner import SmsCleanupError
+    calls=[]
+    def sql(q):calls.append(q);return CHILD if q.startswith('SELECT id FROM') else ''
+    deps=SmsRunnerDeps(sql,repr,lambda _:True,lambda:OWNER)
+    with pytest.raises(SmsCleanupError) as caught:
+        asyncio.run(_cleanup(deps,OWNER,[],set()))
+    assert caught.value.receipt['root_agent_ids']==[]
+    assert caught.value.receipt['verified'] is False
+    assert caught.value.receipt['unattributed_observed_agent_ids']==[CHILD]
+    assert not any('DELETE' in q for q in calls)
+
+
+def test_commit_provenance_uses_exact_user_sequence_and_full_root_uuid(monkeypatch):
+    from benchmarks import sms_runner as sms
+    own={'tool':'start_new_agent','phase':'commit','success':True,'resultTruncated':False,
+         'result':f'Agent started\nTrack: https://www.roselabs.ai/?agent-id={ROOT}'}
+    other=dict(own,result=f'Agent started\nTrack: https://www.roselabs.ai/?agent-id={CHILD}')
+    lines=[json.dumps({'message':'[SmsSupervisor] TOOL_TRACE','userId':OWNER,'mySeq':7,'toolTrace':json.dumps([own])}),
+           json.dumps({'message':'[SmsSupervisor] TOOL_TRACE','userId':OWNER,'mySeq':8,'toolTrace':json.dumps([other])})]
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _: '\n'.join(lines))
+    assert sms._committed_sms_root_ids_after(0,OWNER,7)=={ROOT}
+    assert sms._committed_sms_root_ids_after(0,OWNER,8)=={CHILD}
+    with pytest.raises(RuntimeError,match='missing or ambiguous'):
+        sms._committed_sms_root_ids_after(0,FOREIGN,7)
+    lines.append(lines[0])
+    with pytest.raises(RuntimeError,match='missing or ambiguous'):
+        sms._committed_sms_root_ids_after(0,OWNER,7)
+
+
+def test_cleanup_failure_keeps_receipt_in_the_actual_sms_result(monkeypatch):
+    from benchmarks import sms_runner as sms
+    evidence={'verified':False,'owned_agent_ids':[ROOT],'root_agent_ids':[ROOT],
+              'receipt_path':'/private/exact-owning-receipt.json','native_workflows':[]}
+    statements=[]
+    deps=SmsRunnerDeps(lambda q:statements.append(q) or '',repr,lambda _:True,lambda:OWNER)
+    monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
+    monkeypatch.setattr(sms,'_live_agent_ids',lambda *args:set())
+    monkeypatch.setattr(sms,'_apply_web_search_fixture',lambda *args:None)
+    def profile_error(*args):raise RuntimeError('profile read failed')
+    monkeypatch.setattr(sms,'_read_user_profile',profile_error)
+    async def failed_cleanup(*args,**kwargs):raise sms.SmsCleanupError('native closure missing',evidence)
+    monkeypatch.setattr(sms,'_cleanup',failed_cleanup)
+    result=asyncio.run(sms.run_sms_task('http://localhost:39999',get_task_by_name(CLOSED_TASK_NAME),deps))
+    assert result.passed is False and result.benchmark_status=='ERROR'
+    assert result.stop_metadata['owned_cleanup_verified'] is False
+    assert result.stop_metadata['owned_cleanup_receipt']==evidence
+    assert 'profile read failed' in result.failure_reason and 'native closure missing' in result.failure_reason
+    assert statements==[]
+
+
+def test_duplicate_workflow_generation_is_rejected_before_any_root_cleanup(tmp_path,monkeypatch):
+    from benchmarks.sms_runner import SmsCleanupError
+    rows=[_row(),_row(CHILD,ROOT,workflow_id=ROOT)]
+    monkeypatch.setenv('BENCHMARK_CONTEXT_DIR',str(tmp_path))
+    monkeypatch.setattr(bench.cloud_batch_cleanup,'contract',lambda:(tmp_path/'status','exact-token'))
+    monkeypatch.setattr(bench,'_local_benchmark_task_queue',lambda _:QUEUE)
+    monkeypatch.setattr(bench,'_run_local_victoria_sql',lambda _:json.dumps(rows))
+    finalize=AsyncMock();monkeypatch.setattr(bench,'_finalize_owned_cloud_batch',finalize)
+    with pytest.raises(SmsCleanupError,match='multiple agents') as caught:
+        asyncio.run(_cleanup_owned_sms_roots(bench,'http://localhost:39999',OWNER,{ROOT,CHILD},set(),
+                    {'name':'fixture','passed':False}))
+    assert finalize.await_count==0 and caught.value.receipt['verified'] is False
+    assert json.loads(pathlib.Path(caught.value.receipt['receipt_path']).read_text())['verified'] is False
+
+
+@pytest.mark.parametrize('case',['cancel-seeded','exception-positive-committed-trace','cancel-unknown-trace','cancel-cleanup-failed'])
+def test_interrupted_real_sms_turn_retains_known_roots_and_preserves_cancellation(monkeypatch,case):
+    from benchmarks import sms_runner as sms
+    state={'posted':False,'cleanup_calls':0,'sql':[]}
+    deps=SmsRunnerDeps(lambda q:state['sql'].append(q) or (ROOT if state['posted'] and q.startswith('SELECT id FROM') else ''),repr,lambda _:True,lambda:OWNER)
+    monkeypatch.setattr(sms,'parse_sms_script',lambda _:{'turns':[{'inbound':'hi'}]})
+    monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
+    monkeypatch.setattr(sms,'_apply_web_search_fixture',lambda *args:None)
+    monkeypatch.setattr(sms,'_read_user_profile',lambda *args:{})
+    monkeypatch.setattr(sms,'_reset_session',lambda *args:None)
+    monkeypatch.setattr(sms,'_seed_transcript',lambda *args:None)
+    def seed(deps,user,agents,ids):
+        if case=='cancel-seeded':ids.append(ROOT)
+    monkeypatch.setattr(sms,'_seed_agents',seed)
+    monkeypatch.setattr(sms,'_live_agent_ids',lambda *args:{ROOT} if state['posted'] else set())
+    monkeypatch.setattr(sms,'_read_transcript',lambda *args:[{'role':'user','content':'hi','inboundSeq':7}] if state['posted'] else [])
+    monkeypatch.setattr(sms,'_read_spend_state',lambda *args:SpendState(0,0))
+    monkeypatch.setattr(sms,'_backend_log_size',lambda:0)
+    trace=json.dumps({'message':'[SmsSupervisor] TOOL_TRACE','userId':OWNER,'mySeq':7,
+        'toolTrace':json.dumps([{'tool':'start_new_agent','phase':'commit','success':True,
+            'resultTruncated':False,'result':f'Agent started\nTrack: https://www.roselabs.ai/?agent-id={ROOT}'}])})
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:trace if state['posted'] and case!='cancel-unknown-trace' else '')
+    class Response:
+        status=200
+        async def __aenter__(self):state['posted']=True;return self
+        async def __aexit__(self,*args):pass
+    class Session:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        def post(self,*args,**kwargs):return Response()
+    monkeypatch.setattr(sms.aiohttp,'ClientSession',Session)
+    async def sleep(*args):
+        if case.startswith('cancel'):raise asyncio.CancelledError('owning cancellation')
+        raise RuntimeError('poll failed after actual committed trace')
+    monkeypatch.setattr(sms.asyncio,'sleep',sleep)
+    async def cleanup(*args):
+        state['cleanup_calls']+=1
+        if case=='cancel-cleanup-failed':
+            raise sms.SmsCleanupError('root read-back failed before durable receipt creation',
+                {'verified':False,'owned_agent_ids':[ROOT],'root_agent_ids':[],'receipt_path':None})
+        assert args[2]=={ROOT}
+        return {'verified':True,'root_agent_ids':[ROOT],'native_workflows':[]}
+    deps.cleanup_agents=cleanup
+    task=SimpleNamespace(name='owning-offline',evaluators=[])
+    if case.startswith('cancel'):
+        with pytest.raises(asyncio.CancelledError,match='owning cancellation') as cancelled:
+            asyncio.run(sms.run_sms_task('http://localhost:39999',task,deps))
+        if case=='cancel-cleanup-failed':
+            assert cancelled.value.owned_cleanup_receipt['owned_agent_ids']==[ROOT]
+            assert cancelled.value.owned_cleanup_receipt['verified'] is False
+            assert 'root read-back failed' in cancelled.value.owned_cleanup_error
+    else:
+        result=asyncio.run(sms.run_sms_task('http://localhost:39999',task,deps))
+        assert result.passed is False and result.benchmark_status=='ERROR'
+        assert result.stop_metadata['owned_cleanup_verified'] is True
+    if case=='cancel-unknown-trace':
+        assert deps.committed_agent_ids==set() and state['cleanup_calls']==0
+        assert deps.root_provenance_errors
+        assert not any('DELETE' in q for q in state['sql'])
+    else:
+        assert deps.committed_agent_ids=={ROOT} and state['cleanup_calls']==1
+
+
+def test_early_root_sql_failure_has_durable_false_custody(tmp_path,monkeypatch):
+    from benchmarks.sms_runner import SmsCleanupError
+    monkeypatch.setenv('BENCHMARK_CONTEXT_DIR',str(tmp_path))
+    monkeypatch.setattr(bench.cloud_batch_cleanup,'contract',lambda:(tmp_path/'status','exact-token'))
+    monkeypatch.setattr(bench,'_local_benchmark_task_queue',lambda _:QUEUE)
+    def failed_sql(*args):raise RuntimeError('exact root SQL unavailable')
+    monkeypatch.setattr(bench,'_run_local_victoria_sql',failed_sql)
+    finalizer=AsyncMock();monkeypatch.setattr(bench,'_finalize_owned_cloud_batch',finalizer)
+    with pytest.raises(SmsCleanupError,match='SQL unavailable') as caught:
+        asyncio.run(_cleanup_owned_sms_roots(bench,'http://localhost:39999',OWNER,{ROOT},set(),{'name':'fixture','passed':False}))
+    receipt=caught.value.receipt
+    assert receipt['verified'] is False and receipt['owned_agent_ids']==[ROOT]
+    disk=json.loads(pathlib.Path(receipt['receipt_path']).read_text())
+    assert disk==receipt and finalizer.await_count==0
+
+
+def test_sms_dispatch_relays_only_committed_root_custody_to_existing_callback(monkeypatch):
+    from benchmarks import sms_runner as sms
+    observed=[]
+    task=SimpleNamespace(name='owning-sms',runner='sms')
+    monkeypatch.setattr(bench,'_validate_task_target',lambda *args:None)
+    async def drive(url,actual,deps):
+        assert actual is task and deps.task_name==task.name
+        sms._remember_sms_committed_roots(deps,{ROOT})
+        sms._remember_sms_committed_roots(deps,{ROOT})
+        return 'owning-result'
+    monkeypatch.setattr(sms,'run_sms_task',drive)
+    result=asyncio.run(bench.run_single_task('http://localhost:39999',task,
+        on_agent_created=lambda name,aid:observed.append((name,aid))))
+    assert result=='owning-result' and observed==[(task.name,ROOT)]
+
+
+@pytest.mark.parametrize('path',['success','cancel-verified','cancel-failed','success-foreign-receipt','cancel-verified-foreign-receipt'])
+def test_actual_admitted_sms_wrapper_retires_only_verified_exact_roots(monkeypatch,path):
+    import ast
+    from benchmarks import outcome_publication
+    tree=ast.parse(pathlib.Path(bench.__file__).read_text())
+    wrapper=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='_run_reported_task')
+    admitted,agents,evaluated,signatures={}, {}, {}, {}
+    # A repeated-name sibling already has custody in this registry.
+    live={'same-task':[FOREIGN],'concurrent-non-sms':[CHILD]}
+    task=SimpleNamespace(name='same-task',runner='sms')
+    receipt={'verified':path!='cancel-failed','owned_agent_ids':[ROOT,FOREIGN] if path.endswith('foreign-receipt') else [ROOT],'root_agent_ids':[ROOT]}
+    result=SimpleNamespace(name=task.name,agent_id='',stop_metadata={'runner':'sms','owned_cleanup_receipt':receipt})
+    async def delegate(url,actual,*,on_agent_created,on_task_evaluated,**kwargs):
+        assert actual is task and set(kwargs)=={'keep_failed_agents','other_task_roots'}
+        assert kwargs['keep_failed_agents'] is False and kwargs['other_task_roots']()=={CHILD,FOREIGN}
+        on_agent_created(task.name,ROOT)
+        assert agents[asyncio.current_task()]==ROOT and live[task.name]==[FOREIGN,ROOT]
+        assert kwargs['other_task_roots']()=={CHILD,FOREIGN}
+        if path.startswith('cancel'):
+            cancellation=asyncio.CancelledError('preserved cancellation')
+            cancellation.owned_cleanup_receipt=receipt
+            raise cancellation
+        return result
+    monkeypatch.setattr(outcome_publication,'wait_for_publication',AsyncMock())
+    ns={'asyncio':asyncio,'BenchmarkTask':bench.BenchmarkTask,'TaskResult':bench.TaskResult,
+        'base_url':'http://localhost:39999','run_single_task':delegate,
+        'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None),
+        '_admitted_tasks':admitted,'_admitted_agent_ids':agents,'_evaluated_task_results':evaluated,
+        '_outcome_signatures':signatures,'_live_task_agent_ids':live,
+        '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),'_emit_report':lambda **kw:None}
+    module=ast.fix_missing_locations(ast.Module(body=[wrapper],type_ignores=[]))
+    exec(compile(module,'<actual candidate admitted wrapper>','exec'),ns)
+    async def run():
+        if path.startswith('cancel'):
+            with pytest.raises(asyncio.CancelledError,match='preserved cancellation'):
+                await ns['_run_reported_task'](task,keep_failed_agents=False)
+        else:
+            assert await ns['_run_reported_task'](task,keep_failed_agents=False) is result
+    asyncio.run(run())
+    assert live['concurrent-non-sms']==[CHILD]
+    assert live['same-task']==([FOREIGN,ROOT] if path=='cancel-failed' else [FOREIGN])
+    assert not admitted and not agents
