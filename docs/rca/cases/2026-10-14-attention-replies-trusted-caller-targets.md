@@ -74,8 +74,14 @@ rollback, and absence of foreign signals.
 
 The original local attack artifacts are retained privately as
 attention-ownership-before.txt and attention-workflow-binding-before.txt in
-the isolated review worktree. Final owning and deployment validation is
-tracked by PR #1511. No production agent was modified for these tests.
+the isolated review worktree. The unchanged final identity regression returned unauthorized HTTP 200 before
+the guard and 403 afterward; all 53 attention cases and the full auth-assistance
+domain pass (3.687s and 2.185s). Auth creation with no current workflow uses
+the agent root ID, proven through the actual create/complete API rather than
+rewriting fixture rows (old empty workflow ID failed; native fallback passed).
+A separate parent/child identity invariant rejects crafted legacy mismatches
+before credential, control or USER writes. Scoped lint and formatting pass.
+Final deployment validation is tracked by PR #1511. No production agent was modified for these tests.
 The check batches the requested agent/workflow identities once per gate
 operation and introduces no model-step polling or shared input queue.
 

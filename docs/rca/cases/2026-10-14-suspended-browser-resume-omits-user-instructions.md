@@ -214,10 +214,11 @@ of harness injections, preservation of sent user messages, and schema updates
 when needed. That direction authorizes this scoped runtime change; the normal
 trajectory guard is satisfied with recorded user-direction provenance. No
 production agent was resumed, rerun or modified during this RCA. At 10,000
-agents the design adds one scoped durable-tail read per resumed task, with no
-new per-step polling or shared user fan-in. Existing auth, write-permission,
+agents the combined repair reads each task’s scoped durable tail at resume,
+decision and verification boundaries through the same cursor/source-ID ledger.
+It adds no shared user fan-in or second input transport. Existing auth, write-permission,
 payment and generation snapshots preserve the same instruction custody.
-Draft PR #1511 contains the reviewed code. The normal deploy prompt and agent
+PR #1511 contains the combined native runtime repair. The normal deploy prompt and agent
 terminal-behavior guards passed; Step 0c initially stopped on the runtime-context
 diff, then passed under the user's explicit revised implementation direction.
 The evidence publisher could not produce a share viewer for this deleted
