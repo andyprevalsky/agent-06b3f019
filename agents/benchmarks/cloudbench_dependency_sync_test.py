@@ -27273,6 +27273,7 @@ ROOT_DIR="$FIXTURE/workspace"
 GIT_COMMON_DIR="$FIXTURE/common"
 WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
 FLEET_DIR="$ROOT_DIR/.context/run"
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}
 mkdir -p "$FLEET_DIR"
 SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
 SNAPSHOT_SELECTOR_SCRIPT={shlex.quote(str(SNAPSHOT_SCRIPT))}
