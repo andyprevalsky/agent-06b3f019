@@ -2304,3 +2304,123 @@ def test_campaign_inventory_cleanup_manifest_declared_deadline(tmp_path, fault, 
             with pytest.raises(ValueError): invoke()
     finally:
         lock.close()
+
+
+@pytest.mark.parametrize("case", ["absent", "empty", "three-empty"])
+def test_campaign_inventory_empty_pool_avoids_native_reads(tmp_path, case):
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    def function(name):
+        start = source.index(name+"() {")
+        end = source.index("\n}\n", start)+3
+        return source[start:end]
+    common = tmp_path / "common"
+    (common / "cloudbench-pools").mkdir(parents=True)
+    ids = common / "cloudbench-pools/current.ids"
+    if case != "absent": ids.write_text("")
+    ledger = tmp_path / "native-reads"
+    script = tmp_path / "owning.sh"
+    script.write_text("set -uo pipefail\n" + f"GIT_COMMON_DIR={shlex.quote(str(common))}\nPOOL_IDS_FILE={shlex.quote(str(ids))}\nAPP=navi-whisper-lux-bench\nFLEET_PRIMARY_VM_SIZE=shared-cpu-2x\nFLEET_PRIMARY_VM_MEMORY=4096\nUNAVAILABLE_POOL_IDS=()\nPOOL_INVENTORY_JSON=''\nFLEET_DIR={shlex.quote(str(tmp_path))}\n" +
+        "FLY() { printf 'native-read\\n' >> "+shlex.quote(str(ledger))+"; printf '[]\\n'; }\n" +
+        function("reconcile_pool") + "\n" + function("normalize_current_pool_shape") + "\n" + function("pool_write_shape_hints") + "\n" +
+        "for i in "+("1 2 3" if case == "three-empty" else "1")+"; do reconcile_pool || exit $?; normalize_current_pool_shape || exit $?; pool_write_shape_hints || exit $?; done\n")
+    result = subprocess.run(["bash",str(script)],capture_output=True,text=True,timeout=10)
+    assert result.returncode == 0, result.stdout+result.stderr
+    assert not ledger.exists(), "empty local pool must not issue app-wide native inventory reads in each controller"
+
+
+@pytest.mark.parametrize("case", ["noop", "stale-mutation", "pool-mutation", "unknown", "bad-feed", "standalone"])
+def test_campaign_inventory_reconciliation_refresh_contract(tmp_path, case):
+    source = (ROOT / "scripts/run-bench-fleet").read_text()
+    start = source.index('# Recovery may have removed active machines.')
+    end = source.index('# ── App-wide capacity guard', start)
+    block = source[start:end]
+    events = tmp_path / "events"
+    script = tmp_path / "caller.sh"
+    flags = {"noop": ("0", "0"), "stale-mutation": ("1", "0"), "pool-mutation": ("0", "1"), "bad-feed": ("0", "0"), "standalone": ("1", "1")}
+    assignments = ""
+    if case in flags:
+        a, b = flags[case]
+        assignments = f"FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED={a}\nFLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED={b}\n"
+    script.write_text("set -uo pipefail\nAPP=fixture-app\n" + assignments +
+        "CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=" + ("''" if case == "standalone" else "fixture") + "\n" +
+        "machines_snapshot_identity() { printf original-generation; }\n" +
+        "refresh_machines_snapshot_after() { printf 'refresh:%s\n' \"$1\" >> " + shlex.quote(str(events)) + "; return 75; }\n" +
+        "fleet_admission_machines_json() { printf 'compact\n' >> " + shlex.quote(str(events)) + "; " + ("return 75;" if case == "bad-feed" else "printf '[]';") + " }\n" +
+        "FLY() { printf 'native\n' >> " + shlex.quote(str(events)) + "; printf '[]'; }\n" + block + "\nprintf '%s' \"$warm_json\"\n")
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=10)
+    observed = events.read_text().splitlines()
+    if case in ("stale-mutation", "pool-mutation", "unknown"):
+        assert result.returncode == 1
+        assert observed == ["refresh:original-generation"]
+    elif case == "bad-feed":
+        assert result.returncode == 1
+        assert observed == ["compact"]
+    else:
+        assert result.returncode == 0, result.stderr
+        assert observed == (["native"] if case == "standalone" else ["compact"])
+        assert result.stdout == "[]"
+
+
+@pytest.mark.parametrize('fault', ['healthy', 'wrong-token', 'expired-health', 'parent-birth', 'missing-compact'])
+def test_campaign_inventory_pool_reconciliation_borrows_compact_owned_feed(tmp_path, fault):
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    def function(name):
+        start = source.index(name+'() {')
+        return source[start:source.index('\n}\n', start)+3]
+    common = tmp_path / 'common'
+    (common / 'cloudbench-pools').mkdir(parents=True)
+    ids = common / 'cloudbench-pools/current.ids'
+    ids.write_text('abc123\n')
+    compact = [{'id':'abc123', 'state':'stopped', 'config':{'guest':{'cpu_kind':'shared','cpus':2,'memory_mb':4096}}}]
+    script = tmp_path / 'pool.sh'
+    script.write_text('set -uo pipefail\n' +
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n' +
+        'FLEET_DIR="$1"; APP=fixture-app; FLEET_OWNER_HOST="$(hostname)"\nexport CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$FLEET_DIR"\n' +
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}\n' +
+        'mkdir -p "$INVENTORY_INDEX/current"\nbirth="$(inventory_pid_start_time $$)"\n' +
+        'printf "app=%s\\npid=%s\\npid_start=%s\\ntoken=fixture-token\\nparent_pid=%s\\nparent_start=%s\\n" "$APP" "$$" "$birth" "$$" "$birth" > "$INVENTORY_HOME/owner"\n' +
+        'printf "publisher_token=%s\\nvalid_until=%s\\n" '+ ('foreign' if fault == 'wrong-token' else 'fixture-token') + ' '+ ('1' if fault == 'expired-health' else '"$((INVENTORY_CLOCK_EPOCH+120))"') +' > "$INVENTORY_INDEX/current/health"\n' +
+        'printf "%s" '+shlex.quote(json.dumps(compact))+' > "$INVENTORY_INDEX/current/admission-machines.json"\n' +
+        ('rm "$INVENTORY_INDEX/current/admission-machines.json"\n' if fault == 'missing-compact' else '') +
+        ('sed -i "s/^parent_start=.*/parent_start=foreign/" "$INVENTORY_HOME/owner"\n' if fault == 'parent-birth' else '') +
+        f'GIT_COMMON_DIR={shlex.quote(str(common))}\nPOOL_IDS_FILE={shlex.quote(str(ids))}\nPOOL_CLAIMS_DIR="$FLEET_DIR/claims"\n' +
+        'FLEET_PRIMARY_VM_SIZE=shared-cpu-2x\nFLEET_PRIMARY_VM_MEMORY=4096\nUNAVAILABLE_POOL_IDS=()\n' +
+        'FLY() { touch "$FLEET_DIR/native-read"; return 97; }\n' +
+        '\n'.join(function(n) for n in ['pool_machine_state_from_json','pool_machine_shape_from_json','reconcile_pool','normalize_current_pool_shape','pool_write_shape_hints']) +
+        '\nreconcile_pool || exit $?\nnormalize_current_pool_shape || exit $?\npool_write_shape_hints || exit $?\n[ "$FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED" = 0 ]\n')
+    result = subprocess.run(['bash',str(script),str(tmp_path)],capture_output=True,text=True,timeout=10)
+    assert (result.returncode == 0) == (fault == 'healthy'), result.stdout+result.stderr
+    assert not (tmp_path/'native-read').exists(), 'shared pool read must never fall back to native transport'
+    if fault == 'healthy':
+        assert (tmp_path/'pool-shapes.tsv').read_text() == 'abc123 shared 2 4096\n'
+
+
+@pytest.mark.parametrize('case', ['absent', 'foreign', 'live', 'dead-recovery-refused', 'resize-refused'])
+def test_campaign_inventory_reconciliation_mutation_flags_are_parent_owned(tmp_path, case):
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    def function(name):
+        start = source.index(name+'() {')
+        return source[start:source.index('\n}\n',start)+3]
+    root = tmp_path/'owners'
+    root.mkdir()
+    registry = root/'old'
+    if case not in ('absent','resize-refused'):
+        registry.mkdir()
+        (registry/'meta').write_text('version=2\napp=fixture-app\ncleanup_policy=reap\nhost='+('foreign' if case=='foreign' else 'fixture-host')+'\n')
+    ids = tmp_path/'pool.ids'
+    ids.write_text('abc123\n')
+    script = tmp_path/'flags.sh'
+    script.write_text('set -uo pipefail\n'+
+        f'FLEET_OWNERSHIP_ROOT={shlex.quote(str(root))}\nFLEET_REGISTRY_DIR=own\nFLEET_OWNER_HOST=fixture-host\nAPP=fixture-app\nFLEET_DIR={shlex.quote(str(tmp_path))}\nPOOL_IDS_FILE={shlex.quote(str(ids))}\n'+
+        'registry_meta_value() { awk -F= -v k="$2" \'$1==k {print substr($0,length(k)+2);exit}\' "$1"; }\n'+
+        'fleet_registry_cleanup_state() { printf reap; }\nregistry_owner_alive() { return '+('0' if case=='live' else '1')+'; }\n'+
+        'release_cleanup_disk_reserve() { return 0; }\nacquire_registry_recovery_lock() { return 0; }\nrelease_registry_recovery_lock() { return 0; }\n'+
+        'recover_registry_audit_only_fresh() { [ "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED" = 1 ] || exit 98; return 1; }\n'+
+        function('reconcile_stale_fleet_registries')+'\n'+function('pool_machine_shape_from_json')+'\n'+function('normalize_current_pool_shape')+'\n'+
+        'FLEET_PRIMARY_VM_SIZE=shared-cpu-2x\nFLEET_PRIMARY_VM_MEMORY=4096\n'+
+        "POOL_INVENTORY_JSON='[{\"id\":\"abc123\",\"state\":\"stopped\",\"config\":{\"guest\":{\"cpu_kind\":\"shared\",\"cpus\":1,\"memory_mb\":1024}}}]'\n"+
+        'resize_pool_machine() { [ "$FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED" = 1 ] || exit 98; return 1; }\n'+
+        ('normalize_current_pool_shape; status=$?; [ "$status" = 1 ] && [ "$FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED" = 1 ]\n' if case=='resize-refused' else
+         'reconcile_stale_fleet_registries; status=$?; [ "$status" = '+('1' if case=='dead-recovery-refused' else '0')+' ] && [ "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED" = '+('1' if case=='dead-recovery-refused' else '0')+' ]\n'))
+    result = subprocess.run(['bash',str(script)],capture_output=True,text=True,timeout=10)
+    assert result.returncode == 0, result.stdout+result.stderr
