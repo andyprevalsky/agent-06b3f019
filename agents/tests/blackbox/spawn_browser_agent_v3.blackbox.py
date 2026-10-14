@@ -6523,6 +6523,73 @@ async def test_report_claude_token_rate_limited_swallows_network_error():
 # repo: save_browser_action / assistant messages
 # ========================================
 
+async def test_browser_observation_survives_action_persistence_without_planner_duplication():
+    """Execute the real success-persistence slice and real HTTP serializer.
+
+    Isolate this boundary from the paid browser loop; do not reconstruct its
+    arguments in the test, so dropping evidence at the call site also fails.
+    """
+    import inspect
+    from domains.spawn_browser_agent_v3 import handler, repo
+    from domains.spawn_browser_agent_v3.service_actions import _browser_state_action_result
+    from domains.spawn_browser_agent_v3.service_crypto import mask_secret_values
+    from helpers.llm import convert_context_to_messages
+    from tools.base import MessageStatus
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real)))
+    blocks = [node.body for node in ast.walk(tree) if isinstance(node, ast.If)
+              and ast.unparse(node.test) == "result.get('success', True)"]
+    persistence = []
+    for body in blocks:
+        for i, node in enumerate(body):
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "extra_metadata" for t in node.targets):
+                for end in range(i + 1, len(body)):
+                    n = body[end]
+                    if isinstance(n, ast.Expr) and isinstance(n.value, ast.Await) and isinstance(n.value.value, ast.Call) and isinstance(n.value.value.func, ast.Name) and n.value.value.func.id == "save_browser_action_message":
+                        persistence = body[i:end + 1]
+                        break
+    assert persistence, "Real action persistence boundary not found"
+    function = ast.AsyncFunctionDef(name="persist", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=persistence, decorator_list=[])
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    rejection = "The supplied sign-in details were rejected."
+    # Keep late-page evidence too: no prefix slicing or fixture keyword filter.
+    state = {"url": "https://example.com/login", "timestamp": "2026-10-14T00:00:00Z",
+             "dom_tree": "Page text " * 1500 + rejection + " secret-plaintext"}
+    result = mask_secret_values(_browser_state_action_result(state), {"pwd:synthetic": "secret-plaintext"})
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+    namespace = dict(result=result, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
+                     save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
+                     MessageStatus=MessageStatus, browser_url="https://viewer.invalid", tool_call_id_action="read-1", iteration=5,
+                     MAX_ITERATIONS=250, coords_for_cursor=None)
+    exec(compile(module, "<real-action-persistence>", "exec"), namespace)
+    with patch("config.load_config", return_value=_fake_config()):
+        await namespace["persist"]()
+    body = json.loads(assert_captured_call(url_contains="/api/agents/ag1/messages", method="POST")["requestBody"])
+    evidence = body["metadata"].get("browser_observation", "")
+    assert rejection in evidence, "Observed rejection disappears before credential classification"
+    assert evidence == result["formatted_state"], "Persist the same native observation, without silent truncation"
+    assert "secret-plaintext" not in json.dumps(body)
+    assert "pwd:synthetic" in evidence
+    assert body["metadata"]["task_id"] == "t1" and body["metadata"]["toolCallId"] == "read-1"
+    assert body["message"] == "Browser state captured."
+    row = {"role": "TOOL", "text": body["message"], "metadata": body["metadata"]}
+    before = convert_context_to_messages([row])
+    row["metadata"] = {k: v for k, v in row["metadata"].items() if k != "browser_observation"}
+    assert before == convert_context_to_messages([row]), "Classifier evidence must not duplicate DOM into planning"
+    assert rejection not in json.dumps(before)
+    for action, observation in (("click", result["formatted_state"]), ("read_browser_state", "")):
+        setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+        ref = {"kind": "password", "id": "synthetic-credential"}
+        marked = []
+        namespace.update(action_name=action, result={"success": True, "message": "done", "formatted_state": observation, "credential_ref": ref},
+                         auth_runtime_state=SimpleNamespace(mark_credential_ref=marked.append))
+        with patch("config.load_config", return_value=_fake_config()):
+            await namespace["persist"]()
+        control = json.loads(assert_captured_call(index=len(get_captured_requests()) - 1, url_contains="/api/agents/ag1/messages", method="POST")["requestBody"])
+        assert "browser_observation" not in control["metadata"]
+        assert control["metadata"]["credential_ref"] == ref and marked == [ref]
+
+
 async def test_save_browser_action_message_posts_metadata():
     from tools.base import MessageStatus
     from domains.spawn_browser_agent_v3.repo import save_browser_action_message
@@ -26086,6 +26153,10 @@ async def run_all_tests():
         test_report_claude_token_rate_limited_swallows_network_error,
     )
 
+    await r.record_async(
+        "browser_observation_credential_evidence_persistence",
+        test_browser_observation_survives_action_persistence_without_planner_duplication,
+    )
     await r.record_async(
         "save_browser_action_message_metadata",
         test_save_browser_action_message_posts_metadata,

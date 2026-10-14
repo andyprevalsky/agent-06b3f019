@@ -10341,6 +10341,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 if result.get("credential_ref"):
                     auth_runtime_state.mark_credential_ref(result["credential_ref"])
                     extra_metadata = {"credential_ref": result["credential_ref"]}
+                # Preserve the same masked observation for credential classification.
+                # Metadata is not repeated in the parent planner's tool text.
+                if action_name == "read_browser_state" and result.get("formatted_state"):
+                    extra_metadata = {**(extra_metadata or {}), "browser_observation": result["formatted_state"]}
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
