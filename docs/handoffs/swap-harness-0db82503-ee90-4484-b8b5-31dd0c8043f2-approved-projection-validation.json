@@ -85,7 +85,7 @@
   "deployment_complete": false,
   "PR_merged": false,
   "raw_transcripts_and_values": "PRIVATE; not included in this receipt",
-  "updated_at_utc": "2026-10-14T02:37:20.484872+00:00",
+  "updated_at_utc": "2026-10-14T18:39:50.121637+00:00",
   "backend_credential_fixture_repair": {
     "patch_sha256": "50ffb3495980fa84d920376f256c761e00a6ffafce01a7620fcadc351db1dac5",
     "scope": "Existing test-only mock clock;25ms and all assertions preserved; production source unchanged",
@@ -141,5 +141,103 @@
     "flakiness_proved": false,
     "catalog_fixture_or_product_prompt_changed": false,
     "prior_agent_description": "Explicitconditionalrequestdescription was incorrect; corrected and proposedpromptwithdrawn"
+  },
+  "fresh_backend_20261014_current": {
+    "source_git_sha": "87032ebe60b9187f7086c5067258ebe7c4cfa0e3",
+    "stage": {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "backend-coverage-blackbox",
+      "started_at": "2026-10-14T18:15:22Z",
+      "finished_at": "2026-10-14T18:21:57Z",
+      "started_epoch": 1792001722.7146165,
+      "finished_epoch": 1792002117.7381163,
+      "duration_seconds": 395.0,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/backend-coverage-blackbox-20261014-181522-3273397.log"
+    },
+    "blackbox": {
+      "passed": 195,
+      "failed": 2,
+      "total": 197,
+      "failed_domains": [
+        "browser-provider",
+        "treasury-rails"
+      ],
+      "credential_injection_passed": true
+    },
+    "unit": {
+      "total": 266,
+      "passed": 266,
+      "failed": 0
+    },
+    "coverage": {
+      "fresh_report_generated": false,
+      "reason": "canonical coverage stops after failed blackbox phase"
+    },
+    "trailing_teardown_gate": {
+      "ran": false,
+      "reason": "npm && gate conditional on coverage success"
+    },
+    "inherited_exclusion": {
+      "domain": "integration-health",
+      "verification": "not verified by this coverage gate",
+      "skip_flag_changed": false
+    },
+    "preserved_failure_dir": "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513",
+    "process_retirement": {
+      "observed_pid_births": 30,
+      "alive_exact_births": [],
+      "reused_pids": [],
+      "all_observed_births_retired": true
+    },
+    "native_retirement": {
+      "complete": true,
+      "kernel_browsers_deleted": 7,
+      "steel_sessions_released": 2,
+      "kernel_profiles_404": 2,
+      "auth_persist_journals": [
+        {
+          "path": ".context/test-runs/browser-provider-custody/auth-persist-6Pn2eE/custody.json",
+          "sha256": "e11d937c438fbca960afcaf7ababdb7ab9aaf617a1052376ef25bf9b8034c789",
+          "phase": "cleanup-complete",
+          "ownerRetained": false,
+          "cleanupFailures": 0
+        }
+      ],
+      "source_allocation_markers_audited": [
+        "Kernel browser creation completed",
+        "Created Steel session",
+        "Created new Steel session",
+        "auth-persist allocated journal"
+      ]
+    },
+    "evidence_sha256": {
+      ".context/tamy-resumed/current-backend-coverage-console.log": "4af93c1d11b862b23b74840e85c242d90321ae247b1f4056dffba30ac26f62be",
+      ".context/tamy-resumed/current-backend-coverage-retirement.json": "02a39a2f64f3d235cd9b556ce75d0361740404bb4d10cef409cbf0a52a3b43db",
+      ".context/tamy-resumed/current-backend-browser-native-audit.json": "07f083e445419155c3e04d06971d604e0a27e1680b22ffbc1ccf75ff8f9c8c7f",
+      "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513/server.log": "2cc800eb34a7b761e5c8ca31bc6879a895e2582d06e46e1024cd47dcf901a074",
+      "/home/boxes/rose/.context/test-runs/backend-coverage-failed-20261014-182156-3273513/summary.json": "67b792dc28dd983353583ecaa4fcb5a85eaf29769d50d35634aa1b9d3d9bc318"
+    },
+    "source_unchanged_by_gate_agent": true,
+    "no_timeout_or_skip_changes": true,
+    "recorded_at": "2026-10-14T18:28:30.174245+00:00",
+    "treasury_native_card_readback": {
+      "file": ".context/tamy-resumed/current-treasury-overdue-native-rows.json",
+      "sha256": "cec8dbad9a68838c6427984b0c2657284dd0a937a6dcc054283891dda1d4f207",
+      "cards_closed_balance_zero": 2,
+      "matched_card_and_cardholder_bindings": 2,
+      "sandbox_consumed_released_zero": 2,
+      "financial_reclamation_proven": false
+    },
+    "treasury_canonical_ledger_readback": {
+      "file": ".context/tamy-resumed/current-treasury-ledger-readback.json",
+      "sha256": "53ab4056200a852241d3305273708c57e6585326f9956a2cf79eff6a251350b2",
+      "selected_resolved_overdue": 2,
+      "selected_open_remaining": 0,
+      "all_open_remaining": 0,
+      "manual_ledger_mutation": false
+    }
   }
 }

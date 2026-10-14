@@ -156,6 +156,7 @@ export interface RecreatedSteelSession {
   profileSource: string;
   previousSessionId: string;
   previousProvider: BrowserProviderName;
+  previousSessionReleased: boolean;
 }
 
 export interface SteelSessionReplacementDependencies {
@@ -235,6 +236,20 @@ export async function recreateSession(
           persistProfile: oldSession.providerProfilePersist ?? true,
         }
       : undefined;
+  // A newly persisted Steel profile stays UPLOADING while its source session
+  // is active. Reattaching it before release makes every create retry fail.
+  // Keep the exact profile binding; record the released source honestly even
+  // if replacement creation subsequently fails.
+  const previousSessionReleased =
+    boundProfile?.persistProfile === true && previousProvider === 'steel';
+  if (previousSessionReleased) {
+    await (dependencies.releaseSession ?? releaseSteelRemoteSession)(oldSession.sessionId);
+    const released = await prisma.browserSession.updateMany({
+      where: { id: taskId, sessionId: oldSession.sessionId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    });
+    if (released.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
+  }
   let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
@@ -361,6 +376,7 @@ export async function recreateSession(
         profileSource: profile.profileSource,
         previousSessionId: oldSession.sessionId,
         previousProvider,
+        previousSessionReleased,
       };
     } catch (error) {
       await validationBrowser?.close().catch(() => {});
@@ -390,8 +406,9 @@ export async function recreateSession(
           ? consecutiveCdpTimeouts + 1
           : 0;
       // Each timeout already includes three CDP handshakes against a distinct
-      // new session. Two in a row indicate a provider transport outage; leave
-      // the old session intact and let browser recovery try another provider.
+      // new session. Two in a row indicate a provider transport outage. The
+      // old session stays intact unless its persisted profile required release;
+      // in that case its binding remains honestly CLOSED for browser recovery.
       if (consecutiveCdpTimeouts >= 2) break;
       if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;
