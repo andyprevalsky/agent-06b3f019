@@ -413,7 +413,7 @@ clone_source_read_rate_limit_contract() (
     local refresh_calls="$TMP_ROOT/clone-source-rate-limit-refresh.calls"
     local ledger="$TMP_ROOT/clone-source-rate-limit/primary.ids"
 
-    for function_name in clone_failure_definitively_unallocated \
+    for function_name in fleet_clone_with_queue_admission clone_failure_definitively_unallocated \
         clone_failure_owned_volume_id machine_id_for_clone_name clone_machine_target; do
         function_source="$(fleet_production_function "$function_name")"
         [ -n "$function_source" ] \

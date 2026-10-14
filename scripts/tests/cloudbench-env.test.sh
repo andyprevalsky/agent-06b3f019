@@ -700,7 +700,7 @@ fleet_production_function() {
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-fleet" "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh"
 }
-for function_name in worker_ledger_lock_acquire worker_ledger_lock_release \
+for function_name in fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field; do
   function_source="$(fleet_production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
@@ -747,7 +747,7 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
-  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
+  fleet_clone_with_queue_admission worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function \
   inventory_index_healthy inventory_machine_record_path inventory_machine_field
 unset INVENTORY_INDEX INVENTORY_CLOCK_EPOCH INVENTORY_CLOCK_SECONDS SNAPSHOT_LOOP_PID SNAPSHOT_LOOP_TOKEN
 
