@@ -39,6 +39,11 @@ export default defineConfig(() => {
       proxy,
     },
     plugins: [react()],
+    // Animation assets -> Vite JSON strings -> JSON.parse -> unchanged frame renderer.
+    // Native JSON parsing avoids compiling millions of array literals at startup.
+    json: {
+      stringify: true,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),

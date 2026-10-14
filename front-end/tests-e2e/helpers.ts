@@ -3,7 +3,7 @@ import {
   type BrowserContext,
   type ConsoleMessage,
   type Page,
-  type Response,
+  type Response as PlaywrightResponse,
 } from '@playwright/test';
 
 function resolveLocalSemanticBackendUrl(): string {
@@ -124,7 +124,7 @@ export function attachRecorder(page: Page): Recorder {
   const rec: Recorder = { console: [], pageErrors: [], authResponses: [] };
   page.on('console', (m: ConsoleMessage) => rec.console.push({ type: m.type(), text: m.text() }));
   page.on('pageerror', (e: Error) => rec.pageErrors.push(String(e)));
-  page.on('response', (r: Response) => {
+  page.on('response', (r: PlaywrightResponse) => {
     const u = r.url();
     if (u.includes('/api/auth/')) rec.authResponses.push({ url: u, status: r.status() });
   });

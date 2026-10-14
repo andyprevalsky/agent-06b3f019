@@ -369,6 +369,7 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
 export type ToolMessageMetadata =
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
+  | SpawnAgentMetadata
   | SpawnSubAgentMetadata
   | WaitForMetadata
   | SetPlanMetadata

@@ -49,7 +49,10 @@ export type BrowserActionType =
   | 'navigate'
   | 'type'
   | 'scroll'
-  | 'hover';
+  | 'hover'
+  | 'session_started'
+  | 'auth_assistance'
+  | 'write_lock_rejected';
 
 /**
  * Code agent action types.
@@ -106,7 +109,8 @@ export interface MessageMetadata {
   /** Browser agent current URL */
   browser_url?: string;
   /** Action type for browser/code agents */
-  action_type?: BrowserActionType | CodeActionType;
+  action_type?:
+    BrowserActionType | CodeActionType | ClaudeCodeActionType | 'credential_failure_classification';
   /** Task ID for browser/code agents */
   task_id?: string;
   /** Preview URL for deployed code */

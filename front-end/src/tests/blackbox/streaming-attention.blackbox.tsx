@@ -41,6 +41,7 @@ describe('keyed streaming attention render lifecycle', () => {
   it('exposes the matching canonical answer identity', () => {
     const { container } = renderWithProviders(
       <MessageListItems
+        streamingMetricsBySubAgentId={new Map()}
         filteredMessages={[
           {
             message_id: 'canonical-message',

@@ -196,7 +196,7 @@ describe('About page', () => {
     it('copies email to clipboard when the email button is clicked', async () => {
       const writeTextMock = vi.fn().mockResolvedValue(undefined);
       const user = userEvent.setup({
-        writeToClipboard: writeTextMock,
+        writeToClipboard: true,
       });
 
       // Mock navigator.clipboard before rendering
