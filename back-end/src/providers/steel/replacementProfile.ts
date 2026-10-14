@@ -1,8 +1,12 @@
 import { prisma } from '../database';
 import type { BrowserSessionStatus } from '@prisma/client';
+import type { SteelNativeEffect, SteelLifecycleMutation } from './lifecycleClaim';
 import { steel, releaseSteelRemoteSession } from './session';
 
 export interface SteelReplacementProfileDependencies {
+  verifyLifecycleOwnership?: () => Promise<void>;
+  runOwnedNative?: SteelNativeEffect;
+  mutateLifecycle?: SteelLifecycleMutation;
   inspectSession?: (sessionId: string) => Promise<{
     id: string;
     profileId?: string | null;
@@ -26,28 +30,44 @@ export async function finishSteelProfileWriter(
   ) {
     throw new Error('Steel profile writer does not match the recorded task session');
   }
-  const claim = await prisma.browserSession.updateMany({
-    where: {
-      id: task.id,
-      sessionId: task.sessionId,
-      provider: 'steel',
-      providerProfileId: task.providerProfileId,
-      status: task.status,
-    },
-    data: { status: 'ERROR', closedAt: null },
-  });
+  await dependencies.verifyLifecycleOwnership?.();
+  const mutate: SteelLifecycleMutation =
+    dependencies.mutateLifecycle ?? (async (callback) => callback(prisma));
+  const claim = await mutate((transaction) =>
+    transaction.browserSession.updateMany({
+      where: {
+        id: task.id,
+        sessionId: task.sessionId,
+        provider: 'steel',
+        providerProfileId: task.providerProfileId,
+        status: task.status,
+      },
+      data: { status: 'ERROR', closedAt: null },
+    })
+  );
   if (claim.count !== 1) throw new Error('Steel profile writer changed before replacement claim');
   try {
-    await (dependencies.releaseSession ?? releaseSteelRemoteSession)(task.sessionId);
+    await dependencies.verifyLifecycleOwnership?.();
+    const release = () =>
+      (dependencies.releaseSession ?? releaseSteelRemoteSession)(task.sessionId);
+    await (dependencies.runOwnedNative
+      ? dependencies.runOwnedNative(task.sessionId, 'release', release)
+      : release());
   } catch (error) {
     // A lost release acknowledgement must not restore a false ACTIVE pointer.
     // Exact native confirmation can discharge custody; otherwise ERROR retains it.
     const observed = await inspect(task.sessionId).catch(() => null);
-    if (observed?.id === task.sessionId && observed.status === 'released') {
-      await prisma.browserSession.updateMany({
-        where: { id: task.id, sessionId: task.sessionId, status: 'ERROR' },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
+    const ownsClaim = await (dependencies.verifyLifecycleOwnership?.() ?? Promise.resolve()).then(
+      () => true,
+      () => false
+    );
+    if (ownsClaim && observed?.id === task.sessionId && observed.status === 'released') {
+      await mutate((transaction) =>
+        transaction.browserSession.updateMany({
+          where: { id: task.id, sessionId: task.sessionId, status: 'ERROR' },
+          data: { status: 'CLOSED', closedAt: new Date() },
+        })
+      );
     }
     throw error;
   }

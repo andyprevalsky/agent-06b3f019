@@ -25,7 +25,11 @@ import {
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
-import { withSteelLifecycleClaim } from './lifecycleClaim';
+import {
+  withSteelLifecycleClaim,
+  type SteelNativeEffect,
+  type SteelLifecycleMutation,
+} from './lifecycleClaim';
 import { announceBrowserSessionBinding } from '../browser/sessionBindingAnnounce';
 import {
   newOwnedSteelSessionId,
@@ -448,7 +452,7 @@ export async function closeSession(
     select: { id: true, providerProfileId: true, providerProfilePersist: true },
   });
   if (session === null) throw new Error(`Browser session not found: ${sessionId}`);
-  await withSteelLifecycleClaim(session.id, async () => {
+  await withSteelLifecycleClaim(session.id, async (assertTask, runTaskNative, mutateTask) => {
     const current = await prisma.browserSession.findUnique({
       where: { id: session.id },
       select: { sessionId: true },
@@ -456,7 +460,28 @@ export async function closeSession(
     if (current?.sessionId !== sessionId) {
       throw new Error(`Browser session changed before closing task ${session.id}`);
     }
-    const close = () => closeSessionWithinClaim(sessionId, pause, currentUrl);
+    const close = (
+      assertProfile?: () => Promise<void>,
+      runProfileNative?: SteelNativeEffect,
+      mutateProfile?: SteelLifecycleMutation
+    ) =>
+      closeSessionWithinClaim(
+        sessionId,
+        pause,
+        currentUrl,
+        async () => {
+          await assertTask();
+          await assertProfile?.();
+        },
+        async (id, effect, callback) =>
+          runTaskNative(id, effect, () =>
+            runProfileNative ? runProfileNative(id, effect, callback) : callback()
+          ),
+        (callback) =>
+          mutateTask((transaction) =>
+            mutateProfile ? mutateProfile(callback, transaction) : callback(transaction)
+          )
+      );
     if (session.providerProfileId && session.providerProfilePersist) {
       await withSteelLifecycleClaim(`profile:${session.providerProfileId}`, close);
     } else {
@@ -468,14 +493,20 @@ export async function closeSession(
 async function closeSessionWithinClaim(
   sessionId: string,
   pause: boolean,
-  currentUrl?: string
+  currentUrl?: string,
+  assertOwned?: () => Promise<void>,
+  runOwnedNative?: SteelNativeEffect,
+  mutateLifecycle?: SteelLifecycleMutation
 ): Promise<void> {
   log.info(`${pause ? 'Pausing' : 'Closing'} Steel session ${sessionId}...`);
 
   let releaseError: unknown = null;
   try {
     // Release the Steel session
-    await releaseSteelRemoteSession(sessionId);
+    await assertOwned?.();
+    await (runOwnedNative
+      ? runOwnedNative(sessionId, 'release', () => releaseSteelRemoteSession(sessionId))
+      : releaseSteelRemoteSession(sessionId));
   } catch (error) {
     releaseError = error;
     log.error('Failed to close session in Steel', {
@@ -483,18 +514,38 @@ async function closeSessionWithinClaim(
     });
   }
 
+  let releaseConfirmed = releaseError === null;
+  let confirmedActive = false;
+  if (releaseError !== null && !sessionId.startsWith('local-')) {
+    const observed = await steel.sessions.retrieve(sessionId).catch(() => null);
+    if (observed?.id === sessionId) {
+      releaseConfirmed = observed.status === 'released';
+      confirmedActive = observed.status === 'live';
+    }
+  }
+
   // Update DB
   log.info(`📝 Updating DB with currentUrl: ${currentUrl || 'NONE'}`);
-  await prisma.browserSession.update({
-    where: { sessionId },
-    data: {
-      // ERROR means remote release is still owed. Terminal-agent reconciliation
-      // will retry it; CLOSED must only mean billing is known to have stopped.
-      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
-      closedAt: releaseError === null && !pause ? new Date() : null,
-      currentUrl: currentUrl || undefined,
-    },
-  });
+  await assertOwned?.();
+  const mutate: SteelLifecycleMutation = mutateLifecycle ?? (async (callback) => callback(prisma));
+  await mutate((transaction) =>
+    transaction.browserSession.update({
+      where: { sessionId },
+      data: {
+        // ERROR means remote release is still owed. Terminal-agent reconciliation
+        // will retry it; CLOSED must only mean billing is known to have stopped.
+        status: releaseConfirmed
+          ? pause
+            ? 'PAUSED'
+            : 'CLOSED'
+          : pause && confirmedActive
+            ? 'ACTIVE'
+            : 'ERROR',
+        closedAt: releaseConfirmed && !pause ? new Date() : null,
+        currentUrl: currentUrl || undefined,
+      },
+    })
+  );
   await announceBrowserSessionBinding({ sessionId });
 
   if (releaseError !== null) throw releaseError;

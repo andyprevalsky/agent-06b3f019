@@ -95,6 +95,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       {
         withLifecycleClaim: async (_taskId, callback) => callback(),
         releaseSession: async () => {},
+        prepareCandidateCleanup: async () => {},
+        settleCandidateCleanup: async () => {},
         createSession: async (input) => {
           connectionInputs.push(input as unknown as Record<string, unknown>);
           if (connectionInputs.length < 3) {
@@ -149,6 +151,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
           releaseSession: async () => {},
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async (input) => {
             const geo = (input as { useProxy?: { geolocation?: Record<string, unknown> } }).useProxy
               ?.geolocation;
@@ -177,6 +181,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
       {
         withLifecycleClaim: async (_taskId, callback) => callback(),
         releaseSession: async () => {},
+        prepareCandidateCleanup: async () => {},
+        settleCandidateCleanup: async () => {},
         createSession: async (input) => {
           resumeInputs.push(input as unknown as Record<string, unknown>);
           return {
@@ -210,6 +216,8 @@ export async function testConnectionErrorRetriesOnReplacement(): Promise<void> {
         { forceManagedRotation: true },
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async () => ({
             id: `steel-validation-timeout-${releasedSessions}`,
             debugUrl: 'https://steel.example/debug',

@@ -219,6 +219,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       {
         withLifecycleClaim: async (_taskId, callback) => callback(),
         releaseSession: async () => {},
+        prepareCandidateCleanup: async () => {},
+        settleCandidateCleanup: async () => {},
         createSession: async (input) => {
           createInputs.push(input as unknown as Record<string, unknown>);
           if (createInputs.length === 1) {
@@ -283,6 +285,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       {
         withLifecycleClaim: async (_taskId, callback) => callback(),
         releaseSession: async () => {},
+        prepareCandidateCleanup: async () => {},
+        settleCandidateCleanup: async () => {},
         createSession: async (input) => {
           readOnlyCreateInput = input as unknown as Record<string, unknown>;
           return {
@@ -319,6 +323,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
           releaseSession: async () => {},
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async (input) => {
             forceFreshCreateInput = input as unknown as Record<string, unknown>;
             return {
@@ -362,6 +368,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         { forceManagedRotation: false },
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async (input) => {
             mismatchCreateAttempts += 1;
             assert(
@@ -403,6 +411,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         { forceManagedRotation: true },
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async () => {
             const id = `steel-cdp-unreachable-${createdDuringOutage.length + 1}`;
             createdDuringOutage.push(id);
@@ -442,6 +452,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       { forceManagedRotation: true },
       {
         withLifecycleClaim: async (_taskId, callback) => callback(),
+        prepareCandidateCleanup: async () => {},
+        settleCandidateCleanup: async () => {},
         createSession: async () => {
           const id = `steel-cdp-timeout-reported-${reportedOutageSessions.length + 1}`;
           reportedOutageSessions.push(id);
@@ -464,6 +476,8 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
         { forceManagedRotation: true },
         {
           withLifecycleClaim: async (_taskId, callback) => callback(),
+          prepareCandidateCleanup: async () => {},
+          settleCandidateCleanup: async () => {},
           createSession: async () => {
             cleanupCreateAttempts += 1;
             return {
