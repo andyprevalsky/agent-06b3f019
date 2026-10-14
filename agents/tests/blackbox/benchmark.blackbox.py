@@ -11341,6 +11341,7 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
 
     sms_task = SimpleNamespace(
         name="sms-judge-unavailable",
+        timeout_seconds=420,
         prompt="Reply to the user.",
         evaluators=[
             {"id": "sms-judge", "method": "single_turn_llm_judge", "criteria": ["Reply."], "pass_threshold": 1.0}
@@ -11460,7 +11461,7 @@ async def test_sms_runner_harness_error_has_explicit_error_outcome():
         stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
         stack.enter_context(patch.object(sms, "_cleanup"))
         stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
-        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error"), deps)
+        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error", timeout_seconds=420), deps)
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
