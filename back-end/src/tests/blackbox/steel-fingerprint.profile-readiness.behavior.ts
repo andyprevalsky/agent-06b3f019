@@ -25,30 +25,39 @@ export async function testSteelWriterProfileHandoff(
   let binding = 'old-writer';
   let status = 'ACTIVE';
   const releases: string[] = [];
+  const persistedFields: Record<string, unknown> = {};
+  const sessionSnapshot = (): Record<string, unknown> => ({
+    id: 'writer-profile-task',
+    provider: 'steel',
+    closedAt: null,
+    providerProfileId: 'writer-profile',
+    providerProfileSource: 'user_persistent',
+    providerProfilePersist: true,
+    currentUrl: null,
+    startUrl: null,
+    agentId: 'writer-agent',
+    contextId: 'writer-context',
+    context: { userId: 'writer-user' },
+    ...persistedFields,
+    sessionId: binding,
+    status,
+  });
   try {
     prisma.browserSession.findUnique = (async (args: { select?: unknown }) =>
-      args.select
-        ? null
-        : {
-            id: 'writer-profile-task',
-            sessionId: binding,
-            provider: 'steel',
-            status,
-            closedAt: null,
-            providerProfileId: 'writer-profile',
-            providerProfileSource: 'user_persistent',
-            providerProfilePersist: true,
-            currentUrl: null,
-            startUrl: null,
-            agentId: 'writer-agent',
-            contextId: 'writer-context',
-            context: { userId: 'writer-user' },
-          }) as typeof findSession;
+      args.select ? null : sessionSnapshot()) as typeof findSession;
     prisma.browserSession.updateMany = (async (args: {
-      where: { sessionId: string };
-      data: { sessionId?: string; status?: string };
+      where: Record<string, unknown>;
+      data: Record<string, unknown> & { sessionId?: string; status?: string };
     }) => {
-      if (args.where.sessionId !== binding) return { count: 0 };
+      const row = sessionSnapshot();
+      const matches = Object.entries(args.where).every(([key, expected]) => {
+        const actual = row[key];
+        return expected instanceof Date && actual instanceof Date
+          ? expected.getTime() === actual.getTime()
+          : actual === expected;
+      });
+      if (!matches) return { count: 0 };
+      Object.assign(persistedFields, args.data);
       if (args.data.sessionId) binding = args.data.sessionId;
       if (args.data.status) status = args.data.status;
       return { count: 1 };
