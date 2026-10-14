@@ -32998,3 +32998,90 @@ fleet_clone_with_queue_admission 2 {shlex.quote(str(task_root / "primary.ids"))}
         for process in children:
             if process.poll() is None: process.terminate(); process.wait(timeout=5)
         publisher.terminate(); publisher.wait(timeout=5); lock.close()
+
+
+def test_autoscaler_runtime_handoff_cancelled_worker_capture_failure_is_terminal_without_forgetting_ownership(tmp_path):
+    """A joined failed preservation attempt must not wait the provisioning budget."""
+    source = fleet_source_text()
+    out = tmp_path / 'bench'; out.mkdir()
+    wid = 'deadbeef000019'
+    (out / 'worker-clones.ids').write_text(wid + '\n')
+    (out / 'worker-ready.ids').write_text('')
+    for suffix in ('pending', 'cancelled', 'launch-attempted'):
+        (out / f'worker-{wid}.{suffix}').touch()
+    evidence = out / 'worker-runtime-evidence' / wid; evidence.mkdir(parents=True)
+    (evidence / 'owner.json').write_text('{"original":true}\n')
+    original_owner = (evidence / 'owner.json').read_bytes()
+    start = source.index('      finish_cancelled_worker_provision() {')
+    end = source.index('\n      }', start) + len('\n      }')
+    finish = source[start:end]
+    reconcile = _extract_fleet_function(source, 'reconcile_worker_failure_outcomes() {')
+    bundle = _worker_cleanup_bundle(source)
+    def nested(name):
+        start = source.index('    ' + name + '() {')
+        end = source.index('\n    }', start) + len('\n    }')
+        return source[start:end]
+    terminal = '\n'.join((nested('fail_autoscaler'), nested('complete_autoscaler_after_child'),
+        _extract_fleet_function(source, 'reconcile_worker_ready_outcomes() {')))
+    script = f'''set -uo pipefail
+out={shlex.quote(str(out))}
+wid={wid}
+wrapper="$out/generated-wrapper"
+worker_env="$out/generated-env"
+: > "$wrapper"; : > "$worker_env"
+cloudbench_capture_worker_runtime_evidence() {{
+    (sleep .05; : > "$out/native-capture-joined") &
+    native=$!
+    wait "$native"
+    return 1
+}}
+reap_machine() {{ : > "$out/unexpected-native-reap"; return 99; }}
+fleet_registry_release_id() {{ : > "$out/unexpected-owner-release"; return 99; }}
+{bundle}
+{finish}
+{reconcile}
+finish_cancelled_worker_provision &
+provisioner=$!
+wait "$provisioner"; status=$?
+test "$status" -ne 0 || exit 80
+test -f "$out/native-capture-joined" || exit 81
+reconcile_worker_failure_outcomes fixture "$out"; status=$?
+test "$status" -ne 0 || exit 82
+test -s "$out/autoscaler.failed" || exit 83
+# Exercise the actual terminal loop under its unchanged production budget.
+# It must consume the joined failure on the first observation, not its clock.
+rm "$out/autoscaler.failed"
+printf '0\\n' > "$out/benchmark-child.finished"
+printf '1\\n' > "$out/desired-worker-count"
+bench=fixture
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=5160
+{terminal}
+complete_autoscaler_after_child; status=$?
+test "$status" -ne 0 || exit 84
+test -s "$out/autoscaler.failed" || exit 85
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (out / 'worker-clones.ids').read_text() == wid + '\n'
+    assert (out / f'worker-{wid}.pending').exists()
+    assert (out / f'worker-{wid}.cancelled').exists()
+    assert (evidence / 'owner.json').read_bytes() == original_owner
+    assert not (out / f'worker-{wid}.cleanup-claim').exists()
+    assert not (out / 'unexpected-native-reap').exists()
+    assert not (out / 'unexpected-owner-release').exists()
+    assert not (out / 'autoscaler.completed-after-child').exists()
+
+
+@pytest.mark.parametrize('tracked,cancelled,expected_failure', [(True, True, True), (True, False, True), (False, True, False)])
+def test_autoscaler_runtime_handoff_worker_cleanup_failure_outcome_respects_exact_tracking(tmp_path, tracked, cancelled, expected_failure):
+    source = fleet_source_text(); out = tmp_path / 'bench'; out.mkdir()
+    wid = 'deadbeef000020'
+    (out / 'worker-clones.ids').write_text(wid + '\n' if tracked else '')
+    (out / f'worker-{wid}.cleanup-failed').write_text('original joined preservation failure\n')
+    if cancelled: (out / f'worker-{wid}.cancelled').touch()
+    funcs = '\n'.join(_extract_fleet_function(source, name + '() {') for name in ('worker_is_tracked', 'reconcile_worker_failure_outcomes'))
+    result = subprocess.run(['bash', '-c', funcs + '\nreconcile_worker_failure_outcomes fixture "$1"', 'fixture', str(out)], capture_output=True, text=True, timeout=10)
+    assert (result.returncode != 0) is expected_failure
+    assert (out / 'autoscaler.failed').exists() is expected_failure
+    assert (out / f'worker-{wid}.cleanup-failed').read_text() == 'original joined preservation failure\n'
+    assert (out / 'worker-clones.ids').read_text() == (wid + '\n' if tracked else '')

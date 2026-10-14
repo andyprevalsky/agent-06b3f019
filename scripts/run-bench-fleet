@@ -14226,6 +14226,17 @@ reconcile_worker_ready_outcomes() {  # <bench-output-dir>
 
 reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
     local bench="$1" out="$2" marker name wid reason
+    for marker in "$out"/worker-*.cleanup-failed; do
+        [ -e "$marker" ] || continue
+        name="${marker##*/}"
+        wid="${name#worker-}"; wid="${wid%.cleanup-failed}"
+        if worker_is_tracked "$out" "$wid"; then
+            reason="$(head -1 "$marker" 2>/dev/null)"
+            printf '%s\n' "${reason:-worker $wid cancellation cleanup failed}" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: ${reason:-worker $wid cancellation cleanup failed}" >&2
+            return 1
+        fi
+    done
     for marker in "$out"/worker-*.failed; do
         [ -e "$marker" ] || continue
         name="${marker##*/}"
@@ -14416,9 +14427,17 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           [ -e "$out/worker-$wid.cancelled" ]
       }
       finish_cancelled_worker_provision() {
-          rm -f "$wrapper" "$worker_env" "$out/worker-$wid.pending" 2>/dev/null || true
-          cleanup_failed_worker "$out" "$wid"
-          exit $?
+          local cleanup_status=0 failure_tmp="$out/worker-$wid.cleanup-failed.tmp.$$"
+          rm -f "$wrapper" "$worker_env" 2>/dev/null || true
+          cleanup_failed_worker "$out" "$wid" || cleanup_status=$?
+          if [ "$cleanup_status" -ne 0 ]; then
+              # Intentional cancellation cannot forgive failed preservation or
+              # retirement. Keep pending/ownership and publish the joined result.
+              printf '%s\n' "worker $wid cancellation cleanup failed; exact ownership retained" \
+                  > "$failure_tmp" && mv "$failure_tmp" "$out/worker-$wid.cleanup-failed" \
+                  || echo "❌ worker $wid could not persist cancellation cleanup failure" >&2
+          fi
+          exit "$cleanup_status"
       }
       publish_worker_failure() {
           local reason="$1" failure_tmp="$out/worker-$wid.failed.tmp.$$"
