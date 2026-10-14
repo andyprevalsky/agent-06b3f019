@@ -21,7 +21,7 @@ sources:
   - commit 32947aee57006a63d9232f77daf7725af70f32ff
   - PR #974
 repro: back-end/src/tests/blackbox/whatsapp-webhook.blackbox.ts --parse-media-only
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -90,15 +90,30 @@ env reader: WhatsApp access token, app secret, webhook verify token, Graph
 version and ElevenLabs API key were all nonempty. This is configuration
 presence evidence, not live credential validation.
 
+The optional focused owning health check then used the production-selected
+credentials for read-only API calls. Meta returned the configured phone object
+and ElevenLabs returned a user profile, both HTTP 200. Private receipts are in
+`.context/whatsapp-media-rca/live-credential-receipts-1792018594081`. This proves
+authentication/profile access at those endpoints; it does not prove media
+download permission, a live transcription, or a signed native upload roundtrip.
+
 The regression remains registered in the existing WhatsApp blackbox suite,
 discovered by the backend runner and invoked by `/deploy` backend coverage.
 The full backend coverage run on October 14 passed all 196 domains, including
 the 24-test WhatsApp domain, and all 266 unit files. Coverage met the thresholds
 (89.57% statements/lines, 80.98% branches, 92.64% functions). The retained log is
 `.context/deploy-runs/20261014-220120-4186766/logs/backend-coverage-blackbox-20261014-222604-382499.log`.
-Release and production verification remain pending; keep this case open until
-those gates have completed. No live, signed native WhatsApp media roundtrip has
-been observed in this investigation.
+The owning code defect is corrected and the permanent and canonical checks
+pass. Release qualification continues under deploy run
+`20261014-220120-4186766`; its final PR handoff records production verification.
+No live, signed native WhatsApp media roundtrip has been observed in this
+investigation.
+
+After integrating main's SMS and Steel lifecycle release, the combined backend
+run again passed 196/196 domains (WhatsApp 1,347 ms), all 267 unit files, and
+owned backend/port-lock teardown. Coverage passed at 89.59% statements/lines,
+81.01% branches and 92.58% functions. Its log is
+`.context/deploy-runs/20261014-220120-4186766/logs/backend-coverage-blackbox-20261014-224814-689775.log`.
 
 10k-agent behavior: two bounded Meta requests per attachment and the existing
 per-turn image upload or transcription. No scan or resource cost grows with

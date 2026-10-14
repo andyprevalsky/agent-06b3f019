@@ -18,10 +18,12 @@ tags:
   - lifecycle
 sources:
   - PR #1506
+  - PR #1515
   - commit 49b5470f7
   - task backend coverage 20261014-221231-6318
 repro: back-end/src/tests/blackbox/browser-provider.helpers.ts assertSteelSameProfileReplacement
-status: open
+status: superseded
+superseded_by: 2026-10-14-steel-writable-profile-replacement-precedes-source-release
 ---
 
 ## Problem
@@ -60,8 +62,8 @@ source is released. Its command failed on the buggy implementation with five
 cd back-end && node --import tsx --input-type=module -e "import { assertSteelSameProfileReplacement } from './src/tests/blackbox/browser-provider.helpers.ts'; await assertSteelSameProfileReplacement(false);"
 ```
 
-The sibling case proves CLOSED source custody after a 429 creation failure and
-successful retry through acknowledged release 404. Both cases run before the
+The initial sibling case proved CLOSED source custody after a 429 creation
+failure and successful retry through acknowledged release 404. Both cases run before the
 existing live provider parity in the normal backend blackbox owner. Independent
 adversarial review accepted causal precision, exact ownership, CAS protection,
 recoverable failed-create state and bounded resource use. Live/full gate
@@ -76,6 +78,23 @@ browser-provider owner passed in 130,673 milliseconds. The retained log is
 `.context/deploy-runs/20261014-220120-4186766/logs/backend-coverage-blackbox-20261014-222604-382499.log`.
 Release qualification remains pending.
 
+During qualification, PR #1515 merged into main as `cdbe16c54`, carrying the
+same cause's stronger durable PAUSED-custody and exclusive-lease repair. The
+canonical case is
+`2026-10-14-steel-writable-profile-replacement-precedes-source-release`.
+This independently recorded incident occurred on the older implementation,
+before that repair was merged; it is duplicate discovery rather than a failed
+guardrail recurrence. This case is retained as superseded evidence.
+
+The intermediate CLOSED implementation was removed during the main merge.
+Both Steel production files now equal main; this deployment adds supplemental
+facade and failed-create/404-recovery assertions only. The adapted tests require
+PAUSED custody with null closedAt before acknowledged source release, exact
+profile preservation, retained custody after failed creation, owner-scoped
+lease release, and no duplicate facade release. The causal provider 409 replay
+is unchanged. Both supplementary cases pass against main's lease repair; the
+new full qualification run remains pending at this update.
+
 Golden reference: OpenClaw
 `extensions/browser/src/browser/server-context.availability.ts:634` waits for
 the profile transition, and
@@ -85,13 +104,21 @@ in Claude, Hermes or Codex.
 
 ## Solution
 
-For an existing Steel session with a bound persistent profile, release that
+The historical intermediate fix reused PR #1506: for an existing Steel session
+with a bound persistent profile, release that
 exact source before creating its successor, preserve the same profile, and
 record CLOSED only after acknowledged release. The facade honors the already
 released flag to prevent duplicate cleanup. Creation failure retains the
 source identity/profile binding so subsequent recovery can use the normal
 404-as-already-released contract. No timeout, prompt, schema, provider fallback
 or outage skip changed.
+
+The final production solution is PR #1515's shared
+`prepareWritableSteelProfileHandoff` contract: retain the exact source in
+PAUSED recovery custody under an expiring lease, acknowledge its release before
+attachment, and fence publication and retries against that ownership. See the
+canonical case for its permanent adversarial controls and complete lifecycle
+contract; the earlier CLOSED-only reorder is superseded.
 
 At 10k agents this is one bounded native release and one indexed task-scoped
 update per affected replacement; no global polling, scan or shared bottleneck.

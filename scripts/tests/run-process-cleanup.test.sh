@@ -156,6 +156,25 @@ assert_dead "$stale_pid" "same-worktree worker with stale backend is killed"
 assert_alive "$current_pid" "same-worktree worker with current backend survives"
 assert_alive "$other_pid" "other-worktree worker survives"
 
+# A fork is alive before its fixture's cwd/argv/environment are published.
+# Hold a real child before exec so PID existence cannot certify readiness.
+blocked_release="$TMP_ROOT/blocked-release"
+blocked_ready="$TMP_ROOT/blocked-ready"
+(
+  while [ ! -f "$blocked_release" ]; do sleep 0.05; done
+  exec python3 -c 'from pathlib import Path; import signal, sys; Path(sys.argv[1]).touch(); signal.pause()' "$blocked_ready"
+) &
+blocked_pid="$!"
+PIDS+=("$blocked_pid")
+if (wait_for_process "$blocked_pid" "$blocked_ready") > "$TMP_ROOT/blocked-readiness.log" 2>&1; then
+  echo "FAIL: a live fixture was accepted before publishing readiness" >&2
+  exit 1
+fi
+assert_alive "$blocked_pid" "a blocked fixture remains owned before exec"
+touch "$blocked_release"
+wait_for_process "$blocked_pid" "$blocked_ready"
+echo "PASS: fixture readiness waits for exec instead of accepting a live fork"
+
 assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
 assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"
 assert_db_cleanup_guard "container-old" "container-old" false "" "normal service cleanup preserves a shared DB instance"
