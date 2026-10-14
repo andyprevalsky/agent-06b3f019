@@ -144,3 +144,35 @@ retained history. Parent alone routes deployment; no push or merge by RCA worker
 ## Reusable lesson
 
 Drain owned authoritative input before committing control transfer, and refresh an obsolete decision through the normal input path.
+
+
+## Evidence publication follow-through
+
+The subsequent read-only Hub diagnosis found HTTP200 registration for final
+bac99aab, and authenticated run-agent views returned COMPLETED transcripts
+with52/56messages matching retained local captures. Production agent-preview
+404 was the documented disabled feature, not a missing terminal archive.
+No re-upload or new benchmark was necessary. Canonical
+publish_evidence_links.py with --run-json and --skip-hub-upload used the proved
+existing registration; all FE, terminal-browser and recording checks remained
+enabled. Both agent views verified in fresh browsers. Latest calls selected
+across each full retained root/tree were completion_summary dumps; both rendered
+self-contained HTTPS documents freshly returned200. Private artifact-root
+override kept local evidence files0600. Share links last30days; dump presigned
+links7days. Manifests/evidence URLs are retained in the private RCA output.
+
+Parent actual delta-guard review reports agent-behavior PASS, prompt PASS and
+trajectory-injection FAIL on handler. This supersedes the investigator's
+conservative inferred gate classification. Parent reviewed snapshot
+a47143f5852b1ce3fc81c56eb761e1bbfe34cd1c; end-user approval for that exact
+11-line trajectory hunk is still pending and must precede root adoption/rollout.
+Tests/code in isolated trees were user-authorized; parent candidate review is
+not an end-user trajectory approval. No guarded runtime hunk was changed.
+
+A separately checked-out original-source baseline ran the identical registered
+causal tests: measured command2.2924s exit1 (fresh/during_drain each1 decision,
+zero OTP-consuming decisions); candidate1.9927s exit0 (each2 decisions,one
+receiving native OTP). Both retained ordinary empty/stale/no-OTP assistance.
+Across all earlier canonical attempts:3email attempts and1app attempt; reported
+billable agent cost0dollars,427224input/3137outputtokens. Infrastructure,
+subscription opportunity cost and evidence-publication/storage cost unmeasured.
