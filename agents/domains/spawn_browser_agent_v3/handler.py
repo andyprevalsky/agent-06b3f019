@@ -33,7 +33,12 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
-from browser_tools.secret_refs import register_logging_secret_refs, secret_logging_context, secret_placeholder
+from browser_tools.secret_refs import (
+    redact_current_secret_values,
+    register_logging_secret_refs,
+    secret_logging_context,
+    secret_placeholder,
+)
 from config import load_config
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
@@ -1147,6 +1152,43 @@ class BrowserCursorRealtimeStreamer:
                 return
 
 
+def _redact_browser_activity_error(error: Exception, redact: Callable[[Any], Any]) -> Exception:
+    """Keep private failure payloads out of Temporal history and parent tools."""
+    from temporalio.exceptions import ApplicationError
+
+    changed = False
+    current: Optional[BaseException] = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        try:
+            message = str(current)
+        except Exception:
+            message = extract_error_message(current)
+        details = {"details": list(current.details) if isinstance(current, ApplicationError) else []}
+        if redact(message) != message or redact(details) != details:
+            changed = True
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    if not changed:
+        return error
+    message = redact(extract_error_message(error))
+    if isinstance(error, WorkflowGenerationSealed):
+        return WorkflowGenerationSealed(message)
+    if isinstance(error, ApplicationError):
+        details = redact({"details": list(error.details)})["details"]
+        return ApplicationError(
+            message,
+            *details,
+            type=redact(error.type) if error.type else None,
+            non_retryable=error.non_retryable,
+            next_retry_delay=error.next_retry_delay,
+            category=error.category,
+        )
+    # Temporal already represents ordinary Python failures as ApplicationError
+    # with their Python type. Keep that type and the original retry behavior.
+    return ApplicationError(message, type=type(error).__name__)
+
+
 async def _propagate_browser_credentials_with_progress(
     *,
     config: Any,
@@ -1156,9 +1198,12 @@ async def _propagate_browser_credentials_with_progress(
     status: str,
     success: bool,
     message: str,
+    redact: Optional[Callable[[Any], Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not task_id:
         return None
+    redact = redact or (lambda value: value)
+    message = redact(message)
 
     is_auth_assistance_pause = status == "awaiting_auth_assistance"
     progress_message = (
@@ -1194,7 +1239,7 @@ async def _propagate_browser_credentials_with_progress(
         # The run's own outcome stands: a backend 500 here (a Prisma transaction
         # expiring under load, 2026-10-06) must not turn a completed browser task
         # into a failure that the planner then retries from scratch.
-        error_message = extract_error_message(e)
+        error_message = redact(extract_error_message(e))
         logger.warning(
             "Credential propagation failed; keeping the browser run's outcome",
             agent_id=agent_id,
@@ -1221,10 +1266,15 @@ async def _propagate_browser_credentials_with_progress(
                 "Credential propagation diagnostic message was not saved",
                 agent_id=agent_id,
                 task_id=task_id,
-                error=extract_error_message(save_error),
+                error=redact(extract_error_message(save_error)),
             )
         return {"outcome": "unknown", "refs": 0, "applied": 0, "error": error_message}
 
+    original_result = result
+    result = redact(result)
+    for key in ("refs", "applied"):
+        if isinstance(original_result.get(key), int) and not isinstance(original_result[key], bool):
+            result[key] = original_result[key]
     outcome = result.get("outcome", "unknown")
     refs = result.get("refs", 0)
     applied = result.get("applied", 0)
@@ -1232,7 +1282,7 @@ async def _propagate_browser_credentials_with_progress(
         agent_id=agent_id,
         title="Credential state updated",
         task_id=task_id,
-        message=f"Outcome: {outcome}. Credential refs: {refs}. Updates applied: {applied}.",
+        message=redact(f"Outcome: {outcome}. Credential refs: {refs}. Updates applied: {applied}."),
         status=MessageStatus.FINISHED,
         browser_url=browser_url,
         action_type="credential_propagation",
@@ -6336,11 +6386,16 @@ async def _spawn_browser_agent_activity_v3_real(
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
 
+    def _redact_activity_value(value: Any) -> Any:
+        # Private hydration can precede DOM binding, and cleanup can outlive
+        # its transport. Keep those boundaries under the activity's policy.
+        return redact_current_secret_values(action_history.model_visible_value(value))
+
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
         for key in ("title", "message", "extra_metadata", "auxiliary"):
             if key in kwargs:
-                kwargs[key] = action_history.model_visible_value(kwargs[key])
+                kwargs[key] = _redact_activity_value(kwargs[key])
         return await save_browser_action_message(**kwargs)
 
     browser_url = None
@@ -8712,6 +8767,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     provider=browser_session_metadata.get("provider"),
                 )
                 await _propagate_browser_credentials_with_progress(
+                    redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
                     task_id=task_id,
@@ -9508,6 +9564,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             provider=browser_session_metadata.get("provider"),
                         )
                         await _propagate_browser_credentials_with_progress(
+                            redact=_redact_activity_value,
                             config=config,
                             agent_id=agent_id,
                             task_id=task_id,
@@ -10487,6 +10544,7 @@ Based on this feedback, I need to continue working on the task and address the i
             provider=browser_session_metadata.get("provider"),
         )
         await _propagate_browser_credentials_with_progress(
+            redact=_redact_activity_value,
             config=config,
             agent_id=agent_id,
             task_id=task_id,
@@ -10622,6 +10680,8 @@ Based on this feedback, I need to continue working on the task and address the i
             goal=goal,
         )
 
+        error_message = _redact_activity_value(error_message)
+
         if task_id:
             with contextlib.suppress(Exception):
                 await _save_browser_action_message(
@@ -10645,6 +10705,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
             try:
                 await _propagate_browser_credentials_with_progress(
+                    redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
                     task_id=task_id,
@@ -10659,7 +10720,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     error=extract_error_message(propagation_error),
                 )
 
-        raise
+        safe_error = _redact_browser_activity_error(e, _redact_activity_value)
+        if safe_error is e:
+            raise
+        raise safe_error from None
+
     finally:
         try:
             stop_browser_activity_heartbeat(_heartbeat_token)
@@ -10755,6 +10820,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_session_metadata,
                 ),
             )
+        except Exception as cleanup_error:
+            safe_error = _redact_browser_activity_error(cleanup_error, _redact_activity_value)
+            if safe_error is cleanup_error:
+                raise
+            raise safe_error from None
         finally:
             _secret_log_scope.__exit__(None, None, None)
 

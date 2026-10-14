@@ -582,6 +582,11 @@ def register_logging_secret_refs(refs: Optional[Mapping[str, str]]) -> None:
         _register_log_bindings(bindings, refs)
 
 
+def redact_current_secret_values(value: Any) -> Any:
+    """Redact known activity bindings before DOM binding or during cleanup."""
+    return mask_secret_values(value, _LOG_SECRET_REFS.get())
+
+
 def redact_secret_log_values(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Shared structlog/stdlib processor for execution-scoped credential logs."""
     refs = _LOG_SECRET_REFS.get()

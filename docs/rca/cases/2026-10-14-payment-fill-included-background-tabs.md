@@ -207,6 +207,19 @@ evaluate input_text runtime replacement` and `autofill payment handoff automatic
 secrets model`; this is a deeper repair to the same incident following explicit
 human feedback, rather than a separate incident.
 
+The final public regressions use test-file SHA-256
+`cec82249be6077e26adc9964af0620cb17cb3d94a9d8a5c002d647da2485cbd2`:
+the pinned baseline fails all three in 2.036 seconds, while the repaired source
+passes all three in 1.786 seconds. Independent review also found a literal
+credential error could bypass ordinary results through credential-outcome
+classification and the Temporal failure delivered to the parent model. The
+unchanged full-activity regression fails against `235ff2cd6` in 0.679 seconds
+and passes with the additional boundary repair in 0.579 seconds. Propagation
+requests, responses, and diagnostics now redact private values, and sanitized
+Temporal failures retain their type and retry policy without retaining a raw
+cause chain. Activity-scoped fallback redaction also covers private hydration
+before DOM binding and errors raised during cleanup.
+
 ## Human feedback
 
 The user rejected the automatic payment-entry layer after the narrow tab

@@ -9533,6 +9533,80 @@ async def test_credential_propagation_failure_keeps_the_browser_run_outcome():
             raise AssertionError("a sealed generation must not be swallowed as bookkeeping")
 
 
+async def test_credential_propagation_redacts_classifier_and_diagnostic_payloads():
+    """Credential bookkeeping cannot relay a fatal browser error into a classifier or diagnostics."""
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3 import handler
+    from tools.base import MessageStatus
+
+    refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-propagation-password"}
+    echoed = "failure: " + " | ".join(refs.values())
+    redact = lambda value: mask_secret_values(value, refs)
+    for fail, diagnostic_fails in ((False, False), (True, False), (True, True)):
+        propagate = AsyncMock(**({"side_effect": RuntimeError(echoed)} if fail else {"return_value": {"outcome": "unknown", "refs": 0, "applied": 0, "detail": echoed}}))
+
+        async def save(**kwargs):
+            if diagnostic_fails and kwargs.get("status") == MessageStatus.ERROR:
+                raise RuntimeError(echoed)
+
+        saved = AsyncMock(side_effect=save)
+        log = MagicMock()
+        with (
+            patch.object(handler, "propagate_browser_run_credentials", propagate),
+            patch.object(handler, "save_browser_action_message", saved),
+            patch.object(handler, "logger", log),
+        ):
+            result = await handler._propagate_browser_credentials_with_progress(
+                config=SimpleNamespace(), agent_id="agent-1", task_id="task-1", browser_url="https://fixture.test/",
+                status="error", success=False, message=echoed, redact=redact,
+            )
+        retained = str({"classifier": propagate.await_args.kwargs, "diagnostics": saved.await_args_list, "result": result, "logs": log.mock_calls})
+        assert all(secret not in retained for secret in refs.values()), "fatal credential propagation exposed a known credential"
+        assert propagate.await_args.kwargs["message"] == redact(echoed)
+        assert result["outcome"] == "unknown"
+
+
+def test_browser_activity_error_redaction_preserves_temporal_retry_metadata():
+    """The actual Temporal failure encoder receives no credential-bearing message, cause, or details."""
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
+    from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3.handler import _redact_browser_activity_error
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    refs = {"card_number": "4111111111111111", "pwd:fixture": "synthetic-fatal-temporal-password"}
+    redact = lambda value: mask_secret_values(value, refs)
+    delay = timedelta(seconds=17)
+    for message in ("failure: " + refs["card_number"], "A safe outer failure"):
+        raw = ApplicationError(
+            message, {"nested": [refs["pwd:fixture"]]},
+            type="SyntheticBrowserFatal", non_retryable=True, next_retry_delay=delay,
+            category=ApplicationErrorCategory.BENIGN,
+        )
+        raw.__cause__ = ValueError(refs["pwd:fixture"])
+        try:
+            raise raw
+        except Exception as original:
+            try:
+                raise _redact_browser_activity_error(original, redact) from None
+            except Exception as sanitized:
+                failure = Failure()
+                DefaultFailureConverter().to_failure(sanitized, DefaultPayloadConverter(), failure)
+                serialized = failure.SerializeToString()
+                assert all(secret.encode() not in serialized for secret in refs.values()), "Temporal serialized a secret from a fatal message, cause, or details"
+                assert isinstance(sanitized, ApplicationError)
+                assert sanitized.type == "SyntheticBrowserFatal"
+                assert sanitized.non_retryable is True
+                assert sanitized.next_retry_delay == delay
+                assert sanitized.category == ApplicationErrorCategory.BENIGN
+                assert not failure.HasField("cause"), "the raw credential-bearing exception chain survived redaction"
+    ordinary = RuntimeError("public browser failure")
+    assert _redact_browser_activity_error(ordinary, redact) is ordinary
+    sealed = WorkflowGenerationSealed("workflow generation replaced")
+    assert _redact_browser_activity_error(sealed, redact) is sealed
+
+
 async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
     from providers.rose import RoseClient, StreamChunk
@@ -21375,7 +21449,7 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
 
 
 
-async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False):
+async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
     import copy
@@ -21396,6 +21470,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     events = []
     model_contexts = []
     saved = AsyncMock()
+    propagated = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     session_info = {
         "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
         "passwords": [], "auth_options": {"realm": "old.example"},
@@ -21486,7 +21561,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
         patch(prefix + "_call_browser_use_with_rotation", model_step),
-        patch(prefix + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(prefix + "_wait_for_browser_user_control", AsyncMock(side_effect=fatal_error) if fatal_error is not None else AsyncMock(return_value=False)),
         patch(prefix + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
         patch.object(_FakeDomService, "get_browser_state", observe),
@@ -21496,8 +21571,10 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         patch("domains.spawn_browser_agent_v3.service_actions.wait_for_navigation_ready", AsyncMock()),
         patch(prefix + "create_user_auth_assistance_request", AsyncMock(return_value={"id": "request-1"})),
         patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
+        patch("helpers.llm.check_progress", AsyncMock(side_effect=AssertionError("unexpected live verifier in private fixture"))),
         patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
-        patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(prefix + "propagate_browser_run_credentials", propagated),
         patch(prefix + "close_browser_session", AsyncMock()),
         patch(prefix + "save_browser_action_message", saved),
         patch(prefix + "save_browser_assistant_message", AsyncMock()),
@@ -21518,7 +21595,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     with ExitStack() as stack:
         for target in targets:
             stack.enter_context(target)
-        result = await handler.spawn_browser_agent_activity_v3(
+        pending = handler.spawn_browser_agent_activity_v3(
             user_id="user-1", agent_id="agent-1", goal="Inspect realm-bound authentication",
             tool_call_id="tool-1", task_id="task-1", is_resume=True, start_url=old_url,
             output_schema={"fields": [{"name": "result", "type": "string"}]},
@@ -21531,11 +21608,40 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
                 }} if preapproved_handoff else {}),
             },
         )
+        if fatal_error is not None:
+            with pytest.raises(Exception) as caught:
+                await pending
+            return {"error": caught.value, "classifier_calls": propagated.await_args_list, "saved_calls": saved.await_args_list, "contexts": model_contexts, "private_state": _FakeDomService.last_instance.secret_redaction_state()}
+        result = await pending
     assert result["status"] == "awaiting_auth_assistance"
     assert len(model_contexts) == (1 if preapproved_handoff else 2), "redirect reload added a model call"
     if preapproved_handoff:
         assert result["auth_realm"] == "new.example", "a harness-initiated payment action changed the active realm"
     return model_contexts, saved, events, old_secret, new_secret
+
+
+@_in_browser_activity_context
+async def test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure():
+    """Exercise the real activity fatal boundary after its private password hydration."""
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
+    from temporalio.exceptions import ApplicationError
+
+    secret = "synthetic-prior-realm-password"
+    raw = ApplicationError("provider returned " + secret, {"echo": secret}, type="SyntheticProviderFailure", non_retryable=True)
+    raw.__cause__ = RuntimeError("private cause: " + secret)
+    captured = await _run_realm_transition_action_fixture("evaluate", fatal_error=raw)
+    assert secret in captured["private_state"]["secret_redaction_refs"].values(), "fatal fixture did not reach private credential hydration"
+    assert not captured["contexts"], "fatal fixture unexpectedly advanced into model generation"
+    assert captured["classifier_calls"], "fatal fixture did not exercise actual credential propagation"
+    assert secret not in str(captured["classifier_calls"]), "the fatal activity sent a raw password into the credential classifier"
+    assert secret not in str(captured["saved_calls"]), "the fatal activity persisted a raw password in its completion message"
+    failure = Failure()
+    DefaultFailureConverter().to_failure(captured["error"], DefaultPayloadConverter(), failure)
+    assert secret.encode() not in failure.SerializeToString(), "the activity's fatal error leaked through Temporal into its parent agent"
+    assert isinstance(captured["error"], ApplicationError)
+    assert captured["error"].type == "SyntheticProviderFailure"
+    assert captured["error"].non_retryable is True
 
 
 @_in_browser_activity_context
@@ -27688,6 +27794,14 @@ async def run_all_tests():
         test_credential_propagation_failure_keeps_the_browser_run_outcome,
     )
     await r.record_async(
+        "credential_propagation_redacts_classifier_and_diagnostic_payloads",
+        test_credential_propagation_redacts_classifier_and_diagnostic_payloads,
+    )
+    r.record(
+        "browser_activity_error_redaction_preserves_temporal_retry_metadata",
+        test_browser_activity_error_redaction_preserves_temporal_retry_metadata,
+    )
+    await r.record_async(
         "browser_streaming_rose_client_forwards_chunks",
         test_browser_streaming_rose_client_forwards_and_folds_chunks,
     )
@@ -27752,6 +27866,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_cross_realm_action_redacts_reused_ref_values",
         test_activity_cross_realm_action_redacts_reused_ref_values,
+    )
+    await r.record_async(
+        "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
+        test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
