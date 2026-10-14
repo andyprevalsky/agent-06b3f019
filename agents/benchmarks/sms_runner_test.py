@@ -6,6 +6,7 @@ that spammed the user, so it is pinned here without needing a live stack.
 
 import json
 import pathlib
+import os
 
 import pytest
 
@@ -1012,7 +1013,7 @@ def test_seed_documents_are_validated():
     from types import SimpleNamespace
 
     def script(documents):
-        return SimpleNamespace(name="t", sms_script={"turns": [{"inbound": "hi"}], "seed_documents": documents})
+        return SimpleNamespace(name="t", timeout_seconds=420, sms_script={"turns": [{"inbound": "hi"}], "seed_documents": documents})
 
     with pytest.raises(SmsScriptError, match="source must be one of"):
         parse_sms_script(script([{"source": "gmail", "title": "x", "content": "y"}]))
@@ -1185,7 +1186,7 @@ def test_seed_shapes_are_validated():
     from types import SimpleNamespace
 
     def script(**extra):
-        return SimpleNamespace(name="t", sms_script={"turns": [{"inbound": "hi"}], **extra})
+        return SimpleNamespace(name="t", timeout_seconds=420, sms_script={"turns": [{"inbound": "hi"}], **extra})
 
     with pytest.raises(SmsScriptError, match="children\\[0\\].goal"):
         parse_sms_script(script(seed_agents=[{"goal": "root", "children": [{"count": 2}]}]))
@@ -1389,6 +1390,10 @@ def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_pr
         elif failure!='native-running':state['status']=WorkflowExecutionStatus.TERMINATED
         results[0].logs={'cloud_cleanup_evidence':{'final':{'tree_agent_ids':[ROOT]}},'cloud_provider_cleanup':{'tree_sealed':True}}
     monkeypatch.setattr(bench,'_finalize_owned_cloud_batch',finalize)
+    async def drain(*args):
+        events.append('canonical-terminal-drain')
+        return {'verified':True, 'child_handles_retired':True, 'agent_rows_after':rows}
+    monkeypatch.setattr(__import__('benchmarks.sms_runner',fromlist=['x']),'_drain_owned_sms_obligations',drain)
     run=lambda:asyncio.run(_cleanup_owned_sms_roots(bench,'http://localhost:39999',OWNER,{ROOT},set(), {"name":"fixture", "passed":False, "failure_reason":"SMS contract"}))
     if failure or queue_override not in (QUEUE,None):
         with pytest.raises(RuntimeError):run()
@@ -1398,7 +1403,7 @@ def test_captured_sms_orphan_is_retired_only_after_exact_canonical_and_native_pr
             assert json.loads(p.read_text())['verified'] is False
     else:
         receipt=run()
-        assert events==['native-read','canonical-finalizer','native-read']
+        assert events==['native-read','canonical-finalizer','canonical-terminal-drain','native-read']
         assert handle_calls==[{}, {'first_execution_run_id':FIRST}]
         assert receipt['verified'] is True
         assert receipt['root_agent_ids']==[ROOT]
@@ -1522,9 +1527,11 @@ def test_duplicate_workflow_generation_is_rejected_before_any_root_cleanup(tmp_p
 
 
 @pytest.mark.parametrize('case',['cancel-seeded','exception-positive-committed-trace','cancel-unknown-trace','cancel-cleanup-failed'])
-def test_interrupted_real_sms_turn_retains_known_roots_and_preserves_cancellation(monkeypatch,case):
+@pytest.mark.parametrize('resolved_budget',[None,700])
+def test_interrupted_real_sms_turn_retains_known_roots_and_preserves_cancellation(monkeypatch,case,resolved_budget):
     from benchmarks import sms_runner as sms
     state={'posted':False,'cleanup_calls':0,'sql':[]}
+    monkeypatch.setattr(sms.time,'time',lambda:97.0)
     deps=SmsRunnerDeps(lambda q:state['sql'].append(q) or (ROOT if state['posted'] and q.startswith('SELECT id FROM') else ''),repr,lambda _:True,lambda:OWNER)
     monkeypatch.setattr(sms,'parse_sms_script',lambda _:{'turns':[{'inbound':'hi'}]})
     monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
@@ -1558,13 +1565,16 @@ def test_interrupted_real_sms_turn_retains_known_roots_and_preserves_cancellatio
     monkeypatch.setattr(sms.asyncio,'sleep',sleep)
     async def cleanup(*args):
         state['cleanup_calls']+=1
+        assert args[4]['deadline_at_ms']==int((97.0+(resolved_budget or 420))*1000)
+        assert args[4]['benchmark_status']=='ERROR'
         if case=='cancel-cleanup-failed':
             raise sms.SmsCleanupError('root read-back failed before durable receipt creation',
                 {'verified':False,'owned_agent_ids':[ROOT],'root_agent_ids':[],'receipt_path':None})
         assert args[2]=={ROOT}
         return {'verified':True,'root_agent_ids':[ROOT],'native_workflows':[]}
     deps.cleanup_agents=cleanup
-    task=SimpleNamespace(name='owning-offline',evaluators=[])
+    task=SimpleNamespace(name='owning-offline',evaluators=[],timeout_seconds=420)
+    if resolved_budget is not None:task._resolved_timeout_seconds=resolved_budget
     if case.startswith('cancel'):
         with pytest.raises(asyncio.CancelledError,match='owning cancellation') as cancelled:
             asyncio.run(sms.run_sms_task('http://localhost:39999',task,deps))
@@ -1658,3 +1668,124 @@ def test_actual_admitted_sms_wrapper_retires_only_verified_exact_roots(monkeypat
     assert live['concurrent-non-sms']==[CHILD]
     assert live['same-task']==([FOREIGN,ROOT] if path=='cancel-failed' else [FOREIGN])
     assert not admitted and not agents
+
+
+@pytest.mark.parametrize("drain_failure", [None, "consumer-failure", "unknown-obligation"])
+def test_sms_captured_pending_obligation_requires_canonical_drain_before_row_deletion(tmp_path, monkeypatch, drain_failure):
+    from benchmarks import sms_runner as sms
+    rows=[_row(queue=None)]; calls=[]; state={"status":WorkflowExecutionStatus.RUNNING}
+    monkeypatch.setenv("BENCHMARK_CONTEXT_DIR",str(tmp_path))
+    monkeypatch.setattr(bench.cloud_batch_cleanup,"contract",lambda:(tmp_path/"status","exact-token"))
+    monkeypatch.setattr(bench,"_local_benchmark_task_queue",lambda _:QUEUE)
+    monkeypatch.setattr(bench,"_run_local_victoria_sql",lambda _:json.dumps(rows))
+    import config
+    monkeypatch.setattr(config,"load_config",lambda:SimpleNamespace(temporal=SimpleNamespace(address="localhost:7233",namespace="default",api_key="")))
+    async def describe(**kwargs):
+        calls.append("native")
+        return SimpleNamespace(task_queue=QUEUE, raw_info=SimpleNamespace(first_run_id=FIRST),status=state["status"],run_id=FIRST)
+    def handle(*args,**kwargs):
+        assert args==(ROOT,) and "run_id" not in kwargs
+        return SimpleNamespace(describe=describe)
+    monkeypatch.setattr(Client,"connect",AsyncMock(return_value=SimpleNamespace(get_workflow_handle=handle)))
+    async def canonical(url, results, live):
+        calls.append("delete")
+        rows[0]["cleanup_pending"]=True
+        state["status"]=WorkflowExecutionStatus.TERMINATED
+        results[0].logs={"cloud_cleanup_evidence":{"final":{"tree_agent_ids":[ROOT]}}}
+    monkeypatch.setattr(bench,"_finalize_owned_cloud_batch",canonical)
+    async def drain(module,url,user,ids,roots,bindings,outcome,path):
+        calls.append("drain")
+        assert ids==roots=={ROOT} and bindings=={(ROOT,FIRST):ROOT}
+        assert rows[0]["cleanup_pending"] is True
+        if drain_failure:raise RuntimeError(drain_failure)
+        rows[0].update(cleanup_pending=False, workflow_id=ROOT+":deployment-sealed:"+FOREIGN, first_run_id=None)
+        return {"verified":True,"child_handles_retired":True,"agent_rows_after":rows}
+    monkeypatch.setattr(sms,"_drain_owned_sms_obligations",drain,raising=False)
+    run=lambda:asyncio.run(sms._cleanup_owned_sms_roots(bench,"http://localhost:39999",OWNER,{ROOT},set(),{"name":"fixture","passed":True,"failure_reason":None}))
+    if drain_failure:
+        with pytest.raises(RuntimeError):run()
+        assert rows[0]["cleanup_pending"] is True
+        assert not json.loads(next(tmp_path.glob("sms-owned-cleanup-*.json")).read_text())["verified"]
+    else:
+        result=run()
+        assert result["verified"] and rows[0]["first_run_id"] is None
+        assert calls==["native","delete","drain","native"]
+        assert result["native_workflows"][0]["workflow_id"]==ROOT
+        assert result["native_workflows"][0]["first_run_id"]==FIRST
+
+@pytest.mark.parametrize('case',['consumed-budget','exhausted-before-launch','cancel-owned-child','ignored-term-repeated-cancel'])
+def test_sms_terminal_drain_preserves_absolute_deadline_and_retires_cancelled_child(tmp_path,monkeypatch,case):
+    from benchmarks import sms_runner as sms
+    from benchmarks import local
+    now=101.0 if case=='exhausted-before-launch' else 97.0
+    monkeypatch.setattr(sms.time,'time',lambda:now)
+    monkeypatch.setenv('BENCHMARK_CONTEXT_DIR',str(tmp_path))
+    owner={'pid':os.getpid(),'native_identity':'exact-owning-birth','token':'exact-token'}
+    (tmp_path/'local-stack-owner.json').write_text(json.dumps(owner))
+    manifest={'status':'running','benchmark_mode':True,'worktree':str(sms.REPO_ROOT),'run_sh_pid':owner['pid'],
+              'temporal_task_queue':QUEUE,'ports':{'backend':39999},'database':{'name':'victoria_sms_adapter_test'}}
+    (tmp_path/'services.json').write_text(json.dumps(manifest))
+    module=SimpleNamespace(_services_manifest_is_active=lambda _:True,_local_benchmark_task_queue=lambda _:QUEUE,
+                           manifest_database_url=lambda _:'postgresql://postgres:postgres@localhost:5432/victoria_sms_adapter_test')
+    observed={'created':0,'signals':[],'timeouts':[]};cancel=asyncio.CancelledError('original owning cancellation')
+    receipt_path=tmp_path/'sms-terminal-obligations.json'
+    class Child:
+        pid=424242;returncode=None;waits=0
+        async def wait(self):
+            self.waits+=1
+            if case in ('cancel-owned-child','ignored-term-repeated-cancel') and self.waits==1:raise cancel
+            if case=='ignored-term-repeated-cancel':
+                while self.returncode is None:await asyncio.sleep(0)
+                return self.returncode
+            self.returncode=0 if case=='consumed-budget' else -15
+            return self.returncode
+    child=Child()
+    def identity(pid):assert pid in (owner['pid'],child.pid);return 'exact-owning-birth'
+    def signal(args):
+        assert args[:4]==['process-identity','--expect','exact-owning-birth','--signal'] and args[-1]==str(child.pid)
+        assert args[4] in ('TERM','KILL')
+        observed['signals'].append(args)
+        if args[4]=='KILL':child.returncode=-9
+        elif case!='ignored-term-repeated-cancel':child.returncode=-15
+        return 0
+    monkeypatch.setattr(local,'_process_identity_tools',lambda:{'current_identity':identity,'main':signal})
+    async def create(*args,**kwargs):
+        observed['created']+=1
+        request=json.loads(pathlib.Path(args[-1]).read_text())
+        assert request['deadline_at_ms']==100000
+        assert kwargs['env']['DATABASE_URL']==kwargs['env']['DIRECT_URL']=='postgresql://postgres:postgres@localhost:5432/victoria_sms_adapter_test'
+        receipt_path.write_text(json.dumps({'verified':True,'child_handles_retired':True,'agent_rows_after':[]}))
+        return child
+    monkeypatch.setattr(sms.asyncio,'create_subprocess_exec',create)
+    timeout=asyncio.timeout
+    def cap(seconds):observed['timeouts'].append(seconds);return timeout(seconds)
+    monkeypatch.setattr(sms.asyncio,'timeout',cap)
+    if case=='ignored-term-repeated-cancel':
+        clock={'now':1000.0,'waits':[]}
+        monkeypatch.setattr(sms.time,'monotonic',lambda:clock['now'])
+        actual_wait=asyncio.wait
+        async def wait(tasks,*,timeout):
+            clock['waits'].append(timeout)
+            if child.returncode is None:
+                if len(clock['waits'])==1:
+                    clock['now']+=7.0
+                    raise asyncio.CancelledError('second owning cancellation')
+                clock['now']+=timeout+0.001
+                return set(),set(tasks)
+            return await actual_wait(tasks,timeout=timeout)
+        monkeypatch.setattr(sms.asyncio,'wait',wait)
+    run=lambda:asyncio.run(sms._drain_owned_sms_obligations(module,'http://localhost:39999',OWNER,{ROOT},{ROOT},{(ROOT,FIRST):ROOT},
+        {'name':'fixture','passed':True,'failure_reason':None,'deadline_at_ms':100000},receipt_path))
+    if case=='exhausted-before-launch':
+        with pytest.raises(RuntimeError,match='deadline expired'):run()
+        assert observed['created']==0
+    elif case in ('cancel-owned-child','ignored-term-repeated-cancel'):
+        with pytest.raises(asyncio.CancelledError) as caught:run()
+        assert caught.value is cancel
+        if case=='ignored-term-repeated-cancel':
+            assert child.returncode==-9 and [x[4] for x in observed['signals']]==['TERM','KILL']
+            assert clock['waits']==[15.0,8.0,15.0]
+        else:assert child.returncode==-15 and len(observed['signals'])==1
+    else:
+        assert run()['verified']
+        assert observed['timeouts']==[3.0] and child.returncode==0 and observed['signals']==[]

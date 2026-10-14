@@ -1067,6 +1067,7 @@ async def evaluate_sms_turns(
 
 async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) -> TaskResult:
     """Drive the real SMS supervisor through a scripted thread and score it."""
+    task_deadline_at_ms = int((time.time() + float(getattr(task, "_resolved_timeout_seconds", task.timeout_seconds))) * 1000)
     if not deps.is_local_base_url(base_url):
         raise RuntimeError(
             f"{task.name} drives the live SMS supervisor and must run against the local benchmark "
@@ -1168,7 +1169,9 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
             cleanup_receipt = await _cleanup(
                 deps, user_id, seeded_agent_ids, pre_existing_agents,
                 seeded_document_ids, seeded_request_ids, base_url=base_url,
-                outcome={"name": task.name, "passed": passed, "failure_reason": failure_reason},
+                outcome={"name": task.name, "passed": passed, "failure_reason": failure_reason,
+                         "deadline_at_ms": task_deadline_at_ms,
+                         "benchmark_status": "ERROR" if execution_error else "PASSED" if passed else "FAILED"},
             )
         except Exception as exc:
             cleanup_error = str(exc) or type(exc).__name__
@@ -1308,7 +1311,7 @@ async def _cleanup_owned_sms_roots(
         after = read_rows(final_ids)
         evidence["after_rows"] = after
         save()
-        if any(row["start_pending"] or row["cleanup_pending"] for row in after):
+        if any(row["start_pending"] for row in after):
             save()
             raise RuntimeError("SMS terminal generation cleanup is still pending")
         for row in after:
@@ -1320,6 +1323,19 @@ async def _cleanup_owned_sms_roots(
                 if not row["stale_first_run_id"]:
                     raise RuntimeError("SMS stale terminal generation is unproved")
                 bind(row["stale_workflow_id"], row["stale_first_run_id"], row["id"])
+        evidence["terminal_obligation_receipt_path"] = str(context / ("sms-terminal-obligations-" + sorted(roots)[0] + ".json"))
+        save()
+        drain = await _drain_owned_sms_obligations(module, base_url, user_id, final_ids, roots, bindings, outcome,
+                                                  pathlib.Path(evidence["terminal_obligation_receipt_path"]))
+        evidence["terminal_obligations"] = drain
+        terminal_rows = read_rows(final_ids)
+        if (sorted(terminal_rows, key=lambda row: row["id"]) != sorted(drain.get("agent_rows_after", []), key=lambda row: row["id"])
+                or any(row["start_pending"] or row["cleanup_pending"] for row in terminal_rows)):
+            raise RuntimeError("SMS canonical obligation receipt or final owned rows changed")
+        evidence["after_rows"] = terminal_rows
+        save()
+        # The canonical consumer seals the DB pointer. Retain the original real bindings;
+        # its tombstone is not a workflow to describe.
         if bindings:
             if client is None:
                 cfg = load_config().temporal
@@ -1339,6 +1355,13 @@ async def _cleanup_owned_sms_roots(
         save()
         return evidence
 
+    except asyncio.CancelledError as exc:
+        evidence["verified"] = False
+        evidence["error"] = "SMS owned native cleanup cancelled"
+        if receipt_path is not None:
+            save()
+        exc.owned_cleanup_receipt = evidence
+        raise
     except Exception as exc:
         evidence["verified"] = False
         evidence["error"] = str(exc) or type(exc).__name__
@@ -1365,3 +1388,90 @@ def build_deps_from_module(
         on_agent_created=on_agent_created,
         task_name=task_name,
     )
+
+
+async def _drain_owned_sms_obligations(module: Any, base_url: str, user_id: str, owned_ids: set[str], roots: set[str],
+                                       bindings: dict, outcome: dict, receipt_path: pathlib.Path) -> dict:
+    """Use the canonical exact-agent outbox consumer on the active isolated stack only."""
+    context = pathlib.Path(os.environ["BENCHMARK_CONTEXT_DIR"])
+    manifest_path = context / "services.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError("SMS canonical drain lacks an owned services manifest")
+    manifest = json.loads(manifest_path.read_text())
+    owner = json.loads((context / "local-stack-owner.json").read_text())
+    queue = module._local_benchmark_task_queue(base_url)
+    if (not module._services_manifest_is_active(manifest) or manifest.get("status") != "running"
+            or pathlib.Path(manifest.get("worktree", "")).resolve() != REPO_ROOT or manifest.get("benchmark_mode") is not True
+            or manifest.get("run_sh_pid") != owner.get("pid") or not owner.get("native_identity") or not owner.get("token")
+            or manifest.get("temporal_task_queue") != queue or base_url != f"http://localhost:{manifest.get('ports', {}).get('backend')}"):
+        raise RuntimeError("SMS canonical drain active stack identity is unproved")
+    from benchmarks.local import _process_identity_tools
+    if _process_identity_tools()["current_identity"](owner["pid"]) != owner["native_identity"]:
+        raise RuntimeError("SMS canonical drain stack PID birth changed")
+    database_url = module.manifest_database_url(manifest)
+    parsed = urlparse(database_url)
+    if parsed.scheme != "postgresql" or parsed.hostname != "localhost" or parsed.path != "/" + manifest["database"]["name"]:
+        raise RuntimeError("SMS canonical drain database is not the owned local target")
+    deadline_at_ms = int(outcome.get("deadline_at_ms", (time.time() + 15.0) * 1000))
+    if deadline_at_ms <= time.time() * 1000:
+        raise RuntimeError("SMS task cleanup deadline expired")
+    request_path = receipt_path.with_suffix(".request.json")
+    request = {"context_dir": str(context.resolve()), "receipt_path": str(receipt_path.resolve()), "base_url": base_url,
+               "user_id": user_id, "owned_agent_ids": sorted(owned_ids), "root_agent_ids": sorted(roots), "queue": queue,
+               "bindings": [{"workflow_id": workflow, "first_run_id": first, "agent_id": agent}
+                            for (workflow, first), agent in sorted(bindings.items())],
+               "deadline_at_ms": deadline_at_ms, "outcome": {k:outcome.get(k) for k in ("name", "passed", "failure_reason", "benchmark_status")},
+               "world_model_mode": os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real")}
+    request_path.write_text(json.dumps(request, indent=2) + "\n"); request_path.chmod(0o600)
+    env = os.environ.copy(); env.update({"DATABASE_URL": database_url, "DIRECT_URL": database_url})
+    console_path = receipt_path.with_suffix(".console.log")
+    remaining = (deadline_at_ms - time.time() * 1000) / 1000
+    if remaining <= 0:
+        raise RuntimeError("SMS task cleanup deadline expired before child launch")
+    process = None
+    native_identity = None
+    tools = _process_identity_tools()
+    with console_path.open("wb") as console:
+        console_path.chmod(0o600)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "node", "--import", "tsx", "scripts/finalize-sms-owned-cleanup.ts", str(request_path),
+                cwd=REPO_ROOT / "back-end", env=env, stdout=console, stderr=asyncio.subprocess.STDOUT)
+            if process.returncode is None:
+                native_identity = tools["current_identity"](process.pid)
+            async with asyncio.timeout((deadline_at_ms - time.time() * 1000) / 1000):
+                await process.wait()
+        finally:
+            if process is not None and process.returncode is None:
+                # Retire only this child, fenced by its captured native PID birth.
+                if native_identity is None or tools["main"](["process-identity", "--expect", native_identity,
+                                                            "--signal", "TERM", str(process.pid)]) != 0:
+                    raise RuntimeError("SMS canonical drain child identity or retirement is unproved")
+                retiring = asyncio.create_task(process.wait())
+                retirement_deadline = time.monotonic() + 15.0
+                while not retiring.done() and time.monotonic() < retirement_deadline:
+                    try:
+                        await asyncio.wait([retiring], timeout=max(0.0, retirement_deadline - time.monotonic()))
+                    except asyncio.CancelledError:
+                        continue
+                if not retiring.done():
+                    if tools["main"](["process-identity", "--expect", native_identity,
+                                      "--signal", "KILL", str(process.pid)]) != 0:
+                        retiring.cancel()
+                        raise RuntimeError("SMS canonical drain exact child kill or retirement is unproved")
+                    native_wait_deadline = time.monotonic() + 15.0
+                    while not retiring.done() and time.monotonic() < native_wait_deadline:
+                        try:
+                            await asyncio.wait([retiring], timeout=max(0.0, native_wait_deadline - time.monotonic()))
+                        except asyncio.CancelledError:
+                            continue
+                    if not retiring.done():
+                        retiring.cancel()
+                        raise RuntimeError("SMS canonical drain exact child retirement deadline expired")
+                retiring.result()
+    if process.returncode != 0 or not receipt_path.is_file():
+        raise RuntimeError("SMS canonical obligation drain failed; private receipt retained")
+    receipt = json.loads(receipt_path.read_text())
+    if receipt.get("verified") is not True or receipt.get("child_handles_retired") is not True:
+        raise RuntimeError("SMS canonical obligation closure or child handles are unproved")
+    return receipt
