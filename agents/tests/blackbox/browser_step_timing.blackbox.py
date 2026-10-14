@@ -290,6 +290,7 @@ async def test_slow_otp_poll_does_not_block_steps_and_codes_land_later():
 
 
 def test_browser_loop_never_awaits_otp_poll():
+    import ast
     import inspect
 
     from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
@@ -301,7 +302,9 @@ def test_browser_loop_never_awaits_otp_poll():
     harvest = loop.index("otp_poll_task = _harvest_otp_poll(otp_poll_task)")
     assert harvest < loop.index("browser_turn_messages.extend(otp_user_messages[otp_history_count:])")
     assert harvest < loop.index('step_timer.mark("llm_decision")')
-    teardown = source[source.rindex("finally:") :]
+    activity = ast.parse(source).body[0]
+    cleanup = next(node.finalbody for node in reversed(activity.body) if isinstance(node, ast.Try) and node.finalbody)
+    teardown = ast.unparse(ast.Module(body=cleanup, type_ignores=[]))
     assert "await _drain_otp_poll(otp_poll_task)" in teardown
 
 
@@ -830,6 +833,7 @@ async def test_speculative_state_rejected_when_page_or_session_changed():
 
 
 def test_speculative_state_wired_after_step_start_mutations():
+    import ast
     import inspect
 
     from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
@@ -849,7 +853,9 @@ def test_speculative_state_wired_after_step_start_mutations():
     assert 'action_name == "read_browser_state"' in pre_action
     assert "state_prefetch.discard()" in pre_action
     assert loop.index('step_timer.mark("execute_action")') < loop.index("state_prefetch.arm(")
-    teardown = source[source.rindex("finally:") :]
+    activity = ast.parse(source).body[0]
+    cleanup = next(node.finalbody for node in reversed(activity.body) if isinstance(node, ast.Try) and node.finalbody)
+    teardown = ast.unparse(ast.Module(body=cleanup, type_ignores=[]))
     assert "state_prefetch.discard()" in teardown
 
 
