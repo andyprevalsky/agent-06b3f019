@@ -211,7 +211,10 @@ describe('committed INSERT delivery', () => {
     });
     const hook = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenCalledOnce());
-    const browser = (id: string, toolStatus: string): InsertMessagePayload => ({
+    const browser = (
+      id: string,
+      toolStatus: NonNullable<InsertMessagePayload['metadata']>['toolStatus'],
+    ): InsertMessagePayload => ({
       ...insert,
       id,
       metadata: { toolName: 'spawn_browser_agent', toolCallId: 'browser-a', toolStatus },

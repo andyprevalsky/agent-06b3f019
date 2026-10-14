@@ -65,7 +65,7 @@ describe('Integrations page', () => {
 
     const expandMessages = async (user: ReturnType<typeof userEvent.setup>) => {
       await waitFor(() => expect(screen.getByText('Messages')).toBeInTheDocument());
-      const section = screen.getByText('Messages').closest('.rounded-lg')!;
+      const section = screen.getByText('Messages').closest<HTMLElement>('.rounded-lg')!;
       await user.click(within(section).getAllByRole('button')[0]);
     };
 

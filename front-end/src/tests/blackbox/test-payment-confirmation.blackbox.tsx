@@ -112,6 +112,9 @@ describe('test-payment Confirmation receipt', () => {
           description: `${line.name} description`,
           imageUrl: line.imageUrl,
           priceCents: line.unitPriceCents,
+          productUrl: `/p/${line.id}`,
+          rating: '4.8 stars',
+          reviewCount: '1 review',
         }))}
         selectedIds={CONFIRMATION.receipt.lineItems.map((line) => line.id)}
       />,
