@@ -21033,7 +21033,8 @@ def test_private_fleet_source_snapshot_publication_wins_deadline_race(tmp_path: 
     validation_end = fleet.index('    CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE="owner"', end)
     creation_loop = fleet[start:validation_end]
     helper = SCRIPT_SNAPSHOT_OWNER
-    diagnostic = _extract_fleet_function(fleet, "script_snapshot_creation_timeout_diagnostic() {")
+    diagnostic_signature = "script_snapshot_creation_timeout_diagnostic() {"
+    diagnostic = _extract_fleet_function(fleet, diagnostic_signature) if diagnostic_signature in fleet else ""
     for mode in ("published", "missing", "invalid", "foreign"):
         publish = mode != "missing"
         root = tmp_path / mode
