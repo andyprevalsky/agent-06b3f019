@@ -14,7 +14,7 @@ import {
   sendTransactionalEmail,
   TransactionalEmailDefinitiveError,
 } from '../../providers/transactionalEmail';
-import { sendSms } from '../../providers/smsQueue';
+import { sendSms, sendMms } from '../../providers/smsQueue';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
@@ -201,7 +201,11 @@ async function testCredentialLookupFailureIsDefinitive() {
   }
 }
 
-async function testRejectedSmsBodyFailureRemainsDefinitive() {
+async function testSurgeBodyReadFailure(
+  status: number,
+  definitiveFailure: boolean,
+  send: () => ReturnType<typeof sendSms> = () => sendSms('+15555550100', 'test')
+) {
   const originalFetch = globalThis.fetch;
   const originalApiKey = process.env.SURGE_API_KEY;
   const originalAccountId = process.env.SURGE_ACCOUNT_ID;
@@ -213,16 +217,17 @@ async function testRejectedSmsBodyFailureRemainsDefinitive() {
   globalThis.fetch = async () =>
     ({
       ok: false,
-      status: 503,
+      status,
       text: async () => {
         throw new Error('body read failed');
       },
     }) as Response;
   try {
-    const result = await sendSms('+15555550100', 'test');
-    if (result.success || result.definitiveFailure !== true || !result.error?.includes('503')) {
-      throw new Error(`Rejected SMS lost definitive status: ${JSON.stringify(result)}`);
-    }
+    const result = await send();
+    assert.equal(result.success, false);
+    assert.equal(result.definitiveFailure, definitiveFailure);
+    assert.ok(result.error?.includes(String(status)), `Lost HTTP status: ${result.error}`);
+    assert.match(result.error ?? '', /body read failed/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalApiKey === undefined) delete process.env.SURGE_API_KEY;
@@ -265,9 +270,24 @@ async function main() {
       'credential lookup failures are definitive and pre-send',
       testCredentialLookupFailureIsDefinitive
     ),
-    await run(
-      'rejected SMS remains definitive when its body cannot be read',
-      testRejectedSmsBodyFailureRemainsDefinitive
+    await run('explicitly rejected SMS remains definitive when its body cannot be read', () =>
+      testSurgeBodyReadFailure(422, true)
+    ),
+    await run('SMS server errors remain ambiguous when their body cannot be read', () =>
+      testSurgeBodyReadFailure(503, false)
+    ),
+    await run('SMS request timeouts remain ambiguous when their body cannot be read', () =>
+      testSurgeBodyReadFailure(408, false)
+    ),
+    await run('explicitly rejected MMS remains definitive when its body cannot be read', () =>
+      testSurgeBodyReadFailure(422, true, () =>
+        sendMms('+15555550100', 'test', 'https://example.test/image.png')
+      )
+    ),
+    await run('MMS server errors remain ambiguous when their body cannot be read', () =>
+      testSurgeBodyReadFailure(503, false, () =>
+        sendMms('+15555550100', 'test', 'https://example.test/image.png')
+      )
     ),
   ];
   const passed = results.filter(Boolean).length;

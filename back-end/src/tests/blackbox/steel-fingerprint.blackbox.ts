@@ -31,6 +31,7 @@ import {
 } from './steel-fingerprint.saved-profile.behavior';
 import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 import { testWorkerHardwareConcurrencyMatchesPage as runWorkerHardwareConcurrencyMatchesPage } from './steel-fingerprint.worker-concurrency.behavior';
+import { testWritableSteelProfileHandoffRetainsRecoveryCustody } from './steel-fingerprint.profile-handoff.behavior';
 
 function makeFingerprint(): FingerprintData {
   return {
@@ -606,6 +607,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries transient Connection error',
       fn: testConnectionErrorRetriesOnReplacement,
+    },
+    {
+      name: 'Steel writable profile handoff keeps durable custody across failure and recovery',
+      fn: testWritableSteelProfileHandoffRetainsRecoveryCustody,
     },
     {
       name: 'raw Steel CDP failures retain timeout and authentication categories',

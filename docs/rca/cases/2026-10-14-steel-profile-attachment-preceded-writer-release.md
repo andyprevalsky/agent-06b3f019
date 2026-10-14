@@ -61,8 +61,11 @@ was the reusable native pattern; no account-wide profile-list hot path was used.
 In the isolated repair tree, claim the task and resolved full-profile binding;
 inspect and release only the exact recorded persistent Steel writer; then let
 same-profile create admit readiness within the original five attempts. Preserve
-profile/auth state, return truthful CLOSED on confirmed release without a
-replacement, and ERROR for unresolved release. Native requests remain outside
+profile/auth state. The original isolated correction used CLOSED on confirmed
+release without a replacement; integration with upstream cdbe16c54 preserves its
+PAUSED recoverable binding (not evidence of a live native source), with ERROR
+for unresolved release. Exact source inspection skips a duplicate release when
+the recorded writer is already released. Native requests remain outside
 short DB transactions. Exact owner/deadline row locking fences binding writes.
 Persist candidate cleanup intent before creation and retain ambiguous allocation
 custody; absence during a pending create cannot prove no later allocation.

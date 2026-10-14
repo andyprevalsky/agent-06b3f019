@@ -12,6 +12,7 @@ import { recreateSession } from '../../providers/steel/sessionResume';
 
 const profileId = '2985ff78-3ece-4e5e-8bae-aa97924d84a4';
 const oldId = '390ecfb9-fbe2-4168-b368-04bbafa2efcc';
+const invalidatedRecordedProfileId = '1fb295cf-7069-434e-9a97-6c4ba9c6a28e';
 
 /** Native lifecycle replay; all provider and DB effects are confined to the fixture. */
 export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
@@ -38,6 +39,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     context: prisma.browserContext.update,
   };
   let status = 'ACTIVE';
+  let closedAt: Date | null = null;
   let sessionId = oldId;
   let released = false;
   let phase = 'success';
@@ -55,6 +57,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
   const releases: string[] = [];
   const reset = (next: string) => {
     status = 'ACTIVE';
+    closedAt = null;
     sessionId = oldId;
     released = false;
     phase = next;
@@ -106,7 +109,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
           query.strings.join('').includes('FOR UPDATE'),
           'binding mutation must lock claim atomically'
         );
-        if (phase === 'writeGap' && status === 'ERROR' && createCalls >= 2 && !mutationHeld) {
+        if (phase === 'writeGap' && status === 'PAUSED' && createCalls >= 2 && !mutationHeld) {
           mutationHeld = true;
           mutationEntered?.();
           await mutationGate;
@@ -242,7 +245,11 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
             sessionId,
             provider: 'steel',
             status,
-            providerProfileId: profileId,
+            closedAt,
+            providerProfileId:
+              recordedSource === 'steel_session_auth_invalidated'
+                ? invalidatedRecordedProfileId
+                : profileId,
             providerProfileSource: recordedSource,
             providerProfilePersist: true,
             contextId: 'test-context',
@@ -254,17 +261,42 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
           }
         : null) as typeof prisma.browserSession.findUnique;
     prisma.browserSession.updateMany = (async (input: {
-      where: { sessionId?: string; status?: string };
-      data: { status?: string; sessionId?: string; providerProfileId?: string };
+      where: {
+        sessionId?: string;
+        status?: string;
+        closedAt?: Date | null;
+        providerProfileSource?: string;
+        providerProfileId?: string;
+        providerProfilePersist?: boolean;
+        provider?: string;
+      };
+      data: {
+        status?: string;
+        sessionId?: string;
+        providerProfileId?: string;
+        closedAt?: Date | null;
+      };
     }) => {
       if (
         input.where.sessionId !== sessionId ||
-        (input.where.status && input.where.status !== status)
+        (input.where.status && input.where.status !== status) ||
+        ('closedAt' in input.where &&
+          (input.where.closedAt?.getTime() ?? null) !== (closedAt?.getTime() ?? null)) ||
+        ('providerProfileSource' in input.where &&
+          input.where.providerProfileSource !== recordedSource) ||
+        ('providerProfileId' in input.where &&
+          input.where.providerProfileId !==
+            (recordedSource === 'steel_session_auth_invalidated'
+              ? invalidatedRecordedProfileId
+              : profileId)) ||
+        ('providerProfilePersist' in input.where && input.where.providerProfilePersist !== true) ||
+        ('provider' in input.where && input.where.provider !== 'steel')
       )
         return { count: 0 };
       if (input.data.sessionId && phase === 'cas') return { count: 0 };
       if ('providerProfileId' in input.data) assert.equal(input.data.providerProfileId, profileId);
       status = input.data.status ?? status;
+      if ('closedAt' in input.data) closedAt = input.data.closedAt ?? null;
       sessionId = input.data.sessionId ?? sessionId;
       return { count: 1 };
     }) as typeof prisma.browserSession.updateMany;
@@ -287,7 +319,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
         if (id !== oldId) releasedCandidateIds.add(id);
         if (id !== oldId && phase === 'cleanup') throw new Error('candidate cleanup rejected');
         if (id === oldId) {
-          assert.equal(status, 'ERROR', 'must claim exact writer before release');
+          assert.equal(status, 'PAUSED', 'must claim exact writer before release');
           if (phase === 'release') throw new Error('release acknowledgement lost');
           if (phase === 'releaseConfirmed') {
             released = true;
@@ -348,7 +380,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
       assert.equal(sessionId, oldId, 'failed replacement must not publish a candidate');
       assert.equal(
         status,
-        failure === 'foreign' ? 'ACTIVE' : failure === 'release' ? 'ERROR' : 'CLOSED'
+        failure === 'foreign' ? 'ACTIVE' : failure === 'release' ? 'ERROR' : 'PAUSED'
       );
       if (failure === 'foreign') assert.deepEqual(releases, []);
       if (failure === 'readiness') assert.equal(createCalls, 5);
@@ -404,7 +436,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
     const intentsBeforeUnexpected = new Set(candidates.keys());
     await assert.rejects(run(), /custody write rejected/);
     assert.equal(sessionId, oldId);
-    assert.equal(status, 'CLOSED');
+    assert.equal(status, 'PAUSED');
     assert(
       releases.includes(lastCandidateId),
       'known unexpected allocation must be cleaned despite bookkeeping failure'
@@ -524,7 +556,7 @@ export async function assertSteelProfileReplacementLifecycle(): Promise<void> {
       else winner = await run(); // exact terminal native confirmation permits takeover
       acknowledge();
       await assert.rejects(oldOperation, /expired|cleanup|ownership/);
-      assert.equal(status, winner ? 'ACTIVE' : 'ERROR');
+      assert.equal(status, winner ? 'ACTIVE' : 'PAUSED');
       assert.equal(
         sessionId,
         winner ? winner.sessionId : oldId,

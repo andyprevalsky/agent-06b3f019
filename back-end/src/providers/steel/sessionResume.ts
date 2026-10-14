@@ -310,7 +310,6 @@ async function recreateSessionWithinClaim(
   let consecutiveCdpTimeouts = 0;
   const finishWriter =
     oldSession.provider === 'steel' &&
-    (oldSession.status === 'ACTIVE' || oldSession.status === 'ERROR') &&
     steelRecordedProfileId !== null &&
     oldSession.providerProfilePersist;
   let writerReleased = false;
@@ -406,10 +405,14 @@ async function recreateSessionWithinClaim(
             where: {
               id: taskId,
               sessionId: oldSession.sessionId,
+              provider: oldSession.provider,
+              providerProfileId: oldSession.providerProfileId,
+              providerProfileSource: oldSession.providerProfileSource,
+              providerProfilePersist: oldSession.providerProfilePersist,
               ...(writerReleased
-                ? { status: 'ERROR' as const }
+                ? { status: 'PAUSED' as const, closedAt: null }
                 : oldSession.status
-                  ? { status: oldSession.status }
+                  ? { status: oldSession.status, closedAt: oldSession.closedAt }
                   : {}),
             },
             data: {
@@ -567,26 +570,10 @@ async function recreateSessionWithinClaim(
       `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
     );
   } catch (error) {
-    const ownsClaim = await (dependencies.verifyLifecycleOwnership?.() ?? Promise.resolve()).then(
-      () => true,
-      () => false
-    );
-    if (writerReleased && ownsClaim) {
-      const mutate: SteelLifecycleMutation =
-        dependencies.mutateLifecycle ?? (async (callback) => callback(prisma));
-      await mutate((transaction) =>
-        transaction.browserSession.updateMany({
-          where: { id: taskId, sessionId: oldSession.sessionId, status: 'ERROR' },
-          data: { status: 'CLOSED', closedAt: new Date() },
-        })
-      ).catch((fenceError: unknown) => {
-        log.error('Failed to finalize released Steel writer state', {
-          taskId,
-          error: fenceError instanceof Error ? fenceError.message : String(fenceError),
-        });
-      });
-      await announceBrowserSessionBinding({ id: taskId });
-    }
+    // Confirmed source release retains the PAUSED full-profile recovery binding.
+    // Uncertain release is recorded as ERROR by finishSteelProfileWriter.
+    // Never write after losing the lifecycle owner or a concurrent close.
+    if (writerReleased) await announceBrowserSessionBinding({ id: taskId });
     throw error;
   }
 }

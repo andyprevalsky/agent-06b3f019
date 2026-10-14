@@ -18,7 +18,15 @@ export interface SteelReplacementProfileDependencies {
 
 /** Claim and finish the exact profile writer; never release a foreign source. */
 export async function finishSteelProfileWriter(
-  task: { id: string; sessionId: string; providerProfileId: string; status: BrowserSessionStatus },
+  task: {
+    id: string;
+    sessionId: string;
+    providerProfileId: string;
+    status: BrowserSessionStatus;
+    closedAt: Date | null;
+    providerProfileSource: string | null;
+    providerProfilePersist: boolean;
+  },
   dependencies: SteelReplacementProfileDependencies
 ): Promise<void> {
   const inspect = dependencies.inspectSession ?? ((id: string) => steel.sessions.retrieve(id));
@@ -41,11 +49,17 @@ export async function finishSteelProfileWriter(
         provider: 'steel',
         providerProfileId: task.providerProfileId,
         status: task.status,
+        closedAt: task.closedAt,
+        providerProfileSource: task.providerProfileSource,
+        providerProfilePersist: task.providerProfilePersist,
       },
-      data: { status: 'ERROR', closedAt: null },
+      data: { status: 'PAUSED', closedAt: null },
     })
   );
   if (claim.count !== 1) throw new Error('Steel profile writer changed before replacement claim');
+  // An intentional CLOSED/PAUSED resume may already hold a released writer.
+  // Preserve recovery custody without issuing a duplicate native release.
+  if (native.status === 'released') return;
   try {
     await dependencies.verifyLifecycleOwnership?.();
     const release = () =>
@@ -55,17 +69,27 @@ export async function finishSteelProfileWriter(
       : release());
   } catch (error) {
     // A lost release acknowledgement must not restore a false ACTIVE pointer.
-    // Exact native confirmation can discharge custody; otherwise ERROR retains it.
+    // Exact released evidence keeps PAUSED recovery; otherwise ERROR retains custody.
     const observed = await inspect(task.sessionId).catch(() => null);
     const ownsClaim = await (dependencies.verifyLifecycleOwnership?.() ?? Promise.resolve()).then(
       () => true,
       () => false
     );
-    if (ownsClaim && observed?.id === task.sessionId && observed.status === 'released') {
+    if (ownsClaim) {
+      const released = observed?.id === task.sessionId && observed.status === 'released';
       await mutate((transaction) =>
         transaction.browserSession.updateMany({
-          where: { id: task.id, sessionId: task.sessionId, status: 'ERROR' },
-          data: { status: 'CLOSED', closedAt: new Date() },
+          where: {
+            id: task.id,
+            sessionId: task.sessionId,
+            provider: 'steel',
+            status: 'PAUSED',
+            closedAt: null,
+            providerProfileId: task.providerProfileId,
+            providerProfileSource: task.providerProfileSource,
+            providerProfilePersist: task.providerProfilePersist,
+          },
+          data: { status: released ? 'PAUSED' : 'ERROR', closedAt: null },
         })
       );
     }

@@ -81,6 +81,7 @@ export function verifyMetaSignature(
 interface WhatsAppArchiveOptions {
   archiveRootAgentId?: string;
   archiveContext?: Record<string, unknown>;
+  onDeliveryAttempt?: () => void;
 }
 
 async function archiveWhatsAppTransportBoundary(params: {
@@ -162,6 +163,7 @@ export interface WhatsAppSendResult {
   messageSid?: string;
   error?: string;
   definitiveFailure?: boolean;
+  statusCode?: number;
   /** Meta reports this number can't receive a proactive message — stop mirroring. */
   recipientUnreachable?: boolean;
 }
@@ -210,6 +212,7 @@ async function postWhatsAppMessage(
       seed: mockSeed,
       reason: mockReason,
     });
+    options.onDeliveryAttempt?.();
     await archiveWhatsAppTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
       requestBody,
@@ -238,6 +241,7 @@ async function postWhatsAppMessage(
   }
 
   try {
+    options.onDeliveryAttempt?.();
     const response = await fetch(
       `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
       {
@@ -279,6 +283,7 @@ async function postWhatsAppMessage(
       return {
         success: false,
         error: `WhatsApp API error: ${response.status}`,
+        statusCode: response.status,
         definitiveFailure: recipientUnreachable || !transient,
         ...(recipientUnreachable ? { recipientUnreachable: true } : {}),
       };
