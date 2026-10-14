@@ -174,7 +174,7 @@ class _FakeWFModule:
         if name == "notify_sms_event_activity":
             from datetime import timedelta
 
-            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=270)
+            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=300)
         self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})
         if name in self._activity_results:
             value = self._activity_results[name]

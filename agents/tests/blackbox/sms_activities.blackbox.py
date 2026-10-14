@@ -133,7 +133,7 @@ async def test_notify_event_budget_owns_model_corrections():
     def handler(request: httpx.Request) -> httpx.Response:
         assert "/api/send-sms/notify" in str(request.url)
         read_budget = request.extensions["timeout"]["read"]
-        assert read_budget >= 2 * 60 + 4 * 30, f"Notification HTTP read budget was {read_budget}s; needs 240s"
+        assert read_budget >= 2 * 60 + 4 * 30 + 30, f"Notification HTTP read budget was {read_budget}s; needs 270s"
         return httpx.Response(200, json={"success": True})
 
     setup_mock_fn(handler)

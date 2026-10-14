@@ -22,7 +22,7 @@ sources:
   - agent b2691042-3af3-4d97-82c7-73cbdfa2c8a0
   - commit b784977b0bf699c56bc67b063ae849a9cf5150fb
 repro: back-end/src/tests/blackbox/send-sms.blackbox.ts testBoundary_notifyAgentStartedKeepsLongGoalInsideAgent
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -75,17 +75,19 @@ The final implementation keeps descriptive templates and adds the general correc
 - Lifecycle notification delivery validates complete SMS body length and required URLs. Oversized or explicitly rejected copy is sent to `rose-1-flash` for a rewrite, with the actual error in a paired assistant/tool exchange. Fitting templates need no model call.
 - At most two correction calls are shared across an event's channels. An accepted channel is never retried. Unknown transport outcomes and 5xx stop rather than risk resending an accepted message. Exhausted delivery failures propagate instead of returning a false success.
 - Actual accepted copy enters the transcript. The full agent task and approval content remain in their original records.
-- HTTP and Temporal ownership budgets are derived from the new bounded model/sender path; direct SMS and source lookup retain their existing behavior.
+- HTTP and Temporal ownership budgets are derived from the new bounded model/sender path: two 60-second model calls, four 30-second sends, and 30 seconds of backend overhead fit within a 270-second HTTP read budget and a 300-second activity envelope. Direct SMS and source lookup retain their existing behavior.
 
-Verification so far: notification suite 58/58 including the live model sample, supervisor 46/46, mirrored-delivery suite, focused agent notification/planner/approval suites, prompt/registration structural checks, TypeScript, formatting, and lint. The ordinary blackbox runners discover the new regressions; `/deploy` runs those runners under coverage. Full deploy verification and production rollout remain pending.
+Verification so far: notification suite 58/58 including the live model sample, supervisor 46/46, mirrored-delivery suite, focused agent notification/planner/approval suites, prompt/registration structural checks, TypeScript, formatting, and lint. Full worker coverage passed 110/110 domains and frontend coverage passed 2749 tests; 46 deploy structural gates passed. The ordinary blackbox runners discover the new regressions; `/deploy` runs those runners under coverage. The first full backend coverage run passed 193/196 domains and all 266 unit files; the failing domains exposed the test-contract mismatch described below, a Steel profile rotation problem, and a stale Codex credential that fell back to an unfunded API key. Those deployment gates and production rollout remain pending; the owned SMS reproduction gap is closed.
 
 10k-agent behavior: fitting notifications add no model request. Corrections are capped at two per event and share only local event state, with no new query, global lock, or cross-agent fan-in. Each notification retains its distinct agent URL. Provider failures remain visible and caller budgets own the finite correction path.
 
-The user explicitly authorized the prompt limits and error-driven correction behavior in the follow-up recorded below. The earlier fixed-copy-only proposal was abandoned. Status remains open pending complete deployment verification. The production account agent remains intact while awaiting authentication; evidence publication must not terminate it merely to satisfy terminal-recording requirements.
+The user explicitly authorized the prompt limits and error-driven correction behavior in the follow-up recorded below. The earlier fixed-copy-only proposal was abandoned. Status is fixed for the owned SMS boundary on local reproduction and permanent regression proof; deployment completion must still be reported independently. The production account agent remains intact while awaiting authentication; evidence publication must not terminate it merely to satisfy terminal-recording requirements.
 
 Evidence snapshots are private under `.context/rca-sms-2026-10-14/`. The latest original LLM request was reconstructed as `browser_use_step_37`, using the encrypted envelope's `created_at_ms`. The canonical publisher was attempted with the real production agent and refuses publication without a benchmark run UUID; no synthetic benchmark or terminal event was invented. The live production link is useful for opening the task but is not claimed as a terminal, publication-validated evidence viewer.
 
 Adversarial review found two related ambiguity bugs once failures were surfaced: write-lock dispatch marked every thrown failure FAILED, and all-failed mirrored delivery inherited the SMS channel's definite rejection even when WhatsApp was ambiguous. The final code preserves typed delivery certainty, keeps unknown claims STARTED, and requires every failed channel to be definitely rejected before a claim can become reclaimable. The unchanged owning `send-sms-whatsapp-mirroring` suite first failed with two repeated SMS sends on the original service, then failed with six SMS sends and two WhatsApp attempts on the original mixed-channel aggregation (`1792005216-347924-2276`, 707ms). After both fixes it passed in 565ms (`1792005279-358369-179`): one SMS attempt for the single-channel unknown outcome, three rejected SMS attempts plus one ambiguous WhatsApp attempt for the mixed outcome, and no resend on a repeated request. Its positive control verifies an explicitly rejected claim can be corrected and retried. Final adversarial review passed after this proof and the live model smoke.
+
+Full coverage found an existing waitlist test asserting that HTTP 503 was a definite SMS rejection. Its positive control now uses the captured 422 rejection class and adds unknown-outcome controls for 503 and 408. Extending the same controls to MMS exposed a related owned error-feedback gap: `response.text()` failure discarded the already received HTTP status. The unchanged expanded regression failed 7/9 before the shared SMS/MMS error-reader fix (`1792006397-716530-16848`), then passed 9/9 after it (`1792006444-725373-11737`, 462ms). The same final run passed the notification, mirrored-delivery, and supervisor domains. Both message transports retain status and body-read diagnostics; explicit 4xx rejection remains definite, while 408 and 5xx remain ambiguous.
 
 ## Human feedback
 

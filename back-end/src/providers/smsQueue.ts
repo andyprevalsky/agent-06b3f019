@@ -31,6 +31,14 @@ const log = createLogger('SMS');
  */
 const SURGE_MESSAGE_SETTINGS = { link_shortening: 'disabled' } as const;
 
+async function readSurgeError(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch (error) {
+    return `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 interface SurgeMessageResponse {
   id: string;
   body?: string;
@@ -157,12 +165,7 @@ export async function sendSms(
     });
 
     if (!response.ok) {
-      let errorText: string;
-      try {
-        errorText = await response.text();
-      } catch (error) {
-        errorText = `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
-      }
+      const errorText = await readSurgeError(response);
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,
@@ -281,7 +284,7 @@ export async function sendMms(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await readSurgeError(response);
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,

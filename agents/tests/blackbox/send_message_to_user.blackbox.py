@@ -207,7 +207,7 @@ class _FakeWorkflowModule:
         if name == "notify_sms_event_activity":
             from datetime import timedelta
 
-            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=270)
+            assert kwargs["start_to_close_timeout"] >= timedelta(seconds=300)
         if name in self._activity_results:
             value = self._activity_results[name]
             if isinstance(value, Exception):
