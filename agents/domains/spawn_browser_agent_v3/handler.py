@@ -8554,6 +8554,18 @@ async def _spawn_browser_agent_activity_v3_real(
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
+            # A handoff decision cannot commit against a snapshot that omitted
+            # eligible native inbox input received while that decision ran.
+            # The next ordinary turn admits the real queued messages and lets
+            # the model decide whether they satisfy the current verification.
+            if (
+                action_name == "request_user_assistance_for_authentication"
+                and len(otp_user_messages) > otp_history_count
+            ):
+                await browser_stream.finish_tools(status="ERROR")
+                state_prefetch.discard()
+                continue
+
             if thinking:
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(

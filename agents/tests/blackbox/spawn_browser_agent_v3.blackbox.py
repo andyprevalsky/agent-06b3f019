@@ -20939,6 +20939,96 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
     assert model_contexts and "# Auth Options for claude.ai" not in str(model_contexts[0]), "stale Claude auth inventory reached Google model turn"
 
 @_in_browser_activity_context
+async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh"):
+    """An inbox result received during a model call precedes handoff commit."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    fake_playwright = _FakePlaywright(fake_browser)
+    session_info = {
+        "session_id": "session-1", "debug_url": "https://kernel.example/debug", "ws_url": "ws://old",
+        "passwords": [], "auth_options": {"realm": "shop.example"},
+        "browser_session_metadata": {"provider": "kernel"},
+        "credential_ref": {"kind": "cookie_bundle", "id": "shop-bundle"},
+        "same_session_available": True,
+    }
+    create_auth = AsyncMock(return_value={"id": "request-1"})
+    import asyncio, copy
+    from domains.spawn_browser_agent_v3 import service_crypto
+    from datetime import datetime, timezone, timedelta
+    delivered, persisted, fetched = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async def fetch_emails(*args, **kwargs):
+        await delivered.wait()
+        if case in {"empty", "app_approval"}:
+            return []
+        return [{"id": "challenge-fixture", "credentialId": "inbox-fixture", "date": (datetime.now(timezone.utc) - timedelta(seconds=290 if case == "stale" else 0)).isoformat(), "from": "Rose Shop", "subject": "Verification", "bodyText": "Your verification code is 847291"}]
+    async def fetch_otps(*args, **kwargs):
+        result = await service_crypto.fetch_recent_otps(*args, **kwargs)
+        fetched.set()
+        return result
+    async def persist_otp(*args, **kwargs):
+        if kwargs.get("role") == "USER" and (kwargs.get("credential_ref") or {}).get("kind") == "email_otp":
+            persisted.set()
+    model_contexts = []
+
+    async def model_step(**kwargs):
+        model_contexts.append(copy.deepcopy(kwargs))
+        if len(model_contexts) == 1:
+            delivered.set()
+            if case == "fresh":
+                await persisted.wait()
+            else:
+                await fetched.wait()
+        return {"action": {"action": "request_user_assistance_for_authentication", "thinking": "Verification required", "params": {}}, "usage": {}, "mode": "waterfall"}
+
+    handler = "domains.spawn_browser_agent_v3.handler."
+    targets = [
+        patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_emails", fetch_emails),
+        patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_sms_messages", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_imessages", AsyncMock(return_value=[])),
+        patch(handler + "load_config", return_value=_fake_config()),
+        patch(handler + "activity.heartbeat"),
+        patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+        patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+        patch(handler + "fetch_recent_otps", fetch_otps),
+        patch(handler + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+        patch(handler + "_call_browser_use_with_rotation", model_step),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+        patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://shop.example/login/verify", "title": "Verify it is you"})),
+        patch(handler + "prepare_browser_auth", AsyncMock(return_value={"auth_realm": "shop.example", "auth_options": {"realm": "shop.example"}, "passwords": [], "passkeys": []})),
+        patch(handler + "create_user_auth_assistance_request", create_auth),
+        patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+        patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(handler + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+        patch(handler + "close_browser_session", AsyncMock()),
+        patch(handler + "save_browser_action_message", AsyncMock()),
+        patch(handler + "save_browser_assistant_message", AsyncMock()),
+        patch(handler + "save_browser_credential_ref_message", persist_otp),
+        patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+        patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+    with ExitStack() as stack:
+        for target in targets:
+            stack.enter_context(target)
+        result = await spawn_browser_agent_activity_v3(
+            user_id="user-1", agent_id="agent-1", goal="Read my member number",
+            tool_call_id="tool-1", task_id="task-1", is_resume=True,
+            start_url="https://shop.example", output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+        )
+    assert result["status"] == "awaiting_auth_assistance"
+    assert len(model_contexts) == (2 if case == "fresh" else 1), f"handoff committed stale decision without completed native OTP input: case={case}, turns={len(model_contexts)}"
+    assert "847291" not in str(model_contexts[0]["turn_messages"])
+    assert case != "fresh" or any(m.get("role") == "user" and "847291" in m.get("content", "") for m in model_contexts[1]["turn_messages"])
+    create_auth.assert_awaited_once()
+
+@_in_browser_activity_context
 async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     """Initial/resumed inventory belongs to genuine state results, never system."""
     from contextlib import ExitStack
@@ -27290,6 +27380,9 @@ async def run_all_tests():
     )
 
     # handler statics
+    await r.record_async("auth_handoff_consumes_otp_received_during_decision", test_auth_handoff_consumes_otp_received_during_decision)
+    for otp_case in ("empty", "stale", "app_approval"):
+        await r.record_async(f"auth_handoff_preserves_{otp_case}", lambda otp_case=otp_case: test_auth_handoff_consumes_otp_received_during_decision(otp_case))
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)
     r.record(
