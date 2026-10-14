@@ -615,4 +615,15 @@ def redact_secret_log_values(logger: Any, method_name: str, event_dict: Dict[str
             safe_event["exception"] = "".join(traceback.format_exception(*exception_info))
         else:
             safe_event["exception"] = str(exception_info)
-    return mask_secret_values(exception_values(safe_event), refs)
+    visible = mask_secret_values(exception_values(safe_event), refs)
+    # These fields identify the producing task/session, rather than page data.
+    # A short CVV occurring in a public ID must not detach logs from their
+    # owner. Nested page payloads and exception messages remain redacted.
+    for key in (
+        "agent_id", "user_id", "task_id", "session_id", "workflow_id", "run_id",
+        "tool_call_id", "request_id", "span_id", "parent_span_id",
+        "temporal_workflow", "temporal_activity",
+    ):
+        if key in safe_event:
+            visible[key] = safe_event[key]
+    return visible

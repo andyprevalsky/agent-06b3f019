@@ -219,6 +219,11 @@ requests, responses, and diagnostics now redact private values, and sanitized
 Temporal failures retain their type and retry policy without retaining a raw
 cause chain. Activity-scoped fallback redaction also covers private hydration
 before DOM binding and errors raised during cleanup.
+The logging policy also preserves trusted agent/session/workflow identifiers:
+a synthetic CVV matching digits in an agent UUID previously detached its logs
+from their owner. The unchanged owning credential test fails against `66bd51637`
+and passes after preserving only those identity fields; nested payloads and
+exception text still redact the same digits.
 
 ## Human feedback
 

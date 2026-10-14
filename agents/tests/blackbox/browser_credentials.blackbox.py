@@ -62,6 +62,25 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
     assert failed["success"] is False and failed["status"] == "blocked", failed
     assert failed["page"] == {"{{secret:pwd:avery@example.com}}": "typed {{secret:pwd:avery@example.com}}"}, failed
 
+    # Log routing is trusted harness metadata. A coincidental CVV substring
+    # must not make the producing agent impossible to find in its logs.
+    from browser_tools.secret_refs import redact_secret_log_values, secret_logging_context
+
+    owner = "00000123-0000-0000-0000-000000000001"
+    event = {
+        "agent_id": owner,
+        "tool_call_id": "tool-123",
+        "temporal_workflow": {"workflow_id": owner},
+        "event": "transport returned cvv 123",
+        "payload": {"agent_id": "123", "value": 123},
+    }
+    with secret_logging_context(secret_refs, fresh=True):
+        visible = redact_secret_log_values(None, "info", event)
+    for key in ("agent_id", "tool_call_id", "temporal_workflow"):
+        assert visible[key] == event[key], (key, visible)
+    assert "123" not in visible["event"]
+    assert visible["payload"] == {"agent_id": "{{secret:card_cvv}}", "value": "{{secret:card_cvv}}"}
+
 
 async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed() -> None:
     """A sign-up password is typed by ref and kept, so the new account can be signed into later.
