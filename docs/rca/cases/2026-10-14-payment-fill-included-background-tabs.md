@@ -87,7 +87,7 @@ test was subsequently strengthened to require CDP for the positive case;
 separate final-test baseline/current artifacts preserve that stronger proof.
 
 The final unchanged test was also run with the original helper compiled from
-`git show HEAD:agents/domains/spawn_browser_agent_v3/service_actions.py`, then
+`git show b784977b0bf699c56bc67b063ae849a9cf5150fb:agents/domains/spawn_browser_agent_v3/service_actions.py`, then
 with the repaired helper, through the identical command
 `cd agents && /usr/bin/time -p venv/bin/python ../.context/run-payment-fill-repro.py`.
 The scratch runner replaces only `_iter_payment_fill_targets` with the selected
