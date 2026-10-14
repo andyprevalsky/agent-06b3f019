@@ -1481,6 +1481,7 @@ def post_canary_boundary_subject(tmp_path):
         '"$APP" "$$" "$birth" "$$" "$birth" > "$INVENTORY_HOME/owner"\n'
         'printf "publisher_token=fixture-token\\nvalid_until=%s\\n" "$((INVENTORY_CLOCK_EPOCH + 120))" > "$INVENTORY_INDEX/current/health"\n'
         'printf "[]" > "$MACHINES_SNAPSHOT"\n'
+        'printf "[]" > "$INVENTORY_INDEX/current/admission-machines.json"\n'
         'replace_line() { local path=$1 key=$2 value=$3; '
         'awk -F= -v key="$key" -v value="$value" \'$1 == key {$0=key "=" value} {print}\' '
         '"$path" > "$path.tmp"; mv "$path.tmp" "$path"; }\n'
@@ -1494,7 +1495,7 @@ def post_canary_boundary_subject(tmp_path):
         ' parent-birth) replace_line "$INVENTORY_HOME/owner" parent_start invalid;;\n'
         ' wrong-app) replace_line "$INVENTORY_HOME/owner" app foreign;;\n'
         ' missing-owner) rm "$INVENTORY_HOME/owner";;\n'
-        ' missing-snapshot) rm "$MACHINES_SNAPSHOT";;\n'
+        ' missing-snapshot) rm "$MACHINES_SNAPSHOT" "$INVENTORY_INDEX/current/admission-machines.json";;\n'
         ' invalid-credentials|native-exit-75) unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR; SNAPSHOT_LOOP_PID="";;\n'
         'esac\n'
         'fixture_fault=$2\n'
@@ -1509,6 +1510,18 @@ def post_canary_boundary_subject(tmp_path):
         + boundary
     )
     return script
+
+
+def test_campaign_inventory_post_canary_valid_feed_admits_without_native_read(tmp_path):
+    script = post_canary_boundary_subject(tmp_path)
+    result = subprocess.run(
+        ["bash", str(script), str(tmp_path), "none"], capture_output=True, text=True,
+        timeout=FIXTURE_HOST_GUARD_SECONDS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "admitted").exists()
+    assert not (tmp_path / "pending-observed").exists()
+    assert not (tmp_path / "native-read").exists()
 
 
 @pytest.mark.parametrize("fault", (
@@ -1591,7 +1604,10 @@ def test_campaign_inventory_warm_volume_read_uses_exact_fresh_feed(tmp_path, fau
     if fault == 'wrong-path': machines[0]['config']['mounts'][0]['path'] = '/foreign'
     snapshot = tmp_path / 'machines.json'
     snapshot.write_text(json.dumps(machines))
-    if fault == 'malformed-json': snapshot.write_text('{invalid')
+    (inventory / 'current/admission-machines.json').write_text(json.dumps(machines))
+    if fault == 'malformed-json':
+        snapshot.write_text('{invalid')
+        (inventory / 'current/admission-machines.json').write_text('{invalid')
     health = inventory / 'current/health'
     valid = f'publisher_token=fixture\nvalid_until={int(time.time()) + 60}\n'
     health.write_text('publisher_token=fixture\nvalid_until=1\n' if fault in ['recovering', 'expired'] else valid)
