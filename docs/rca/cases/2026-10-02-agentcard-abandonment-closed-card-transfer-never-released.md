@@ -460,3 +460,16 @@ The user explicitly instructed on October12: "make this test skippable w a warng
 The restored deploy-scoped flag reports the exact sandbox release stall as `SKIPPED` with a loud warning, neverPASS. It requires purchaseHELD, fundingRECLAIMING, a CLOSEDcard with zero balance, matching nonempty card/transfer card IDs, and a test-mode transfer stillconsumed with released0. The common predicate additionally rejects missing/boolean balance and foreign-card state; both legacy and owned-timer boundaries are covered while preserving existing deadlines. Genuine read failures, cancellation, live transfers and unrelated cleanup errors remain strict. Owned cleanup may record this sandbox failure as a warning after fresh exact-owner reads; the test capture/refund remains explicitly unresolved. Production LIVE abandonment/refund requirements remain unchanged.
 
 Six permanent owning controls cover CI skip admission, exact native stall classification, owned cleanup warning, identity/balance guards, both timeout owners with flagON/OFF, and read-error/cancellation rejection. Against the original4db runtime 0/6passed; with the restored policy all6pass, alongside12unchanged payment controls. No timeout, task definition, prompt, model or payment success oracle changed. The original4389native run's3PASSED/1ERROR and original failed cleanup receipt remain historical evidence; an explicit waiver does not retroactively make that attempt pass.
+
+### October 14 integration duplicate-test repair
+
+Main integration preserved later original copies of four test/helper definitions
+that shadowed main's strengthened sandbox fixture and opt-in controls. Five exact
+owning cases failed offline on the integrated test module, while the unchanged
+main runtime and main test module passed. Removing only those redundant copies
+and three duplicate registrations restores all ten selected positive/negative
+controls without changing any runtime guard, assertion, deadline or catalog.
+The main definitions and the branch SMS scoring case remain intact; exact
+original source, warning commit ancestry and lossless preservation snapshots
+remain unchanged. This repair supplies no historical failed run or live lane
+acceptance credit.
