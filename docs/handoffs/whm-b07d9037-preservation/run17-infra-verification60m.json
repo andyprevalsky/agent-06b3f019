@@ -142,7 +142,20 @@
     "publisher_exit_code": 0,
     "publisher_finished_at": "2026-10-14T18:28:13.422144Z",
     "every1160_original_members_authenticated_again_before_projection": true,
-    "source_change_infrastructure_authorization": "User explicitly auto-approved infrastructure; independently reviewed optional evidence transport projection leaves WHM context/runtime acquisition unchanged"
+    "source_change_infrastructure_authorization": "User explicitly auto-approved infrastructure; independently reviewed optional evidence transport projection leaves WHM context/runtime acquisition unchanged",
+    "approval_refresh": {
+      "publisher_exit_code": 0,
+      "finished_at": "2026-10-14T19:21:45.340022+00:00",
+      "fresh_browser_messages": 175,
+      "full1160_archive_authentication_repeated": true,
+      "last_call_is_latest_of305_owned_Agent_dumps": true,
+      "last_call_site": "1791947898555-facf7b17477d-execute_loop",
+      "last_call_viewer": "https://boxes.dev/visuals/vis_88c8ce5f654fdde7371767549b4ded67",
+      "sharing": "Current thread and publishing user",
+      "original_call_content_preserved": true,
+      "viewer_presentation_changes": "Dark/mobile CSS and legacy renderer denominator qualification note only; no source/runtime context changes",
+      "all_preview_console_errors_and_blocked_loads": 0
+    }
   },
   "source_approvals": {
     "infra_autoapproved": true,
@@ -225,6 +238,12 @@
       "members": 381,
       "manifest_sha256": "e91053607ddc3cd5cd99561b0bbf1cf0c20988b889195ebd72c99e730ad379c0",
       "full_authenticated_decrypted_member_readback": true
+    },
+    {
+      "receipt_path": "docs/handoffs/whm-b07d9037-preservation/run17-approval-evidence-private-receipt.json",
+      "members": 16,
+      "manifest_sha256": "7d7a70094aa23a32d049510af1a519c019f818f2550498331486aeb4ef7e82ca",
+      "full_authenticated_decrypted_member_readback": true
     }
   ],
   "next_work": "Publication infrastructure repair within autoapproval; context/hierarchy proposals remain held; original round remains unfinished",
@@ -295,7 +314,9 @@
       "mocked_foundry_cases": 14,
       "pure_serializer_controls": 2,
       "requires_user_context_approval": true,
-      "live_Azure_cache_behavior_and_benchmark_PASS_open": true
+      "live_Azure_cache_behavior_and_benchmark_PASS_open": true,
+      "approval_id": "R17-FOUNDRY-INPUT-1",
+      "decision": "AWAITING_USER; no source application"
     },
     "next_slice": {
       "pending_decision": "R17-NEXT-SLICE-1",
@@ -305,5 +326,6 @@
       "resource_preflight_complete": false,
       "original_verdict_preserved": true
     }
-  }
+  },
+  "last_checkpoint_update_utc": "2026-10-14T19:34:35.390069+00:00"
 }
