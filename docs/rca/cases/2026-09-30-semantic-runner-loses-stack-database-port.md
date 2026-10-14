@@ -26,7 +26,7 @@ sources:
   - commit edd03da7268b72d32fa345b503e88ef5645c110b
   - agent 35693a7b-5fbf-45e6-a907-4dc378f63a34
 repro: scripts/tests/semantic-deploy-gate.test.sh
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -194,9 +194,16 @@ That suite is already registered in `scripts/run-deploy-structural-gates.py`
 and `/deploy` Step 4. No new suite or product prompt/schema changes are needed.
 The helper checks manifest metadata only; it does not validate PID liveness
 for a running manifest reusing the same backend URL. Independent adversarial
-review passed with these wording/fixture corrections. The repair is included in this deployment stabilization batch. Default-runner
-UI verification and production rollout remain gates before shipment; this
-recurrence is mitigated pending those results.
+review passed with these wording/fixture corrections. The integrated default runner passed the unchanged full UI batch, 8/8 in
+37.9s, including take/hand-back in 19.5s, without explicit semantic DB URLs.
+The invocation receipt pins source `010f53d294eddad4c56c8d6cf1a3d424ca10c9a3`,
+backend/frontend ports 56000/56001, and the running manifest database
+`victoria_bench_deploy_payment_fill_semantic_20261014_1953` at port 5432.
+Receipt: `.context/deploy-payment-fill/.context/deploy-cycles/cycle-3-010f53d29/semantic-default-invocation.json`.
+This verifies the complete named-database repair at its owning local flow.
+[PR #1512](https://github.com/Rose-Ai-Labs/rose/pull/1512) carries the repair;
+its deployment scorecard records the shipping gates and actual rollout.
+This result makes no claim about the unrelated original purchase or authentication observations.
 
 The wrong-DB row was snapshotted before cleanup. Parent deleted only the exact
 session using task, agent, context, provider session, debug URL and ACTIVE/AGENT

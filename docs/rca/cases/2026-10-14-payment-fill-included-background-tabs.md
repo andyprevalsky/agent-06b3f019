@@ -153,9 +153,9 @@ production surface. Two old CDP fixtures gained realistic focused-root and
 parent metadata without weakening their assertions. Independent adversarial
 review passed the narrowly stated diagnosis and repair.
 
-The narrow CDP ownership repair is implemented and reproduced above. Its
-shipping gates and production rollout are tracked separately in this change's
-deploy scorecard. This case stays open for the unresolved checkout and
+The narrow CDP ownership repair is implemented and reproduced above and is
+carried by [PR #1512](https://github.com/Rose-Ai-Labs/rose/pull/1512). Its shipping
+gates and actual production rollout are recorded in the deployment scorecard. This case stays open for the unresolved checkout and
 authentication observations; the original purchase has not been replayed or
 proven to complete. The static mint cutoff remains a documented production
 configuration; changing it requires explicit approval.

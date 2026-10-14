@@ -106,7 +106,7 @@ were changed.
 
 The existing permanent gate remains registered by
 agents/tests/blackbox/benchmark.blackbox.py:637 as
- test_autoscaler_runtime_handoff_is_in_permanent_gate; its native48-test command
+ test_autoscaler_runtime_handoff_is_in_permanent_gate; its native 48-test command
  includes this owning test. The benchmark blackbox runner records that gate as
  autoscaler_runtime_handoff_permanent_gate and agents coverage runs the blackbox
  runner. No extra suite or deployment gate was introduced.
@@ -127,11 +127,16 @@ green exits 0 with 48 passed and 10/10 modes in 53.93s. The ordinary atomic cand
 53.52s with all 10 modes passing and native owners absent. Permanent stress
 on its own, without the external plugin, failed on the non-atomic fixture in
 14.55s: the same two transient inventory modes failed (8/10), with precise
-failed_cases present in stdout and native owners absent. Permanent green passed the same unchanged native test command in14.57s
-(10/10 modes, all owners absent). Final permanent48-test group passed in53.82s (48 passed,932 deselected),
-with all10 modes passing, all Popen children reaped and all recorded native
+failed_cases present in stdout and native owners absent. Permanent green passed the same unchanged native test command in 14.57s
+(10/10 modes, all owners absent). Final permanent 48-test group passed in 53.82s (48 passed, 932 deselected),
+with all 10 modes passing, all Popen children reaped and all recorded native
 owners absent. Permanent-control.private.patch passes
 git apply --check against the shared deployment revision.
+
+Integrated source `010f53d294eddad4c56c8d6cf1a3d424ca10c9a3` then passed
+all 110 agents blackbox domains under coverage, including the benchmark domain
+in 214.28s. This is source-bound full-runner verification; it does not establish
+the missing historical 9/10 failing mode or close that outcome-reproduction gap.
 
 ## Human feedback
 
