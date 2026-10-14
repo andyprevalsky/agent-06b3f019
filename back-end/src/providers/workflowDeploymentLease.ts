@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 
 export const WORKFLOW_DEPLOYMENT_LEASE_KEY = 'deployment:temporal-workflow-cutover';
 const LEASE_OPERATION_TYPE = 'TEMPORAL_WORKFLOW_DEPLOYMENT_LEASE';
@@ -28,7 +28,7 @@ export async function acquireWorkflowDeploymentLease(
     throw new Error('Workflow deployment lease timings are invalid');
   }
   const ownerId = randomUUID();
-  const acquired = await prisma.$transaction(async (tx) => {
+  const acquired = await runTransactionWithRetry(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${operationKey}))`;
     const cutoff = new Date(Date.now() - leaseMs);
     const existing = await tx.toolSideEffect.findUnique({

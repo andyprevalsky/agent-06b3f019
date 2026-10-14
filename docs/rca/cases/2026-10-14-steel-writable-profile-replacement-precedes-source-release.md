@@ -22,7 +22,6 @@ tags:
   - deploy-gate
 sources:
   - commit 3c9a5b558d7d40eac1e9b72ab0c50e62d9c277df
-  - fleet run backend-coverage-failed-20261014-193129-420021
   - agent 25acf5cf-8f9b-4e3b-ba4b-30fb935231b7
 repro: back-end/src/tests/blackbox/steel-fingerprint.profile-handoff.behavior.ts
 status: fixed
