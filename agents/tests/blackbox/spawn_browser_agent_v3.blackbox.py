@@ -20954,10 +20954,25 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh"):
         "same_session_available": True,
     }
     create_auth = AsyncMock(return_value={"id": "request-1"})
+    tool_events = AsyncMock()
+    stream_instances = []
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+    def make_stream(**kwargs):
+        stream = BrowserThinkingStream(**kwargs)
+        stream_instances.append(stream)
+        return stream
     import asyncio, copy
     from domains.spawn_browser_agent_v3 import service_crypto
     from datetime import datetime, timezone, timedelta
-    delivered, persisted, fetched = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    from domains.spawn_browser_agent_v3.handler import _drain_otp_poll as real_drain, _fetch_and_append_recent_otp_user_messages as real_poll
+    delivered, persisted, fetched, poll_completed = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    ordering = []
+    async def poll(**kwargs):
+        result = await real_poll(**kwargs)
+        ordering.append("poll_completed")
+        poll_completed.set()
+        return result
     async def fetch_emails(*args, **kwargs):
         await delivered.wait()
         if case in {"empty", "app_approval"}:
@@ -20974,16 +20989,29 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh"):
 
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
+        await stream_instances[-1].on_chunk(StreamChunk(kind="tool_call", data={"id": f"handoff-{len(model_contexts)}", "name": "request_user_assistance_for_authentication", "arguments": {}}))
         if len(model_contexts) == 1:
-            delivered.set()
+            if case != "during_drain":
+                delivered.set()
             if case == "fresh":
                 await persisted.wait()
-            else:
+                await poll_completed.wait()
+            elif case != "during_drain":
                 await fetched.wait()
+        ordering.append("decision_returned")
         return {"action": {"action": "request_user_assistance_for_authentication", "thinking": "Verification required", "params": {}}, "usage": {}, "mode": "waterfall"}
 
+    async def drain_poll(task, **kwargs):
+        if case == "during_drain":
+            delivered.set()
+        ordering.append("drain_started")
+        await real_drain(task, **kwargs)
+        ordering.append("drain_finished")
     handler = "domains.spawn_browser_agent_v3.handler."
     targets = [
+        patch(handler + "_fetch_and_append_recent_otp_user_messages", poll),
+        patch(handler + "BrowserThinkingStream", make_stream),
+        patch(handler + "_drain_otp_poll", drain_poll),
         patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_emails", fetch_emails),
         patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_sms_messages", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.service_crypto.fetch_recent_imessages", AsyncMock(return_value=[])),
@@ -20995,7 +21023,7 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh"):
         patch(handler + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
         patch(handler + "_call_browser_use_with_rotation", model_step),
         patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", tool_events),
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
         patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://shop.example/login/verify", "title": "Verify it is you"})),
         patch(handler + "prepare_browser_auth", AsyncMock(return_value={"auth_realm": "shop.example", "auth_options": {"realm": "shop.example"}, "passwords": [], "passkeys": []})),
@@ -21023,10 +21051,26 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh"):
             use_claude_mode=False, write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
         )
     assert result["status"] == "awaiting_auth_assistance"
-    assert len(model_contexts) == (2 if case == "fresh" else 1), f"handoff committed stale decision without completed native OTP input: case={case}, turns={len(model_contexts)}"
+    assert len(model_contexts) == (2 if case in {"fresh", "during_drain"} else 1), f"handoff committed stale decision without completed native OTP input: case={case}, turns={len(model_contexts)}"
     assert "847291" not in str(model_contexts[0]["turn_messages"])
-    assert case != "fresh" or any(m.get("role") == "user" and "847291" in m.get("content", "") for m in model_contexts[1]["turn_messages"])
+    assert case not in {"fresh", "during_drain"} or any(m.get("role") == "user" and "847291" in m.get("content", "") for m in model_contexts[1]["turn_messages"])
     create_auth.assert_awaited_once()
+    if case == "fresh":
+        assert ordering.index("poll_completed") < ordering.index("decision_returned")
+    if case == "during_drain":
+        assert ordering.index("decision_returned") < ordering.index("drain_started") < ordering.index("poll_completed") < ordering.index("drain_finished")
+    closures = [(call.kwargs["tool_call_id"], call.kwargs.get("status")) for call in tool_events.await_args_list if call.kwargs.get("status")]
+    expected = [("handoff-1", "ERROR"), ("handoff-2", "FINISHED")] if case in {"fresh", "during_drain"} else [("handoff-1", "FINISHED")]
+    assert closures == expected, "superseded streamed handoff lifecycle was not closed truthfully"
+    for context in model_contexts:
+        pending = set()
+        for message in context["turn_messages"]:
+            if message.get("role") == "assistant":
+                pending.update(call["id"] for call in message.get("tool_calls", []))
+            if message.get("role") == "tool":
+                assert message["tool_call_id"] in pending
+                pending.remove(message["tool_call_id"])
+        assert not pending, "orphan model tool call in retained history"
 
 @_in_browser_activity_context
 async def test_initial_auth_inventory_is_delivered_by_page_state_result():
@@ -27381,7 +27425,7 @@ async def run_all_tests():
 
     # handler statics
     await r.record_async("auth_handoff_consumes_otp_received_during_decision", test_auth_handoff_consumes_otp_received_during_decision)
-    for otp_case in ("empty", "stale", "app_approval"):
+    for otp_case in ("empty", "stale", "app_approval", "during_drain"):
         await r.record_async(f"auth_handoff_preserves_{otp_case}", lambda otp_case=otp_case: test_auth_handoff_consumes_otp_received_during_decision(otp_case))
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)
