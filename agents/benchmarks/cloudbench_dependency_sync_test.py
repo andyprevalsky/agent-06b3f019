@@ -27245,7 +27245,59 @@ private_source_allows_provider_call {command} {identity}
 """
             result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=5)
             assert result.returncode == (0 if identity == "deadbeef000001" else 1), result.stderr
-    assert 'private_source_allows_provider_call "$@" && flyctl "$@"' in fleet
+    # Exercise the actual wrapper: the protected-base fence must run before
+    # either the shared pacing authority or the native provider transport.
+    wrapper = _extract_fleet_function(fleet, "FLY() {")
+    calls = tmp_path / "native-calls"
+    paced = tmp_path / "paced-calls"
+    for admission in ("0", "1", "invalid"):
+        for identity in ("feedface000001", "683e47df5094d8", "vol_private", "vol_shared", "deadbeef000001"):
+            calls.unlink(missing_ok=True)
+            paced.unlink(missing_ok=True)
+            script = f"""set -uo pipefail
+PRIVATE_SOURCE_ID=feedface000001
+PRIVATE_SOURCE_VOLUME_ID=vol_private
+SHARED_WARM_ID=683e47df5094d8
+SHARED_WARM_VOLUME_ID=vol_shared
+CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION={admission}
+flyctl() {{ printf '%s\\n' "$*" >> "$NATIVE_CALLS"; }}
+cloudbench_mutation_admission() {{ printf 'pace\\n' >> "$PACED_CALLS"; }}
+{guard}
+{wrapper}
+FLY machine update {identity}
+"""
+            result = subprocess.run(["bash", "-c", script],
+                env={"PATH": os.environ["PATH"], "NATIVE_CALLS": str(calls), "PACED_CALLS": str(paced)},
+                capture_output=True, text=True, check=False, timeout=5)
+            allowed = identity == "deadbeef000001" and admission != "invalid"
+            assert (result.returncode == 0) is allowed, result.stderr
+            assert calls.exists() is allowed
+            assert not paced.exists(), "config-update wrapper entered clone pacing"
+    for pacing_status in (0, 1):
+        calls.unlink(missing_ok=True)
+        paced.unlink(missing_ok=True)
+        script = f"""set -uo pipefail
+PRIVATE_SOURCE_ID=feedface000001
+PRIVATE_SOURCE_VOLUME_ID=vol_private
+SHARED_WARM_ID=683e47df5094d8
+SHARED_WARM_VOLUME_ID=vol_shared
+CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=1
+ROOT_DIR=fixture
+APP=fixture-app
+FLEET_OWNER_PID_START=fixture-birth
+clone_timeout=1
+flyctl() {{ printf '%s\\n' "$*" >> "$NATIVE_CALLS"; }}
+cloudbench_mutation_admission() {{ printf 'pace\\n' >> "$PACED_CALLS"; return {pacing_status}; }}
+{guard}
+{wrapper}
+FLY machine clone feedface000001
+"""
+        result = subprocess.run(["bash", "-c", script],
+            env={"PATH": os.environ["PATH"], "NATIVE_CALLS": str(calls), "PACED_CALLS": str(paced)},
+            capture_output=True, text=True, check=False, timeout=5)
+        assert (result.returncode == 0) is (pacing_status == 0), result.stderr
+        assert paced.read_text() == "pace\n"
+        assert calls.exists() is (pacing_status == 0), "native clone ran despite denied pacing"
 
 
 def test_private_fleet_source_capture_is_immutable_and_pool_scoped(tmp_path: Path) -> None:
