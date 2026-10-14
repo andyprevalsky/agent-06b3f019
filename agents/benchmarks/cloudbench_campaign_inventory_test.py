@@ -2483,3 +2483,107 @@ def test_campaign_inventory_reconciliation_mutation_flags_are_parent_owned(tmp_p
          'reconcile_stale_fleet_registries; status=$?; [ "$status" = '+('1' if case=='dead-recovery-refused' else '0')+' ] && [ "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED" = '+('1' if case=='dead-recovery-refused' else '0')+' ]\n'))
     result = subprocess.run(['bash',str(script)],capture_output=True,text=True,timeout=10)
     assert result.returncode == 0, result.stdout+result.stderr
+
+
+@pytest.mark.parametrize('case', ['valid', 'provider', 'malformed', 'wrong-type', 'missing', 'foreign', 'bad-epoch', 'duplicate'])
+def test_pinned_snapshot_epoch_distinguishes_unknown_from_absence(tmp_path, case):
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    start = source.index('snapshot_created_epoch() {')
+    function = source[start:source.index('\n}\n', start)+3]
+    row = {'id': 'vs_owned', 'created_at': '2026-10-13T15:06:27Z'}
+    payload = [row]
+    if case in ('missing', 'foreign'):
+        payload = [] if case == 'missing' else [dict(row, id='vs_foreign')]
+    elif case == 'bad-epoch':
+        payload = [dict(row, created_at='invalid')]
+    elif case == 'duplicate':
+        payload = [row, row]
+    elif case == 'wrong-type':
+        payload = {'id': 'vs_owned'}
+    body = 'return 75' if case == 'provider' else 'printf %s '+shlex.quote('invalid-json' if case == 'malformed' else json.dumps(payload))
+    result = subprocess.run(['bash', '-c', 'set -uo pipefail\nAPP=fixture-app\nVOL_ID=vol_owned\nFLY() { '+body+'; }\n'+function+'\nsnapshot_created_epoch vs_owned\n'], capture_output=True, text=True, timeout=10)
+    if case == 'valid':
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == '1791903987'
+    else:
+        assert result.returncode == (1 if case in ('missing', 'foreign') else 75), result.stdout+result.stderr
+        assert not result.stdout.strip()
+        assert 'snapshot epoch' in result.stderr
+        assert 'invalid-json' not in result.stderr
+
+
+@pytest.mark.parametrize('case', ['valid', 'stale', 'wrong-node', 'wrong-python', 'wrong-snapshot', 'provider', 'malformed', 'captured'])
+def test_pinned_snapshot_preflight_refuses_uncertainty_without_maintenance(tmp_path, case):
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    def function(name):
+        start = source.index(name+'() {')
+        return source[start:source.index('\n}\n', start)+3]
+    state = tmp_path/'receipt'
+    state.write_text(('foreign' if case=='wrong-node' else 'node')+' '+('foreign' if case=='wrong-python' else 'python')+' 1791903927 '+('vs_foreign' if case=='wrong-snapshot' else 'vs_owned')+'\n')
+    snapshots = json.dumps([{'id':'vs_owned','created_at':'2026-10-12T15:06:27Z' if case=='stale' else '2026-10-13T15:06:27Z'}])
+    native = 'return 75' if case=='provider' else 'printf %s '+shlex.quote('invalid-json' if case=='malformed' else snapshots)
+    setup = 'SNAPSHOTS_JSON='+shlex.quote(snapshots)+'\nHYDRATED_WARM_DEPS_STATE="$(cat "$WARM_DEPS_STATE_FILE")"\n' if case=='captured' else 'HYDRATED_WARM_DEPS_STATE=""\n'
+    script = 'set -uo pipefail\nPRIVATE_SOURCE_FILE=""\nAPP=fixture\nVOL_ID=vol_owned\nSNAP_ID=vs_owned\nROOT_DIR=fixture\nBENCH_REF=fixture\nwarm_json="[]"\nCLOUDBENCH_WARM_DEPS_AUTOREFRESH=0\nCLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)\nWARM_DEPS_STATE_FILE='+shlex.quote(str(state))+'\n'+setup+'FLY() { '+native+'; }\ncloudbench_node_dependency_fingerprint() { printf node; }\ncloudbench_manifest_fingerprint() { printf python; }\ngit() { return 0; }\n'+ '\n'.join(function(n) for n in ['warm_deps_recorded_state','snapshot_created_epoch','warm_deps_preflight'])+'\nwarm_deps_preflight\n'
+    result = subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=10)
+    assert (result.returncode==0)==(case in ('valid','captured')), result.stdout+result.stderr
+    if case in ('provider','malformed'):
+        assert 'freshness could not be verified' in result.stderr
+        assert 'STALE' not in result.stderr
+    elif case not in ('valid','captured'):
+        assert 'STALE' in result.stderr
+
+
+@pytest.mark.parametrize('case', ['valid','missing','missing-hash','wrong-hash','wrong-path','symlink','unsafe-mode','foreign-owner','malformed','wrong-type','duplicate-id','missing-id','oversize'])
+def test_configured_snapshot_inventory_file_authority(tmp_path, case):
+    import hashlib
+    source=(ROOT/'scripts/run-bench-fleet').read_text()
+    start=source.index('configured_warm_snapshot_inventory() {')
+    function=source[start:source.index('\n}\n',start)+3]
+    path=tmp_path/'cloudbench-warm-snapshot-inventory.fixture.json'
+    data=b'[{"id":"vs_owned"}]'
+    if case=='malformed': data=b'invalid-json'
+    if case=='wrong-type': data=b'{}'
+    if case=='duplicate-id': data=b'[{"id":"vs_owned"},{"id":"vs_owned"}]'
+    if case=='missing-id': data=b'[{}]'
+    if case=='oversize': data=b' '*(2097153)
+    path.write_bytes(data);path.chmod(0o600)
+    digest=hashlib.sha256(data).hexdigest()
+    if case=='missing':path.unlink()
+    if case=='missing-hash':digest=''
+    if case=='wrong-hash':digest='0'*64
+    if case=='wrong-path':path=tmp_path/'foreign.json';path.write_bytes(data);path.chmod(0o600)
+    if case=='symlink':
+        target=tmp_path/'target';path.rename(target);path.symlink_to(target)
+    if case=='unsafe-mode':path.chmod(0o644)
+    script='set -uo pipefail\nGIT_COMMON_DIR='+shlex.quote(str(tmp_path))+'\nMACHINE_NAME=fixture\nCLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE='+shlex.quote(str(path))+'\nCLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256='+shlex.quote(digest)+'\n'+function+'\nconfigured_warm_snapshot_inventory\n'
+    if case=='foreign-owner':
+        script="python3() { shift 4; command python3 -I -S -B -c 'import os,sys;uid=os.geteuid();os.geteuid=lambda:uid+1;exec(compile(sys.stdin.read(),\"<owner-negative>\",\"exec\"))' \"$@\"; }\n"+script
+    result=subprocess.run(['bash','-c',script],capture_output=True,timeout=10)
+    assert (result.returncode==0)==(case=='valid'), result.stderr
+    if case=='valid': assert result.stdout==data
+    else: assert not result.stdout and b'configured snapshot inventory refused' in result.stderr
+
+
+@pytest.mark.parametrize('case',['valid','foreign-mount','foreign-app','wrong-node','wrong-python','pin-mismatch','missing-snapshot','incomplete','stale'])
+def test_configured_snapshot_inventory_uses_current_donor_proof(tmp_path, case):
+    import hashlib
+    source=(ROOT/'scripts/run-bench-fleet').read_text()
+    def function(name):
+        start=source.index(name+'() {');return source[start:source.index('\n}\n',start)+3]
+    start=source.index('if { [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]')
+    end=source.index('\nelse\n    # `|| echo', start)
+    block=source[start:end]+'\nfi\n'
+    node='1'*64;python='2'*64
+    key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+    machine={'id':'warm','config':{'mounts':[{'volume':'vol_owned'}],'metadata':{key:node+' '+python+' 1791903927 vs_owned vol_owned warm fixture-app'}}}
+    if case=='foreign-mount':machine['config']['mounts'][0]['volume']='vol_foreign'
+    snaps=[{'id':'vs_owned','created_at':'2026-10-13T15:06:27Z','status':'created','size':100}]
+    if case=='missing-snapshot':snaps=[]
+    if case=='incomplete':snaps[0]['status']='running'
+    if case=='stale':snaps[0]['created_at']='1970-01-01T00:00:01Z'
+    path=tmp_path/'cloudbench-warm-snapshot-inventory.fixture.json';path.write_text(json.dumps(snaps));path.chmod(0o600)
+    script='set -uo pipefail\nsource '+shlex.quote(str(ROOT/'scripts/lib/cloudbench-env.sh'))+'\nGIT_COMMON_DIR='+shlex.quote(str(tmp_path))+'\nMACHINE_NAME=fixture\nROOT_DIR=fixture\nAPP='+('foreign-app' if case=='foreign-app' else 'fixture-app')+'\nWARM_ID=warm\nVOL_ID=vol_owned\nCLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)\nCLOUDBENCH_SNAPSHOT_ID='+('vs_foreign' if case=='pin-mismatch' else 'vs_owned')+'\nCLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE='+shlex.quote(str(path))+'\nCLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256='+hashlib.sha256(path.read_bytes()).hexdigest()+'\nwarm_json='+shlex.quote(json.dumps([machine]))+'\ncloudbench_node_dependency_fingerprint() { printf '+('0'*64 if case=='wrong-node' else node)+'; }\ncloudbench_manifest_fingerprint() { printf '+('0'*64 if case=='wrong-python' else python)+'; }\nFLY() { echo FORBIDDEN_NATIVE >&2; exit 99; }\n'+function('configured_warm_snapshot_inventory')+'\n'+block+'\nprintf "%s" "$HYDRATED_WARM_DEPS_STATE"\n'
+    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=10)
+    assert (result.returncode==0)==(case=='valid'),result.stdout+result.stderr
+    assert 'FORBIDDEN_NATIVE' not in result.stderr
+    if case=='valid': assert result.stdout.endswith(node+' '+python+' 1791903927 vs_owned')

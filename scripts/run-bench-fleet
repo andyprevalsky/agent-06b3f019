@@ -1051,6 +1051,43 @@ hydrate_warm_deps_state() {
     fi
     return 0
 }
+configured_warm_snapshot_inventory() {
+    python3 -I -S -B - "$CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE" \
+        "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256:-}" "$GIT_COMMON_DIR" "$MACHINE_NAME" <<'PYCONFIG'
+import hashlib, json, os, re, stat, sys
+try:
+    path, digest, common, machine = sys.argv[1:]
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("required digest")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", machine):
+        raise ValueError("machine name")
+    expected = os.path.join(common, "cloudbench-warm-snapshot-inventory." + machine + ".json")
+    if path != expected or os.path.realpath(common) != common or os.path.realpath(path) != path:
+        raise ValueError("proof path")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_mode & 0o077 or before.st_size > 2097152:
+            raise ValueError("proof file authority")
+        data = stream.read(2097153)
+        after = os.fstat(stream.fileno())
+    fields = lambda v: (v.st_dev, v.st_ino, v.st_size, v.st_mtime_ns, v.st_uid, v.st_mode)
+    if fields(before) != fields(after) or fields(after) != fields(os.lstat(path)):
+        raise ValueError("proof file changed")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("proof digest")
+    value = json.loads(data)
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise ValueError("proof inventory type")
+    ids = [row.get("id") for row in value]
+    if any(not isinstance(identity, str) or not identity for identity in ids) or len(set(ids)) != len(ids):
+        raise ValueError("proof snapshot identities")
+    sys.stdout.buffer.write(data)
+except (OSError, ValueError, TypeError) as error:
+    print("configured snapshot inventory refused (" + type(error).__name__ + ")", file=sys.stderr)
+    raise SystemExit(75)
+PYCONFIG
+}
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
@@ -12981,9 +13018,29 @@ print(expected)
 # when the auto-selected newest one is stale — e.g. missing the dep-fingerprint
 # marker → cloudbench-sync-deps.sh FATAL — pin a known-good one until a fresh
 # warm image/snapshot is baked).
+if { [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ] || [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_SHA256:-}" ]; } \
+    && { [ -z "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ] || [ -z "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; }; then
+    echo "❌ configured snapshot inventory requires an explicit file and snapshot pin" >&2
+    exit 1
+fi
 if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
     SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
     echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
+    if [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]; then
+        SNAPSHOTS_JSON="$(configured_warm_snapshot_inventory)" || exit 1
+        _proof_node="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || exit 1
+        _proof_python="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || exit 1
+        HYDRATED_WARM_DEPS_STATE="$(printf '{"machines":%s,"snapshots":%s}' "$warm_json" "$SNAPSHOTS_JSON" | \
+            cloudbench_warm_deps_state_from_inventory "$APP" "$WARM_ID" "$VOL_ID" "$_proof_node" "$_proof_python")" || {
+            echo "❌ configured snapshot inventory does not prove current donor dependencies" >&2
+            exit 1
+        }
+        read -r _ _ _ _proof_snapshot <<< "$HYDRATED_WARM_DEPS_STATE" || exit 1
+        if [ "$_proof_snapshot" != "$SNAP_ID" ]; then
+            echo "❌ configured snapshot inventory does not prove the pinned snapshot" >&2
+            exit 1
+        fi
+    fi
 else
     # `|| echo '[]'` made a failed provider read indistinguishable from "this
     # volume has no snapshots", and the caller then aborts the whole lane with
@@ -13078,26 +13135,39 @@ fi
 # carries in a git-common state file (shared across sibling workspaces); heal
 # centrally ONCE when it drifts.
 snapshot_created_epoch() {  # snapshot_created_epoch <snap_id> [captured-inventory]
-    local snapshots
+    local snapshots query_status=0
     if [ "$#" -gt 1 ]; then
         snapshots="$2"
     else
-        snapshots="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        snapshots="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null)" || query_status=$?
+        if [ "$query_status" -ne 0 ]; then
+            echo "snapshot epoch provider read failed (exit=$query_status)" >&2
+            return 75
+        fi
     fi
     printf '%s' "$snapshots" | SID="$1" python3 -c '
 import json, os, sys
 from datetime import datetime
-try: snaps = json.load(sys.stdin) or []
-except Exception: snaps = []
-for s in snaps:
-    if s.get("id") == os.environ["SID"]:
-        try:
-            print(int(datetime.fromisoformat(str(s.get("created_at","")).replace("Z","+00:00")).timestamp()))
-        except ValueError:
-            print(0)
-        break
-' 2>/dev/null || true
+try:
+    snaps = json.load(sys.stdin)
+    if not isinstance(snaps, list) or any(not isinstance(s, dict) for s in snaps):
+        raise ValueError("inventory type")
+    matches = [s for s in snaps if s.get("id") == os.environ["SID"]]
+    if not matches:
+        print("snapshot epoch exact snapshot absent", file=sys.stderr)
+        raise SystemExit(1)
+    if len(matches) != 1:
+        raise ValueError("duplicate snapshot identity")
+    epoch = int(datetime.fromisoformat(str(matches[0].get("created_at", "")).replace("Z", "+00:00")).timestamp())
+    if epoch <= 0:
+        raise ValueError("nonpositive epoch")
+    print(epoch)
+except (ValueError, TypeError, OverflowError, OSError) as error:
+    print("snapshot epoch inventory invalid (" + type(error).__name__ + ")", file=sys.stderr)
+    raise SystemExit(75)
+'
 }
+
 snapshot_is_complete_exact() {  # snapshot_is_complete_exact <snap_id>
     FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SNAP_ID="$1" python3 -c '
 import json, os, sys
@@ -13138,9 +13208,15 @@ warm_deps_preflight() {
         # the donor, volume and manifests. Reuse that captured inventory: an
         # uncertain later provider read is not evidence that proof went stale.
         if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
-            snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")"
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")" || {
+                echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
+                return 1
+            }
         else
-            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || {
+                echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
+                return 1
+            }
         fi
         if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
            [ "$_rest" = "$SNAP_ID" ] && \
