@@ -740,7 +740,7 @@ async def test_browser_verifier_context_uses_real_capture_not_blank_placeholder(
             return [{"step": 1, "action": "goto", "result": {"success": True}}]
 
     async def browser_state(capture):
-        dom = DOMService.__new__(DOMService)
+        dom = DOMService("ws://unused-verifier-capture-fixture")
         dom._selector_map = {}
         dom._session = SimpleNamespace(
             get_browser_state_summary=AsyncMock(
@@ -10465,10 +10465,17 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     dom.selector_map = {}
     ah = MagicMock()
     ah.record_action = AsyncMock()
+
+    async def drag(dom_service, action_history, params):
+        await action_history.record_action(
+            dom_service=dom_service, action="drag", params=params, result={"success": True},
+        )
+        return {"success": True, "message": "Dragged (1,2) → (3,4)"}
+
     with patch(
         "browser_tools.tool_executor_v2._execute_drag",
         new_callable=AsyncMock,
-        return_value={"success": True, "message": "Dragged (1,2) → (3,4)"},
+        side_effect=drag,
     ) as drag_mock:
         out = await execute_action(
             dom,
@@ -10487,7 +10494,11 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert out["success"] is True
     drag_mock.assert_awaited_once()
     assert drag_mock.await_args.args[0] is dom
-    assert drag_mock.await_args.args[1] is ah
+    ah.record_action.assert_awaited_once()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["dom_service"] is dom
+    assert recorded["action"] == "drag" and recorded["result"] == {"success": True}
+    assert recorded["params"] == {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "steps": 10}
     assert drag_mock.await_args.args[2]["start_x"] == 1
     assert drag_mock.await_args.args[2]["end_y"] == 4
 
@@ -14608,6 +14619,7 @@ async def test_evaluate_awaits_promises():
     ctx = SimpleNamespace(
         action_name="evaluate",
         params={"code": "(async () => ({ok:true,size:3}))()"},
+        model_params=None,
         session=session,
         dom_service=SimpleNamespace(),
         action_history=history,
@@ -19564,7 +19576,7 @@ async def test_dom_service_get_page_image_urls_reads_fresh_snapshot_without_scre
             selector_map=selector_map,
         ),
     )
-    service = DOMService.__new__(DOMService)
+    service = DOMService("ws://unused-page-image-fixture")
     service._selector_map = {}
     service._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=snapshot))
 
