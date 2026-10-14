@@ -1,10 +1,10 @@
 {
   "schema_version": 4,
-  "snapshot_at": "2026-10-14T19:00:15.629533+00:00",
+  "snapshot_at": "2026-10-14T20:26:58.831922+00:00",
   "original_started_at": "2026-10-12T18:39:09+00:00",
-  "wall_seconds": 174066.62953305244,
+  "wall_seconds": 179269.8319220543,
   "original_attempts": 31,
-  "resumed_attempts": 211,
+  "resumed_attempts": 234,
   "all_attempts": [
     {
       "schema_version": 1,
@@ -3151,15 +3151,314 @@
       "status": "passed",
       "exit_code": 0,
       "log": "logs/chat-router-failover-live-20261014-185420-4026654.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-prompt-unflagged",
+      "started_at": "2026-10-14T19:23:13Z",
+      "finished_at": "2026-10-14T19:23:14Z",
+      "started_epoch": 1792005793.4604013,
+      "finished_epoch": 1792005794.3940306,
+      "duration_seconds": 0.9,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/approved-sms-prompt-unflagged-20261014-192313-130498.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-prompt-approved",
+      "started_at": "2026-10-14T19:25:07Z",
+      "finished_at": "2026-10-14T19:25:08Z",
+      "started_epoch": 1792005907.6161768,
+      "finished_epoch": 1792005908.4786325,
+      "duration_seconds": 0.9,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/approved-sms-prompt-approved-20261014-192507-215799.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-agent-behavior",
+      "started_at": "2026-10-14T19:25:08Z",
+      "finished_at": "2026-10-14T19:25:08Z",
+      "started_epoch": 1792005908.536656,
+      "finished_epoch": 1792005908.7822864,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/approved-sms-agent-behavior-20261014-192508-217274.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-trajectory",
+      "started_at": "2026-10-14T19:25:08Z",
+      "finished_at": "2026-10-14T19:25:09Z",
+      "started_epoch": 1792005908.838946,
+      "finished_epoch": 1792005909.0839286,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/approved-sms-trajectory-20261014-192508-217407.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approval-postfix-agents",
+      "started_at": "2026-10-14T19:22:20Z",
+      "finished_at": "2026-10-14T19:25:44Z",
+      "started_epoch": 1792005740.9658723,
+      "finished_epoch": 1792005944.6199348,
+      "duration_seconds": 203.7,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/approval-postfix-agents-20261014-192220-94965.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-approved-fixtures-focused-cohort",
+      "started_at": "2026-10-14T19:23:02Z",
+      "finished_at": "2026-10-14T19:25:49Z",
+      "started_epoch": 1792005782.7340045,
+      "finished_epoch": 1792005949.8293326,
+      "duration_seconds": 167.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-approved-fixtures-focused-cohort-20261014-192302-121742.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-command-structural",
+      "started_at": "2026-10-14T19:22:35Z",
+      "finished_at": "2026-10-14T19:27:38Z",
+      "started_epoch": 1792005755.1825814,
+      "finished_epoch": 1792006058.606292,
+      "duration_seconds": 303.4,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/approved-sms-command-structural-20261014-192235-98083.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-frontend-format",
+      "started_at": "2026-10-14T19:40:22Z",
+      "finished_at": "2026-10-14T19:40:34Z",
+      "started_epoch": 1792006822.1888242,
+      "finished_epoch": 1792006834.891012,
+      "duration_seconds": 12.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-frontend-format-20261014-194022-383994.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-frontend-build",
+      "started_at": "2026-10-14T19:40:22Z",
+      "finished_at": "2026-10-14T19:40:44Z",
+      "started_epoch": 1792006822.18859,
+      "finished_epoch": 1792006844.843581,
+      "duration_seconds": 22.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-frontend-build-20261014-194022-383993.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-frontend-lint",
+      "started_at": "2026-10-14T19:40:22Z",
+      "finished_at": "2026-10-14T19:40:51Z",
+      "started_epoch": 1792006822.1872497,
+      "finished_epoch": 1792006851.1047685,
+      "duration_seconds": 28.9,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-frontend-lint-20261014-194022-383990.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-prompt-unflagged",
+      "started_at": "2026-10-14T19:41:19Z",
+      "finished_at": "2026-10-14T19:41:20Z",
+      "started_epoch": 1792006879.3563294,
+      "finished_epoch": 1792006880.4226742,
+      "duration_seconds": 1.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/main-d1b-prompt-unflagged-20261014-194119-422614.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-prompt-approved",
+      "started_at": "2026-10-14T19:42:56Z",
+      "finished_at": "2026-10-14T19:42:57Z",
+      "started_epoch": 1792006976.2867725,
+      "finished_epoch": 1792006977.148023,
+      "duration_seconds": 0.9,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-prompt-approved-20261014-194256-470484.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-agent-behavior",
+      "started_at": "2026-10-14T19:42:57Z",
+      "finished_at": "2026-10-14T19:42:57Z",
+      "started_epoch": 1792006977.198623,
+      "finished_epoch": 1792006977.446496,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-agent-behavior-20261014-194257-471505.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-trajectory",
+      "started_at": "2026-10-14T19:42:57Z",
+      "finished_at": "2026-10-14T19:42:57Z",
+      "started_epoch": 1792006977.5009542,
+      "finished_epoch": 1792006977.7204614,
+      "duration_seconds": 0.2,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-trajectory-20261014-194257-471730.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-frontend-coverage",
+      "started_at": "2026-10-14T19:40:22Z",
+      "finished_at": "2026-10-14T19:43:09Z",
+      "started_epoch": 1792006822.183489,
+      "finished_epoch": 1792006989.1912863,
+      "duration_seconds": 167.0,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-frontend-coverage-20261014-194022-383988.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-command-structural",
+      "started_at": "2026-10-14T19:40:22Z",
+      "finished_at": "2026-10-14T19:45:41Z",
+      "started_epoch": 1792006822.189631,
+      "finished_epoch": 1792007141.49162,
+      "duration_seconds": 319.3,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/main-d1b-command-structural-20261014-194022-383998.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "current-main-primary-db-sync",
+      "started_at": "2026-10-14T19:43:10Z",
+      "finished_at": "2026-10-14T19:45:49Z",
+      "started_epoch": 1792006990.6947348,
+      "finished_epoch": 1792007149.1356294,
+      "duration_seconds": 158.4,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/current-main-primary-db-sync-20261014-194310-476939.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approval-postfix-integrated-agents",
+      "started_at": "2026-10-14T19:43:02Z",
+      "finished_at": "2026-10-14T19:47:22Z",
+      "started_epoch": 1792006982.9680834,
+      "finished_epoch": 1792007242.0570734,
+      "duration_seconds": 259.1,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/approval-postfix-integrated-agents-20261014-194302-473331.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "credential-health",
+      "started_at": "2026-10-14T20:03:07Z",
+      "finished_at": "2026-10-14T20:03:08Z",
+      "started_epoch": 1792008187.3411038,
+      "finished_epoch": 1792008188.0536416,
+      "duration_seconds": 0.7,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/credential-health-20261014-200307-715986.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "amplitude-live",
+      "started_at": "2026-10-14T20:03:07Z",
+      "finished_at": "2026-10-14T20:03:10Z",
+      "started_epoch": 1792008187.3506136,
+      "finished_epoch": 1792008190.8662057,
+      "duration_seconds": 3.5,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/amplitude-live-20261014-200307-715988.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "chat-router-failover-live",
+      "started_at": "2026-10-14T20:03:10Z",
+      "finished_at": "2026-10-14T20:03:14Z",
+      "started_epoch": 1792008190.9466662,
+      "finished_epoch": 1792008194.1807122,
+      "duration_seconds": 3.2,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/chat-router-failover-live-20261014-200310-717099.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "amplitude-live",
+      "started_at": "2026-10-14T20:06:44Z",
+      "finished_at": "2026-10-14T20:06:53Z",
+      "started_epoch": 1792008404.2334352,
+      "finished_epoch": 1792008413.765778,
+      "duration_seconds": 9.5,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/amplitude-live-20261014-200644-750588.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "chat-router-failover-live",
+      "started_at": "2026-10-14T20:06:53Z",
+      "finished_at": "2026-10-14T20:07:10Z",
+      "started_epoch": 1792008413.827064,
+      "finished_epoch": 1792008430.8414106,
+      "duration_seconds": 17.0,
+      "status": "passed",
+      "exit_code": 0,
+      "log": "logs/chat-router-failover-live-20261014-200653-752792.log"
     }
   ],
   "all_attempts_retained": true,
   "attempt_statuses": {
-    "failed": 40,
-    "passed": 202
+    "failed": 46,
+    "passed": 219
   },
   "interrupted_exit143_count": 2,
-  "summed_attempt_seconds": 42253.8,
+  "summed_attempt_seconds": 43934.6,
   "all_lane_attempt_accounting": {
     "prompt-approval": {
       "attempts": 12,
@@ -3272,28 +3571,30 @@
       "interval_union_seconds": 5499.804498195648
     },
     "credential-health": {
-      "attempts": 5,
+      "attempts": 6,
       "statuses": {
-        "passed": 5
+        "passed": 6
       },
-      "summed_attempt_seconds": 9.6,
-      "interval_union_seconds": 9.649352550506592
+      "summed_attempt_seconds": 10.299999999999999,
+      "interval_union_seconds": 10.361890316009521
     },
     "amplitude-live": {
-      "attempts": 5,
+      "attempts": 7,
       "statuses": {
-        "passed": 5
+        "passed": 6,
+        "failed": 1
       },
-      "summed_attempt_seconds": 84.79999999999998,
-      "interval_union_seconds": 84.8327898979187
+      "summed_attempt_seconds": 97.79999999999998,
+      "interval_union_seconds": 97.88072490692139
     },
     "chat-router-failover-live": {
-      "attempts": 5,
+      "attempts": 7,
       "statuses": {
-        "passed": 5
+        "passed": 6,
+        "failed": 1
       },
-      "summed_attempt_seconds": 83.7,
-      "interval_union_seconds": 83.65672278404236
+      "summed_attempt_seconds": 103.9,
+      "interval_union_seconds": 103.90511536598206
     },
     "seed-memory-ratchet": {
       "attempts": 3,
@@ -4133,6 +4434,150 @@
       },
       "summed_attempt_seconds": 1752.2,
       "interval_union_seconds": 1752.1653480529785
+    },
+    "approved-sms-prompt-unflagged": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 0.9,
+      "interval_union_seconds": 0.9336292743682861
+    },
+    "approved-sms-prompt-approved": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.9,
+      "interval_union_seconds": 0.8624556064605713
+    },
+    "approved-sms-agent-behavior": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.24563050270080566
+    },
+    "approved-sms-trajectory": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.24498248100280762
+    },
+    "approval-postfix-agents": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 203.7,
+      "interval_union_seconds": 203.65406250953674
+    },
+    "sms-approved-fixtures-focused-cohort": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 167.1,
+      "interval_union_seconds": 167.09532809257507
+    },
+    "approved-sms-command-structural": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 303.4,
+      "interval_union_seconds": 303.4237105846405
+    },
+    "main-d1b-frontend-format": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 12.7,
+      "interval_union_seconds": 12.702187776565552
+    },
+    "main-d1b-frontend-build": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 22.7,
+      "interval_union_seconds": 22.654990911483765
+    },
+    "main-d1b-frontend-lint": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 28.9,
+      "interval_union_seconds": 28.917518854141235
+    },
+    "main-d1b-prompt-unflagged": {
+      "attempts": 1,
+      "statuses": {
+        "failed": 1
+      },
+      "summed_attempt_seconds": 1.1,
+      "interval_union_seconds": 1.0663447380065918
+    },
+    "main-d1b-prompt-approved": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.9,
+      "interval_union_seconds": 0.8612504005432129
+    },
+    "main-d1b-agent-behavior": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.24787306785583496
+    },
+    "main-d1b-trajectory": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 0.2,
+      "interval_union_seconds": 0.21950721740722656
+    },
+    "main-d1b-frontend-coverage": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 167.0,
+      "interval_union_seconds": 167.00779724121094
+    },
+    "main-d1b-command-structural": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 319.3,
+      "interval_union_seconds": 319.30198907852173
+    },
+    "current-main-primary-db-sync": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 158.4,
+      "interval_union_seconds": 158.44089460372925
+    },
+    "approval-postfix-integrated-agents": {
+      "attempts": 1,
+      "statuses": {
+        "passed": 1
+      },
+      "summed_attempt_seconds": 259.1,
+      "interval_union_seconds": 259.08898997306824
     }
   },
   "failed_interrupted_attempts": [
@@ -4655,14 +5100,93 @@
       "status": "failed",
       "exit_code": 1,
       "log": "logs/current-steel-prompt-unflagged-20261014-184147-3768624.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approved-sms-prompt-unflagged",
+      "started_at": "2026-10-14T19:23:13Z",
+      "finished_at": "2026-10-14T19:23:14Z",
+      "started_epoch": 1792005793.4604013,
+      "finished_epoch": 1792005794.3940306,
+      "duration_seconds": 0.9,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/approved-sms-prompt-unflagged-20261014-192313-130498.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "approval-postfix-agents",
+      "started_at": "2026-10-14T19:22:20Z",
+      "finished_at": "2026-10-14T19:25:44Z",
+      "started_epoch": 1792005740.9658723,
+      "finished_epoch": 1792005944.6199348,
+      "duration_seconds": 203.7,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/approval-postfix-agents-20261014-192220-94965.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "sms-approved-fixtures-focused-cohort",
+      "started_at": "2026-10-14T19:23:02Z",
+      "finished_at": "2026-10-14T19:25:49Z",
+      "started_epoch": 1792005782.7340045,
+      "finished_epoch": 1792005949.8293326,
+      "duration_seconds": 167.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/sms-approved-fixtures-focused-cohort-20261014-192302-121742.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "main-d1b-prompt-unflagged",
+      "started_at": "2026-10-14T19:41:19Z",
+      "finished_at": "2026-10-14T19:41:20Z",
+      "started_epoch": 1792006879.3563294,
+      "finished_epoch": 1792006880.4226742,
+      "duration_seconds": 1.1,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/main-d1b-prompt-unflagged-20261014-194119-422614.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "amplitude-live",
+      "started_at": "2026-10-14T20:03:07Z",
+      "finished_at": "2026-10-14T20:03:10Z",
+      "started_epoch": 1792008187.3506136,
+      "finished_epoch": 1792008190.8662057,
+      "duration_seconds": 3.5,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/amplitude-live-20261014-200307-715988.log"
+    },
+    {
+      "schema_version": 1,
+      "run_id": "20261012-234924-2614623",
+      "stage": "chat-router-failover-live",
+      "started_at": "2026-10-14T20:03:10Z",
+      "finished_at": "2026-10-14T20:03:14Z",
+      "started_epoch": 1792008190.9466662,
+      "finished_epoch": 1792008194.1807122,
+      "duration_seconds": 3.2,
+      "status": "failed",
+      "exit_code": 1,
+      "log": "logs/chat-router-failover-live-20261014-200310-717099.log"
     }
   ],
   "nonoverlapping_accounting": {
-    "recorded_gates_review_control_seconds_NOT_continuous_CPU": 29363.066125392914,
+    "recorded_gates_review_control_seconds_NOT_continuous_CPU": 32850.279802799225,
     "late_collection_unclassified_seconds": 2671.3136649131775,
-    "decided_and_new_exact_wire_request_windows_outside_recorded_activity_NOT_measured_idle": 83343.12990808487,
+    "known_approved_or_withdrawn_snapshot_windows_outside_recorded_activity_NOT_measured_idle": 43184.346182346344,
+    "pending_menu_snapshot_window_outside_recorded_activity_NOT_measured_idle": 0,
     "quota_migration_proxy_outside_activity_seconds": 3085.6228880882263,
-    "unclassified_engineering_setup_conditional_authority_wait_seconds_NOT_user_delay": 55603.49694657326
+    "unclassified_engineering_setup_conditional_authority_wait_seconds_NOT_user_delay": 97478.26938390732
   },
   "reconciliation_difference_seconds": 0.0,
   "factory_intervals": [
@@ -4719,6 +5243,18 @@
       "start": "2026-10-14T18:39:16.237637+00:00",
       "recorded_finish": "2026-10-14T18:56:10.448359+00:00",
       "actual_accounting_finish": "2026-10-14T18:56:10.448359+00:00"
+    },
+    {
+      "stage": "runtime-blackbox",
+      "start": "2026-10-14T19:21:13.349977+00:00",
+      "recorded_finish": "2026-10-14T19:28:41.698889+00:00",
+      "actual_accounting_finish": "2026-10-14T19:28:41.698889+00:00"
+    },
+    {
+      "stage": "runtime-blackbox",
+      "start": "2026-10-14T19:36:19.967156+00:00",
+      "recorded_finish": null,
+      "snapshot_cap": "2026-10-14T20:26:58.831922+00:00"
     }
   ],
   "old_decoder_request": {
@@ -4867,6 +5403,13 @@
       "sha256": "1c8066961ee774956a45b466a6e0533dd44542e5c1f0d03cb01e9e9b5d0d6296",
       "reported_cost_cents": 0.0,
       "task_count": 1
+    },
+    {
+      "run_id": "444136cc-2def-4995-bc1d-4a8014e96e70",
+      "path": "agents/benchmarks/runs/20261014_192533_444136cc-2def-4995-bc1d-4a8014e96e70_sms-supervisor-closed-no-spawn,sms-supervisor-fill-form-searches-then-delegates,sms-supervisor-open-spawns-agent.json",
+      "sha256": "8e41061ce7fc48a92098f23d53abb28467d0e487bfc0721498fd12c108d23806",
+      "reported_cost_cents": 0.0,
+      "task_count": 3
     }
   ],
   "earlier_sms_before_approved_projection": {
@@ -4907,22 +5450,75 @@
   "provenance": {
     "input_sha256": {
       ".context/tamy-resumed/original-timing/stages.jsonl": "1a9ce12d904777370e4192a221149955fb4c181b76f68a538c38b3c333825a79",
-      ".context/deploy-runs/20261012-234924-2614623/stages.jsonl": "f35836535f81b654e21b0aea79d0c95367c77ca80e6c7e3cb829361e9fa62f14",
+      ".context/deploy-runs/20261012-234924-2614623/stages.jsonl": "8059cc6afd4ab8917fb6d4eab3a05740cfd8761d7a28a0f23e449e7340a68f24",
       ".context/tamy-resumed/original-timing/factory-events.jsonl": "7f6eda672c1b67a7c49bcdfec014a6e4d97c3ce156018d4508b188060a673c20",
-      ".context/factory-events.jsonl": "45e9532a101ced1ba9251b2fe2a70b13e7dbdd7aac1ffa2e061f1665723cb4d9"
+      ".context/factory-events.jsonl": "6c4410b1ce7d029368060e844e48a57b7223886804dfc09c579960f3c8d2b3f7"
     },
     "prior_scorecard_sha256": "ce6ad67054fb6da562ac090a59d1fea920562924b9ab6cdf941fc593183d304f",
     "prior_stop_sha256": "cad7f0282cb706db5aa9f4aa3dcf94be16b3f58c0a5b1c9f561ac9572ac56647"
   },
-  "approval_wait_qualification": "Request intervals are not measured human idle time. The withdrawn conditional prompt window ends at its retained04:54 receipt; old decoder ambiguity and uninstrumented turn gaps remain unclassified. No continuous agent work is inferred.",
+  "approval_snapshot_windows": [
+    {
+      "snapshot": "original prompt (including revision)",
+      "start": "2026-10-12T18:42:51.253193Z",
+      "end": "2026-10-12T20:03:38.769985Z",
+      "status": "APPROVED"
+    },
+    {
+      "snapshot": "first resumed request",
+      "start": "2026-10-13T00:17:09.626806Z",
+      "end": "2026-10-13T01:44:54.365556Z",
+      "status": "APPROVED"
+    },
+    {
+      "snapshot": "existing Rose projection",
+      "start": "2026-10-13T18:52:27.141521+00:00",
+      "end": "2026-10-14T01:51:56.227953+00:00",
+      "status": "APPROVED"
+    },
+    {
+      "snapshot": "unsupported conditional prompt",
+      "start": "2026-10-14T02:38:23.004915Z",
+      "end": "2026-10-14T04:54:46.235315+00:00",
+      "status": "WITHDRAWN"
+    },
+    {
+      "snapshot": "TAMY-FIXTURE-DATE-1 and TAMY-JUDGE-PROFILE-1",
+      "start": "2026-10-14T19:06:46.096735Z",
+      "end": "2026-10-14T19:18:39.688945Z",
+      "status": "APPROVED"
+    }
+  ],
+  "approval_accounting_rule": "Exact snapshot associations verified against event timestamps; known withdrawal closes its request. Withdrawn decoder has no exact event and cannot capture an unrelated decision. Pending request is not approval or measured user idle.",
+  "current_test_approvals": {
+    "approved_applied": [
+      "TAMY-FIXTURE-DATE-1",
+      "TAMY-JUDGE-PROFILE-1"
+    ],
+    "approval_decision_event": "2026-10-14T19:18:39.688945Z",
+    "pending_menu": {
+      "id": "TAMY-FIXTURE-MENU-1",
+      "request_event": "2026-10-14T19:49:45.852556Z",
+      "status": "PENDING_UNAPPLIED",
+      "live_fix_pass_not_established": true
+    }
+  },
+  "independent_offline_owning_input_confirmation": {
+    "red_wall_seconds": 0.6515704210032709,
+    "green_wall_seconds": 0.9959104790032143,
+    "scope": "PRIVATE candidate fixture-input confirmation; not live task success; not a separately recorded stage"
+  },
+  "private_snapshot_sha256": "7f210533e6c046741c0307ecb9d4572c466668c99a6dc0639efa3990611d18b5",
+  "prior_public_scorecard_sha256": "f2c54a5078dee79de228e3c51bc0ec25f2713ab02a1a85e6c08cdc1da831f9aa",
+  "approval_wait_qualification": "Exact snapshot associations verified against event timestamps; known withdrawal closes its request. Withdrawn decoder has no exact event and cannot capture an unrelated decision. Pending request is not approval or measured user idle. Recorded stage/control intervals take priority; no continuous CPU work is inferred.",
   "latest_source_evidence": {
-    "runtime_head": "0af01a88e2b083ef72bb64325014b9ae72147245",
-    "Group3": "PASS_WITH_DOCUMENTED_WARNINGS_AND_DEFERRAL",
-    "current_SMS_contracts": "closed unchanged repeats FAIL; fill static PASS/semantic FAIL; proposed corrections not applied",
-    "new_fixture_and_judge_snapshot_approval": "NOT_YET_GRANTED",
+    "runtime_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "Group3": "FRESH_AGENTS_FRONTEND_STATIC_AND_POST_SYNC_LIVE_PROBES_PASS_WITH_EXISTING_ANTHROPIC_WARNING; backend/controller qualified",
+    "current_SMS_contracts": "approved date/profile input patches applied; fill/open PASS; closed FAIL",
+    "pending_menu_snapshot": "AWAITING_DECISION_UNAPPLIED",
+    "cleanup_fix": "PRIVATE_UNAPPLIED_UNDER_REVIEW",
     "deployment_complete": false,
     "PR_merged": false
   },
-  "direct_provider_invoice_cost": "NOT_ESTABLISHED; benchmark cost excludes direct SMS and live probes",
-  "private_snapshot_sha256": "5688cf1a38f33c3c543b57ca39bfe0b3f330eb91b0e335214d787075f0ef5757"
+  "direct_provider_invoice_cost": "NOT_ESTABLISHED; reported benchmark cost excludes direct SMS and live probes"
 }

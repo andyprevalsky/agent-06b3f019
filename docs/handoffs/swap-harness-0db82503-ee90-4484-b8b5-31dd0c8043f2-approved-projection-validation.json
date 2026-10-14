@@ -2,7 +2,7 @@
   "schema_version": 1,
   "recorded_at_utc": "2026-10-14T02:14:36.430474+00:00",
   "runtime_source": "4310587e0e57ad35582e03232c91b3306e90a08b",
-  "current_checkpoint": "0af01a88e2b083ef72bb64325014b9ae72147245",
+  "current_checkpoint": "d1b836316c1967cc107b7c72508e66d382b29f34",
   "approval": "TAMY-CEREBRAS-1 approved and applied exactly",
   "native_owning_gate": "PASS",
   "fresh_SMS": {
@@ -85,7 +85,7 @@
   "deployment_complete": false,
   "PR_merged": false,
   "raw_transcripts_and_values": "PRIVATE; not included in this receipt",
-  "updated_at_utc": "2026-10-14T19:02:39.541566+00:00",
+  "updated_at_utc": "2026-10-14T20:01:28.407311+00:00",
   "backend_credential_fixture_repair": {
     "patch_sha256": "50ffb3495980fa84d920376f256c761e00a6ffafce01a7620fcadc351db1dac5",
     "scope": "Existing test-only mock clock;25ms and all assertions preserved; production source unchanged",
@@ -474,14 +474,17 @@
     "raw_publication": false
   },
   "latest_deploy_state": {
-    "runtime_head": "0af01a88e2b083ef72bb64325014b9ae72147245",
-    "Group3": "PASS_WITH_EXISTING_ANTHROPIC_WARN_AND_TREASURY_DEFERRAL",
-    "SMS_test_changes": "PRIVATE_UNAPPLIED_NOT_APPROVED",
+    "runtime_head": "d1b836316c1967cc107b7c72508e66d382b29f34",
+    "Group3": "FRESH_AGENTS_FRONTEND_STATIC_AND_POST_SYNC_LIVE_PROBES_PASS_WITH_EXISTING_ANTHROPIC_WARNING; backend/controller qualified by actual identical inputs",
+    "SMS_test_changes": "TAMY-FIXTURE-DATE-1 and TAMY-JUDGE-PROFILE-1 APPROVED_APPLIED_EXACTLY",
+    "SMS_current_outcome": "2_PASS_1_FAIL; closed no-spawn still fails",
+    "SMS_native_resource_audit": "10/10 known native generations match first-run and owned queue and are terminal; both known Kernel browsers deleted/profiles404; no global inventory claim",
     "pending_snapshot_IDs": [
-      "TAMY-FIXTURE-DATE-1",
-      "TAMY-JUDGE-PROFILE-1"
+      "TAMY-FIXTURE-MENU-1"
     ],
-    "next_action_after_approval": "Apply exactly approved test changes, rerun owning SMS and applicable gates, then bounded exact-head review and existing authorized deploy",
+    "cleanup_source_fix": "PRIVATE_UNAPPLIED; parent callback cancellation custody and candidate coordinator owning assertions under review",
+    "current_receipt": "docs/handoffs/swap-harness-0db82503-ee90-4484-b8b5-31dd0c8043f2-post-approval-validation.json",
+    "historic_fields": "Earlier result sections retain their stated source/timestamp; do not treat them as current runtime proof",
     "review_cycle_2": "NOT_STARTED",
     "production": "NOT_DEPLOYED",
     "merged": false
@@ -681,5 +684,6 @@
     "SMS_product_prompt_changed_this_turn": false,
     "catalog_unmodified": true
   },
-  "previous_checkpoint_header": "e87ac65479b0ff20aad069dfe49a8f6214dfea44"
+  "previous_checkpoint_header": "e87ac65479b0ff20aad069dfe49a8f6214dfea44",
+  "prior_current_checkpoint_before_test_approval": "0af01a88e2b083ef72bb64325014b9ae72147245"
 }
