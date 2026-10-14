@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- terminal manager, WebSocket ownership, and persisted output share one session lifecycle */
 /**
  * Terminal + transport hooks for ClaudeCodeChip.
  *
@@ -7,14 +6,17 @@
  *  - useSavedOutputFetch: fetches persisted output on first post-completion expand
  */
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { fetchCodeAgentSession } from '../hooks';
 import { CLAUDE_CODE_WS_MAX_RETRIES, CLAUDE_CODE_WS_RETRY_DELAYS } from '../config';
-import { type ChipState, type CodeProvider, type WsMessage } from '../types';
+import { type ChipState, type WsMessage } from '../types';
 import { parseExitCode, TERMINAL_THEME, type TerminalStream } from './claudeCodeChip.theme';
+import type * as TerminalTypes from './claudeCodeChip.terminal.types';
+
+export type { TerminalManager } from './claudeCodeChip.terminal.types';
 
 const ANSI_RESET = '\x1b[0m';
 const ANSI_DIM = '\x1b[2m';
@@ -163,14 +165,7 @@ export function formatTerminalOutputForDisplay(
     .join('');
 }
 
-export interface TerminalManager {
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
-  /** Initialize xterm in the container and observe resize; returns cleanup. */
-  mount: (container: HTMLDivElement) => () => void;
-}
-
-export function useTerminalManager(): TerminalManager {
+export function useTerminalManager(): TerminalTypes.TerminalManager {
   const terminalRef = useRef<XTermTerminal | null>(null);
   const outputBufferRef = useRef<string>('');
 
@@ -211,20 +206,11 @@ export function useTerminalManager(): TerminalManager {
   return { terminalRef, outputBufferRef, mount };
 }
 
-interface UseWebSocketArgs {
-  wsUrl: string | undefined;
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
-  isCompletedRef: RefObject<boolean>;
-  shouldClose: boolean;
-  onStateChange: (state: ChipState) => void;
-}
-
 function applyWsMessage(
   msg: WsMessage,
-  terminalRef: RefObject<XTermTerminal | null>,
-  outputBufferRef: RefObject<string>,
-  isCompletedRef: RefObject<boolean>,
+  terminalRef: MutableRefObject<XTermTerminal | null>,
+  outputBufferRef: MutableRefObject<string>,
+  isCompletedRef: MutableRefObject<boolean>,
   onStateChange: (state: ChipState) => void,
 ): void {
   switch (msg.type) {
@@ -280,7 +266,7 @@ export function useClaudeCodeWebSocket({
   isCompletedRef,
   shouldClose,
   onStateChange,
-}: UseWebSocketArgs): void {
+}: TerminalTypes.UseWebSocketArgs): void {
   const wsRef = useRef<WebSocket | null>(null);
 
   const connect = useCallback(
@@ -334,15 +320,6 @@ export function useClaudeCodeWebSocket({
   }, [shouldClose]);
 }
 
-interface UseSavedOutputArgs {
-  taskId: string;
-  codeProvider: CodeProvider;
-  shouldFetch: boolean;
-  terminalRef: RefObject<XTermTerminal | null>;
-  outputBufferRef: RefObject<string>;
-  onOutputLoaded?: (output: string) => void;
-}
-
 export function useSavedOutputFetch({
   taskId,
   codeProvider,
@@ -350,7 +327,7 @@ export function useSavedOutputFetch({
   terminalRef,
   outputBufferRef,
   onOutputLoaded,
-}: UseSavedOutputArgs): void {
+}: TerminalTypes.UseSavedOutputArgs): void {
   const [fetched, setFetched] = useState(false);
 
   useEffect(() => {

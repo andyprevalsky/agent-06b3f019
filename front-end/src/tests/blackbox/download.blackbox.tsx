@@ -15,7 +15,7 @@ const DOWNLOAD_URL =
   'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg';
 
 describe('Download page', () => {
-  let hrefSetter: ReturnType<typeof vi.fn>;
+  let hrefSetter: ReturnType<typeof vi.fn<(value: string) => void>>;
   let originalLocation: Location;
 
   beforeEach(() => {
