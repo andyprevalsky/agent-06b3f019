@@ -758,6 +758,14 @@ def _remap_cached_browser_action_target(
     return remapped
 
 
+def _private_browser_runtime_url(dom_service: Any, fallback: Any = "") -> str:
+    """Use the private browser URL for routing, independently of redacted views."""
+    accessor = inspect.getattr_static(dom_service, "runtime_current_url", None)
+    if callable(accessor):
+        return str(dom_service.runtime_current_url(fallback=str(fallback or "")) or fallback or "")
+    return str(fallback or "")
+
+
 async def _prepare_pending_write_lock_action(
     dom_service: Any,
     pending_action: Dict[str, Any],
@@ -766,7 +774,7 @@ async def _prepare_pending_write_lock_action(
 ) -> tuple[Dict[str, Any], Dict[str, Any], str]:
     """Rehydrate browser state before replaying the exact action a user approved."""
     browser_state = await dom_service.get_browser_state(include_screenshot=False)
-    current_url = str(browser_state.get("url") or "")
+    current_url = _private_browser_runtime_url(dom_service, browser_state.get("url"))
     if not current_url:
         raise RuntimeError("Cannot execute an approved browser action without a resumed page URL")
     action = _remap_cached_browser_action_target(
@@ -8061,7 +8069,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                 browser_activity_checkpoint(f"Step {iteration} - write lock action applied")
                 if isinstance(result, dict) and result.get("current_url"):
-                    current_url = str(result.get("current_url") or current_url)
+                    current_url = _private_browser_runtime_url(dom_service, result.get("current_url") or current_url)
                 await record_passkey_usage_once()
 
                 await action_history.record_action(
@@ -8139,7 +8147,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 restored_transcript_unobserved = False
                 step_timer.annotate(observe_dom=observe_needs_dom)
-                current_url = str(observe_page_state.get("url") or current_url)
+                current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
@@ -8615,7 +8623,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             humanizer_factory=BrowserHumanizer,
                         )
                         browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                        current_url = browser_state.get("url", current_url)
+                        current_url = _private_browser_runtime_url(dom_service, browser_state.get("url") or current_url)
                         recovery_result = {
                             "success": True,
                             "message": (
@@ -9196,7 +9204,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         # gate already receives blocked_resource_url via recovery_reason.
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                    current_url = browser_state.get("url", current_url)
+                    current_url = _private_browser_runtime_url(dom_service, browser_state.get("url") or current_url)
                     if config_result is not None:
                         saved_resume = str(config_result.get("saved_url") or "").strip()
                         if saved_resume.startswith(("http://", "https://")) and not str(
@@ -9930,13 +9938,15 @@ Based on this feedback, I need to continue working on the task and address the i
                 success=isinstance(result, dict) and bool(result.get("success", True)),
             )
             if isinstance(result, dict) and result.get("current_url"):
-                current_url = str(result.get("current_url") or "")
+                current_url = _private_browser_runtime_url(dom_service, result.get("current_url"))
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
                     visited_urls.append(current_url)
             if (
                 action_name == "input_text"
                 and result.get("success")
-                and str(unified_action.get("params", {}).get("text", "")) == MINTED_NEW_PASSWORD_REF
+                and str(unified_action.get("params", {}).get("text", "")) in (
+                    MINTED_NEW_PASSWORD_REF, secret_placeholder(MINTED_NEW_PASSWORD_REF),
+                )
                 and current_url
             ):
                 # The account now exists (or is being created) under this password; keep it.
@@ -10423,7 +10433,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service.get_browser_state(include_screenshot=True),
                         timeout=10,
                     )
-                    current_url = final_browser_state.get("url", current_url) or current_url
+                    current_url = _private_browser_runtime_url(dom_service, final_browser_state.get("url") or current_url)
                 except Exception:
                     # Last-known loop observation — prefer a stale-but-real page
                     # over skipping synthesis entirely when the refresh freezes.

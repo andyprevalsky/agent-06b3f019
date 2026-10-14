@@ -21490,7 +21490,7 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
 
 
 
-async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None):
+async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None, minted_password_text=None):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
     import copy
@@ -21585,6 +21585,8 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         params = {"code": "(() => window.fixtureReadbackAndNavigate())()"} if action == "evaluate" else (
             {"url": requested_url} if action == "goto" else {}
         )
+        if action == "input_text" and minted_password_text is not None:
+            params = {"text": minted_password_text}
         return {"action": {"action": action, "thinking": "Inspect the surviving sign-in page", "params": params},
                 "usage": {}, "mode": "waterfall"}
 
@@ -21633,6 +21635,14 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
             patch("domains.spawn_browser_agent_v3.service_actions.wait_for_payment_ref_fields", AsyncMock(return_value=True)),
             patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", unexpected_handoff_action),
         ])
+    if minted_password_text is not None:
+        async def save_minted(_config, _user_id, url):
+            events.append(("save-minted", url))
+
+        targets.extend([
+            patch(prefix + "execute_action", AsyncMock(return_value={"success": True, "current_url": old_url})),
+            patch(prefix + "save_minted_account_password", save_minted),
+        ])
     with ExitStack() as stack:
         for target in targets:
             stack.enter_context(target)
@@ -21659,6 +21669,19 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     if preapproved_handoff:
         assert result["auth_realm"] == "new.example", "a harness-initiated payment action changed the active realm"
     return model_contexts, saved, events, old_secret, new_secret
+
+
+@_in_browser_activity_context
+async def test_activity_saves_minted_password_after_canonical_or_legacy_entry():
+    """The actual activity saves a successfully entered advertised password ref."""
+    for text in ("{{secret:pwd:new}}", "pwd:new"):
+        contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture(
+            "input_text", minted_password_text=text,
+        )
+        assert events.count(("save-minted", "https://old.example/login")) == 1, (
+            "successful minted password entry did not persist the account password"
+        )
+        assert prior not in str(contexts) and active not in str(contexts)
 
 
 @_in_browser_activity_context
@@ -27907,6 +27930,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_cross_realm_action_redacts_reused_ref_values",
         test_activity_cross_realm_action_redacts_reused_ref_values,
+    )
+    await r.record_async(
+        "activity_saves_minted_password_after_canonical_or_legacy_entry",
+        test_activity_saves_minted_password_after_canonical_or_legacy_entry,
     )
     await r.record_async(
         "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
