@@ -550,9 +550,10 @@ async def spawn_explore_agent_activity(
     resume_details: Dict[str, Any] = {}
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        compiled = source_handoff.render("") or compile_explore_wrap_up("", tool_call_results)
+        compiled = compile_explore_wrap_up("", tool_call_results)
         resume_details.update(
             result=compiled,
+            source_handoff=source_handoff.render(compiled),
             tool_call_results=list(tool_call_results[-8:]),
             source_owned_handoff=bool(source_handoff.records or source_handoff.omitted_count),
         )
@@ -1024,9 +1025,6 @@ async def spawn_explore_agent_activity(
         tool_call_results,
     )
 
-    model_summary = compile_explore_wrap_up(result.get("final_response", "") or "", [])
-    final_response = source_handoff.render(model_summary) or final_response
-
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
     # keep the explore's own completion status so the user-visible result is
@@ -1041,6 +1039,10 @@ async def spawn_explore_agent_activity(
             "after this exploration finishes when connect gates are enabled."
         )
         final_response = f"{(final_response or '').rstrip()}{notice}"
+
+    # Preserve the complete existing user text, including fallback and notices,
+    # inside the separate source-owned machine handoff.
+    machine_handoff = source_handoff.render(final_response)
 
     # A tool-free explore completion is not grounded research. Models can
     # occasionally call attempt_completion immediately and claim that search
@@ -1059,6 +1061,7 @@ async def spawn_explore_agent_activity(
     result_payload = {
         "status": "completed" if run_completed else "error",
         "source_owned_handoff": bool(source_handoff.records or source_handoff.omitted_count),
+        "source_handoff": machine_handoff,
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,

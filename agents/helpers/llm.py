@@ -1638,6 +1638,20 @@ def collapse_duplicate_tool_results(context: List[Dict[str, Any]]) -> List[Dict[
     return [msg for index, msg in enumerate(context) if _terminal_tool_call_id(msg) is None or index in kept]
 
 
+def _appended_structured_response(metadata: Dict[str, Any]) -> Any:
+    """Avoid repeating a service-owned summary already in the TOOL text.
+
+    Keep the persisted envelope intact: the verifier consumes it in place of
+    text, while parent message builders append evidence alongside that text.
+    """
+    response = metadata["structured_response"]
+    if metadata.get("source_owned_handoff") is True and isinstance(response, dict):
+        return {
+            key: value for key, value in response.items() if key not in {"model_summary", "model_summary_truncated"}
+        }
+    return response
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -1878,7 +1892,7 @@ def convert_context_to_messages(
                     tool_content = f"{metadata['title']}: {content}"
                 sections = []
                 if metadata.get("structured_response"):
-                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
+                    sections.append(f"Structured Response: {json.dumps(_appended_structured_response(metadata))}")
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
@@ -1895,7 +1909,7 @@ def convert_context_to_messages(
                     system_content = f"{metadata['title']}: {content}"
                 sections = []
                 if metadata.get("structured_response"):
-                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
+                    sections.append(f"Structured Response: {json.dumps(_appended_structured_response(metadata))}")
                 system_content = _append_llm_context_sections_preserving_reference(system_content, sections)
                 messages.append({"role": "system", "content": system_content})
 
@@ -2239,7 +2253,7 @@ async def build_llm_messages(
                         tool_content = f"{metadata['title']}: {tool_content}"
                     sections = []
                     if metadata.get("structured_response"):
-                        sections.append("Structured Response: " + json.dumps(metadata["structured_response"]))
+                        sections.append("Structured Response: " + json.dumps(_appended_structured_response(metadata)))
                     if metadata_texts:
                         sections.extend(metadata_texts)
                     if content:
@@ -2259,7 +2273,7 @@ async def build_llm_messages(
                     tool_content = f"{ts_prefix}{metadata['title']}: {text}"
                 sections = []
                 if metadata.get("structured_response"):
-                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
+                    sections.append(f"Structured Response: {json.dumps(_appended_structured_response(metadata))}")
                 if metadata_texts:
                     sections.extend(metadata_texts)
                 if content:
