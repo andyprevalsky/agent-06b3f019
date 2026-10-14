@@ -119,7 +119,9 @@ tests with three skips, and failed only the mobile ownership-switch test's
 selection of a minimized sidebar row. Main now omits those rows, so the fixture
 opens the actual mobile menu before selecting the owned agent. All assertions
 remain unchanged; the three owning suites pass 22 tests in 12.10 seconds. The
-full coverage stage is repeating on that fixture correction. Latest accepted
+final full coverage stage passes on d53952482: all 163 files, 2,760 tests,
+three skips, 151.70 seconds. Coverage is 81.05% statements, 73.19% branches,
+81.45% functions, and 83.35% lines. Latest accepted
 browser schema and stale subagent text regressions also fail before and pass
 after, preserving displayed native state.
 

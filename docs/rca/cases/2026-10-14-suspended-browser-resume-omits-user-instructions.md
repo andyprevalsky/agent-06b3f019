@@ -149,7 +149,8 @@ remaining deploy-resume fixture omitted the newly required durable-message
 route. Adding that API-shaped fixture route preserves all existing handoff,
 exact-once completion, billing, and timing assertions. The unchanged owning
 suite now passes in 26.2 seconds. The repeated merged-source
-coverage run passes all 110 agents domains; aggregate unit coverage is finishing.
+coverage run passes all 110 agents domains, 184 fast-cache tests, and 134 unit
+tests, at 82% coverage (337.0-second recorded stage).
 All 46 deploy structural gates passed. The merged-source backend and frontend
 typechecks pass with zero errors; frontend lint passes with nine warnings.
 
