@@ -114,17 +114,32 @@
   },
   "new_pending_prompt_approval": {
     "id": "TAMY-CONDITION-1",
-    "status": "PRIVATE_UNAPPLIED",
+    "status": "WITHDRAWN_NOT_APPLIED",
     "proposal_sha256": "6e01a73f22b685ea6ad7031210032a8b57932eeabe771024b158906680f1d206",
     "scope": "OneaddedSMSconditionalactioninstruction; noclassifier/tooldescription/schema/model/catalog/timeout change",
     "existing_composition_test": "PASS0.393s",
     "real_post_fix_task_pass": "NOT_ESTABLISHED",
-    "independent_review": "Reasonablepromptproductdecision; ambiguousfallbackscope refined; notclaiminggoldencopyorprovedfix"
+    "independent_review": "Reasonablepromptproductdecision; ambiguousfallbackscope refined; notclaiminggoldencopyorprovedfix",
+    "withdrawal_observed_at_utc": "2026-10-14T04:54:46.235315+00:00",
+    "reason": "The actual SMS request is unconditional. Prior response incorrectly described an explicit condition. Fixture includes August15 date during October14 run; proposed explicit-condition instruction is unsupported.",
+    "human_approval_or_rejection": false
   },
   "private_dump_archive_readback": {
     "files": 46,
     "sha256_matches": 46,
     "descendant_completeness": "NOT_INDEPENDENTLY_ESTABLISHED"
   },
-  "all_raw_transcripts_values_task_captures": "PRIVATE"
+  "all_raw_transcripts_values_task_captures": "PRIVATE",
+  "test_input_correction": {
+    "task": "sms-supervisor-closed-no-spawn",
+    "catalog_prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "actual_inbound": "Order me a lum lok Togo from the ferry building asap",
+    "explicit_condition_in_user_input": false,
+    "fixture_date_phrase": "closed for kitchen renovations through August15",
+    "run_date_utc": "2026-10-14",
+    "potential_calendar_ambiguity": true,
+    "flakiness_proved": false,
+    "catalog_fixture_or_product_prompt_changed": false,
+    "prior_agent_description": "Explicitconditionalrequestdescription was incorrect; corrected and proposedpromptwithdrawn"
+  }
 }
