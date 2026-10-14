@@ -8,6 +8,7 @@ This module provides:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -600,7 +601,7 @@ class ActionHistory:
         step = self._next_step
         # Bind before deriving descriptions: DOM labels can echo a value that
         # was just entered, even when params and the tool result are safe.
-        if hasattr(dom_service, "model_visible_value"):
+        if callable(inspect.getattr_static(dom_service, "model_visible_value", None)):
             self.bind_dom_service(dom_service)
 
         # Convert between index and coordinates
