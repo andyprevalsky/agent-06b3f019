@@ -399,16 +399,33 @@ if [[ -f "$STACK_MANIFEST" ]] && ! jq -e . "$STACK_MANIFEST" >/dev/null 2>&1; th
   exit 1
 fi
 
+if [[ "${ROSE_DEPLOY_WORKTREE:-0}" == "1" && "${ROSE_USE_SYSTEM_PG:-false}" == "true" && -z "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
+  echo "❌ Isolated deploy coverage requires an explicit prepared BACKEND_COVERAGE_DATABASE_URL; refusing shared database fallback." >&2
+  exit 1
+fi
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   if ! node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
     const url = new URL(process.env.BACKEND_COVERAGE_DATABASE_URL);
-    const expectedName = `victoria_${process.argv[1]}`;
+    const identity = process.argv[1];
+    const isolated = process.env.ROSE_DEPLOY_WORKTREE === "1";
+    let expectedName = `victoria_${identity}`;
+    if (isolated) {
+      const root = fs.realpathSync(process.argv[2]);
+      if (!process.env.ROSE_DEPLOY_WORKTREE_PATH ||
+          fs.realpathSync(process.env.ROSE_DEPLOY_WORKTREE_PATH) !== root) process.exit(1);
+      const safe = identity.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 48);
+      expectedName = `victoria_deploy_${safe}`;
+      const marker = fs.readFileSync(path.join(root, ".context", "deploy-system-pg.db"), "utf8");
+      if (marker !== `${expectedName}\n` || (url.port && url.port !== "5432")) process.exit(1);
+    }
     if (!["postgres:", "postgresql:"].includes(url.protocol) ||
         !["localhost", "127.0.0.1"].includes(url.hostname) ||
         decodeURIComponent(url.pathname.slice(1)) !== expectedName ||
         url.search !== "" || url.hash !== "") process.exit(1);
-  ' "$WORKSPACE_HINT"; then
-    echo "❌ BACKEND_COVERAGE_DATABASE_URL must name the local victoria_$WORKSPACE_HINT database." >&2
+  ' "$WORKSPACE_HINT" "$ROOT_DIR"; then
+    echo "❌ BACKEND_COVERAGE_DATABASE_URL must name this workspace's local database (the exact prepared marker for an isolated deploy worktree)." >&2
     exit 1
   fi
   LOCAL_PSQL_URL="$BACKEND_COVERAGE_DATABASE_URL"
@@ -417,7 +434,7 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
     exit 1
   fi
   DB_FOUND=true
-  echo "Using isolated system Postgres database victoria_$WORKSPACE_HINT"
+  echo "Using explicitly validated workspace system Postgres database"
 elif [[ -f "$STACK_MANIFEST" ]] &&
   [[ "$(jq -r '.database.container // empty' "$STACK_MANIFEST")" == "$DB_CONTAINER" ]] &&
   [[ "$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")" == "false" ]]; then
