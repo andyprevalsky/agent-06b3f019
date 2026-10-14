@@ -18,6 +18,7 @@ from config import load_config
 from helpers.trace_archive import archive_json
 from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+from utils.llm_timeouts import SMS_NOTIFICATION_HTTP_TIMEOUT_SECONDS
 
 logger = structlog.get_logger()
 
@@ -193,7 +194,7 @@ async def _notify_sms_event_real(user_id: str, event_type: str, agent_id: str, p
                     "X-API-Key": config.backend.api_key,
                     "Content-Type": "application/json",
                 },
-                timeout=30.0,
+                timeout=httpx.Timeout(SMS_NOTIFICATION_HTTP_TIMEOUT_SECONDS, connect=30.0),
             )
 
             logger.info(

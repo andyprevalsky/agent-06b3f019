@@ -31,6 +31,7 @@ from helpers.generation_handoff import (
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
 
 # Import activities (executed via workflow.execute_activity)
 with workflow.unsafe.imports_passed_through():
@@ -50,7 +51,7 @@ class SendMessageToUserManager(ToolManager):
 
     async def execute_tool(
         self,
-        workflow_instance: object,
+        workflow_instance: Any,
         tool_call: Dict[str, Any],
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
@@ -90,12 +91,10 @@ class SendMessageToUserManager(ToolManager):
         if is_sub_agent(workflow_instance):
             logger.info(
                 "Sub-agent called send_message_to_user with is_question=True, auto-responding",
-                agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
-                depth=workflow_instance.depth,  # type: ignore[union-attr]
+                agent_id=workflow_instance.agent_id,
+                depth=workflow_instance.depth,
             )
-            await workflow_instance._post_message(  # type: ignore[union-attr]
-                SUB_AGENT_AUTO_RESPONSE, "USER", {"autoResponse": True}
-            )
+            await workflow_instance._post_message(SUB_AGENT_AUTO_RESPONSE, "USER", {"autoResponse": True})
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Auto-response (sub-agent)",
@@ -108,7 +107,7 @@ class SendMessageToUserManager(ToolManager):
         # ── 3. Get agent source ──
         agent_source = await workflow.execute_activity(
             get_agent_source,
-            args=[workflow_instance.agent_id],  # type: ignore[union-attr]
+            args=[workflow_instance.agent_id],
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -119,13 +118,13 @@ class SendMessageToUserManager(ToolManager):
         if agent_source == "SMS":
             logger.info(
                 "SMS-initiated goal, sending SMS question immediately",
-                agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
+                agent_id=workflow_instance.agent_id,
             )
             try:
                 notification_args = [
-                    workflow_instance.user_id,  # type: ignore[union-attr]
+                    workflow_instance.user_id,
                     "planner_message",
-                    workflow_instance.agent_id,  # type: ignore[union-attr]
+                    workflow_instance.agent_id,
                     {"message": message, "is_question": True},
                 ]
                 world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
@@ -134,7 +133,7 @@ class SendMessageToUserManager(ToolManager):
                 await workflow.execute_activity(
                     notify_sms_event_activity,
                     args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=30),
+                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 sms_sent = True
@@ -143,19 +142,19 @@ class SendMessageToUserManager(ToolManager):
         else:
             logger.info(
                 "Non-SMS goal, waiting for response with SMS fallback timeout",
-                agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
+                agent_id=workflow_instance.agent_id,
                 timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
             )
             try:
                 await wait_condition_or_generation_handoff(
-                    lambda: workflow_instance._has_new_messages,  # type: ignore[union-attr]
+                    lambda: workflow_instance._has_new_messages,
                     workflow_instance,
                     timeout=timedelta(minutes=SMS_FALLBACK_TIMEOUT_MINUTES),
                     workflow_mod=workflow,
                 )
                 logger.info(
                     "User responded within timeout, no SMS needed",
-                    agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
+                    agent_id=workflow_instance.agent_id,
                 )
             except GenerationHandoffRequested:
                 yield ToolEvent(
@@ -169,13 +168,13 @@ class SendMessageToUserManager(ToolManager):
             except (TimeoutError, TemporalTimeoutError):
                 logger.info(
                     "No response within timeout, sending SMS",
-                    agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
+                    agent_id=workflow_instance.agent_id,
                 )
                 try:
                     notification_args = [
-                        workflow_instance.user_id,  # type: ignore[union-attr]
+                        workflow_instance.user_id,
                         "planner_message",
-                        workflow_instance.agent_id,  # type: ignore[union-attr]
+                        workflow_instance.agent_id,
                         {"message": message, "is_question": True},
                     ]
                     world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
@@ -184,7 +183,7 @@ class SendMessageToUserManager(ToolManager):
                     await workflow.execute_activity(
                         notify_sms_event_activity,
                         args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
+                        start_to_close_timeout=timedelta(seconds=SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
                     sms_sent = True
@@ -192,10 +191,10 @@ class SendMessageToUserManager(ToolManager):
                     logger.error("Failed to send SMS fallback: %s", e)
 
         # ── 5. Wait for user response ──
-        if not workflow_instance._has_new_messages:  # type: ignore[union-attr]
+        if not workflow_instance._has_new_messages:
             try:
                 await wait_condition_or_generation_handoff(
-                    lambda: workflow_instance._has_new_messages,  # type: ignore[union-attr]
+                    lambda: workflow_instance._has_new_messages,
                     workflow_instance,
                     workflow_mod=workflow,
                 )
@@ -219,11 +218,11 @@ class SendMessageToUserManager(ToolManager):
                 )
                 return
 
-        workflow_instance._has_new_messages = False  # type: ignore[union-attr]
+        workflow_instance._has_new_messages = False
 
         logger.info(
             "User responded to send_message_to_user request",
-            agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
+            agent_id=workflow_instance.agent_id,
             sms_was_sent=sms_sent,
         )
 
@@ -244,7 +243,7 @@ _manager: Optional[SendMessageToUserManager] = None
 
 def get_manager() -> SendMessageToUserManager:
     """Get or create send_message_to_user manager singleton."""
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = SendMessageToUserManager()
     return _manager
@@ -254,7 +253,7 @@ def get_manager() -> SendMessageToUserManager:
 
 
 async def send_message_to_user(
-    workflow_instance: object,
+    workflow_instance: Any,
     tool_call: Dict[str, Any],
     tool_call_id: str,
 ) -> MessageStatus | None:
@@ -265,7 +264,7 @@ async def send_message_to_user(
     manager = get_manager()
     last_status = None
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(event, tool_call_id, "send_message_to_user")  # type: ignore[union-attr]
+        await workflow_instance._handle_tool_event(event, tool_call_id, "send_message_to_user")
         if isinstance(event, ToolEvent) and event.status:
             last_status = event.status
     return last_status

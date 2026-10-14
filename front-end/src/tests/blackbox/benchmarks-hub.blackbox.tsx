@@ -522,7 +522,7 @@ describe('BenchmarksView edge states', () => {
   });
 
   function mockWith(overrides: {
-    runs?: unknown;
+    runs?: typeof RUNS;
     requests?: unknown;
     agentStatus?: number;
     dispatchStatus?: number;

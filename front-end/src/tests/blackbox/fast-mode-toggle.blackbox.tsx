@@ -80,6 +80,7 @@ function renderTopBar({
     <TooltipProvider>
       <TopBar
         showTestPrompts={false}
+        shouldAutoLoadDefaultPrompt={() => false}
         showFastMode={showFastMode}
         fastMode={fastMode}
         onFastModeChange={onFastModeChange}

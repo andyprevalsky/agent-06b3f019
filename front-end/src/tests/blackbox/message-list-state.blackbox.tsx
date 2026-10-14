@@ -37,6 +37,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   return {
     agent: null,
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],

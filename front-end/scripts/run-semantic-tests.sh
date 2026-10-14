@@ -37,24 +37,35 @@ apply_local_semantic_db_urls() {
     fi
     return 0
   fi
-  if [[ -z "${LOCAL_DB_PORT:-}" ]]; then
-    local manifest_port=""
-    if [[ -f "$REPO_DIR/.context/services.json" ]]; then
-      manifest_port=$(jq -er --arg backend "${BACKEND_URL:-}" \
-        'select(.status == "running" and .urls.backend == $backend) | .database.runtime_port' \
-        "$REPO_DIR/.context/services.json" 2>/dev/null) || manifest_port=""
-    fi
-    if [[ ! "$manifest_port" =~ ^[0-9]+$ ]] || (( manifest_port < 1 || manifest_port > 65535 )); then
-      echo "FAIL: Cannot identify the running stack database for ${BACKEND_URL:-unset}; set SEMANTIC_DATABASE_URL or LOCAL_DB_PORT" >&2
+  local manifest="$REPO_DIR/.context/services.json"
+  local database_name="victoria"
+  if [[ -f "$manifest" ]]; then
+    local database_identity="" manifest_port=""
+    database_identity=$(jq -er --arg backend "${BACKEND_URL:-}" '
+      select(.status == "running" and .urls.backend == $backend)
+      | .database
+      | select(.runtime_port | type == "number" and . == floor and . >= 1 and . <= 65535)
+      | select(.name | type == "string" and test("^[A-Za-z0-9_]+$"))
+      | [.runtime_port, .name] | @tsv
+    ' "$manifest" 2>/dev/null) || {
+      echo "FAIL: Cannot identify the running stack database for ${BACKEND_URL:-unset}; set SEMANTIC_DATABASE_URL" >&2
+      return 1
+    }
+    IFS=$'\t' read -r manifest_port database_name <<< "$database_identity"
+    if [[ -n "${LOCAL_DB_PORT:-}" && "$LOCAL_DB_PORT" != "$manifest_port" ]]; then
+      echo "FAIL: LOCAL_DB_PORT differs from the running stack database port; set SEMANTIC_DATABASE_URL for an explicit override" >&2
       return 1
     fi
     export LOCAL_DB_PORT="$manifest_port"
+  elif [[ -z "${LOCAL_DB_PORT:-}" ]]; then
+    echo "FAIL: Cannot identify the running stack database for ${BACKEND_URL:-unset}; set SEMANTIC_DATABASE_URL or LOCAL_DB_PORT" >&2
+    return 1
   fi
   if [[ ! "$LOCAL_DB_PORT" =~ ^[0-9]+$ ]] || (( LOCAL_DB_PORT < 1 || LOCAL_DB_PORT > 65535 )); then
     echo "FAIL: LOCAL_DB_PORT must be a valid TCP port, got $LOCAL_DB_PORT" >&2
     return 1
   fi
-  export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
+  export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/${database_name}?connection_limit=50&pool_timeout=30"
   if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
     export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
   fi
