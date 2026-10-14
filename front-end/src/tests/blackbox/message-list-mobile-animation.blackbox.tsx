@@ -2,7 +2,7 @@
  * Blackbox coverage for mobile-only message entry animation suppression.
  */
 import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext } from '@/features/agent-context';
@@ -15,6 +15,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   return {
     agent: null,
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
@@ -28,10 +32,6 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
-    inspectionContext: null,
-    stagePendingAgentCreation: vi.fn(),
-    reconcilePendingAgentCreation: vi.fn(async () => {}),
-    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }

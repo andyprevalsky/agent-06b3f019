@@ -1,5 +1,5 @@
 import type { FilePointer, OutputSchema } from '../api';
-import type { BrowserActionType, ClaudeCodeActionType, ToolStatus, MessageMetadata } from './message-metadata';
+import type { BrowserActionType, ClaudeCodeActionType, ToolStatus } from './message-metadata';
 
 // =============================================================================
 // Tool-Specific Metadata Types
@@ -47,7 +47,7 @@ export type ToolName =
 /**
  * Base metadata present on all TOOL messages.
  */
-export interface BaseToolMetadata extends MessageMetadata {
+export interface BaseToolMetadata {
   toolCallId: string;
   toolName: ToolName;
   toolStatus: ToolStatus;
@@ -65,7 +65,7 @@ export interface SpawnBrowserAgentMetadata extends BaseToolMetadata {
   /** Current browser URL */
   browser_url?: string;
   /** Type of browser action performed */
-  action_type?: BrowserActionType;
+  action_type?: BrowserActionType | string;
   /** Additional data from the action */
   auxiliary?: Record<string, unknown>;
   /** Routes to browser panel's MessageList (same as task_id for sub-actions) */
@@ -128,7 +128,7 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
   /** WebSocket URL for terminal streaming */
   ws_url?: string;
   /** Type of action performed */
-  action_type?: ClaudeCodeActionType;
+  action_type?: ClaudeCodeActionType | string;
   /** Routes to Claude Code panel's MessageList (same as task_id for sub-actions) */
   subAgentId?: string;
   /** Indicates an error occurred */
@@ -367,9 +367,9 @@ export interface SimpleToolMetadata extends BaseToolMetadata {
  * Union of all tool-specific metadata types.
  */
 export type ToolMessageMetadata =
-  | SpawnAgentMetadata
   | SpawnBrowserAgentMetadata
   | SpawnClaudeCodeAgentMetadata
+  | SpawnAgentMetadata
   | SpawnSubAgentMetadata
   | WaitForMetadata
   | SetPlanMetadata

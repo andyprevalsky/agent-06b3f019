@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import Download from '@/features/download';
@@ -15,7 +15,7 @@ const DOWNLOAD_URL =
   'https://kzlurqihzaolhzsbkctf.supabase.co/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg';
 
 describe('Download page', () => {
-  let hrefSetter: Mock<(value: string) => void>;
+  let hrefSetter: ReturnType<typeof vi.fn<(value: string) => void>>;
   let originalLocation: Location;
 
   beforeEach(() => {
@@ -23,7 +23,7 @@ describe('Download page', () => {
     flushMock.mockReset();
     // Save the real location object and replace with a mock that captures href assignments
     originalLocation = window.location;
-    hrefSetter = vi.fn<(value: string) => void>();
+    hrefSetter = vi.fn();
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: {

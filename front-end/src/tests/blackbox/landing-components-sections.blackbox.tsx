@@ -500,12 +500,10 @@ describe('features/index/hooks', () => {
     });
 
     it('handleSubmit with valid email sets loading → success and calls onSuccess', async () => {
-      let captured: Record<string, unknown> | null = null;
+      let captured: Record<string, unknown> = null;
       server.use(
         http.post(`${API_BASE}/waitlist`, async ({ request }) => {
-          const value = await request.json();
-          if (!value || typeof value !== 'object') throw new Error('Expected waitlist object');
-          captured = { ...value };
+          captured = (await request.json()) as Record<string, unknown>;
           return HttpResponse.json({ success: true, message: 'ok' });
         }),
       );

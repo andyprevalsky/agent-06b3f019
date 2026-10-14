@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ErrorBoundary from '@/components/ErrorBoundary';
 
-export function BrokenChild(): React.ReactNode {
+export function BrokenChild(): never {
   throw new Error('boom');
 }
 

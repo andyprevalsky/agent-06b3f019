@@ -23,7 +23,7 @@ export interface InsertMessagePayload {
 /**
  * Typed TOOL message payload with discriminated union on toolName.
  */
-export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageMetadata> extends InsertMessagePayload {
+export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageMetadata> {
   id: string;
   timestamp: string;
   text: string;

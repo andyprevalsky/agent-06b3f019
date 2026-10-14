@@ -17,13 +17,6 @@ import { useRecordingPlayer } from './useRecordingPlayer';
  * Never use Vapi's private bucket recordingUrl (hipaa-recordings / R2) as
  * <audio src>. Those URLs are not browser-playable.
  */
-function recordingSeekHandler(seekToFraction: (fraction: number) => void) {
-  return (event: React.MouseEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    seekToFraction((event.clientX - rect.left) / rect.width);
-  };
-}
-
 export const RecordingPlayer = memo(function RecordingPlayer({
   agentId,
   callId,
@@ -64,11 +57,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
     } else {
       setSrc(null);
       setLoading(false);
-      setError(
-        recordingUrl || callId
-          ? 'Recording is not playable from the provider URL.'
-          : null,
-      );
+      setError(recordingUrl || callId ? 'Recording is not playable from the provider URL.' : null);
     }
 
     return () => {
@@ -80,11 +69,13 @@ export const RecordingPlayer = memo(function RecordingPlayer({
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
+  const handleSeek = (event: React.MouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    seekToFraction(clickX / rect.width);
+  };
 
-
-  if (error) {
-    return <p className="text-xs text-red-500">{error}</p>;
-  }
+  if (error) return <p className="text-xs text-red-500">{error}</p>;
   if (loading || !src) {
     return <p className="text-xs text-muted-foreground">Loading recording…</p>;
   }
@@ -100,7 +91,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
       <div className="flex-1 flex items-center gap-2">
         <div
           className="flex-1 h-2 bg-muted rounded-full overflow-hidden cursor-pointer relative group"
-          onClick={recordingSeekHandler(seekToFraction)}
+          onClick={handleSeek}
         >
           <div
             className="h-full bg-primary transition-all duration-100"

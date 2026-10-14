@@ -108,6 +108,10 @@ function makeContext(): AgentContextValue {
   return {
     agent: null,
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => undefined,
+    reconcilePendingAgentCreation: async () => undefined,
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'e1fa0fad-02d7-4a3c-983d-ef9739111f32',
     setSelectedAgentId: () => undefined,
     messages,
@@ -121,10 +125,6 @@ function makeContext(): AgentContextValue {
     isLoadingAgent: false,
     forceResubscribe: () => undefined,
     isChatMode: false,
-    inspectionContext: null,
-    stagePendingAgentCreation: () => {},
-    reconcilePendingAgentCreation: async () => {},
-    rollbackPendingAgentCreation: () => false,
   };
 }
 

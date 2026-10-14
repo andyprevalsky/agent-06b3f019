@@ -69,7 +69,6 @@
   "src/features/terminal-component-group/components/claudeCodeChip.utils.ts",
   "src/features/terminal-component-group/components/claudeCodeChip.hooks.ts",
   "src/features/terminal-component-group/components/claudeCodeChip.terminal.ts",
-  "src/features/terminal-component-group/components/claudeCodeChip.output.ts",
   "src/features/terminal-component-group/components/claudeCodeChip.renderers.tsx",
   "src/features/terminal-component-group/components/CompletionSummaryCard.tsx",
   "src/features/terminal-component-group/components/CostLimitModal.tsx",

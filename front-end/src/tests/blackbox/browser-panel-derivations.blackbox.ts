@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Message } from '@/lib/api';
 
 import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
@@ -565,7 +566,7 @@ describe('computeActiveBrowserPanels', () => {
 
 describe('rotate_ip progress lifecycle', () => {
   it('renders one tool when streamed and persisted progress share the model tool-call id', () => {
-    const messages = [
+    const messages: Message[] = [
       {
         message_id: 'streamed-rotate',
         timestamp: '2026-07-19T11:58:12.000Z',

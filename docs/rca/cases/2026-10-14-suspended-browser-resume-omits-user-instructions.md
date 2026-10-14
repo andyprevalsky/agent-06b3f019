@@ -140,7 +140,12 @@ compute auth, real usage/cache identity, archived schema deduplication, and
 declined auth. Infrastructure gate markers (RESOLVED, SOURCE_CONNECTED, and
 SUBSCRIPTION_ACTIVE) also remain control state: the expanded owning assertion
 failed before and passed after parsing the observed reserved protocol values.
-Whole-repository deployment coverage is pending.
+The first whole agents-coverage attempt passed 109 of 110 domains; the
+remaining deploy-resume fixture omitted the newly required durable-message
+route. Adding that API-shaped fixture route preserves all existing handoff,
+exact-once completion, billing, and timing assertions. The unchanged owning
+suite now passes in 26.2 seconds. Full coverage will repeat on the merged frozen
+source. All 46 deploy structural gates passed.
 
 Golden references read: codex/codex-rs/core/src/session/input_queue.rs:389
 drains pending typed input; hermes-agent/agent/agent_runtime_helpers.py:3758

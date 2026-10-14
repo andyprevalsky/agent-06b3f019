@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Session } from '@supabase/supabase-js';
 
 import { server } from './msw/server';
 
@@ -23,7 +24,7 @@ import {
 const API_BASE = 'http://localhost:3001/api';
 
 function mockSession() {
-  const session = {
+  const session: Session = {
     access_token:
       'eyJhbGciOiJIUzI1NiJ9.' +
       btoa(JSON.stringify({ sub: 'user-12345678', role: 'authenticated' })) +
@@ -31,8 +32,15 @@ function mockSession() {
     refresh_token: 'test-refresh',
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer' as const,
-    user: { id: 'user-12345678', is_anonymous: false, app_metadata: {}, user_metadata: {}, aud: 'authenticated', created_at: '2026-10-14T00:00:00Z' },
+    token_type: 'bearer',
+    user: {
+      id: 'user-12345678',
+      is_anonymous: false,
+      aud: 'authenticated',
+      app_metadata: {},
+      user_metadata: {},
+      created_at: '2026-01-01T00:00:00Z',
+    },
   };
   localStorage.setItem('rose-session', JSON.stringify(session));
   return session;
@@ -54,7 +62,7 @@ describe('lib/supabase', () => {
       refresh_token: 'r',
       expires_in: 0,
       expires_at: Math.floor(Date.now() / 1000) - 10,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'u' },
     };
     localStorage.setItem('rose-session', JSON.stringify(expired));
@@ -75,7 +83,7 @@ describe('lib/supabase', () => {
       refresh_token: 'admin-refresh',
       expires_in: 7776000,
       expires_at: Math.floor(Date.now() / 1000) + 7776000,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'admin-1' },
     };
     const expiredImpersonated = {
@@ -83,7 +91,7 @@ describe('lib/supabase', () => {
       refresh_token: 'target-refresh',
       expires_in: 3600,
       expires_at: Math.floor(Date.now() / 1000) - 10,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'target-1' },
     };
     localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
@@ -113,7 +121,7 @@ describe('lib/supabase', () => {
       refresh_token: 'r',
       expires_in: 0,
       expires_at: Math.floor(Date.now() / 1000) - 10,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id },
     });
     localStorage.setItem('rose-session', JSON.stringify(stale('target-1')));
@@ -144,7 +152,7 @@ describe('lib/supabase', () => {
       refresh_token: 'r',
       expires_in: 3600,
       expires_at: Math.floor(Date.now() / 1000) - 10,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'target-1' },
     };
     localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
@@ -167,7 +175,7 @@ describe('lib/supabase', () => {
       refresh_token: 'admin-refresh',
       expires_in: 7776000,
       expires_at: Math.floor(Date.now() / 1000) + 7776000,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'admin-1' },
     };
     localStorage.setItem(
@@ -177,7 +185,7 @@ describe('lib/supabase', () => {
         refresh_token: 'r',
         expires_in: 3600,
         expires_at: Math.floor(Date.now() / 1000) - 10,
-        token_type: 'bearer' as const,
+        token_type: 'bearer',
         user: { id: 'target-1' },
       }),
     );
@@ -206,7 +214,7 @@ describe('lib/supabase', () => {
       refresh_token: 'r',
       expires_in: 3600,
       expires_at: Math.floor(Date.now() / 1000) + 3600,
-      token_type: 'bearer' as const,
+      token_type: 'bearer',
       user: { id: 'u-1' } as never,
     } as never;
     storeSession(session);

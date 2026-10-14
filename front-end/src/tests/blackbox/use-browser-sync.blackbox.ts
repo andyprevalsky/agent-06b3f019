@@ -9,14 +9,14 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 
 import { useBrowserSync } from '@/features/integrations/hooks/useBrowserSync';
 
-import type { BrowserInfo, BrowserCookiesHandler } from '@/features/integration-handlers-context';
+import type { BrowserInfo } from '@/features/integration-handlers-context';
 
-function makeHandlers(overrides: { browserCookies?: Partial<BrowserCookiesHandler> } = {}) {
+function makeHandlers(overrides: Record<string, unknown> = {}) {
   const base = {
     browserCookies: {
       isAvailable: true,
       getInstalledBrowsers: vi.fn(async (): Promise<BrowserInfo[]> => [
-        { type: 'chrome' as const, name: 'Chrome', isInstalled: true, needsManualPassword: false },
+        { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
         { type: 'atlas', name: 'Atlas', isInstalled: true, needsManualPassword: true },
       ]),
       syncBrowser: vi.fn(async () => {}),
@@ -25,7 +25,7 @@ function makeHandlers(overrides: { browserCookies?: Partial<BrowserCookiesHandle
       openKeychainAccess: vi.fn(async () => ({ success: true })),
     },
   };
-  return { browserCookies: { ...base.browserCookies, ...overrides.browserCookies } };
+  return { ...base, ...overrides };
 }
 
 describe('useBrowserSync', () => {
@@ -179,7 +179,7 @@ describe('useBrowserSync', () => {
       browserCookies: {
         isAvailable: true,
         getInstalledBrowsers: vi.fn(async () => [
-          { type: 'chrome' as const, name: 'Chrome', isInstalled: true, needsManualPassword: false },
+          { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
         ]),
         syncBrowser: vi.fn(async () => {
           throw new Error('sync failed');

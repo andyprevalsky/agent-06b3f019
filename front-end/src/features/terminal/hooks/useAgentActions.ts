@@ -7,7 +7,6 @@
 import { useState, useCallback, useRef } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
-import type { ClientSource } from '@/lib/clientSource';
 
 import {
   fetchAgentDetail,
@@ -26,7 +25,7 @@ interface UseAgentActionsArgs {
   applyAgentDetail: (agentId: string, data: AgentDetailResponse) => boolean;
   setSelectedAgentIdContext: (id: string | null) => void;
   setCurrentView: (v: TerminalView) => void;
-  clientSource: ClientSource;
+  clientSource: AgentDetail['source'];
   loadAgents: () => Promise<void>;
 }
 

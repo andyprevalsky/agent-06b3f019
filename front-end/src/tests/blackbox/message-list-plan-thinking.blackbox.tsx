@@ -37,6 +37,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   return {
     agent: makeAgent(),
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
@@ -50,10 +54,6 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
-    inspectionContext: null,
-    stagePendingAgentCreation: vi.fn(),
-    reconcilePendingAgentCreation: vi.fn(async () => {}),
-    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }

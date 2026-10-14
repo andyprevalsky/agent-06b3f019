@@ -63,6 +63,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   return {
     agent: null,
     applyAgentDetail: () => true,
+    inspectionContext: null,
+    stagePendingAgentCreation: () => {},
+    reconcilePendingAgentCreation: async () => {},
+    rollbackPendingAgentCreation: () => false,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
@@ -76,10 +80,6 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
     isLoadingAgent: false,
     forceResubscribe: () => {},
     isChatMode: false,
-    inspectionContext: null,
-    stagePendingAgentCreation: vi.fn(),
-    reconcilePendingAgentCreation: vi.fn(async () => {}),
-    rollbackPendingAgentCreation: vi.fn(() => false),
     ...overrides,
   };
 }
@@ -223,10 +223,7 @@ describe('MessageList', () => {
         }),
         msg('credential-classified', {
           role: 'TOOL',
-          text:
-            'Browser run failed.\n\n' +
-            'Failure reason: unknown\n\n' +
-            "Raw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
+          text: "Browser run failed.\n\nFailure reason: unknown\n\nRaw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
           timestamp: new Date(baseTime + 2000).toISOString(),
           metadata: {
             toolCallId: 'credential-failure-classifier:agent-1',
@@ -390,7 +387,7 @@ describe('MessageList', () => {
       streamingBubbles: new Map([['sb-1', { text: 'streaming...', sequence: 1, done: false }]]),
       streamingAttention: {
         stream_id: 'str-a',
-        sequence: 0,
+        sequence: 1,
         done: false,
         tool_call_id: 'sa-1',
         message: 'please respond',

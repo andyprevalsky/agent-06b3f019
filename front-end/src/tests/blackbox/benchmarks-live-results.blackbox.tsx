@@ -1,9 +1,9 @@
-import type { HubRunTask } from '@/lib/api/benchmarksHub';
-import { afterEach, it, vi, expect } from 'vitest';
+import { afterEach, it, vi } from 'vitest';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
 import { BenchmarkRunView } from '@/features/benchmarks/BenchmarkRunView';
+import type { HubRunDetail } from '@/lib/api/benchmarksHub';
 
 type FetchInput = Parameters<typeof fetch>[0];
 const base = {
@@ -269,7 +269,7 @@ it('keeps grouped completion counts across task pages while showing only the cur
 
 // Captured from the existing campaign-hub-grouping owning inverse, using the
 // production Hub projection. A controller exit without a verdict remains null.
-const owningMixedInfra = {
+const owningMixedInfra: Omit<HubRunDetail, 'dispatch'> = {
   run_id: 'group-a',
   timestamp: '2026-10-06T20:00:00+00:00',
   suite: 'cloud-fleet',
@@ -351,7 +351,7 @@ const owningMixedInfra = {
     agents: 0,
   },
 };
-const owningMixedCancelled = {
+const owningMixedCancelled: Omit<HubRunDetail, 'dispatch'> = {
   run_id: 'group-a',
   timestamp: '2026-10-06T20:00:00+00:00',
   suite: 'cloud-fleet',
@@ -444,9 +444,7 @@ it.each([
     'rose-session',
     JSON.stringify({ access_token: 'fixture-token', user: { id: 'fixture-admin' } }),
   );
-  const group: Omit<typeof owningMixedInfra, 'tasks'> & { tasks: HubRunTask[] } = structuredClone(
-    kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra,
-  );
+  const group = structuredClone(kind === 'cancelled' ? owningMixedCancelled : owningMixedInfra);
   if (kind === 'passed' || kind === 'failed') {
     group.tasks[1] = {
       ...group.tasks[1],

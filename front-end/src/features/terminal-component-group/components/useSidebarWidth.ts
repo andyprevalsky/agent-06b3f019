@@ -1,6 +1,9 @@
 /**
  * STATE MACHINE: useSidebarWidth
  *
+ * [INITIAL] --valid stored width--> [RESTORED WIDTH]
+ *     +---- missing / invalid / unavailable storage --> [COLLAPSED(64)]
+ *
  * [IDLE] --pointerdown on handle--> [DRAGGING] --pointermove--> [DRAGGING]
  *   ^                                    |
  *   +-------- pointerup / pointercancel -+   (width persisted to localStorage)
@@ -18,7 +21,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   SIDEBAR_COLLAPSE_SNAP_WIDTH,
   SIDEBAR_WIDTH_COLLAPSED,
-  SIDEBAR_WIDTH_EXPANDED,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
   SIDEBAR_WIDTH_STORAGE_KEY,
@@ -33,12 +35,12 @@ export function resolveSidebarWidth(rawWidth: number): number {
 function readStoredWidth(): number {
   try {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    if (stored === null) return SIDEBAR_WIDTH_EXPANDED;
+    if (stored === null) return SIDEBAR_WIDTH_COLLAPSED;
     const parsed = Number.parseInt(stored, 10);
-    return Number.isFinite(parsed) ? resolveSidebarWidth(parsed) : SIDEBAR_WIDTH_EXPANDED;
+    return Number.isFinite(parsed) ? resolveSidebarWidth(parsed) : SIDEBAR_WIDTH_COLLAPSED;
   } catch {
     // Private-mode / disabled storage — fall back to the default width.
-    return SIDEBAR_WIDTH_EXPANDED;
+    return SIDEBAR_WIDTH_COLLAPSED;
   }
 }
 

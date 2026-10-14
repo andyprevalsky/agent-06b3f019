@@ -6,7 +6,10 @@
 
 import { useEffect, type RefObject } from 'react';
 
-type VideoQualityCaps = HTMLVideoElement;
+interface VideoQualityCaps extends HTMLVideoElement {
+  webkitDecodedFrameCount?: number;
+  webkitDroppedFrameCount?: number;
+}
 
 function tryMicroSeek(v: HTMLVideoElement): void {
   try {

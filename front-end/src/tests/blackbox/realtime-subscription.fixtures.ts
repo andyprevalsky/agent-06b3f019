@@ -1,9 +1,8 @@
 import { vi } from 'vitest';
-import type { Message } from '@/lib/api';
 import type { RealtimeSubscriptionDeps } from '@/features/agent-context/hooks/useRealtimeSubscription';
 
 /** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
-export function agentDetailJson(messages: Message[]) {
+export function agentDetailJson<T>(messages: T[]) {
   return {
     agent: {
       agent_id: 'agent-1',
@@ -60,9 +59,7 @@ export function fakeChannel(state: 'joined' | 'closed' | 'errored' = 'joined') {
   } as unknown as import('@supabase/supabase-js').RealtimeChannel;
 }
 
-export function makeDeps(
-  overrides: Partial<RealtimeSubscriptionDeps> = {},
-): RealtimeSubscriptionDeps {
+export function makeDeps<T extends Partial<RealtimeSubscriptionDeps>>(overrides?: T) {
   const setters = {
     setStreamingBubbles: vi.fn(),
     setStreamingPlan: vi.fn(),
@@ -92,5 +89,5 @@ export function makeDeps(
     forceResubscribeCounter: 0,
     onLoadAgents: vi.fn(),
     ...overrides,
-  };
+  } satisfies RealtimeSubscriptionDeps;
 }

@@ -153,12 +153,10 @@ describe('integrations/api', () => {
 
   describe('startGmailOAuthApi', () => {
     it('returns { authUrl } on success; sends returnUrl when provided', async () => {
-      let body: Record<string, unknown> | null = null;
+      let body: Record<string, unknown> = null;
       server.use(
         http.post(`${API_BASE}/integrations/email/gmail/start`, async ({ request }) => {
-          const value = await request.json();
-          if (!value || typeof value !== 'object') throw new Error('Expected agent object');
-          body = { ...value };
+          body = (await request.json()) as Record<string, unknown>;
           return HttpResponse.json({ authUrl: 'https://g.com/auth' });
         }),
       );
@@ -270,12 +268,10 @@ describe('integrations/api', () => {
 
   describe('createLinkedInSyncAgentApi', () => {
     it('posts a LinkedIn sync goal to /api/agents and resolves on success', async () => {
-      let body: Record<string, unknown> | null = null;
+      let body: Record<string, unknown> = null;
       server.use(
         http.post(`${API_BASE}/agents`, async ({ request }) => {
-          const value = await request.json();
-          if (!value || typeof value !== 'object') throw new Error('Expected agent object');
-          body = { ...value };
+          body = (await request.json()) as Record<string, unknown>;
           return HttpResponse.json({ agent_id: 'a-1' }, { status: 201 });
         }),
       );
