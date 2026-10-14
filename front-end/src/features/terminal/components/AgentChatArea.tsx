@@ -8,6 +8,7 @@
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
  *
  * INPUT ROUTING:
+ *   shared recording / inspection → show read-only notice, omit mutation controls
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
  *
@@ -19,7 +20,7 @@
  *   About, Privacy, and Terms remain available while chatting.
  */
 
-import { useRef, Suspense, type ComponentType } from 'react';
+import { useRef, Suspense, type ComponentType, type ReactNode } from 'react';
 import * as analytics from '@/lib/analytics';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
@@ -76,6 +77,11 @@ export function AgentChatArea({
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
   const sharedView = isBenchmarkSharedView();
+  const readOnlyMessage = sharedView
+    ? 'Read-only benchmark recording'
+    : a.inspectionContext
+      ? 'Read-only account inspection. Switch to this account to control the agent.'
+      : null;
 
   const canSubmit = composerCanSubmit({
     selectedAgentId: a.selectedAgentId,
@@ -114,8 +120,8 @@ export function AgentChatArea({
         </Suspense>
       )}
 
-      {sharedView ? (
-        <SharedRecordingNotice />
+      {readOnlyMessage !== null ? (
+        <ReadOnlyNotice>{readOnlyMessage}</ReadOnlyNotice>
       ) : (
         <InputArea
           agents={a}
@@ -135,11 +141,9 @@ export function AgentChatArea({
   );
 }
 
-function SharedRecordingNotice() {
+function ReadOnlyNotice({ children }: { children: ReactNode }) {
   return (
-    <div className="relative z-10 pb-8 text-center text-sm text-muted-foreground">
-      Read-only benchmark recording
-    </div>
+    <div className="relative z-10 pb-8 text-center text-sm text-muted-foreground">{children}</div>
   );
 }
 

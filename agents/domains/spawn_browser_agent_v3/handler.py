@@ -22,7 +22,7 @@ import time
 import traceback
 import uuid as uuid_module
 import weakref
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import structlog
@@ -46,7 +46,7 @@ from helpers.generation_handoff import (
     park_pending_tool,
     take_tool_resume,
 )
-from helpers.messages import stream_browser_cursor
+from helpers.messages import poll_new_messages, stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
@@ -942,6 +942,55 @@ def _complete_pending_payment_card_result(
     return False
 
 
+async def _load_browser_resume_user_instructions(
+    agent_id: str,
+    resume_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Read durable user input once at the suspension boundary, after hydration."""
+    cursor = resume_state.get("user_message_cursor") or datetime.fromtimestamp(0, timezone.utc).isoformat()
+    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    # The overlap includes separately inserted rows sharing the last timestamp.
+    rows = await poll_new_messages(agent_id, cursor_time - timedelta(microseconds=1))
+    messages = list(resume_state.get("user_instruction_messages") or [])
+    seen_ids = set(resume_state.get("user_instruction_message_ids") or [])
+    newest = cursor_time
+    for row in sorted(rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))):
+        raw_timestamp = row.get("timestamp")
+        if raw_timestamp:
+            timestamp = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+            newest = max(newest, timestamp)
+        if str(row.get("role") or "").upper() != "USER" or (row.get("metadata") or {}).get("hidden"):
+            continue
+        message_id = row.get("id") or row.get("message_id")
+        text = row.get("text")
+        if not message_id or message_id in seen_ids or not isinstance(text, str) or not text.strip():
+            continue
+        messages.append({"role": "user", "content": text})
+        seen_ids.add(message_id)
+    return {
+        **resume_state,
+        "user_instruction_messages": messages,
+        "user_instruction_message_ids": sorted(seen_ids),
+        "user_message_cursor": newest.isoformat(),
+    }
+
+
+def _append_browser_user_instructions(
+    resume_state: Optional[Dict[str, Any]],
+    browser_turn_messages: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Deliver genuine user feedback once across repeated activity resumes."""
+    state = resume_state or {}
+    messages = [
+        {"role": "user", "content": message["content"]}
+        for message in state.get("user_instruction_messages", [])
+        if isinstance(message, dict) and isinstance(message.get("content"), str)
+    ]
+    delivered = int(state.get("delivered_user_instruction_count") or 0)
+    browser_turn_messages.extend(dict(message) for message in messages[delivered:])
+    return messages
+
+
 def _browser_resume_continuity_state(
     *,
     action_history: Any,
@@ -951,6 +1000,9 @@ def _browser_resume_continuity_state(
     reasoning_messages: Optional[List[str]] = None,
     action_summary: Optional[List[str]] = None,
     auth_runtime_state: Optional[AuthRuntimeState] = None,
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
+    user_message_cursor: Optional[str] = None,
+    user_instruction_message_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -961,6 +1013,10 @@ def _browser_resume_continuity_state(
         "reasoning_messages": list(reasoning_messages or []),
         "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
+        "user_instruction_messages": list(user_instruction_messages or []),
+        "delivered_user_instruction_count": len(user_instruction_messages or []),
+        "user_message_cursor": user_message_cursor,
+        "user_instruction_message_ids": list(user_instruction_message_ids or []),
     }
     return state
 
@@ -5137,6 +5193,10 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "action_summary",
     "auth_attempts",
     "browser_resume_context_ref",
+    "user_instruction_messages",
+    "delivered_user_instruction_count",
+    "user_message_cursor",
+    "user_instruction_message_ids",
 )
 
 
@@ -6216,6 +6276,10 @@ async def _spawn_browser_agent_activity_v3_real(
         write_lock_resume_state = await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
+        if write_lock_resume_state.get("approval_type") != AUTH_ASSISTANCE_DECLINED:
+            write_lock_resume_state = await _load_browser_resume_user_instructions(
+                agent_id, write_lock_resume_state
+            )
 
     from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
@@ -6364,7 +6428,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     unlock_domain=merchant_domain,
                     prior_domain=site_entry.get("domain"),
                 )
-        if write_lock_resume_state.get("approval_type") == "auth_assistance":
+        if (
+            write_lock_resume_state.get("approval_type") == "auth_assistance"
+            and write_lock_resume_state.get("auth_assistance_completed", True)
+        ):
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
                     auth_realm=auth_realm,
@@ -7444,6 +7511,11 @@ async def _spawn_browser_agent_activity_v3_real(
         iteration = resume_step_count
         consecutive_api_failures = 0
         browser_turn_messages.extend(resume_user_messages)
+        user_instruction_messages = _append_browser_user_instructions(
+            write_lock_resume_state, browser_turn_messages
+        )
+        user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor") or activity.info().scheduled_time.isoformat()
+        user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
         otp_history_count = 0
         supervisor_recovery_count = 0
         failed_steel_auth_recovery_ids: set[str] = set()
@@ -7731,6 +7803,9 @@ async def _spawn_browser_agent_activity_v3_real(
                             task_id=task_id,
                             state=_browser_resume_continuity_state(
                                 action_history=action_history,
+                                user_instruction_messages=user_instruction_messages,
+                                user_message_cursor=user_message_cursor,
+                                user_instruction_message_ids=user_instruction_message_ids,
                                 visited_urls=visited_urls,
                                 verifier_checkpoints=verifier_checkpoints,
                                 browser_turn_messages=browser_turn_messages,
@@ -8857,6 +8932,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         task_id=task_id,
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
+                            user_instruction_messages=user_instruction_messages,
+                            user_message_cursor=user_message_cursor,
+                            user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,
                             browser_turn_messages=browser_turn_messages,
@@ -9413,6 +9491,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         goal=goal,
                         current_url=current_url,
                         browser_state=verifier_browser_state,
+                        user_instruction_messages=user_instruction_messages,
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
@@ -10162,6 +10241,9 @@ Based on this feedback, I need to continue working on the task and address the i
                         task_id=task_id,
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
+                            user_instruction_messages=user_instruction_messages,
+                            user_message_cursor=user_message_cursor,
+                            user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,
                             browser_turn_messages=browser_turn_messages,
@@ -10302,6 +10384,9 @@ Based on this feedback, I need to continue working on the task and address the i
                         task_id=task_id,
                         state=_browser_resume_continuity_state(
                             action_history=action_history,
+                            user_instruction_messages=user_instruction_messages,
+                            user_message_cursor=user_message_cursor,
+                            user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,
                             browser_turn_messages=browser_turn_messages,
@@ -10477,6 +10562,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     goal=goal,
                     current_url=current_url,
                     browser_state=final_browser_state,
+                    user_instruction_messages=user_instruction_messages,
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
@@ -12011,6 +12097,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         return
                     user_declined = False
+                    auth_assistance_completed = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
                         # A decline used to be read as "the user signed in": the
@@ -12018,6 +12105,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         user_declined = (
                             isinstance(signal_response, str) and signal_response.strip() == REJECTION_SENTINEL
                         )
+                        auth_assistance_completed = signal_response == "__AUTH_ASSISTANCE_COMPLETED__"
                         workflow_instance.is_paused = False
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
@@ -12027,6 +12115,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
                         "approval_type": AUTH_ASSISTANCE_DECLINED if user_declined else "auth_assistance",
+                        "auth_assistance_completed": auth_assistance_completed,
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),

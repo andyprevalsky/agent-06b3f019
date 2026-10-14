@@ -185,7 +185,9 @@ const authCompleted = browserMessage('auth-done', '2026-10-09T20:34:10.619Z', {
 });
 
 describe('live view follows the backend session binding', () => {
+  let viewportWidth: number;
   beforeEach(() => {
+    viewportWidth = window.innerWidth;
     const session = {
       access_token: 'test-token',
       refresh_token: 'test-refresh',
@@ -201,8 +203,119 @@ describe('live view follows the backend session binding', () => {
   });
 
   afterEach(() => {
+    window.innerWidth = viewportWidth;
     localStorage.clear();
     window.history.replaceState({}, '', '/');
+  });
+
+  it.each([
+    { width: 390, state: 'active' },
+    { width: 390, state: 'waiting' },
+    { width: 390, state: 'disconnected' },
+    { width: 1280, state: 'active' },
+    { width: 1280, state: 'waiting' },
+    { width: 1280, state: 'disconnected' },
+  ])(
+    'keeps foreign browser inspection read-only at width $width while $state',
+    async ({ width, state }) => {
+      window.innerWidth = width;
+      const mutations: string[] = [];
+      serveLiveView(() => binding(REBOUND_STEEL, 1));
+      server.use(
+        http.get(`${API_BASE}/browser-session/task/:taskId/control`, () =>
+          HttpResponse.json({ state: 'requested', agentPaused: false, debugUrl: REBOUND_STEEL }),
+        ),
+        http.post(`${API_BASE}/browser-session/task/:taskId/control`, ({ request }) => {
+          mutations.push(request.url);
+          return HttpResponse.json({ state: 'user', agentPaused: false, debugUrl: REBOUND_STEEL });
+        }),
+        http.post(`${API_BASE}/auth-assistance/:requestId/:action`, ({ request }) => {
+          mutations.push(request.url);
+          return HttpResponse.json({ liveViewUrl: REBOUND_STEEL });
+        }),
+      );
+      const messages = [sessionInit(REBOUND_STEEL)];
+      if (state === 'waiting') messages.push(authRequest);
+      if (state === 'disconnected') {
+        messages.push(
+          browserMessage('inspection-paused', '2026-10-14T17:33:50Z', {
+            action_type: 'session_paused',
+            toolStatus: 'FINISHED',
+          }),
+        );
+      }
+      const context = agentContext(messages);
+      context.inspectionContext = {
+        user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275',
+        name: 'Tamara',
+        phone: null,
+        email: null,
+      };
+      renderWithProviders(
+        <AgentContext.Provider value={context}>
+          <BrowserStatusBar taskId={TASK_ID} browserUrl={REBOUND_STEEL} />
+        </AgentContext.Provider>,
+      );
+
+      await waitFor(() => expect(liveIframe()).toBeInTheDocument());
+      fireEvent.load(liveIframe()!);
+      expect(
+        screen.queryByRole('button', { name: /^(Take control|Hand back control|Start Agent)$/i }),
+      ).not.toBeInTheDocument();
+      expect(liveIframe()).toHaveAttribute('inert');
+      expect(liveIframe()).toHaveAttribute('tabindex', '-1');
+      expect(liveIframe()?.src).toContain('interactive=false');
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 30));
+      });
+      expect(mutations).toEqual([]);
+    },
+  );
+
+  it('does not recover browser control after an owned view becomes foreign inspection', async () => {
+    let releaseRead: (() => void) | undefined;
+    const mutations: string[] = [];
+    serveLiveView(() => binding(REBOUND_STEEL, 1));
+    server.use(
+      http.get(`${API_BASE}/browser-session/task/:taskId/control`, async () => {
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve;
+        });
+        return HttpResponse.json({
+          state: 'requested',
+          agentPaused: false,
+          debugUrl: REBOUND_STEEL,
+        });
+      }),
+      http.post(`${API_BASE}/browser-session/task/:taskId/control`, ({ request }) => {
+        mutations.push(request.url);
+        return HttpResponse.json({ state: 'user', agentPaused: false, debugUrl: REBOUND_STEEL });
+      }),
+    );
+    const context = agentContext([sessionInit(REBOUND_STEEL)]);
+    const view = (value: AgentContextValue) => (
+      <AgentContext.Provider value={value}>
+        <BrowserStatusBar taskId={TASK_ID} browserUrl={REBOUND_STEEL} />
+      </AgentContext.Provider>
+    );
+    const rendered = renderWithProviders(view(context));
+    await waitFor(() => expect(releaseRead).toBeDefined());
+    rendered.rerender(
+      view({
+        ...context,
+        inspectionContext: {
+          user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275',
+          name: 'Tamara',
+          phone: null,
+          email: null,
+        },
+      }),
+    );
+    await act(async () => {
+      releaseRead?.();
+      await new Promise((resolve) => window.setTimeout(resolve, 30));
+    });
+    expect(mutations).toEqual([]);
   });
 
   it('shows the rebound session after auth assistance, not the expired transcript session', async () => {

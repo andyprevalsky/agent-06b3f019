@@ -378,6 +378,7 @@ async def build_browser_verifier_context(
     session_id: str,
     payment_card_evidence: Optional[Dict[str, Any]] = None,
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
+    user_instruction_messages: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -536,6 +537,10 @@ async def build_browser_verifier_context(
     # media_type, data}}` instead of being inlined as text.
     return [
         {"role": "USER", "text": user_prompt},
+        *[
+            {"role": "USER", "text": message["content"]}
+            for message in user_instruction_messages or []
+        ],
         {
             "role": "TOOL",
             "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown - URL transitions, tool inputs/outputs):\n\n{actions_text}",
