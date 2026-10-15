@@ -31,6 +31,7 @@ export type StartPhase = 'plan' | 'execute';
 
 export interface StartNewAgentArgs {
   goal: string;
+  notification_message?: string | null;
   budget_dollars?: number;
   start_phase?: StartPhase | null;
 }
@@ -132,6 +133,9 @@ export async function commitStartNewAgent(
           text: goal,
           role: 'USER',
           timestamp: new Date(),
+          metadata: {
+            startNotification: { message: args.notification_message?.trim() || "I'm on it." },
+          },
         },
       });
 

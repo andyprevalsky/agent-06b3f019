@@ -405,6 +405,12 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
     };
   }
   if (
+    args.notification_message !== undefined &&
+    args.notification_message !== null &&
+    typeof args.notification_message !== 'string'
+  )
+    throw new Error('notification_message must be a string or null');
+  if (
     args.start_phase !== undefined &&
     args.start_phase !== null &&
     args.start_phase !== 'plan' &&

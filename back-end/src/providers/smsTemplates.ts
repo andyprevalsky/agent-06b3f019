@@ -35,8 +35,10 @@ export const SMS_TEMPLATES = {
   /* c8 ignore start -- SMS Supervisor templates only called from excluded smsSupervisor module */
   // SMS Supervisor templates. Templates with a `url` argument receive the
   // per-agent deep link (getAgentUrl → roselabs.ai?agent-id=…).
-  agentStarted: (_prefix: string, goal: string, url: string) =>
-    `I'm on it: ${goal}\nFollow along: ${url || ROSE_LABS_URL}`,
+  agentStarted: (_prefix: string, goal: string, url: string, notificationMessage?: string) =>
+    notificationMessage?.trim()
+      ? `${notificationMessage.trim()}\n${url || ROSE_LABS_URL}`
+      : `I'm on it: ${goal}\nFollow along: ${url || ROSE_LABS_URL}`,
 
   plannerQuestion: (_prefix: string, question: string) =>
     `I need your input to keep going: ${question}`,
