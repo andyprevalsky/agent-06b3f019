@@ -6812,6 +6812,193 @@ def _compacted_completed_plan_followup_context(followup_text: str) -> List[Dict[
     ]
 
 
+async def _exercise_fresh_start_schema_acceptance(
+    *, generation_fails=False, invalid_schema=False, persistence_fails=False
+):
+    """Run the real fresh-start and terminal paths against a stale database row."""
+    import workflows.agent_workflow as module
+
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    followup = "get a refund, the doordasher delivered to the wrong location"
+    stale_schema = {"fields": [{"name": "order_confirmation_id", "type": "str", "required": True}]}
+    replacement = {"fields": [{"name": "refund_status", "type": "str", "required": True}]}
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": _completed_plan_followup_context(followup_text=followup),
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "fetch_agent_config": {"response_schema": stale_schema, "write_lock_enabled": True},
+            "set_response_schema_activity": {"schema": {"fields": []} if invalid_schema else replacement, "usage": {}},
+            "generate_completion_summary": {"summary": "Refund handled", "tool_counts": {}, "usage": {}},
+        }
+    )
+    if generation_fails:
+        fake.activity_fail_for.add("set_response_schema_activity")
+    if persistence_fails:
+        fake.activity_fail_for.add("persist_response_schema_activity")
+    original = _patch_workflow(fake)
+    original_run_agent = module.run_agent
+
+    async def completed_turn(**kwargs):
+        return {
+            "status": "completed",
+            "context": _completed_plan_followup_context(followup_text=followup),
+            "structured_response": {"refund_status": "refunded"},
+            "token_count": 3,
+            "context_size": 30,
+        }
+
+    module.run_agent = completed_turn
+    error = None
+    result = None
+    try:
+        try:
+            result = await wf.run(
+                "fresh-schema-agent",
+                "fresh-schema-user",
+                "order me glide floss from doordash",
+                "anthropic/claude-sonnet-4.5",
+                256,
+                {"type": "FLOAT_LLM_JUDGE"},
+                None,
+                None,
+                None,
+                0,
+                None,
+                "execute",
+                25,
+                250,
+                {},
+            )
+        except RuntimeError as exc:
+            error = exc
+        if generation_fails or invalid_schema:
+            assert error is not None, "fresh-start generation failure completed using the stale database contract"
+            assert wf.output_schema is None, "completion restored a schema from the completed prior task"
+            assert not wf._is_finished, "unaccepted fresh-start requirements latched terminal state"
+            assert not any(
+                name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls
+            )
+            assert sum(name == "fetch_agent_config" for name, _args in fake.activity_calls) == 1, (
+                "completion reloaded the stale schema"
+            )
+        else:
+            assert error is None, (
+                f"accepted fresh-start contract failed after lost persistence acknowledgement: {error}"
+            )
+            assert result["status"] == "completed"
+            assert wf.output_schema == replacement
+            assert wf._response_schema_accepted_revision == wf._response_schema_revision > 0
+            assert await wf._make_response_schema_getter()() == replacement
+            assert any(name == "persist_response_schema_activity" for name, _args in fake.activity_calls)
+            assert sum(name == "fetch_agent_config" for name, _args in fake.activity_calls) == 1
+        return wf, fake
+    finally:
+        module.run_agent = original_run_agent
+        _restore_workflow(original)
+
+
+async def test_workflow_fresh_start_generation_failure_cannot_restore_completed_task_schema():
+    await _exercise_fresh_start_schema_acceptance(generation_fails=True)
+
+
+async def test_workflow_fresh_start_empty_schema_cannot_restore_completed_task_schema():
+    await _exercise_fresh_start_schema_acceptance(invalid_schema=True)
+
+
+async def test_workflow_fresh_start_accepted_schema_survives_lost_persistence_ack():
+    await _exercise_fresh_start_schema_acceptance(persistence_fails=True)
+
+
+async def test_workflow_fresh_start_unchanged_schema_is_accepted_before_persistence():
+    wf, fake, replacement = _user_schema_refresh_fixture()
+    wf._response_schema_initialized = False
+    wf.output_schema = replacement
+    wf.max_iterations, wf.context_gates = 30, {}
+    persistence_ack = asyncio.Event()
+    fake.activity_blockers["persist_response_schema_activity"] = persistence_ack
+    original = _patch_workflow(fake)
+    task = None
+    try:
+        task = asyncio.create_task(
+            wf._regenerate_output_schema_for_new_instruction(
+                [
+                    {"role": "USER", "text": "Research venue prices"},
+                ]
+            )
+        )
+        await asyncio.sleep(0)
+        assert wf._response_schema_accepted_revision == wf._response_schema_revision > 0, (
+            "unchanged fresh-start schema was not accepted natively"
+        )
+        assert wf.output_schema is replacement
+        assert any(name == "persist_response_schema_activity" for name, _args in fake.activity_calls)
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(wf._continuation_resume_state(wf.context))
+        assert restored.output_schema == replacement
+        assert restored._response_schema_accepted_revision == wf._response_schema_accepted_revision
+        persistence_ack.set()
+        await task
+        assert await wf._make_response_schema_getter()() == replacement
+    finally:
+        persistence_ack.set()
+        if task is not None:
+            await task
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_refuses_failed_fresh_start_before_terminal_effects():
+    wf, fake, _replacement = _user_schema_refresh_fixture()
+    wf._response_schema_initialized = False
+    wf.output_schema = None
+    fake.activity_fail_for.add("set_response_schema_activity")
+    fake.activity_returns["fetch_agent_config"] = {"response_schema": {"fields": [{"name": "old_task", "type": "str"}]}}
+    original = _patch_workflow(fake)
+    try:
+        await wf._regenerate_output_schema_for_new_instruction([{"role": "USER", "text": "Research venue prices"}])
+        try:
+            await wf._mark_complete([], {"old_task": "done"})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("direct terminal path accepted failed fresh-start schema generation")
+        assert not wf._is_finished
+        assert not any(
+            name in ("fetch_agent_config", "generate_completion_summary", "mark_finished")
+            for name, _args in fake.activity_calls
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_fresh_start_discards_schema_superseded_during_generation():
+    wf, fake, replacement = _user_schema_refresh_fixture()
+    wf._response_schema_initialized = False
+    wf.output_schema = None
+    blocker = asyncio.Event()
+    fake.activity_blockers["set_response_schema_activity"] = blocker
+    original = _patch_workflow(fake)
+    try:
+        task = asyncio.create_task(
+            wf._regenerate_output_schema_for_new_instruction([{"role": "USER", "text": "Research venue prices"}])
+        )
+        await asyncio.sleep(0)
+        await wf.receive_user_response("Actually, return only venue opening hours")
+        blocker.set()
+        await task
+        assert wf.output_schema is None, "fresh-start adopted a candidate superseded while generating"
+        assert wf._response_schema_accepted_revision < wf._response_schema_revision
+        assert not any(name == "persist_response_schema_activity" for name, _args in fake.activity_calls)
+        generation_args = next(args for name, args in fake.activity_calls if name == "set_response_schema_activity")
+        assert generation_args[5] is False, "superseded generation was allowed to persist before native acceptance"
+    finally:
+        blocker.set()
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_skips_stale_plan_after_completion_followup():
     """Post-completion follow-up must not replay the completed DAG.
 
@@ -10258,6 +10445,30 @@ async def run_all_tests():
     await r.record_async(
         "wf_new_instruction_native_schema",
         test_workflow_new_instruction_schema_uses_native_state_without_user_row,
+    )
+    await r.record_async(
+        "wf_fresh_start_failed_generation_no_stale_schema",
+        test_workflow_fresh_start_generation_failure_cannot_restore_completed_task_schema,
+    )
+    await r.record_async(
+        "wf_fresh_start_empty_generation_no_stale_schema",
+        test_workflow_fresh_start_empty_schema_cannot_restore_completed_task_schema,
+    )
+    await r.record_async(
+        "wf_fresh_start_native_acceptance_lost_db_ack",
+        test_workflow_fresh_start_accepted_schema_survives_lost_persistence_ack,
+    )
+    await r.record_async(
+        "wf_fresh_start_unchanged_native_acceptance",
+        test_workflow_fresh_start_unchanged_schema_is_accepted_before_persistence,
+    )
+    await r.record_async(
+        "wf_mark_complete_rejects_failed_fresh_contract",
+        test_workflow_mark_complete_refuses_failed_fresh_start_before_terminal_effects,
+    )
+    await r.record_async(
+        "wf_fresh_start_superseded_generation_not_persisted",
+        test_workflow_fresh_start_discards_schema_superseded_during_generation,
     )
     await r.record_async(
         "wf_verifier_refreshes_schema_from_feedback",

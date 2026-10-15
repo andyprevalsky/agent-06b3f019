@@ -186,6 +186,74 @@ revision and per-verification USER identity set. It introduces no fleet scan,
 global subscription or cross-agent event channel. The case remains open pending
 rollout.
 
+### Fresh-start acceptance gap found in final review, 2026-10-15
+
+PR #1511 review comment 4277591962 identified a related acceptance path on
+9b8b694bb47f211443b3d3a32fe375036f7bed5c. This is a locally reproduced
+fresh-start defect, not additional evidence about the original Calendar outcome.
+The deployment was held before merge. Archive searches `schema generation
+returned no fields` and `fresh start stale response schema completion followup`
+found this acceptance case and schema-contract relatives; the new evidence is
+appended here because the same native acceptance invariant was incomplete.
+
+Path: a real USER follow-up supersedes a completed task -> fresh workflow clears
+the old native schema -> latest-USER schema generation fails or returns empty
+fields -> the helper returns without claiming a requirement revision -> completion
+sees revision zero as accepted and reloads the completed task's database schema.
+The first bad boundary is the fresh-start helper's missing acceptance state,
+not the completion card renderer or provider result. The earlier mid-run tests
+did not exercise this separate startup helper.
+
+The fresh-start helper now claims a native requirement revision, generates with
+`persist=False`, and discards a candidate if actual input supersedes it during
+generation. A valid candidate, including an unchanged schema, is accepted before
+the database write await. Generation failures remain unaccepted; a lost persistence
+acknowledgement retains the accepted native contract. The terminal method checks
+that acceptance before it can latch completion, post a summary, or reload a
+database schema. It adds no additional schema await between the caller's verdict
+check and completion. No synthetic USER/TOOL narration, model score changes,
+browser transport, timeout changes, or How/template changes are part of this fix.
+
+Six permanent tests were run against unchanged 9b8b694 source and then against
+the repaired source with identical fixtures/assertions. Exact commands from the
+isolated `root-fresh-start/agents` directory, with the reused venv activated:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. --baseline 9b8b694bb47f211443b3d3a32fe375036f7bed5c --runtime workflows.agent_workflow workflow test_workflow_fresh_start_generation_failure_cannot_restore_completed_task_schema test_workflow_fresh_start_empty_schema_cannot_restore_completed_task_schema test_workflow_fresh_start_accepted_schema_survives_lost_persistence_ack test_workflow_mark_complete_refuses_failed_fresh_start_before_terminal_effects test_workflow_fresh_start_discards_schema_superseded_during_generation test_workflow_fresh_start_unchanged_schema_is_accepted_before_persistence
+```
+
+The identical command without `--baseline ... --runtime workflows.agent_workflow`
+uses the current runtime. The private runner loads the unchanged permanent tests
+and swaps only the runtime module with `git show` for the baseline run.
+`root-fresh-schema-all-before.log` records exit 6: both generation failures
+completed using the stale database contract; the direct terminal path accepted
+failed generation; an obsolete generated candidate was adopted; native accepted
+revision and unchanged-schema acceptance were absent. The first five tests also
+failed before any source edit in `root-fresh-schema-before.log` (exit 5).
+`root-fresh-schema-all-after.log` records all six passing (exit 0).
+
+The exception/empty-field/lost-ack tests execute the actual fresh `run` and
+`_mark_complete` methods, replacing only external activities and the agent turn.
+They assert no stale database reload, summary generation, or terminal latch after
+failure, and successful completion with the accepted new schema after a lost DB
+ack. Other tests exercise the direct terminal bypass, in-flight authored input,
+and continuation before the write acknowledgement. The existing stale-plan and
+native-input/no-injection controls remain unchanged.
+
+The owning deploy runner discovers all six tests. Canonical command:
+
+```bash
+python scripts/run_blackbox_tests.py workflow workflow_determinism
+```
+
+`root-fresh-schema-final-workflow.log` records two domains passed, zero failed
+(37.1s), including all six new tests and five determinism checks. Ruff lint and
+the prompt, trajectory and agent-behavior guards pass against the exact 9b8b694
+base. Independent read-only review found no blocker and independently ran the
+first five causal tests. This is runtime-only development handoff to the PR #1511
+owner for combined validation and deployment; no production rollout or original
+Calendar task success is claimed here.
+
 ## Human feedback
 
 The user required conditional schema refresh and the same standard for browser

@@ -2898,6 +2898,8 @@ class AgentWorkflow:
         latest = latest_real_user_instruction(context)
         if not latest:
             return
+        self._response_schema_revision += 1
+        target_revision = self._response_schema_revision
         try:
             generated = await workflow.execute_activity(
                 set_response_schema_activity,
@@ -2907,22 +2909,43 @@ class AgentWorkflow:
                     self._active_compute_token_payload(),
                     self.fast_mode_cache_enabled,
                     False,
+                    False,
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except Exception as e:
-            workflow.logger.warning(f"Failed to regenerate output_schema after superseded plan: {e}")
+            self._record_response_schema_refresh_failure(target_revision, str(e))
+            return
+        if target_revision < self._response_schema_revision:
+            self._response_schema_applied_revision = target_revision
             return
         schema = generated.get("schema") if isinstance(generated, dict) else None
         if not (isinstance(schema, dict) and schema.get("fields")):
+            self._record_response_schema_refresh_failure(target_revision, "schema generation returned no fields")
             return
-        if schema == self.output_schema:
-            return
-        self.output_schema = schema
+        if schema != self.output_schema:
+            self.output_schema = schema
+        self._response_schema_accepted_revision = target_revision
+        self._response_schema_refresh_failure_reason = None
         workflow.logger.info(
             f"Regenerated output_schema from latest USER instruction with {len(schema['fields'])} field(s)"
         )
+        # As with mid-run feedback, accept in native state before persistence.
+        # A failed write acknowledgement must not restore a completed task's schema.
+        try:
+            await workflow.execute_activity(
+                persist_response_schema_activity,
+                args=[self.agent_id, schema],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            self._record_response_schema_refresh_failure(target_revision, str(e))
+            return
+        self._response_schema_applied_revision = target_revision
+        self._response_schema_refresh_failed_revision = 0
+        self._response_schema_refresh_error = None
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
@@ -5455,6 +5478,7 @@ class AgentWorkflow:
         7. Save blueprint (fire-and-forget, no UI)
         """
         await self._await_deferred_startup()
+        self._require_current_response_schema_acceptance()
         workflow.logger.info("✓ Marking task complete")
         # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
