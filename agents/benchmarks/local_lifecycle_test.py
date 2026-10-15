@@ -927,6 +927,242 @@ def test_local_stack_cleanup_accepts_only_complete_native_schema_two_receipts():
             assert accepted==expected,(native,birth)
 
 
+def _seed_bootstrap_workspace(folder):
+    """Copy the unchanged bootstrap, replacing only external executables."""
+    import shutil
+    (folder / "scripts").mkdir()
+    shutil.copytree(REPO / "scripts/lib", folder / "scripts/lib")
+    for name in ("run.sh", "process-identity.py"):
+        shutil.copy2(REPO / "scripts" / name, folder / "scripts" / name)
+    (folder / "agents/benchmarks").mkdir(parents=True)
+    shutil.copy2(REPO / "agents/benchmarks/seed_cache_path.py", folder / "agents/benchmarks/seed_cache_path.py")
+    (folder / "back-end/prisma").mkdir(parents=True)
+    shutil.copy2(REPO / "back-end/prisma/schema.prisma", folder / "back-end/prisma/schema.prisma")
+    (folder / "back-end/.env").write_text("R2_BUCKET_TRACE_ARCHIVE=fixture-only\n")
+    binary = folder / "bin"
+    binary.mkdir()
+    fake = r"""#!/usr/bin/env python3
+import os,sys
+from pathlib import Path
+name=Path(sys.argv[0]).name
+state=Path(os.environ['BOOTSTRAP_DB_STATE'])
+with open(os.environ['BOOTSTRAP_EXTERNAL_LOG'],'a') as log:log.write(name+' '+' '.join(sys.argv[1:])+'\n')
+if name in ('docker','lsof'):sys.exit(1)
+if name=='pg_isready':sys.exit(0)
+if name=='pg_dump':print('pg_dump (PostgreSQL) 16.4');sys.exit(0)
+if name=='createdb':state.write_text('owned');sys.exit(0)
+if name=='dropdb':
+ if state.exists() and os.environ.get('BOOTSTRAP_DROP_FAIL')=='1':sys.exit(7)
+ state.unlink(missing_ok=True);sys.exit(0)
+if name=='readlink':
+ if os.environ.get('BOOTSTRAP_READ_FAIL')=='1' and sys.argv[1].endswith('.publish.lock'):sys.exit(7)
+ try:print(os.readlink(sys.argv[1]));sys.exit(0)
+ except OSError:sys.exit(1)
+if name=='rm':
+ if os.environ.get('BOOTSTRAP_LOCK_FAIL')=='1' and any(x.endswith('.publish.lock') for x in sys.argv[1:]):sys.exit(7)
+ for arg in sys.argv[1:]:
+  if not arg.startswith('-'):Path(arg).unlink(missing_ok=True)
+ sys.exit(0)
+if name=='npx':
+ if 'scripts/ensure-fast-mode-cache-schema.ts' in sys.argv:sys.exit(0)
+ if 'scripts/seed-dump-cache.ts' in sys.argv and 'get' in sys.argv:sys.exit(1)
+sys.exit(99)
+"""
+    for name in ("docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"):
+        path = binary / name
+        path.write_text(fake)
+        path.chmod(0o700)
+    return binary
+
+
+def _run_native_seed_bootstrap(folder, *, drop_fail=False, lock_fail=False, read_fail=False):
+    local = load_local()
+    binary = _seed_bootstrap_workspace(folder)
+    stack = local.ServiceStack("fixture-bootstrap", folder, folder/"services.json", folder/"services.log", True)
+    env = {
+        "PATH": f"{binary}:{os.environ['PATH']}", "CONDUCTOR_PORT": "24101",
+        "CONDUCTOR_WORKSPACE_NAME": "fixture-bootstrap", "BENCHMARK_ISOLATED_RUN": "true",
+        "BENCHMARK_RUN_ID": stack.run_id, "BENCHMARK_CONTEXT_DIR": str(folder),
+        "ROSE_USE_SYSTEM_PG": "true", "FAST_MODE_CACHE_USE_LOCAL": "1",
+        "BENCHMARK_SKIP_WMH_BUILD": "1", "BENCHMARK_REQUIRE_SEED_DUMP": "1",
+        "BENCHMARK_SEED_DUMP": str(folder/"seed.dump"),
+        "RUN_STACK_CLEANUP_STATUS_FILE": str(folder/"local-stack-cleanup.status"),
+        "RUN_STACK_CLEANUP_TOKEN": "fixture-bootstrap-token", "OWNER_READY": str(folder/"owner-ready"),
+        "BOOTSTRAP_DB_STATE": str(folder/"database.state"),
+        "BOOTSTRAP_EXTERNAL_LOG": str(folder/"external.log"), "BOOTSTRAP_DROP_FAIL": str(int(drop_fail)),
+        "BOOTSTRAP_LOCK_FAIL": str(int(lock_fail)), "BOOTSTRAP_READ_FAIL": str(int(read_fail)),
+    }
+    command = 'while [ ! -f "$OWNER_READY" ]; do sleep 0.01; done; exec bash scripts/run.sh --benchmark'
+    with stack.service_log.open("w") as output:
+        child = subprocess.Popen(["bash", "-c", command], cwd=folder, env=env, stdout=output, stderr=subprocess.STDOUT)
+    try:
+        local._record_stack_cleanup_owner(stack, child, env["RUN_STACK_CLEANUP_TOKEN"])
+        (folder/"owner-ready").touch()
+        assert child.wait(timeout=30) == 1, "cache miss must retain the original startup failure"
+    finally:
+        if child.poll() is None:
+            child.terminate()  # Only this unreaped direct native fixture owner.
+            child.wait(timeout=10)
+    text = stack.service_log.read_text()
+    assert "canonical base fixture is unavailable" in text, text
+    assert "refusing a slow production cold-sync substitute" in text, text
+    assert not stack.manifest_path.exists(), "no services may start after failed seed admission"
+    assert (folder/"seed.dump.publish.lock").is_symlink() == (lock_fail or read_fail), "seed lock cleanup did not match the external outcome"
+    calls = (folder/"external.log").read_text().splitlines()
+    assert all(line.split()[0] in {"docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"} for line in calls)
+    assert all("npx" != line.split()[0] or "ensure-fast-mode-cache-schema.ts" in line or "seed-dump-cache.ts get" in line for line in calls)
+    return local, stack
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_bootstrap_miss():
+    """An actual pre-service seed miss must seal its native owner before exiting 1."""
+    with tempfile.TemporaryDirectory(prefix="native-seed-miss-") as directory:
+        folder = Path(directory)
+        local, stack = _run_native_seed_bootstrap(folder)
+        assert not (folder/"database.state").exists(), "owned bootstrap database leaked"
+        local.stop_services(None, stack=stack)  # Actual unchanged receiver; no signal owner remains.
+        owner = json.loads((folder/"local-stack-owner.json").read_text())
+        receipt = folder/"local-stack-cleanup.status"
+        fields = local._read_cleanup_receipt(receipt, owner["token"], allowed_versions=("1", "2"))
+        assert fields["version"] == "2" and fields["stack_native_identity"] == owner["native_identity"]
+        assert fields["stack_pid"] == str(owner["pid"]) and fields["stack_birth"] == owner["birth"]
+        original = receipt.read_text()
+        for field, wrong in (("token", "foreign-token"), ("stack_native_identity", "foreign-native")):
+            receipt.write_text(original.replace(f"{field}={fields[field]}", f"{field}={wrong}"))
+            try:
+                local.stop_services(None, stack=stack)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"foreign {field} authorized cleanup")
+        receipt.unlink()
+        try:
+            local.stop_services(None, stack=stack)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("missing receipt authorized cleanup")
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_cleanup_failure():
+    """Failed owned PostgreSQL teardown must never produce a clean receipt."""
+    with tempfile.TemporaryDirectory(prefix="native-seed-drop-fail-") as directory:
+        folder = Path(directory)
+        local, stack = _run_native_seed_bootstrap(folder, drop_fail=True)
+        assert (folder/"database.state").exists(), "negative control did not fail owned teardown"
+        try:
+            local.stop_services(None, stack=stack)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("failed database cleanup authorized a clean receipt")
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_lock_failure():
+    """A retained owned seed lock cannot accompany a clean stack receipt."""
+    with tempfile.TemporaryDirectory(prefix="native-seed-lock-fail-") as directory:
+        folder = Path(directory)
+        local, stack = _run_native_seed_bootstrap(folder, lock_fail=True)
+        assert not (folder/"database.state").exists()
+        fields = dict(line.split("=", 1) for line in (folder/"local-stack-cleanup.status").read_text().splitlines())
+        assert fields["state"] == "failed"
+        try:
+            local.stop_services(None, stack=stack)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("retained seed lock authorized a clean receipt")
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_container_cleanup():
+    """Bootstrap Docker teardown acts on the immutable owner and preserves failures."""
+    import re
+    source = (REPO/"scripts/run.sh").read_text()
+    function = re.search(r"^cleanup_seed_bootstrap_database\(\) \{.*?^\}", source, re.M | re.S).group()
+    command = r"""
+    docker() {
+        printf '%s\n' "$*"
+        [ "$*" != "$FAIL_COMMAND" ]
+    }
+    USE_SYSTEM_PG=false
+    SYSTEM_DB_OWNED_BY_US=false
+    DB_OWNED_BY_US=true
+    DB_OWNED_CONTAINER_ID=immutable-owned-id
+    DB_CONTAINER=replaced-foreign-name
+    DB_VOLUME=owned-volume
+    """ + function + r"""
+    status=0
+    cleanup_seed_bootstrap_database || status=$?
+    printf 'result=%s owner=%s\n' "$status" "$DB_OWNED_CONTAINER_ID"
+    """
+    for failure in ("none", "rm -f immutable-owned-id", "volume rm owned-volume"):
+        result = subprocess.run(["bash", "-c", command], env={**os.environ, "FAIL_COMMAND": failure},
+                                capture_output=True, text=True, check=True)
+        assert "replaced-foreign-name" not in result.stdout
+        if failure == "none":
+            assert result.stdout.endswith("result=0 owner=\n")
+        else:
+            assert result.stdout.endswith("result=1 owner=immutable-owned-id\n")
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_readlink_error():
+    """Only a readlink I/O fault retains our lock; it cannot authorize clean."""
+    with tempfile.TemporaryDirectory(prefix="native-seed-read-fail-") as directory:
+        folder = Path(directory)
+        local, stack = _run_native_seed_bootstrap(folder, read_fail=True)
+        owner = json.loads((folder/"local-stack-owner.json").read_text())
+        assert os.readlink(folder/"seed.dump.publish.lock") == str(owner["pid"])
+        assert not (folder/"database.state").exists()
+        fields = dict(line.split("=", 1) for line in (folder/"local-stack-cleanup.status").read_text().splitlines())
+        assert fields["state"] == "failed", "readlink uncertainty certified a retained native-owned lock as clean"
+        try:
+            local.stop_services(None, stack=stack)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("readlink uncertainty authorized cleanup")
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_native_lock_observation():
+    """Only native absence or a successfully read foreign owner clears held state."""
+    import re
+    source = (REPO/"scripts/run.sh").read_text()
+    function = re.search(r"^release_seed_lock_if_held\(\) \{.*?^\}", source, re.M | re.S).group()
+    with tempfile.TemporaryDirectory(prefix="native-lock-observation-") as directory:
+        folder = Path(directory)
+        (folder/"sitecustomize.py").write_text(
+            "import errno,os\noriginal=os.readlink\n"
+            "def readlink(path,*args,**kwargs):\n"
+            " if os.fspath(path)==os.environ['LOCK_FAULT_PATH'] and os.environ['LOCK_MODE'] in ('io','permission','io-absent'):\n"
+            "  raise OSError(errno.EACCES if os.environ['LOCK_MODE']=='permission' else errno.EIO,'fixture native observation fault')\n"
+            " return original(path,*args,**kwargs)\nos.readlink=readlink\n")
+        command = '. "$REVIEW_REPO/scripts/lib/seed-cache.sh"\n' + function + r"""
+        _SEED_DUMP="$LOCK_DUMP"
+        _SEED_LOCK_HELD=1
+        case "$LOCK_MODE" in
+            foreign) ln -s "$FOREIGN_PID" "${_SEED_DUMP}.publish.lock" ;;
+            ours|io|permission) ln -s "$$" "${_SEED_DUMP}.publish.lock" ;;
+        esac
+        readlink() {
+            case "$LOCK_MODE" in ours|io|permission|io-absent) return 7 ;; esac
+            command readlink "$@"
+        }
+        status=0
+        release_seed_lock_if_held || status=$?
+        printf 'status=%s held=%s\n' "$status" "$_SEED_LOCK_HELD"
+        """
+        for mode in ("absent", "foreign", "ours", "io", "permission", "io-absent"):
+            dump = folder/mode
+            env = {**os.environ, "REVIEW_REPO": str(REPO), "LOCK_MODE": mode,
+                   "LOCK_DUMP": str(dump), "LOCK_FAULT_PATH": str(dump)+".publish.lock",
+                   "PYTHONPATH": str(folder), "FOREIGN_PID": str(os.getpid())}
+            result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, check=True)
+            good = mode in {"absent", "foreign"}
+            assert result.stdout.strip() == ("status=0 held=0" if good else "status=1 held=1"), (mode, result.stdout, result.stderr)
+            if mode == "foreign":
+                assert os.readlink(str(dump)+".publish.lock") == str(os.getpid())
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     folder = Path(sys.argv[2]).resolve()
