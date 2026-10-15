@@ -10806,7 +10806,6 @@ Based on this feedback, I need to continue working on the task and address the i
     except WorkflowGenerationSealed:
         generation_sealed = True
         raise
-
     except Exception as e:
         last_action = action_summary[-1] if action_summary else "initialization"
         logger.error(
