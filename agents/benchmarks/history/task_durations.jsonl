@@ -6185,3 +6185,5 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 162.9, "cost_cents": 0.0, "timestamp": "2026-10-15T10:34:32.358859+00:00", "agent_id": "721b5847-c526-449d-9d81-7866fc3ef899"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 320.2, "cost_cents": 1.0, "timestamp": "2026-10-15T10:34:32.358859+00:00", "agent_id": "84e2b8e5-af51-42c4-8998-bd2634c34744"}
 {"task": "agent-payment-abandonment", "duration_seconds": 246.0, "cost_cents": 0.0, "timestamp": "2026-10-15T10:34:32.358859+00:00", "agent_id": "43f7d643-3815-442c-b36e-6deff16a8267"}
+{"task": "sms-supervisor-fill-form-searches-then-delegates", "duration_seconds": 79.4, "cost_cents": 0.0, "timestamp": "2026-10-15T19:19:34.566543+00:00", "agent_id": ""}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 38.8, "cost_cents": 0.0, "timestamp": "2026-10-15T19:19:34.566543+00:00", "agent_id": ""}
