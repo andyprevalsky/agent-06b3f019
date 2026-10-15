@@ -53,6 +53,11 @@ import {
   runGroupSchedule,
 } from './benchmarkHubRunProjection';
 import {
+  assertHubStorageOwnership,
+  HUB_SQL_TIMEOUT_MS,
+  withHubStorageOwnership,
+} from './benchmarkHubStorageOwnership';
+import {
   getObject,
   getObjectStrict,
   putObject,
@@ -268,14 +273,18 @@ async function withIndexLock<T>(operation: () => Promise<T>, putCohort?: QueuedP
   }
   indexAdmissionHeld = true;
   try {
-    return await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
-        return operation();
-      },
-      // Locked work is bounded to the catalog, the compact index and one
-      // bounded cycle of run bundles; index repair never scans the archive.
-      { maxWait: 30_000, timeout: 5 * 60_000 }
+    return await withHubStorageOwnership(() =>
+      prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
+          const result = await operation();
+          assertHubStorageOwnership();
+          return result;
+        },
+        // Locked work is bounded to the catalog, the compact index and one
+        // bounded cycle of run bundles; index repair never scans the archive.
+        { maxWait: 30_000, timeout: HUB_SQL_TIMEOUT_MS }
+      )
     );
   } finally {
     // A rejected mutation remains rejected for its caller and hands admission

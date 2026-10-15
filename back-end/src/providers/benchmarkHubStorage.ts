@@ -3,6 +3,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import * as fs from 'node:fs/promises';
 import path from 'path';
+import { assertHubStorageOwnership, ownedHubStorageRequest } from './benchmarkHubStorageOwnership';
 
 const KEY_PREFIX = 'benchmark-hub';
 const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
@@ -54,31 +55,52 @@ function getS3Client(): S3Client {
   return s3Client;
 }
 
-async function streamToBuffer(body: unknown): Promise<Buffer> {
+async function streamToBuffer(body: unknown, signal?: AbortSignal): Promise<Buffer> {
+  assertHubStorageOwnership();
   if (body instanceof Buffer) return body;
-  const stream = body as AsyncIterable<Uint8Array>;
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
+  const stream = body as AsyncIterable<Uint8Array> & { destroy?: (error: Error) => void };
+  const abort = () => stream.destroy?.(new Error('Benchmark Hub body ownership ended'));
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    if (signal?.aborted) {
+      abort();
+      signal.throwIfAborted();
+    }
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of stream) {
+      assertHubStorageOwnership();
+      chunks.push(chunk);
+    }
+    assertHubStorageOwnership();
+    return Buffer.concat(chunks);
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 export async function putObject(key: string, data: string): Promise<void> {
-  if (r2Configured()) {
-    await getS3Client().send(
-      new PutObjectCommand({
-        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-        Key: `${KEY_PREFIX}/${key}`,
-        Body: data,
-        ContentType: 'application/json',
-      })
-    );
-    return;
-  }
-  const target = path.join(LOCAL_DIR, key);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, data);
-  await fs.rename(tmp, target);
+  await ownedHubStorageRequest(async (signal) => {
+    if (r2Configured()) {
+      assertHubStorageOwnership();
+      await getS3Client().send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+          Key: `${KEY_PREFIX}/${key}`,
+          Body: data,
+          ContentType: 'application/json',
+        }),
+        { abortSignal: signal }
+      );
+      return;
+    }
+    const target = path.join(LOCAL_DIR, key);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    assertHubStorageOwnership();
+    const tmp = `${target}.tmp-${process.pid}`;
+    await fs.writeFile(tmp, data);
+    assertHubStorageOwnership();
+    await fs.rename(tmp, target);
+  });
 }
 
 function isObjectNotFound(error: unknown): boolean {
@@ -98,32 +120,39 @@ function isObjectNotFound(error: unknown): boolean {
 
 /** Null means a confirmed missing object; transport/permission faults throw. */
 export async function getObjectStrict(key: string): Promise<string | null> {
-  if (r2Configured()) {
+  return ownedHubStorageRequest(async (signal) => {
+    if (r2Configured()) {
+      try {
+        assertHubStorageOwnership();
+        const response = await getS3Client().send(
+          new GetObjectCommand({
+            Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+            Key: `${KEY_PREFIX}/${key}`,
+          }),
+          { abortSignal: signal }
+        );
+        return (await streamToBuffer(response.Body, signal)).toString('utf-8');
+      } catch (error: unknown) {
+        assertHubStorageOwnership();
+        if (isObjectNotFound(error)) return null;
+        throw error;
+      }
+    }
     try {
-      const response = await getS3Client().send(
-        new GetObjectCommand({
-          Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-          Key: `${KEY_PREFIX}/${key}`,
-        })
-      );
-      return (await streamToBuffer(response.Body)).toString('utf-8');
+      return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
     } catch (error: unknown) {
+      assertHubStorageOwnership();
       if (isObjectNotFound(error)) return null;
       throw error;
     }
-  }
-  try {
-    return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
-  } catch (error: unknown) {
-    if (isObjectNotFound(error)) return null;
-    throw error;
-  }
+  });
 }
 
 export async function getObject(key: string): Promise<string | null> {
   try {
     return await getObjectStrict(key);
   } catch {
+    assertHubStorageOwnership();
     return null;
   }
 }

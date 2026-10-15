@@ -4,6 +4,11 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
+import {
+  assertHubStorageOwnership,
+  HUB_SQL_TIMEOUT_MS,
+  withHubStorageOwnership,
+} from '../../providers/benchmarkHubStorageOwnership';
 import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
 
 export type Operation = () => Promise<unknown>;
@@ -85,7 +90,13 @@ export function loadDeclaration<T>(
       },
     }
   ).outputText;
-  const context = vm.createContext({ ...bindings, exports: {} });
+  const context = vm.createContext({
+    assertHubStorageOwnership,
+    HUB_SQL_TIMEOUT_MS,
+    withHubStorageOwnership,
+    ...bindings,
+    exports: {},
+  });
   vm.runInContext(compiled, context);
   if (additional !== undefined) context.owner.mutation = context.extraOwner;
   return context.owner;
