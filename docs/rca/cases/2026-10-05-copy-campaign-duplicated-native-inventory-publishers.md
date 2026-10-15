@@ -380,3 +380,40 @@ Preserve typed 75 and allow only a campaign-borrowed, owned-publisher pending so
 An actual pinned v0.4.115 CLI request to the isolated loopback fixture advertises `Accept-Encoding: gzip` and decodes the gzip response. The initial full-HTTP helper instead advertised `identity`. A source-owned full-refresh control serving the same 1 MiB full configuration in 16 KiB chunks at 40 ms intervals exhausted the original one-second fixture deadline through the identity path; enabling gzip completes that same transaction and publishes the ordinary atomic index. This establishes a transport parity and bounded transfer improvement, not historical proof that the provider honored gzip or that compression alone caused V38 failures.
 
 The helper now requests gzip, verifies wire HTTP 200/Content-Length/EOF, and independently caps wire and decompressed data at 256 MiB. Bounded zlib decoding requires a complete CRC-verified gzip stream with no unconsumed or trailing bytes. Identity responses remain supported; unsupported encodings, corrupt/truncated/trailing gzip, oversized wire or decoded bodies remain refusals. Decompression and full JSON validation stay inside the original request deadline; full configuration/private originals and all existing consumer and publication semantics are preserved. No summary response, field dropping, native fallback, TTL change or new deadline is introduced.
+
+### V39: preserve the failed read boundary; freshness RCA remains open
+
+The original V39 first physical failure was `r001-j0050`, task
+`polar-odysseys-b421f308e18f`, run `20261015-163219-17942`. Clone
+`8e37e1f7394968` exhausted its unchanged 600-second storage-observation budget
+with status 75. The retained publisher history has thirteen Machines-list 142
+cycles after its last completed refresh. This proves unavailable observation,
+not failed provider storage. The strict first 1/1 infrastructure threshold and
+its original exact-parent TERM remain authoritative.
+
+The helper reduced every refusal to its exception class. The retained 40-byte
+`Refusal` output therefore cannot distinguish authentication, response headers,
+body transfer, decompression, parsing, validation or encoding. Four registered
+controls exercising the actual publisher (held headers, held body, corrupt gzip
+and successful full output) failed on the original source because the phase was
+absent. The identical controls pass after preserving an allowlisted, private,
+source-hashed phase sidecar alongside the existing failure diagnostics. Sidecar
+creation is exclusive, no-follow, same-user/private-parent and limited to 8 KiB.
+Only fixed phase, refusal, signal and exception-class enums, numeric timing and
+byte counts are recorded; generic exception text, credentials, URLs, headers and
+configured data are excluded. An unsafe or missing sidecar never changes native
+status, output, deadline, ownership, publication or freshness. `complete` means
+buffered stdout write returned; separate wrapper EOF/status and atomic index
+publication still decide success. Missing or truncated evidence remains unknown.
+
+The original freshness cause remains open. The actual campaign admission reader
+already consumes the compact generation without inline files or environment;
+an owning control succeeds with the full-snapshot path deliberately unreadable.
+A real 600-registry scan does incur 8,400 external metadata programs, but neither
+an eight-worker pair nor a 300-worker/8-CPU native-free replay reproduced the
+publisher timeout: the full helper completed within its original 30 seconds.
+These negative results do not justify a speculative metadata optimization as the
+cure. The successful instrumented one-GET diagnostic under 600 compact readers
+also does not reproduce actual concurrent clone/config traffic. Preserve this
+distinction in the next unchanged original experiment; this evidence repair is
+not a successful 600-task outcome or a freshness cure.

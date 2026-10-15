@@ -176,7 +176,7 @@ INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 
 inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-output> <started-SECONDS>
-    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}"
+    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}" phase_source="${5:-}"
     local directory="${INVENTORY_HOME:-$FLEET_DIR}/inventory-refresh-diagnostics" temporary private_tmp
     [ -d "$directory" ] || mkdir -m 700 "$directory" || return 1
     [ ! -L "$directory" ] || return 1
@@ -194,6 +194,24 @@ inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-out
             >> "$directory/history" || return 1
         chmod 600 "$directory/history" || return 1
     fi
+    # The helper writes only allowlisted phase rows to its exclusive private
+    # sidecar. Keep these separate from native JSON; diagnostics grant nothing.
+    if [ -n "$phase_source" ] && [ -f "$phase_source" ] && [ ! -L "$phase_source" ]; then
+        private_tmp="$(mktemp "$directory/.phase.XXXXXX")" || return 1
+        if cp "$phase_source" "$private_tmp" && chmod 600 "$private_tmp" \
+            && mv "$private_tmp" "$directory/phase.latest.private"; then
+            case "$status" in
+                pending|0) rm -f "$phase_source" ;;
+                *)
+                    private_tmp="$(mktemp "$directory/.failure-phase.XXXXXX")" || return 1
+                    if cp "$phase_source" "$private_tmp" && chmod 600 "$private_tmp" \
+                        && mv "$private_tmp" "$directory/failure.phase.private"; then
+                        rm -f "$phase_source"
+                    fi
+                    ;;
+            esac
+        fi
+    fi
     case "$status" in pending|0) return 0 ;; esac
     private_tmp="$(mktemp "$directory/.failure.XXXXXX")" || return 1
     if [ -f "$raw" ] && [ ! -L "$raw" ]; then
@@ -203,7 +221,7 @@ inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-out
 }
 
 _refresh_inventory_snapshot_unlocked() {
-    local suffix machines_tmp volumes_tmp publish_tmp started status=0
+    local suffix machines_tmp volumes_tmp publish_tmp phase_tmp started status=0
     # Native Machine JSON can contain configured env and files. Keep even
     # short-lived snapshots private before any diagnostic copy is made.
     umask 077
@@ -211,19 +229,20 @@ _refresh_inventory_snapshot_unlocked() {
     suffix="${BASHPID:-$$}.$RANDOM"
     machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
     volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
+    phase_tmp="${INVENTORY_HOME:-$FLEET_DIR}/inventory-refresh-diagnostics/.machines-phase.$suffix"
     publish_tmp="${INVENTORY_HOME:-$FLEET_DIR}/inventory-publish.tmp.$suffix"
     # Pinned flyctl sends headless CLI analytics after JSON. Keep that optional
     # finalizer out of these bounded reads; native EOF/status still decide success.
     inventory_refresh_diagnostic machines-list pending "" "$started" || true
-    FLY_SEND_METRICS=0 fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-        machines list -a "$APP" --json > "$machines_tmp" || status=$?
+    CLOUDBENCH_INVENTORY_PHASE_FILE="$phase_tmp" FLY_SEND_METRICS=0 \
+        fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" machines list -a "$APP" --json > "$machines_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
-        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" || true
+        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" "$phase_tmp" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
     fi
-    inventory_refresh_diagnostic volumes-list pending "" "$started" || true
+    inventory_refresh_diagnostic volumes-list pending "" "$started" "$phase_tmp" || true
     status=0
     FLY_SEND_METRICS=0 fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
         volumes list -a "$APP" --json > "$volumes_tmp" || status=$?

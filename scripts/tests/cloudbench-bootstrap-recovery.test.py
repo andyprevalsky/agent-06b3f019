@@ -979,5 +979,77 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
         self.assertNotEqual(result.returncode, 0)
 
 
+
+class MachineExecDeliveryTests(unittest.TestCase):
+    """Recorded machine-exec bodies are distinct from the CLI transport status."""
+    def setUp(self):
+        import runpy
+        self.capture = runpy.run_path(str(REPO / "scripts/cloudbench-original-volume-capture.py"))
+        self.client = object.__new__(self.capture["Fly"])
+        self.client.app = APP
+        self.calls = []
+        self.response = (0, json.dumps({"stdout": json.dumps({"stage": 0, "inert": True, "bytes": 4000, "sha256": "a" * 64})}), "")
+        def raw(seconds, *args):
+            self.calls.append((seconds, args))
+            return self.response
+        self.client.flyctl = raw
+
+    def execute(self, command="python3 inert-stage.py", budget=7000):
+        return self.client.machine_exec_json(30, MACHINE, command,
+            max_command_bytes=budget,
+            validate_ack=lambda value: (type(value.get("stage")) is int
+                and type(value.get("inert")) is bool and type(value.get("bytes")) is int
+                and value == {"stage": 0, "inert": True, "bytes": 4000, "sha256": "a" * 64}))
+
+    def test_machine_exec_recorded_payload_rejection_is_not_guest_success(self):
+        # Exact captured stderr-only envelope; a real CLI returned transport zero.
+        self.response = (0, json.dumps({"stderr": "Unhandled rejection: Rejection([PayloadTooLarge, MethodNotAllowed, MethodNotAllowed, MethodNotAllowed, MethodNotAllowed, MethodNotAllowed, MethodNotAllowed, MethodNotAllowed])"}), "")
+        with self.assertRaises(self.capture["CaptureFailure"]):
+            self.execute()
+        self.assertEqual(len(self.calls), 1)  # No automatic retry/staging.
+
+    def test_machine_exec_oversize_is_refused_before_transport(self):
+        with self.assertRaises(self.capture["Refusal"]):
+            self.execute("x" * 15045)
+        self.assertEqual(self.calls, [])
+
+    def test_machine_exec_utf8_budget_counts_bytes(self):
+        with self.assertRaises(self.capture["Refusal"]):
+            self.execute("é" * 4000)
+        self.assertEqual(self.calls, [])
+
+    def test_machine_exec_typed_ack_and_transport_binding(self):
+        self.assertTrue(self.execute()["inert"])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0], 30)
+        self.assertEqual(self.calls[0][1], ("machine", "exec", MACHINE,
+            "python3 inert-stage.py", "--timeout", "30", "-a", APP, "--json"))
+
+    def test_machine_exec_invalid_responses_fail_closed_without_retry(self):
+        for body in ({}, {"stdout": "not JSON"}, {"stdout": "[]"},
+                     {"stdout": json.dumps({"stage": 1})},
+                     {"stdout": "{}", "stderr": "failure"},
+                     {"stdout": "{}", "exit_code": True},
+                     {"stdout": "{}", "error": "unexpected envelope error"},
+                     {"stdout": json.dumps({"stage": 0, "inert": 1, "bytes": 4000, "sha256": "a" * 64})}):
+            with self.subTest(body=body):
+                self.response = (0, json.dumps(body), "")
+                before = len(self.calls)
+                with self.assertRaises(self.capture["CaptureFailure"]):
+                    self.execute()
+                self.assertEqual(len(self.calls), before + 1)
+
+    def test_machine_exec_nonzero_and_response_bound(self):
+        for response in ((1, "", "private-error"), (0, "x" * 1048577, "")):
+            self.response = response
+            with self.assertRaises(self.capture["CaptureFailure"]):
+                self.execute()
+
+    def test_machine_exec_missing_ack_validator_is_preflight_refusal(self):
+        with self.assertRaises(self.capture["Refusal"]):
+            self.client.machine_exec_json(30, MACHINE, "noop", max_command_bytes=7000, validate_ack=None)
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

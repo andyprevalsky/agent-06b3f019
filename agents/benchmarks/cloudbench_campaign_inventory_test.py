@@ -2996,3 +2996,202 @@ def test_campaign_inventory_compression_caps_wire_and_decoded_bytes(tmp_path, mo
     assert events == ['gzip']
     if case == 'gzip-decoded-cap': assert len(wire) < 1024 < len(raw)
     else: assert len(wire) > 1024
+
+
+@pytest.mark.parametrize("case", ("headers-hold", "body-hold", "crc", "success"))
+def test_campaign_inventory_retains_private_typed_phase_evidence(tmp_path, case):
+    """The actual publisher preserves its first unavailable boundary without changing authority."""
+    import gzip
+    import hashlib
+    import stat
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    secret = "PRIVATE_PHASE_FIXTURE_NOT_DIAGNOSTIC"
+    payload = json.dumps([{"id": "m1", "state": "created", "config": {
+        "env": {"PRIVATE": secret}, "files": [], "mounts": [{"volume": "v1"}]}}]).encode()
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if case == "headers-hold":
+                release.wait(3)
+            body = gzip.compress(payload)
+            if case == "crc":
+                body = body[:-8] + bytes([body[-8] ^ 1]) + body[-7:]
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if case == "body-hold":
+                    self.wfile.write(body[:1])
+                    self.wfile.flush()
+                    release.wait(3)
+                    self.wfile.write(body[1:])
+                else:
+                    self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    work = tmp_path / "inventory"
+    work.mkdir(mode=0o700)
+    binary = tmp_path / "flyctl"
+    binary.write_text('#!/bin/bash\n[ "$1 $2" = "volumes list" ] || exit 91\nprintf \'[{"id":"v1","state":"created"}]\\n\'\n')
+    binary.chmod(0o700)
+    source = (ROOT / "scripts/cloudbench-campaign-inventory.sh").read_text()
+    dispatch = source[source.index("FLY() {"):source.index("\nSNAPSHOT_LOOP_PID=")]
+    shell = "source " + shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh")) + "\n" + dispatch + "\n_refresh_inventory_snapshot_unlocked\n"
+    env = dict(os.environ, PATH=str(tmp_path) + ":" + os.environ["PATH"], APP="fixture",
+               SOURCE=str(ROOT / "scripts"), FLEET_DIR=str(work),
+               MACHINE_READINESS_SCRIPT=str(ROOT / "scripts/cloudbench-machine-readiness.py"),
+               FLY_API_TOKEN="offline-" + secret, FLY_FLAPS_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+               CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS="1")
+    env.pop("FLY_FORCE_INSTANCE_ID", None)
+    try:
+        result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, timeout=8)
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert result.returncode == (0 if case == "success" else 1)
+    diagnostics = work / "inventory-refresh-diagnostics"
+    retained = diagnostics / ("phase.latest.private" if case == "success" else "failure.phase.private")
+    assert retained.is_file(), "publisher erased the owning Machines failure phase"
+    raw = retained.read_bytes()
+    mode = retained.stat()
+    assert mode.st_uid == os.getuid() and mode.st_nlink == 1 and stat.S_IMODE(mode.st_mode) == 0o600
+    assert 0 < len(raw) <= 8192
+    assert secret.encode() not in raw and b"127.0.0.1" not in raw and b"Authorization" not in raw
+    rows = [json.loads(line) for line in raw.splitlines()]
+    expected_sha = hashlib.sha256((ROOT / "scripts/cloudbench-campaign-machines.py").read_bytes()).hexdigest()
+    assert all(row["source_sha256"] == expected_sha for row in rows)
+    assert all(row["phase"] in {"setup", "auth", "headers", "body_read", "decompress", "json_parse", "validate", "encode", "fetch_return", "stdout_write", "complete"} for row in rows)
+    last = rows[-1]
+    if case == "success":
+        assert last["phase"] == "complete"
+        assert json.loads((work / "machines.json").read_bytes()) == json.loads(payload)
+        assert (work / "inventory/current/machines/m1").is_file()
+    else:
+        expected = {"headers-hold": "headers", "body-hold": "body_read", "crc": "decompress"}[case]
+        assert last["phase"] == expected and last["event"] == "failure"
+        assert not (work / "inventory/current").exists(), "diagnostics granted publication"
+
+
+@pytest.mark.parametrize("unsafe", ("existing", "symlink", "open-parent"))
+def test_campaign_inventory_phase_sidecar_refusal_never_grants_authority(tmp_path, unsafe):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    holder = tmp_path / "holder"
+    holder.mkdir(mode=0o700)
+    path = holder / "sidecar"
+    original = tmp_path / "original"
+    original.write_bytes(b"protected-original")
+    if unsafe == "existing":
+        path.write_bytes(b"protected-original")
+    elif unsafe == "symlink":
+        path.symlink_to(original)
+    else:
+        holder.chmod(0o755)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"[]")
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    env = dict(os.environ, FLY_FLAPS_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+               FLY_API_TOKEN="offline-fixture", CLOUDBENCH_INVENTORY_PHASE_FILE=str(path))
+    env.pop("FLY_FORCE_INSTANCE_ID", None)
+    try:
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/cloudbench-campaign-machines.py"),
+                                 "fixture", "1"], env=env, capture_output=True, timeout=4)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert result.returncode == 0 and json.loads(result.stdout) == []
+    assert original.read_bytes() == b"protected-original"
+    if unsafe in ("existing", "symlink"):
+        assert path.read_bytes() == b"protected-original"
+    else:
+        assert not path.exists()
+
+
+def test_campaign_inventory_phase_evidence_distinguishes_owned_term(tmp_path):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    release = threading.Event()
+    body_started = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"[")
+            self.wfile.flush()
+            body_started.set()
+            release.wait(4)
+            try:
+                self.wfile.write(b"]")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    holder = tmp_path / "private"
+    holder.mkdir(mode=0o700)
+    sidecar = holder / "phases"
+    env = dict(os.environ, FLY_FLAPS_BASE_URL=f"http://127.0.0.1:{server.server_port}",
+               FLY_API_TOKEN="offline-fixture", CLOUDBENCH_INVENTORY_PHASE_FILE=str(sidecar))
+    env.pop("FLY_FORCE_INSTANCE_ID", None)
+    process = subprocess.Popen([sys.executable, str(ROOT / "scripts/cloudbench-campaign-machines.py"),
+                                "fixture", "3"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def birth():
+        value = Path(f"/proc/{process.pid}/stat").read_text()
+        return value[value.rfind(")") + 2:].split()[19]
+    owner_birth = birth()
+    try:
+        assert body_started.wait(2)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
+            if rows[-1]["phase"] == "body_read":
+                break
+            time.sleep(.005)
+        assert rows[-1]["phase"] == "body_read" and process.poll() is None and birth() == owner_birth
+        process.terminate()
+        stdout, _ = process.communicate(timeout=4)
+        assert process.returncode == 1 and stdout == b""
+        rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
+        assert rows[-1]["event"] == "failure" and rows[-1]["phase"] == "body_read"
+        assert rows[-1]["signal"] == "term"
+    finally:
+        release.set()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=4)
+        server.shutdown()
+        server.server_close()
+        thread.join()

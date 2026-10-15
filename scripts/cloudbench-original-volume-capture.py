@@ -405,6 +405,45 @@ class Fly:
         return rc, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
 
+    def machine_exec_json(self, seconds: int, machine_id: str, command: str, *,
+                          max_command_bytes: int, validate_ack,
+                          max_response_bytes: int = 1048576) -> dict:
+        """Opt-in receipt delivery; byte budget is caller policy, not provider capacity.
+
+        Never stage, retry, print private output, or infer guest success from the
+        raw CLI exit. The caller must authenticate its own source/nonce/ACK.
+        """
+        if (type(seconds) is not int or seconds <= 0
+                or type(max_command_bytes) is not int or max_command_bytes <= 0
+                or type(max_response_bytes) is not int or max_response_bytes <= 0
+                or not callable(validate_ack) or not isinstance(command, str)
+                or not command or "\0" in command
+                or not isinstance(machine_id, str) or not SAFE_TOKEN.fullmatch(machine_id)):
+            raise Refusal("invalid bounded machine exec arguments")
+        if len(command.encode("utf-8")) > max_command_bytes:
+            raise Refusal("Machine exec command exceeds caller delivery budget")
+        rc, stdout, _ = self.flyctl(seconds, "machine", "exec", machine_id, command,
+                                   "--timeout", str(seconds), "-a", self.app, "--json")
+        if rc != 0 or len(stdout.encode("utf-8")) > max_response_bytes:
+            raise CaptureFailure("Machine exec transport or response bound failed")
+        try:
+            envelope = json.loads(stdout)
+            if (not isinstance(envelope, dict) or set(envelope) - {"stdout", "stderr", "exit_code"}
+                    or envelope.get("stderr") not in (None, "")
+                    or not isinstance(envelope.get("stdout"), str)
+                    or not envelope["stdout"].strip()):
+                raise ValueError("unconfirmed guest output")
+            if "exit_code" in envelope and (type(envelope["exit_code"]) is not int or envelope["exit_code"] != 0):
+                raise ValueError("unconfirmed guest exit")
+            value = json.loads(envelope["stdout"])
+            if not isinstance(value, dict) or validate_ack(value) is not True:
+                raise ValueError("unconfirmed caller acknowledgement")
+        except Exception:
+            # Error strings can contain private stdout, env or credentials.
+            raise CaptureFailure("Machine exec acknowledgement refused") from None
+        return value
+
+
 def validate_original_config(config: object, ident: dict) -> None:
     readiness = sibling("cloudbench-machine-readiness.py")
     if not isinstance(config, dict) or not readiness["startup_command_overridable"](config):
