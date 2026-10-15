@@ -12782,12 +12782,24 @@ def _private_secret_action_fixture(evaluate=None):
         session=session,
         selector_map={},
         ensure_browser_overlays_suppressed=AsyncMock(),
+        # Private dependency metadata deliberately contains the CVV fixture as
+        # part of another number. This object is never an ActionHistoryEntry.
+        synthetic_execution_metadata=17390,
     )
     history = SimpleNamespace(record_action=AsyncMock(), get_entries=lambda: [])
     humanizer = SimpleNamespace(
         click_at_coords=AsyncMock(), press_key=AsyncMock(), type_text=AsyncMock(),
     )
     return dom, history, humanizer, evaluate
+
+
+def _recorded_private_action_payloads(history, dom):
+    """Inspect persisted arguments without stringifying the private DOM dependency."""
+    payloads = []
+    for call in history.record_action.await_args_list:
+        assert call.kwargs["dom_service"] is dom
+        payloads.append({key: value for key, value in call.kwargs.items() if key != "dom_service"})
+    return payloads
 
 
 def _selected_payment_ref_action_fixture(ref_name="card_number", index=8, coords=(11, 12)):
@@ -12849,7 +12861,7 @@ async def test_execute_action_secret_refs_resolve_without_mutating_model_action(
     expression = evaluate.await_args.kwargs["params"]["expression"]
     assert refs["card_number"] in expression, "evaluate did not receive its privately resolved credential"
     assert "{{secret:card_number}}" not in expression
-    recorded = str([call.kwargs for call in history.record_action.await_args_list])
+    recorded = str(_recorded_private_action_payloads(history, dom))
     assert all(secret not in recorded for secret in refs.values()), "ActionHistory retained execution plaintext"
 
 
@@ -12879,7 +12891,7 @@ async def test_execute_action_secret_refs_mask_all_card_values_and_transport_err
         assert result["success"] is (not isinstance(outcome, Exception) and "exceptionDetails" not in outcome)
         retained = str({
             "return": result,
-            "history": [call.kwargs for call in history.record_action.await_args_list],
+            "history": _recorded_private_action_payloads(history, dom),
             "logs": log.mock_calls,
         })
         leaked = [ref for ref, secret in refs.items() if secret in retained]
@@ -12975,7 +12987,7 @@ async def test_execute_action_secret_refs_preserve_agent_selected_fields_and_jav
             )
             assert refused["success"] is False and "tagged template" in refused["error"]
             assert len(expressions) == prior_evaluations, "unsupported credential interpolation executed JavaScript"
-            recorded = str([call.kwargs for call in history.record_action.await_args_list])
+            recorded = str(_recorded_private_action_payloads(history, dom))
             assert all(secret not in recorded for secret in refs.values()), "private JS source reached ActionHistory"
             for other in ("#name", "#expiry", "#cvv"):
                 assert await page.locator(other).input_value() == ""
