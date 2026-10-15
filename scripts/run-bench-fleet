@@ -13620,6 +13620,36 @@ admit_app_capacity_with_wait() {
         phase="during admission wait"
     done
 }
+start_admitted_machines_snapshot_loop() {
+    # Admission already established this deadline and reserved this fleet.
+    # A borrowed publisher may cross its generation expiry before reuse. Wait
+    # only inside that original clock; never re-reserve or accept stale data.
+    local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
+    while :; do
+        status=0
+        start_machines_snapshot_loop || status=$?
+        [ "$status" -ne 0 ] || return 0
+        if [ "$status" -ne 75 ] \
+            || [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] \
+            || [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ]; then
+            echo "❌ post-admission inventory authority unavailable (status=$status); refusing provisioning" >&2
+            return 1
+        fi
+        case "${CAPACITY_ADMISSION_DEADLINE:-}:$interval" in
+            *[!0-9:]*|:*) echo "❌ invalid original inventory admission wait clock" >&2; return 1 ;;
+        esac
+        [ "$interval" -gt 0 ] || return 1
+        remaining=$((CAPACITY_ADMISSION_DEADLINE - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "❌ post-admission inventory remained unavailable within the original admission deadline" >&2
+            return 1
+        fi
+        [ "$interval" -le "$remaining" ] || interval="$remaining"
+        echo "⏳ post-admission inventory temporarily unavailable; withholding provisioning within original deadline" >&2
+        sleep "$interval"
+    done
+}
+
 release_capacity_reservation_after_primary_start_accounted() {
     # Replacement slots are no longer needed once every stopped boot config is
     # committed.  Keep the shared-unit reservation until Fly inventory itself
@@ -15277,7 +15307,7 @@ admit_app_capacity_with_wait 1 || exit 1
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
 : > "$CLAIMED_POOL_FILE"
-start_machines_snapshot_loop || exit 1
+start_admitted_machines_snapshot_loop || exit 1
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
 # A pooled primary can have a smaller volume than the legacy warm donor. Worker

@@ -33215,3 +33215,88 @@ def test_private_fleet_source_target_option_does_not_block_exact_recovery(tmp_pa
     assert result.returncode == (0 if recovery == "1" else 1)
     if recovery == "1":
         assert result.stdout.strip() == "target="
+
+
+@pytest.mark.parametrize("case", ["healthy", "recovers", "exhausts", "expired", "foreign", "dead", "standalone"])
+def test_private_fleet_source_post_admission_inventory_keeps_original_wait_clock(
+    tmp_path: Path, case: str,
+) -> None:
+    """A real borrowed generation may expire after admission but before reuse."""
+    fleet = fleet_source_text()
+    marker = 'admit_app_capacity_with_wait 1 || exit 1\n\n# ── Clone one'
+    start = fleet.index('mkdir -p "$FLEET_DIR"', fleet.index(marker))
+    post_admission = fleet[start:fleet.index('echo ""', start)]
+    optional_waiter = (
+        _extract_fleet_function(fleet, "start_admitted_machines_snapshot_loop() {")
+        if "start_admitted_machines_snapshot_loop() {" in fleet else ""
+    )
+    script = r'''set -uo pipefail
+FLEET_DIR="$ROOT/run"
+source "$ENV_HELPER"
+source "$INVENTORY_HELPER"
+sleep 30 & owned_publisher=$!
+recovery_writer=""
+trap 'kill "$owned_publisher" 2>/dev/null || true; wait "$owned_publisher" 2>/dev/null || true; if [ -n "$recovery_writer" ]; then wait "$recovery_writer" 2>/dev/null || true; fi' EXIT
+APP=fixture-app
+INVENTORY_HOME="$ROOT/shared";INVENTORY_INDEX="$INVENTORY_HOME/index"
+mkdir -p "$INVENTORY_INDEX/current"
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$INVENTORY_HOME"
+INVENTORY_MAX_STALE_SECONDS=90
+INVENTORY_CLOCK_EPOCH=$(date +%s);INVENTORY_CLOCK_SECONDS=$SECONDS
+publisher_birth=$(cloudbench_pid_start_time "$owned_publisher")
+parent_birth=$(cloudbench_pid_start_time "$$")
+printf 'app=%s\npid=%s\npid_start=%s\ntoken=owned-token\nparent_pid=%s\nparent_start=%s\n' "$APP" "$owned_publisher" "$publisher_birth" "$$" "$parent_birth" > "$INVENTORY_HOME/owner"
+healthy() { printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health"; }
+stale() { printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH-1))" > "$INVENTORY_INDEX/current/health"; }
+FLY() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
+healthy
+start_machines_snapshot_loop || exit 91
+printf 'FIRST_BORROW_PASS\n'
+# The original admission boundary consumed a healthy generation. Only the
+# subsequent race is controlled; actual owner/birth/token/health readers run.
+CAPACITY_ADMISSION_DEADLINE=$((SECONDS+3))
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+CAPACITY_RESERVATION_PUBLISHED=1
+CAPACITY_RESERVATION_TOKEN=original-reservation
+cp "$INVENTORY_HOME/owner" "$ROOT/original-owner"
+capacity_release_reservation() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
+case "$CASE" in
+ recovers) stale; (sleep 0.1; healthy) & recovery_writer=$! ;;
+ exhausts) stale; CAPACITY_ADMISSION_DEADLINE=$((SECONDS+1)) ;;
+ expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS ;;
+ foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
+ dead) kill "$owned_publisher"; wait "$owned_publisher" 2>/dev/null || true ;;
+ standalone) unset CLOUDBENCH_CAMPAIGN_INVENTORY_DIR ;;
+esac
+original_deadline=$CAPACITY_ADMISSION_DEADLINE
+CLAIMED_POOL_FILE="$ROOT/claimed"
+''' + optional_waiter + "\n(\n" + post_admission + r'''
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original_deadline" ] || exit 92
+[ "$CAPACITY_RESERVATION_PUBLISHED:$CAPACITY_RESERVATION_TOKEN" = "1:original-reservation" ] || exit 94
+cmp "$INVENTORY_HOME/owner" "$ROOT/original-owner" || exit 95
+printf 'POST_ADMISSION_CONTINUED\n'
+)
+status=$?
+printf 'POST_STATUS=%s\n' "$status"
+exit "$status"
+'''
+    completed = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, timeout=12,
+        env={**os.environ, "ROOT": str(tmp_path), "CASE": case,
+             "ENV_HELPER": str(ENV_HELPER_SCRIPT),
+             "INVENTORY_HELPER": str(ROOT / "scripts/lib/cloudbench-inventory.sh")},
+    )
+    assert "FIRST_BORROW_PASS" in completed.stdout, completed.stderr
+    assert "FORBIDDEN_NATIVE" not in completed.stderr
+    if case in {"healthy", "recovers", "standalone"}:
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert "POST_ADMISSION_CONTINUED" in completed.stdout
+    else:
+        assert completed.returncode != 0
+        assert "POST_ADMISSION_CONTINUED" not in completed.stdout
+
+    if case == "exhausts":
+        assert "withholding provisioning within original deadline" in completed.stderr
+        assert "remained unavailable within the original admission deadline" in completed.stderr
+    if case in {"dead", "foreign", "expired"}:
+        assert "POST_ADMISSION_CONTINUED" not in completed.stdout

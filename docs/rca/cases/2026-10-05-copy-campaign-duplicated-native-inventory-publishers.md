@@ -204,3 +204,22 @@ proof stay intact; destination clone and worker placement, child runtime state,
 and provenance use the explicit target. There is no automatic region probing,
 retry or timeout extension. Exact recovery ignores this placement-only option
 and retains its existing recorded resource identities.
+
+### Borrowed generation expiry after capacity admission
+
+The first V31 failure logged successful capacity admission, then exited silently
+before the next startup banner. Its claimed-pool file was created at
+1792056946.564, after the retained prior generation's 1792056944 expiry and
+before the next generation was published. The historical second-borrow status
+and publisher liveness were not captured, so this is not a sole-cause claim.
+An owning native-free control with real publisher/parent birth fences reproduced
+an independent bug: expiry after admission made the redundant borrowed start
+return 75, and the caller immediately converted it to silent exit 1.
+
+Keep that transient pending only within the original capacity-admission deadline
+and retry interval. Provision only after a fresh successful borrow; dead,
+foreign, malformed or exhausted observations still refuse. Do not create a new
+wait clock, renew inventory TTL, re-reserve capacity, fall back to native child
+queries, or accept failed native JSON. This repairs the demonstrated caller
+race; it does not establish the cause of the native Machines-list timeouts or
+prove a successful simultaneous 600-task outcome.
