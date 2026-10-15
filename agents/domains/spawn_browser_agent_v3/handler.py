@@ -18,6 +18,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 import traceback
 import uuid as uuid_module
@@ -1924,19 +1925,24 @@ async def _replace_browser_humanizer(
     return rebound_humanizer
 
 
-def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.Task[int]"]:
+def _harvest_otp_poll(
+    task: Optional["asyncio.Task[int]"], *, propagate_sealed: bool = True
+) -> Optional["asyncio.Task[int]"]:
     """Collect a finished background OTP poll without ever waiting on it.
 
     Returns the task while it is still in flight, ``None`` once it has been
     harvested (or never started) so the caller can start the next poll. A
-    failed poll never fails the step.
+    transiently failed poll never fails the step. A sealed generation must stop.
     """
     if task is None or not task.done():
         return task
     if task.cancelled():
         return None
     error = task.exception()
-    if error is not None:
+    if isinstance(error, WorkflowGenerationSealed):
+        if propagate_sealed:
+            raise error
+    elif error is not None:
         logger.warning("Failed to fetch OTPs", error=str(error)[:200])
     elif task.result():
         logger.info("Appended OTP user messages", count=task.result())
@@ -1950,7 +1956,9 @@ async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float
     if not task.done():
         await asyncio.wait({task}, timeout=grace_s)
         task.cancel()
-    task.add_done_callback(_harvest_otp_poll)
+    # The owner observes sealing synchronously; callbacks only consume exceptions.
+    task.add_done_callback(lambda done: _harvest_otp_poll(done, propagate_sealed=False))
+    _harvest_otp_poll(task)
 
 
 def _restored_indexes_unresolved(dom_service: Any, *, transcript_restored: bool) -> bool:
@@ -2291,6 +2299,7 @@ async def _append_new_otp_user_messages(
     seen_otp_codes: set[str],
     otp_user_messages: List[Dict[str, str]],
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
+    pending_otp_ref_messages: Optional[Dict[tuple[str, str, str], str]] = None,
     agent_id: str,
     task_id: Optional[str],
     task_elapsed_seconds: Optional[float] = None,
@@ -2302,6 +2311,7 @@ async def _append_new_otp_user_messages(
     sends the agent to the site with a code the site never issued it.
     """
     new_count = 0
+    pending_refs = pending_otp_ref_messages if pending_otp_ref_messages is not None else {}
     for otp in otps:
         if not is_usable_email_otp(otp):
             logger.info(
@@ -2331,35 +2341,42 @@ async def _append_new_otp_user_messages(
 
         if otp.code in seen_otp_codes:
             continue
-
         seen_otp_codes.add(otp.code)
         message = format_otp_user_message(otp)
         otp_user_messages.append({"role": "user", "content": message})
         credential_ref = None
         if otp.credential_id:
-            credential_ref = {
-                "kind": otp.credential_kind,
-                "id": str(otp.credential_id),
-            }
+            credential_ref = {"kind": otp.credential_kind, "id": str(otp.credential_id)}
         else:
             logger.warning(
                 "OTP missing credential id; skipping credential-ref logging",
                 agent_id=agent_id,
                 source_message_id=otp.source_message_id,
             )
-
         if credential_ref and credential_refs_by_secret_ref is not None:
             credential_refs_by_secret_ref[otp.code] = credential_ref
         new_count += 1
-
         if task_id and credential_ref:
-            await save_browser_credential_ref_message(
-                agent_id=agent_id,
-                task_id=task_id,
-                message=message,
-                role="USER",
-                credential_ref=credential_ref,
-            )
+            ref_key = (otp.code, credential_ref["kind"], credential_ref["id"])
+            pending_refs.setdefault(ref_key, message)
+
+    # Persistence retries do not depend on the mailbox returning the OTP again.
+    # Each already-owned reference gets one attempt on this existing poll.
+    if task_id:
+        for ref_key, message in list(pending_refs.items()):
+            try:
+                accepted = await save_browser_credential_ref_message(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    message=message,
+                    role="USER",
+                    credential_ref={"kind": ref_key[1], "id": ref_key[2]},
+                )
+            except WorkflowGenerationSealed:
+                pending_refs.clear()
+                raise
+            if accepted is True:
+                pending_refs.pop(ref_key, None)
 
     return new_count
 
@@ -2372,6 +2389,7 @@ async def _fetch_and_append_recent_otp_user_messages(
     seen_otp_codes: set[str],
     otp_user_messages: List[Dict[str, str]],
     credential_refs_by_secret_ref: Dict[str, Dict[str, str]],
+    pending_otp_ref_messages: Optional[Dict[tuple[str, str, str], str]] = None,
     agent_id: str,
     task_id: Optional[str],
     task_elapsed_seconds: Optional[float] = None,
@@ -2382,6 +2400,7 @@ async def _fetch_and_append_recent_otp_user_messages(
         seen_otp_codes=seen_otp_codes,
         otp_user_messages=otp_user_messages,
         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+        pending_otp_ref_messages=pending_otp_ref_messages,
         agent_id=agent_id,
         task_id=task_id,
         task_elapsed_seconds=task_elapsed_seconds,
@@ -4446,12 +4465,53 @@ def _schedule_browser_cleanup(
     playwright_driver_pid: Optional[int],
     tool_call_id: Optional[str] = None,
     emit_task_terminal: bool = True,
+    local_only: bool = False,
+    local_only_recorders: Optional[List[Any]] = None,
+    local_only_setup_tasks: tuple[Any, ...] = (),
     preparation_cancellation: Optional[Dict[str, Any]] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
         try:
+            if local_only:
+                # Cancel setup before collecting its registered instances.
+                deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
+                owned_tasks = {task for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
+                               if isinstance(task, asyncio.Task)}
+                if cursor_streamer is not None:
+                    cursor_streamer.closed = True
+                    if isinstance(cursor_streamer.flush_task, asyncio.Task):
+                        owned_tasks.add(cursor_streamer.flush_task)
+                for owned_task in owned_tasks:
+                    owned_task.cancel()
+                    owned_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                if owned_tasks:
+                    await asyncio.wait(owned_tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+                if resolved_network_recorder is None and network_recorder_task is not None:
+                    if network_recorder_task.done() and not network_recorder_task.cancelled():
+                        with contextlib.suppress(Exception):
+                            resolved_network_recorder = network_recorder_task.result()
+                recorders = [browser_recorder, resolved_network_recorder, *(local_only_recorders or [])]
+                aborted = set()
+                for recorder in recorders:
+                    if recorder is not None and id(recorder) not in aborted:
+                        aborted.add(id(recorder))
+                        with contextlib.suppress(Exception):
+                            await recorder.abort_local(
+                                settle_timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                            )
+                if humanizer is not None:
+                    with contextlib.suppress(Exception):
+                        await _bounded_browser_terminal_io(humanizer.close(), "sealed humanizer detach")
+                if dom_service is not None:
+                    with contextlib.suppress(Exception):
+                        await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
+                await _stop_playwright_resources(
+                    playwright_browser, playwright_instance, agent_id,
+                    close_browser=False, driver_pid=playwright_driver_pid,
+                )
+                return
             if cursor_streamer:
                 with contextlib.suppress(Exception):
                     await cursor_streamer.close()
@@ -4509,7 +4569,7 @@ def _schedule_browser_cleanup(
             # Recording finalize alone does not close the FE live chip. Emit a
             # task_complete terminal so timeout/cancel cleanup cannot leave the
             # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
-            if emit_task_terminal:
+            if emit_task_terminal and not local_only:
                 await _emit_browser_task_terminal_for_fe(
                     agent_id=agent_id,
                     task_id=task_id,
@@ -4542,7 +4602,7 @@ def _schedule_browser_cleanup(
                 task_id=task_id,
                 error=extract_error_message(exc),
             )
-            if emit_task_terminal:
+            if emit_task_terminal and not local_only:
                 await _emit_browser_task_terminal_for_fe(
                     agent_id=agent_id,
                     task_id=task_id,
@@ -6418,6 +6478,9 @@ async def _spawn_browser_agent_activity_v3_real(
     # because a realm transition rebinds that dict while a poll is in flight.
     otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
+    pending_otp_ref_messages: Dict[tuple[str, str, str], str] = {}
+    generation_sealed = False
+    locally_owned_recorders: List[Any] = []
     otp_task_started_monotonic = time.monotonic()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
@@ -7105,6 +7168,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 task_id=task_id,
                 session_id=session_id,
                 output_dir=recording_output_dir,
+                register_local_owner=locally_owned_recorders.append,
             )
             if recorder and recorder.persists_network_log and task_id:
                 await save_browser_action_message(
@@ -7175,6 +7239,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     session_id=session_id,
                     browser_url=browser_url,
                     session_metadata=browser_session_metadata,
+                    register_local_owner=locally_owned_recorders.append,
                 ),
                 _apply_logo_hijack(dom_service),
             )
@@ -7912,6 +7977,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         seen_otp_codes=seen_otp_codes,
                         otp_user_messages=otp_user_messages,
                         credential_refs_by_secret_ref=otp_credential_refs,
+                        pending_otp_ref_messages=pending_otp_ref_messages,
                         agent_id=agent_id,
                         task_id=task_id,
                         task_elapsed_seconds=time.monotonic() - otp_task_started_monotonic,
@@ -8382,6 +8448,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     step_timer.mark("llm_decision")
                 finally:
                     rose_client.set_thinking_stream(None)
+                    otp_poll_task = _harvest_otp_poll(otp_poll_task)
                     await browser_stream.finish()
                     if not decision_succeeded:
                         await browser_stream.finish_tools(status="ERROR")
@@ -8462,6 +8529,8 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_url=browser_url,
                 )
                 continue
+            except WorkflowGenerationSealed:
+                raise
             except Exception as e:
                 consecutive_api_failures += 1
                 logger.error(
@@ -8476,6 +8545,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     break
                 await asyncio.sleep(2)
                 continue
+
+            # Observe a finished native poll before any decision side effects.
+            otp_poll_task = _harvest_otp_poll(otp_poll_task)
 
             # Reset consecutive failure counter on success
             consecutive_api_failures = 0
@@ -8563,6 +8635,15 @@ async def _spawn_browser_agent_activity_v3_real(
                 if len(otp_user_messages) > otp_history_count:
                     await browser_stream.finish_tools(status="ERROR")
                     state_prefetch.discard()
+                    iteration, consecutive_budget_free, consecutive_keystroke_free = (
+                        adjust_iteration_after_action(
+                            iteration=iteration,
+                            action_name=action_name,
+                            consecutive_budget_free=consecutive_budget_free,
+                            consecutive_keystroke_free=consecutive_keystroke_free,
+                            action_executed=False,
+                        )
+                    )
                     continue
 
             if thinking:
@@ -10689,6 +10770,9 @@ Based on this feedback, I need to continue working on the task and address the i
             "message": "Browser agent cancelled by user",
         }
 
+    except WorkflowGenerationSealed:
+        generation_sealed = True
+        raise
     except Exception as e:
         last_action = action_summary[-1] if action_summary else "initialization"
         logger.error(
@@ -10772,11 +10856,18 @@ Based on this feedback, I need to continue working on the task and address the i
 
         raise
     finally:
+        generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
         stop_browser_activity_heartbeat(_heartbeat_token)
-        await _drain_otp_poll(otp_poll_task)
+        otp_generation_error = None
+        try:
+            await _drain_otp_poll(otp_poll_task)
+        except WorkflowGenerationSealed as error:
+            # Finish local resource cleanup before propagating the stop signal.
+            otp_generation_error = error
+            generation_sealed = True
         state_prefetch.discard()
         diagnostics_finalized = False
-        if browser_network_recorder is None and network_recorder_task is not None:
+        if not generation_sealed and browser_network_recorder is None and network_recorder_task is not None:
             try:
                 browser_network_recorder = await asyncio.wait_for(
                     asyncio.shield(network_recorder_task),
@@ -10789,7 +10880,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_resolve_error),
                 )
-        if browser_network_recorder is not None:
+        if not generation_sealed and browser_network_recorder is not None:
             try:
                 await _finalize_browser_diagnostics_for_fe(
                     browser_network_recorder=browser_network_recorder,
@@ -10806,7 +10897,13 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_error),
                 )
-        if browser_download_persister is None and download_persister_task is not None:
+        if generation_sealed and download_persister_task is not None:
+            if download_persister_task.done() and not download_persister_task.cancelled():
+                with contextlib.suppress(Exception):
+                    browser_download_persister = download_persister_task.result()
+            else:
+                download_persister_task.cancel()
+        if not generation_sealed and browser_download_persister is None and download_persister_task is not None:
             with contextlib.suppress(Exception):
                 browser_download_persister = await asyncio.wait_for(
                     asyncio.shield(download_persister_task),
@@ -10840,7 +10937,10 @@ Based on this feedback, I need to continue working on the task and address the i
             # hub-archive races still need cleanup as the terminal safety net.
             # Pause-for-resume returns must keep the FE chip open for the next
             # activity call (write / payment / auth assistance).
-            emit_task_terminal=not browser_task_paused_for_resume,
+            emit_task_terminal=not browser_task_paused_for_resume and not generation_sealed,
+            local_only=generation_sealed,
+            local_only_recorders=locally_owned_recorders,
+            local_only_setup_tasks=(download_persister_task,),
         )
         playwright_browser = None
         playwright_instance = None
@@ -10854,6 +10954,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 browser_turn_messages,
                 otp_user_messages,
                 seen_otp_codes,
+                pending_otp_ref_messages,
+                otp_credential_refs,
                 visited_urls,
                 reasoning_messages,
                 action_summary,
@@ -10865,6 +10967,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 browser_session_metadata,
             ),
         )
+        if otp_generation_error is not None:
+            raise otp_generation_error
 
 
 # ========================================

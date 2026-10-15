@@ -253,15 +253,16 @@ def adjust_iteration_after_action(
     consecutive_budget_free: int,
     action_params: Optional[Mapping[str, Any]] = None,
     consecutive_keystroke_free: int = 0,
+    action_executed: bool = True,
 ) -> tuple[int, int, int]:
-    """Refund a step budget unit for observation-only and keystroke tools.
+    """Refund a step for unexecuted actions, observations and keystroke tools.
 
     Returns ``(new_iteration, new_consecutive_budget_free,
     new_consecutive_keystroke_free)``. After the matching consecutive cap,
     further calls consume budget so the loop still terminates.
     """
     name = str(action_name or "").strip().lower()
-    if name in BUDGET_FREE_BROWSER_ACTIONS:
+    if not action_executed or name in BUDGET_FREE_BROWSER_ACTIONS:
         consecutive = int(consecutive_budget_free) + 1
         if consecutive <= MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS:
             return max(0, int(iteration) - 1), consecutive, 0
