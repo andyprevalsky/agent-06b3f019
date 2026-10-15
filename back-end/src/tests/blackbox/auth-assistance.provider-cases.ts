@@ -381,6 +381,45 @@ async function testAuthoredCompletion(controlFirst: boolean): Promise<void> {
   });
 }
 
+async function testAuthoredCompletionScopeBeforeSignal(): Promise<void> {
+  await withFixture('authored-task-scope', 'kernel', async (fixture) => {
+    const requestId = await createLiveViewRequest(fixture, 'example.com');
+    const text = '  Use this account\nKeep only venue_prices.  ';
+    let signals = 0;
+    const result = await completeAuthAssistanceForUser(
+      requestId,
+      fixture.userId,
+      new Date(),
+      {
+        signalCompleted: async () => {
+          signals++;
+          // An independent read at the signal boundary proves the authored source committed first.
+          const rows = await prisma.message.findMany({
+            where: {
+              agentId: fixture.agentId,
+              role: 'USER',
+              metadata: { path: ['attentionRequestId'], equals: requestId },
+            },
+          });
+          assert(rows.length === 1 && rows[0].text === text, 'Authored bytes commit before signal');
+          const metadata = asRecord(rows[0].metadata);
+          assert(
+            metadata.browserTaskId === fixture.browserSessionId,
+            'Locked auth request scopes the reply to BrowserSession.id, not the provider session'
+          );
+          assert(
+            metadata.browserTaskId !== fixture.sessionId,
+            'Provider session ID is not task identity'
+          );
+        },
+        resumeAgent: async () => ({ success: true }),
+      },
+      text
+    );
+    assert(result.status === 'completed' && signals === 1, 'Real auth completion must signal once');
+  });
+}
+
 async function testCompletedAuthRetryReadsFenceAfterGenerationLock(): Promise<void> {
   await withFixture('completed-retry-fence', 'kernel', async (fixture) => {
     const requestId = await createLiveViewRequest(fixture, 'example.com');
@@ -463,6 +502,10 @@ export const authAssistanceProviderCompletionTests: TestCase[] = [
   [
     'completed auth retry refreshes its fence after the generation lock',
     testCompletedAuthRetryReadsFenceAfterGenerationLock,
+  ],
+  [
+    'auth completion commits native task scope before signaling',
+    testAuthoredCompletionScopeBeforeSignal,
   ],
   ['auth completion preserves explicit authored input once', () => testAuthoredCompletion(false)],
   [

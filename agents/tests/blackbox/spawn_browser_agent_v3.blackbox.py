@@ -21861,9 +21861,10 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
 
     close_mock = AsyncMock()
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
-        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
         patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
         patch(
@@ -23531,6 +23532,47 @@ async def test_browser_coalesced_schema_failure_retains_completed_usage_and_late
     assert rows[-1]["text"] in generation_calls[-1], "retry lost the correction arriving during prior generation"
 
 
+
+async def test_browser_task_scoped_feedback_refreshes_only_its_actor_and_verifier():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3 import service as svc
+    from helpers.messages import poll_new_messages
+
+    start = await native_browser_start_source("2026-10-14T17:00:00+00:00", tool_call_id="tool-a")
+    correction = {"id": "task-a-reply", "role": "USER", "text": "  Use Andy's shared Calendar.\n", "timestamp": "2026-10-14T17:01:00+00:00",
+                  "metadata": {"source": "attention_response", "attentionRequestId": "req-a", "browserTaskId": "task-a"}}
+    initial = {"fields": [{"name": "events", "type": "list[str]", "required": True}]}
+    generation = AsyncMock(return_value=(initial, None, {}))
+    states, actors = {}, {}
+    with (
+        patch.object(h, "poll_new_messages", poll_new_messages),
+        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [start, correction]})),
+        patch("helpers.messages.activity.heartbeat"),
+        patch("helpers.llm._generate_response_schema_with_rose", generation),
+    ):
+        for task in ("a", "b"):
+            turns = []
+            state, schema, _ = await h._sync_browser_user_instructions(
+                agent_id="agent-1", goal="Read today's events", response_schema=initial,
+                instruction_state={"tool_call_id": "tool-" + task, "task_id": "task-" + task,
+                    "user_message_cursor": "2026-10-14T17:00:00+00:00", "user_message_cursor_is_task_start": True},
+                turn_messages=turns, compute_auth=None,
+            )
+            assert schema is initial
+            actors[task], states[task] = turns, state
+    assert actors["a"] == [{"role": "user", "content": correction["text"]}]
+    assert actors["b"] == [], "parallel browser actor received a sibling reply"
+    assert generation.await_count == 1, "sibling reply changed another browser's schema"
+    history = SimpleNamespace(get_entries=lambda: [])
+    with patch.object(svc, "list_session_files", AsyncMock(return_value=[])):
+        contexts = {task: await svc.build_browser_verifier_context(
+            goal="Read today's events", current_url="https://example.test/calendar", browser_state={"dom_tree": "<main>Calendar</main>"},
+            action_history=history, config=SimpleNamespace(), session_id="session-" + task,
+            user_instruction_messages=state["user_instruction_messages"],
+        ) for task, state in states.items()}
+    assert any(message.get("text") == correction["text"] for message in contexts["a"])
+    assert not any(correction["text"] in str(message) for message in contexts["b"]), "parallel verifier received a sibling reply"
+
 async def test_browser_resume_delivers_user_corrections_once_to_actor_and_verifier():
     from domains.spawn_browser_agent_v3 import handler as h
     from domains.spawn_browser_agent_v3 import service as svc
@@ -23713,6 +23755,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert len(approval_calls) == 1
     assert approval_calls[0]["question"] == "Approve checkout?"
     assert approval_calls[0]["metadata"]["url"] == "https://www.dickblick.com/cart/"
+    assert approval_calls[0]["metadata"]["browserTaskId"] == "task-1"
     assert len(start_calls) == 2
     # Write-lock approval alone is not GMV — paid-order capture requires
     # structured_response with amount + confirmation id (backend path).
@@ -23889,6 +23932,7 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     ]
     assert len(approval_calls) == 1
     assert approval_calls[0]["metadata"]["requestPaymentCard"]["merchant"] == "Blick Art Materials"
+    assert approval_calls[0]["metadata"]["browserTaskId"] == "task-1"
     assert approval_calls[0]["metadata"]["requestPaymentCard"]["totalCents"] == 636
     assert len(start_calls) == 2
 
@@ -26143,7 +26187,7 @@ _CALENDAR_FEEDBACK_USER_UPDATE = (
 )
 
 
-async def _run_browser_durable_user_feedback_replay(*, change_fields=False, verifier_feedback=None, schema_failure=False, schema_failures=0, schema_invalid=False, poll_failure_calls=(), capture_error=False, feedback_at_completion=False, emit_tool_stream=False):
+async def _run_browser_durable_user_feedback_replay(*, change_fields=False, verifier_feedback=None, schema_failure=False, schema_failures=0, schema_invalid=False, poll_failure_calls=(), capture_error=False, feedback_at_completion=False, emit_tool_stream=False, fresh=False):
     """Replay ae17b024's durable USER correction through the real activity loop."""
     from contextlib import ExitStack
 
@@ -26202,6 +26246,9 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
     )
 
     durable_messages.append(await native_browser_start_source((now - timedelta(minutes=1)).isoformat()))
+    if fresh:
+        feedback_message["timestamp"] = (now - timedelta(seconds=30)).isoformat()
+        durable_messages.append(feedback_message)
     poll_calls = 0
     async def fetch_agent_snapshot(agent_id, since, **kwargs):
         nonlocal poll_calls
@@ -26301,6 +26348,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", tool_events),
         patch("domains.spawn_browser_agent_v3.handler.fetch_browser_control_state", AsyncMock(return_value="agent")),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value={**session_info, "task_id": "task-1", "browser_url": session_info["debug_url"], "cdp_url": session_info["ws_url"]})),
         patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
         patch(
             "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
@@ -26345,9 +26393,9 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         try:
             result = await spawn_browser_agent_activity_v3(
                 user_id="user-1", agent_id="agent-1", goal=_CALENDAR_FEEDBACK_ORIGINAL_GOAL,
-                tool_call_id="tool-1", task_id="task-1", is_resume=True,
+                tool_call_id="tool-1", task_id="task-1", is_resume=not fresh,
                 output_schema=initial_schema, use_claude_mode=False,
-                write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1",
+                write_lock_resume_state=None if fresh else {"approval_type": "manual_pause", "task_id": "task-1",
                     "user_message_cursor": (now - timedelta(minutes=1)).isoformat()},
             )
         except TimeoutError as failure:
@@ -26686,16 +26734,31 @@ async def test_browser_instruction_generation_seal_still_propagates():
             await h._sync_browser_user_instructions(agent_id="agent-1", goal="Read", response_schema={"fields": []}, instruction_state={}, turn_messages=[], compute_auth=None)
 
 
-async def test_browser_resume_poll_miss_disqualifies_approved_pending_write():
+async def test_browser_transient_resume_poll_miss_preserves_approved_pending_write():
     actor, _judge = await _exercise_browser_resume_user_input(pending_action={"action": "click", "params": {"index": 4}}, initial_poll_failure=True)
-    actor.pending_execution.assert_not_awaited()
+    actor.pending_execution.assert_awaited_once()
+    assert actor.decision_order[0] == "queued_action", "confirmed empty read discarded an approved write"
     assert actor.activity_result["status"] == "completed"
+
+
+@_in_browser_activity_context
+async def test_fresh_browser_retains_user_input_before_activity_scheduling():
+    from dataclasses import replace
+    from temporalio import activity
+    scheduled = replace(activity.info(), scheduled_time=datetime.now(timezone.utc))
+    with patch("domains.spawn_browser_agent_v3.handler.activity.info", return_value=scheduled):
+        replay = await _run_browser_durable_user_feedback_replay(fresh=True)
+    assert replay["result"]["status"] == "completed", replay["result"]
+    assert replay["feedback"] in json.dumps(replay["model_calls"][0]["turn_messages"]), "fresh activity omitted correction after the manager source but before scheduling"
+    replay["generator"].assert_awaited_once()
 
 
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("browser_resume_poll_miss_disqualifies_approved_pending_write", test_browser_resume_poll_miss_disqualifies_approved_pending_write)
+    await r.record_async("browser_task_scoped_feedback_refreshes_only_its_actor_and_verifier", test_browser_task_scoped_feedback_refreshes_only_its_actor_and_verifier)
+    await r.record_async("browser_transient_resume_poll_miss_preserves_approved_pending_write", test_browser_transient_resume_poll_miss_preserves_approved_pending_write)
+    await r.record_async("fresh_browser_retains_user_input_before_activity_scheduling", test_fresh_browser_retains_user_input_before_activity_scheduling)
     await r.record_async("browser_unconfirmed_input_stops_before_actor_dispatch", test_browser_unconfirmed_input_stops_before_actor_dispatch)
     await r.record_async("browser_instruction_generation_seal_still_propagates", test_browser_instruction_generation_seal_still_propagates)
     await r.record_async("browser_first_completion_feedback_retries_generation_once", test_browser_first_completion_feedback_retries_generation_once)

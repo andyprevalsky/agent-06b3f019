@@ -350,3 +350,47 @@ uses actual input and native state, without generated schema USER/TOOL narration
 ## Reusable lesson
 
 Reuse the delegated task's authoritative input ledger for decisions, native schema updates and verdict acceptance throughout active execution and resume.
+
+### 2026-10-15 second-review source and recipient boundaries
+
+Review `5526868411` on immutable `f2625c20` identified three browser intake
+regressions. The unchanged local reproductions demonstrated missing server-side
+projection, loss of an approved pending write after a transient read, and no
+native browser recipient on attention replies. An independent actual-producer
+probe also showed a correction after manager start but before activity scheduling
+was excluded by the fresh scheduled-time floor.
+
+The repair keeps the same durable GET/poll, task-start floor and source-ID ledger.
+The GET's optional `browserToolCallId` projects USER rows plus the exact manager
+`session_starting` TOOL in the repository, before the growing internal transcript
+crosses HTTP. Ordinary root reads retain their previous result. The browser
+filters scoped attention USER rows by native task ID; unscoped root USER remains
+global and internal OTP USER remains excluded. Actual write/payment manager
+requests carry `browserTaskId`; authored persistence copies scope from the locked
+request, including existing auth `browserSessionId` provenance, before signaling.
+Text bytes, attention source IDs and owner/workflow checks are preserved.
+
+Fresh real and simulated activities now derive their input floor from the actual
+manager start source, matching legacy recovery. Activity scheduling is not proof
+of task start. Saved certified floors remain valid. An approved pending action
+survives a transient read miss and executes only after a confirmed read; actual
+new input still invalidates it. For simulated activities, the additional confirmed
+read applies to a queued approved action, preserving the existing normal actor
+read/retry path.
+
+Owning regressions execute the actual manager start producer and actual manager
+write/payment approval producer. Four initial boundary/action cases failed on
+`f2625c20` and pass after repair; four HTTP/scope/approval provenance cases likewise
+failed before and pass unchanged afterward. A further actor/schema/verifier case
+proves a task-A reply reaches only A and does not refresh B's contract. Backend
+owning cases cover huge irrelevant transcript exclusion, ordinary GET parity,
+late committed USER discovery and ownership, plus real auth completion's source
+commit before its signal. Focused commands and raw before/after outputs remain in
+the incident's private second-review worktree `.context/review2-*` artifacts.
+
+The first combined owning run exposed missing manager starts in fresh direct
+activity fixtures. Those fixtures now call the real start producer, retaining
+all action, approval, usage, failure and completion assertions. Its failure log
+is preserved; it is not counted as a passing run. This patch adds no synthetic
+conversation or verifier verdict, changes no provider score, and raises no budget,
+iteration or timeout limit.

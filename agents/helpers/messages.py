@@ -850,6 +850,7 @@ async def poll_new_messages(
     last_checked: Union[datetime, str],
     include_internal_subagent: bool = False,
     browser_tool_call_id: Optional[str] = None,
+    browser_task_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
@@ -871,13 +872,17 @@ async def poll_new_messages(
         logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={since.isoformat()}")
 
         # Use the single fetch_agent_data implementation with server-side filtering
-        data = await _fetch_agent_data_impl(agent_id, since=since.isoformat())
+        data = await _fetch_agent_data_impl(
+            agent_id, since=since.isoformat(),
+            **({"browser_tool_call_id": browser_tool_call_id} if browser_tool_call_id else {}),
+        )
         new_messages = data.get("messages", [])
         if browser_tool_call_id:
             # The same durable read carries actual USER sources and the exact
             # delegated task's native start event. Browser internals and root
             # compaction summaries are not user instructions.
-            return [row for row in new_messages if (row.get("role") == "USER" and not is_internal_subagent_message(row)) or (
+            return [row for row in new_messages if (row.get("role") == "USER" and not is_internal_subagent_message(row)
+                and ((row.get("metadata") or {}).get("browserTaskId") in (None, browser_task_id))) or (
                 row.get("role") == "TOOL"
                 and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
                 and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"

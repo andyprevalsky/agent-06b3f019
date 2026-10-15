@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
-from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
+from _test_utils import BlackboxResult, native_browser_start_source, setup_mock_fn, teardown_mock
 
 
 def _with_archive_env(tmp: str):
@@ -2250,6 +2250,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         browser_pool="rose-1-ultra",
     )
     pricing = AsyncMock(return_value={})
+    native_start = await native_browser_start_source("2026-01-01T00:00:00+00:00", tool_call_id="browser-call", mode="simulate")
     with (
         patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(
             scheduled_time=browser_handler.datetime.now(browser_handler.timezone.utc))),
@@ -2259,7 +2260,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
-        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[])),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[native_start])),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2368,6 +2369,7 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
     scheduled_time = datetime.now(timezone.utc) - timedelta(seconds=30)
     rows = [{"id": "prior-task", "role": "USER", "text": "Historical task input",
              "timestamp": (scheduled_time - timedelta(seconds=1)).isoformat()}]
+    rows.append(await native_browser_start_source(scheduled_time.isoformat(), tool_call_id="tool-browser", mode="simulate"))
     if startup_feedback:
         rows.append({"id": "queued-correction", "role": "USER", "text": correction,
                      "timestamp": (scheduled_time + timedelta(seconds=1)).isoformat()})
@@ -2775,6 +2777,53 @@ async def test_simulated_browser_user_feedback_invalidates_pending_approved_acti
 
 async def test_simulated_browser_resume_poll_miss_disqualifies_pending_write():
     await _exercise_simulated_browser_pending_approval(user_feedback=True, initial_poll_failure=True)
+
+
+async def test_fresh_simulated_browser_uses_native_manager_input_boundary():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3 import handler
+    from _test_utils import native_browser_start_source
+
+    class StoppedBeforeExternalPricing(Exception):
+        pass
+
+    scheduled = datetime(2026, 10, 14, 17, 2, tzinfo=timezone.utc)
+    initial_state = None
+    with (
+        patch.object(handler.activity, "info", return_value=SimpleNamespace(scheduled_time=scheduled)),
+        patch.object(handler, "load_config", return_value=SimpleNamespace()),
+        patch.object(handler, "get_model_pricing_with_fallback", AsyncMock(side_effect=StoppedBeforeExternalPricing)),
+    ):
+        try:
+            await handler._spawn_browser_agent_activity_v3_simulated(
+                user_id="user-1", agent_id="agent-1", goal="Read calendar", tool_call_id="tool-1", task_id="task-1",
+                session_id=None, cdp_url=None, is_resume=False, output_schema={"fields": [{"name": "events", "type": "str"}]},
+                attachments=None, write_lock_enabled=True, start_url="about:blank", write_lock_resume_state=None,
+                system_name="Rose", use_claude_mode=False, gpt_token=None, gpt_account_id=None,
+                gpt_token_source=None, gpt_token_pool_id=None, world_model=SimpleNamespace(),
+            )
+        except StoppedBeforeExternalPricing as error:
+            frame = error.__traceback__
+            while frame:
+                if frame.tb_frame.f_code.co_name == "_spawn_browser_agent_activity_v3_simulated":
+                    initial_state = dict(frame.tb_frame.f_locals["instruction_state"])
+                frame = frame.tb_next
+    assert initial_state is not None
+    rows = [await native_browser_start_source("2026-10-14T17:00:00+00:00", mode="simulate"),
+            {"id": "prior", "role": "USER", "text": "Previous task", "timestamp": "2026-10-14T16:59:00+00:00"},
+            {"id": "actual", "role": "USER", "text": "Use Andy account instead", "timestamp": "2026-10-14T17:01:00+00:00"}]
+    async def poll(_agent, since, **options):
+        assert options["browser_tool_call_id"] == "tool-1"
+        return [row for row in rows if datetime.fromisoformat(row["timestamp"]) > since]
+    with patch.object(handler, "poll_new_messages", AsyncMock(side_effect=poll)):
+        state = await handler._load_browser_resume_user_instructions("agent-1", initial_state)
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "Use Andy account instead"}], "fresh simulated activity dropped actual pre-scheduling feedback"
+    assert state["user_message_cursor"] == "2026-10-14T17:00:00+00:00"
+
+
+async def test_simulated_browser_transient_read_retains_approved_write():
+    await _exercise_simulated_browser_pending_approval(initial_poll_failure=True)
 
 
 async def test_simulated_browser_legacy_resume_reads_feedback_sent_during_pause():
@@ -3191,6 +3240,8 @@ def test_simulated_resume_preserves_full_user_instruction_tail():
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("simulated_browser_transient_read_retains_approved_write", test_simulated_browser_transient_read_retains_approved_write)
+    await r.record_async("fresh_simulated_browser_uses_native_manager_input_boundary", test_fresh_simulated_browser_uses_native_manager_input_boundary)
     await r.record_async("simulated_browser_publishes_native_task_start_for_resume_scope", test_simulated_browser_publishes_native_task_start_for_resume_scope)
     await r.record_async("simulated_browser_resume_poll_miss_disqualifies_pending_write", test_simulated_browser_resume_poll_miss_disqualifies_pending_write)
     await r.record_async("simulated_browser_unconfirmed_input_blocks_actual_click_transition", test_simulated_browser_unconfirmed_input_blocks_actual_click_transition)
