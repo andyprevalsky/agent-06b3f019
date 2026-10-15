@@ -297,3 +297,39 @@ that had never waited. The successor moves clock creation to first actual 75,
 with parent-shell JSON capture. A second owning control crosses two getters and
 normal admission, verifies the same deadline, then proves an expired pending read
 cannot obtain a new budget. No slow workload or provider call was needed.
+
+### Cleanup admission and retired atomic-replace dentries (2026-10-15, V34)
+
+V34 first failed at cleanup reserve admission, before provider mutation:
+`unsafe cleanup admission file`. A single source/boot/epoch/terminal-bound
+metadata read found the five retained candidate operands regular, UID 1001,
+and single-link. No bad retained file was found; the historical exact path and
+predicate therefore remain unknown. No ownership, file-type or hard-link guard
+was waived, and no second guest read was made.
+
+The actual campaign atomic JSON writer and native Linux `Path.lstat` reproduced
+612 link-count-zero results among 193,949 reads in three seconds. A concurrent
+`os.replace` can unlink the lookup's old dentry before its stat attributes are
+returned, even though the current pathname is valid. An independent kernel
+control observed the same class. The old one-shot predicate falsely refused
+this legitimate producer transition. This establishes a causal bug class, not
+which historical V34 operand triggered it.
+
+Only an initial same-UID regular inode with zero links now triggers finite
+re-resolution of the exact pathname. Each fresh descriptor uses `O_NOFOLLOW`;
+`fstat` must show a regular same-UID single-link inode before acceptance. A
+retired zero-link descriptor is never accepted. Symlinks, foreign UID and hard
+links (two or more) still refuse. Thirty-two immediate descriptor attempts are
+a fixed bound with no sleeps, new timer, native query, cleanup floor or reserve
+policy change. Exhaustion remains a truthful refusal. Unsafe errors now include
+the source-owned path and predicate attributes, without file contents.
+
+A second pathname lookup after descriptor validation was deliberately removed:
+it reintroduced the same atomic replacement race (the intermediate controls
+and finite exhaustion evidence are retained). The final real-writer/guard
+control returned 181,584 validated reads over 2,726 replacements with zero
+accepted retired inodes and zero exceptions in three seconds. Deterministic
+owning controls cover retired lookup followed by current descriptor, replacement
+during open, persistent retired-descriptor exhaustion, and unchanged symlink,
+foreign-owner and hard-link refusals. Full reserve budget, owner and nested
+canary controls remain mandatory; no 600-task success is claimed by this fix.

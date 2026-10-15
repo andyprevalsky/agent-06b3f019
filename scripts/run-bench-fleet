@@ -5854,10 +5854,28 @@ reserve_identity = None
 
 
 def regular(path):
+    def validate(observed):
+        if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid() or observed.st_nlink not in (0, 1):
+            raise ValueError("unsafe cleanup admission file: path=" + str(path)
+                             + " uid=" + str(observed.st_uid) + " nlink=" + str(observed.st_nlink)
+                             + " type=" + str(stat.S_IFMT(observed.st_mode)))
     observed = path.lstat()
-    if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.getuid() or observed.st_nlink != 1:
-        raise ValueError("unsafe cleanup admission file")
-    return observed
+    validate(observed)
+    if observed.st_nlink == 1:
+        return observed
+    # Atomic replacement retired the lookup's dentry. Never accept that inode:
+    # open the same source-owned path anew and validate its descriptor directly.
+    # A second path lookup after fstat would introduce the same replacement race.
+    for _ in range(32):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            opened = os.fstat(descriptor)
+            validate(opened)
+            if opened.st_nlink == 1:
+                return opened
+        finally:
+            os.close(descriptor)
+    raise ValueError("cleanup admission file kept changing during atomic replacement: path=" + str(path))
 
 
 def directory(path):

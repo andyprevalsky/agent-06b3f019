@@ -33536,3 +33536,72 @@ printf 'ONE_PARENT_PENDING_CLOCK\n'
                             env={**os.environ, "ROOT": str(tmp_path)})
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ONE_PARENT_PENDING_CLOCK" in result.stdout
+
+
+@pytest.mark.parametrize("case", ["regular", "unlinked-then-current", "unlinked-replaced-at-open", "unlinked-exhausts", "hardlink", "symlink", "foreign", "unlinked-then-foreign"])
+def test_fleet_cleanup_admission_revalidates_unlinked_file_before_acceptance(tmp_path: Path, monkeypatch, case: str) -> None:
+    import ast
+    import stat
+    reserve = _extract_fleet_function(fleet_source_text(), "reserve_cleanup_disk_space() {")
+    program = reserve.split("<<'PY'\n", 1)[1].rsplit("\nPY\n", 1)[0]
+    node = next(n for n in ast.parse(program).body if isinstance(n, ast.FunctionDef) and n.name == "regular")
+    namespace = {"os": os, "stat": stat, "Path": Path}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "actual-cleanup-regular", "exec"), namespace)
+    path = tmp_path / "manifest.json"
+    path.write_text('{"cohort_id":"fixture","jobs":{}}')
+    if case == "hardlink":
+        os.link(path, tmp_path / "peer")
+    if case == "symlink":
+        path.rename(tmp_path / "real")
+        path.symlink_to(tmp_path / "real")
+    actual = Path.lstat
+    actual_open = os.open
+    actual_fstat = os.fstat
+    descriptor_observations = []
+    def descriptor_stat(fd):
+        value = actual_fstat(fd)
+        fields = list(value)
+        if case == "unlinked-exhausts":
+            fields[3] = 0
+        elif case == "unlinked-then-foreign":
+            fields[4] = os.getuid() + 1
+        value = os.stat_result(fields)
+        descriptor_observations.append(value)
+        return value
+    monkeypatch.setattr(os, "fstat", descriptor_stat)
+    opened_flags = []
+    if case == "unlinked-replaced-at-open":
+        replacement = tmp_path / "new-manifest"
+        replacement.write_text('{"cohort_id":"fixture","jobs":{"new":null}}')
+        def replaced_open(target, flags, *args, **kwargs):
+            descriptor = actual_open(target, flags, *args, **kwargs)
+            if Path(target) == path:
+                opened_flags.append(flags)
+                if replacement.exists():
+                    replacement.replace(path)
+            return descriptor
+        monkeypatch.setattr(os, "open", replaced_open)
+    calls = []
+    def observed(self, *args, **kwargs):
+        value = actual(self, *args, **kwargs)
+        if self == path:
+            calls.append(value)
+            fields = list(value)
+            if case == "unlinked-exhausts" or (case.startswith("unlinked-") and len(calls) == 1):
+                fields[3] = 0  # deterministic retired dentry; real Linux replay is recorded separately
+            elif case in {"foreign", "unlinked-then-foreign"}:
+                fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(Path, "lstat", observed)
+    if case in {"regular", "unlinked-then-current", "unlinked-replaced-at-open"}:
+        value = namespace["regular"](path)
+        assert value.st_ino == actual(path).st_ino and value.st_nlink == 1
+        if case.startswith("unlinked-"):
+            assert descriptor_observations and descriptor_observations[-1].st_nlink == 1
+        if case == "unlinked-replaced-at-open":
+            assert len(opened_flags) >= 2 and all(flags & os.O_NOFOLLOW for flags in opened_flags)
+    else:
+        with pytest.raises((ValueError, OSError)):
+            namespace["regular"](path)
+    assert len(descriptor_observations) <= 32  # finite, no sleeps/new deadline/provider call
