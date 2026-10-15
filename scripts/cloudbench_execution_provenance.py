@@ -62,6 +62,7 @@ _CONFIG_SCALAR_KEYS = {
     "campaign_mutation_admission",
     "boot_update_capacity_wait_seconds",
     "boot_config_barrier_wait_seconds",
+    "primary_reuse_only",
     "primary_vm_size",
     "primary_vm_memory_mb",
     "bundled_frontend_vm_size",

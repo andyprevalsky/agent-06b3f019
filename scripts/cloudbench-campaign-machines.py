@@ -199,7 +199,7 @@ def validate(value: object) -> list[dict]:
             machine['checks'] = [x for x in checks if not x.get('name', '').startswith('bg_deployments_compat')]
     return value
 
-def fetch(app: str, seconds: float) -> bytes:
+def fetch(app: str, seconds: float, machine_id: str | None = None) -> bytes:
     deadline = time.monotonic() + seconds
     def expired(signum, frame):
         _d_signal(signum)
@@ -220,6 +220,10 @@ def fetch(app: str, seconds: float) -> bytes:
         if os.environ.get('FLY_FORCE_INSTANCE_ID'):
             raise Refusal('unsupported forced instance override')
         url = base + '/v1/apps/' + urllib.parse.quote(app, safe='') + '/machines'
+        if machine_id is not None:
+            if not re.fullmatch('[0-9a-f]+', machine_id):
+                raise Refusal('invalid or duplicate Machine identity')
+            url += '/' + machine_id
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         _d_phase('headers')
         with opener.open(urllib.request.Request(url, headers=headers), timeout=max(0.001, deadline-time.monotonic())) as response:
@@ -251,7 +255,12 @@ def fetch(app: str, seconds: float) -> bytes:
         _d_phase('json_parse',decoded_bytes=len(raw))
         parsed_value = json.loads(raw)
         _d_phase('validate')
-        value = validate(parsed_value)
+        if machine_id is None:
+            value = validate(parsed_value)
+        else:
+            value = validate([parsed_value])[0]
+            if value.get('id') != machine_id:
+                raise Refusal('invalid or duplicate Machine identity')
         _d_phase('encode')
         result = json.dumps(value, separators=(',', ':'), allow_nan=False).encode() + b'\n'
         if time.monotonic() >= deadline:

@@ -134,7 +134,7 @@ if [[ "${1:-}" == "stability-proof" ]]; then
         esac
     done
     if [ "$stability_proof_read_only" -eq 0 ]; then
-        benchmark_agent_instructions >&2
+        benchmark_agent_instructions
     fi
     exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
         --capability "$@"
@@ -256,6 +256,11 @@ Startup reuse:
   --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
                       runs automatically claim and return this workspace pool.
                       Stopped Machines retain billable volume storage.
+  --reuse-pool-only  Use eligible owned stopped primary pool IDs only; no primary
+                      cloning. Additional worker admission is unchanged.
+  --recover-stale-owner-to-pool TOKEN
+                      Exact canonical recovery, preserving proven stopped
+                      primaries in this workspace pool; requires sealed evidence.
   --fresh-volumes    Default: empty volumes for REAL task Machines; bootstrap
                       exact source plus baked deps. SIM snapshots remain.
                       Requires boot launch; cannot prepare a generic pool.
@@ -339,12 +344,12 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --recover-stale-owner|--provision-pool)
+        --recover-stale-owner|--recover-stale-owner-to-pool|--provision-pool)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --keep-clones|--reuse-pool-only|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
