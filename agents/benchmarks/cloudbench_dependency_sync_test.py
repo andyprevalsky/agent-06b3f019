@@ -33605,3 +33605,74 @@ def test_fleet_cleanup_admission_revalidates_unlinked_file_before_acceptance(tmp
         with pytest.raises((ValueError, OSError)):
             namespace["regular"](path)
     assert len(descriptor_observations) <= 32  # finite, no sleeps/new deadline/provider call
+
+
+@pytest.mark.parametrize('case', ['healthy', 'pending', 'pending-twice', 'healthy-work-first-pending', 'expired', 'expires-before-allocation', 'foreign', 'dead', 'missing-field', 'unsafe'])
+def test_clone_source_owned_pending_consumes_first_native_allowance(tmp_path, case):
+    source = FLEET_SCRIPT.read_text()
+    function = _extract_fleet_function(source, 'clone_machine_target() {')
+    index = tmp_path / 'inventory/current'
+    (index / 'machines').mkdir(parents=True)
+    health = index / 'health'
+    pending = case in ('pending', 'pending-twice', 'healthy-work-first-pending', 'expired', 'expires-before-allocation')
+    health.write_text('publisher_token=' + ('foreign' if case == 'foreign' else 'owned')
+                      + '\nvalid_until=' + str(int(time.time()) + (-30 if pending else 10000)) + '\n')
+    (index / 'machines/warm').write_text('state=stopped\n' if case == 'missing-field' else
+                                       'clone_cmd_overridable=' + ('0' if case == 'unsafe' else '1') + '\n')
+    trace = tmp_path / 'native-budget'
+    sleeps = tmp_path / 'sleeps'
+    registry = tmp_path / 'registry'
+    script = f'''set -u
+FLEET_DIR={shlex.quote(str(tmp_path))}; ROOT_DIR={shlex.quote(str(ROOT))}; APP=fixture
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-inventory.sh'))}
+SNAPSHOT_LOOP_PID=$$; SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time $$)"; SNAPSHOT_LOOP_TOKEN=owned
+INVENTORY_PUBLISHER_BORROWED=1; INVENTORY_CAMPAIGN_PARENT_PID=$$; INVENTORY_CAMPAIGN_PARENT_START="$SNAPSHOT_LOOP_PID_START"
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$FLEET_DIR"; CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=10
+CLOUDBENCH_CLONE_TIMEOUT_SECONDS=240; CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
+SNAP_ID=vs_fixture; PRIVATE_SOURCE_FILE=; WARM_ID=warm; REGION=ord
+CASE={shlex.quote(case)}
+[ "$CASE" != dead ] || SNAPSHOT_LOOP_PID_START=proc-start:foreign:1
+sleep() {{
+    printf '%s\n' "$1" >> {shlex.quote(str(sleeps))}
+    SECONDS=$((SECONDS + $1))
+    if [ "$CASE" != expired ] && {{ [ "$CASE" != pending-twice ] || [ "$(wc -l < {shlex.quote(str(sleeps))})" -ge 2 ]; }}; then
+        printf 'publisher_token=owned\nvalid_until=%s\n' "$(( $(date +%s) + 10000 ))" > {shlex.quote(str(health))}
+    fi
+}}
+fleet_registry_record_name() {{
+    printf '%s\n' "$1" >> {shlex.quote(str(registry))}
+    [ "$CASE" != expires-before-allocation ] || SECONDS=$((SECONDS + 240))
+}}
+fleet_registry_release_name() {{ :; }}
+fleet_audit_update_fresh_clone() {{ :; }}
+clone_failure_owned_volume_id() {{ :; }}
+clone_failure_definitively_unallocated() {{ return 0; }}
+fleet_clone_with_queue_admission() {{ printf '%s\n' "$1" > {shlex.quote(str(trace))}; printf fixture-refusal; return 9; }}
+FLY() {{ echo FORBIDDEN_NATIVE >&2; return 99; }}
+{function}
+# Unrelated healthy work must not consume any pending/native allowance.
+[ "$CASE" != healthy-work-first-pending ] || SECONDS=301
+clone_machine_target "$FLEET_DIR/primary.ids" warm shared-cpu-2x 4096 vs_fixture snapshot
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert 'FORBIDDEN_NATIVE' not in result.stderr
+    if case == 'healthy':
+        assert trace.read_text().strip() == '240'
+        assert not sleeps.exists()
+    elif case in ('pending', 'healthy-work-first-pending'):
+        assert 225 <= int(trace.read_text()) <= 230
+        assert sleeps.read_text().splitlines() == ['10']
+    elif case == 'pending-twice':
+        assert 215 <= int(trace.read_text()) <= 220
+        assert sleeps.read_text().splitlines() == ['10', '10']
+    else:
+        assert not trace.exists()
+        if case == 'expired':
+            assert 235 <= sum(map(int, sleeps.read_text().splitlines())) <= 240
+            assert not registry.exists()
+        elif case == 'expires-before-allocation':
+            assert 'exhausted the first native clone allowance before allocation' in result.stderr
+        else:
+            assert not sleeps.exists() and not registry.exists()

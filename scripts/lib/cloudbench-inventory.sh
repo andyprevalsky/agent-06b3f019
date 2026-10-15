@@ -545,7 +545,7 @@ inventory_machine_record_path() {  # inventory_machine_record_path <id>
 
 inventory_machine_field() {  # inventory_machine_field <id> <field>
     local path key value
-    inventory_index_healthy || return 1
+    inventory_index_healthy || return $?
     path="$(inventory_machine_record_path "$1")" || return 1
     [ -s "$path" ] || return 1
     while IFS='=' read -r key value; do

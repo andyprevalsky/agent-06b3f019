@@ -368,3 +368,9 @@ all causes of provider unavailability. Validate the changed path once under the
 existing bounded reader fixture before another paid campaign. Run the normal
 N2 preflight before all 600 controllers under the same original overall budget;
 do not use a near-expiry PASS cache to defer that work into controller startup.
+
+### V38 clone-source typed availability boundary
+
+The original first failing controller (`r002-j0237`, run `20261015-151720-14937`) refused allocation with source observation status 1, before any Machine was created. The getter collapsed `inventory_index_healthy` status 75 into 1. An actual same-process PID/birth/token-fenced, expired-health fixture reproduces this translation; the historical underlying status remains unknown. Foreign ownership and a missing keyed field remain fatal.
+
+Preserve typed 75 and allow only a campaign-borrowed, owned-publisher pending source observation to wait. Arm its clock on the first actual pending observation and charge all waiting to the first existing 240-second native clone allowance. Pass only its remaining seconds to that first clone; healthy reads keep the original 240-second argument, and later attempts, storage waits, TTL and campaign deadlines remain unchanged. Expiry refuses allocation. This repairs the demonstrated status contract; it does not repair or explain the separately observed publisher availability loss, and is not a basis for another paid slice alone.

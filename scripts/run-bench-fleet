@@ -10937,8 +10937,33 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     # --detach still launches the clone. CMD can be made inert at creation only
     # when no inherited exec/entrypoint takes precedence; use the shared native
     # inventory and reject unknown shapes before creating any provider resource.
-    local source_override source_observation_status=0
-    source_override="$(inventory_machine_field "$source_id" clone_cmd_overridable)" || source_observation_status=$?
+    local source_override source_observation_status=0 source_pending_deadline="" source_remaining source_interval
+    local first_clone_timeout
+    clone_timeout="${CLOUDBENCH_CLONE_TIMEOUT_SECONDS:-240}"
+    # Only an actual owned-publisher pending observation starts this clock.
+    # Its wait consumes the first existing native clone allowance, never a new
+    # admission window; healthy reads leave the original native budget intact.
+    while :; do
+        source_observation_status=0
+        source_override="$(inventory_machine_field "$source_id" clone_cmd_overridable)" || source_observation_status=$?
+        [ "$source_observation_status" = 75 ] || break
+        if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] \
+            || [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ] \
+            || [ -z "${SNAPSHOT_LOOP_PID:-}" ]; then
+            break
+        fi
+        source_interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
+        case "$clone_timeout:$source_interval" in *[!0-9:]*) return 2 ;; esac
+        [ "$clone_timeout" -gt 0 ] && [ "$source_interval" -gt 0 ] || return 2
+        [ -n "$source_pending_deadline" ] || source_pending_deadline=$((SECONDS + clone_timeout))
+        source_remaining=$((source_pending_deadline - SECONDS))
+        if [ "$source_remaining" -le 0 ]; then
+            echo "❌ clone source observation remained unavailable within the first native clone allowance; refusing allocation" >&2
+            return 1
+        fi
+        [ "$source_interval" -le "$source_remaining" ] || source_interval="$source_remaining"
+        sleep "$source_interval"
+    done
     if [ "$source_observation_status" -ne 0 ] || { [ "$source_override" != 0 ] && [ "$source_override" != 1 ]; }; then
         echo "❌ clone source startup observation unavailable or invalid (inventory status=$source_observation_status); refusing allocation" >&2
         return 1
@@ -10957,7 +10982,6 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
     # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
     # clone-from-snapshot + --detach returns well under this; 25min+ = hung.
-    clone_timeout="${CLOUDBENCH_CLONE_TIMEOUT_SECONDS:-240}"
     mkdir -p "$(dirname "$ledger")"
     names_ledger="${ledger%.ids}.names"
     diagnostic_log="${ledger%.ids}.log"
@@ -10985,7 +11009,15 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             return 1
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
-        clone_out="$(fleet_clone_with_queue_admission "$clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
+        first_clone_timeout="$clone_timeout"
+        if [ "$attempt" = 1 ] && [ -n "$source_pending_deadline" ]; then
+            first_clone_timeout=$((source_pending_deadline - SECONDS))
+            if [ "$first_clone_timeout" -le 0 ]; then
+                echo "❌ clone source wait exhausted the first native clone allowance before allocation" >&2
+                return 1
+            fi
+        fi
+        clone_out="$(fleet_clone_with_queue_admission "$first_clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
             "${snapshot_args[@]}" "${volume_placement_args[@]}" --region "${clone_region:-$REGION}" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" \
             --override-cmd "sleep infinity" --detach 2>&1)"
