@@ -173,5 +173,7 @@ The fixture now mocks only the exact profile path, requires acknowledged release
 and retained PAUSED custody before returning READY, and requires that read before
 create. Its original binding, publication CAS, cleanup and recovery assertions
 remain. The mock restores the original GET in finally. No runtime behavior,
-provider limits or retry policy changed. Full combined coverage is being rerun;
-the failed first attempt is retained separately.
+provider limits or retry policy changed. Full combined backend coverage then passed all 196 domains and all 267 unit
+files, with 89.61% line and 81.06% branch coverage. The browser-provider domain
+passed in 117142ms and steel-fingerprint in 21449ms. The failed first attempt
+is retained separately. Independent review of the exact fixture diff is clean.
