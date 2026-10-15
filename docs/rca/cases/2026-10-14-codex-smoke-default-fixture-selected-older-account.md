@@ -172,3 +172,32 @@ it.
 Bind credential smoke tests to their declared local authority before treating a
 revoked account chosen from a mixed production seed as proof that the current
 login needs reauthentication.
+
+## October 15 deploy-runner authority scope follow-up
+
+During PR1520 validation, the parent incorrectly sourced the backend-only
+`.context/deploy-codex-auth.env` from a shared test launcher used by agent
+coverage. The benchmark domain's two fixtures deliberately use a non-loopback
+source DSN; inherited explicit Codex authority correctly triggered
+`Explicit Codex auth requires an isolated loopback database`. The guard and the
+fixtures were correct. This is another fixture-authority configuration error,
+not evidence that the credential or production selection path failed.
+
+Archive searches were `Explicit Codex auth requires an isolated loopback database`,
+`fixture-authority`, and `CODEX_TOKEN_USER_ID`; this existing configuration-error
+case owns the follow-up. The failed receipt is
+`.context/deploy-agents-coverage-r6.log`:109/110 domains passed; the benchmark
+domain failed `compute_token_explicit_prod_source` and
+`compute_token_source_contract`. The parent's ignored launcher was corrected
+to scope Codex authority to backend coverage only. The agent lane reran with
+`CODEX_TOKEN_USER_ID`, `CODEX_BLACKBOX_USER_ID`, and `CODEX_AUTH_PATH` removed
+from that command's environment. Backend coverage retained its legitimate
+isolated authority. No production code, fixture assertion, credential, gate,
+or database-safety guard was changed to resolve this launch error.
+
+`.context/deploy-agents-coverage-r6b.log` records the unchanged full agent suite
+passing110/110 domains and82% coverage after the environment correction.
+The same source's backend suite independently passed197/197 domains and271 unit
+files at89.62% line coverage, including its real current-authority Codex smoke.
+These runs establish the scope correction; the original credential-selection
+incident and its mitigation below remain unchanged.
