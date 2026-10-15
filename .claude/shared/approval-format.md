@@ -3,8 +3,8 @@
 This file is the single source of truth for human approval requests emitted by
 `/RCA`, `/deploy`, and `/descend`. Read it completely immediately before
 composing any approval request. Do not replace it with a shorter free-form
-summary, and do not rename, reorder, or omit its six required sections
-(Before Behavior, After Behavior, TL;DR, Evidence, Detail, Downstream
+summary, and do not rename, reorder, or omit its seven required sections
+(Before Behavior, After Behavior, How, TL;DR, Evidence, Detail, Downstream
 Implications). Present them exactly as described in Presentation below.
 
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
@@ -30,7 +30,7 @@ inside it. The sections below show field labels in bold only to define them.
 
 Use the same visual styling as `/deploy` Step 15 and the benchmark scorecard:
 64-column `━` outer borders, `─` section separators, a `🔐 APPROVAL` header,
-the approval ID/subject, and `⏳ AWAITING DECISION`. Keep the six required labels
+the approval ID/subject, and `⏳ AWAITING DECISION`. Keep the seven required labels
 and their order exactly; the frame is decoration, not another content section.
 Apply this styling to every approval from `/RCA`, `/deploy`, `/descend`, or other
 skills that reference this file. Use one approval block per snapshot decision.
@@ -39,7 +39,7 @@ approval in the parent benchmark card. Continue independent authorized work;
 presentation does not create additional approval gates.
 
 Inside the frame, `Before:` and `After:` are always the first two content items,
-followed by `TL;DR:`, `Evidence:`, `Detail:`, `Downstream:`, and the response
+followed by `How:`, `TL;DR:`, `Evidence:`, `Detail:`, `Downstream:`, and the response
 syntax. The whole message for one approval has exactly this shape (the outer
 four-backtick fence only delimits the example):
 
@@ -56,6 +56,9 @@ Before:
 ────────────────────────────────────────────────────────────────
 After:
   <the same trigger and ordering after the change or action>
+────────────────────────────────────────────────────────────────
+How:
+  <one concise sentence naming how the fix or action is implemented>
 ────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence>
@@ -135,11 +138,22 @@ change or action. State the same triggering conditions and ordering so the
 human can compare it directly with Before Behavior. Call out what is
 intentionally unchanged.
 
+## How
+
+`How:` comes immediately after After: and immediately before TL;DR: exactly
+one concise sentence explaining how the fix was made or the action will be
+performed. Name the actual mechanism, such as runtime harness injection,
+prompt or schema editing, application logic, configuration, or an operational
+command, and what it changes. For runtime harness injection, say what enters
+the agent's context and where; identify synthetic context when injected.
+Describe the mechanism in plain language, keeping exact diffs and detailed
+implementation reasoning in Detail.
+
 ## TL;DR
 
-`TL;DR:` follows After: exactly one sentence stating, in plain language,
+`TL;DR:` follows How: exactly one sentence stating, in plain language,
 what the human is approving and its single most important consequence. Together
-with Before and After it must let the reader decide without reading further;
+with Before, After, and How it must let the reader decide without reading further;
 the sections below justify it.
 Never omit it, never exceed one sentence, and never hide a cost, risk, or
 irreversibility here that the later sections reveal — if it is in Downstream
@@ -332,4 +346,4 @@ with how they are checked, fixtures, task prompt) is missing. For prompt / LLM-v
 is also invalid if the exact diff body is omitted or replaced by a file link
 alone. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
-approval ID and present all six sections again.
+approval ID and present all seven sections again.

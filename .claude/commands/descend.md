@@ -18,7 +18,7 @@ Both planned user-input gates, and any unplanned human approval permitted by
 the composed commands, must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
-replace the shared Before Behavior, After Behavior, TL;DR, Evidence, Detail,
+replace the shared Before Behavior, After Behavior, How, TL;DR, Evidence, Detail,
 and Downstream Implications sections or their code-block presentation.
 
 ## Hard rules
@@ -1059,6 +1059,9 @@ After:
   <The same trigger and ordering after the fix, including the measured passing
   result and what remains unchanged.>
 ────────────────────────────────────────────────────────────────
+How:
+  <One concise sentence naming the fix mechanism and what it changes.>
+────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence: what to approve and its most important consequence>
 ────────────────────────────────────────────────────────────────
@@ -1143,6 +1146,9 @@ Before:
 ────────────────────────────────────────────────────────────────
 After:
   <The exact prompt or terminal behavior after this deploy.>
+────────────────────────────────────────────────────────────────
+How:
+  <One concise sentence naming the deploy mechanism and what it changes.>
 ────────────────────────────────────────────────────────────────
 TL;DR:
   <exactly one sentence: what to approve and its most important consequence>
