@@ -52,7 +52,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     () => assertSteelSameProfileReplacement(false),
   ],
   [
-    'Steel CLOSED replacement failure recovers through release404',
+    'Steel PAUSED replacement failure recovers through release404',
     () => assertSteelSameProfileReplacement(true),
   ],
   [

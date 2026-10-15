@@ -21,8 +21,10 @@ tags:
   - lease
   - deploy-gate
 sources:
+  - PR #1515
   - commit 3c9a5b558d7d40eac1e9b72ab0c50e62d9c277df
   - agent 25acf5cf-8f9b-4e3b-ba4b-30fb935231b7
+  - task backend coverage 20261014-221231-6318
 repro: back-end/src/tests/blackbox/steel-fingerprint.profile-handoff.behavior.ts
 status: fixed
 ---
@@ -144,6 +146,27 @@ reproduced or encoded in permanent controls and repaired; final read-only review
 reported no remaining blocking finding. This case records a locally proven fix;
 merge, complete deployment gates, and production rollout remain owned by the
 parent deployment workflow.
+
+### Independent discovery during the WhatsApp deploy
+
+The same cause failed the October 14 WhatsApp deployment on its pre-merge
+revision: profile `71d0a72c-4faa-4098-8833-939d37a5777b` was still uploading
+while source `c4c99d59-c5db-47c1-bc83-e551faaad2bf` remained active. Its
+supplemental causal/facade test failed with the same five 409 attempts before
+the narrow reorder and passed afterward; a live browser-provider run and a
+196-domain full coverage run then passed on that intermediate implementation.
+Those results prove the old failure and reorder but do not qualify the later
+merged lease implementation.
+
+The WhatsApp deployment then merged main `cdbe16c54` / PR #1515 and retained
+this stronger production implementation unchanged. Its supplemental facade and
+429/release404-recovery tests now assert PAUSED recovery custody, exact profile,
+acknowledged release, lease retirement and absence of duplicate facade cleanup.
+Both pass locally. Full repeat qualification on that merged revision remains
+with the parent deployment. The earlier duplicate archive entry,
+`2026-10-14-steel-persisted-profile-attached-before-source-release`, is retained
+as superseded; this was independent discovery on the old revision, not a
+recurrence after this repair shipped.
 
 ## Human feedback
 

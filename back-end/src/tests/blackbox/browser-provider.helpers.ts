@@ -264,7 +264,7 @@ export function withProvider(value: string | undefined, test: () => void): void 
 }
 
 /** Exercise actual Steel replacement/facade with offline native and DB boundaries. */
-export async function assertSteelSameProfileReplacement(retryFailedReplacement: boolean): Promise<void> {
+export async function assertSteelSameProfileReplacement(retryReleased: boolean): Promise<void> {
   const find = prisma.browserSession.findUnique;
   const fingerprint = prisma.integration.findUnique;
   const update = prisma.browserSession.updateMany;
@@ -273,6 +273,8 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
   const create = steel.sessions.create;
   const release = steel.sessions.release;
   const connect = chromium.connectOverCDP;
+  const transaction = prisma.$transaction;
+  const leaseUpdate = prisma.toolSideEffect.updateMany;
   const row = {
     id: 'offline-task',
     sessionId: 'offline-source',
@@ -286,12 +288,47 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
     startUrl: null,
     proxyRotationCount: 4,
     status: 'ACTIVE',
-    closedAt: null as Date | null,
+    closedAt: null,
     context: { userId: 'offline-user' },
   };
   let ready = false;
   let releases = 0;
-  let failCreate = retryFailedReplacement;
+  let failCreate = retryReleased;
+  let leaseRow: {
+    operationKey: string;
+    operationType: string;
+    status: string;
+    externalId: string;
+    updatedAt: Date;
+  } | null = null;
+  let leaseReleases = 0;
+  prisma.$transaction = (async (callback: (tx: unknown) => Promise<unknown>) =>
+    callback({
+      $executeRaw: async () => 0,
+      toolSideEffect: {
+        findUnique: async () => leaseRow,
+        upsert: async (args: { create: NonNullable<typeof leaseRow> }) => {
+          leaseRow = { ...args.create, updatedAt: new Date() };
+          return leaseRow;
+        },
+      },
+    })) as typeof transaction;
+  prisma.toolSideEffect.updateMany = (async (args: {
+    where: Record<string, unknown>;
+    data: { status?: string };
+  }) => {
+    if (
+      leaseRow === null ||
+      Object.entries(args.where).some(
+        ([key, value]) => leaseRow?.[key as keyof typeof leaseRow] !== value
+      )
+    ) {
+      return { count: 0 };
+    }
+    if (args.data.status === 'RELEASED') leaseReleases++;
+    Object.assign(leaseRow, args.data);
+    return { count: 1 };
+  }) as typeof leaseUpdate;
   prisma.browserSession.findUnique = (async (args: unknown) => {
     if ('agentId' in ((args as { select?: object }).select ?? {})) return null;
     return { ...row };
@@ -299,7 +336,9 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
   prisma.integration.findUnique = (async () => null) as typeof fingerprint;
   prisma.browserSession.updateMany = (async (args: unknown) => {
     const { where, data } = args as { where: { sessionId: string }; data: Partial<typeof row> };
-    if (!Object.entries(where).every(([key, value]) => (row as Record<string, unknown>)[key] === value)) return { count: 0 };
+    if (Object.entries(where).some(([key, value]) => row[key as keyof typeof row] !== value)) {
+      return { count: 0 };
+    }
     Object.assign(row, data);
     return { count: 1 };
   }) as typeof update;
@@ -307,14 +346,23 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
   prisma.browserContext.update = (async () => ({})) as typeof contextUpdate;
   steel.sessions.release = (async (id: string) => {
     nodeAssert.strictEqual(id, 'offline-source');
+    nodeAssert.strictEqual(row.status, 'PAUSED', 'source release must retain recovery custody');
     releases++;
     if (ready) throw Object.assign(new Error('already released'), { status: 404 });
     ready = true;
     return {};
   }) as typeof release;
   steel.sessions.create = (async (input: { profileId?: string }) => {
-    nodeAssert.strictEqual(ready, true);
+    if (!ready) {
+      throw Object.assign(
+        new Error(
+          "409 Profile 'offline-profile' is still uploading and cannot be attached to a session yet. Wait for its status to become 'ready', then retry."
+        ),
+        { status: 409 }
+      );
+    }
     nodeAssert.strictEqual(row.status, 'PAUSED');
+    nodeAssert.strictEqual(row.closedAt, null);
     nodeAssert.strictEqual(input.profileId, 'offline-profile');
     if (failCreate) throw Object.assign(new Error('offline create failed'), { status: 429 });
     return {
@@ -329,12 +377,13 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
       close: async () => {},
     }) as unknown as Browser) as typeof connect;
   try {
-    if (retryFailedReplacement) {
+    if (retryReleased) {
       await nodeAssert.rejects(
         () => recreateSession('offline-task', { forceManagedRotation: true }),
         /offline create failed/
       );
       nodeAssert.strictEqual(row.status, 'PAUSED');
+      nodeAssert.strictEqual(row.closedAt, null);
       nodeAssert.strictEqual(row.sessionId, 'offline-source');
       failCreate = false;
       const recovered = await recreateSession('offline-task', { forceManagedRotation: true });
@@ -355,6 +404,7 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
     }
     nodeAssert.strictEqual(row.status, 'ACTIVE');
     nodeAssert.strictEqual(row.sessionId, 'offline-replacement');
+    nodeAssert.strictEqual(leaseReleases, retryReleased ? 2 : 1);
   } finally {
     prisma.browserSession.findUnique = find;
     prisma.integration.findUnique = fingerprint;
@@ -364,5 +414,7 @@ export async function assertSteelSameProfileReplacement(retryFailedReplacement: 
     steel.sessions.create = create;
     steel.sessions.release = release;
     chromium.connectOverCDP = connect;
+    prisma.$transaction = transaction;
+    prisma.toolSideEffect.updateMany = leaseUpdate;
   }
 }
