@@ -185,3 +185,22 @@ EOF/status checks, freshness, and timeout. Do not export it for task processes o
 interpret failed-command JSON as a successful inventory. Unavailable/invalid
 clone-source observations must refuse distinctly from a positive unsafe-startup
 classification; neither diagnostic authorizes allocation or a freshness waiver.
+
+### Explicit fresh-workspace placement after a regional refusal
+
+The e0f8 N2 preflight exhausted its existing clone attempts; both final provider
+responses rejected volume creation with "no capacity available in ord" before
+any task Machine launched. Feed recovery and successful Hub publication are
+separate evidence. A timestamp-only N2 PASS from another region is not placement
+proof: use an explicit source-and-region-owned stamp path and let the normal
+preflight write it. N2 is a cheap negative/readiness screen, not a reservation or
+proof of 600-task regional capacity.
+
+`CLOUDBENCH_FRESH_TARGET_REGION` is an explicit fresh-only placement option.
+Unset preserves donor-region placement. An opted-in fleet must use boot launch,
+only real fresh-volume tasks, and no pool/private/snapshot/simulation source.
+The verified donor region, mount, image, dependency fingerprints and snapshot
+proof stay intact; destination clone and worker placement, child runtime state,
+and provenance use the explicit target. There is no automatic region probing,
+retry or timeout extension. Exact recovery ignores this placement-only option
+and retains its existing recorded resource identities.

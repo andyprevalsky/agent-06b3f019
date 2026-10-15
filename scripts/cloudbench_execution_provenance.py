@@ -48,6 +48,7 @@ _SENSITIVE_CONFIG_SEGMENTS = {
 _CONFIG_SCALAR_KEYS = {
     "app",
     "region",
+    "donor_region",
     "run_timeout_seconds",
     "child_run_timeout_seconds",
     "benchmark_wall_clock_backstop_seconds",

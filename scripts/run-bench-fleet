@@ -1648,6 +1648,48 @@ primary_clone_storage_mode() {
 # Print EXACTLY what code the run will execute on the box: the ref (HEAD), whether
 # it is on origin (unpushed commits never reach the box), and the uncommitted diff
 # that is shipped as a patch. Also stashed to $UNIFIED_DIR for the dashboard header.
+
+# Keep the verified donor region separate from an explicit fresh-only target.
+# Snapshot-backed, pooled, private, or simulated sources cannot cross this gate.
+fresh_target_region_admission() {
+    [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ] || return 0
+    local requested="$CLOUDBENCH_FRESH_TARGET_REGION" bench
+    case "$requested" in
+        [a-z][a-z0-9][a-z0-9]) ;;
+        *) echo "❌ invalid explicit fresh target region; refusing allocation" >&2; return 1 ;;
+    esac
+    if [ "${FRESH_VOLUMES:-0}" != 1 ] || [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != 1 ] \
+        || [ -n "${PRIVATE_SOURCE_FILE:-}" ] || [ -n "${PROVISION_POOL:-}" ] \
+        || [ -n "${SIM_ON_CSV:-}" ] || [ -s "${POOL_IDS_FILE:-}" ] \
+        || [ "${RECOVER_STALE_ONLY:-0}" != 0 ]; then
+        echo "❌ fresh target region requires an unpooled, nonprivate fresh boot-launch fleet; refusing allocation" >&2
+        return 1
+    fi
+    for bench in "${BENCHES[@]}"; do
+        [ "$(primary_clone_storage_mode "$bench")" = fresh ] || {
+            echo "❌ fresh target region cannot route snapshot or simulated tasks; refusing allocation" >&2
+            return 1
+        }
+    done
+    if [ -n "${FRESH_TARGET_REGION:-}" ]; then
+        [ "$FRESH_TARGET_REGION" = "$requested" ] || return 1
+    else
+        FRESH_TARGET_REGION="$requested"
+    fi
+}
+FRESH_TARGET_REGION=""
+if [ "${RECOVER_STALE_ONLY:-0}" != 1 ]; then
+    fresh_target_region_admission || exit 1
+fi
+
+fresh_target_region_bind_destination() {
+    [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ] || return 0
+    fresh_target_region_admission || return 1
+    # Only after the unchanged donor dependency proof may child/worker runtime
+    # metadata inherit the destination. REGION remains the verified donor.
+    export CLOUDBENCH_REGION="$FRESH_TARGET_REGION"
+}
+
 print_code_provenance() {
     local branch head_sha head_sub pushed dirtystat untracked_count
     branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -10828,6 +10870,11 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_snapshot="${5:-$SNAP_ID}"
     local storage_mode="${6:-snapshot}"
+    local clone_region
+    if [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ]; then
+        [ "$storage_mode" = fresh ] && fresh_target_region_admission || return 1
+        clone_region="$FRESH_TARGET_REGION"
+    fi
     local -a snapshot_args=()
     case "$storage_mode" in
         snapshot) snapshot_args=(--from-snapshot "$clone_snapshot") ;;
@@ -10889,7 +10936,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(fleet_clone_with_queue_admission "$clone_timeout" "$ledger" machine clone "$source_id" -a "$APP" \
-            "${snapshot_args[@]}" --region "$REGION" --name "$target_name" \
+            "${snapshot_args[@]}" --region "${clone_region:-$REGION}" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" \
             --override-cmd "sleep infinity" --detach 2>&1)"
         clone_status=$?
@@ -13295,6 +13342,7 @@ warm_deps_preflight() {
     return 1
 }
 warm_deps_preflight || exit 1
+fresh_target_region_bind_destination || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 
 # A newer snapshot is not proof that it contains the dependency state recorded
@@ -13735,7 +13783,7 @@ if ! TASK_MATRIX_SHA256="$(python3 "$EXECUTION_PROVENANCE_SCRIPT" digest-task-ma
 fi
 PROVENANCE_CONFIG_ARGS=(
     --config-value "app=$APP"
-    --config-value "region=$REGION"
+    --config-value "region=${FRESH_TARGET_REGION:-$REGION}"
     --config-value "run_timeout_seconds=$RUN_TIMEOUT"
     --config-value "child_run_timeout_seconds=$CHILD_RUN_TIMEOUT"
     --config-value "benchmark_wall_clock_backstop_seconds=${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}"
@@ -13787,6 +13835,9 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "task_count=${#BENCHES[@]}"
     --config-value "task_matrix_sha256=$TASK_MATRIX_SHA256"
 )
+if [ -n "$FRESH_TARGET_REGION" ]; then
+    PROVENANCE_CONFIG_ARGS+=(--config-value "donor_region=$REGION")
+fi
 if ! python3 "$EXECUTION_PROVENANCE_SCRIPT" create \
     --base-sha "$BENCH_REF" \
     --workspace-patch-sha256 "$workspace_patch_provenance" \
@@ -15432,7 +15483,9 @@ for bench in "${BENCHES[@]}"; do
         # matches this pool, or explicit dynamic resize will be verified before
         # start. A 4GB pool must never silently host an 8GB payment/browser
         # guest. Both cases reuse the existing 20GB volume.
-        if bench_uses_default_pool_shape "$bench"; then
+        if [ -n "$FRESH_TARGET_REGION" ]; then
+            fresh_target_region_admission || exit 1
+        elif bench_uses_default_pool_shape "$bench"; then
             pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"
         else
             echo "  ↪️  [$bench] using distinct primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
