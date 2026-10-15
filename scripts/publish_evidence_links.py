@@ -450,6 +450,90 @@ def verified_preparation_cancelled_tasks(bundle: dict, agent_id: str) -> set[str
     return set(expected)
 
 
+def _recording_episode_identity(meta: dict) -> tuple | None:
+    """Bind media to a task generation and an immutable provider session handle."""
+    task, generation = meta.get("task_id"), meta.get("workflowGeneration")
+    native = meta.get("browser_session_metadata")
+    native = native if isinstance(native, dict) else {}
+    provider = native.get("provider") or meta.get("provider")
+    if not all(isinstance(value, str) and value for value in (task, generation, provider)):
+        return None
+    session = next((native.get(key) or meta.get(key) for key in
+                    ("session_id", "browser_session_id", "kernel_session_id")
+                    if native.get(key) or meta.get(key)), None)
+    if isinstance(session, str) and session:
+        return task, generation, provider, "session", session
+    # Kernel's native live URL identifies the browser; a visited page or profile
+    # does not. Other providers need an explicit session ID before deduplication.
+    url = meta.get("browser_url")
+    if provider != "kernel" or not isinstance(url, str):
+        return None
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or not (parsed.hostname or "").endswith(".kernel.sh")
+            or not re.fullmatch(r"/browser/live/[A-Za-z0-9_-]+", parsed.path)):
+        return None
+    return task, generation, provider, "kernel-live", parsed.hostname, parsed.path
+
+
+def _terminal_matches_recording_episode(meta: dict, identity: tuple) -> bool:
+    """A task-only completion may close its current episode, never a foreign handle."""
+    native = meta.get("browser_session_metadata")
+    native = native if isinstance(native, dict) else {}
+    provider = native.get("provider") or meta.get("provider")
+    if provider and provider != identity[2]:
+        return False
+    handles = ("session_id", "browser_session_id", "kernel_session_id")
+    if meta.get("browser_url") or any(native.get(key) or meta.get(key) for key in handles):
+        return _recording_episode_identity({**meta, "provider": provider or identity[2]}) == identity
+    return True
+
+
+def _recorded_episode_diagnostics(messages: list) -> tuple[set[int], set[str]]:
+    """Exclude only finalizer diagnostics for independently saved recording episodes.
+
+    A deployment seal copies an IN_PROGRESS recording tool call. Its FINISHED
+    error row is not a new saved part when the exact start already has media.
+    Preserve every row and fail closed for an unrecorded or unknown episode.
+    """
+    rows = [(index, _message_metadata(row)) for index, row in enumerate(messages)
+            if isinstance(row, dict)]
+    starts = [(index, meta, _recording_episode_identity(meta)) for index, meta in rows
+              if meta.get("action_type") == "recording" and meta.get("toolStatus") == "IN_PROGRESS"]
+    covered, missing = set(), set()
+    known_tasks = {identity[0] for _, _, identity in starts if identity is not None}
+    for index, start, identity in starts:
+        if identity is None:
+            if start.get("task_id") in known_tasks:
+                missing.add(start["task_id"])
+            continue
+        boundary = next((i for i, _, key in starts if i > index and key == identity), len(messages))
+        saved = [(i, meta) for i, meta in rows if index < i < boundary
+                 and meta.get("action_type") == "recording"
+                 and meta.get("toolStatus") == "FINISHED" and not meta.get("error")
+                 and _recording_episode_identity(meta) == identity and _recording_sources(meta)]
+        terminal = any(i > index and meta.get("action_type") == "task_complete"
+                       and meta.get("task_id") == identity[0]
+                       and meta.get("workflowGeneration") == identity[1]
+                       and meta.get("toolStatus") in {"FINISHED", "ERROR"}
+                       and _terminal_matches_recording_episode(meta, identity)
+                       for i, meta in rows)
+        if not saved or not terminal:
+            missing.add(identity[0])
+            continue
+        for i, meta in rows:
+            if (i > saved[-1][0] and meta.get("action_type") == "recording"
+                    and meta.get("toolStatus") == "FINISHED" and meta.get("error") is True
+                    and meta.get("deploymentFenced") is True and meta.get("errorCode") == "DEPLOY_INTERRUPTED"
+                    and _recording_episode_identity(meta) == identity
+                    and isinstance(start.get("toolCallId"), str) and start["toolCallId"]
+                    and meta.get("toolCallId") == start["toolCallId"]
+                    and isinstance(start.get("recording_path"), str) and start["recording_path"]
+                    and meta.get("recording_path") == start["recording_path"]
+                    and not _recording_sources(meta)):
+                covered.add(i)
+    return covered, missing
+
+
 def validate_browser_agents_terminated_with_recording(
     agent_id: str, messages: list, *, zero_session_task_ids: set[str] | None = None,
     preparation_cancelled_task_ids: set[str] | None = None,
@@ -481,7 +565,8 @@ def validate_browser_agents_terminated_with_recording(
     )
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
-    for message in messages:
+    covered_diagnostics, unrecorded_tasks = _recorded_episode_diagnostics(messages)
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
         meta = _message_metadata(message)
@@ -525,7 +610,8 @@ def validate_browser_agents_terminated_with_recording(
         if action == "task_complete":
             state["complete"] = True
             state["seen"] = True
-        if action == "recording" and str(meta.get("toolStatus") or "") == "FINISHED":
+        if (action == "recording" and str(meta.get("toolStatus") or "") == "FINISHED"
+                and index not in covered_diagnostics):
             recording_candidates.setdefault(task_id, []).append(meta)
 
     failures: list[str] = []
@@ -541,7 +627,7 @@ def validate_browser_agents_terminated_with_recording(
         # A saved part without a source (its upload failed) is a missing part.
         parts = [_recording_sources(meta) for meta in recording_candidates.get(task_id, [])]
         sources = [source for part in parts for source in part]
-        recording_ok = bool(parts) and all(parts) and all(
+        recording_ok = task_id not in unrecorded_tasks and bool(parts) and all(parts) and all(
             _probe_recording_view_url(value)
             if kind == "view"
             else _probe_recording_file_pointer(agent_id, value)

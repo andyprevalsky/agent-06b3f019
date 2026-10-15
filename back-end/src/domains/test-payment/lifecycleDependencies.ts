@@ -15,9 +15,15 @@ export type StripeHold = {
   amount: number;
   amount_capturable: number;
   amount_received: number;
+  livemode: boolean;
 };
 export type StripeRefundList = {
-  data: Array<{ id: string; status: string | null; amount: number }>;
+  data: Array<{
+    id: string;
+    status: string | null;
+    amount: number;
+    payment_intent: string | { id: string } | null;
+  }>;
 };
 export type StripeHoldSearch = {
   data: Array<{ id: string }>;

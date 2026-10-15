@@ -82,3 +82,44 @@ export async function testPersistOutput_coolsExhaustedOAuthCredential() {
     });
   }
 }
+
+export async function testPersistOutput_coolsFundedKeyForObservedBalanceError() {
+  const { persistOutput } = await import('../../domains/codex-code/service');
+  const { codexSmokeCreditSkipReason } = await import('./codex-credit-skip');
+  const taskId = crypto.randomUUID();
+  const output =
+    '[Codex] Error: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.';
+  await prisma.integration.deleteMany({ where: { userId: COOLDOWN_USER_ID, name: COOLDOWN_NAME } });
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId: crypto.randomUUID(),
+      sandboxId: `codex-balance-${taskId}`,
+      goal: 'captured funded API balance failure',
+      status: 'ACTIVE',
+    },
+  });
+  try {
+    await persistOutput(taskId, output);
+    const cooldown = await prisma.integration.findFirst({
+      where: { userId: COOLDOWN_USER_ID, name: COOLDOWN_NAME },
+    });
+    assert(
+      cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil.getTime() > Date.now(),
+      'observed no-credits API response must cool the funded key'
+    );
+    assert(
+      codexSmokeCreditSkipReason(output, []) !== null,
+      'funded-only exhaustion qualifies for skip'
+    );
+    assert(
+      codexSmokeCreditSkipReason('auth error code: token_revoked\n' + output, []) === null,
+      'captured OAuth revocation plus API exhaustion must remain a hard failure'
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+    await prisma.integration.deleteMany({
+      where: { userId: COOLDOWN_USER_ID, name: COOLDOWN_NAME },
+    });
+  }
+}

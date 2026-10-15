@@ -1147,7 +1147,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The only deploy-approved smoke skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. This provider-auth/funding state is skippable by future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Other timeouts, stalls, wrong tool usage, backend crashes, or failures must be diagnosed and fixed.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -1228,7 +1228,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
+- Skipping or disabling tests, except the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
 **Escalation is ONLY for:**
 
@@ -1316,21 +1316,29 @@ canaries from the smoke floor of every later deploy until three fresh passes.
 
 The bootstrap must report an AgentCard sandbox pool of at least $500. This is
 test-only float provisioned through the authenticated admin session; it does not
-bypass Organization MCP in the purchase path. All four tasks must pass with
+bypass Organization MCP in the purchase path. All non-skipped tasks must pass with
 their full purchase, Stripe, AgentCard card, organization transfer, attention,
-and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed
-abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the
+and cleanup assertions. A missing lifecycle snapshot, unapproved skip, unreclaimed
+abandonment transfer, or unrefunded Stripe capture blocks deploy except for the
+standing release-stall exception below. Record the
 four task results and total cost in `TEST_REPORT`.
 
-One exception is approved for every deploy: `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`
-turns the open sandbox stall in
+One exception is approved permanently for every future deploy and benchmark run:
+the open AgentCard release stall in
 `docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md`
-into a loud `⚠️⚠️ SKIPPED` instead of a failure. It applies only when Rose closed
-the card and is reclaiming while AgentCard still reports that card's test-mode
-transfer `consumed` with `releasedCents=0`; any other lifecycle, cleanup or live
-(`livemode=true`) failure still fails. Report the skip as `3/4 pass, 1 ⚠️ skipped
-(AgentCard sandbox release stall)` in `TEST_REPORT` and the scorecard. Step 13c's
-production abandonment stays strict.
+is automatically a loud `⚠️⚠️ SKIPPED`, never PASS. No environment opt-in or renewed
+human approval is required. This standing user instruction covers BOTH sandbox
+and production (Step 13c), regardless of the Stripe payment's mode. It applies
+when Rose closed the card with zero balance and is reclaiming while AgentCard
+still reports that exact card's transfer `consumed` with `releasedCents=0`, in
+the task's expected AgentCard mode. Other lifecycle, read, cancellation and
+cleanup failures still fail. Report the skipped count and unreleased amount in
+`TEST_REPORT` and the scorecard. The existing reconciliation deadline stays
+unchanged; do not keep retrying the same confirmed stall every ten minutes,
+mint another card to get a passing result, or ask the user to approve this
+exception again. `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0` explicitly restores
+strict behavior for release diagnostics. A skip does not release funds, refund
+Stripe, or prove native cleanup; retain that liability and its evidence.
 
 ## Step 6b: Semantic tests + fix
 
@@ -1506,7 +1514,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ is required) ║
 
-# ║ 6a. AgentCard sandbox lifecycle: 4/4 pass whenever the payment ║
+# ║ 6a. AgentCard lifecycle: all pass or approved warning skips ║
 
 # ║ lifecycle surface changed ║
 
@@ -2519,7 +2527,9 @@ SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-life
 
 ## Step 13c: AgentCard production lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty. The standing release-stall
+exception in Step 6a also applies to this production gate automatically and
+without further approval. Run after both the backend
 and frontend merged commits are live. Launch it concurrently with the semantic
 gate because the two checks are isolated:
 
@@ -2550,10 +2560,21 @@ permanently once done.
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 
-The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
+The runner performs the abandon/reclaim/refund action idempotently on success,
+failure, cancellation, and verifier errors before deleting the benchmark agent.
+A fully observed closed-card / consumed-transfer / zero-release stall is
+`⚠️⚠️ SKIPPED` under the permanent user-approved exception, and does not block
+deploy completion. Record its still-unreleased allocation and pending refund;
+never claim cleanup passed. A missing snapshot or any other failure still blocks.
+Existing failed attempts remain unchanged: record their deploy gate as explicitly
+waived when their saved native evidence proves this same stall. Do not allocate
+another live card or require a human-saved live Stripe card merely to replace
+that waived result. If the process was forcibly killed, recover the printed
+agent's execution/browser resources before assessing the financial exception.
 
 After every applicable production deployment, health, semantic, release, and
-AgentCard gate is green, close the production-verification lifecycle:
+AgentCard gate has passed or has this explicitly permitted warning skip, close
+the production-verification lifecycle:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish production-verify
