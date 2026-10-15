@@ -564,3 +564,36 @@ Review also proved the existing verifier serializer ignored excludeFromModel des
 Searches `verifier IN_PROGRESS prerequisite schema` and `verification error model context tool row` found the existing requirement-version case, September 2 UI-only teardown contract, and August 19 same-call error ownership case. This is a related review follow-up, not proof of recurrence of the exact Calendar outcome. The reference tool executor in claude-code-src/src/services/tools/StreamingToolExecutor.ts:88 closes an unavailable-tool result under the actual tool_use_id; that is an identity/closure analog only, not a verifier/UI exclusion policy. Rose's existing native verifier counter and excludeFromModel contract own this repair.
 
 No new deployment or provider/shared resource action was performed on the handoff box. PR1511 owner must record combined acceptance, review and rollout separately.
+
+
+### October 15 final native-retry qualification
+
+The integrated runtime/test source at 890cc278b9572ce0c2f2e89a48b9a16310a438a1
+passes the full fresh agents gate: 110 blackbox domains, 184 fast-cache tests,
+134 unit tests and 82% aggregate coverage. All 46 command-structural suites,
+backend types/affected lint/structural checks, five fidelity-verified cold
+seeds (160 MB maximum against the unchanged 228 MB budget), and credential,
+Amplitude and actual chat-router failover probes pass. Backend/frontend,
+shared scripts and Mac source remain byte-identical to their previously
+qualified composed component trees; their existing full coverage is retained
+with an explicit component diff proof.
+
+The final local Group 4 passes all nine smoke tasks: eight ordinary real-mode
+tasks plus the canonical cached 51-agent mass scenario. All four AgentCard
+sandbox lifecycle tasks, including abandonment/reclaim, pass without using
+the standing release-stall exception. Eight UI specs and the real E2B
+claude-code domain pass (37.8 seconds and 19.116 seconds respectively).
+The latency gate passes all five tests with 20 measured samples in 9.9 minutes.
+Full-lifecycle p50/max milliseconds are direct answer 1560/2002, web search
+2480/3019, planning 647/1273 and execution 797/906. Every measured path remains
+below its unchanged six-second reporting target; minimum smoothness is .971.
+These results validate this source, not successful completion of the deleted
+original Calendar task.
+
+Every final native smoke duration/attempt/span row is retained append-only in
+the stabilization batch before its bounded review. The three isolated test
+stacks were natively cleaned and verified stopped with no remaining listeners;
+the primary semantic stack is also torn down before publication. PostgreSQL
+and all protected unrelated resources are preserved. The user-directed repair
+uses existing retry owners and actual input; the rejected new FAILED policy
+is not shipped, and no new approval is inferred for it.
