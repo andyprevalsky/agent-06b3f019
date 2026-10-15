@@ -593,3 +593,160 @@ unchanged.
 Commit every write queued behind a serialized whole-catalog writer in one shared
 read-modify-write cycle; per-write cycles cap throughput, and priority only
 reorders a queue that a burst of equally important writes still outgrows.
+
+### 2026-10-15 V41 related progress-upload timeouts: cause remains open
+
+The retained original V41 `r001-j0077` log (SHA256
+`f3beb20dcf8230639638cbd31f580afda10ed0d357d864f4628ce58fdee2679b`)
+contains sixteen nonfatal `The read operation timed out` upload warnings.
+These are separate from its first authentic serialized-inventory-refresh error
+and the later organization Machine-limit refusal. The strict campaign's original
+1/1 infrastructure stop remains disqualified; its final cancellation denominator
+does not requalify it.
+
+The read-only discriminator used guest uploader source `82b849ee` and the exact
+source of the already owned private Hub service, `78491fd2`; these are different
+source identities. The five reviewed server/store/router/tracing/ancestor files
+and the database instrumentation match their live-service Git blobs. No HTTP,
+provider or guest request, load replay, service mutation or runtime fix was run.
+
+The existing server log records 35 stores of the exact run
+`20261015-200010-17187`, including a final store at
+`2026-10-15T20:29:33.121Z`. In the V41 time window, 5,061 completed POST response
+logs have HTTP 201; 113 exceed the client's **base** 30-second window. Their
+median is 14.439 seconds, p95 29.063 seconds and maximum 61.821 seconds. These
+are shared Hub traffic and completed-response observations, not a census of
+failed/aborted requests or matches to the sixteen warning lines. The effective
+client window also includes its payload-derived allowance; the exact failed
+request bodies and their effective windows were not retained here.
+
+The frozen uploader serializes JSON and gzip before opening the request. The
+non-required live-progress path uses one attempt and returns false with a
+nonfatal warning; verified progress updates its coalescing state only after a
+matching response. Required uploads retain their exact-read reconciliation.
+The exception can arise while opening/reading headers or while verifying the
+response body; its string alone does not distinguish these stages. Initial
+serialization is outside the socket read, although this does not exclude
+indirect resource contention.
+
+The live service groups up to 64 uploads per catalog transaction with eight
+write lanes, admits catalog cycles through the existing serial writer, and
+returns HTTP 201 after `putRun` completes. The legacy HTTP duration runs from
+its middleware entry through `res.finish`. Five response rows over 60 seconds
+pair with their immediately preceding HTTP trace-end rows. Two have successful
+same-request `$executeRaw` durations of only 1 and 3 ms. That bounds those raw
+query spans, not transaction checkout, admission wait or R2 work; grouped work
+can also execute under a different cohort creator's request context. There are
+no retained request-specific admission/R2/catalog phase intervals.
+
+Archive searches were `The read operation timed out hub upload` and
+`Hub final publication serial writer timeout`. This incident is a **relative**
+of this case and the September 10 ambiguous-commit case, not an established
+recurrence of their particular first-bad boundaries. The current server already
+has group commit; the observed delay must not be assigned to the old one-upload
+writer or a generic scheduler/network explanation without an owning RED.
+
+The finite read-only result is a positive server-latency discriminator plus an
+open phase/correlation gap. Missing originals are the exact failed client's
+transport timing/response stage (the existing publisher emits a source-owned
+`hub-live-publication.events.jsonl`) and a request-to-run/admission/storage phase
+binding. No new guest read was authorized for this lane. No owning local RED or
+unchanged benchmark outcome proof exists, so no runtime repair or longer timeout
+is proposed. Private bounded original tails, source hashes and safe projections
+are retained in `.context/stress600-root/i41-hub-upload/`.
+
+
+#### V41 client timing operand recovered without a second query
+
+The operator's existing coalesced original-attempt reader subsequently captured
+the exact source-owned `hub-live-publication.events.jsonl`: 3,781 complete raw
+bytes, SHA256 `619efa217e4b41fe5fd5ee20f710af2c0c115ec128225911d89c876ce01cb178`.
+Its ACK-validated outer receipt binds host `2862e42f0973e8`, boot `71360121`,
+source `82b849ee` and the unchanged original epoch; API calls and native mutations
+were zero. The safe event projection matches that outer receipt exactly and
+contains no malformed or partial rows.
+
+There are 36 progress-upload events: 20 verified successes lasting
+7.938–28.030 seconds and 16 unverified results lasting 32.077–34.262 seconds,
+matching the original sixteen nonfatal warnings. All report one queued task.
+The guest event window is `20:07:30.441–20:27:33.550 UTC`. This closes the missing
+client wall-clock/whole-upload-duration operand from the preceding note. Its
+monotonic elapsed timer includes JSON/gzip preparation, HTTP and response-body
+verification, so it is not a pure HTTP measurement.
+
+The existing schema contains no payload byte count, effective timeout, request
+ID, HTTP status or headers-versus-body failure stage. Exact warning-to-server
+request correlation therefore remains unknown. Same-run store records that
+fall inside a client interval are only temporal candidates: coalescing and late
+commits prevent one-to-one counting, and no guest/backend clock-offset estimate
+was retained. Nothing here labels the old mutation uncommitted or changes the
+original attempt classification. The RCA remains open without an owning local
+RED; no timing extension or runtime patch is justified by this recovered operand.
+The private hash-bound fold is `i41-hub-upload/client-server-interval-fold.safe.json`.
+
+#### V41 bounded request-join design (2026-10-15; unapplied)
+
+The live `78491fd2` tracing middleware already honors and echoes a caller's
+12-hex `X-Request-Id` and carries it in HTTP request start/end traces. Original
+`82b849ee` uploader requests send no ID; its successful-response verification
+also ignores that echoed field, and its four-field client event cannot join a
+request after a timeout. Three native-free controls executed the exact original
+Python function bodies with tiny preparation/socket fixtures: success, timeout
+in opener, and timeout reading response. All lack a client/server join; the
+two timeout stages have the same recorded shape. Three controls executed the
+full unchanged server tracing module, transpiled using the existing toolchain,
+with fake request/response objects: absent-header generation and two distinct
+caller IDs retain consistent echo/start/end IDs. No HTTP/server/provider/load
+was run. These prove an observability gap, not the historical timeout cause.
+
+A design-only candidate reuses that existing header with a fresh safe ID per
+POST attempt and records bounded source-bound attempt timing in the existing
+client event path. It does not change verification, retries or timeouts. The
+existing same-run in-flight coalescer can return one promise to multiple request
+contexts; cohort work also inherits its initiating context. Consequently storage
+or queue timing cannot be attributed to all requests from the leader's trace:
+an explicit follower/leader/cohort join is required for any later deeper stage
+capture. Logical `putObject` duration is not pure R2 request duration. No candidate
+was applied, and no latency RED/GREEN or unchanged benchmark outcome is claimed.
+
+Local design and six discriminator controls are retained under
+`.context/stress600-root/i41-hub-upload/request-join-design/`; `review.safe.json`
+SHA256 is `8f2c91d3fe0dfe48b2c42e705da80a6f727b82e3dc73b02f9be6e7407031444d`.
+The original Hub timeout cause remains **OPEN** and this unrelated logging work
+does not gate the next unchanged qualification experiment.
+
+#### V41 client join candidate — causal evidence for missing metadata only
+
+The first-join design was accepted for a client-only implementation. In the
+existing author checkout at `1be6abe603720faddeaf3ebb101ebb5e535d48f3`, the owning
+registered `agents/benchmarks/hub_upload_test.py` controls failed before editing
+the uploader: five cases had no actual outbound request ID (success, open/read
+timeout, wrong bundle ACK, malformed echo) and the retry case lacked its optional
+collector. The identical six cases pass on the candidate in 0.04s. Twelve
+mocked-transport controls pass in 0.13s, including four-attempt reconciliation,
+exhaustion, unchanged compressed payload across retry, original programming-error
+semantics, private diagnostic-write refusal, unchanged timeout derivation and
+auth-absent behavior. No HTTP, server, provider or load test ran.
+
+The candidate sends a fresh random 12-hex ID per POST using the existing header
+and appends only typed bounded attempt metadata to the existing private live
+publication event. Existing event fields and upload boolean/bundle ACK semantics
+remain intact, including when an echoed ID is malformed. Required retries and
+terminal reconciliation code are unchanged. There is no backend edit or restart,
+no deadline increase, and no storage-timing claim. The two source paths remain
+uncommitted and frozen for the parent's review. Packet
+`.context/stress600-root/i41-hub-upload/client-join-component/component-review.safe.json`
+SHA256: `a59d6c6a9bd3a516ddf4312f684cbd1fd6555d63e41750f16e1e637fed8f4240`.
+This repairs a reproduced missing-observation boundary if accepted; it does not
+establish or cure the original upload timeout cause, which remains **OPEN**.
+
+The scoped observation repair was accepted after the parent's independent six
+controls also passed (0.04s), then committed normally as
+`a828d9d6eb42341959603677fc6978854ed16031`, changing only the uploader and its
+registered test family. Actual native-recipe production on that committed ref
+returned fingerprint `ac0900ebfd53787c910f42db3665f866ea946ebc4874f6db91594e57154d2dad`
+unchanged; the uploader SHA256
+`90a19012a3e47b2810711b520e6c741a264c108d9186ca18d19e4bc9d7e577fc`
+requires an explicit extra source binding outside those25 files. This source
+checkpoint is not a live rollout or outcome proof. Historical latency cause
+remains OPEN, and no server change, HTTP request or paid trial was made here.
