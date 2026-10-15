@@ -53,6 +53,11 @@ import {
   runGroupSchedule,
 } from './benchmarkHubRunProjection';
 import {
+  assertHubStorageOwnership,
+  HUB_SQL_TIMEOUT_MS,
+  withHubStorageOwnership,
+} from './benchmarkHubStorageOwnership';
+import {
   getObject,
   getObjectStrict,
   putObject,
@@ -257,7 +262,10 @@ let indexAdmissionHeld = false;
  * uses subsequent bounded cycles, sharing the catalog round trip per batch.
  * The shared SQL lock orders other processes' admitted writes.
  */
-async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
+async function withIndexLock<T>(operation: () => Promise<T>, putCohort?: QueuedPut[]): Promise<T> {
+  // A generic mutation is a FIFO barrier: later uploads belong to a new
+  // cohort and must register admission after this operation.
+  if (putCohort === undefined) openPutCohort = null;
   // Wait before borrowing a connection. Otherwise concurrent uploads occupy
   // the SQL pool while waiting for the same cross-process advisory lock.
   if (indexAdmissionHeld) {
@@ -265,14 +273,18 @@ async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
   }
   indexAdmissionHeld = true;
   try {
-    return await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
-        return operation();
-      },
-      // Locked work is bounded to the catalog, the compact index and one
-      // bounded cycle of run bundles; index repair never scans the archive.
-      { maxWait: 30_000, timeout: 5 * 60_000 }
+    return await withHubStorageOwnership(() =>
+      prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
+          const result = await operation();
+          assertHubStorageOwnership();
+          return result;
+        },
+        // Locked work is bounded to the catalog, the compact index and one
+        // bounded cycle of run bundles; index repair never scans the archive.
+        { maxWait: 30_000, timeout: HUB_SQL_TIMEOUT_MS }
+      )
     );
   } finally {
     // A rejected mutation remains rejected for its caller and hands admission
@@ -317,7 +329,7 @@ async function storeRun(
     tasks.length > 0 && tasks.every((task) => task.status === 'starting') && agentIds.length === 0;
 
   const stored = await new Promise<StoredPut>((resolve, reject) => {
-    queuedPuts.push({
+    const put: QueuedPut = {
       bundle,
       runId,
       tasks,
@@ -326,10 +338,14 @@ async function storeRun(
       startingRegistration,
       resolve,
       reject,
-    });
-    if (!putCycleQueued) {
-      putCycleQueued = true;
-      void commitQueuedPuts();
+    };
+    if (openPutCohort === null) {
+      const cohort = [put];
+      openPutCohort = cohort;
+      void commitQueuedPuts(cohort);
+    } else {
+      openPutCohort.push(put);
+      if (openPutCohort.length === PUT_CYCLE_LIMIT) openPutCohort = null;
     }
   });
   log.info('Stored benchmark run bundle', {
@@ -354,8 +370,7 @@ type QueuedPut = {
 };
 type PutCycle = { index: HubRunSummary[]; agentIndex: HubAgentRunIndexSnapshot | null };
 
-const queuedPuts: QueuedPut[] = [];
-let putCycleQueued = false;
+let openPutCohort: QueuedPut[] | null = null;
 // One cycle's locked work stays bounded; later uploads take the next cycle.
 const PUT_CYCLE_LIMIT = 64;
 const PUT_WRITE_LANES = 8;
@@ -371,27 +386,30 @@ const PUT_WRITE_LANES = 8;
  * validation error rejects only its own upload. A storage failure rejects the
  * whole cycle, whose catalog was not published.
  */
-async function commitQueuedPuts(): Promise<void> {
-  let cycle: QueuedPut[] = [];
+async function commitQueuedPuts(cycle: QueuedPut[]): Promise<void> {
   try {
-    await withIndexLock(async () => {
-      cycle = queuedPuts.splice(0, PUT_CYCLE_LIMIT);
-      putCycleQueued = queuedPuts.length > 0;
-      if (putCycleQueued) void commitQueuedPuts();
-      await commitPutCycle(cycle);
-    });
-  } catch (error: unknown) {
-    if (cycle.length === 0) {
-      // Admission failed before this cycle claimed its uploads.
-      cycle = queuedPuts.splice(0);
-      putCycleQueued = false;
+    const outcomes = await withIndexLock(async () => {
+      if (openPutCohort === cycle) openPutCohort = null;
+      return commitPutCycle(cycle);
+    }, cycle);
+    // Object writes alone do not establish a successful SQL commit. Publish
+    // cache state and caller acknowledgements only after the transaction joins.
+    for (const { put, stored } of outcomes) {
+      if (stored.revision !== null) {
+        applyHubRunToResolutionCaches(put.runId, put.agentIds, stored.revision);
+      }
+      put.resolve(stored);
     }
+  } catch (error: unknown) {
+    if (openPutCohort === cycle) openPutCohort = null;
     for (const put of cycle) put.reject(error);
   }
 }
 
-async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
-  if (queued.length === 0) return;
+async function commitPutCycle(
+  queued: QueuedPut[]
+): Promise<Array<{ put: QueuedPut; stored: StoredPut }>> {
+  if (queued.length === 0) return [];
   const committed = await listRunsStrict();
   const cycle: PutCycle = {
     index: committed,
@@ -422,7 +440,10 @@ async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
     cycle.index = [put.summary, ...cycle.index.filter((r) => r.run_id !== put.runId)];
     const fields = runGroupFields({ ...put.summary, run_id: put.runId });
     bundles.push([put.runId, { ...put.bundle, tasks: put.tasks, ...fields }]);
-    outcomes.push({ put, stored: { summary: put.summary, revision: cycle.agentIndex.revision } });
+    outcomes.push({
+      put,
+      stored: { summary: put.summary, revision: cycle.agentIndex.revision },
+    });
   }
   if (bundles.length > 0) {
     const writes = new Map<string, Array<Record<string, unknown>>>();
@@ -438,18 +459,13 @@ async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
     await writeAgentRunIndex(agentIndex);
     await inLanes([...writes.keys()], (runId) => putObject(`visibility/${runId}.json`, 'true'));
   }
-  log.info('Committed Benchmark Hub upload cycle', {
+  log.info('Staged Benchmark Hub upload cycle', {
     uploads: queued.length,
     stored: bundles.length,
     absorbed: outcomes.length - bundles.length,
     rejected: queued.length - outcomes.length,
   });
-  for (const { put, stored } of outcomes) {
-    if (stored.revision !== null) {
-      applyHubRunToResolutionCaches(put.runId, put.agentIds, stored.revision);
-    }
-    put.resolve(stored);
-  }
+  return outcomes;
 }
 
 /** Bounded concurrent writes; stops claiming items after the first failure. */
@@ -652,7 +668,10 @@ function parseRunCatalog(raw: string): HubRunSummary[] {
     const run = value as HubRunSummary;
     return {
       ...run,
-      tasks: run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) })),
+      tasks: run.tasks.map((task) => ({
+        ...task,
+        agent_id: normalizeAgentId(task.agent_id),
+      })),
     };
   });
 }

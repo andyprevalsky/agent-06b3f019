@@ -1,173 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
-import vm from 'node:vm';
-import ts from 'typescript';
-import { coalesceHubRunPuts } from '../../providers/benchmarkHubInFlight';
-
-type Operation = () => Promise<unknown>;
-type Owner = (operation: Operation) => Promise<unknown>;
-type Transaction = { $executeRaw: (sql: TemplateStringsArray, key: string) => Promise<void> };
-type Prisma = {
-  $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => Promise<unknown>;
-};
-
-/** Execute the actual storage owner's admission and transaction boundary. */
-function loadOwner(prisma: Prisma): Owner {
-  return loadDeclaration('withIndexLock', { prisma, Promise });
-}
-
-/** Include the owner's reachable declarations, replacing only external boundaries. */
-function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T {
-  const filename =
-    process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH ??
-    path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
-  const source = readFileSync(filename, 'utf8');
-  const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
-  const groupFilename = path.join(path.dirname(filename), 'benchmarkHubRunProjection.ts');
-  const grouped = tree.statements.some(
-    (node) =>
-      ts.isImportDeclaration(node) &&
-      ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text === './benchmarkHubRunProjection'
-  );
-  const statements = [
-    ...tree.statements,
-    ...(grouped
-      ? ts.createSourceFile(
-          groupFilename,
-          readFileSync(groupFilename, 'utf8'),
-          ts.ScriptTarget.Latest,
-          true
-        ).statements
-      : []),
-  ];
-  const named = new Map<string, ts.Statement>();
-  for (const node of statements) {
-    if (ts.isFunctionDeclaration(node) && node.name) named.set(node.name.text, node);
-    if (ts.isVariableStatement(node)) {
-      for (const declaration of node.declarationList.declarations) {
-        named.set(declaration.name.getText(), node);
-      }
-    }
-  }
-  const included = new Set<ts.Statement>();
-  const include = (identifier: string): void => {
-    if (Object.hasOwn(bindings, identifier)) return;
-    const node = named.get(identifier);
-    if (!node || included.has(node)) return;
-    included.add(node);
-    const visit = (child: ts.Node): void => {
-      if (ts.isIdentifier(child)) include(child.text);
-      ts.forEachChild(child, visit);
-    };
-    ts.forEachChild(node, visit);
-  };
-  include(name);
-  assert.ok(included.has(named.get(name)!));
-  const declarations = statements.filter((node) => included.has(node));
-  const compiled = ts.transpileModule(
-    declarations.map((node) => node.getText()).join('\n') + `\nglobalThis.owner = ${name};`,
-    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
-  ).outputText;
-  const context = vm.createContext({ ...bindings, exports: {} });
-  vm.runInContext(compiled, context);
-  return context.owner;
-}
-
-type Bundle = Record<string, unknown>;
-type PutRun = (bundle: Bundle, options?: { live?: boolean; source?: string }) => Promise<Bundle>;
-
-function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {}) {
-  const database = databaseBoundary(4);
-  const objects = new Map<string, string>();
-  const writes: Array<{ key: string; value: string }> = [];
-  let transactions = 0;
-  let ancestors = 0;
-  let cacheUpdates = 0;
-  let revision = 0;
-  const putRun = loadDeclaration<PutRun>('putRun', {
-    Promise,
-    coalesceHubRunPuts,
-    prisma: {
-      $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
-        transactions += 1;
-        return database.prisma.$transaction(body, options);
-      },
-    },
-    listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
-    readAgentRunIndexForMutation: async () => ({ revision }),
-    agentIdsFromHubBundle: () => ['fixture-agent'],
-    hubAgentIndexAfterPut: () => ({ revision: ++revision }),
-    putObject: async (key: string, value: string) => {
-      await beforeWrite(key);
-      writes.push({ key, value });
-      objects.set(key, value);
-    },
-    writeAgentRunIndex: async () => {},
-    slotHubAncestorSkeletonsFromBundle: async () => {
-      ancestors += 1;
-    },
-    applyHubRunToResolutionCaches: () => {
-      cacheUpdates += 1;
-    },
-    log: { info: () => {} },
-  });
-  return {
-    putRun,
-    objects,
-    runWrites: () => writes.filter(({ key }) => key.startsWith('runs/')),
-    stats: () => ({ transactions, ancestors, cacheUpdates, ...database.stats() }),
-  };
-}
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-function databaseBoundary(capacity: number) {
-  let tail: Promise<void> = Promise.resolve();
-  let open = 0;
-  let peakOpen = 0;
-  let held = 0;
-  let peakHeld = 0;
-  const prisma: Prisma = {
-    async $transaction(body, options) {
-      assert.equal(JSON.stringify(options), JSON.stringify({ maxWait: 30_000, timeout: 300_000 }));
-      if (open === capacity) throw new Error('fixture connection pool exhausted');
-      open += 1;
-      peakOpen = Math.max(peakOpen, open);
-      let release: (() => void) | undefined;
-      let acquired = false;
-      try {
-        return await body({
-          async $executeRaw(sql, key) {
-            assert.equal(sql.join('?'), 'SELECT pg_advisory_xact_lock(hashtext(?))');
-            assert.equal(key, 'benchmark-hub:index');
-            const previous = tail;
-            tail = new Promise<void>((resolve) => {
-              release = resolve;
-            });
-            await previous;
-            acquired = true;
-            held += 1;
-            peakHeld = Math.max(peakHeld, held);
-          },
-        });
-      } finally {
-        if (acquired) held -= 1;
-        release?.();
-        open -= 1;
-      }
-    },
-  };
-  return { prisma, stats: () => ({ open, peakOpen, held, peakHeld }) };
-}
+import {
+  loadOwner,
+  databaseBoundary,
+  putBoundary,
+  deferred,
+  registerCommitControls,
+} from './benchmark-hub-admission.testkit';
 
 test('50 Hub mutations wait for process admission before borrowing SQL connections', async () => {
   const database = databaseBoundary(4);
@@ -188,7 +27,12 @@ test('50 Hub mutations wait for process admission before borrowing SQL connectio
   release?.();
   const outcomes = await results;
   assert.equal(outcomes.filter((result) => result.status === 'fulfilled').length, 50);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('Hub mutations are admitted in FIFO order behind the current holder', async () => {
@@ -211,7 +55,12 @@ test('Hub mutations are admitted in FIFO order behind the current holder', async
   release?.();
   assert.deepEqual(await outcomes, ['holder', 'put-cycle', 'delete', 'index-read']);
   assert.deepEqual(admitted, ['holder', 'put-cycle', 'delete', 'index-read']);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('a failed catalog write rejects its whole cycle and an unchanged retry commits', async () => {
@@ -262,8 +111,16 @@ test('a failed Hub mutation releases admission and preserves its rejection', asy
   ]);
   assert.equal(outcomes[0].status, 'rejected');
   if (outcomes[0].status === 'rejected') assert.equal(outcomes[0].reason, marker);
-  assert.deepEqual(outcomes[1], { status: 'fulfilled', value: 'next mutation' });
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(outcomes[1], {
+    status: 'fulfilled',
+    value: 'next mutation',
+  });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('failed transaction acquisition releases admission for the next caller', async () => {
@@ -283,9 +140,17 @@ test('failed transaction acquisition releases admission for the next caller', as
   ]);
   assert.equal(outcomes[0].status, 'rejected');
   if (outcomes[0].status === 'rejected') assert.equal(outcomes[0].reason, marker);
-  assert.deepEqual(outcomes[1], { status: 'fulfilled', value: 'next mutation' });
+  assert.deepEqual(outcomes[1], {
+    status: 'fulfilled',
+    value: 'next mutation',
+  });
   assert.equal(acquisitions, 2);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('separate backend admissions still serialize through the shared PostgreSQL lock', async () => {
@@ -306,7 +171,12 @@ test('separate backend admissions still serialize through the shared PostgreSQL 
   );
   assert.equal(outcomes.length, 20);
   assert.equal(peakInside, 1);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 2, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 2,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 const packet = {
@@ -329,7 +199,10 @@ test('50 identical pending Hub packets share one publication before SQL admissio
   const requests = [
     first,
     ...Array.from({ length: 49 }, () =>
-      boundary.putRun(JSON.parse(JSON.stringify(packet)), { live: true, source: 'fixture' })
+      boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+        live: true,
+        source: 'fixture',
+      })
     ),
   ];
   gate.resolve();
@@ -403,7 +276,10 @@ test('settled packets are evicted and late live packets preserve the absorbing f
   const second = await boundary.putRun(packet, { live: true });
   assert.notEqual(first, second);
   assert.equal(boundary.runWrites().length, 2);
-  const terminalPacket = { ...packet, tasks: [{ name: 'fixture-task', passed: false }] };
+  const terminalPacket = {
+    ...packet,
+    tasks: [{ name: 'fixture-task', passed: false }],
+  };
   await boundary.putRun(terminalPacket, { live: false });
   const lateLive = await boundary.putRun(packet, { live: true });
   assert.equal(lateLive.live, false);
@@ -589,3 +465,5 @@ test('coalescing follows the same normalized run identity as actual persistence'
   assert.equal(boundary.runWrites().length, 3);
   assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
 });
+
+registerCommitControls();
