@@ -253,6 +253,11 @@ exclude only that dependency, verify its object identity separately, and still
 inspect every supplied history payload field, returned value, and error/log
 argument. The three public-dispatch regressions pass in 1.308 seconds with that
 collision present. Runtime masking is unchanged by this test correction.
+The final test file has SHA-256
+`928b285a618c15e581f315681a373eb72843eafbf01d0684aa05f853b5082c56`;
+all three unchanged public-dispatch tests still fail on pinned baseline
+`32947aee57006a63d9232f77daf7725af70f32ff` in 1.846 seconds and pass on the
+repaired source in 2.082 seconds.
 
 ## Human feedback
 
