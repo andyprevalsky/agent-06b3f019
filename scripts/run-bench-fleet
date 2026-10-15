@@ -765,6 +765,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-seed.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \

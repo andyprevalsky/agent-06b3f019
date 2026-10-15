@@ -446,6 +446,47 @@ class BootstrapRecoveryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             recovery.publish(self.out, receipt)
 
+    def test_normal_controller_snapshot_includes_exact_machines_reader(self):
+        """The real sealed entrypoint must carry the recovery consumer's reader."""
+        snapshot_temp=self.base/'native-reader-snapshot';snapshot_temp.mkdir()
+        ready,release=self.base/'reader-ready',self.base/'reader-release'
+        environment=os.environ.copy()
+        for key in tuple(environment):
+            if key.startswith('CLOUDBENCH_SCRIPT_SNAPSHOT'):
+                environment.pop(key)
+        environment.update(TMPDIR=str(snapshot_temp),PYTHONDONTWRITEBYTECODE='1',
+            CLOUDBENCH_FAKE_DIR=str(self.base/'fake-provider'),
+            CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY=str(ready),
+            CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE=str(release))
+        with tempfile.TemporaryFile() as output:
+            controller=subprocess.Popen(['bash',str(ROOT/'run-bench-fleet'),'--recover-stale-owner','invalid-token'],env=environment,stdout=output,stderr=subprocess.STDOUT)
+            try:
+                deadline=time.monotonic()+30
+                while not ready.exists() and controller.poll() is None and time.monotonic()<deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(),'real controller did not enter its sealed script snapshot')
+                snapshots=list(snapshot_temp.glob('cloudbench-scripts.*'));self.assertEqual(len(snapshots),1)
+                reader=snapshots[0]/'cloudbench-campaign-machines.py'
+                # Execute the exact failing import boundary from the real snapshot;
+                # fetch is never invoked, so this control cannot dispatch a request.
+                imported=subprocess.run([sys.executable,'-I','-B','-c',
+                    'import runpy,sys,json; from pathlib import Path; p=Path(sys.argv[1]); '
+                    'm=runpy.run_path(str(p)); assert callable(m["fetch"]); '
+                    'v=runpy.run_path(str(p.with_name("cloudbench_execution_provenance.py"))); '
+                    'v["verify_snapshot"](p.parent,json.loads(p.with_name("cloudbench-controller-snapshot-manifest.json").read_text()))',str(reader)],
+                    env=environment,capture_output=True,text=True,timeout=5)
+                self.assertEqual(imported.returncode,0,imported.stderr)
+                self.assertEqual(reader.read_bytes(),(ROOT/'cloudbench-campaign-machines.py').read_bytes())
+                self.assertFalse(reader.is_symlink())
+                manifest=json.loads((snapshots[0]/'cloudbench-controller-snapshot-manifest.json').read_text())
+                entry=next(row for row in manifest['files'] if row['path']==reader.name)
+                self.assertEqual(entry['sha256'],digest(reader.read_bytes()))
+            finally:
+                release.touch();controller.wait(timeout=30)
+            self.assertEqual(controller.returncode,2)
+            output.seek(0);self.assertIn(b'--recover-stale-owner requires exactly 32',output.read())
+        self.assertFalse(list(snapshot_temp.glob('cloudbench-scripts.*')),'exact owned snapshot must join/remove normally')
+
     def test_normal_controller_snapshot_preserves_trusted_source_policy(self):
         snapshot_temp = self.base / "native-snapshot-temp"
         snapshot_temp.mkdir()
