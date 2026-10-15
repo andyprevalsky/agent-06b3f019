@@ -167,3 +167,21 @@ rejected request and original clock, never reset or rename the once directory,
 and distinguish transport/setup time from measured load time. The supervisor
 joined all 604 owned Popen objects without signals. Do not use compression to
 change source, bypass a refusal, or duplicate an indeterminate operation.
+
+### Optional CLI finalizers consume the native read clock
+
+Pinned flyctl v0.4.115 sends noninteractive CLI analytics synchronously after
+command output. An offline paired control with the exact pinned binary and a
+slow localhost metrics fixture emitted byte-identical version JSON and returned
+zero in both cases: analytics enabled completed in 5.048 seconds; supported
+`FLY_SEND_METRICS=0` completed in 0.046 seconds with no metrics request. This
+isolates optional finalizer cost, not the cause of the historical nine exit-142
+inventory reads. Ordinary cache-lock contention was separately bounded by the
+CLI's one-second lock timeout and did not reproduce that outage.
+
+Set the option only on the shared inventory Machines and Volumes read calls.
+Keep the original native CLI, authentication, endpoint, JSON normalization,
+EOF/status checks, freshness, and timeout. Do not export it for task processes or
+interpret failed-command JSON as a successful inventory. Unavailable/invalid
+clone-source observations must refuse distinctly from a positive unsafe-startup
+classification; neither diagnostic authorizes allocation or a freshness waiver.
