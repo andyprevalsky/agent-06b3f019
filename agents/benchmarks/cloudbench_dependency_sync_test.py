@@ -33622,6 +33622,7 @@ def test_clone_source_owned_pending_consumes_first_native_allowance(tmp_path, ca
     trace = tmp_path / 'native-budget'
     sleeps = tmp_path / 'sleeps'
     registry = tmp_path / 'registry'
+    audit = tmp_path / 'audit'
     script = f'''set -u
 FLEET_DIR={shlex.quote(str(tmp_path))}; ROOT_DIR={shlex.quote(str(ROOT))}; APP=fixture
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
@@ -33644,8 +33645,8 @@ fleet_registry_record_name() {{
     printf '%s\n' "$1" >> {shlex.quote(str(registry))}
     [ "$CASE" != expires-before-allocation ] || SECONDS=$((SECONDS + 240))
 }}
-fleet_registry_release_name() {{ :; }}
-fleet_audit_update_fresh_clone() {{ :; }}
+fleet_registry_release_name() {{ rm -f {shlex.quote(str(registry))}; }}
+fleet_audit_update_fresh_clone() {{ printf '%s\n' "$4" > {shlex.quote(str(audit))}; }}
 clone_failure_owned_volume_id() {{ :; }}
 clone_failure_definitively_unallocated() {{ return 0; }}
 fleet_clone_with_queue_admission() {{ printf '%s\n' "$1" > {shlex.quote(str(trace))}; printf fixture-refusal; return 9; }}
@@ -33674,5 +33675,8 @@ clone_machine_target "$FLEET_DIR/primary.ids" warm shared-cpu-2x 4096 vs_fixture
             assert not registry.exists()
         elif case == 'expires-before-allocation':
             assert 'exhausted the first native clone allowance before allocation' in result.stderr
+            assert not registry.exists()
+            assert not (tmp_path / 'primary.names').read_text().strip()
+            assert audit.read_text().strip() == 'not-allocated-verified'
         else:
             assert not sleeps.exists() and not registry.exists()

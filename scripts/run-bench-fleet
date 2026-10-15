@@ -10999,6 +10999,11 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
             private_fleet_source_admission || return 1
         fi
+        if [ "$attempt" = 1 ] && [ -n "$source_pending_deadline" ] \
+            && [ "$SECONDS" -ge "$source_pending_deadline" ]; then
+            echo "❌ clone source wait exhausted the first native clone allowance before name reservation" >&2
+            return 1
+        fi
         target_volume=""
         target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
         # Record the provider target name durably BEFORE asking Fly to allocate,
@@ -11013,6 +11018,13 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         if [ "$attempt" = 1 ] && [ -n "$source_pending_deadline" ]; then
             first_clone_timeout=$((source_pending_deadline - SECONDS))
             if [ "$first_clone_timeout" -le 0 ]; then
+                # No provider call has occurred. Close this exact durable name
+                # with the existing verified-not-allocated transition.
+                fleet_audit_update_fresh_clone "$target_name" "" "" \
+                    not-allocated-verified || return 1
+                fleet_registry_release_name "$target_name" || return 1
+                grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+                mv "$names_ledger.tmp" "$names_ledger" || return 1
                 echo "❌ clone source wait exhausted the first native clone allowance before allocation" >&2
                 return 1
             fi
