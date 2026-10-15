@@ -153,3 +153,25 @@ line and 81.12% branch coverage. All actual direct test children used matching
 loopback database URLs. The separate accidental schema-setup operation and its
 read-only attribution limits are recorded as an operational recurrence in the
 June27 stray-db-push case; that failed setup is not counted as a test result.
+
+### Offline upstream fixture integration
+
+Fresh combined coverage after syncing upstream `101ed30a57a1cd796b04eecca6a01d1976a05f9a`
+passed 195/196 backend domains and all 267 unit files. The two same-profile
+rotation controls in the upstream browser-provider fixture mocked release and
+create but omitted the native profile GET added by this repair. Their fake
+`offline-profile` ID therefore reached Steel and returned 400 before allocation.
+This was a fixture dependency gap, not evidence of a provider outage.
+
+The exact existing fixture is now exercised by an outer GET tripwire, so the
+isolated reproduction needs no provider network. Running
+`node --import tsx .context/rca-ae17b024/profile-offline-controls.ts`
+failed before the fixture repair with
+`Offline fixture reached unowned profile transport`; the unchanged command
+then passed both ordinary rotation and failed-create/release404 recovery.
+The fixture now mocks only the exact profile path, requires acknowledged release
+and retained PAUSED custody before returning READY, and requires that read before
+create. Its original binding, publication CAS, cleanup and recovery assertions
+remain. The mock restores the original GET in finally. No runtime behavior,
+provider limits or retry policy changed. Full combined coverage is being rerun;
+the failed first attempt is retained separately.
