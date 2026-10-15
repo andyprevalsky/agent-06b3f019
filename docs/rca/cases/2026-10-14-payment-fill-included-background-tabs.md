@@ -259,6 +259,81 @@ all three unchanged public-dispatch tests still fail on pinned baseline
 `32947aee57006a63d9232f77daf7725af70f32ff` in 1.846 seconds and pass on the
 repaired source in 2.082 seconds.
 
+### 2026-10-15: minted-password persistence across ordinary tools
+
+A focused audit of frozen `ca2a9fa6446a67b6753b34662ce7534efa0ea657`
+(runtime surface `c3a63eeb954c`) reproduced successful private `evaluate`
+execution with zero minted-password save calls. Archive searches were
+`minted password evaluate persistence` and
+`credential input_text only save minted account password`. The searches,
+`git log --all` and source inspection found the earlier canonical-reference
+repair, but no general successful-use persistence mechanism. Completed plans
+`browser-auth-credential-model`, `rotate-ip-tool` and `agentcard-integration`
+were checked for the credential, dispatch and target-ownership contracts.
+This is a relative extension of this case's all-tool credential contract;
+it does not establish another failure of the original merchant checkout.
+
+Critical path: advertised minted reference -> shared parameter/JavaScript
+resolver -> authorized native action -> action success -> minted-password
+save. The resolver already knew which registered references it actually
+consumed. The first incorrect boundary was the activity's save condition:
+it inspected only an `input_text` action's raw `text` value. Successful
+`evaluate` and other ordinary tools therefore never reached persistence.
+
+The public dispatcher now reports successful consumed reference names through
+an optional private per-action set. That set is cleared on entry and populated
+only after successful execution, never added to a tool result, history or model
+metadata. The activity's existing common action wrapper creates a new set for
+each invocation and saves the minted password when that exact reference was
+consumed. It captures the authorized source URL before execution: navigation
+or realm refresh must not save the old realm's password under the new realm.
+The existing idempotent backend save and warning-only save failure behavior
+remain; success means credential use, not confirmed account creation.
+There is no tool allowlist, field selection, raw-substring classifier, prompt,
+schema, timeout, provider or trajectory change.
+
+The existing permanently registered
+`test_activity_saves_minted_password_after_canonical_or_legacy_entry` now runs
+actual public dispatch and resolution, replacing its former mocked dispatcher.
+It preserves canonical and legacy input cases and exercises JavaScript entry
+and ordinary navigation. Controls cover ordinary text, another registered
+password, unresolved references, JavaScript comments, a CDP JavaScript failure,
+a native typing failure, and password-origin denial. All browser/provider,
+model and persistence transports are synthetic; no live signup is claimed.
+The common realm fixture's existing redirect, privacy, assistance and fatal
+error checks also pass unchanged.
+
+Exact red/green command, from the isolated repair checkout:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/boxes/rose/.context/deploy-private-browser-credentials/agents/venv/bin/python -B .context/run-minted-password-regression.py
+```
+
+The runner invokes the checked-in registered test directly using synthetic
+configuration and the existing Temporal activity environment. Final unchanged
+test-file SHA-256:
+`096980e9bca0f9ced85d06a80ece3a792bd25dad1f556406b71efff6684ab9c2`.
+On the frozen buggy runtime: exit 1, test wall time 1.554 seconds,
+`minted password persistence mismatch: action=evaluate, should_save=True, failure=False, denied=False, saves=[]`.
+On the repair: exit 0, `REGRESSION PASS wall_s 2.358`.
+These test wall clocks exclude module import. Original and final red/green
+logs are preserved in the repair checkout's ignored `.context` directory.
+Fourteen relevant existing credential/realm blackbox checks pass in 3.467
+seconds through `.context/run-minted-password-focused.py`. The original copied
+synthetic scratch reproduction also passes in 3.892 seconds, reporting
+`PRIVATE_EVALUATE_EXECUTION_CONFIRMED=True` and `MINTED_PASSWORD_SAVE_CALLS=1`.
+Its modified-fixture-source technique remains supplemental only; the permanent
+test uses normal fixture parameters and no source execution.
+
+Registration remains in `spawn_browser_agent_v3.blackbox.py::run_all_tests`,
+which `run_blackbox_tests.py` discovers as `spawn-browser-agent-v3` and the
+existing agent coverage/deploy lane invokes. Full coverage and deploy gates
+are parent-owned after integration; they were deliberately not rerun here.
+At 10,000 agents this adds one short-lived set per active action, containing
+reference names only, with no shared state, lock, subscription or periodic
+query. Only successful minted-reference use invokes the existing idempotent
+save once; unrelated, failed and denied actions add zero persistence requests.
+
 ## Human feedback
 
 The user rejected the automatic payment-entry layer after the narrow tab

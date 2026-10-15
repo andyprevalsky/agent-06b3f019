@@ -1690,9 +1690,13 @@ async def execute_action(
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    successful_secret_refs: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
-    """Resolve private values only for execution; retain and return redacted data."""
+    """Resolve private values and report successful use privately to the caller."""
     execution = locals().copy()
+    execution.pop("successful_secret_refs")
+    if successful_secret_refs is not None:
+        successful_secret_refs.clear()
     refs = dict(secret_refs or {})
     register = getattr(dom_service, "register_secret_refs", None)
     if callable(register):
@@ -1750,6 +1754,8 @@ async def execute_action(
         error_text = visible(str(error))
         logger.error("Browser action failed", action=action_name, error=error_text)
         result = {"success": False, "error": error_text}
+    if result.get("success") and successful_secret_refs is not None:
+        successful_secret_refs.update(used)
     safe_result = visible(result)
     if used_credential:
         # Credential bookkeeping comes from the private binding inventory,

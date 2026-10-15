@@ -7858,8 +7858,23 @@ async def _spawn_browser_agent_activity_v3_real(
             redaction_refs = [dict(secret_refs)]
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
+            successful_secret_refs: set[str] = set()
+            kwargs["successful_secret_refs"] = successful_secret_refs
+            # A tool may navigate or refresh the active realm while executing.
+            # Persist the password for the page authorized at resolution time.
+            credential_url = kwargs.get("current_url") or current_url
             try:
                 result = await execute_action(*args, **kwargs)
+                if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
+                    try:
+                        await save_minted_account_password(config, user_id, credential_url)
+                    except Exception as save_error:
+                        logger.warning(
+                            "Failed to save minted account password",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            error=_redact_activity_value(extract_error_message(save_error)),
+                        )
                 # Ref names can collide across realms. Keep each binding's
                 # values until this result is safe to log, persist, and submit.
                 if hasattr(dom_service, "model_visible_action_result"):
@@ -9941,24 +9956,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 current_url = _private_browser_runtime_url(dom_service, result.get("current_url"))
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
                     visited_urls.append(current_url)
-            if (
-                action_name == "input_text"
-                and result.get("success")
-                and str(unified_action.get("params", {}).get("text", "")) in (
-                    MINTED_NEW_PASSWORD_REF, secret_placeholder(MINTED_NEW_PASSWORD_REF),
-                )
-                and current_url
-            ):
-                # The account now exists (or is being created) under this password; keep it.
-                try:
-                    await save_minted_account_password(config, user_id, current_url)
-                except Exception as save_error:
-                    logger.warning(
-                        "Failed to save minted account password",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        error=extract_error_message(save_error),
-                    )
             if (
                 not result.get("credential_ref")
                 and action_name == "input_text"

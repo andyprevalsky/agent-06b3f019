@@ -21502,7 +21502,7 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
 
 
 
-async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None, minted_password_text=None):
+async def _run_realm_transition_action_fixture(action_name, *, redirect=True, restoration_error=False, fatal_error=None, minted_password_text=None, credential_action=None, credential_failure=False, credential_origin=None):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
     import copy
@@ -21518,7 +21518,7 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     assistance_url = "https://auth.example/login"
     old_secret = "synthetic-prior-realm-password"
     new_secret = "synthetic-current-realm-password"
-    shared_ref = "pwd:fixture"
+    shared_ref = "pwd:new" if minted_password_text is not None or credential_action is not None else "pwd:fixture"
     active_page = {"url": final_url if preapproved_handoff else old_url, "title": "Sign in", "dom_tree": "Sign in"}
     events = []
     model_contexts = []
@@ -21536,7 +21536,9 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
             {"auth_realm": realm, "auth_options": {"realm": realm}}, decryption_key=None,
         )
         state.password_secret_refs = {shared_ref: old_secret if realm == "old.example" else new_secret}
-        state.password_origins = {shared_ref: "https://" + realm}
+        if credential_action is not None:
+            state.password_secret_refs["pwd:other"] = "synthetic-other-password"
+        state.password_origins = {ref: credential_origin or "https://" + realm for ref in state.password_secret_refs}
         state.credential_refs_by_secret_ref = {shared_ref: {"kind": "password", "id": realm + "-password"}}
         state.auth_options = {"realm": realm, "passwords": [{"id": realm + "-password", "ref": shared_ref}]}
         state.auth_options_section = "# Auth Options for " + realm + "\nPassword ref: " + shared_ref
@@ -21570,7 +21572,9 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         return NavigationEvent()
 
     async def evaluate(**_kwargs):
-        events.append(("evaluate", old_url))
+        events.append(("evaluate", _kwargs["params"]["expression"]))
+        if credential_failure:
+            return {"exceptionDetails": {"text": "Synthetic JavaScript failure"}}
         active_page["url"] = final_url
         return {"result": {"value": {"prior": old_secret, "active": new_secret}}}
 
@@ -21597,6 +21601,9 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
         params = {"code": "(() => window.fixtureReadbackAndNavigate())()"} if action == "evaluate" else (
             {"url": requested_url} if action == "goto" else {}
         )
+        if credential_action is not None and len(model_contexts) == 1:
+            action = credential_action["action"]
+            params = copy.deepcopy(credential_action["params"])
         if action == "input_text" and minted_password_text is not None:
             params = {"text": minted_password_text}
         return {"action": {"action": action, "thinking": "Inspect the surviving sign-in page", "params": params},
@@ -21647,12 +21654,18 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
             patch("domains.spawn_browser_agent_v3.service_actions.wait_for_payment_ref_fields", AsyncMock(return_value=True)),
             patch("domains.spawn_browser_agent_v3.service_actions._execute_interaction_action", unexpected_handoff_action),
         ])
-    if minted_password_text is not None:
+    if minted_password_text is not None or credential_action is not None:
         async def save_minted(_config, _user_id, url):
             events.append(("save-minted", url))
 
+        async def type_text(_humanizer, text):
+            events.append(("type-text", text))
+            if credential_failure:
+                raise RuntimeError("Synthetic typing failure")
+
         targets.extend([
-            patch(prefix + "execute_action", AsyncMock(return_value={"success": True, "current_url": old_url})),
+            patch.object(_FakeHumanizer, "type_text", type_text, create=True),
+            patch.object(_FakeHumanizer, "press_key", AsyncMock(), create=True),
             patch(prefix + "save_minted_account_password", save_minted),
         ])
     with ExitStack() as stack:
@@ -21693,6 +21706,39 @@ async def test_activity_saves_minted_password_after_canonical_or_legacy_entry():
         assert events.count(("save-minted", "https://old.example/login")) == 1, (
             "successful minted password entry did not persist the account password"
         )
+        assert ("type-text", prior) in events, "input_text bypassed private resolution"
+        assert prior not in str(contexts) and active not in str(contexts)
+
+    cases = [
+        ({"action": "evaluate", "params": {"code": "document.querySelector('#password').value = '{{secret:pwd:new}}'"}}, True, False, None),
+        ({"action": "goto", "params": {"url": "https://old.example/signup?password={{secret:pwd:new}}"}}, True, False, None),
+        ({"action": "input_text", "params": {"text": "ordinary text"}}, False, False, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:other}}"}}, False, False, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:missing}}"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "/* {{secret:pwd:new}} */ 'ordinary text'"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "'{{secret:pwd:missing}}'"}}, False, False, None),
+        ({"action": "evaluate", "params": {"code": "document.querySelector('#password').value = '{{secret:pwd:new}}'"}}, False, True, None),
+        ({"action": "input_text", "params": {"text": "{{secret:pwd:new}}"}}, False, True, None),
+        ({"action": "evaluate", "params": {"code": "'{{secret:pwd:new}}'"}}, False, False, "https://unrelated.example"),
+    ]
+    for action, should_save, failure, origin in cases:
+        contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture(
+            action["action"], credential_action=action,
+            credential_failure=failure, credential_origin=origin,
+        )
+        consumed = [value for kind, value in events if kind in {"type-text", "evaluate", "navigate"}]
+        if should_save or failure:
+            assert any(prior in value for value in consumed), "action bypassed private resolution"
+        if origin:
+            assert not consumed, "password origin denial reached browser execution"
+        if action["params"].get("text") == "{{secret:pwd:other}}":
+            assert ("type-text", "synthetic-other-password") in events
+        save_calls = [event for event in events if event[0] == "save-minted"]
+        assert save_calls == ([("save-minted", "https://old.example/login")] if should_save else []), (
+            f"minted password persistence mismatch: action={action['action']}, "
+            f"should_save={should_save}, failure={failure}, denied={bool(origin)}, saves={save_calls}"
+        )
+        assert "synthetic-other-password" not in str(contexts)
         assert prior not in str(contexts) and active not in str(contexts)
 
 
