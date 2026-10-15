@@ -275,6 +275,57 @@ this follow-up and ran its test. Combined workflow/determinism validation was
 rerun on the final source after this repair: two domains passed, zero failed
 (42.1s). The earlier 37.1s pass was interim.
 
+## October 15 follow-up: finish rejected native contracts durably
+
+Review 5526868411 of frozen PR #1511 source
+`f2625c20ded63a76b625b526f95a23a9b5f90886` found an incomplete failure path in
+the fresh-start acceptance repair. The native guard prevented stale schema
+acceptance, but its plain RuntimeError could escape direct execute, post-DAG,
+Fast Mode and final-completion paths. The Temporal worker does not configure
+ordinary RuntimeError as a workflow failure, so the workflow task could retry
+without publishing the agent's existing FAILED state. This is a follow-up
+failure-handling defect, not evidence of that root outcome in the Calendar run.
+
+The guard now raises a specific RuntimeError subclass. A narrow boundary around
+the registered workflow entry catches only that class and invokes the existing
+`_mark_failed` path with the original reason. Unrelated RuntimeError,
+cancellation and generation handoff retain their existing behavior. The current
+schema requirement, accepted revisions, provider judgment, iteration limits and
+the seven earlier fresh-start controls remain enforced. Temporal registration
+still selects the actual guarded coroutine and preserves its argument signature.
+
+The permanent run-level case exercises all four direct completion paths and
+asserts the actual FAILED status write, original failure message, and absence
+of stale-schema reload or successful completion. Its unrelated-error control
+passes before and after. From `agents/`, the exact causal command is:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. --baseline f2625c20ded63a76b625b526f95a23a9b5f90886 --runtime workflows.agent_workflow workflow test_workflow_unaccepted_schema_completion_reaches_durable_failure test_workflow_schema_failure_handler_does_not_swallow_unrelated_errors
+```
+
+The first case fails on frozen f262 with `execute schema rejection escaped as
+retryable workflow-task error: set_response_schema_activity failed`; the
+unrelated-error control passes. Omitting only `--baseline` and its value makes
+both pass with unchanged assertions. The combined before/after transcripts are
+`.context/root-review-causal-{before,after}.log`; they also contain the fresh-task
+intake regression documented in the linked root intake case. The full owning
+`python scripts/run_blackbox_tests.py workflow workflow_determinism` passes two
+domains with zero failures in 38.6s on the final combined source, retained in
+`.context/root-review-final-owning-v2.log`. The earlier 37.4s pass is interim.
+Scoped cached Ruff, compilation and diff
+checks pass. Independent review of the terminal boundary is clean.
+
+Archive searches used `No output schema has been accepted RuntimeError workflow
+task` and `fresh followup historical USER response schema`. Existing schema
+acceptance and rejection-intake cases are the relevant leads; unrelated archive
+deadline RuntimeError cases have different owners. This evidence is appended
+here instead of claiming a second occurrence of the original Calendar outcome.
+
+The incremental agent-behavior approval guard flags this terminal mapping;
+neither an approval flag nor an override was supplied. That result and the
+exact frozen diff are handed to the PR #1511 deployment owner for the required
+authorization disposition. Prompt and trajectory-injection guards pass.
+
 ## Human feedback
 
 The user required conditional schema refresh and the same standard for browser

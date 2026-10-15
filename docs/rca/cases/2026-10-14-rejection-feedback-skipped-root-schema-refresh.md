@@ -196,6 +196,69 @@ in that normal deploy-owned workflow runner. Scoped Ruff, compilation and diff
 checks pass. Production acceptance and the single combined rollout remain
 pending the deployment owner.
 
+## October 15 follow-up: preserve a fresh task's authored input boundary
+
+Outside-diff review 5526868411 on frozen
+`f2625c20ded63a76b625b526f95a23a9b5f90886` exposed a related intake defect.
+A new task after a completed run correctly regenerated its initial schema from
+the latest real USER instruction. Its first execute poll then fetched history
+from the epoch, admitted prior-task USER rows as new feedback, and generated
+another schema containing the old requirements. Independently, the schema
+reload builder prepended the older stored goal and imported those historical
+rows again. Seeding intake acknowledgments alone could not repair both paths.
+
+At this existing fresh-superseded-start boundary, the workflow now records the
+latest authored instruction as the task's schema base and acknowledges the
+observed real USER prefix by canonical source identity. The schema builder
+excludes that same prefix; the fresh base is already supplied separately.
+Both values survive continuation. The canonical attention request ID prevents
+a physical-row or signal retry of an earlier event from becoming new feedback.
+An unseen source remains eligible regardless of its timestamp, and distinct
+same-text events preserve A -> B -> A. Existing pending feedback is retained.
+Ordinary resumes do not acquire a new task boundary. No timestamp cutoff,
+second input transport, generated USER row or synthetic narration is added.
+
+The permanent real-workflow fixture executes the first epoch poll, requires
+exactly the initial fresh schema generation, and then independently reloads
+requirements to exclude both the old goal and the earlier correction. From
+`agents/`, the causal command is:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. --baseline f2625c20ded63a76b625b526f95a23a9b5f90886 --runtime workflows.agent_workflow workflow test_workflow_fresh_task_poll_and_reload_exclude_prior_requirements
+```
+
+It fails on f262 with `fresh execute poll readmitted previous-task requirements`
+and passes unchanged after omitting only `--baseline` and its value. Combined
+transcripts are `.context/root-review-causal-{before,after}.log`. A second
+registered owning case preserves same-timestamp distinct sources, delayed
+commits, attention retries, intentional repeated instructions, continuation and
+normal-resume behavior.
+
+Independent review also reproduced an attention signal delivered before the
+startup snapshot established that boundary. Its durable row was excluded, but
+its already-queued text could be appended again. The captured pre-ledger runtime
+has SHA256 `37dd21a4c6a4e1a319cc0116b2554663cf8666f68f96241ecaa086c05965ad6d`.
+On that source, the unchanged permanent case
+`test_workflow_fresh_boundary_filters_only_proven_queued_feedback_sources` fails
+with `a known pre-boundary signal consumed current-source coverage or
+reintroduced historical requirements`. It passes after pairing native feedback
+occurrences with their proven source keys and filtering baseline sources before
+text-occurrence accounting. Unknown legacy text stays unclassified; genuine
+distinct events with the same words and A -> B -> A remain intact. Continuation
+preserves alignment even when rejecting a malformed non-string feedback entry.
+The source snapshot and exact final proof logs remain private as
+`root-preboundary-source-before.py`, `root-preboundary-source-final-red.log`,
+`root-preboundary-source-green.log` and `root-preboundary-source-focused.log`.
+An added fixture control initially lacked its local copy import; that setup
+error was corrected and is not counted as the causal failure.
+
+All five new regressions are registered in the normal owning runner. The final
+full workflow and determinism command passes two domains in 38.6s, retained in
+`.context/root-review-final-owning-v2.log`; the 37.4s run preceded the queued-source
+repair. Scoped lint, compilation and diff checks pass. This is a related
+fresh-task admission boundary, not a reclassification of the original Calendar
+incident as a root rejection failure.
+
 ## Human feedback
 
 The user asked to follow the root standard and implement missing support there,

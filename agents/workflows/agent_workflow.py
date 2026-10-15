@@ -12,6 +12,7 @@ import hashlib
 import json as _json
 import re
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import structlog
@@ -716,6 +717,22 @@ def _canonical_pending_approval_resume(pending_approval: Any) -> Optional[Dict[s
     return None
 
 
+class ResponseSchemaUnacceptedError(RuntimeError):
+    """Current user requirements have no accepted native completion contract."""
+
+
+def _with_schema_rejection_terminal_state(run):
+    @wraps(run)
+    async def guarded(self, *args, **kwargs):
+        try:
+            return await run(self, *args, **kwargs)
+        except ResponseSchemaUnacceptedError as error:
+            await self._mark_failed(context=self.context, reason="error", message=str(error))
+            return {"status": "failed", "reason": "error", "goal": self.goal}
+
+    return guarded
+
+
 @workflow.defn
 class AgentWorkflow:
     """
@@ -773,7 +790,10 @@ class AgentWorkflow:
         # per accepted batch while still catching feedback that arrives during
         # the schema-generation activity.
         self._response_schema_feedback: List[str] = []
+        self._response_schema_feedback_sources: List[Optional[Tuple[str, ...]]] = []
         self._response_schema_feedback_rows: Set[Tuple[str, ...]] = set()
+        self._response_schema_task_base: Optional[str] = None
+        self._response_schema_task_baseline_rows: Set[Tuple[str, ...]] = set()
         self._response_schema_attention_events: Dict[str, str] = {}
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
@@ -1004,9 +1024,17 @@ class AgentWorkflow:
             runtime.get("pending_approval_resume")
         )
         if isinstance(runtime.get("response_schema_feedback"), list):
-            self._response_schema_feedback = [
-                value for value in runtime["response_schema_feedback"] if isinstance(value, str)
-            ]
+            source_rows = runtime.get("response_schema_feedback_sources")
+            self._response_schema_feedback = []
+            self._response_schema_feedback_sources = []
+            for index, value in enumerate(runtime["response_schema_feedback"]):
+                if not isinstance(value, str):
+                    continue
+                source = source_rows[index] if isinstance(source_rows, list) and index < len(source_rows) else None
+                self._response_schema_feedback.append(value)
+                self._response_schema_feedback_sources.append(
+                    tuple(source) if isinstance(source, list) and source and all(isinstance(part, str) for part in source) else None
+                )
         self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
         self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
         self._response_schema_initialized = runtime.get("response_schema_initialized") is True
@@ -1032,6 +1060,13 @@ class AgentWorkflow:
         if isinstance(runtime.get("response_schema_feedback_rows"), list):
             self._response_schema_feedback_rows = {
                 tuple(value) for value in runtime["response_schema_feedback_rows"]
+                if isinstance(value, list) and all(isinstance(part, str) for part in value)
+            }
+        if isinstance(runtime.get("response_schema_task_base"), str):
+            self._response_schema_task_base = runtime["response_schema_task_base"]
+        if isinstance(runtime.get("response_schema_task_baseline_rows"), list):
+            self._response_schema_task_baseline_rows = {
+                tuple(value) for value in runtime["response_schema_task_baseline_rows"]
                 if isinstance(value, list) and all(isinstance(part, str) for part in value)
             }
         if isinstance(runtime.get("response_schema_attention_events"), dict):
@@ -1249,7 +1284,15 @@ class AgentWorkflow:
                     self._pending_approval_resume
                 ),
                 "response_schema_feedback": list(self._response_schema_feedback),
+                "response_schema_feedback_sources": [
+                    list(self._response_schema_feedback_sources[index])
+                    if index < len(self._response_schema_feedback_sources) and self._response_schema_feedback_sources[index] is not None
+                    else None
+                    for index in range(len(self._response_schema_feedback))
+                ],
                 "response_schema_feedback_rows": [list(key) for key in sorted(self._response_schema_feedback_rows)],
+                "response_schema_task_base": self._response_schema_task_base,
+                "response_schema_task_baseline_rows": [list(key) for key in sorted(self._response_schema_task_baseline_rows)],
                 "response_schema_attention_events": dict(self._response_schema_attention_events),
                 "response_schema_pending_signals": dict(self._response_schema_pending_signals),
                 "response_schema_baseline_initialized": self._response_schema_baseline_initialized,
@@ -1451,7 +1494,9 @@ class AgentWorkflow:
             if request_id in self._response_schema_attention_events:
                 return
             self._response_schema_attention_events[request_id] = response
-        self._response_schema_feedback.append(response)
+        self._append_response_schema_feedback(
+            response, ("attention_response", request_id) if request_id is not None else None,
+        )
         text = response.strip()
         if text:
             if request_id is None:
@@ -1461,6 +1506,30 @@ class AgentWorkflow:
         self._response_schema_refresh_error = None
         self._has_new_messages = True
         self._start_response_schema_refresh()
+
+    def _append_response_schema_feedback(self, response: str, source: Optional[Tuple[str, ...]] = None) -> None:
+        """Keep authored text paired with proven source identity; legacy text stays unknown."""
+        count = len(self._response_schema_feedback)
+        self._response_schema_feedback_sources = self._response_schema_feedback_sources[:count]
+        self._response_schema_feedback_sources.extend([None] * (count - len(self._response_schema_feedback_sources)))
+        self._response_schema_feedback.append(response)
+        self._response_schema_feedback_sources.append(source)
+
+    def _establish_response_schema_task_boundary(self, messages: List[Dict]) -> None:
+        """A fresh task consumes the observed USER prefix, not future source IDs."""
+        latest_index = next((index for index in range(len(messages) - 1, -1, -1)
+                             if latest_real_user_instruction([messages[index]]) is not None), None)
+        if latest_index is None:
+            return
+        self._response_schema_task_base = messages[latest_index]["text"]
+        for message in messages[:latest_index + 1]:
+            keys = _real_user_requirement_keys([message])
+            self._response_schema_task_baseline_rows.update(keys)
+            self._response_schema_feedback_rows.update(keys)
+            event_id = self._response_schema_attention_event_id(message)
+            if keys and event_id is not None and isinstance(message.get("text"), str):
+                self._response_schema_attention_events.setdefault(event_id, message["text"])
+        self._response_schema_baseline_initialized = True
 
     def _bind_response_schema_feedback_rows(self, messages: List[Dict]) -> None:
         """Associate accepted plain-signal occurrences with durable USER identities."""
@@ -1505,7 +1574,7 @@ class AgentWorkflow:
                 if event_id in self._response_schema_attention_events:
                     continue
                 self._response_schema_attention_events[event_id] = text
-            self._response_schema_feedback.append(text)
+            self._append_response_schema_feedback(text, next(iter(keys)))
             self._response_schema_revision += 1
             self._response_schema_refresh_error = None
             self._has_new_messages = True
@@ -1721,6 +1790,7 @@ class AgentWorkflow:
     # =========================================================================
 
     @workflow.run
+    @_with_schema_rejection_terminal_state
     async def run(
         self,
         agent_id: str,
@@ -2131,6 +2201,7 @@ class AgentWorkflow:
             startup_execute_context = filter_internal_subagent_messages(startup_execute_context)
             prior_run_superseded = plan_superseded_by_new_user_instruction(startup_execute_context)
             if prior_run_superseded:
+                self._establish_response_schema_task_boundary(startup_execute_context)
                 # A completed or followed-up run's schema is not live. Chat
                 # persist has already moved Agent.goal to the router task;
                 # still skip generate-from-row here so a stale leftover cannot
@@ -2691,7 +2762,7 @@ class AgentWorkflow:
     def _require_current_response_schema_acceptance(self) -> None:
         """Do not certify a processed failure as acceptance of new requirements."""
         if self._response_schema_accepted_revision < self._response_schema_revision:
-            raise RuntimeError(
+            raise ResponseSchemaUnacceptedError(
                 self._response_schema_refresh_failure_reason
                 or "No output schema has been accepted for the current user requirements"
             )
@@ -2699,7 +2770,7 @@ class AgentWorkflow:
     async def _response_schema_user_messages(self) -> List[str]:
         """Return durable, ordered user requirements for schema generation."""
         messages: List[str] = []
-        goal = (self.fast_cache_goal or self.goal or "").strip()
+        goal = self._response_schema_task_base or (self.fast_cache_goal or self.goal or "").strip()
         if goal:
             messages.append(goal)
         if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
@@ -2740,12 +2811,14 @@ class AgentWorkflow:
             key = ("attention_response", event_id) if event_id is not None else (
                 ("id", str(message_id)) if message_id else ("legacy", str(message.get("timestamp") or ""), text)
             )
+            if key in self._response_schema_task_baseline_rows:
+                continue
             if key in seen_rows:
                 continue
             seen_rows.add(key)
             # The initial goal is already the first requirement. A later real
             # USER row can repeat it intentionally to restore the original task.
-            is_initial_goal = event_id is None and text.strip() == goal and (first_user_row or (key[0] == "legacy" and not key[1]))
+            is_initial_goal = self._response_schema_task_base is None and event_id is None and text.strip() == goal and (first_user_row or (key[0] == "legacy" and not key[1]))
             first_user_row = False
             if is_initial_goal:
                 continue
@@ -2754,7 +2827,10 @@ class AgentWorkflow:
 
         # Plain signals may precede their durable poll. Match occurrences rather
         # than unique text so A -> B -> A keeps the user's final correction.
-        for feedback in self._response_schema_feedback:
+        for index, feedback in enumerate(self._response_schema_feedback):
+            source = self._response_schema_feedback_sources[index] if index < len(self._response_schema_feedback_sources) else None
+            if source is not None and source in self._response_schema_task_baseline_rows:
+                continue
             text = feedback
             if not text.strip():
                 continue
