@@ -130,3 +130,35 @@ observations at the scheduler lifetime, while preserving exact owning mutation
 checks and borrower cleanup fences. Count actual native calls and decoded work,
 and report measured cloud E2E independently instead of converting transport
 reduction into a fabricated speedup.
+
+## October 15 standalone fixture synchronization follow-up
+
+The concise kickoff notification deployment merged current main and reproduced
+an offline fixture race in the existing ownership control. The full deploy
+structural run reported `assert 3 == 4` in
+`test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_ordinary_fleet_ownership`.
+Its original receipt is
+`.context/deploy-runs/20261015-023030-48107/logs/deploy-command-structural-20261015-174429-753568.log`:
+623 selected controls passed and this control failed. Archive searches for
+`inventory ordinary fleet owner first asynchronous poll fixture` located this
+owning case; its existing solution and human feedback remain applicable.
+
+The standalone fixture ended its first controller immediately after startup.
+Startup joins the initial native read, while the first periodic refresh runs
+asynchronously. The controller's correct EXIT cleanup could therefore cancel
+that refresh before the fixture's four-read assertion observed it. This is a
+test-fixture/environment mismatch, not evidence that ordinary fleet cleanup or
+campaign sharing should change.
+
+A controlled 100 ms native-read delay reproduced the unchanged failure before
+the repair: one parameter passed and one failed in 5.03 seconds. The fixture now
+records the owning job on each native read and waits for that owner's second
+machine read and refresh-lock release before exiting. The exact four-read
+assertion remains. Both delay parameters then passed in 5.45 seconds, and six
+focused ownership controls passed in 10.87 seconds. No production publisher,
+provider call policy, timeout, task prompt, assertion, or cleanup rule changed.
+The full deployment structural suite is rerun separately and remains the
+required integration gate.
+
+No new human feedback was recorded. Join the asynchronous observation a fixture
+asserts before invoking that fixture's normal owner cleanup.

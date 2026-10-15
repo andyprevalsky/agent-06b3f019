@@ -84,6 +84,11 @@ export const TOOL_SCHEMAS = [
           type: 'string' as const,
           description: 'The task goal for the agent',
         },
+        notification_message: {
+          type: 'string' as const,
+          description:
+            'Short user-facing kickoff notification for this agent. Include what you are starting, omit internal task instructions and links; the agent link is appended automatically.',
+        },
         budget_dollars: {
           type: 'number' as const,
           description: 'Budget in dollars (default: $1.00)',

@@ -10,6 +10,15 @@ assert.equal(
   `I'm on it: Order my usual Blue Bottle coffee for pickup\nFollow along: ${agentUrl}`
 );
 assert.equal(
+  SMS_TEMPLATES.agentStarted(
+    'coffee',
+    'INTERNAL: use saved account details and compare pickup locations',
+    agentUrl,
+    "I'll order your usual Blue Bottle coffee."
+  ),
+  `I'll order your usual Blue Bottle coffee.\n${agentUrl}`
+);
+assert.equal(
   SMS_TEMPLATES.plannerQuestion('coffee', 'Which Blue Bottle location should I use?'),
   'I need your input to keep going: Which Blue Bottle location should I use?'
 );

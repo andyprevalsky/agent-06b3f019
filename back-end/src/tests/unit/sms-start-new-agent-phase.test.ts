@@ -27,7 +27,11 @@ async function testExecutePhaseQueued(): Promise<void> {
   const result = await dispatchToolCall(
     {
       tool: 'start_new_agent',
-      arguments: { goal: 'Order oat milk from Whole Foods', start_phase: 'execute' },
+      arguments: {
+        goal: 'Order oat milk from Whole Foods',
+        start_phase: 'execute',
+        notification_message: "I'll order your oat milk.",
+      },
     },
     'unit-test-user',
     pending
@@ -37,6 +41,26 @@ async function testExecutePhaseQueued(): Promise<void> {
   const op = pending[0];
   assert.equal(op?.kind, 'start_new_agent');
   assert.equal(op.kind === 'start_new_agent' ? op.args.start_phase : undefined, 'execute');
+  assert.equal(
+    op.kind === 'start_new_agent' ? op.args.notification_message : undefined,
+    "I'll order your oat milk."
+  );
+}
+
+async function testInvalidNotificationRejected(): Promise<void> {
+  const pending: PendingOp[] = [];
+  const result = await dispatchToolCall(
+    {
+      tool: 'start_new_agent',
+      arguments: { goal: 'Order oat milk', notification_message: 42 },
+    },
+    'unit-test-user',
+    pending,
+    emptyContext
+  );
+  assert.equal(result.success, false);
+  assert.equal(pending.length, 0);
+  assert.match(result.error ?? '', /notification_message must be a string or null/);
 }
 
 async function testNullPhaseQueued(): Promise<void> {
@@ -58,6 +82,7 @@ async function main(): Promise<void> {
     { name: 'unknown start_phase rejected', fn: testInvalidPhaseRejected },
     { name: 'execute start_phase queued on the op', fn: testExecutePhaseQueued },
     { name: 'null start_phase accepted (plan default)', fn: testNullPhaseQueued },
+    { name: 'invalid notification rejected before queueing', fn: testInvalidNotificationRejected },
   ];
 
   let failed = 0;
