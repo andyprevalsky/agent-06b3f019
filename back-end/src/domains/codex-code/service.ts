@@ -209,9 +209,10 @@ async function detectAndMarkCodexExhaustion(
 
   const hasOAuthCredential = (session.claudeTokenIntegrationId ?? '') !== '';
   let oauthReason = '';
+  let oauthRevoked = false;
   let fundedKeyReason = '';
   const isRevoked = (reason: string) =>
-    reason === 'oauth_refresh_invalid' ||
+    reason.trim() === 'oauth_refresh_invalid' ||
     reason
       .split('\n')
       .some((body) => classifyComputeGrantFailure({ status: 401, body }).verdict === 'revoked');
@@ -221,7 +222,11 @@ async function detectAndMarkCodexExhaustion(
   if (credentialFeedback !== undefined && credentialFeedback.length > 0) {
     for (const feedback of credentialFeedback) {
       if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
-        if (isRevoked(feedback.reason) || !oauthReason) oauthReason = feedback.reason;
+        const revoked = isRevoked(feedback.reason);
+        if (revoked || !oauthReason) {
+          oauthReason = feedback.reason;
+          oauthRevoked = revoked;
+        }
       } else if (
         feedback.source === 'funded_api_key' ||
         (feedback.source === 'initial' && !hasOAuthCredential)
@@ -244,7 +249,24 @@ async function detectAndMarkCodexExhaustion(
         : hasOAuthCredential
           ? ''
           : output;
-    if (isRevoked(oauthSegment) || exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
+    let commandOutput = false;
+    const diagnostics = oauthSegment.split('\n').filter((line) => {
+      if (line.startsWith('[Codex command output]')) {
+        commandOutput = true;
+        return false;
+      }
+      if (line.startsWith('[Codex exit_code]')) {
+        commandOutput = false;
+        return false;
+      }
+      if (commandOutput) return false;
+      return (
+        /^\[Codex\] (?:Error|Turn failed):/.test(line) ||
+        /^\d{4}-\d{2}-\d{2}T\S+\s+ERROR\s+codex_login::auth\S*:\s+Failed to refresh token\b/.test(line)
+      );
+    });
+    oauthRevoked = diagnostics.some(isRevoked) || oauthSegment.trim() === 'oauth_refresh_invalid';
+    if (oauthRevoked || exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
     if (exhaustionPattern.test(fundedKeySegment) || fundingPattern.test(fundedKeySegment))
       fundedKeyReason = fundedKeySegment;
   }
@@ -253,7 +275,7 @@ async function detectAndMarkCodexExhaustion(
     const integrationId = session.claudeTokenIntegrationId ?? '';
     if (integrationId === '') {
       log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
-    } else if (isRevoked(oauthReason)) {
+    } else if (oauthRevoked) {
       const integration = await repo.findCredentialIntegration(integrationId);
       if (integration) {
         await markGptUserTokenRateLimited(integration.userId, {

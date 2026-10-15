@@ -16,8 +16,8 @@
  *   - signature verification (pure fn): a body signed with the app secret passes;
  *     a tampered body / bad scheme / absent header fails (constant-time compare)
  *   - waId normalization: Meta's `15551234567` -> `+15551234567` (matches User.phone)
- *   - inbound parsing: first text message extracted; status-only receipts and
- *     non-text media yield no route (acknowledged 200, no provisioning)
+ *   - inbound parsing: text, image captions, and media-only images/voice notes
+ *     survive normalization; status-only receipts and unsupported types do not route
  *   - provisioning: an unknown WhatsApp number is SILENTLY onboarded (User row
  *     created) and routes to the supervisor (lastInboundSeq bumped)
  *   - harness independence: supervisor runs async; webhook returns 200 immediately
@@ -25,31 +25,27 @@
  *
  * Usage:
  *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts
+ *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts --parse-media-only
+ *   npx tsx src/tests/blackbox/whatsapp-webhook.blackbox.ts --media-processing-only
  */
 
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHmac } from 'node:crypto';
+import { deepStrictEqual } from 'node:assert';
 import { verifyMetaSignature } from '../../providers/whatsappCloud';
 import {
+  mediaProcessingTests,
+  testInbound_mediaOnlyPersistsRoutesAndDeduplicates,
+} from './whatsapp-webhook.media.behavior';
+import {
   parseWhatsAppInbound,
+  parseWhatsAppInboundMessages,
   normalizeWaId,
   resolveWebhookVerification,
   isStatusOnlyEvent,
 } from '../../domains/whatsapp-webhook/service.validation';
-import {
-  cleanupAgentScopedUser,
-  provisionUserWithPhone,
-  readCapturesAfter,
-  setFixtureOverride,
-  waitFor,
-} from './sms-supervisor.helpers';
-import {
-  appendOutboundSms,
-  recordInboundSms,
-  parseSmsSessionMessages,
-} from '../../providers/smsSupervisor/sessionStore';
-import { buildSmsContext } from '../../providers/smsSupervisor/contextBuilder';
+import { createWhatsAppReactionReplyTests } from './whatsapp-webhook.reaction-reply.behavior';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -59,6 +55,15 @@ const CASE_CONCURRENCY = Number(
 const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? '';
 
 const prisma = new PrismaClient();
+const { testInbound_reactionPrecedesReply, testInbound_quotesEarlierIncomingAndSentMessages } =
+  createWhatsAppReactionReplyTests(prisma, {
+    BASE_URL,
+    request,
+    assertStatus,
+    assertEqual,
+    uniqueWaNumber,
+    inboundPayload,
+  });
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -269,6 +274,7 @@ async function testUnit_parseInbound_text() {
   assertEqual(parsed.fromPhone, '+15551234567', 'fromPhone normalized');
   assertEqual(parsed.messageBody, 'hello rose', 'body trimmed');
   assertEqual(parsed.messageId, 'wamid.TEST', 'messageId');
+  assertEqual('attachments' in parsed, false, 'text preserves its existing shape');
 }
 
 async function testUnit_parseInbound_statusOnly() {
@@ -276,22 +282,122 @@ async function testUnit_parseInbound_statusOnly() {
   assertEqual(parseWhatsAppInbound(statusPayload()), null, 'status-only yields no message');
 }
 
-async function testUnit_parseInbound_nonText() {
-  const image = inboundPayload('15551234567', 'x');
-  // Replace the text message with an image message (no text.body).
+function inboundMessagesPayload(messages: Record<string, unknown>[]): Record<string, unknown> {
+  const payload = inboundPayload('15551234567', 'x');
   (
-    ((image.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
+    ((payload.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
       .value as Record<string, unknown>
-  ).messages = [
+  ).messages = messages;
+  return payload;
+}
+
+function inboundMediaMessage(
+  kind: 'image' | 'audio',
+  media: Record<string, unknown>,
+  messageId = `wamid.${kind.toUpperCase()}`
+): Record<string, unknown> {
+  return {
+    from: '15551234567',
+    id: messageId,
+    timestamp: '1700000000',
+    type: kind,
+    [kind]: media,
+  };
+}
+
+async function testUnit_parseInbound_imageCaption() {
+  const payload = inboundMessagesPayload([
+    inboundMediaMessage('image', {
+      id: '172304219900001',
+      mime_type: 'image/jpeg',
+      caption: '  Please describe this photo  ',
+    }),
+  ]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: 'Please describe this photo',
+    messageId: 'wamid.IMAGE',
+    attachments: [{ mediaId: '172304219900001', type: 'image/jpeg' }],
+  });
+}
+
+async function testUnit_parseInbound_imageWithoutCaption() {
+  const payload = inboundMessagesPayload([inboundMediaMessage('image', { id: '172304219900002' })]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: '',
+    messageId: 'wamid.IMAGE',
+    attachments: [{ mediaId: '172304219900002', type: null }],
+  });
+}
+
+async function testUnit_parseInbound_voiceWithoutText() {
+  const payload = inboundMessagesPayload([
+    inboundMediaMessage('audio', {
+      id: '172304219900003',
+      mime_type: 'audio/ogg; codecs=opus',
+      voice: true,
+    }),
+  ]);
+  deepStrictEqual(parseWhatsAppInbound(payload), {
+    fromPhone: '+15551234567',
+    messageBody: '',
+    messageId: 'wamid.AUDIO',
+    attachments: [{ mediaId: '172304219900003', type: 'audio/ogg; codecs=opus' }],
+  });
+}
+
+async function testUnit_parseInbound_invalidMediaId() {
+  for (const kind of ['image', 'audio'] as const) {
+    for (const media of [{}, { id: '' }, { id: 42 }]) {
+      assertEqual(
+        parseWhatsAppInbound(inboundMessagesPayload([inboundMediaMessage(kind, media)])),
+        null,
+        `${kind} requires a nonempty string media ID: ${JSON.stringify(media)}`
+      );
+    }
+  }
+}
+
+async function testUnit_parseInbound_unsupportedType() {
+  const payload = inboundMessagesPayload([
     {
       from: '15551234567',
-      id: 'wamid.IMG',
-      timestamp: '1700000000',
-      type: 'image',
-      image: { id: 'MEDIA' },
+      id: 'wamid.LOCATION',
+      type: 'location',
+      location: { latitude: 37.7749, longitude: -122.4194 },
     },
-  ];
-  assertEqual(parseWhatsAppInbound(image), null, 'non-text yields no message (v1 media follow-up)');
+  ]);
+  assertEqual(parseWhatsAppInbound(payload), null, 'unsupported location does not route');
+}
+
+async function testUnit_parseInbound_mixedBatch() {
+  const payload = inboundMessagesPayload([
+    { from: '15551234567', id: 'wamid.TEXT', type: 'text', text: { body: '  hello  ' } },
+    inboundMediaMessage('image', {
+      id: '172304219900004',
+      caption: ' Look ',
+      mime_type: 'image/png',
+    }),
+    { from: '15551234567', id: 'wamid.LOCATION', type: 'location', location: {} },
+    inboundMediaMessage('audio', { id: '172304219900005', mime_type: 'audio/ogg', voice: true }),
+    inboundMediaMessage('image', {}),
+  ]);
+  deepStrictEqual(parseWhatsAppInboundMessages(payload), [
+    { fromPhone: '+15551234567', messageBody: 'hello', messageId: 'wamid.TEXT' },
+    {
+      fromPhone: '+15551234567',
+      messageBody: 'Look',
+      messageId: 'wamid.IMAGE',
+      attachments: [{ mediaId: '172304219900004', type: 'image/png' }],
+    },
+    {
+      fromPhone: '+15551234567',
+      messageBody: '',
+      messageId: 'wamid.AUDIO',
+      attachments: [{ mediaId: '172304219900005', type: 'audio/ogg' }],
+    },
+  ]);
 }
 
 // ==================== GET verification (HTTP) ====================
@@ -334,7 +440,7 @@ async function testInbound_statusOnlyAcknowledgedNotRouted() {
   assertStatus(res.status, 200, res.data);
 }
 
-async function testInbound_nonTextAcknowledged() {
+async function testInbound_unsupportedTypeAcknowledged() {
   const image = inboundPayload('15559990000', 'x');
   (
     ((image.entry as Record<string, unknown>[])[0].changes as Record<string, unknown>[])[0]
@@ -342,10 +448,10 @@ async function testInbound_nonTextAcknowledged() {
   ).messages = [
     {
       from: '15559990000',
-      id: 'wamid.IMG',
+      id: 'wamid.LOCATION',
       timestamp: '1700000000',
-      type: 'image',
-      image: { id: 'MEDIA' },
+      type: 'location',
+      location: { latitude: 37.7749, longitude: -122.4194 },
     },
   ];
   const res = await request(`${BASE_URL}/api/whatsapp/webhook`, {
@@ -353,11 +459,11 @@ async function testInbound_nonTextAcknowledged() {
     body: JSON.stringify(image),
   });
   assertStatus(res.status, 200, res.data);
-  // No provisioning for non-text in v1.
+  // Unsupported message types must not provision a user.
   const user = await prisma.user.findFirst({ where: { phone: '+15559990000' } });
   if (user) {
     await prisma.user.deleteMany({ where: { phone: '+15559990000' } }).catch(() => {});
-    throw new Error('non-text message must not provision a user');
+    throw new Error('unsupported message must not provision a user');
   }
 }
 
@@ -421,125 +527,6 @@ async function testInbound_newNumberProvisionsAndRoutes() {
   }
 }
 
-async function testInbound_reactionPrecedesReply() {
-  const wa = uniqueWaNumber();
-  const phone = `+${wa}`;
-  const messageId = `wamid.reaction.${wa}`;
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const reply = 'Here is your answer.';
-  try {
-    await setFixtureOverride(
-      userId,
-      JSON.stringify({
-        reaction_emoji: '👩🏽‍💻',
-        reasoning: 'Answer the user.',
-        tool_calls: [
-          {
-            tool: 'send_user_message',
-            arguments: { message: reply, reply_to_message_id: messageId },
-          },
-          { tool: 'attempt_completion', arguments: {} },
-        ],
-      })
-    );
-    const probe = await request(`${BASE_URL}/api/test/captures`);
-    assertStatus(probe.status, 200, probe.data);
-    const cursor = (probe.data as { nextId: number }).nextId - 1;
-    const response = await request(`${BASE_URL}/api/whatsapp/webhook`, {
-      method: 'POST',
-      body: JSON.stringify(inboundPayload(wa, 'hello rose', messageId)),
-    });
-    assertStatus(response.status, 200, response.data);
-    const sent = await waitFor(async () => {
-      const bodies = (await readCapturesAfter(cursor))
-        .filter((call) => call.url.includes('graph.facebook.com') && call.requestBody !== null)
-        .map(
-          (call) =>
-            JSON.parse(call.requestBody!) as {
-              to?: string;
-              type?: string;
-              reaction?: { message_id?: string; emoji?: string };
-              text?: { body?: string };
-              context?: { message_id?: string };
-            }
-        )
-        .filter((body) => body.to === wa);
-      return bodies.some((body) => body.text?.body === reply) ? bodies : null;
-    });
-    assertEqual(sent.length, 2, 'one reaction and one reply');
-    assertEqual(sent[0].type, 'reaction', 'first outbound is a native reaction');
-    assertEqual(sent[0].reaction?.message_id, messageId, 'reaction targets this inbound');
-    assertEqual(sent[0].reaction?.emoji, '👩🏽‍💻', 'model-selected compound emoji is preserved');
-    assertEqual(sent[1].text?.body, reply, 'answer follows reaction');
-    assertEqual(sent[1].context?.message_id, messageId, 'answer quotes the selected user message');
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
-async function testInbound_quotesEarlierIncomingAndSentMessages() {
-  for (const role of ['user', 'assistant'] as const) {
-    const wa = uniqueWaNumber();
-    const userId = await provisionUserWithPhone(prisma, `+${wa}`);
-    const earlierId = `wamid.earlier.${role}.${wa}`;
-    const currentId = `wamid.current.${wa}`;
-    const reply = `Reply quoting earlier ${role} message`;
-    try {
-      if (role === 'user') await recordInboundSms(userId, 'Earlier question', earlierId);
-      else await appendOutboundSms(userId, 'Earlier answer', earlierId);
-      const context = await buildSmsContext(userId);
-      if (!context.contextUserMessage.includes(earlierId))
-        throw new Error('Reply target ID missing from agent context');
-      await setFixtureOverride(
-        userId,
-        JSON.stringify({
-          reaction_emoji: '🤔',
-          reasoning: 'Quote the earlier message.',
-          tool_calls: [
-            {
-              tool: 'send_user_message',
-              arguments: { message: reply, reply_to_message_id: earlierId },
-            },
-            { tool: 'attempt_completion', arguments: {} },
-          ],
-        })
-      );
-      const probe = await request(`${BASE_URL}/api/test/captures`);
-      assertStatus(probe.status, 200, probe.data);
-      const cursor = (probe.data as { nextId: number }).nextId - 1;
-      const response = await request(`${BASE_URL}/api/whatsapp/webhook`, {
-        method: 'POST',
-        body: JSON.stringify(inboundPayload(wa, 'reply to that earlier message', currentId)),
-      });
-      assertStatus(response.status, 200, response.data);
-      const quoted = await waitFor(async () => {
-        const bodies = (await readCapturesAfter(cursor))
-          .filter((call) => call.url.includes('graph.facebook.com') && call.requestBody !== null)
-          .map(
-            (call) =>
-              JSON.parse(call.requestBody!) as {
-                to?: string;
-                text?: { body?: string };
-                context?: { message_id?: string };
-              }
-          );
-        return bodies.find((body) => body.to === wa && body.text?.body === reply);
-      });
-      assertEqual(quoted.context?.message_id, earlierId, 'quotes the selected earlier message');
-      await waitFor(async () => {
-        const session = await prisma.smsSession.findUnique({ where: { userId } });
-        const messages = parseSmsSessionMessages(session?.messages);
-        return messages.some((message) => message.providerMessageId === currentId) &&
-          messages.some((message) => message.content === reply)
-          ? true
-          : null;
-      });
-    } finally {
-      await cleanupAgentScopedUser(prisma, userId);
-    }
-  }
-}
-
 // ==================== invariants on verification endpoint ====================
 
 async function testConcurrency_parallelVerify() {
@@ -561,61 +548,103 @@ async function testConcurrency_parallelVerify() {
 
 // ==================== RUN ====================
 
+const mediaParsingTests = [
+  { name: 'unit -- parseWhatsAppInbound text compatibility', fn: testUnit_parseInbound_text },
+  { name: 'unit -- parseWhatsAppInbound status-only', fn: testUnit_parseInbound_statusOnly },
+  { name: 'media -- image caption preserved', fn: testUnit_parseInbound_imageCaption },
+  {
+    name: 'media -- image without caption retained',
+    fn: testUnit_parseInbound_imageWithoutCaption,
+  },
+  { name: 'media -- voice note without text retained', fn: testUnit_parseInbound_voiceWithoutText },
+  { name: 'media -- invalid media IDs rejected', fn: testUnit_parseInbound_invalidMediaId },
+  { name: 'media -- unsupported type rejected', fn: testUnit_parseInbound_unsupportedType },
+  {
+    name: 'media -- mixed batch retains text, images, and audio',
+    fn: testUnit_parseInbound_mixedBatch,
+  },
+];
+
 async function runAll() {
+  const parseMediaOnly = process.argv.includes('--parse-media-only');
+  const mediaProcessingOnly = process.argv.includes('--media-processing-only');
+  const focused = parseMediaOnly || mediaProcessingOnly;
   console.log('WhatsApp Webhook Black-box Tests\n');
-  console.log(`Testing against: ${BASE_URL}`);
+  console.log(
+    focused ? 'Testing media without DB/server or live providers' : `Testing against: ${BASE_URL}`
+  );
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
-  const parallelTests = [
-    // pure-function coverage (no server needed, safe to parallelize)
-    { name: 'unit -- normalizeWaId', fn: testUnit_normalizeWaId },
-    { name: 'unit -- verifyMetaSignature accepts valid', fn: testUnit_verifyMetaSignature_valid },
-    {
-      name: 'unit -- verifyMetaSignature rejects tampered/bad',
-      fn: testUnit_verifyMetaSignature_rejects,
-    },
-    { name: 'unit -- resolveWebhookVerification', fn: testUnit_resolveWebhookVerification },
-    { name: 'unit -- parseWhatsAppInbound text', fn: testUnit_parseInbound_text },
-    { name: 'unit -- parseWhatsAppInbound status-only', fn: testUnit_parseInbound_statusOnly },
-    { name: 'unit -- parseWhatsAppInbound non-text', fn: testUnit_parseInbound_nonText },
-    // GET verification
-    {
-      name: 'GET /whatsapp/webhook -- correct token echoes challenge',
-      fn: testVerify_correctTokenEchoesChallenge,
-    },
-    { name: 'GET /whatsapp/webhook -- wrong token -> 403', fn: testVerify_wrongTokenForbidden },
-    { name: 'GET /whatsapp/webhook -- wrong mode -> 403', fn: testVerify_wrongModeForbidden },
-    // POST acknowledge-only paths (no provisioning)
-    {
-      name: 'POST /whatsapp/webhook -- status-only receipt acknowledged',
-      fn: testInbound_statusOnlyAcknowledgedNotRouted,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- non-text acknowledged, not provisioned',
-      fn: testInbound_nonTextAcknowledged,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- malformed acknowledged',
-      fn: testInbound_malformedAcknowledged,
-    },
-    // invariants
-    { name: 'concurrency -- 10 parallel verifies consistent', fn: testConcurrency_parallelVerify },
-  ];
+  const parallelTests = mediaProcessingOnly
+    ? []
+    : parseMediaOnly
+      ? mediaParsingTests
+      : [
+          // pure-function coverage (no server needed, safe to parallelize)
+          { name: 'unit -- normalizeWaId', fn: testUnit_normalizeWaId },
+          {
+            name: 'unit -- verifyMetaSignature accepts valid',
+            fn: testUnit_verifyMetaSignature_valid,
+          },
+          {
+            name: 'unit -- verifyMetaSignature rejects tampered/bad',
+            fn: testUnit_verifyMetaSignature_rejects,
+          },
+          { name: 'unit -- resolveWebhookVerification', fn: testUnit_resolveWebhookVerification },
+          ...mediaParsingTests,
+          // GET verification
+          {
+            name: 'GET /whatsapp/webhook -- correct token echoes challenge',
+            fn: testVerify_correctTokenEchoesChallenge,
+          },
+          {
+            name: 'GET /whatsapp/webhook -- wrong token -> 403',
+            fn: testVerify_wrongTokenForbidden,
+          },
+          { name: 'GET /whatsapp/webhook -- wrong mode -> 403', fn: testVerify_wrongModeForbidden },
+          // POST acknowledge-only paths (no provisioning)
+          {
+            name: 'POST /whatsapp/webhook -- status-only receipt acknowledged',
+            fn: testInbound_statusOnlyAcknowledgedNotRouted,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- unsupported type acknowledged, not provisioned',
+            fn: testInbound_unsupportedTypeAcknowledged,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- malformed acknowledged',
+            fn: testInbound_malformedAcknowledged,
+          },
+          // invariants
+          {
+            name: 'concurrency -- 10 parallel verifies consistent',
+            fn: testConcurrency_parallelVerify,
+          },
+        ];
 
-  const sequentialTests = [
-    {
-      name: 'POST /whatsapp/webhook -- quote earlier incoming and sent messages',
-      fn: testInbound_quotesEarlierIncomingAndSentMessages,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- native reaction precedes reply',
-      fn: testInbound_reactionPrecedesReply,
-    },
-    {
-      name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',
-      fn: testInbound_newNumberProvisionsAndRoutes,
-    },
-  ];
+  const sequentialTests = parseMediaOnly
+    ? []
+    : mediaProcessingOnly
+      ? mediaProcessingTests
+      : [
+          ...mediaProcessingTests,
+          {
+            name: 'POST /whatsapp/webhook -- media-only persists, routes, and deduplicates',
+            fn: () => testInbound_mediaOnlyPersistsRoutesAndDeduplicates(prisma),
+          },
+          {
+            name: 'POST /whatsapp/webhook -- quote earlier incoming and sent messages',
+            fn: testInbound_quotesEarlierIncomingAndSentMessages,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- native reaction precedes reply',
+            fn: testInbound_reactionPrecedesReply,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',
+            fn: testInbound_newNumberProvisionsAndRoutes,
+          },
+        ];
 
   console.log(
     `Running ${parallelTests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`

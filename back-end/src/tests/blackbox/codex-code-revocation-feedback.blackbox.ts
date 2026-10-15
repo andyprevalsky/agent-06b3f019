@@ -14,7 +14,7 @@ async function main() {
     accountId: '',
   };
   const captured =
-    '401 token_revoked\nrefresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\nYou have no credits remaining.';
+    '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\nYou have no credits remaining.';
   const failures: string[] = [];
   try {
     for (const source of ['user', 'pool']) {
@@ -25,6 +25,15 @@ async function main() {
         'empty-feedback',
         'quota',
         'funded-only',
+        'turn-failed',
+        'bare-refresh',
+        'structured-reversed',
+        'unknown-auth',
+        'google-auth',
+        'application-auth',
+        'command-auth',
+        'agent-prose',
+        'quota-auth',
       ]) {
         try {
           await prisma.integration.deleteMany({ where: sharedWhere });
@@ -76,7 +85,10 @@ async function main() {
             feedback = [
               { source: 'oauth', reason: 'usage_limit_reached' },
               { source: 'oauth', reason: 'oauth_refresh_invalid' },
-              { source: 'funded_api_key', reason: 'You have no credits remaining.' },
+              {
+                source: 'funded_api_key',
+                reason: 'You have no credits remaining.',
+              },
             ];
           } else if (mode === 'initial') {
             output = 'Terminal snapshot';
@@ -88,25 +100,65 @@ async function main() {
           else if (mode === 'quota') {
             output = 'CODEX_E2B_DONE';
             feedback = [
-              { source: 'oauth', reason: 'Quota exceeded. Check your plan and billing details.' },
+              {
+                source: 'oauth',
+                reason: 'Quota exceeded. Check your plan and billing details.',
+              },
             ];
           } else if (mode === 'funded-only') {
             output = '401 token_revoked';
             feedback = [{ source: 'funded_api_key', reason: 'token_revoked' }];
           }
+          if (mode === 'turn-failed') output = '[Codex] Turn failed: refresh_token_invalidated';
+          else if (mode === 'bare-refresh') output = 'oauth_refresh_invalid';
+          else if (mode === 'structured-reversed') {
+            output = 'Terminal snapshot';
+            feedback = [
+              { source: 'oauth', reason: 'oauth_refresh_invalid' },
+              { source: 'oauth', reason: 'usage_limit_reached' },
+            ];
+          } else if (mode === 'unknown-auth')
+            output = 'Example invalid_grant: your session has ended';
+          else if (mode === 'google-auth') output = 'Google OAuth refresh failed: invalid_grant';
+          else if (mode === 'application-auth') output = 'HTTP401 token_revoked';
+          else if (mode === 'command-auth') {
+            output =
+              '[Codex command output]\nHTTP401 token_revoked\n[Codex] Error: invalid_grant\n[Codex exit_code] 1';
+          } else if (mode === 'agent-prose')
+            output = '[Codex] Investigated invalid_grant and HTTP401 token_revoked';
+          else if (mode === 'quota-auth')
+            output = 'usage_limit_reached\nGoogle OAuth refresh failed: invalid_grant';
+          const healthy = [
+            'funded-only',
+            'unknown-auth',
+            'google-auth',
+            'application-auth',
+            'command-auth',
+            'agent-prose',
+          ].includes(mode);
+          const quota = mode === 'quota' || mode === 'quota-auth';
+          const funded = ['plain', 'structured', 'initial', 'empty-feedback'].includes(mode);
           await persistOutput(taskId, output, feedback);
-          const actual = await prisma.integration.findUniqueOrThrow({ where: { id: selected.id } });
-          const connection = await prisma.computeAccountConnection.findUniqueOrThrow({
-            where: { userId_provider_accountId: { userId, provider: 'codex', accountId } },
+          const actual = await prisma.integration.findUniqueOrThrow({
+            where: { id: selected.id },
           });
-          if (mode === 'quota') {
+          const connection = await prisma.computeAccountConnection.findUniqueOrThrow({
+            where: {
+              userId_provider_accountId: {
+                userId,
+                provider: 'codex',
+                accountId,
+              },
+            },
+          });
+          if (quota) {
             assert.equal(actual.status, 'CONNECTED');
             assert.equal(connection.state, 'connected');
             assert.ok(
               actual.rateLimitedUntil && actual.rateLimitedUntil > new Date(),
               'temporary quota stays a cooldown'
             );
-          } else if (mode === 'funded-only') {
+          } else if (healthy) {
             assert.equal(
               actual.status,
               'CONNECTED',
@@ -134,15 +186,17 @@ async function main() {
               null,
               'revocation remains a hard smoke failure'
             );
-            const cooldown = await prisma.integration.findUnique({
-              where: { userId_name_accountId: sharedWhere },
-            });
-            assert.ok(
-              cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil > new Date(),
-              'funded exhaustion still cools shared key'
-            );
+            if (funded) {
+              const cooldown = await prisma.integration.findUnique({
+                where: { userId_name_accountId: sharedWhere },
+              });
+              assert.ok(
+                cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil > new Date(),
+                'funded exhaustion still cools shared key'
+              );
+            }
           }
-          if (mode === 'quota' || mode === 'funded-only') {
+          if (!funded) {
             assert.equal(
               await prisma.integration.findUnique({
                 where: { userId_name_accountId: sharedWhere },
@@ -151,7 +205,14 @@ async function main() {
               'no funded quota event means no shared-key cooldown'
             );
           }
-          const untouched = await prisma.integration.findUniqueOrThrow({ where: { id: other.id } });
+          if (healthy || quota) {
+            assert.equal(actual.isActive, true);
+            assert.equal(actual.failureReason, null);
+            assert.equal(connection.lastErrorReason, null);
+          }
+          const untouched = await prisma.integration.findUniqueOrThrow({
+            where: { id: other.id },
+          });
           assert.equal(untouched.status, 'CONNECTED');
           assert.equal(untouched.isActive, true);
           assert.equal(untouched.rateLimitedUntil, null);
@@ -183,9 +244,12 @@ async function main() {
       where: {
         sandboxId: { startsWith: 'offline-revocation-' },
         claudeTokenIntegrationId: {
-          in: (await prisma.integration.findMany({ where: { userId }, select: { id: true } })).map(
-            (row) => row.id
-          ),
+          in: (
+            await prisma.integration.findMany({
+              where: { userId },
+              select: { id: true },
+            })
+          ).map((row) => row.id),
         },
       },
     });

@@ -26,6 +26,7 @@ export async function reactToInboundMessage(
     inboundAlreadyPersisted?: boolean;
     mySeq: number;
     trigger?: 'inbound' | 'scheduled';
+    abortSignal?: AbortSignal;
   },
   computeToken: SupervisorComputeToken | null = null
 ) {
@@ -65,9 +66,12 @@ export async function reactToInboundMessage(
         }
         return selected;
       },
-      { attempts: 3, baseDelayMs: 400 }
+      { attempts: 3, baseDelayMs: 400, signal: config.abortSignal }
     );
     toolCall.arguments = { emoji };
+    if (config.abortSignal?.aborted) {
+      throw config.abortSignal.reason ?? new Error('Reaction selection aborted');
+    }
     if (config.channel !== 'WHATSAPP') {
       return {
         tool: toolCall.tool,

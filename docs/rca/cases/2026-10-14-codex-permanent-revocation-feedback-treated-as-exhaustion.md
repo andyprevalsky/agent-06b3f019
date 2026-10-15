@@ -151,3 +151,52 @@ blackbox domain as permanent regression registration.
 ## Reusable lesson
 
 Preserve permanent-versus-temporary failure kind and selected credential identity when feeding sandbox authentication errors back into integration and account connection health.
+
+
+## October 15 PR1520 cycle1: raw terminal revocation needs source attribution
+
+The owning regression now proves this correction against the actual service and local database. The complete deployment gates remain separate.
+Official comment 4277658886 identified that `isRevoked` classified every terminal
+line as an attributed 401 body. Plain invalid_grant, Google OAuth failures and
+application HTTP401 token_revoked therefore expired the selected ChatGPT grant.
+The first bad boundary is the raw terminal compatibility reader, not structured
+credential feedback or the canonical exact-selected expiry/sync handler.
+
+The isolated proof executes the actual current/draft decision function, real
+classifier and fake persistence boundaries. `node
+.context/pr1520-cycle1-draft/proof.cjs` records current false expiry and proposed
+healthy/cooldown outcomes without DB writes. The complete historical session
+6303ae33-d6ca-4b11-b3fe-a02fad90b1b0 was SELECTed from explicit local Victoria in a
+READ ONLY transaction and retained privately mode0600. Its 5805 characters/5807
+bytes hash to b3321937f08d255920ee5f86378548b7e1c9614e13ec66c2a459b9113368406e.
+`node .context/pr1520-cycle1-draft/historical-proof.cjs` passes: exact-selected
+expiry plus funded cooldown; existing credit skip remains null. No private
+output is printed and no live integration is mutated by this proof.
+
+The implementation recognizes native [Codex] Error:/Turn failed: diagnostics outside
+command-output blocks, exact whole-output oauth_refresh_invalid, and anchored
+Codex login auth ERROR refresh diagnostics (required by the historical output).
+Producer references: ws-server.mjs renderCodexJsonLine lines164/176,229/230 and
+stderr append line566; native tracing analog is
+codex/codex-rs/login/src/auth/manager.rs:1657. It carries oauthRevoked explicitly
+rather than reclassifying full raw quota text downstream. Structured source
+feedback remains unchanged; revocation retains precedence over quota. Arbitrary
+unframed legacy prose no longer authorizes permanent retirement. Flat terminal
+text cannot cryptographically defeat intentionally forged boundary/prose text;
+no such stronger guarantee is claimed.
+
+The permanent cases extend the existing discovered codex-code feedback
+suite, with 15 finite modes across user/pool, real service+DB behavior and all
+existing selected-owner, unrelated-account and cleanup assertions intact. The
+original representative raw fixture gains native producer framing, preserving
+its exact expiry assertions rather than pretending arbitrary 401 prose has
+source authority. Structured precedence both orders, bare sentinel, native
+Turn failed, Google/application/command/prose negatives and quota+unrelated auth
+are retained. The same permanent regression command produced 18 passes / 12 failures before the implementation, then 30 passes / zero failures afterward. Logs are `.context/deploy-review-auth-before.log` and `deploy-review-auth-after.log`. The database assertions verify exact-account state, connection synchronization, unrelated accounts, cooldowns and cleanup. The isolated VM proof remains separately scoped; no full deployment success is claimed here.
+
+Human feedback: the parent required immutable source during Group4, explicit
+quota-plus-unrelated-auth negative coverage, full historical-output proof and
+producer attribution rather than generic auth-word matching. Deployment was
+user-authorized; these are delegated repair constraints. Comment4277658891's
+claim that a physically missing row remains active is invalid; warning optional,
+no credential fallback is warranted.
