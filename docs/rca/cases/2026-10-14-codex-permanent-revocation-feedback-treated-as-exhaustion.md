@@ -88,8 +88,7 @@ existing compute failure classifier, and recognizes the sandbox's existing
 `oauth_refresh_invalid` structured reason. It routes those failures through
 canonical scoped auth_error handling using the selected credential owner's
 user/account and exact integration ID. Plain terminal segments remain separated
-at the existing OAuth-to-funded fallback marker. Explicit empty structured
-feedback falls back to retained output rather than hiding known revocation.
+at the existing OAuth-to-funded fallback marker. Supplied structured feedback is authoritative, including an empty list; legacy terminal parsing applies only when the field is omitted.
 Within structured OAuth feedback, revocation takes precedence over an earlier
 temporary quota reason. Real quota retains its existing temporary cooldown.
 Funded quota retains shared-key cooldown, with the captured no-credits wording
@@ -108,7 +107,7 @@ Identical pre/post command, from repository root:
 cd back-end && DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria node --import tsx src/tests/blackbox/codex-code-revocation-feedback.blackbox.ts
 ```
 
-Before: exit 1, 10 failures and two passing quota controls. Plain, structured,
+The initial twelve-case regression, before the review refinements below, observed: exit 1, 10 failures and two passing quota controls. Plain, structured,
 initial and empty-feedback modes for both sources each reported captured
 permanent revocation with actual CONNECTED versus expected EXPIRED. Both
 funded-only negative controls also detected an unwarranted quota cooldown.
@@ -200,3 +199,22 @@ producer attribution rather than generic auth-word matching. Deployment was
 user-authorized; these are delegated repair constraints. Comment4277658891's
 claim that a physically missing row remains active is invalid; warning optional,
 no credential fallback is warranted.
+
+
+### Structured metadata remains authoritative
+
+The current worker always supplies its structured event list, and the original
+main implementation treated an explicit empty list as no observed failures.
+Retaining that contract prevents an ordinary agent message beginning
+`[Codex] Error:` from overriding the actual event metadata. Only callers that
+omit the field use the bounded legacy terminal reader. No producer or agent
+runtime changes were needed.
+
+The permanent suite now has 16 modes across both credential sources (32 cases).
+Before restoring this boundary it had 28 passes and four failures: explicit
+empty feedback and diagnostic-looking agent prose expired both selected user
+and pooled credentials. The unchanged command then passed all 32 cases, with
+all positive revocation, quota and ownership assertions retained. Proof is
+`.context/deploy-review-structured-before.log` and
+`.context/deploy-review-structured-after.log`. The complete historical raw
+failure remains expiry plus funded cooldown, with credit-skip null.

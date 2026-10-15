@@ -229,6 +229,8 @@ async function detectAndMarkCodexExhaustion(
   output: string,
   credentialFeedback?: CodexCredentialFeedback[]
 ): Promise<void> {
+  // A supplied structured list is authoritative, including no observed failures.
+  if (credentialFeedback?.length === 0) return;
   const exhaustionPattern =
     /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing/i;
 
@@ -245,7 +247,7 @@ async function detectAndMarkCodexExhaustion(
   const fundingPattern =
     /no credits remaining|add credits to continue|credit_balance_exhausted|credit balance is too low/i;
 
-  if (credentialFeedback !== undefined && credentialFeedback.length > 0) {
+  if (credentialFeedback !== undefined) {
     for (const feedback of credentialFeedback) {
       if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
         const revoked = isRevokedCodexOAuth(feedback.reason);

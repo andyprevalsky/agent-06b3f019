@@ -34,6 +34,7 @@ async function main() {
         'command-auth',
         'agent-prose',
         'quota-auth',
+        'structured-prose',
       ]) {
         try {
           await prisma.integration.deleteMany({ where: sharedWhere });
@@ -97,7 +98,10 @@ async function main() {
               { source: 'funded_api_key', reason: 'no credits remaining' },
             ];
           } else if (mode === 'empty-feedback') feedback = [];
-          else if (mode === 'quota') {
+          else if (mode === 'structured-prose') {
+            output = '[Codex] Error: invalid_grant';
+            feedback = [];
+          } else if (mode === 'quota') {
             output = 'CODEX_E2B_DONE';
             feedback = [
               {
@@ -130,6 +134,8 @@ async function main() {
             output = 'usage_limit_reached\nGoogle OAuth refresh failed: invalid_grant';
           const healthy = [
             'funded-only',
+            'empty-feedback',
+            'structured-prose',
             'unknown-auth',
             'google-auth',
             'application-auth',
@@ -137,7 +143,7 @@ async function main() {
             'agent-prose',
           ].includes(mode);
           const quota = mode === 'quota' || mode === 'quota-auth';
-          const funded = ['plain', 'structured', 'initial', 'empty-feedback'].includes(mode);
+          const funded = ['plain', 'structured', 'initial'].includes(mode);
           await persistOutput(taskId, output, feedback);
           const actual = await prisma.integration.findUniqueOrThrow({
             where: { id: selected.id },
