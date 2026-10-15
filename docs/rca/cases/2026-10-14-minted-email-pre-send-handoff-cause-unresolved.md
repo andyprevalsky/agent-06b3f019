@@ -103,3 +103,54 @@ claim. Archive only OPEN in isolated checkout, no adoption. Freedom preserved.
 ## Reusable lesson
 
 Separate an observed prerequisite divergence from its unproven cause and from downstream delivery paths that the agent never exercised.
+
+## Follow-up transport audit: replay parity qualification (2026-10-15)
+
+The six original paid decision calls, full private responses, request IDs, timings
+and usage remain unchanged. A later read-only source/serialization audit narrows
+“original-context” above: they replayed captured visible context and raw model/route,
+not a demonstrated byte-identical original HTTP request. This qualification does
+not infer a cache cause, model limitation, repair, or reason for the native handoff.
+
+Original complete_browser_use builds one system message containing an internal
+static/dynamic boundary sentinel. Its post-response dump splits that sentinel into
+two system messages. The executed replay driver passed the dump messages directly
+to collect without restoring that segmentation. Foundry's Responses builder joins
+them into identical instructions, but derives its static cache scope differently:
+original static prefix versus replay joined static+dynamic system text. Namespace
+preservation therefore did not preserve the generated provider prompt_cache_key.
+
+Pure offline actual-builder comparison using a common logical model override proves
+one difference in SOURCE-RECONSTRUCTED bodies: prompt_cache_key. Instructions, input,
+tools and all remaining generated fields match. These are not captured historical
+wire bytes; actual deployment/cooldown/endpoint state was not retained. Source dump
+hash190628c7206c35c8217c03da7dfe7d5de13a7d6ec369e62c9e67c23224fce79a unchanged.
+
+Caller temperature0.3, max_tokens2048 and seedNone above are caller settings only:
+this Foundry Responses builder emits no temperature, output-token-limit or seed
+fields. They cannot establish wire generation settings or explain variability.
+Original inner collect and replay both used dump_contextFalse; old replay changed
+skip_cache_writeFalse toTrue. Foundry does not consume that flag, though other
+fallback transports can. Same logical model/route does not prove same deployment
+or provider cache state. Mutable/prefetch message corruption was not established;
+post-response snapshots cannot independently prove what was at the HTTP send.
+No retained actual outgoing wire body was found in inspected local evidence.
+
+A corrected OFFLINE preparation driver restores the original system segmentation
+and default skip_cache_writeFalse, then compares against independent production
+browser-message construction and the actual provider body builder. It makes no
+HTTP/model/tool/inbox call. In a fixed common model/deployment placeholder context:
+
+- Expected source-derived bodySHA256:d3ee94ba97001c46edb67fd21e720d487036c6f7ea2ba706678088c088deb3fc.
+- Old dump-replay bodySHA256:a79ec64a7a520aedfd7d9cd8a82e984a03374511e35204a41e64f89b03472469.
+- Corrected body equals expected, INCLUDING provider prompt_cache_key. This repairs
+  offline replay preparation parity only, not the authentication task or its cause.
+
+Artifacts: /home/boxes/rose/.context/auth-deploy/native-replay-transport-audit/
+findings.md, serialization-comparison.json, corrected-replay-proof.json and
+old-six-preservation.json. Safe offline command:
+`agents/venv/bin/python .context/auth-deploy/native-replay-transport-audit/prepare_corrected_replay.py`.
+The driver contains no network execution; an actual paid repeat remains unauthorized.
+Read-only peer review confirmed the reconstructed-body claim and historical-wire
+limits. The case remains OPEN/unresolved; no live, runtime or active review-head
+change, cache-causality claim, repair adoption or new paid call follows.
