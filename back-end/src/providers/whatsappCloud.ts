@@ -334,7 +334,7 @@ async function postWhatsAppMessage(
 export async function sendWhatsAppMessage(
   phoneNumber: string,
   message: string,
-  options: WhatsAppArchiveOptions = {}
+  options: WhatsAppArchiveOptions & { replyToMessageId?: string } = {}
 ): Promise<WhatsAppSendResult> {
   // Meta expects the recipient in international format without a leading '+'.
   const to = phoneNumber.replace(/^\+/, '');
@@ -344,8 +344,38 @@ export async function sendWhatsAppMessage(
     to,
     type: 'text',
     text: { preview_url: false, body: message },
+    ...(options.replyToMessageId !== undefined
+      ? { context: { message_id: options.replyToMessageId } }
+      : {}),
   };
   return postWhatsAppMessage(requestBody, phoneNumber, options);
+}
+
+/** Attach an emoji to an exact inbound message using Meta's native reaction API. */
+export async function sendWhatsAppReaction(
+  phoneNumber: string,
+  messageId: string,
+  emoji: string,
+  options: WhatsAppArchiveOptions = {}
+): Promise<WhatsAppSendResult> {
+  if (messageId.trim() === '') {
+    return {
+      success: false,
+      error: 'Missing inbound WhatsApp message ID',
+      definitiveFailure: true,
+    };
+  }
+  return postWhatsAppMessage(
+    {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phoneNumber.replace(/^\+/, ''),
+      type: 'reaction',
+      reaction: { message_id: messageId, emoji },
+    },
+    phoneNumber,
+    options
+  );
 }
 
 /**

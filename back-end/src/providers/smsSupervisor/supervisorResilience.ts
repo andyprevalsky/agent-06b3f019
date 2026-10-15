@@ -10,6 +10,21 @@
 
 import type { ToolResult } from './supervisorTools';
 
+export function buildToolFailureMessage(
+  failures: readonly ToolResult[],
+  stage: 'execute' | 'commit'
+): string {
+  const failedTools = failures
+    .filter((result) => !result.success)
+    .map((result) => `${result.tool}: ${result.error || result.result || 'failed'}`);
+  const details = failedTools.length > 0 ? failedTools.join('; ') : 'unknown failure';
+  const prefix =
+    stage === 'commit'
+      ? 'I tried to finish that, but one or more actions failed while applying the changes'
+      : 'I tried to finish that, but one or more actions failed';
+  return `${prefix}: ${details}. Please try again or open Rose to check the current state.`;
+}
+
 /**
  * Retry an idempotent async op that may throw transiently, with exponential
  * backoff. Returns the first success; rethrows the last error only after every
