@@ -1,6 +1,11 @@
 /** Benchmark Hub object I/O, with Render R2 and isolated local storage. */
 
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import * as fs from 'node:fs/promises';
 import path from 'path';
 import { randomUUID } from 'node:crypto';
@@ -119,8 +124,8 @@ export async function putObject(key: string, data: string): Promise<void> {
     if (r2Configured()) {
       const versions = hubStorageVersions();
       // Preserve the first observation; failed CAS never refreshes or retries.
-      if (versions && !versions.has(key)) await getObjectStrict(key);
-      const expected = versions ? versions.get(key) : (await readRemoteObject(key, signal)).etag;
+      if (versions && !versions.has(key)) versions.set(key, await readRemoteETag(key, signal));
+      const expected = versions ? versions.get(key) : await readRemoteETag(key, signal);
       if (expected === undefined) throw new Error('Benchmark Hub write has no object observation');
       assertHubStorageOwnership();
       const response = await getS3Client().send(
@@ -161,6 +166,27 @@ function isObjectNotFound(error: unknown): boolean {
     record.name === 'NotFound' ||
     record.$metadata?.httpStatusCode === 404
   );
+}
+
+/** Observe write preconditions without downloading a previously unread bundle. */
+async function readRemoteETag(key: string, signal?: AbortSignal): Promise<string | null> {
+  try {
+    assertHubStorageOwnership();
+    const response = await getS3Client().send(
+      new HeadObjectCommand({
+        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+        Key: `${KEY_PREFIX}/${key}`,
+      }),
+      { abortSignal: signal }
+    );
+    assertHubStorageOwnership();
+    if (!response.ETag) throw new Error('Benchmark Hub read returned no ETag');
+    return response.ETag;
+  } catch (error: unknown) {
+    assertHubStorageOwnership();
+    if (isObjectNotFound(error)) return null;
+    throw error;
+  }
 }
 
 async function readRemoteObject(

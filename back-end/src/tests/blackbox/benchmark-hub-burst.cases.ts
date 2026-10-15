@@ -1,5 +1,11 @@
 /** A fleet-wide burst of terminal uploads must share catalog cycles at the single Hub writer. */
 import assert from 'node:assert/strict';
+import {
+  commitObject,
+  logicalObject,
+  objectETag,
+  type HubObjectInput,
+} from './benchmark-hub-r2.fixture';
 import { S3Client } from '@aws-sdk/client-s3';
 import { _resetForTests, loadHubAgentRunIndex, putRun } from '../../providers/benchmarkHubStore';
 
@@ -55,19 +61,25 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
   const cycleSizes: number[] = [];
   let publishedRunIds = new Set([`${prefix}-group`]);
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       if (input.Key === 'benchmark-hub/index.json') catalogReads += 1;
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
     if (input.Key === 'benchmark-hub/index.json') {
       catalogWrites += 1;
-      const entries = JSON.parse(input.Body!) as Array<{ run_id: string }>;
+      const entries = JSON.parse(logicalObject(input.Body!)) as Array<{ run_id: string }>;
       cycleSizes.push(entries.filter((run) => !publishedRunIds.has(run.run_id)).length);
       publishedRunIds = new Set(entries.map((run) => run.run_id));
     }
@@ -81,8 +93,8 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
       holderWriting.resolve();
       await releaseHolder.promise;
     }
-    objects.set(input.Key, input.Body!);
-    return {};
+    const committed = commitObject(objects, input);
+    return committed;
   };
   // The fleet's terminal shape: one released task, half with a root agent.
   const final = (i: number) => ({
@@ -149,7 +161,7 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
     assert.ok(peakBundleWrites <= 8, 'bundle publication must use at most eight lanes');
     assert.equal(activeBundleWrites, 0, 'all write lanes settle before acknowledgement');
     assert.ok(results.every((summary) => summary.live === false));
-    const index = JSON.parse(objects.get('benchmark-hub/index.json')!) as Array<{
+    const index = JSON.parse(logicalObject(objects.get('benchmark-hub/index.json')!)) as Array<{
       run_id: string;
       live: boolean;
       tasks: Array<{ status: string }>;
@@ -160,10 +172,14 @@ export async function concurrentFinalBurst(count = 40): Promise<void> {
       assert.equal(run?.live, false);
       assert.equal(run?.tasks[0]?.status, 'INFRA_ERROR');
       assert.deepEqual(
-        JSON.parse(objects.get(`benchmark-hub/runs/${prefix}-final-${i}.json`)!).tasks,
+        JSON.parse(logicalObject(objects.get(`benchmark-hub/runs/${prefix}-final-${i}.json`)!))
+          .tasks,
         final(i).tasks
       );
-      assert.equal(objects.get(`benchmark-hub/visibility/${prefix}-final-${i}.json`), 'true');
+      assert.equal(
+        logicalObject(objects.get(`benchmark-hub/visibility/${prefix}-final-${i}.json`)!),
+        'true'
+      );
     }
     assert.equal(index.find((entry) => entry.run_id === `${prefix}-group`)?.live, true);
     const agentIndex = await loadHubAgentRunIndex();

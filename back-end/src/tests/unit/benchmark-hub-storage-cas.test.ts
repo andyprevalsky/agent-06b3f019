@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test, { TestContext } from 'node:test';
 import { createHash } from 'node:crypto';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import {
   getObjectStrict,
   putObject,
@@ -41,11 +46,11 @@ function remote(t: TestContext, initial?: string, objectKey = 'index.json') {
     S3Client.prototype,
     'send',
     async (
-      command: GetObjectCommand | PutObjectCommand,
+      command: GetObjectCommand | HeadObjectCommand | PutObjectCommand,
       options?: { abortSignal?: AbortSignal }
     ) => {
       const key = command.input.Key!;
-      if (command instanceof GetObjectCommand) {
+      if (command instanceof GetObjectCommand || command instanceof HeadObjectCommand) {
         const body = objects.get(key);
         if (body === undefined) throw Object.assign(new Error('missing'), { name: 'NoSuchKey' });
         return { Body: Buffer.from(body), ETag: etag(body) };

@@ -4,6 +4,12 @@
  * fleet's queued live snapshots must not delay a final upload behind them.
  */
 import assert from 'node:assert/strict';
+import {
+  commitObject,
+  logicalObject,
+  objectETag,
+  type HubObjectInput,
+} from './benchmark-hub-r2.fixture';
 import { mock } from 'node:test';
 import { S3Client } from '@aws-sdk/client-s3';
 import { prisma } from '../../providers/database';
@@ -48,25 +54,31 @@ async function publicationRead(failIndexWrite: boolean): Promise<void> {
   const floorPublished = deferred();
   const releaseWriter = deferred();
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
     assert.equal(typeof input.Body, 'string');
     if (input.Key === 'benchmark-hub/agent-run-index.json' && failIndexWrite) {
       throw new Error('fixture index publication failed');
     }
-    objects.set(input.Key, input.Body!);
+    const committed = commitObject(objects, input);
     if (input.Key === 'benchmark-hub/agent-run-index-revision.json') {
       floorPublished.resolve();
       await releaseWriter.promise;
     }
-    return {};
+    return committed;
   };
   let writer: Promise<unknown> | undefined;
   let reader: Promise<unknown> | undefined;
@@ -207,8 +219,14 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
   const archivedBundleReads: string[] = [];
   let countingReads = true;
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       if (countingReads && input.Key.startsWith(`benchmark-hub/runs/${prefix}-`)) {
         archivedBundleReads.push(input.Key);
@@ -216,11 +234,11 @@ async function writeAfterInconsistentIndex(agentIndexDocument: 'trailing' | 'mal
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    objects.set(input.Key, input.Body!);
-    return {};
+    const committed = commitObject(objects, input);
+    return committed;
   };
   try {
     await putRun({ run_id: `${prefix}-next`, tasks: [{ agent_id: 'agent-next' }] });
@@ -295,16 +313,23 @@ async function queuedUploadAdmission(
   const bundleWrites: string[] = [];
   const publications: Array<Array<{ run_id: string; live: boolean }>> = [];
   sender.send = async (command) => {
-    const input = (command as { input: { Bucket: string; Key: string; Body?: string } }).input;
+    const input = (command as { input: HubObjectInput }).input;
     assert.equal(input.Bucket, 'offline');
+    if (command?.constructor?.name === 'HeadObjectCommand') {
+      const value = objects.get(input.Key);
+      if (value === undefined)
+        throw Object.assign(new Error('fixture absent'), { name: 'NotFound' });
+      return { ETag: objectETag(value) };
+    }
     if (command?.constructor?.name === 'GetObjectCommand') {
       const value = objects.get(input.Key);
       if (value === undefined)
         throw Object.assign(new Error('fixture absent'), { name: 'NoSuchKey' });
-      return { Body: Buffer.from(value) };
+      return { Body: Buffer.from(value), ETag: objectETag(value) };
     }
     assert.equal(command?.constructor?.name, 'PutObjectCommand');
-    if (input.Key === 'benchmark-hub/index.json') publications.push(JSON.parse(input.Body!));
+    if (input.Key === 'benchmark-hub/index.json')
+      publications.push(JSON.parse(logicalObject(input.Body!)));
     const runId = /^benchmark-hub\/runs\/(.+)\.json$/.exec(input.Key)?.[1];
     if (runId !== undefined) {
       bundleWrites.push(runId.slice(prefix.length + 1));
@@ -313,8 +338,8 @@ async function queuedUploadAdmission(
         await releaseHolder.promise;
       }
     }
-    objects.set(input.Key, input.Body!);
-    return {};
+    const committed = commitObject(objects, input);
+    return committed;
   };
   const upload = (name: string, snapshot: boolean) =>
     putRun(
@@ -361,15 +386,12 @@ async function failedReadBackoff(mode: 'error' | 'legacy' | 'stale'): Promise<vo
     reads += 1;
     if (unavailable && mode === 'error') throw new Error('fixture storage unavailable');
     const revision = unavailable ? 7 : 13;
-    return {
-      Body: Buffer.from(
-        JSON.stringify(
-          key.endsWith('-revision.json')
-            ? { version: 1, revision }
-            : { version: 1, revision, complete: !unavailable || mode !== 'legacy', agents: {} }
-        )
-      ),
-    };
+    const body = JSON.stringify(
+      key.endsWith('-revision.json')
+        ? { version: 1, revision }
+        : { version: 1, revision, complete: !unavailable || mode !== 'legacy', agents: {} }
+    );
+    return { Body: Buffer.from(body), ETag: objectETag(body) };
   });
   try {
     if (mode === 'stale') applyHubRunToResolutionCaches('ahead-replica', [], 12);
