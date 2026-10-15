@@ -176,9 +176,87 @@ async def test_credential_exchanges_keep_wire_data_but_not_captures():
     assert json.loads(get_captures()[0]["responseBody"]) == {"results": [{"name": "Ada"}]}
 
 
+async def test_local_credential_exchange_uses_real_transport_and_metadata_only_capture():
+    """Real loopback credentials stay visible as safe metadata without broad localhost capture."""
+    import httpx
+    import helpers.httpx_capture as capture
+
+    secret = "fixture-local-credential-never-record-this"
+    wire_requests = []
+    handlers = set()
+
+    async def serve(reader, writer):
+        task = asyncio.current_task()
+        handlers.add(task)
+        try:
+            raw_headers = await reader.readuntil(b"\r\n\r\n")
+            lines = raw_headers.decode().split("\r\n")
+            headers = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
+            body = await reader.readexactly(int(headers.get("Content-Length", "0")))
+            wire_requests.append((lines[0], headers, body))
+            response = json.dumps({"accessToken": secret, "refresh_token": secret}).encode()
+            writer.write(
+                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: "
+                + str(len(response)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + response
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            handlers.discard(task)
+
+    teardown_mock()
+    assert capture._mock_handler is None, "This regression must exercise the actual wrapped transport"
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    address = server.sockets[0].getsockname()
+    origin = f"http://127.0.0.1:{address[1]}"
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+            ordinary = await client.get(origin + "/health")
+            assert ordinary.status_code == 201
+            assert capture.get_captures() == [], "Ordinary local infrastructure must remain uncaptured"
+            for path in (
+                "/oauth/token",
+                "/api/integrations/lantern-people/credentials/token",
+                "/api/integrations/lantern-people/credentials/upload",
+            ):
+                capture.clear_captures()
+                payload = "refresh_token=" + secret
+                response = await client.post(
+                    origin + path + "?refresh_hint=" + secret,
+                    content=payload,
+                    headers={"Authorization": "Bearer " + secret},
+                )
+                assert response.status_code == 201
+                assert response.json()["accessToken"] == secret
+                _, received_headers, received_body = wire_requests[-1]
+                assert received_headers["Authorization"] == "Bearer " + secret
+                assert received_body.decode() == payload
+                entries = capture.get_captures()
+                assert len(entries) == 1, "A real local credential exchange must publish safe response metadata"
+                entry = entries[0]
+                assert entry["url"] == origin + path
+                assert entry["method"] == "POST" and entry["responseStatus"] == 201
+                assert entry["requestHeaders"] == {} and entry["requestBody"] is None
+                assert entry["responseBody"] is None
+                assert secret not in json.dumps(entries), "Local credentials leaked into capture"
+    finally:
+        server.close()
+        await server.wait_closed()
+        if handlers:
+            await asyncio.gather(*list(handlers))
+        teardown_mock()
+
+
 async def run_all_tests():
     print("httpx-capture blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "local_credential_exchange_metadata_real_transport",
+        test_local_credential_exchange_uses_real_transport_and_metadata_only_capture,
+    )
     await r.record_async(
         "credential_exchange_capture_privacy", test_credential_exchanges_keep_wire_data_but_not_captures
     )

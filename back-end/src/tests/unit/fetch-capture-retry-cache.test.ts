@@ -147,7 +147,76 @@ async function testCredentialExchanges(): Promise<void> {
   if (cleanupError !== undefined) throw cleanupError;
 }
 
+async function testCompletionOrderedCredentialCursor(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const previousReplay = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+  const secret = `fake-pagination-secret-${randomUUID()}`;
+  const slowUrl = `https://slow-${randomUUID()}.example.test/oauth/token?hint=${secret}`;
+  const fastUrl = `https://fast-${randomUUID()}.example.test/oauth/token?hint=${secret}`;
+  let releaseSlow: () => void = () => assert.fail('slow barrier was not initialized');
+  let signalStarted: () => void = () => assert.fail('start barrier was not initialized');
+  const slowBarrier = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  globalThis.fetch = (async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (new URL(url).hostname === '127.0.0.1') return originalFetch(input, init);
+    if (url === slowUrl) {
+      signalStarted();
+      await slowBarrier;
+    } else assert.equal(url, fastUrl);
+    return new Response(JSON.stringify({ access_token: secret }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = '0';
+  const app = express();
+  app.use('/captures', installFetchCapture());
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  assert(address !== null && typeof address === 'object');
+  const base = `http://127.0.0.1:${address.port}`;
+  let slow: Promise<Response> | undefined;
+  try {
+    await originalFetch(`${base}/captures`, { method: 'DELETE' });
+    slow = fetch(slowUrl, { method: 'POST', body: secret });
+    await started;
+    await fetch(fastUrl, { method: 'POST', body: secret });
+    const first = (await (await originalFetch(`${base}/captures`)).json()) as {
+      captures: Array<{ id: number; url: string }>;
+    };
+    assert.equal(first.captures.length, 1);
+    assert.equal(first.captures[0].url, fastUrl.split('?')[0]);
+    releaseSlow();
+    await slow;
+    const later = (await (
+      await originalFetch(`${base}/captures?after=${first.captures[0].id}`)
+    ).json()) as { captures: Array<{ id: number; url: string }> };
+    assert.deepEqual(
+      later.captures.map((entry) => entry.url),
+      [slowUrl.split('?')[0]],
+      'a late-completing credential exchange was lost after the visible capture cursor'
+    );
+    assert(later.captures[0].id > first.captures[0].id);
+    assert(!JSON.stringify([first, later]).includes(secret));
+  } finally {
+    releaseSlow();
+    await slow?.catch(() => undefined);
+    globalThis.fetch = originalFetch;
+    if (previousReplay === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = previousReplay;
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
+}
+
 async function run(): Promise<void> {
+  await testCompletionOrderedCredentialCursor();
   await testCredentialExchanges();
   assert.strictEqual(isRetryableOutboundResponseStatus(429), true);
   assert.strictEqual(isRetryableOutboundResponseStatus(500), true);

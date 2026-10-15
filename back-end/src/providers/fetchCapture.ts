@@ -273,7 +273,14 @@ class FetchReplayClient {
 
 const captures: CapturedCall[] = [];
 let nextId = 1;
+let nextRequestId = 1;
 let fsCache: NonBlockingFileCache | null = null;
+
+// Cursor IDs follow publication, so an earlier slow request cannot appear
+// behind a cursor that already observed a later, faster request.
+function publishCapture(entry: Omit<CapturedCall, 'id'>): void {
+  captures.push({ ...entry, id: nextId++ });
+}
 
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
@@ -351,10 +358,10 @@ export function installFetchCapture(): Router {
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
     // Captures are still recorded for outbound boundary assertions.
+    const id = nextRequestId++;
     if (shouldBypassOutboundReplay(url)) {
       const captureStart = Date.now();
-      const entry: CapturedCall = {
-        id: nextId++,
+      const entry: Omit<CapturedCall, 'id'> = {
         timestamp: new Date().toISOString(),
         url: credentialExchange ? credentialMetadataUrl(url) : url,
         method: resolveMethod(),
@@ -380,11 +387,10 @@ export function installFetchCapture(): Router {
         throw err;
       } finally {
         entry.durationMs = Date.now() - captureStart;
-        captures.push(entry);
+        publishCapture(entry);
       }
     }
 
-    const id = nextId++;
     const start = Date.now();
     const method = resolveMethod();
 
@@ -420,8 +426,7 @@ export function installFetchCapture(): Router {
     // real API. Pass the original request through untouched and record a
     // capture entry so boundary assertions still see the outbound call.
     if (!bodySerializable) {
-      const passthroughEntry: CapturedCall = {
-        id,
+      const passthroughEntry: Omit<CapturedCall, 'id'> = {
         timestamp: new Date().toISOString(),
         url,
         method,
@@ -438,12 +443,12 @@ export function installFetchCapture(): Router {
         const response = await originalFetch(input, init);
         passthroughEntry.durationMs = Date.now() - start;
         passthroughEntry.responseStatus = response.status;
-        captures.push(passthroughEntry);
+        publishCapture(passthroughEntry);
         return response;
       } catch (err) {
         passthroughEntry.durationMs = Date.now() - start;
         passthroughEntry.error = err instanceof Error ? err.message : String(err);
-        captures.push(passthroughEntry);
+        publishCapture(passthroughEntry);
         throw err;
       }
     }
@@ -463,8 +468,7 @@ export function installFetchCapture(): Router {
       redactedHeaders[k] = redactHeader(k, v);
     }
 
-    const entry: CapturedCall = {
-      id,
+    const entry: Omit<CapturedCall, 'id'> = {
       timestamp: new Date().toISOString(),
       url,
       method,
@@ -487,7 +491,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = response.status;
       entry.responseBody = await response.clone().text();
-      captures.push(entry);
+      publishCapture(entry);
       return response;
     }
 
@@ -505,7 +509,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = status;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status,
@@ -550,7 +554,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status: 200,
@@ -586,7 +590,7 @@ export function installFetchCapture(): Router {
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 201;
       entry.responseBody = body;
-      captures.push(entry);
+      publishCapture(entry);
 
       return new globalThis.Response(body, {
         status: 201,
@@ -604,12 +608,12 @@ export function installFetchCapture(): Router {
         const response = await originalFetch(input, init);
         entry.durationMs = Date.now() - start;
         entry.responseStatus = response.status;
-        captures.push(entry);
+        publishCapture(entry);
         return response;
       } catch (err) {
         entry.durationMs = Date.now() - start;
         entry.error = err instanceof Error ? err.message : String(err);
-        captures.push(entry);
+        publishCapture(entry);
         throw err;
       }
     }
@@ -642,14 +646,14 @@ export function installFetchCapture(): Router {
         entry.responseBody = entry.responseBody.slice(0, 2000) + '...[truncated]';
       }
 
-      captures.push(entry);
+      publishCapture(entry);
 
       // Reconstruct a Response object from the serialized data (base64 for binary).
       return responseFromSerialized(serialized);
     } catch (err) {
       entry.durationMs = Date.now() - start;
       entry.error = err instanceof Error ? err.message : String(err);
-      captures.push(entry);
+      publishCapture(entry);
       throw err;
     }
   };

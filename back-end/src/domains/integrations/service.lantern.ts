@@ -19,11 +19,23 @@ export async function uploadLanternCredentials(userId: string, encryptedCredenti
   await repo.withLanternCredentialLock(userId, async (store) => {
     const existing = await store.find();
     if (existing !== null) {
-      const old = decodeLanternConnection(
-        (existing.config as { encryptedCredentials?: unknown } | null)?.encryptedCredentials
-      );
+      let old: ReturnType<typeof decodeLanternConnection> | undefined;
+      try {
+        old = decodeLanternConnection(
+          (existing.config as { encryptedCredentials?: unknown } | null)?.encryptedCredentials
+        );
+      } catch (error) {
+        // A separately verified new grant can repair an unreadable old row. Server
+        // configuration, database and unexpected failures must still propagate.
+        if (
+          !(error instanceof LanternCredentialError) ||
+          error.status !== 400 ||
+          !['INVALID_LANTERN_ENVELOPE', 'INVALID_LANTERN_CONNECTION'].includes(error.code)
+        )
+          throw error;
+      }
       if (
-        old.connectionId === connection.connectionId &&
+        old?.connectionId === connection.connectionId &&
         (old.expiresAt > connection.expiresAt || isRefreshFence(existing.failureReason))
       ) {
         throw new LanternCredentialError(409, 'LANTERN_NEW_LOGIN_REQUIRED');
@@ -42,7 +54,6 @@ export async function uploadLanternCredentials(userId: string, encryptedCredenti
 type Integration = NonNullable<Awaited<ReturnType<typeof repo.findLanternIntegration>>>;
 
 const CLAIM_PREFIX = 'lantern_refresh_pending:';
-const CLAIM_LIFETIME_MS = 20000;
 function isRefreshFence(reason: string | null) {
   return reason === 'lantern_refresh_outcome_unknown' || reason?.startsWith(CLAIM_PREFIX) === true;
 }
@@ -51,21 +62,20 @@ function claimDeadline(reason: string | null) {
   const deadline = Number(reason.slice(CLAIM_PREFIX.length).split(':')[0]);
   return Number.isSafeInteger(deadline) ? deadline : 0;
 }
-function pendingError(reason: string | null): never {
-  if (claimDeadline(reason) > Date.now())
+async function pendingError(
+  reason: string | null,
+  isLive = repo.isLanternRefreshClaimLive
+): Promise<never> {
+  const deadline = claimDeadline(reason);
+  if (deadline > 0 && (await isLive(deadline)))
     throw new LanternCredentialError(503, 'LANTERN_REFRESH_IN_PROGRESS', { retryAfterSeconds: 1 });
   throw new LanternCredentialError(409, 'LANTERN_RECONNECT_REQUIRED');
 }
 
-function readConnection(row: Integration | null, allowPending = false) {
+function readConnection(row: Integration | null) {
   if (row === null) throw new LanternCredentialError(404, 'LANTERN_NOT_CONNECTED');
   const pending = isRefreshFence(row.failureReason);
-  if (pending && !allowPending) pendingError(row.failureReason);
-  if (
-    !row.isActive ||
-    (pending && !allowPending) ||
-    (row.status !== 'CONNECTED' && !(allowPending && pending))
-  ) {
+  if (!row.isActive || pending || row.status !== 'CONNECTED') {
     throw new LanternCredentialError(409, 'LANTERN_RECONNECT_REQUIRED');
   }
   try {
@@ -98,17 +108,22 @@ export async function getLanternToken(actorUserId: string) {
   // An explicitly selected shared owner never falls back to a personal grant.
   const userId = lanternSharedUserId() ?? actorUserId;
   const row = await repo.findLanternIntegration(userId);
-  const connection = readConnection(row, true);
+  if (
+    row !== null &&
+    (!row.isActive || (row.status !== 'CONNECTED' && !isRefreshFence(row.failureReason)))
+  )
+    throw new LanternCredentialError(409, 'LANTERN_RECONNECT_REQUIRED');
+  const version = (row?.config as { encryptedCredentials?: unknown } | null)?.encryptedCredentials;
+  const existing = staleRefreshes.get(userId);
+  if (existing !== undefined && existing.version === version) return existing.promise;
+  if (row !== null && isRefreshFence(row.failureReason)) await pendingError(row.failureReason);
+  const connection = readConnection(row);
   if (
     row?.status === 'CONNECTED' &&
     !isRefreshFence(row.failureReason) &&
     connection.expiresAt > Date.now() + 30000
   )
     return tokenResult(connection);
-  const version = (row!.config as { encryptedCredentials?: unknown }).encryptedCredentials;
-  const existing = staleRefreshes.get(userId);
-  if (existing !== undefined && existing.version === version) return existing.promise;
-  if (isRefreshFence(row!.failureReason)) pendingError(row!.failureReason);
   const refresh = refreshLanternForUser(userId).finally(() => {
     if (staleRefreshes.get(userId)?.promise === refresh) staleRefreshes.delete(userId);
   });
@@ -120,22 +135,27 @@ async function refreshLanternForUser(userId: string) {
   try {
     const claimed = await repo.withLanternCredentialLock(userId, async (store) => {
       const current = await store.find();
+      if (current !== null && isRefreshFence(current.failureReason))
+        await pendingError(current.failureReason, store.isRefreshClaimLive);
       const saved = readConnection(current);
       if (saved.expiresAt > Date.now() + 30000) return { saved, claim: null };
       const original = (current!.config as { encryptedCredentials: string }).encryptedCredentials;
-      const deadline = Date.now() + CLAIM_LIFETIME_MS;
-      const claim = `${CLAIM_PREFIX}${deadline}:${randomUUID()}`;
-      const changed = await store.markRefreshPending(current!.id, original, claim);
-      if (changed.count !== 1)
+      const changed = await store.markRefreshPending(current!.id, original, randomUUID());
+      if (changed.count !== 1 || changed.claim === undefined)
         throw new LanternCredentialError(503, 'LANTERN_CREDENTIAL_UNAVAILABLE');
-      return { saved, claim, original, id: current!.id, deadline };
+      return { saved, claim: changed.claim, original, id: current!.id };
     });
     if (claimed.claim === null) return tokenResult(claimed.saved);
-    // A delayed/ambiguous transaction commit must never dispatch after its lease.
-    if (Date.now() >= claimed.deadline!) pendingError(claimed.claim);
     try {
+      // DB time admits the exact committed claim. Subtract the entire monotonic
+      // round trip conservatively so delayed admission cannot dispatch after expiry.
+      const admissionStarted = performance.now();
+      const remainingMs = await repo.withLanternCredentialLock(userId, (store) =>
+        store.admitRefresh(claimed.id!, claimed.original!, claimed.claim!)
+      );
+      if (remainingMs <= performance.now() - admissionStarted)
+        throw new LanternCredentialError(409, 'LANTERN_RECONNECT_REQUIRED');
       const refreshed = await refreshLanternConnection(claimed.saved);
-      if (Date.now() >= claimed.deadline!) pendingError(null);
       const written = await repo.withLanternCredentialLock(userId, (store) =>
         store.finishRefresh(
           claimed.id!,

@@ -73,6 +73,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
+from providers.rose.errors import RoseAllFailed
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -3160,6 +3161,17 @@ async def call_llm_structured_streaming(
             raise
         except RoseError as exc:
             logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
+            if (
+                isinstance(exc, RoseAllFailed)
+                and not exc.step_errors
+                and _parse_failed_count >= 2
+                and _parse_failed_model in _skip_models
+            ):
+                # Validation excluded the remaining candidate. Preserve the typed
+                # output failure without retrying or changing pool eligibility.
+                raise LLMStructuredOutputError(
+                    f"No eligible Rose candidate remains after invalid {response_model.__name__} output"
+                ) from exc
             raise ValueError(f"Rose streaming failed: {exc}") from exc
         finally:
             with contextlib.suppress(Exception):

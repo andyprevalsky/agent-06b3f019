@@ -36,9 +36,20 @@ def clamp_discover_limit(limit: Any) -> int:
 
 
 def _normalize_person(row: dict[str, Any], fields: list[str] | None) -> PersonResult:
+    for key in ("reachOut", "person", "profile"):
+        if row.get(key) is not None and not isinstance(row[key], dict):
+            raise lantern_error("INVALID_RESPONSE")
     reach_out = row.get("reachOut") or {}
+    if reach_out.get("person") is not None and not isinstance(reach_out["person"], dict):
+        raise lantern_error("INVALID_RESPONSE")
     native = row.get("person") or reach_out.get("person") or row
     profile = row.get("profile") or {}
+    for container in (row, native):
+        roles_value = container.get("currentRoles")
+        if roles_value is not None and (
+            not isinstance(roles_value, list) or any(not isinstance(role, dict) for role in roles_value)
+        ):
+            raise lantern_error("INVALID_RESPONSE")
     roles = row.get("currentRoles") or native.get("currentRoles") or []
     current = roles[0] if roles else {}
     name = row.get("name") or native.get("name")

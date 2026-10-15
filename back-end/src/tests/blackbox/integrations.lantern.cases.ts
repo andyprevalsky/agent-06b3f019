@@ -168,6 +168,29 @@ export async function testLanternCredentials(): Promise<void> {
     checkData = readyCheck;
     assert.equal((await upload(connection())).status, 200);
     assert.equal(checks, 8);
+    const previousKey = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const previousPublicKey = previousKey.publicKey
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+    for (const invalidStoredEnvelope of [
+      'corrupt-stored-envelope',
+      encryptPasswordForStorage('{not valid decrypted JSON', publicKey),
+      encryptPasswordForStorage(JSON.stringify(connection()), previousPublicKey),
+    ]) {
+      await prisma.integration.update({
+        where: {
+          userId_name_accountId: { userId: users[0], name: 'lantern_people', accountId: '' },
+        },
+        data: { config: { encryptedCredentials: invalidStoredEnvelope } },
+      });
+      const reconnected = await upload({ ...connection(), connectionId: 'grant_recovered' });
+      assert.equal(
+        reconnected.status,
+        200,
+        'a new verified grant must replace a corrupt or old-key stored credential'
+      );
+      assert.equal((await upload(connection())).status, 200);
+    }
     const find = () =>
       prisma.integration.findUniqueOrThrow({
         where: {
@@ -328,6 +351,84 @@ export async function testLanternCredentials(): Promise<void> {
     ) as Record<string, unknown>;
     assert.equal(saved.refreshToken, 'lantern_rt_rotated');
     assert.equal(saved.connectionId, 'grant_fixture');
+    // An in-flight same-version refresh cannot hide a later ineligible row.
+    await stale();
+    holdRefresh = true;
+    releaseRefresh = undefined;
+    const statusOwner = token();
+    try {
+      for (let attempt = 0; releaseRefresh === undefined && attempt < 100; attempt++)
+        await delay(10);
+      assert(releaseRefresh !== undefined, 'The controlled refresh must reach HTTP');
+      const pendingRow = await find();
+      await prisma.integration.update({
+        where: { id: row.id },
+        data: { status: 'SYNC_FAILED', failureReason: null },
+      });
+      try {
+        const ineligible = await fetch(
+          `${base}/api/integrations/lantern-people/credentials/token`,
+          { headers, signal: AbortSignal.timeout(1000) }
+        );
+        assert.equal(
+          ineligible.status,
+          409,
+          'A same-version promise must not bypass an ineligible integration status'
+        );
+      } finally {
+        await prisma.integration.update({
+          where: { id: row.id },
+          data: { status: pendingRow.status, failureReason: pendingRow.failureReason },
+        });
+      }
+    } finally {
+      holdRefresh = false;
+      releaseRefresh?.();
+      assert.equal((await statusOwner).status, 200);
+    }
+    const realNow = Date.now;
+    for (const offset of [-120000, 120000]) {
+      const beforeSkewedRefresh = refreshes;
+      await prisma.integration.update({
+        where: { id: row.id },
+        data: {
+          config: {
+            encryptedCredentials: envelope({ ...connection(), expiresAt: realNow() - 600000 }),
+          },
+        },
+      });
+      try {
+        Date.now = () => realNow() + offset;
+        const skewed = await token();
+        assert.equal(skewed.status, 200, 'a timely refresh must survive application clock skew');
+        assert.equal(refreshes, beforeSkewedRefresh + 1);
+      } finally {
+        Date.now = realNow;
+      }
+    }
+    const databaseClock = await prisma.$queryRaw<{ nowMs: bigint }[]>`
+      SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS "nowMs"`;
+    const liveClaim = `lantern_refresh_pending:${Number(databaseClock[0].nowMs) + 20000}:${randomUUID()}`;
+    await prisma.integration.update({
+      where: { id: row.id },
+      data: { status: 'EXPIRED', failureReason: liveClaim },
+    });
+    const beforePendingRead = refreshes;
+    try {
+      Date.now = () => realNow() + 120000;
+      assert.equal(
+        (await token()).status,
+        503,
+        'a database-live claim must remain in progress when the application clock is ahead'
+      );
+      assert.equal(
+        refreshes,
+        beforePendingRead,
+        'a pending claim must not dispatch another refresh'
+      );
+    } finally {
+      Date.now = realNow;
+    }
     await stale();
     const beforePersistenceFailure = refreshes;
     // Only this random fixture user is constrained. Reject final persistence

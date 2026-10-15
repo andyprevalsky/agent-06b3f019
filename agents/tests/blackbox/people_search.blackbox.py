@@ -511,6 +511,49 @@ async def test_manager_reports_error():
     assert any(call["activity"] == "post_agent_message" for call in calls)
 
 
+async def test_nested_malformed_native_profiles_are_typed_nonretryable_errors():
+    """Actual activity must reject malformed nested wire values without raw Python failures."""
+    from temporalio.exceptions import ApplicationError
+
+    nullable = _people(1)[0]
+    for key in ("title", "company", "location"):
+        nullable.pop(key)
+    _setup({"people": [nullable], "generation": "fixture-nullable-generation"})
+    valid = await _run()
+    assert valid["results"][0]["name"] == nullable["name"]
+    assert valid["results"][0]["title"] is None
+    assert valid["results"][0]["company"] is None
+    assert valid["results"][0]["source"]["record_id"] == nullable["sourceRecordId"]
+    assert len(get_captured_requests()) == 1
+
+    violations = []
+    for field, value in (
+        ("person", "not-an-object"),
+        ("reachOut", "not-an-object"),
+        ("profile", "not-an-object"),
+        ("currentRoles", ["not-a-role-object"]),
+        ("currentRoles", {"title": "not-an-array"}),
+    ):
+        row = {**nullable, field: value}
+        _setup({"people": [row], "generation": "fixture-malformed-generation"})
+        failure = None
+        try:
+            await _run()
+        except Exception as error:
+            failure = error
+        if (
+            not isinstance(failure, ApplicationError)
+            or failure.type != "LanternPeopleError"
+            or not failure.non_retryable
+            or "INVALID_RESPONSE" not in str(failure)
+        ):
+            violations.append(f"{field}/{type(value).__name__}: {type(failure).__name__}: {failure}")
+        assert len(get_captured_requests()) == 1, (
+            "Malformed native payload must not trigger provider retries or fallback"
+        )
+    assert not violations, "Malformed nested profiles escaped the typed boundary: " + "; ".join(violations)
+
+
 async def run_all_tests():
     print("people-search Lantern blackbox tests:")
     result = BlackboxResult()
@@ -536,6 +579,7 @@ async def run_all_tests():
         test_errors_are_not_empty_success_or_retried,
         test_invalid_connection_stops_before_network,
         test_malformed_success_fails,
+        test_nested_malformed_native_profiles_are_typed_nonretryable_errors,
         test_manager_defaults_usage_criteria_and_entry_point,
         test_manager_reports_error,
     ):
