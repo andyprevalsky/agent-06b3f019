@@ -151,6 +151,64 @@ async def test_enrich_by_id_preserves_fields_without_contact_reveals():
     assert "attributes" not in (await _run(mode="enrich", search_options={"sourceRecordId": "record-0"}))["results"][0]
 
 
+async def test_exact_enrichment_missing_record_is_typed_error():
+    from temporalio.exceptions import ApplicationError
+
+    for options in ({"sourceRecordId": "record-missing"}, {"sourceRecordId": "record-missing", "generation": "g1"}):
+        _setup({"items": []}, operation="people_profiles_get")
+        try:
+            await _run(mode="enrich", fields=["current_title"], search_options=options)
+        except ApplicationError as error:
+            assert error.type == "LanternPeopleError"
+            assert error.non_retryable
+            assert "SOURCE_RECORD_NOT_FOUND" in str(error)
+        else:
+            raise AssertionError("Exact-ID enrichment must reject HTTP200 items[] instead of empty success")
+        calls = get_captured_requests()
+        assert len(calls) == 1, "Missing exact records must not trigger retry or discovery fallback"
+        payload = json.loads(calls[0]["requestBody"])
+        assert payload["ids"] == ["record-missing"]
+        assert payload.get("generation") == options.get("generation")
+
+
+async def test_missing_enrichment_manager_reports_error_without_query_charge():
+    from temporalio.exceptions import ApplicationError
+    from tools.people_search.handler import people_search
+
+    _setup({"items": []}, operation="people_profiles_get")
+    messages = []
+
+    async def execute(activity_fn, *args, **kwargs):
+        if activity_fn.__name__ == "people_search_activity":
+            with (
+                patch("temporalio.activity.heartbeat"),
+                patch("tools.people_search.service.load_config", return_value=_fake_config()),
+            ):
+                return await activity_fn(*kwargs["args"])
+        if activity_fn.__name__ == "post_agent_message":
+            messages.append(kwargs["args"])
+
+    try:
+        await people_search(
+            execute_activity=execute,
+            tool_call={"query": "missing person", "mode": "enrich", "source_record_id": "record-missing"},
+            tool_call_id="missing-enrich",
+            agent_id="agent-missing-enrich",
+            user_id="user-1",
+        )
+    except ApplicationError as error:
+        assert "SOURCE_RECORD_NOT_FOUND" in str(error)
+        assert error.non_retryable
+    else:
+        raise AssertionError("Missing enrichment must fail before returning billable success usage")
+    assert len(get_captured_requests()) == 1
+    assert len(messages) == 2
+    assert messages[-1][3]["toolStatus"] == "ERROR"
+    assert all(message[3]["toolStatus"] != "FINISHED" for message in messages)
+    assert "SOURCE_RECORD_NOT_FOUND" in messages[-1][1]
+    assert "**Cost:** $0.0000" in messages[-1][1]
+
+
 async def test_enrich_does_not_pick_an_ambiguous_first_match():
     from temporalio.exceptions import ApplicationError
 
@@ -741,6 +799,8 @@ async def run_all_tests():
         test_limit_clamp_discover,
         test_discover_request_normalization_and_criteria,
         test_enrich_by_id_preserves_fields_without_contact_reveals,
+        test_exact_enrichment_missing_record_is_typed_error,
+        test_missing_enrichment_manager_reports_error_without_query_charge,
         test_enrich_does_not_pick_an_ambiguous_first_match,
         test_exact_enrichment_rejects_search_constraints,
         test_manager_preserves_provider_recovery_details,

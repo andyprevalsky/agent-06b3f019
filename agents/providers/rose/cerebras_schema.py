@@ -68,6 +68,8 @@ class _SchemaProjection:
         props = node.get("properties")
         if not isinstance(props, dict):
             raise ValueError("object lacks properties")
+        if any(not isinstance(key, str) for key in props):
+            raise ValueError("non-string property name")
         required = node.get("required", [])
         if not isinstance(required, list) or any(not isinstance(key, str) or key not in props for key in required):
             raise ValueError("invalid required properties")
@@ -101,6 +103,8 @@ class _SchemaProjection:
     def walk(self, node: Any, depth: int) -> dict:
         if not isinstance(node, dict) or not node:
             raise ValueError("untyped or boolean schema")
+        if any(not isinstance(key, str) for key in node):
+            raise ValueError("non-string schema keyword")
         if depth > 10:
             raise ValueError("schema nesting exceeds provider limit")
         unknown = node.keys() - _SCHEMA_KEYS - _LOCAL_CONSTRAINTS

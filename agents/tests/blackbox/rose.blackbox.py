@@ -376,6 +376,20 @@ def test_cerebras_native_tools_keep_incompatible_schemas_visible():
         {"type": "object", "additionalProperties": False, "properties": {"value": {"type": "number", **bounds}}}
         for bounds in invalid_bounds
     )
+    # Raw Python-built tool schemas reach this builder without JSON roundtrip.
+    # Invalid names must decline strict projection rather than throw TypeError.
+    for key in (1, True, None, ("tuple",)):
+        schemas.extend(
+            [
+                {"type": "object", "additionalProperties": False, "properties": {key: {"type": "string"}}},
+                {"type": "object", "additionalProperties": False, "properties": {}, key: 1, "unknown": True},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"nested": {"type": "string", key: 1, "unknown": True}},
+                },
+            ]
+        )
     supported = {
         "type": "object",
         "additionalProperties": False,
@@ -439,6 +453,47 @@ def test_cerebras_native_tools_keep_incompatible_schemas_visible():
     assert function["parameters"]["properties"]["pattern"] == {"type": "string"}
     assert function["parameters"]["required"] == ["pattern"]
     assert function["parameters"]["properties"]["nested"] == supported["properties"]["nested"]
+    assert tools == original
+
+
+async def test_cerebras_raw_schema_keys_reach_native_client():
+    """Public complete accepts raw nested dictionaries; canonical models remain valid."""
+    from copy import deepcopy
+
+    tools = [
+        {
+            "name": "raw_lookup",
+            "input_schema": {"type": "object", "properties": {1: {"type": "string"}}, "additionalProperties": False},
+        }
+    ]
+    original = deepcopy(tools)
+    requests = []
+
+    def handler(request):
+        assert request.url.host == "api.cerebras.ai", "No route fallthrough is expected"
+        body = json.loads(request.content)
+        requests.append(body)
+        assert body["tools"][0]["function"]["strict"] is False
+        # Ordinary HTTP JSON serialization already stringifies integer keys;
+        # the adapter must preserve the Python caller input, not normalize it.
+        assert body["tools"][0]["function"]["parameters"] == json.loads(json.dumps(original[0]["input_schema"]))
+        return httpx.Response(
+            200,
+            text="\n".join(_openai_sse([{"choices": [{"delta": {"content": "native"}, "finish_reason": "stop"}]}])),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-key-shape", "ROSE_FAST_CACHE_MODE": "off"}):
+        chunks = await _drain(
+            RoseClient(openrouter_key="offline-unused").complete(
+                pool="rose-1-flash",
+                messages=[{"role": "user", "content": "lookup"}],
+                tools=tools,
+            )
+        )
+    assert len(requests) == 1
+    assert any(chunk.kind == "content" and chunk.data.get("text") == "native" for chunk in chunks)
     assert tools == original
 
 
@@ -8388,6 +8443,7 @@ async def run_all_tests():
     r.record("pool_registry_lookup", test_pool_registry_lookup)
     r.record("cerebras_native_tools_enforce_shapes", test_cerebras_native_tools_enforce_representable_shapes)
     r.record("cerebras_native_tools_incompatible_visible", test_cerebras_native_tools_keep_incompatible_schemas_visible)
+    await r.record_async("cerebras_raw_schema_keys_native_client", test_cerebras_raw_schema_keys_reach_native_client)
     await r.record_async("cerebras_mixed_toolset_contract", test_cerebras_mixed_toolset_uses_valid_request_contract)
     await r.record_async(
         "cerebras_strict_native_parser_retry", test_cerebras_strict_native_response_retains_parser_retry

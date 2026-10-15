@@ -187,6 +187,8 @@ async def execute_people_search(
     rows = data.get("items" if operation == "people_profiles_get" else "people")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise lantern_error("INVALID_RESPONSE")
+    if mode == "enrich" and not rows:
+        raise lantern_error("SOURCE_RECORD_NOT_FOUND")
     if mode == "enrich" and len(rows) > 1:
         raise lantern_error(
             "PERSON_RESOLUTION_REQUIRED", {"hint": "Discover candidates, then enrich with source_record_id."}
