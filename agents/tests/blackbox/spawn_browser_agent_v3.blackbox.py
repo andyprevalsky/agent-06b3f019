@@ -21968,10 +21968,11 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
         await on_step(env)
         return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
 
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     resume_mock = AsyncMock()
     close_mock = AsyncMock()
     patch_targets = [
-        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
