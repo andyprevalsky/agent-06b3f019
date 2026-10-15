@@ -776,9 +776,10 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
   }
 
   const send = extracted.tools.find((tool) => tool.name === 'send_user_message');
-  const sendArgs = (
-    (send?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
-  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const sendArgs = send?.input_schema as {
+    properties: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
   const replyTarget = sendArgs.properties.reply_to_message_id;
   assertEqual(replyTarget.type, 'string', 'native reply target remains a string');
   assert(

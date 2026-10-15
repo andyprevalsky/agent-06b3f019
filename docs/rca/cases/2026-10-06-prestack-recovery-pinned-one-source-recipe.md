@@ -420,3 +420,23 @@ had authenticated clean receipts and the local root had retired. Dirty-candidate
 qualification was never claimed. Committed-source positives, mutation inverses
 and fresh full R11 verification are still mandatory. Private audit evidence is
 `.context/r11-absent-container-audit/`; it is not a deployment PASS.
+
+### October 15 PR1473 source composition after current main integration
+
+The integrated source at `cea52afef` combines reviewed main cleanup with the
+previously reviewed PR1473 frontend coverage command. A non-author reconstructed
+all 40 executable bindings independently. Relative to reviewed `2fc56aea`, 39
+match exactly; only the entire frontend package manifest differs, and it is
+byte-identical to the reviewed `a6a1b58b` manifest. Relative to `a6a1b58b`, 39
+match and the sole changed entire `run.sh` matches `2fc56aea`. Phase and provenance
+validators remain byte-identical across both reviewed parents.
+
+The finite composite fingerprint
+`c6039c4e1d631c58df5999dbc5b9fc645e1984af337802ab32117465471b63dd`
+is independently countersigned only for `before-stack-launch` and
+`agent-network-index-bootstrap`. No later phase, wildcard, validator or receipt
+exception is added. The original three unregistered-source gate failures remain
+failed; fresh owning checks are required after this registration. The private
+audit retains the complete binding comparisons and independent reconstruction;
+its 121 archived files passed hash read-back. This source registration grants no
+benchmark acceptance credit.
