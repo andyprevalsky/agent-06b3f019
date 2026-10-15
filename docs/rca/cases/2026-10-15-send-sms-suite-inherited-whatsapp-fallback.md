@@ -4,12 +4,17 @@ date: 2026-10-15
 title: SMS error assertions inherited WhatsApp fallback from the canonical user
 surface: infra
 component: backend-blackbox
-classification: fixture-environment-data-mismatch
+classification: test-bug
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: send-sms.blackbox.ts selected a canonical user whose WhatsApp fallback was enabled
 symptoms:
   - SMS provider rejection assertions expected HTTP 500 but observed HTTP 200
   - two of sixty-two send-sms cases failed
+tags:
+  - sms
+  - blackbox
+  - fixtures
+  - whatsapp
 sources:
   - commit 0118ea315c327471d761d3939a715fc4c5a1eb9c
 repro: back-end/src/tests/blackbox/send-sms.blackbox.ts
