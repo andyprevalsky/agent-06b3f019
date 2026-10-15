@@ -4617,6 +4617,10 @@ def test_demo_replay_namespace_rejects_live_write_through(monkeypatch):
     class _Response:
         status_code = 200
 
+        @staticmethod
+        def json():
+            return {"ok": True, "stored": True}
+
     class _Recorder:
         async def post(self, url, **kwargs):
             posts.append(kwargs["json"]["key"])
