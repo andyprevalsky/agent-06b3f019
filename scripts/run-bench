@@ -256,6 +256,7 @@ Startup reuse:
   --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
                       runs automatically claim and return this workspace pool.
                       Stopped Machines retain billable volume storage.
+  --cold-primary-bootstrap  Explicit future empty-checkout policy for verified cold primaries.
   --reuse-pool-only  Use eligible owned stopped primary pool IDs only; no primary
                       cloning. Additional worker admission is unchanged.
   --recover-stale-owner-to-pool TOKEN
@@ -349,7 +350,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --keep-clones|--reuse-pool-only|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)

@@ -12,6 +12,21 @@ fetch_lock_kind=""
 fetch_lock_fd=""
 fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
+# The explicit cold-primary policy is consumed by the driver's FIRST fetch.
+# Its later normal git-sync deliberately does not repeat this empty check.
+case "${CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT:-0}" in 0|1) ;; *) exit 1 ;; esac
+if [ "${CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT:-0}" = 1 ]; then
+    if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" != 1 ] \
+        || ! [[ "$REF" =~ ^[0-9a-f]{40}$ ]] \
+        || [ -L "$REPO_DIR" ] \
+        || ! python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); sys.exit(p.resolve() != p.absolute())' "$REPO_DIR" \
+        || { [ -e "$REPO_DIR" ] && { [ ! -d "$REPO_DIR" ] \
+             || [ -n "$(find "$REPO_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; }; }; then
+        echo "[cloudbench] FATAL: cold-primary first checkout requires an exact ref and absent or empty unlinked destination" >&2
+        exit 1
+    fi
+fi
+
 # Empty Fly volumes carry no Git metadata. Only an explicit REAL-primary
 # handoff may initialize a blank checkout; retained non-Git data stays intact.
 if [ ! -d "$REPO_DIR/.git" ]; then

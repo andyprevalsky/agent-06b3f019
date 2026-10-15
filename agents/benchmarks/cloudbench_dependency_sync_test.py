@@ -5142,11 +5142,14 @@ def test_fetch_ref_restores_dirty_exact_sha_after_fresh_reuse(tmp_path: Path, ch
     )
     fresh = subprocess.run(
         ["bash", str(FETCH_SCRIPT), str(repo), first],
-        env=dict(env, CLOUDBENCH_FRESH_VOLUME="1"),
+        env=dict(env, CLOUDBENCH_FRESH_VOLUME="1", CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT="1"),
         capture_output=True,
         text=True,
     )
     assert fresh.returncode == 0, fresh.stderr
+    second_sync = subprocess.run(["bash", str(FETCH_SCRIPT), str(repo), first],
+        env=dict(env, CLOUDBENCH_FRESH_VOLUME="1", CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT="0"), capture_output=True, text=True)
+    assert second_sync.returncode == 0, second_sync.stderr
     assert git(repo, "rev-parse", "--is-shallow-repository") == "true"
     assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", unused_blob], capture_output=True).returncode != 0
     (donor / "node_modules/current-package").mkdir(parents=True)
@@ -30924,7 +30927,8 @@ printf '\\nOBSERVED=%s,%s,%s\\n' "$accepted" "$SELF_MANAGED_HUB_RUN" "${{BENCHMA
     "role,rejected",
     [("primary", ""), ("worker", ""), ("worker", "deps"), ("worker", "prisma")],
 )
-def test_fresh_role_bootstraps_before_repo_writes_and_ready_work(tmp_path: Path, role: str, rejected: str) -> None:
+@pytest.mark.parametrize("cold", [False, True])
+def test_fresh_role_bootstraps_before_repo_writes_and_ready_work(tmp_path: Path, role: str, rejected: str, cold: bool) -> None:
     origin = tmp_path / "origin.git"
     author = tmp_path / "author"
     for args in (["git", "init", "--bare", str(origin)], ["git", "init", str(author)]):
@@ -30982,6 +30986,7 @@ REF={ref}
 BENCH_SIMULATE=0
 FETCH_REF_SCRIPT={shlex.quote(str(FETCH_SCRIPT))}
 CLOUDBENCH_FRESH_VOLUME=1
+CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP={1 if cold and role == "primary" else 0}
 CLOUDBENCH_GIT_MIN_FREE_KB=1
 export CLOUDBENCH_FRESH_VOLUME CLOUDBENCH_GIT_MIN_FREE_KB
 CLOUDBENCH_SYNC_DEPS_SCRIPT={shlex.quote(str(helper))}
@@ -34018,7 +34023,7 @@ recover_exact_stale_fleet_owner {owner}
     assert (registry / "meta").is_file(), "no proof failure may erase retained ownership"
 
 
-@pytest.mark.parametrize("args", [["fixture-task", "--reuse-pool-only"], ["--recover-stale-owner-to-pool", "a" * 32]])
+@pytest.mark.parametrize("args", [["fixture-task", "--reuse-pool-only"], ["--recover-stale-owner-to-pool", "a" * 32], ["fixture-task", "--reuse-pool-only", "--cold-primary-bootstrap"], ["--recover-stale-owner-to-pool", "a" * 32, "--cold-primary-bootstrap"]])
 def test_normal_cli_forwards_owned_pool_reuse_policy(tmp_path: Path, args: list[str]) -> None:
     """Exercise the ordinary launcher parser, never a provider subprocess."""
     root = tmp_path / "repo"
@@ -34094,18 +34099,28 @@ pool_native_reuse_proof abc123 cloudbench-owned vol_fixture sha256:{'e' * 64} {s
 
 
 @pytest.mark.parametrize('window', ['pending-before-release', 'released-before-seal', 'sealed-before-terminal', 'terminal-before-release'])
-def test_recovery_to_pool_retries_real_pending_transfer_windows(tmp_path: Path, window: str) -> None:
+@pytest.mark.parametrize('cold', [False, True])
+def test_recovery_to_pool_retries_real_pending_transfer_windows(tmp_path: Path, window: str, cold: bool) -> None:
     """Real planner + local claim/ledger/audit FSM resume, without any native creation."""
-    root, registry, run, _ = _owned_primary_pool_plan_fixture(tmp_path)
+    if cold:
+        root, registry, _, run, _, native, receipt = _cold_primary_phase_fixture(tmp_path)
+        machine = native['id']
+    else:
+        root, registry, run, _ = _owned_primary_pool_plan_fixture(tmp_path)
+        machine = 'abc123'
     common = root / '.git'; audit = common / 'audits' / registry.name
     claims = common / 'cloudbench-pool-claims'; claims.mkdir()
     pool = common / 'cloudbench-pools/workspace.ids'; pool.parent.mkdir()
     meta = registry / 'meta'
-    meta.write_text(meta.read_text() + 'host=same-host\npid=123\npid_start=original-boot:123\ncleanup_policy=reap\n')
+    if cold:
+        meta.write_text(meta.read_text().replace('host=fixture-host', 'host=same-host').replace('pid_start=oldboot:123', 'pid_start=original-boot:123'))
+    else:
+        meta.write_text(meta.read_text() + 'host=same-host\npid=123\npid_start=original-boot:123\ncleanup_policy=reap\n')
     fresh = audit / 'fresh/cloudbench-owned'
     fresh.write_text('version=1\n' + fresh.read_text())
-    (audit / 'meta').write_text((audit / 'meta').read_text() + 'run_id=original-run\n')
+    if not cold: (audit / 'meta').write_text((audit / 'meta').read_text() + 'run_id=original-run\n')
     functions = ''.join(_extract_fleet_function(fleet_source_text(), name + '() {') for name in (
+        'fleet_preconfig_recovery_plan', 'fleet_recovery_confirm_preconfig_cohort',
         'registry_meta_value', 'fleet_registry_cleanup_state', 'fleet_validate_reap_cohort',
         'pool_recovery_primary_plan', 'pool_publish_recovery_baseline', 'recover_registry_primaries_to_pool',
         'pool_ledger_lock_acquire', 'pool_ledger_lock_release', 'pool_ledger_record_id', 'pool_ledger_remove_id',
@@ -34122,9 +34137,14 @@ def test_recovery_to_pool_retries_real_pending_transfer_windows(tmp_path: Path, 
         'terminal-before-release': ('pool_claim_release_exact', ''),
     }[window]
     failed = tmp_path / 'injected'; actions = tmp_path / 'native-actions'
-    safe_proof = json.dumps({'version': 1, 'app': 'fixture-app', 'machine_id': 'abc123', 'name': 'cloudbench-owned', 'volume_id': 'vol_fixture', 'instance_id': 'v1', 'config_sha256': '1' * 64, 'image_digest': 'sha256:' + 'e' * 64}, sort_keys=True, separators=(',', ':'))
+    safe_proof = json.dumps({'version': 1, 'app': 'fixture-app', 'machine_id': machine, 'name': 'cloudbench-owned', 'volume_id': 'vol_fixture', 'instance_id': 'v1', 'config_sha256': '1' * 64, 'image_digest': 'sha256:' + 'e' * 64}, sort_keys=True, separators=(',', ':'))
+    safe_proof_row = json.loads(safe_proof)
+    if cold:
+        safe_proof_row['cold_bootstrap'] = dict(policy='real-empty-bootstrap-v1', registry=str(registry), output=str(run / 'task'), run_token=registry.name + '-0', receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+    safe_proof = json.dumps(safe_proof_row, sort_keys=True, separators=(',', ':'))
     result = subprocess.run(['bash', '-c', f'''set -uo pipefail
 APP=fixture-app
+POOL_COLD_BOOTSTRAP={1 if cold else 0}
 ROOT_DIR={shlex.quote(str(root))}
 GIT_COMMON_DIR={shlex.quote(str(common))}
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
@@ -34137,6 +34157,9 @@ POOL_META_FILE="$POOL_IDS_FILE.deps"
 POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
 CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}
 CLOUDBENCH_PYTHON_MANIFESTS=(requirements.txt)
+STARTUP_FAILURE_ARCHIVE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-startup-failure-archive.py"
+fleet_preconfig_native_read() {{ return 99; }}
+cloudbench_fsync_directory() {{ return 0; }}
 registry_owner_alive() {{ return 1; }}
 cloudbench_node_dependency_fingerprint() {{ printf %s {'b' * 64}; }}
 cloudbench_manifest_fingerprint() {{ printf %s {'c' * 64}; }}
@@ -34153,12 +34176,14 @@ eval "$(declare -f {target} | sed '1s/{target}/original_boundary/')"
  original_boundary "$@"
 }}
 first=0
+{'fleet_recovery_confirm_preconfig_cohort ' + shlex.quote(str(registry)) + ' || exit 89' if cold else ':'}
 recover_registry_primaries_to_pool {shlex.quote(str(registry))} || first=$?
 [ "$first" -ne 0 ] || exit 90
-[ -f "$POOL_CLAIMS_DIR/abc123" ] || exit 91
-[ "$(registry_meta_value "$POOL_CLAIMS_DIR/abc123" transfer_state)" = pending ] || exit 92
+[ -f "$POOL_CLAIMS_DIR/{machine}" ] || exit 91
+[ "$(registry_meta_value "$POOL_CLAIMS_DIR/{machine}" transfer_state)" = pending ] || exit 92
+{'fleet_recovery_confirm_preconfig_cohort ' + shlex.quote(str(registry)) + ' || exit 88' if cold else ':'}
 recover_registry_primaries_to_pool {shlex.quote(str(registry))} || exit 93
-[ ! -e "$POOL_CLAIMS_DIR/abc123" ] || exit 94
+[ ! -e "$POOL_CLAIMS_DIR/{machine}" ] || exit 94
 [ ! -e {shlex.quote(str(registry / 'clones/cloudbench-owned'))} ] || exit 95
 [ "$(registry_meta_value {shlex.quote(str(fresh))} disposition)" = transferred-to-pool-stopped ] || exit 96
 [ -f {shlex.quote(str(audit / 'pool-handoffs/cloudbench-owned'))} ] || exit 97
@@ -34166,7 +34191,7 @@ pool_source_image_digest() {{ return 99; }}
 recover_registry_primaries_to_pool {shlex.quote(str(registry))} || exit 98
 '''], text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, (window, result.returncode, result.stderr)
-    assert pool.read_text() == 'abc123\n'
+    assert pool.read_text() == machine + '\n'
     assert not actions.exists(), 'no retry may clone/create/stop/destroy a native Machine'
 
 
@@ -34325,8 +34350,8 @@ fleet_recovery_confirm_preconfig_cohort {shlex.quote(str(registry))}
     assert 'FORBIDDEN-native' not in result.stderr
 
 
-@pytest.mark.parametrize('pool_only', [False, True])
-def test_exact_owner_preconfig_entrypoint_routes_real_consumer_before_missing_proxy(tmp_path: Path, pool_only: bool) -> None:
+@pytest.mark.parametrize('pool_only,cold', [(False, False), (True, False), (True, True)])
+def test_exact_owner_preconfig_entrypoint_routes_real_consumer_before_missing_proxy(tmp_path: Path, pool_only: bool, cold: bool) -> None:
     root, registry, audit, run, out, native = _preconfig_recovery_integration_fixture(tmp_path)
     original = tmp_path / 'native.json'; original.write_text(json.dumps(native))
     actions = tmp_path / 'canonical-actions'
@@ -34344,6 +34369,7 @@ FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
 CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}
 STARTUP_FAILURE_ARCHIVE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-startup-failure-archive.py"
 RECOVER_PRIMARY_TO_POOL={1 if pool_only else 0}
+POOL_COLD_BOOTSTRAP={1 if cold else 0}
 {functions}
 registry_owner_alive() {{ return 1; }}
 release_cleanup_disk_reserve() {{ return 0; }}
@@ -34356,6 +34382,12 @@ fleet_recovery_confirm_runtime_evidence() {{ echo FORBIDDEN-fake-runtime >&2; re
 fleet_recovery_retire_one_sealed_machine() {{ return 99; }}
 fleet_recovery_confirm_pool_claims() {{ return 0; }}
 recover_registry_audit_only_fresh() {{ return 0; }}
+recover_registry_primaries_to_pool() {{
+ [ "${{POOL_COLD_BOOTSTRAP:-0}}" = 1 ] || return 99
+ [ -s {shlex.quote(str(out / 'failed-preconfig-runtime-archive/consumed.json'))} ] || return 99
+ [ ! -e {shlex.quote(str(out / 'remote-logs/runtime-evidence/run.json'))} ] || return 99
+ printf '%s\\n' cold-pool-handoff >> {shlex.quote(str(actions))}
+}}
 reap_registry_clones() {{
  [ ! -e "$1/runtime-evidence-unconfirmed" ] || return 99
  [ ! -e {shlex.quote(str(out / 'runtime-evidence.pending'))} ] || return 99
@@ -34370,14 +34402,14 @@ fleet_publish_recovered_terminal_projection() {{ return 0; }}
 FLY() {{ echo FORBIDDEN-provider >&2; return 99; }}
 recover_exact_stale_fleet_owner {registry.name}
 '''], capture_output=True, text=True, timeout=10)
-    if pool_only:
+    if pool_only and not cold:
         assert result.returncode != 0 and not actions.exists()
         assert (out / 'runtime-evidence.pending').exists()
         assert (registry / 'runtime-evidence-unconfirmed').exists()
         assert not (out / 'failed-preconfig-runtime-archive').exists(), 'refuse before any native read'
         return
     assert result.returncode == 0, result.stderr
-    assert actions.read_text().splitlines() == ['canonical-reaper']
+    assert actions.read_text().splitlines() == (['cold-pool-handoff', 'canonical-reaper'] if cold else ['canonical-reaper'])
     assert (out / 'benchmark-child.finished').read_text() == '125\n'
     assert json.loads((run / '_batch/run.json').read_text())['controller_exit_code'] == 1
     assert 'FORBIDDEN-' not in result.stderr
@@ -34432,3 +34464,179 @@ fleet_reap_registry_record_native {shlex.quote(str(registry))} forced 2 0 {shlex
         assert not mutations.exists(), 'no phase/config drift may reach ordinary provider mutation'
         assert (registry / 'clones/cloudbench-owned').exists()
     assert (out / 'benchmark-child.finished').read_text() == '125\n'
+
+
+@pytest.mark.parametrize("state", ["existing-git", "nonempty", "linked", "linked-parent", "wrong-ref", "not-fresh"])
+def test_cold_primary_first_fetch_refuses_before_any_git(tmp_path: Path, state: str) -> None:
+    """New cold policy requires a blank destination before the first fetch only."""
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    if state == 'existing-git': (repo / '.git').mkdir()
+    if state == 'nonempty': (repo / 'keep').write_text('original')
+    if state == 'linked':
+        repo.rename(tmp_path / 'original'); repo.symlink_to(tmp_path / 'original', target_is_directory=True)
+    if state == 'linked-parent':
+        real = tmp_path / 'real'; real.mkdir(); (tmp_path / 'parent').symlink_to(real, target_is_directory=True); repo = tmp_path / 'parent/repo'
+    tools = tmp_path / 'bin'; tools.mkdir()
+    calls = tmp_path / 'git-called'
+    (tools / 'git').write_text('#!/bin/sh\necho forbidden >> "$COLD_GIT_CALLS"\nexit 99\n')
+    (tools / 'git').chmod(0o755)
+    result = subprocess.run(['bash', os.environ.get('CLOUDBENCH_COLD_FETCH_UNDER_TEST', str(FETCH_SCRIPT)), str(repo), 'main' if state == 'wrong-ref' else 'a' * 40],
+        env=dict(os.environ, PATH=str(tools) + ':' + os.environ['PATH'], COLD_GIT_CALLS=str(calls),
+                 CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT='1', CLOUDBENCH_FRESH_VOLUME='0' if state == 'not-fresh' else '1'),
+        text=True, capture_output=True, timeout=5)
+    assert result.returncode != 0
+    assert not calls.exists(), result.stderr
+    if state == 'nonempty': assert (repo / 'keep').read_text() == 'original'
+
+
+def _cold_primary_phase_fixture(tmp_path: Path):
+    root, registry, audit, run, out, native = _preconfig_recovery_integration_fixture(tmp_path)
+    native['state'] = 'stopped'
+    native['config']['guest'] = {'cpu_kind': 'shared', 'cpus': 2, 'memory_mb': 4096}
+    base = out / 'failed-preconfig-runtime-archive'; base.mkdir(mode=0o700)
+    before, after = base / 'before.json', base / 'after.json'
+    before.write_text(json.dumps(native)); after.write_text(json.dumps(native))
+    helper = runpy.run_path(str(ROOT / 'scripts/cloudbench-startup-failure-archive.py'))
+    archive, receipt = base / 'originals.tar.gz', base / 'consumed.json'
+    helper['capture_preconfig'](registry, out, native['id'], registry.name + '-0', archive)
+    helper['commit_preconfig'](registry, out, native['id'], registry.name + '-0', archive, before, after, receipt)
+    (out / 'runtime-evidence.pending').unlink()
+    (registry / 'runtime-evidence-unconfirmed').unlink()
+    return root, registry, audit, run, out, native, receipt
+
+
+@pytest.mark.parametrize('fault', ['none', 'no-opt-in', 'warm-default', 'missing-receipt', 'tampered-receipt', 'version', 'config', 'image', 'retain', 'accepted'])
+def test_cold_primary_native_proof_requires_canonical_phase_and_current_pair(tmp_path: Path, fault: str) -> None:
+    root, registry, audit, run, out, native, receipt = _cold_primary_phase_fixture(tmp_path)
+    snapshot = tmp_path / 'snapshot'; snapshot.mkdir()
+    for name in ('cloudbench_execution_provenance.py', 'cloudbench-startup-failure-archive.py'):
+        (snapshot / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
+    first, second = tmp_path / 'first.json', tmp_path / 'second.json'
+    current = copy.deepcopy(native)
+    if fault == 'version': current['instance_id'] = 'foreign'
+    if fault == 'config': current['config']['metadata'] = {'external': 'change'}
+    if fault == 'image': current['config']['image'] = 'registry.example/image@sha256:' + 'e' * 64
+    first.write_text(json.dumps(native)); second.write_text(json.dumps(current))
+    if fault == 'missing-receipt': receipt.unlink()
+    if fault == 'tampered-receipt':
+        value = json.loads(receipt.read_text()); value['proof_credit'] = 1; receipt.write_text(json.dumps(value))
+    if fault == 'retain':
+        path = registry / 'meta'; path.write_text(path.read_text().replace('cleanup_policy=reap', 'cleanup_policy=retain'))
+    if fault == 'accepted': (out / 'post-config-start.accepted').touch()
+    calls = tmp_path / 'reads'
+    (snapshot / 'cloudbench-campaign-machines.py').write_text(f'''from pathlib import Path
+def fetch(app, timeout, machine):
+ p=Path({str(calls)!r}); n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1))
+ return Path({str(first)!r} if n == 0 else {str(second)!r}).read_bytes()
+''')
+    source = fleet_source_text()
+    functions = _extract_fleet_function(source, 'pool_native_reuse_proof() {')
+    result = subprocess.run(['bash', '-c', f'''set -uo pipefail
+APP=fixture-app
+POOL_COLD_BOOTSTRAP={0 if fault == 'no-opt-in' else 1}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(snapshot))}
+{functions}
+pool_native_reuse_proof {native['id']} cloudbench-owned vol_fixture {'sha256:' + 'd' * 64} {shlex.quote(str(registry))} {'""' if fault == 'warm-default' else 'initial-cold'}
+'''], capture_output=True, text=True, timeout=5)
+    assert (result.returncode == 0) == (fault == 'none'), result.stderr
+    if fault == 'none':
+        proof = json.loads(result.stdout)
+        assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
+        assert proof['cold_bootstrap']['receipt_sha256'] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+        assert proof['instance_id'] == native['instance_id']
+        assert calls.read_text() == '2'
+        assert not (out / 'remote-logs/runtime-evidence/run.json').exists()
+    assert (registry / 'clones/cloudbench-owned').exists(), 'read-only proof never transfers ownership'
+
+
+@pytest.mark.parametrize('fault', ['none', 'default', 'tamper', 'pending-runtime', 'foreign-volume'])
+def test_cold_primary_plan_consumes_phase_without_fabricating_started_runtime(tmp_path: Path, fault: str) -> None:
+    root, registry, audit, run, out, native, receipt = _cold_primary_phase_fixture(tmp_path)
+    if fault == 'tamper': receipt.write_text('{}')
+    if fault == 'pending-runtime': (out / 'runtime-evidence.pending').write_text('{}')
+    if fault == 'foreign-volume':
+        path = registry / 'clones/cloudbench-owned'; path.write_text(path.read_text().replace('vol_fixture', 'vol_foreign'))
+    function = _extract_fleet_function(fleet_source_text(), 'pool_recovery_primary_plan() {')
+    result = subprocess.run(['bash', '-c', f'''set -uo pipefail
+ROOT_DIR={shlex.quote(str(root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+APP=fixture-app
+POOL_CLAIMS_DIR={shlex.quote(str(tmp_path / 'claims'))}
+POOL_COLD_BOOTSTRAP={0 if fault == 'default' else 1}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}
+{function}
+pool_recovery_primary_plan {shlex.quote(str(registry))} {'b' * 64} {'c' * 64}
+'''], capture_output=True, text=True, timeout=5)
+    assert (result.returncode == 0) == (fault == 'none'), result.stderr
+    if fault == 'none':
+        assert result.stdout.splitlines() == ['b' * 64 + '\t' + 'c' * 64 + '\tcold-image-bootstrap', native['id'] + '\tcloudbench-owned\tvol_fixture']
+    assert not (out / 'remote-logs/runtime-evidence/run.json').exists()
+    assert not (out / 'guest-shutdown.confirmed').exists()
+
+
+@pytest.mark.parametrize('fault', ['cold', 'warm', 'miss', 'missing-intent', 'source', 'run', 'owner', 'proof', 'linked-intent', 'sim'])
+def test_cold_primary_claim_intent_is_bound_before_boot(tmp_path: Path, fault: str) -> None:
+    """Execute actual primary claim handoff and its Phase2 intent consumer."""
+    out = tmp_path / 'task'; out.mkdir()
+    common = tmp_path / 'common'; common.mkdir()
+    proofs = common / 'cloudbench-pool-reuse'; proofs.mkdir()
+    proof = proofs / 'abc123.json'
+    row = dict(machine_id='abc123', volume_id='vol_owned')
+    if fault != 'warm': row['cold_bootstrap'] = dict(policy='real-empty-bootstrap-v1')
+    proof.write_text(json.dumps(row))
+    contract = runpy.run_path(str(EXECUTION_PROVENANCE_SCRIPT))
+    matrix = tmp_path / 'matrix.json'
+    matrix.write_text(json.dumps(contract['build_task_matrix'](['task=' + ('simulate' if fault == 'sim' else 'real')])))
+    functions = ''.join(_extract_fleet_function(fleet_source_text(), name + '() {') for name in (
+        'pool_reuse_proof_file', 'primary_cold_bootstrap_requested', 'provision_primary_machine'))
+    modify = {
+        'missing-intent': 'rm "$out/cold-primary-bootstrap"',
+        'linked-intent': 'mv "$out/cold-primary-bootstrap" "$out/original"; ln -s original "$out/cold-primary-bootstrap"',
+        'source': 'BENCH_REF=' + 'f' * 40,
+        'run': 'RUN_ID=foreign', 'owner': 'FLEET_OWNER_TOKEN=' + 'f' * 32,
+        'proof': 'printf changed >> ' + shlex.quote(str(proof)),
+    }.get(fault, ':')
+    result = subprocess.run(['bash', '-c', f'''set -uo pipefail
+out={shlex.quote(str(out))}
+POOL_COLD_BOOTSTRAP=1
+POOL_REUSE_ONLY=1
+FRESH_TARGET_REGION=''
+BENCH_REF={'d' * 40}
+RUN_ID=future-run
+FLEET_OWNER_TOKEN={'a' * 32}
+EXECUTION_TASK_MATRIX_FILE={shlex.quote(str(matrix))}
+GIT_COMMON_DIR={shlex.quote(str(common))}
+primary_vm_size_for_bench() {{ printf shared-cpu-2x; }}
+primary_vm_memory_for_bench() {{ printf 4096; }}
+bench_uses_default_pool_shape() {{ return 0; }}
+claim_pool_machine() {{ {'return 0;' if fault == 'miss' else 'printf abc123;'} }}
+clone_machine_target() {{ echo FORBIDDEN-create >&2; return 99; }}
+{functions}
+provision_primary_machine task "$out" || exit 13
+{modify}
+primary_cold_bootstrap_requested "$out" abc123
+'''], capture_output=True, text=True, timeout=5)
+    assert (result.returncode == 0) == (fault in {'cold', 'warm'}), result.stderr
+    assert 'FORBIDDEN-create' not in result.stderr
+    if fault in {'cold', 'warm'}:
+        assert result.stdout.strip() == ('1' if fault == 'cold' else '0')
+        intent = json.loads((out / 'cold-primary-bootstrap').read_text())
+        assert intent['source_ref'] == 'd' * 40 and intent['run_id'] == 'future-run'
+        assert intent['run_token'] == 'a' * 32 + '-0' and intent['volume_id'] == 'vol_owned'
+
+
+@pytest.mark.parametrize('case', ['run', 'recover', 'default', 'nonboot', 'provision', 'no-reuse', 'sim-override'])
+def test_cold_primary_policy_is_explicit_and_primary_only(case: str) -> None:
+    function = _extract_fleet_function(fleet_source_text(), 'cold_primary_admission() {')
+    result = subprocess.run(['bash', '-c', f'''set -uo pipefail
+POOL_COLD_BOOTSTRAP={0 if case == 'default' else 1}
+POOL_REUSE_ONLY={0 if case in {'recover', 'no-reuse'} else 1}
+RECOVER_PRIMARY_TO_POOL={1 if case == 'recover' else 0}
+PROVISION_POOL={'600' if case == 'provision' else '""'}
+SIM_ON_CSV={'task' if case == 'sim-override' else '""'}
+CLOUDBENCH_BOOT_LAUNCH={0 if case == 'nonboot' else 1}
+{function}
+cold_primary_admission
+'''], text=True, capture_output=True)
+    assert (result.returncode == 0) == (case in {'run', 'recover', 'default'}), result.stderr

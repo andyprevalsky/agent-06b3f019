@@ -38,6 +38,7 @@
 #                      (default CONDUCTOR_PORT+5764 → 8765 on the standard 3001 workspace,
 #                       so concurrent workspaces get non-colliding hubs)
 #   --keep-clones      do NOT destroy the per-bench machines on exit (debugging)
+#   --cold-primary-bootstrap  opt into empty-checkout bootstrap for verified cold primaries
 #   --reuse-pool-only  claim existing authenticated stopped primary pool IDs only;
 #                      refuse misses, never clone primaries (autoscaler unchanged)
 #   --foreground       keep the controller in the launching session (tests/debugging);
@@ -1012,6 +1013,7 @@ AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 POOL_REUSE_ONLY="0"    # explicit primary-only no-create policy; workers unchanged
+POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm evidence
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
 FRESH_VOLUMES_REQUESTED=0
@@ -1207,6 +1209,7 @@ while [ $# -gt 0 ]; do
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
         --keep-clones)    KEEP_CLONES="1"; shift ;;
         --reuse-pool-only) POOL_REUSE_ONLY="1"; shift ;;
+        --cold-primary-bootstrap) POOL_COLD_BOOTSTRAP="1"; shift ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; RUN_TIMEOUT_OPERATOR_SET="1"; shift 2 ;;
         --autoscale-max)
             AUTOSCALE_MAX="${2:-}"
@@ -1244,6 +1247,18 @@ reuse_pool_only_admission() {
     echo "🏊 reuse-only primary admission: no new primary Machines; worker autoscaling remains unchanged" >&2
 }
 reuse_pool_only_admission || exit 2
+cold_primary_admission() {
+    [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 0
+    [ -z "${PROVISION_POOL:-}" ] && [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = 1 ] \
+        && [ -z "${SIM_ON_CSV:-}" ] \
+        && { [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] || [ "${POOL_REUSE_ONLY:-0}" = 1 ]; } || return 1
+}
+cold_primary_admission || { echo "❌ cold primary policy requires reuse-only REAL boot or exact pool recovery" >&2; exit 2; }
+if [ "$POOL_COLD_BOOTSTRAP" = 1 ]; then
+    # Separate image-donor baseline; never label an uninitialized volume warm.
+    POOL_IDS_FILE="${POOL_IDS_FILE%.ids}.cold.ids"
+    POOL_META_FILE="$POOL_IDS_FILE.deps"; POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
+fi
 if [ -n "$PROVISION_POOL" ] || [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != 1 ]; then
     [ "$FRESH_VOLUMES_REQUESTED" = 0 ] || {
         echo "❌ --fresh-volumes requires task-specific boot launch, not a generic pool" >&2; exit 2;
@@ -1413,6 +1428,9 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
         echo "❌ benchmark catalog preflight failed before Fly provisioning" >&2
         exit 1
+    fi
+    if [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] && printf '%s\n' "$catalog_modes_output" | grep -q '^simulate'; then
+        echo "❌ cold primary bootstrap requires REAL tasks" >&2; exit 2
     fi
     catalog_index=0
     while IFS=$'\t' read -r catalog_mode browser_requirement catalog_timeout; do
@@ -9137,10 +9155,11 @@ PY
 }
 
 fleet_preconfig_recovery_plan() {  # exact whole-owner fresh/no-admission cohort, local only
-    python3 - "$1" "$APP" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" <<'PYPLAN'
+    python3 - "$1" "$APP" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "${POOL_COLD_BOOTSTRAP:-0}" "${POOL_CLAIMS_DIR:-}" <<'PYPLAN'
 import json, os, re, runpy, stat, sys
 from pathlib import Path
 registry, app, audit_root, contract_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[4]
+cold, claims_root = sys.argv[5:]
 def read(path, limit=1048576):
     assert path.resolve(strict=True) == path
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
@@ -9214,6 +9233,16 @@ for ordinal, task in enumerate(tasks):
     disposition = record['disposition']
     if disposition in {'destroyed-verified-absent', 'destroyed-provider-retained'}:
         read(out / 'failed-preconfig-runtime-archive/consumed.json', 65536)
+    elif cold == '1' and disposition in {'transfer-pending-stopped', 'transferred-to-pool-stopped'}:
+        archive = runpy.run_path(str(Path(contract_path).with_name('cloudbench-startup-failure-archive.py')))
+        archive['verify_preconfig_receipt'](registry, out, machine, identity['run_token'],
+                                          out / 'failed-preconfig-runtime-archive/consumed.json')
+        if clone_name in clones:
+            assert fields(clones[clone_name]) == {'name': clone_name, 'id': machine, 'volume_id': volume}
+        elif disposition != 'transferred-to-pool-stopped' or os.path.lexists(Path(claims_root) / machine):
+            claim = fields(Path(claims_root) / machine)
+            assert claim['fleet_owner_token'] == owner and claim['machine_id'] == machine
+            assert claim['clone_name'] == clone_name and claim['volume_id'] == volume and claim['transfer_state'] == 'pending'
     else:
         assert disposition == 'owned'
         assert fields(clones[clone_name]) == {'name': clone_name, 'id': machine, 'volume_id': volume}
@@ -10894,10 +10923,13 @@ PYSOURCE
 
 pool_native_reuse_proof() {  # <machine> <name> <volume> <image-digest> [owner-registry]
     python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-machines.py" \
-        "$APP" "$1" "$2" "$3" "$4" "${5:-}" <<'PYPROOF'
-import hashlib, json, re, runpy, sys
+        "$APP" "$1" "$2" "$3" "$4" "${5:-}" "${6:-}" "${POOL_COLD_BOOTSTRAP:-0}" <<'PYPROOF'
+import hashlib, json, re, runpy, sys, tempfile
 from pathlib import Path
-helper, app, machine, name, volume, image, registry_raw = sys.argv[1:]
+helper, app, machine, name, volume, image, registry_raw, cold_raw, cold_opt_in = sys.argv[1:]
+assert not cold_raw or cold_opt_in == "1"
+cold = json.loads(cold_raw) if cold_raw and cold_raw != "initial-cold" else None
+cold_requested = bool(cold_raw)
 fetch = runpy.run_path(helper)['fetch']
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
@@ -10919,9 +10951,13 @@ config = first['config']
 assert image_digest(first) == image
 assert config.get('auto_destroy') is None or config.get('auto_destroy') is False
 assert config.get('restart') == {'policy': 'no'}
-assert config.get('init', {}).get('cmd') == ['bash', '/cloudbench-boot.sh']
-assert not config['init'].get('exec') and not config['init'].get('entrypoint')
-assert isinstance(config.get('env'), dict) and 'GATE_REF' not in config['env']
+if cold_requested:
+    assert config.get('init') == {'cmd': ['sleep', 'infinity']}
+    assert config.get('env') in (None, {})
+else:
+    assert config.get('init', {}).get('cmd') == ['bash', '/cloudbench-boot.sh']
+    assert not config['init'].get('exec') and not config['init'].get('entrypoint')
+    assert isinstance(config.get('env'), dict) and 'GATE_REF' not in config['env']
 assert isinstance(config.get('mounts'), list) and len(config['mounts']) == 1
 assert config['mounts'][0].get('volume') == volume and config['mounts'][0].get('path') == '/data'
 guest = config.get('guest'); assert isinstance(guest, dict)
@@ -10931,6 +10967,7 @@ assert type(guest.get('memory_mb')) is int and guest['memory_mb'] > 0
 if registry_raw:
     registry = Path(registry_raw); meta = read_fields(registry / 'meta')
     assert meta['fleet_owner_token'] == registry.name and meta['app'] == app
+    if cold_requested: assert meta['cleanup_policy'] == 'reap'
     run = Path(meta['runs_root']) / meta['run_id']
     contract = runpy.run_path(str(Path(helper).with_name('cloudbench_execution_provenance.py')))
     provenance = contract['load_provenance'](run / 'execution-provenance.json')
@@ -10944,7 +10981,7 @@ if registry_raw:
         assert match and memory.isdigit()
         shapes.add(('shared' if match[1] == 'shared-cpu' else 'performance', int(match[2]), int(memory)))
     assert (guest['cpu_kind'], guest['cpus'], guest['memory_mb']) in shapes
-    assert config['env'].get('REF') == provenance['base_sha']
+    if not cold_requested: assert config['env'].get('REF') == provenance['base_sha']
     matches = []
     for ordinal, task in enumerate(matrix['tasks']):
         path = run / task['name'] / '.cid'
@@ -10954,14 +10991,48 @@ if registry_raw:
                 assert source in {'clone', 'pool'}
                 matches.append(ordinal)
     assert len(matches) == 1
-    assert config['env'].get('CLOUDBENCH_BARRIER_TOKEN') == registry.name + '-' + str(matches[0])
+    if cold_requested:
+        out = run / matrix['tasks'][matches[0]]['name']
+        cold = {'policy': 'real-empty-bootstrap-v1', 'registry': str(registry), 'output': str(out),
+                'run_token': registry.name + '-' + str(matches[0])}
+        receipt = out / 'failed-preconfig-runtime-archive/consumed.json'
+        cold['receipt_sha256'] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+    else:
+        assert config['env'].get('CLOUDBENCH_BARRIER_TOKEN') == registry.name + '-' + str(matches[0])
 second = json.loads(fetch(app, 20, machine))
 assert second.get('id') == machine and second.get('state') == 'stopped' and second.get('name') == name
 assert second.get('instance_id') == first['instance_id'] and digest(second['config']) == digest(config)
 assert image_digest(second) == image
+extra = {}
+if cold_requested:
+    assert isinstance(cold, dict) and set(cold) == {'policy','registry','output','run_token','receipt_sha256'}
+    assert cold['policy'] == 'real-empty-bootstrap-v1'
+    receipt = Path(cold['output']) / 'failed-preconfig-runtime-archive/consumed.json'
+    archive_helper = runpy.run_path(str(Path(helper).with_name('cloudbench-startup-failure-archive.py')))
+    assert hashlib.sha256(archive_helper['read'](receipt, 1048576)).hexdigest() == cold['receipt_sha256']
+    with tempfile.TemporaryDirectory(prefix='cloudbench-cold-native.') as directory:
+        before, after = Path(directory) / 'before.json', Path(directory) / 'after.json'
+        before.touch(mode=0o600); after.touch(mode=0o600)
+        before.write_text(json.dumps(first)); after.write_text(json.dumps(second))
+        phase = archive_helper['verify_preconfig_receipt'](cold['registry'], cold['output'], machine,
+                    cold['run_token'], receipt, before, after)
+    _, archived, _ = archive_helper['read_preconfig_archive'](phase['archive_path'])
+    assert archive_helper['fields_bytes'](archived['registry/meta'])['app'] == app
+    assert phase['volume_id'] == volume and phase['machine_id'] == machine
+    out = Path(cold['output'])
+    for forbidden in ('post-config-start.accepted', 'cloudbench-run.json', 'worker-runtime-evidence',
+                      'status-proxy.port', 'cloudbench-boot-start.log', 'guest-shutdown.confirmed'):
+        assert not (out / forbidden).exists() and not (out / forbidden).is_symlink()
+    read = archive_helper['read']
+    assert read(out / 'benchmark-child.finished', 32).strip() == b'125'
+    assert read(out / 'boot-config-unapplied', 256).strip() == machine.encode()
+    assert read(out / 'worker-clones.ids', 65536) == b''
+    assert json.loads(read(out / 'runtime-evidence.owner.json', 65536)) == {'version': 1, 'machine_id': machine, 'run_token': cold['run_token']}
+    assert not (out / 'runtime-evidence.pending').exists() and not (out / 'runtime-evidence.pending').is_symlink()
+    extra = {'cold_bootstrap': cold}
 print(json.dumps({'version': 1, 'app': app, 'machine_id': machine, 'name': name,
                   'volume_id': volume, 'instance_id': first['instance_id'],
-                  'config_sha256': digest(config), 'image_digest': image}, sort_keys=True, separators=(',', ':')))
+                  'config_sha256': digest(config), 'image_digest': image, **extra}, sort_keys=True, separators=(',', ':')))
 PYPROOF
 }
 
@@ -10974,7 +11045,8 @@ import json, os, re, stat, sys
 from pathlib import Path
 path = Path(sys.argv[1]); machine = sys.argv[2]; proof = json.loads(sys.argv[3])
 assert proof['machine_id'] == machine and re.fullmatch('[0-9a-f]+', machine)
-assert set(proof) == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
+assert set(proof) - {'cold_bootstrap'} == {'version','app','machine_id','name','volume_id','instance_id','config_sha256','image_digest'}
+if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
 assert re.fullmatch('[0-9a-f]{64}', proof['config_sha256'])
 assert re.fullmatch('sha256:[0-9a-f]{64}', proof['image_digest'])
 path.parent.mkdir(exist_ok=True)
@@ -10995,7 +11067,7 @@ PYWRITE
 }
 
 pool_verify_reuse_proof() {  # <machine> <volume> [refresh after canonical return]
-    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current
+    local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold
     path="$(pool_reuse_proof_file "$id")" || return 1
     [ -e "$path" ] || { [ ! -L "$path" ]; return; }
     fields="$(python3 - "$path" "$id" "$volume" "$APP" <<'PYREAD'
@@ -11007,26 +11079,29 @@ with os.fdopen(os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK), 'rb') as 
 row = json.loads(raw)
 assert row['version'] == 1 and row['app'] == app and row['machine_id'] == machine and row['volume_id'] == volume
 assert all(isinstance(row[k], str) and '\n' not in row[k] and '\t' not in row[k] for k in ('name','image_digest'))
-print(row['name'], row['image_digest'], json.dumps(row,sort_keys=True,separators=(',',':')),sep='\t')
+print(row['name'], row['image_digest'], json.dumps(row,sort_keys=True,separators=(',',':')), json.dumps(row.get('cold_bootstrap')) if 'cold_bootstrap' in row else 'none',sep='\t')
 PYREAD
 )" || return 1
-    IFS=$'\t' read -r name image prior <<< "$fields"
+    IFS=$'\t' read -r name image prior cold <<< "$fields"
     if [ "$mode" = refresh ]; then
         current="$(pool_native_reuse_proof "$id" "$name" "$volume" "$image" "$FLEET_REGISTRY_DIR")" || return 1
         pool_write_reuse_proof "$id" "$current" refresh
     else
-        current="$(pool_native_reuse_proof "$id" "$name" "$volume" "$image")" || return 1
+        if [ "$cold" != none ]; then
+            [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || return 1
+        else cold=""; fi
+        current="$(pool_native_reuse_proof "$id" "$name" "$volume" "$image" "" "$cold")" || return 1
         [ "$current" = "$prior" ]
     fi
 }
 
 pool_recovery_primary_plan() {  # <registry> <current node fp> <current python fp>
     python3 - "$1" "$ROOT_DIR" "$FLEET_AUDIT_ROOT" "$APP" "$2" "$3" \
-        "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "$POOL_CLAIMS_DIR" <<'PYPLAN'
+        "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py" "$POOL_CLAIMS_DIR" "${POOL_COLD_BOOTSTRAP:-0}" <<'PYPLAN'
 import os, re, runpy, stat, sys
 from pathlib import Path
 registry, root, audit_root = map(Path, sys.argv[1:4])
-app, node, python_fp, contract_path, claims_root = sys.argv[4:]
+app, node, python_fp, contract_path, claims_root, cold = sys.argv[4:]
 def read(path, limit=1048576):
     assert path.resolve(strict=True) == path
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
@@ -11064,7 +11139,7 @@ assert values['python_dependency_fingerprint'] == python_fp
 snapshot = values['volume_snapshot_id']
 assert re.fullmatch('[A-Za-z0-9_-]+', snapshot)
 # This is a dependency provenance bridge, not a new provider snapshot query.
-print(node, python_fp, snapshot, sep='\t')
+print(node, python_fp, 'cold-image-bootstrap' if cold == '1' else snapshot, sep='\t')
 seen = set()
 for task in matrix['tasks']:
     out = run / task['name']
@@ -11078,7 +11153,12 @@ for task in matrix['tasks']:
     seen.add(machine)
     # Never import an app inventory/name match or an unstarted/unsealed guest.
     read(out / 'runtime-evidence.owner.json', 65536)
-    read(out / 'remote-logs/runtime-evidence/run.json')
+    if cold == '1':
+        helper = runpy.run_path(str(Path(contract_path).with_name('cloudbench-startup-failure-archive.py')))
+        helper['verify_preconfig_receipt'](registry, out, machine, owner + '-' + str(matrix['tasks'].index(task)),
+                                           out / 'failed-preconfig-runtime-archive/consumed.json')
+    else:
+        read(out / 'remote-logs/runtime-evidence/run.json')
     assert not os.path.lexists(out / 'failed-startup-runtime-archive')
     assert not os.path.lexists(out / 'runtime-evidence.pending')
     name = read(audit / 'by-machine-id' / machine, 4096).strip()
@@ -11170,7 +11250,7 @@ recover_registry_primaries_to_pool() {  # exact recovery lock + canonical eviden
         [ -n "$id" ] || continue
         [ "$id" != "${WARM_ID:-}" ] && [ "$id" != "${SHARED_WARM_ID:-}" ] \
             && [ "$volume" != "${WARM_VOLUME_ID:-}" ] && [ "$volume" != "${SHARED_WARM_VOLUME_ID:-}" ] || return 1
-        native_proof="$(pool_native_reuse_proof "$id" "$clone_name" "$volume" "$source_image" "$registry")" || return 1
+        native_proof="$(pool_native_reuse_proof "$id" "$clone_name" "$volume" "$source_image" "$registry" "$([ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] && printf initial-cold)")" || return 1
         if [ -e "$POOL_CLAIMS_DIR/$id" ] || [ -L "$POOL_CLAIMS_DIR/$id" ]; then
             fleet_audit_update_recovered_transfer "$POOL_CLAIMS_DIR/$id" validate-only || return 1
         fi
@@ -11290,7 +11370,7 @@ PY
         fi
     done
     if [ "$preconfig_candidate" = 1 ] || [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
-        if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ]; then
+        if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] && [ "${POOL_COLD_BOOTSTRAP:-0}" != 1 ]; then
             echo "❌ never-configured primaries lack authenticated warm-volume bootstrap proof; pool admission refused" >&2
             release_registry_recovery_lock "$registry"; return 1
         fi
@@ -12746,6 +12826,31 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
     done
 }
 
+primary_cold_bootstrap_requested() {  # validate future task intent before the boot child exists
+    [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] || { printf 0; return 0; }
+    python3 - "$1" "$2" "$BENCH_REF" "$RUN_ID" "$FLEET_OWNER_TOKEN" "$EXECUTION_TASK_MATRIX_FILE" "$(pool_reuse_proof_file "$2")" <<'PYINTENT'
+import hashlib, json, os, re, stat, sys
+from pathlib import Path
+out, machine, ref, run, owner, matrix, proof_path = Path(sys.argv[1]), *sys.argv[2:]
+def read(path):
+    path = Path(path); assert path.resolve(strict=True) == path
+    with os.fdopen(os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid() and info.st_size <= 65536
+        return stream.read(65537)
+assert read(out / '.cid').decode() == 'pool ' + machine + '\n'
+raw = read(proof_path); proof = json.loads(raw)
+tasks = json.loads(read(matrix))['tasks']
+ordinal = next(i for i, task in enumerate(tasks) if task['name'] == out.name)
+assert tasks[ordinal]['world_model_mode'] == 'real' and re.fullmatch('[0-9a-f]{40}', ref)
+expected = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof else 'warm',
+            'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
+            'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
+assert json.loads(read(out / 'cold-primary-bootstrap')) == expected
+print(1 if 'cold_bootstrap' in proof else 0)
+PYINTENT
+}
+
 provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundary
     local bench="$1" out="$2" bench_vm_size bench_vm_memory pcid=""
     bench_vm_size="$(primary_vm_size_for_bench "$bench")" || return 1
@@ -12763,6 +12868,27 @@ provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundar
     fi
     if [ -n "$pcid" ]; then
         printf 'pool %s\n' "$pcid" > "$out/.cid"
+        if [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+            python3 - "$(pool_reuse_proof_file "$pcid")" "$out/cold-primary-bootstrap" "$pcid" "$BENCH_REF" "$RUN_ID" "$FLEET_OWNER_TOKEN" "$EXECUTION_TASK_MATRIX_FILE" "$bench" <<'PYCOLD' || return 1
+import hashlib, json, os, re, sys
+from pathlib import Path
+path, destination, machine, ref, run, owner, matrix, bench = sys.argv[1:]
+raw = Path(path).read_bytes(); proof = json.loads(raw)
+assert proof['machine_id'] == machine and re.fullmatch('[0-9a-f]{40}', ref)
+tasks = json.loads(Path(matrix).read_text())['tasks']
+ordinal = next(i for i, task in enumerate(tasks) if task['name'] == bench)
+assert tasks[ordinal]['world_model_mode'] == 'real'
+if 'cold_bootstrap' in proof: assert proof['cold_bootstrap']['policy'] == 'real-empty-bootstrap-v1'
+intent = {'version': 1, 'policy': 'real-empty-bootstrap-v1' if 'cold_bootstrap' in proof else 'warm',
+          'machine_id': machine, 'volume_id': proof['volume_id'], 'source_ref': ref,
+          'run_id': run, 'run_token': owner + '-' + str(ordinal), 'proof_sha256': hashlib.sha256(raw).hexdigest()}
+with os.fdopen(os.open(destination, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
+    json.dump(intent, stream, sort_keys=True); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+fd = os.open(Path(destination).parent, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try: os.fsync(fd)
+finally: os.close(fd)
+PYCOLD
+        fi
     elif [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ [$bench] no eligible stopped owned primary pool Machine; reuse-only refuses cloning" >&2
         return 1
@@ -14151,7 +14277,11 @@ if [ -s "$POOL_IDS_FILE" ]; then
         echo "   retire this workspace's stopped pool first; then rebuild with: bash scripts/run-bench-fleet --provision-pool ${PROVISION_POOL:-${#BENCHES[@]}}" >&2
         exit 1
     fi
-    echo "✅ pooled dependency trees match the current ref (${pool_snap:-unknown snapshot})"
+    if [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        echo "✅ cold pool image manifest baseline matches; guest checkout remains uninitialized until guarded bootstrap"
+    else
+        echo "✅ pooled dependency trees match the current ref (${pool_snap:-unknown snapshot})"
+    fi
 fi
 
 # Recover only positively owned ephemeral clones whose same-host controller
@@ -14623,7 +14753,8 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "campaign_mutation_admission=${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}"
     --config-value "boot_update_capacity_wait_seconds=$BOOT_UPDATE_CAPACITY_WAIT_SECONDS"
     --config-value "boot_config_barrier_wait_seconds=$BOOT_CONFIG_BARRIER_WAIT_SECONDS"
-    --config-value "primary_reuse_only=$POOL_REUSE_ONLY"
+    --config-value "primary_reuse_only=$POOL_REUSE_ONLY" \
+    --config-value "cold_primary_bootstrap=$POOL_COLD_BOOTSTRAP"
     --config-value "primary_vm_size=$FLEET_PRIMARY_VM_SIZE"
     --config-value "primary_vm_memory_mb=$FLEET_PRIMARY_VM_MEMORY"
     --config-value "bundled_frontend_vm_size=$FLEET_BUNDLED_FRONTEND_VM_SIZE"
@@ -16356,6 +16487,12 @@ for bench in "${BENCHES[@]}"; do
         echo "❌ [$bench] provisioning failed (no machine) — skipping"
         i=$((i + 1)); continue
     fi
+    cold_primary=0
+    if [ "$src" = pool ]; then
+        cold_primary="$(primary_cold_bootstrap_requested "$out" "$cid")" || {
+            echo "❌ [$bench] cold/warm claim intent differs from this exact task; refusing boot" >&2; exit 1;
+        }
+    fi
     if [ "$src" = "pool" ]; then
         echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port)"
     else
@@ -16421,7 +16558,8 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
-    CLOUDBENCH_FRESH_VOLUME="$([ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf 1 || printf 0)" \
+    CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP="$cold_primary" \
+    CLOUDBENCH_FRESH_VOLUME="$([ "$cold_primary" = 1 ] || { [ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ]; } && printf 1 || printf 0)" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
