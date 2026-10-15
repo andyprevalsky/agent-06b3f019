@@ -1336,6 +1336,85 @@ class ControllerExportContinuationTests(unittest.TestCase):
             self.fail('old exporter unexpectedly accepted unsealed continuation')
         self.module.continue_launch(self.args)
 
+    def fifo_capture(self):
+        fifo=self.repo/'.context/native-retirement.pipe';os.mkfifo(fifo,0o600)
+        self.phase='old';self.toolref='3'*40
+        source=Path(self.module.__file__).read_bytes()
+        def blob(command,*args,**kwargs):
+            return source if command[-1]==self.toolref+':scripts/cloudbench-controller-export.py' else self.collector
+        self.patches[-2].stop()  # replace only the check_output boundary with distinct old/tool source
+        self.toolpatch=patch.object(self.module.subprocess,'check_output',side_effect=blob);self.toolpatch.start();self.addCleanup(self.toolpatch.stop)
+        args=self.types.SimpleNamespace(record=self.oldrecord,archive=self.base/'fifo.tar.gz',manifest=self.base/'fifo-manifest.json',pending=self.base/'fifo-pending.json',capture_tool_ref=self.toolref)
+        original_open=os.open
+        def no_ipc(path,*args,**kwargs):
+            self.assertNotEqual(str(path),str(fifo),'export must never open FIFO IPC')
+            return original_open(path,*args,**kwargs)
+        before=fifo.lstat()
+        with patch.object(self.module,'writers',return_value=[]),patch.object(self.module.os,'open',side_effect=no_ipc):
+            self.assertEqual(self.module.export(args),0)
+        self.assertEqual((fifo.lstat().st_dev,fifo.lstat().st_ino,fifo.lstat().st_mtime_ns),(before.st_dev,before.st_ino,before.st_mtime_ns))
+        self.assertEqual(self.owner.read_bytes(),self.original)
+        verify=self.types.SimpleNamespace(**{**vars(args),'ref':self.oldref,'machine':'abc123','app':'fixture','image':'image@sha256:fixture','caller':self.oldcaller,'repo':self.repo})
+        self.module.verify(verify)
+        return fifo,args,verify
+
+    def test_original_run_fifo_capture_is_metadata_only_and_truthful_tool(self):
+        fifo,args,verify=self.fifo_capture()
+        manifest=json.loads(args.manifest.read_bytes());row=manifest['files']['context/native-retirement.pipe']
+        self.assertEqual(row['kind'],'fifo');self.assertTrue(row['metadata_only'])
+        self.assertEqual(manifest['record']['collector_sha256'],digest(self.collector))
+        self.assertEqual(manifest['capture_tool']['source_ref'],self.toolref)
+        self.assertNotEqual(manifest['capture_tool']['sha256'],manifest['record']['collector_sha256'])
+        self.phase='new';self.args.old_archive=args.archive;self.args.old_manifest=args.manifest
+        self.module.continue_launch(self.args);self.module.launch(self.launch)
+        self.assertEqual(json.loads(self.record.read_bytes())['continuation']['old_archive_sha256'],digest(args.archive.read_bytes()))
+
+    def test_fifo_capture_rejects_changed_tool_and_original_launch(self):
+        _,args,verify=self.fifo_capture();original=args.manifest.read_bytes()
+        for key in ('sha256','original_launch_sha256','original_collector_sha256'):
+            with self.subTest(key=key):
+                row=json.loads(original);row['capture_tool'][key]='f'*64;args.manifest.write_text(json.dumps(row))
+                with self.assertRaises(ValueError):self.module.verify(verify)
+        args.manifest.write_bytes(original)
+        old=self.oldrecord.read_bytes();record=json.loads(old);record['image']='foreign';self.oldrecord.write_text(json.dumps(record))
+        with self.assertRaises(ValueError):self.module.verify(verify)
+        self.oldrecord.write_bytes(old)
+        with patch.object(self.module.subprocess,'check_output',return_value=b'wrong-tool'):
+            with self.assertRaises(ValueError):self.module.verify(verify)
+
+    def test_fifo_capture_cannot_rebind_original_record_outside_archive(self):
+        _,args,verify=self.fifo_capture()
+        record=json.loads(self.oldrecord.read_bytes());record['foreign_added_receipt']='forged'
+        raw=json.dumps(record).encode();self.oldrecord.write_bytes(raw)
+        metadata=json.loads(args.manifest.read_bytes());metadata['record']=record
+        metadata['capture_tool']['original_launch_sha256']=digest(raw)
+        args.manifest.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError,'archived original launch'):
+            self.module.verify(verify)
+
+    def test_fifo_archive_rejects_wrong_type_and_metadata_drift(self):
+        _,args,verify=self.fifo_capture();original=args.manifest.read_bytes()
+        for key,value in (('mode',stat.S_IFSOCK|0o600),('mtime_ns',1),('gid',99999),('nlink',2),('inode',0),('device',0)):
+            with self.subTest(key=key):
+                row=json.loads(original);row['files']['context/native-retirement.pipe']['stat'][key]=value;args.manifest.write_text(json.dumps(row))
+                with self.assertRaisesRegex(ValueError,'FIFO metadata'):self.module.verify(verify)
+        args.manifest.write_bytes(original)
+
+    def test_fifo_drift_during_capture_preserves_ipc_and_refuses_seal(self):
+        fifo=self.repo/'.context/native-retirement.pipe';os.mkfifo(fifo,0o600)
+        self.phase='old';source=Path(self.module.__file__).read_bytes();toolref='3'*40
+        with patch.object(self.module.subprocess,'check_output',side_effect=lambda cmd,*a,**k:source if cmd[-1]==toolref+':scripts/cloudbench-controller-export.py' else self.collector):
+            calls=[]
+            def writers(roots,permitted):
+                calls.append(1)
+                if len(calls)==2:os.utime(fifo,ns=(1,1))
+                return []
+            archive=self.base/'drift.tar.gz'
+            with patch.object(self.module,'writers',side_effect=writers):
+                with self.assertRaisesRegex(ValueError,'originals changed'):
+                    self.module.export(self.types.SimpleNamespace(record=self.oldrecord,archive=archive,manifest=self.base/'drift-manifest.json',pending=self.base/'drift-pending.json',capture_tool_ref=toolref))
+            self.assertFalse(archive.exists());self.assertTrue(stat.S_ISFIFO(fifo.lstat().st_mode))
+
     def test_changed_source_continuation_preserves_original_seal_and_ownership(self):
         self.prepare();self.module.launch(self.launch)
         self.assertEqual(self.owner.read_bytes(),self.original)

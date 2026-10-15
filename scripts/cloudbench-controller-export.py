@@ -11,6 +11,7 @@ import pwd
 import math
 import re
 import types
+from decimal import Decimal
 import stat
 import subprocess
 import tarfile
@@ -69,7 +70,7 @@ def file_state(path):
     value = path.lstat()
     return {"device": value.st_dev, "inode": value.st_ino, "bytes": value.st_size,
             "mtime_ns": value.st_mtime_ns, "mode": value.st_mode, "uid": value.st_uid,
-            "allocated_bytes": value.st_blocks * 512}
+            "allocated_bytes": value.st_blocks * 512, "gid": value.st_gid, "nlink": value.st_nlink}
 
 
 def sources(repo, common, temp_roots):
@@ -135,6 +136,27 @@ def sealed_bytes(path, limit=None):
     return digest.hexdigest(), bytes(raw) if raw is not None else None
 
 
+def source_collector(repo, ref):
+    if not isinstance(ref,str) or re.fullmatch('[0-9a-f]{40}',ref) is None:
+        raise ValueError('capture tool source ref missing')
+    return subprocess.check_output(['git','-c','safe.directory='+str(repo),'-C',str(repo),'--no-replace-objects','show',ref+':scripts/cloudbench-controller-export.py'])
+
+
+def checked_collector_bytes():
+    return globals().get('CHECKED_COLLECTOR_SOURCE_BYTES') or Path(__file__).read_bytes()
+
+
+def capture_tool_binding(repo, record, record_sha, tool_ref):
+    tool=source_collector(repo,tool_ref); actual=checked_collector_bytes()
+    if tool != actual: raise ValueError('capture tool executable source differs')
+    original=source_collector(repo,record['source_ref'])
+    if hashlib.sha256(original).hexdigest() != record['collector_sha256']:
+        raise ValueError('original launch collector source differs')
+    return {'schema':'controller-original-capture-tool-v1','source_ref':tool_ref,
+            'sha256':hashlib.sha256(tool).hexdigest(),'original_run_source_ref':record['source_ref'],
+            'original_collector_sha256':record['collector_sha256'],'original_launch_sha256':record_sha}
+
+
 def continuation_binding(value, repo, ref, driver_pid, caller, image, epoch):
     """Verify the original seal with its original collector, never with new bytes."""
     if value.get('resource_release_verified') is not False:
@@ -178,12 +200,18 @@ def continuation_binding(value, repo, ref, driver_pid, caller, image, epoch):
         raise ValueError("original workspace ownership changed")
     if ownership['source_ref'] != old_ref or ownership['volume_id'] != os.environ.get('GATE_WORKSPACE_VOLUME_ID') or ownership['app'] != record['app']:
         raise ValueError("original workspace identity differs")
-    collector = subprocess.check_output(['git','-c','safe.directory='+str(repo),'-C',str(repo),'--no-replace-objects','show',old_ref+':scripts/cloudbench-controller-export.py'])
-    if hashlib.sha256(collector).hexdigest() != record['collector_sha256']:
+    original_collector = source_collector(repo,old_ref)
+    if hashlib.sha256(original_collector).hexdigest() != record['collector_sha256']:
         raise ValueError("original collector differs")
-    namespace={'__name__':'original_controller_seal_verifier','__file__':str(repo/'scripts/cloudbench-controller-export.py'),'CHECKED_COLLECTOR_SHA256':record['collector_sha256']}
+    manifest=json.loads(raws['old_manifest'])
+    capture=manifest.get('capture_tool')
+    collector=source_collector(repo,capture['source_ref']) if capture else original_collector
+    expected_collector=capture['sha256'] if capture else record['collector_sha256']
+    if hashlib.sha256(collector).hexdigest()!=expected_collector:
+        raise ValueError('declared original capture tool differs')
+    namespace={'__name__':'original_controller_seal_verifier','__file__':str(repo/'scripts/cloudbench-controller-export.py'),'CHECKED_COLLECTOR_SHA256':expected_collector,'CHECKED_COLLECTOR_SOURCE_BYTES':collector}
     exec(compile(collector, 'original-source-bound-controller-export', 'exec'), namespace)
-    namespace['verify'](types.SimpleNamespace(archive=paths['old_archive'],manifest=paths['old_manifest'],record=paths['old_record'],ref=old_ref,machine=record['machine_id'],app=record['app'],image=image,caller=None))
+    namespace['verify'](types.SimpleNamespace(archive=paths['old_archive'],manifest=paths['old_manifest'],record=paths['old_record'],ref=old_ref,machine=record['machine_id'],app=record['app'],image=image,caller=None,repo=repo))
     manifest=json.loads(raws['old_manifest'])
     for member,expected in (('context/controller-workspace-volume/ownership.json',owner_sha),('controller-output/launch.json',value['old_record_sha256'])):
         if manifest['files'].get(member,{}).get('sha256') != expected: raise ValueError("original archive lacks ownership binding")
@@ -249,7 +277,12 @@ def launch(args):
 
 
 def export(args):
-    record = json.loads(args.record.read_text())
+    record_raw = sealed_bytes(args.record,67108864)[1]
+    record = json.loads(record_raw)
+    tool_ref = getattr(args,'capture_tool_ref',None)
+    capture_tool = capture_tool_binding(Path(record['repo']),record,hashlib.sha256(record_raw).hexdigest(),tool_ref) if tool_ref else None
+    if capture_tool is None and record['collector_sha256'] != hashlib.sha256(checked_collector_bytes()).hexdigest():
+        raise ValueError('changed capture tool requires explicit source binding')
     if record["version"] != 1 or birth(record["driver_pid"]) != record["driver_birth"] or record["host"] != socket.gethostname():
         raise ValueError("original controller driver identity changed")
     repo, common = Path(record["repo"]), Path(record["common_git"])
@@ -321,6 +354,15 @@ def export(args):
                                     raise ValueError("original changed before export")
                                 archive.addfile(info, Reader(source))
                             files[name] = {"kind":"file", "bytes":before["bytes"], "sha256":digest.hexdigest()}
+                        elif stat.S_ISFIFO(before["mode"]):
+                            if before['nlink'] != 1 or before['bytes'] != 0:
+                                raise ValueError('unsafe FIFO metadata')
+                            info.type=tarfile.FIFOTYPE;info.size=0;info.linkname=''
+                            seconds,nanos=divmod(before['mtime_ns'],1000000000)
+                            info.pax_headers['mtime']=str(seconds)+'.'+str(nanos).zfill(9)
+                            info.pax_headers['cloudbench.fifo-source-stat']=json.dumps(before,sort_keys=True,separators=(',',':'))
+                            archive.addfile(info)
+                            files[name]={'kind':'fifo','metadata_only':True,'stat':before}
                         elif stat.S_ISDIR(before["mode"]):
                             archive.addfile(info); files[name] = {"kind":"directory"}
                         elif stat.S_ISLNK(before["mode"]):
@@ -335,7 +377,7 @@ def export(args):
         with args.archive.open("rb") as source:
             for chunk in iter(lambda:source.read(1048576), b""): archive_sha.update(chunk)
         sync_json(args.manifest, {"version":1, "record":record, "files":files, "excluded":excluded,
-                                 "archive_sha256":archive_sha.hexdigest(), "resource_release_verified":False})
+                                 "archive_sha256":archive_sha.hexdigest(), "resource_release_verified":False, **({"capture_tool":capture_tool} if capture_tool else {})})
         return 0
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -351,7 +393,13 @@ def verify(args):
     if args.app and record.get("app") != args.app: raise ValueError("native app identity differs")
     if args.image and record.get("image") != args.image: raise ValueError("image binding differs")
     if args.caller and record.get("caller") != json.loads(args.caller.read_text()): raise ValueError("caller binding differs")
-    if record.get("collector_sha256") != (globals().get("CHECKED_COLLECTOR_SHA256") or hashlib.sha256(Path(__file__).read_bytes()).hexdigest()): raise ValueError("collector bytes differ")
+    if manifest.get('capture_tool'):
+        capture=manifest['capture_tool']
+        repo=getattr(args,'repo',None) or Path(git(Path(__file__).parent,'rev-parse','--show-toplevel'))
+        expected_capture=capture_tool_binding(Path(repo),record,hashlib.sha256(args.record.read_bytes()).hexdigest() if args.record else capture['original_launch_sha256'],capture['source_ref'])
+        if capture != expected_capture: raise ValueError('capture tool provenance differs')
+    elif record.get("collector_sha256") != (globals().get("CHECKED_COLLECTOR_SHA256") or hashlib.sha256(checked_collector_bytes()).hexdigest()):
+        raise ValueError("collector bytes differ")
     if manifest.get("version") != 1 or manifest.get("resource_release_verified") is not False:
         raise ValueError("export receipt does not permit resource release")
     digest = hashlib.sha256()
@@ -368,6 +416,15 @@ def verify(args):
     with tarfile.open(args.archive, "r:gz") as archive:
         members = archive.getmembers()
         if len(members) != len(expected) or {m.name for m in members} != set(expected): raise ValueError("archive membership differs")
+        if manifest.get('capture_tool'):
+            member=archive.getmember('controller-output/launch.json')
+            if not member.isfile() or member.size > 67108864:
+                raise ValueError('unsafe original launch member')
+            source=archive.extractfile(member)
+            if source is None: raise ValueError('original launch member missing')
+            raw=source.read(67108865)
+            if len(raw)>67108864 or hashlib.sha256(raw).hexdigest()!=manifest['capture_tool']['original_launch_sha256'] or json.loads(raw)!=record:
+                raise ValueError('archived original launch differs from capture binding')
         if 'continuation' in record:
             member = archive.getmember('controller-output/continuation.json')
             if not member.isfile() or member.size > 1048576:
@@ -386,6 +443,10 @@ def verify(args):
                 value = hashlib.sha256()
                 for chunk in iter(lambda:source.read(1048576), b""): value.update(chunk)
                 if value.hexdigest() != row["sha256"]: raise ValueError("archive member bytes differ")
+            elif row['kind'] == 'fifo':
+                metadata=row['stat']
+                if json.loads(member.pax_headers.get('cloudbench.fifo-source-stat','null')) != metadata or row.get('metadata_only') is not True or not member.isfifo() or member.size != 0 or member.linkname or not stat.S_ISFIFO(metadata['mode']) or metadata['bytes'] != 0 or metadata['nlink'] != 1 or member.mode != stat.S_IMODE(metadata['mode']) or member.uid != metadata['uid'] or member.gid != metadata['gid'] or Decimal(member.pax_headers.get('mtime','NaN'))*1000000000 != metadata['mtime_ns']:
+                    raise ValueError('archive FIFO metadata differs')
             elif row["kind"] == "directory":
                 if not member.isdir(): raise ValueError("archive directory differs")
             elif row["kind"] == "symlink":
@@ -398,6 +459,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("caller","launch","export","verify","continue"))
     for name in ("repo","record","caller","archive","manifest","pending","continuation","old-record","old-manifest","old-archive"): parser.add_argument("--"+name,type=Path)
+    parser.add_argument("--capture-tool-ref")
     parser.add_argument("--epoch", type=float)
     parser.add_argument("--driver-pid", type=int); parser.add_argument("--ref"); parser.add_argument("--image")
     parser.add_argument("--machine"); parser.add_argument("--app")
