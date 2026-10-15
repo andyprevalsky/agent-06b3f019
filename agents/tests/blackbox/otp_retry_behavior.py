@@ -114,7 +114,7 @@ async def assert_false_ack_keeps_otp_input_usable(fake_session_factory):
 
 
 async def assert_sealed_otp_poll_stops_activity(owning_fixture, path="settled_drain"):
-    case = {"settled_drain": "sealed_harvest", "during_drain": "sealed_during_drain", "loop_harvest": "sealed_loop_harvest"}[path]
+    case = {"settled_drain": "sealed_harvest", "during_drain": "sealed_during_drain", "loop_harvest": "sealed_loop_harvest", "foreground_held_poll": "foreground_sealed_held_poll"}[path]
     loop = asyncio.get_running_loop()
     original_handler, callback_errors = loop.get_exception_handler(), []
     loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
