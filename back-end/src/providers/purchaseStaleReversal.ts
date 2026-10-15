@@ -8,12 +8,14 @@ const log = createLogger('PurchaseCleanup');
 export async function reverseStalePurchasePayment(purchase: {
   id: string;
   stripePaymentIntentId: string | null;
+  stripeLivemode: boolean;
 }): Promise<PurchaseSpendStatus> {
   if (purchase.stripePaymentIntentId === null) return PurchaseSpendStatus.FAILED;
   try {
     const reversal = await reversePurchasePaymentIntent(
       purchase.stripePaymentIntentId,
-      purchase.id
+      purchase.id,
+      purchase.stripeLivemode
     );
     return reversal === 'refunded' ? PurchaseSpendStatus.REFUNDED : PurchaseSpendStatus.FAILED;
   } catch (error) {

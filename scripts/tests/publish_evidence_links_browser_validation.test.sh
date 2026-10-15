@@ -825,5 +825,84 @@ for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
         server.server_close()
         assert not thread.is_alive()
 
+def check_fenced_recording_episode_provenance():
+    from copy import deepcopy
+    identity = dict(toolName="spawn_browser_agent", task_id="episode-task",
+                    workflowGeneration="owned-generation",
+                    browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+                    browser_session_metadata={"provider": "kernel", "profile_id": "owned-profile"})
+    start = msg(**identity, action_type="recording", toolStatus="IN_PROGRESS",
+                toolCallId="episode-start", recording_path="/owned/index.html")
+    saved = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                toolCallId="episode-saved", recording_view_url="https://ok/recorded-part")
+    terminal = msg(**identity, action_type="task_complete", toolStatus="FINISHED")
+    fenced = msg(**identity, action_type="recording", toolStatus="FINISHED",
+                 toolCallId="episode-start", recording_path="/owned/index.html",
+                 error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+    complete = [start, saved, terminal, fenced]
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete) == [], (
+        "a proven recorded episode's deployment diagnostic is not another saved media part")
+    for field, value in (("task_id", "foreign-task"), ("workflowGeneration", "foreign-generation"),
+                         ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+                         ("toolCallId", "unknown-start")):
+        bad = deepcopy(complete); bad[-1]["metadata"][field] = value
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), field
+    for field in ("browser_url", "workflowGeneration"):
+        bad = deepcopy(complete)
+        for row in bad: row["metadata"].pop(field, None)
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), field
+    for transform in ("no-start", "no-terminal", "unreachable", "placeholder-only", "unrecorded-resume"):
+        bad = deepcopy(complete)
+        if transform == "no-start": bad = bad[1:]
+        elif transform == "no-terminal": bad.pop(2)
+        elif transform == "unreachable": bad[1]["metadata"]["recording_view_url"] = "https://bad/unreachable"
+        elif transform == "placeholder-only": bad[1]["metadata"].pop("recording_view_url")
+        else:
+            extra = deepcopy(start); extra["metadata"]["toolCallId"] = "unrecorded-resume"
+            bad.insert(2, extra)
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad), transform
+    unknown = deepcopy(complete)
+    for row in unknown: row["metadata"]["browser_session_metadata"]["provider"] = "unknown-provider"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, unknown)
+    explicit = deepcopy(complete)
+    for row in explicit:
+        row["metadata"].pop("browser_url")
+        row["metadata"]["browser_session_metadata"]["session_id"] = "native-session-a"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, explicit) == []
+    explicit[2]["metadata"]["browser_session_metadata"] = {"provider": "kernel", "session_id": "native-session-b"}
+    assert mod.validate_browser_agents_terminated_with_recording(agent, explicit), "foreign native session closed episode"
+    other_start = deepcopy(start); other_start["metadata"]["toolCallId"] = "second-start"
+    other_saved = deepcopy(saved); other_saved["metadata"]["recording_view_url"] = "https://ok/second-part"
+    other_fenced = deepcopy(fenced); other_fenced["metadata"]["toolCallId"] = "second-start"
+    assert mod.validate_browser_agents_terminated_with_recording(
+        agent, [start, saved, other_start, other_saved, terminal, fenced, other_fenced]) == []
+    for field, value in (("workflowGeneration", "new-generation"),
+                         ("browser_url", "https://fixture.kernel.sh/browser/live/new-session")):
+        extra = deepcopy(start); extra["metadata"][field] = value
+        extra["metadata"]["toolCallId"] = "unrecorded-episode"
+        assert mod.validate_browser_agents_terminated_with_recording(agent, complete + [extra]), field
+    # A's terminal cannot close B, even if B already uploaded playable media.
+    for task_started in (False, True):
+        new_identity = dict(identity, browser_url="https://fixture.kernel.sh/browser/live/session-b")
+        b_start = msg(**new_identity, action_type="recording", toolStatus="IN_PROGRESS",
+                      toolCallId="b-start", recording_path="/b/index.html")
+        b_saved = msg(**new_identity, action_type="recording", toolStatus="FINISHED",
+                      recording_view_url="https://ok/b-recording")
+        b_fenced = msg(**new_identity, action_type="recording", toolStatus="FINISHED",
+                       toolCallId="b-start", recording_path="/b/index.html",
+                       error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+        prefix = [msg(**new_identity, action_type="task_started", toolStatus="IN_PROGRESS")] if task_started else []
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_saved, b_fenced]), "earlier terminal closed later session B"
+        foreign_terminal = msg(**identity, action_type="task_complete", toolStatus="FINISHED")
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_saved, foreign_terminal, b_fenced]), "foreign session terminal closed B"
+        b_terminal = msg(**new_identity, action_type="task_complete", toolStatus="FINISHED")
+        assert mod.validate_browser_agents_terminated_with_recording(
+            agent, complete + prefix + [b_start, b_terminal, b_saved, b_fenced]) == []
+
+
+with patch.object(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/")):
+    check_fenced_recording_episode_provenance()
 print("publish_evidence_links browser validation checks passed")
 PY

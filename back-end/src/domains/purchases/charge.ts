@@ -137,7 +137,7 @@ export async function mintCaptureAndIssue(
 
   // Admin no-charge flow has no Stripe hold to capture; the card is already fully company-funded.
   if (paymentIntent !== undefined) {
-    await captureAuthorizedHold(paymentIntent.id);
+    await captureAuthorizedHold(paymentIntent.id, purchase.stripeLivemode);
     state.paymentIntentCaptured = true;
   }
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
@@ -195,19 +195,22 @@ async function closeIssuedCardOnFailure(
 /** Reverse Stripe after a mint failure by re-reading the durable PaymentIntent state. */
 async function reverseStripePaymentOnFailure(
   state: ChargeState,
-  purchaseId: string
+  purchaseId: string,
+  livemode: boolean
 ): Promise<void> {
   const paymentIntentId = state.paymentIntentId;
   if (paymentIntentId === undefined || state.walletReclaimFailed) return;
-  await reversePurchasePaymentIntent(paymentIntentId, purchaseId).catch((reverseError) => {
-    state.paymentReversalFailed = true;
-    log.warn('Failed to reverse Stripe payment after purchase mint failure', {
-      purchase_id: purchaseId,
-      stripe_payment_intent_id: paymentIntentId,
-      captured: state.paymentIntentCaptured,
-      error: reverseError instanceof Error ? reverseError.message : String(reverseError),
-    });
-  });
+  await reversePurchasePaymentIntent(paymentIntentId, purchaseId, livemode).catch(
+    (reverseError) => {
+      state.paymentReversalFailed = true;
+      log.warn('Failed to reverse Stripe payment after purchase mint failure', {
+        purchase_id: purchaseId,
+        stripe_payment_intent_id: paymentIntentId,
+        captured: state.paymentIntentCaptured,
+        error: reverseError instanceof Error ? reverseError.message : String(reverseError),
+      });
+    }
+  );
 }
 
 /** Undo every side effect after a failed mint, then throw a typed purchase error. */
@@ -236,7 +239,7 @@ export async function rollbackChargeFailure(
       error: boundaryError.message,
     });
   }
-  await reverseStripePaymentOnFailure(state, purchaseId);
+  await reverseStripePaymentOnFailure(state, purchaseId, purchase.stripeLivemode);
   log.error('Failed to mint purchase card', {
     purchase_id: purchaseId,
     user_id: input.userId,
