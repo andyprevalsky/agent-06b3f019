@@ -2711,18 +2711,18 @@ def test_campaign_inventory_completion_evidence_preserves_fly_noclobber_for_exit
     assert result.stdout == '[]'
     assert 'C' in marker.read_text()
 
-@pytest.mark.parametrize('setting', [None, '0', '10', 'invalid', '', '5', '10.0', 'true', '-1', 'missing', 'unsupported', 'cancel10'])
+@pytest.mark.parametrize('setting', [None, '0', '10', 'invalid', '', '5', '10.0', 'true', '-1', 'missing', 'unsupported', 'no-process-group', 'cancel10'])
 def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_path, setting):
     """Real campaign children change priority without moving parent or PID custody."""
     if not hasattr(os, 'getpriority') or os.getpriority(os.PRIO_PROCESS, 0) != 0:
         pytest.skip('actual nice0 parent required for the scheduling contract')
     scripts = tmp_path/'scripts';scripts.mkdir()
     child = tmp_path/'child.py'
-    child.write_text('import os,json,time,signal,sys\nfrom pathlib import Path\nr=Path(os.environ["PRIORITY_FIXTURE"])\npid=os.getpid()\nbirth=None\ntry:\n s=Path("/proc",str(pid),"stat").read_text();birth=s[s.rfind(")")+2:].split()[19]\nexcept OSError:pass\n(r/"child.json").write_text(json.dumps({"pid":pid,"parent":os.getppid(),"nice":os.getpriority(os.PRIO_PROCESS,0),"parent_nice":os.getpriority(os.PRIO_PROCESS,os.getppid()),"birth":birth,"sid":os.getsid(0),"argv":sys.argv[1:]}))\ndef stop(*args):\n (r/"child-term").write_text(str(pid));sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nif os.environ.get("PRIORITY_CANCEL")=="1":\n while True:time.sleep(.02)\n')
+    child.write_text('import os,json,time,signal,sys\nfrom pathlib import Path\nr=Path(os.environ["PRIORITY_FIXTURE"])\npid=os.getpid()\nbirth=None\ntry:\n s=Path("/proc",str(pid),"stat").read_text();birth=s[s.rfind(")")+2:].split()[19]\nexcept OSError:pass\n(r/"child.json").write_text(json.dumps({"pid":pid,"parent":os.getppid(),"nice":os.getpriority(os.PRIO_PROCESS,0),"parent_nice":os.getpriority(os.PRIO_PROCESS,os.getppid()),"birth":birth,"sid":os.getsid(0),"parent_sid":os.getsid(os.getppid()),"pgid":os.getpgrp(),"tty":os.isatty(0),"autogroup":Path("/proc/self/autogroup").read_text().split()[0] if Path("/proc/self/autogroup").is_file() else None,"parent_autogroup":Path("/proc",str(os.getppid()),"autogroup").read_text().split()[0] if Path("/proc",str(os.getppid()),"autogroup").is_file() else None,"argv":sys.argv[1:]}))\ndef stop(*args):\n (r/"child-term").write_text(str(pid));sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nif os.environ.get("PRIORITY_CANCEL")=="1":\n while True:time.sleep(.02)\n')
     (scripts/'run-bench').write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(child))+' "$@"\n')
     env={k:v for k,v in os.environ.items() if not k.startswith(('RUN_BENCH_CAMPAIGN_', 'BENCHMARK_HUB_', 'CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE'))}
     env.update(PRIORITY_FIXTURE=str(tmp_path), CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0', CLOUDBENCH_CHILD_TERM_SECONDS='1')
-    if setting is not None:env['CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE']='10' if setting in ('missing','unsupported','cancel10') else setting
+    if setting is not None:env['CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE']='10' if setting in ('missing','unsupported','no-process-group','cancel10') else setting
     if setting=='cancel10':env['PRIORITY_CANCEL']='1'
     launcher=tmp_path/'launcher.py'
     patch=''
@@ -2730,9 +2730,10 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
     if setting=='unsupported':
         fake=tmp_path/'unsupported-nice';fake.write_text('#!/bin/bash\nexit 2\n');fake.chmod(0o700)
         patch='shutil.which=lambda name:'+repr(str(fake))+'\n'
+    if setting=='no-process-group':patch='inspect.signature=lambda function:inspect.Signature()\n'
     source_path = os.environ.get('CLOUDBENCH_CONTROLLER_PRIORITY_SOURCE')
     execution = ('from pathlib import Path\nexec(compile(Path('+repr(source_path)+').read_text(),'+repr(str(ROOT/'scripts/run-bench-campaign.py'))+',"exec"),{"__name__":"__main__","__file__":'+repr(str(ROOT/'scripts/run-bench-campaign.py'))+'})\n') if source_path else 'runpy.run_path('+repr(str(ROOT/'scripts/run-bench-campaign.py'))+',run_name="__main__")\n'
-    launcher.write_text('import shutil,runpy\n'+patch+execution)
+    launcher.write_text('import shutil,runpy,inspect\n'+patch+execution)
     command=[sys.executable,str(launcher),'--root',str(tmp_path),'--runs','1','--concurrency','1','--task','owned','--e2e-timeout','30']
     with (tmp_path/'stdout').open('w') as out, (tmp_path/'stderr').open('w') as err:
         process=subprocess.Popen(command,env=env,stdout=out,stderr=err)
@@ -2745,7 +2746,7 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
             process.wait(timeout=15)
         finally:
             if process.poll() is None:process.terminate();process.wait(timeout=5)
-    if setting in ('invalid','','5','10.0','true','-1','missing','unsupported'):
+    if setting in ('invalid','','5','10.0','true','-1','missing','unsupported','no-process-group'):
         assert process.returncode!=0
         assert not (tmp_path/'child.json').exists()
         assert not (tmp_path/'.context/benchmarks/campaigns').exists()
@@ -2753,12 +2754,91 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
         actual=json.loads((tmp_path/'child.json').read_text())
         assert actual['nice']==(10 if setting in ('10','cancel10') else 0)
         assert actual['parent']==process.pid and actual['parent_nice']==0
-        assert actual['sid']==actual['pid'] and actual['argv']==['owned','--foreground']
+        assert actual['sid']==(actual['parent_sid'] if setting in ('10','cancel10') else actual['pid'])
+        assert actual['pgid']==actual['pid'] and actual['tty'] is False
+        if actual['autogroup'] is not None and actual['parent_autogroup'] is not None:
+            assert (actual['autogroup']==actual['parent_autogroup']) == (setting in ('10','cancel10'))
+        assert actual['argv']==['owned','--foreground']
         summary=json.loads(next((tmp_path/'.context/benchmarks/campaigns').glob('*/summary.json')).read_text())
         job=summary['jobs'][0]
         assert job['controller_pid']==actual['pid']
         if sys.platform.startswith('linux'):assert actual['birth'] is not None
         if setting=='cancel10':assert (tmp_path/'child-term').read_text()==str(actual['pid'])
+
+
+
+def test_campaign_inventory_shared_session_cancel_keeps_other_groups(tmp_path):
+    """The real killpg path drains one tree without touching its shared SID peers."""
+    import importlib.util
+    import inspect
+    import signal
+
+    if 'process_group' not in inspect.signature(subprocess.Popen).parameters:
+        pytest.skip('process_group is unavailable')
+    spec = importlib.util.spec_from_file_location('campaign_cancel', ROOT/'scripts/run-bench-campaign.py')
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    child = tmp_path/'group-child.py'
+    child.write_text(r'''
+import json,os,signal,subprocess,sys,time
+from pathlib import Path
+root=Path(sys.argv[1]);name=sys.argv[2];role=sys.argv[3]
+owned=None
+if role=='leader':
+    owned=subprocess.Popen([sys.executable,__file__,str(root),name+'-grandchild','leaf'],close_fds=True)
+    until=time.monotonic()+5
+    while not (root/(name+'-grandchild.ready')).exists():
+        if time.monotonic()>until:raise RuntimeError('grandchild readiness')
+        time.sleep(.01)
+def stop(*args):
+    if owned is not None:owned.wait(timeout=5)
+    (root/(name+'.term')).write_text(str(os.getpid()))
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop)
+s=Path('/proc',str(os.getpid()),'stat').read_text()
+(root/(name+'.ready')).write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgrp(),'sid':os.getsid(0),'birth':s[s.rfind(')')+2:].split()[19]}))
+while True:time.sleep(.02)
+''')
+    before = (os.getpid(), os.getsid(0), os.getpgrp())
+    processes = []
+    try:
+        for name, role in [('first','leader'), ('sibling','leader'), ('publisher','leaf')]:
+            command = [sys.executable, str(child), str(tmp_path), name, role]
+            if name != 'publisher':command = [shutil.which('nice'), '-n', '10', *command]
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, process_group=0, close_fds=True)
+            processes.append((name, process))
+        until = time.monotonic()+8
+        while not all((tmp_path/(name+'.ready')).exists() for name, _ in processes):
+            assert time.monotonic()<until
+            assert all(process.poll() is None for _, process in processes)
+            time.sleep(.01)
+        rows = {name:json.loads((tmp_path/(name+'.ready')).read_text()) for name, _ in processes}
+        for name, process in processes:
+            assert rows[name]['pid']==rows[name]['pgid']==process.pid
+            assert rows[name]['sid']==before[1]
+        first = processes[0][1]
+        campaign.terminate_owned_children({first.pid:{'_process':first}})
+        assert first.wait(timeout=5)==0
+        assert (tmp_path/'first.term').read_text()==str(first.pid)
+        grandchild = json.loads((tmp_path/'first-grandchild.ready').read_text())
+        assert grandchild['pgid']==first.pid and grandchild['sid']==before[1]
+        assert (tmp_path/'first-grandchild.term').read_text()==str(grandchild['pid'])
+        with pytest.raises(ProcessLookupError):os.killpg(first.pid, 0)
+        assert before==(os.getpid(), os.getsid(0), os.getpgrp())
+        for name, process in processes[1:]:
+            assert process.poll() is None and not (tmp_path/(name+'.term')).exists()
+            current = Path('/proc',str(process.pid),'stat').read_text()
+            assert current[current.rfind(')')+2:].split()[19]==rows[name]['birth']
+        assert not (tmp_path/'sibling-grandchild.term').exists()
+    finally:
+        active = {process.pid:{'_process':process} for _, process in processes if process.poll() is None}
+        campaign.terminate_owned_children(active)
+        for _, process in processes:process.wait(timeout=5)
+    for name in ('sibling', 'sibling-grandchild', 'publisher'):
+        assert (tmp_path/(name+'.term')).exists()
+    for _, process in processes:
+        with pytest.raises(ProcessLookupError):os.killpg(process.pid, 0)
 
 
 @pytest.mark.parametrize("mode", ["success", "machines-nonzero-json", "volumes-nonzero-json", "malformed-json"])

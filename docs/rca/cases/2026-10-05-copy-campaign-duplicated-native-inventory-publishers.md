@@ -417,3 +417,46 @@ cure. The successful instrumented one-GET diagnostic under 600 compact readers
 also does not reproduce actual concurrent clone/config traffic. Preserve this
 distinction in the next unchanged original experiment; this evidence repair is
 not a successful 600-task outcome or a freshness cure.
+
+### V40: session autogroups defeat the selected-controller priority opt-in
+
+V40 first failed on `r001-j0047` (`message-person-agent-sms`, run
+`20261015-185403-16666`): clone `d8d0760a367d08` exhausted the original
+600-second storage-observation budget with status 75. The retained prior
+generation expired at epoch 1792091495; the next generation was published at
+1792091618, after the first physical failure at 1792091580.350877. Its unchanged
+publisher token and this gap corroborate unavailable inventory. The exact
+historical keyed clone observation remains unknown. The final failed helper
+sidecar shows an alarm during JSON encoding, with 30.57 seconds wall time but
+only 1.71 seconds of helper CPU. This is not proof of failed provider storage.
+
+A source/birth-bound observation found the publisher at process nice 0 in
+autogroup 6 and a selected nice10 controller in autogroup 8, both in the root
+CPU cgroup with Linux autogroup scheduling enabled. Creating a new session for
+every controller creates a separate equal-weight autogroup; process nice10
+then does not give the publisher its intended priority across those groups.
+The earlier negative CPU replays shared a session and therefore missed the
+actual scheduling topology.
+
+One bounded native-free pair on the closed original controller used the exact
+helper and wrapper, a full 69.51 MB synthetic configuration response, the
+unchanged 30-second deadline and 32 positive-CPU nice10 workers on one CPU.
+Separate worker sessions reproduced status 142 after 34.15 seconds, with TERM
+during encoding. Changing only workers to inherit the broker session while
+retaining individual process groups completed the identical full output with
+status 0 in 2.79 seconds. Every worker was alive at request start and wrapper
+completion, every worker and native group joined, and the server thread joined.
+No provider query, kernel setting, TTL change or artificial helper delay was
+used. This establishes the scheduling failure class, not an original 600-task
+success or an explanation for every historical timeout.
+
+Only explicit `CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE=10` selected launches now
+inherit the parent session and create a unique process group. Default/unset/0
+still create a new session. Missing Python `process_group` support refuses
+before campaign resources or controllers are admitted. Publisher, Hub, seed and
+nested-runner session lifetimes are unchanged. Registered real-launch controls
+verify nice, SID, PGID, autogroup, PID/birth and default/refusal behavior. A real
+`terminate_owned_children` control drains one controller and its grandchild
+without affecting the shared-session parent, sibling controller or publisher,
+then verifies normal cleanup of the remaining owned groups. The unchanged
+original 600-task outcome remains required before closing the freshness RCA.

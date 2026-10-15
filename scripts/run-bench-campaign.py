@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -565,7 +566,10 @@ def main() -> int:
     if controller_nice not in ("0", "10"):
         raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")
     controller_prefix: list[str] = []
+    controller_process_options = {"start_new_session": True}
     if controller_nice == "10":
+        if "process_group" not in inspect.signature(subprocess.Popen).parameters:
+            raise SystemExit("controller nice10 requires process_group support; no controller admitted")
         nice_binary = shutil.which("nice")
         if nice_binary is None or not hasattr(os, "getpriority"):
             raise SystemExit("controller nice10 is unsupported; no controller admitted")
@@ -582,6 +586,10 @@ def main() -> int:
         if probe.returncode:
             raise SystemExit("controller nice10 is unsupported; no controller admitted")
         controller_prefix = [nice_binary, "-n", "10"]
+        # Separate sessions create equal-priority Linux autogroups, defeating
+        # nice10 relative to the shared publisher. Inherit the session while
+        # keeping one owned process group per controller for exact killpg.
+        controller_process_options = {"process_group": 0}
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
     campaign_id = (
         requested_id
@@ -1098,7 +1106,7 @@ def main() -> int:
                     env=environment,
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                    **controller_process_options,
                 )
                 job["_process"] = process
                 job["controller_pid"] = process.pid
