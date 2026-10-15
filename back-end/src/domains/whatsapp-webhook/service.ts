@@ -69,6 +69,7 @@ async function routeToSupervisor(
   userId: string,
   fromPhone: string,
   messageBody: string,
+  messageId: string,
   attachments: WhatsAppMediaAttachment[],
   requestStart: number
 ): Promise<void> {
@@ -78,7 +79,7 @@ async function routeToSupervisor(
   ]
     .filter((part) => part !== '')
     .join('\n\n');
-  const mySeq = await recordInboundSms(userId, persistedInbound);
+  const mySeq = await recordInboundSms(userId, persistedInbound, messageId);
 
   log.info('Routing to supervisor (WhatsApp)', {
     userId,
@@ -93,6 +94,7 @@ async function routeToSupervisor(
     userId,
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
+    inboundMessageId: messageId,
     mySeq,
     inboundAlreadyPersisted: true,
     attachments,
@@ -278,7 +280,7 @@ export async function handleInboundWhatsApp(
         await markWhatsAppReachable(userId);
       }
 
-      await routeToSupervisor(userId, fromPhone, messageBody, attachments, requestStart);
+      await routeToSupervisor(userId, fromPhone, messageBody, messageId, attachments, requestStart);
     } catch (error) {
       // Processing failed (e.g. DB error) → release the dedup reservation so
       // Meta's retry reprocesses this message instead of skipping it as a dup.

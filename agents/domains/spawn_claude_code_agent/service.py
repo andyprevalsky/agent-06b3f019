@@ -151,6 +151,10 @@ def build_codex_credential_feedback(
                 "purchase more credits",
                 "quota exceeded. check your plan and billing details.",
                 "insufficient_quota",
+                "no credits remaining",
+                "add credits to continue",
+                "credit_balance_exhausted",
+                "credit balance is too low",
             )
         ):
             continue

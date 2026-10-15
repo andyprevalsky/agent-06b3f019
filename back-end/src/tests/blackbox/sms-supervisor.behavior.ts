@@ -319,7 +319,7 @@ export async function testRealLlm_supervisorRoundTrip(prisma: PrismaClient) {
     }
     if (asstMsgs.length !== 1) {
       throw new Error(
-        `Expected exactly one assistant turn persisted, got ${asstMsgs.length}: ${JSON.stringify(
+        `Expected exactly one substantive reply persisted, got ${asstMsgs.length}: ${JSON.stringify(
           asstMsgs.map((m) => m.content?.substring(0, 40))
         )}`
       );

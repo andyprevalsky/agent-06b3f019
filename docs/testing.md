@@ -199,6 +199,16 @@ bash scripts/run-predeploy-local
 
 This gate selects the bounded predeploy set and invokes `scripts/run-bench --local`, which owns the stack, execution and cleanup. General cloud selections use `scripts/run-bench <slice-or-task...>`. The lower-level `run_benchmark.py --port N` remains available for an explicitly reused running backend; it is not the normal deploy launcher. Production-only payment verification uses `scripts/run-bench agent-payment-production-abandonment` and the CLI's existing production routing.
 
+The user-approved AgentCard closed-card release stall is automatically skippable
+in every future sandbox and production run, including CI and `/deploy`; no flag
+or renewed approval is required. A confirmed CLOSED/zero-balance card with its
+exact transfer still consumed/released0 and funding RECLAIMING produces a loud
+`SKIPPED` warning. Independent lifecycle and execution cleanup failures remain
+strict. Retain the unreleased allocation and pending refund as liabilities;
+the skip does not prove native release. Explicitly set
+`BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0` only for strict release diagnostics.
+The benchmark blackbox domain owns the saved production-receipt regression.
+
 Every `/deploy` also runs compact offline benchmark controls in Step 4s:
 canonical CLI dispatch, completed LIVE-query evidence, exact composite-root
 cleanup, quiesced resource retirement, and evaluated result publication before

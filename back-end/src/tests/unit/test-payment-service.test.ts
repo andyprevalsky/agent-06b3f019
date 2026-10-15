@@ -381,13 +381,14 @@ async function main(): Promise<void> {
       },
       retrieveStripeHold: async () => ({
         id: 'pi_life',
+        livemode: false,
         status: 'succeeded',
         amount: 4396,
         amount_capturable: 0,
         amount_received: 4396,
       }),
       listStripeRefunds: async () => ({
-        data: [{ id: 're_1', status: 'succeeded', amount: 4396 }],
+        data: [{ id: 're_1', status: 'succeeded', amount: 4396, payment_intent: 'pi_life' }],
       }),
       getOrgCardholderId: async () => 'cardholder-life',
       searchStripeHolds: async () => ({ data: [{ id: 'pi_life' }] }),

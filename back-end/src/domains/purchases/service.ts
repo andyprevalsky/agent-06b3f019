@@ -220,7 +220,7 @@ async function recoverStaleChargingPurchase(purchase: PurchaseSpend): Promise<vo
 
   if (purchase.stripePaymentIntentId !== null) {
     try {
-      await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+      await cancelAuthorizedHold(purchase.stripePaymentIntentId, purchase.stripeLivemode);
     } catch (error) {
       log.warn('Failed to cancel Stripe hold while recovering stale CHARGING purchase', {
         purchase_id: purchase.id,
