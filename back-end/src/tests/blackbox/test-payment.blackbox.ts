@@ -326,13 +326,14 @@ const tests: Array<[string, () => Promise<void>]> = [
         getOrgCardholderId: async () => undefined,
         retrieveStripeHold: async () => ({
           id: 'pi-hold-1',
+          livemode: false,
           status: 'succeeded',
           amount: 4396,
           amount_capturable: 0,
           amount_received: 4396,
         }),
         listStripeRefunds: async () => ({
-          data: [{ id: 're-1', status: 'succeeded', amount: 4396 }],
+          data: [{ id: 're-1', status: 'succeeded', amount: 4396, payment_intent: 'pi-hold-1' }],
         }),
         listOrgTransfers: async ({ status }) => {
           transferReads += 1;

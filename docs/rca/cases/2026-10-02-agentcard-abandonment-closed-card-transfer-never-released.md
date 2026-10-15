@@ -471,3 +471,44 @@ message was sent. A concrete vendor-report draft and the sanitized provider
 timeline remain private under `.context/production/agentcard/`, alongside the
 original failure, controller exit receipt, and any separate recovery receipts.
 The case remains open.
+
+
+### Recurrence on 2026-10-15 during PR #1520 production verification
+
+Merged source `6ef22cc55811444f1524fb9faf22f6e97600410e` ran the unchanged
+production-only abandonment task as benchmark run
+`d0b6dbf8-0637-4130-a651-0cb42a7d7d79`, root
+`a1e098ad-02a5-49d6-9b9e-bf8a8163ba6a`. The task failed after581seconds:
+purchaseHELD, walletFundingRECLAIMING, cardCLOSED with zero balance, exact LIVE
+organization transfer consumed/transferred100/released0. The original controller
+also failed final cleanup, preserved the native failed verdict and run bundle,
+and joined exit1; its saved run timestamp is05:26:23UTC. No sandbox warning
+exception applies to a live transfer.
+
+Five owned backend release-observation passes began05:10:32,05:13:47,05:15:57,
+05:18:00 and05:20:54UTC. All30 exact-transfer observations through05:21:56
+returned consumed/100/0. A native read at05:22:08 independently matched the exact
+closed card and unreleased live transfer. These executed observation passes
+separate this occurrence from the GET-only/global-reconciliation bug. The
+underlying cause remains unproved: this does not establish merchant capture,
+shared-cardholder netting, throttling, or a repeated-close clock reset.
+
+After joining the original controller, an independent owner ran the unchanged
+stock cleanup and lifecycle validators on only the same original allocation.
+Recovery05:29:23–05:37:38UTC failed with the same native settlement state and
+created no new card or mint. Retry2 began05:40:27UTC, with the next due time
+05:50:27UTC. Attempts never overlap; exact financial identities, source SHA,
+clocks, snapshots and exit receipts remain under ignored `.context/`. No direct
+DB terminalization, premature Stripe refund, provider-record fabrication, or
+vendor message was used. The strict production gate and this RCA remain open.
+
+A separate mode-ownership audit found that this allocation's funding Stripe PI
+and customer are test-mode despite the task's documented live billing intent;
+the exact AgentCard transfer is live. Existing test PI compensation must remain
+on its original Stripe account. This is a separate gate/fixture coverage issue,
+not proof explaining AgentCard's unreleased transfer. Its local mode-routing
+reproduction and repair draft remain isolated. Four exact-user live customers
+were read; none has an attached/default live card. A zero-charge hosted setup
+session was prepared against one existing owned customer without DB or
+subscription writes, and human card save is pending. No live Stripe capture or
+completed production financial gate is claimed.

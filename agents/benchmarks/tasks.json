@@ -6857,12 +6857,14 @@
         "amountCents": 100
       },
       "stripeHold": {
+        "livemode": true,
         "status": "succeeded",
         "amountCents": 100,
         "amountCapturableCents": 0,
         "amountReceivedCents": 100
       },
       "stripeRefund": {
+        "paymentIntentLivemode": true,
         "status": "succeeded",
         "amountCents": 100
       },
@@ -8365,6 +8367,7 @@
         "amountCents": 100
       },
       "stripeHold": {
+        "livemode": true,
         "status": "succeeded",
         "amountCents": 100,
         "amountCapturableCents": 0,

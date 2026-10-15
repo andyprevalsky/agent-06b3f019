@@ -2707,6 +2707,96 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     assert cleanup_index < seal_index < archive_index
 
 
+async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, archive_fails=False):
+    """Run the actual task owner; replace only external allocation/IO boundaries."""
+    from copy import deepcopy
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    root, task_id = "11111111-1111-4111-8111-111111111111", "owned-browser-task"
+    meta = dict(task_id=task_id, toolName="spawn_browser_agent", agentType="browser",
+                workflowGeneration=root)
+    data = {"agent": {"agent_id": root, "status": "ACTIVE"}, "messages": [
+        {"role": "TOOL", "text": "recorded", "metadata": dict(meta, action_type="recording",
+         toolStatus="FINISHED", recording_view_url="https://fixture.invalid/recording")},
+        {"role": "TOOL", "text": "terminal", "metadata": dict(meta, action_type="task_complete",
+         toolStatus="FINISHED")},
+    ], "_benchmark": {"payment_lifecycle": {"purchase": {"id": "owned-purchase", "status": "HELD"}}}}
+    task = deepcopy(get_task_by_name("agent-payment-abandonment"))
+    task.name = "agent-payment-production-abandonment"; task.tags = []; task.production_only = True
+    async def poll(_base, _agent, _task, _monitor, snapshot):
+        snapshot.update(deepcopy(data))
+        if phase == "cancel": raise asyncio.CancelledError()
+        if phase == "poll": raise RuntimeError("actual payment reconciliation release pending")
+        return deepcopy(data), 0, 0, None
+    async def execute(_base, _agent, callback, **_kwargs): return await callback({})
+    async def get(_base, aid):
+        assert aid == root
+        if refresh == "unavailable": raise RuntimeError("authoritative read unavailable")
+        if refresh == "empty": return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
+        result = deepcopy(data)
+        if refresh == "foreign": result["agent"]["agent_id"] = "foreign-agent"
+        if refresh == "shorter": result["messages"] = result["messages"][:1]
+        return result
+    async def collect(_agent, snapshot, _start):
+        if logger_fails: raise RuntimeError("log transport unavailable")
+        return {"messages": bench.extract_message_transcript(snapshot)}
+    async def cleanup(*_args, **_kwargs):
+        if phase == "cleanup": raise RuntimeError("actual payment reconciliation release pending")
+        return None
+    async_names = ["prepare_sandbox_payment_residual", "_preflight_production_payment_identity",
+                   "_apply_live_fixtures", "_apply_memory_fixtures", "_apply_auth_test_site",
+                   "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
+                   "subscribe_supabase_realtime_agent", "post_world_model_update_events", "archive_agent_start"]
+    with contextlib.ExitStack() as stack:
+        for name in async_names: stack.enter_context(patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else [])))
+        for name, replacement in {
+            "create_agent": AsyncMock(return_value=root), "_poll_agent": poll,
+            "_run_with_agent_execution_backstop": execute, "get_agent": get,
+            "get_agent_tree": AsyncMock(return_value=[{"agent_id": root, "status": "ACTIVE"}]),
+            "_get_settled_tool_usage": AsyncMock(return_value={}), "_fetch_tree_stats": AsyncMock(return_value={}),
+            "get_llm_usage_details": AsyncMock(return_value=({}, {})),
+            "_get_initial_payment_lifecycle_with_retry": AsyncMock(return_value=deepcopy(data["_benchmark"]["payment_lifecycle"])),
+            "evaluate_task": lambda *_args: (False, "payment remains pending"),
+            "collect_logs": collect, "ensure_payment_lifecycle_cleanup": cleanup,
+            "finalize_archive_and_score_world_model": AsyncMock(
+                return_value=(None, None), side_effect=RuntimeError("archive unavailable") if archive_fails else None),
+            "_begin_interrupt_cleanup": lambda: False,
+            "delete_agent": AsyncMock(),
+        }.items(): stack.enter_context(patch.object(bench, name, replacement))
+        result = await bench._run_single_task_as_run_user(
+            "https://fixture.invalid", task, True, None, "", None, None, None)
+    assert not result.passed
+    assert result.benchmark_status == ("CANCELLED" if phase == "cancel" else "ERROR")
+    assert result.logs["messages"] == bench.extract_message_transcript(data), "exception discarded the owned transcript"
+    assert result.message_count == 2
+    assert result.logs["failure_evidence"]["agent_id"] == root
+    assert result.logs["failure_evidence"]["benchmark_state"]["payment_lifecycle"]["purchase"]["id"] == "owned-purchase"
+    assert result.logs["tree"][root]["messages"] == bench.extract_message_transcript(data)
+    if phase != "cancel": assert "actual payment reconciliation release pending" in result.failure_reason
+    if refresh == "foreign": assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
+    if archive_fails: assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
+    return result
+
+
+async def test_task_failure_preserves_owned_snapshot_on_all_error_exits():
+    for phase in ("poll", "cleanup", "cancel"):
+        for refresh in ("ready", "empty", "unavailable", "foreign", "shorter"):
+            await _exercise_failure_evidence_exit(phase, refresh)
+    await _exercise_failure_evidence_exit("poll", "unavailable", logger_fails=True)
+    for phase in ("poll", "cancel"):
+        await _exercise_failure_evidence_exit(phase, "unavailable", archive_fails=True)
+
+
+async def test_payment_browser_seal_rejects_empty_declared_browser_evidence():
+    from benchmarks import run_benchmark as bench
+    empty = {"agent": {"agent_id": "owned-root", "status": "FAILED", "model": "benchmark-hub"}, "messages": []}
+    with patch.object(bench, "get_agent", AsyncMock(return_value=empty)), patch.object(bench, "pause_agent", AsyncMock()) as pause:
+        _sealed, error = await bench._seal_payment_abandonment_browser_for_archive(
+            "https://fixture.invalid", "owned-root", empty)
+    assert error, "empty Hub snapshot falsely authorized a declared browser as sealed"
+    pause.assert_not_called()
+
+
 async def test_cancelled_preparation_archives_only_with_positive_task_and_owner_proof():
     """Joined pre-action init can coexist with an earlier recorded browser task."""
     import benchmarks.run_benchmark as bench
@@ -3420,16 +3510,21 @@ async def _exercise_owned_payment_reconciliation_caller(
     ):
         result = None
         error = None
+        snapshot = {}
         try:
             if caller == "cleanup":
                 result = await bench.ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             else:
-                data, _triggered, _resolved, failure = await bench._poll_agent(base_url, agent_id, task)
+                data, _triggered, _resolved, failure = await bench._poll_agent(base_url, agent_id, task, timeout_snapshot=snapshot)
                 assert failure is None
                 result = data["_benchmark"]["payment_lifecycle"]
         except (RuntimeError, TimeoutError, asyncio.CancelledError) as caught:
             error = caught
 
+    if caller == "poll" and error is not None and recovery_started:
+        assert snapshot["agent"]["id"] == agent_id
+        assert snapshot["messages"] == ready["messages"]
+        assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
         path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"}
         for _, path, _ in requests
@@ -23217,6 +23312,8 @@ async def run_all_tests():
         "post_pause_refreshes_retain_observed_harness_evidence",
         test_post_pause_refreshes_retain_observed_harness_evidence,
     )
+    await r.record_async("task_failure_preserves_owned_snapshot", test_task_failure_preserves_owned_snapshot_on_all_error_exits)
+    await r.record_async("payment_browser_seal_rejects_empty_evidence", test_payment_browser_seal_rejects_empty_declared_browser_evidence)
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",
         test_payment_abandonment_seals_browser_before_hub_archive,

@@ -10,7 +10,7 @@ import {
   reclaimPurchaseWalletFunding,
   recordIssuedPurchaseCardFunding,
 } from './purchase-wallet-funding';
-import { reversePurchasePaymentIntent, stripe } from './stripe';
+import { reversePurchasePaymentIntent, getStripeClientForLivemode } from './stripe';
 import {
   createWalletFundingProvider,
   isWalletFundingConsumedDuringReclaimError,
@@ -44,8 +44,11 @@ function scopeWhere(scope?: FundingCompensationScope): FundingCompensationScope 
   };
 }
 
-async function recoverUnpersistedStripeIntent(purchaseId: string): Promise<string | null> {
-  const result = await stripe.paymentIntents.search({
+async function recoverUnpersistedStripeIntent(
+  purchaseId: string,
+  livemode: boolean
+): Promise<string | null> {
+  const result = await getStripeClientForLivemode(livemode).paymentIntents.search({
     query: `metadata['purchaseSpendId']:'${purchaseId}'`,
     limit: 10,
   });
@@ -67,12 +70,13 @@ async function recoverUnpersistedStripeIntent(purchaseId: string): Promise<strin
 
 async function reversePurchaseAuthorization(
   purchaseId: string,
-  persistedPaymentIntentId: string | null
+  persistedPaymentIntentId: string | null,
+  livemode: boolean
 ): Promise<string | null> {
   const paymentIntentId =
-    persistedPaymentIntentId ?? (await recoverUnpersistedStripeIntent(purchaseId));
+    persistedPaymentIntentId ?? (await recoverUnpersistedStripeIntent(purchaseId, livemode));
   if (paymentIntentId === null) return null;
-  await reversePurchasePaymentIntent(paymentIntentId, purchaseId);
+  await reversePurchasePaymentIntent(paymentIntentId, purchaseId, livemode);
   return paymentIntentId;
 }
 
@@ -130,7 +134,8 @@ async function compensateAbandonedPurchase(
   if (purchase === null) return;
 
   const paymentIntentId =
-    purchase.stripePaymentIntentId ?? (await recoverUnpersistedStripeIntent(purchase.id));
+    purchase.stripePaymentIntentId ??
+    (await recoverUnpersistedStripeIntent(purchase.id, purchase.stripeLivemode));
   if (paymentIntentId === null) {
     // The funding marker is written before Stripe. No Stripe PI means the process died before any
     // provider call could start, so this row is safe to terminate without replaying AgentCard.
@@ -159,7 +164,7 @@ async function compensateAbandonedPurchase(
       code: error instanceof AgentCardProviderError ? error.code : undefined,
     });
     await discardPendingPurchaseWalletCollection(purchase.id);
-    await reversePurchaseAuthorization(purchase.id, paymentIntentId);
+    await reversePurchaseAuthorization(purchase.id, paymentIntentId, purchase.stripeLivemode);
     await prisma.purchaseSpend.updateMany({
       where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
       data: { status: PurchaseSpendStatus.FAILED },
@@ -168,7 +173,7 @@ async function compensateAbandonedPurchase(
   }
   if (issued === null) return;
   if (issued.staticCard) {
-    await reversePurchaseAuthorization(purchase.id, paymentIntentId);
+    await reversePurchaseAuthorization(purchase.id, paymentIntentId, purchase.stripeLivemode);
     await prisma.purchaseSpend.updateMany({
       where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
       data: { status: PurchaseSpendStatus.VOIDED },
@@ -196,7 +201,7 @@ async function compensateAbandonedPurchase(
     }
     throw error;
   }
-  await reversePurchaseAuthorization(purchase.id, paymentIntentId);
+  await reversePurchaseAuthorization(purchase.id, paymentIntentId, purchase.stripeLivemode);
   await prisma.purchaseSpend.updateMany({
     where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
     data: { status: PurchaseSpendStatus.VOIDED },

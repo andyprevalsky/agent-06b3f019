@@ -4512,7 +4512,7 @@ async def _poll_agent(
         if subscription_checkout_evidence:
             data["_benchmark"]["subscription_checkout"] = subscription_checkout_evidence
         if timeout_snapshot is not None:
-            timeout_snapshot["_benchmark"] = data["_benchmark"]
+            timeout_snapshot.update(data)
         if seen_attention_kinds:
             data["_benchmark"]["attention_request_kind_seen"] = seen_attention_kinds[-1]
             if task.expected_attention_kind:
@@ -4598,6 +4598,10 @@ async def _poll_agent(
                 # this success path must fit the task's remaining execution time.
                 async with asyncio.timeout(remaining_task_budget):
                     lifecycle = await _start_payment_abandonment_with_recovery(base_url, agent_id)
+                    # Retain exact allocation ownership before reconciliation can raise.
+                    data["_benchmark"] = {**data.get("_benchmark", {}), "payment_lifecycle": lifecycle}
+                    if timeout_snapshot is not None:
+                        timeout_snapshot.update(data)
                     remaining_task_budget = (
                         None if wall_clock_disabled else max(0, resolved_timeout - (time.time() - start))
                     )
@@ -6586,6 +6590,49 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         raise RuntimeError("owned cloud evidence finalization failed: " + "; ".join(failures))
 
 
+async def _capture_task_failure_evidence(
+    base_url: str, agent_id: str, task: BenchmarkTask, data: dict, start_time: datetime,
+) -> tuple[dict, dict]:
+    """Retain the last owned snapshot even when refresh or log transport fails."""
+    errors = []
+    try:
+        refreshed = await get_agent(base_url, agent_id)
+        owner = refreshed.get("agent", {}).get("id") or refreshed.get("agent", {}).get("agent_id")
+        if owner and owner != agent_id:
+            raise ValueError("failure snapshot belongs to another agent")
+        if refreshed.get("messages") and len(refreshed["messages"]) >= len(data.get("messages", [])):
+            data = _retain_harness_benchmark_state(data, refreshed)
+        elif not data.get("messages"):
+            errors.append("No authoritative messages available from agent read")
+    except Exception as exc:
+        errors.append(f"snapshot: {type(exc).__name__}: {exc}")
+    if task.payment_card_request_action == "abandon":
+        data, seal_error = await _seal_payment_abandonment_browser_for_archive(base_url, agent_id, data)
+        if seal_error:
+            errors.append(seal_error)
+    try:
+        logs = await collect_logs(agent_id, data, start_time)
+    except Exception as exc:
+        errors.append(f"logs: {type(exc).__name__}: {exc}")
+        logs = {}
+    logs["messages"] = extract_message_transcript(data)
+    try:
+        tree_agents = await get_agent_tree(base_url, agent_id)
+
+        async def owned_snapshot(aid):
+            return data if aid == agent_id else await get_agent(base_url, aid)
+
+        tree = canonicalize_agent_tree(await collect_tree_messages(agent_id, tree_agents, owned_snapshot))
+        if tree:
+            logs["tree"] = tree
+    except Exception as exc:
+        errors.append(f"tree: {type(exc).__name__}: {exc}")
+    logs["failure_evidence"] = {
+        "agent_id": agent_id, "benchmark_state": data.get("_benchmark", {}), "errors": errors,
+    }
+    return data, logs
+
+
 async def _seal_payment_abandonment_browser_for_archive(
     base_url: str,
     agent_id: str,
@@ -6600,6 +6647,8 @@ async def _seal_payment_abandonment_browser_for_archive(
     the terminal chip row and the finalized recording required by evidence-link
     validation.
     """
+    if not data.get("messages"):
+        return data, "Payment-abandonment browser evidence is missing; empty snapshot cannot authorize sealing"
     if _agent_messages_ready_for_durable_browser_evidence(data.get("messages")):
         return data, None
 
@@ -13751,6 +13800,8 @@ async def _run_single_task_as_run_user(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    data: dict = {}
+    last_snapshot: dict = {}
     archive_manifest_ref: Optional[str] = None
     world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
@@ -13864,7 +13915,8 @@ async def _run_single_task_as_run_user(
         execution_started_at = asyncio.get_running_loop().time()
 
         async def execute_agent(snapshot: dict):
-            nonlocal grep_fixture_manifest
+            nonlocal grep_fixture_manifest, last_snapshot
+            last_snapshot = snapshot
             if on_agent_created:
                 on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
@@ -14439,6 +14491,7 @@ async def _run_single_task_as_run_user(
         duration = time.time() - start
         interrupt_cleanup_started = _begin_interrupt_cleanup() if cloud_batch_cleanup.contract() is None else False
         cancelled_agent_deleted = False
+        cancellation_cleanup_ok = True
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
         if realtime_monitor:
             await realtime_monitor.stop()
@@ -14448,40 +14501,30 @@ async def _run_single_task_as_run_user(
         status = "CANCELLED"
         progress_score = 0
         if agent_id:
-            try:
-                data = await get_agent(base_url, agent_id)
-                agent = data.get("agent", {})
-                messages = data.get("messages", [])
-                status = agent.get("status", "CANCELLED")
-                progress_score = agent.get("progress", 0)
-            except Exception:
-                data = {}
-            try:
-                print("    Collecting prod logs...")
-                logs = await collect_logs(agent_id, data, start_time)
-                log_summary = []
-                for key, label in [
-                    ("backend_logs", "backend"),
-                    ("worker_logs", "worker"),
-                    ("research_logs", "research"),
-                    ("realtime_logs", "realtime"),
-                ]:
-                    entries = logs.get(key, [])
-                    log_summary.append(f"{label}={len(entries)}")
-                log_summary.append(f"messages={len(logs.get('messages', []))}")
-                print(f"    Logs collected: {', '.join(log_summary)}")
-            except Exception as log_exc:
-                print(f"    ⚠ Failed to collect cancellation logs: {log_exc}")
-            archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
-                base_url,
-                agent_id,
-                task.name,
-                force=True,
-                benchmark_passed=False,
-                benchmark_status="CANCELLED",
-                failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
+            data, logs = await _capture_task_failure_evidence(
+                base_url, agent_id, task, data or last_snapshot, start_time,
             )
-            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            messages = data.get("messages", [])
+            status = data.get("agent", {}).get("status", "CANCELLED")
+            progress_score = data.get("agent", {}).get("progress", 0)
+            try:
+                archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+                    base_url,
+                    agent_id,
+                    task.name,
+                    force=True,
+                    benchmark_passed=False,
+                    benchmark_status="CANCELLED",
+                    failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
+                )
+            except Exception as archive_error:
+                logs["failure_evidence"]["errors"].append(
+                    f"archive: {type(archive_error).__name__}: {archive_error}")
+            try:
+                await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            except Exception as cleanup_error:
+                cancellation_cleanup_ok = False
+                logs["failure_evidence"]["errors"].append(f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
             if interrupt_cleanup_started:
                 if not _should_delete_cancelled_agent(keep_failed_agents):
                     raise RuntimeError("owner-requested benchmark teardown cannot retain the cancelled agent")
@@ -14498,7 +14541,7 @@ async def _run_single_task_as_run_user(
                         print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
                 except Exception:
                     print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
-        interrupt_cleanup_ready = interrupt_cleanup_started
+        interrupt_cleanup_ready = interrupt_cleanup_started and cancellation_cleanup_ok and cancelled_agent_deleted
         print(
             f"    Interrupt cleanup evidence: agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
@@ -14537,22 +14580,24 @@ async def _run_single_task_as_run_user(
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
-        # Best-effort log collection — errors are when logs matter most
         logs = None
         if agent_id:
-            try:
-                logs = await collect_logs(agent_id, {}, start_time)
-            except Exception:
-                pass
-            archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
-                base_url,
-                agent_id,
-                task.name,
-                force=True,
-                benchmark_passed=False,
-                benchmark_status=error_status,
-                failure_reason=str(e),
+            data, logs = await _capture_task_failure_evidence(
+                base_url, agent_id, task, data or last_snapshot, start_time,
             )
+            try:
+                archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+                    base_url,
+                    agent_id,
+                    task.name,
+                    force=True,
+                    benchmark_passed=False,
+                    benchmark_status=error_status,
+                    failure_reason=str(e),
+                )
+            except Exception as archive_error:
+                logs["failure_evidence"]["errors"].append(
+                    f"archive: {type(archive_error).__name__}: {archive_error}")
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -14562,7 +14607,7 @@ async def _run_single_task_as_run_user(
             progress_score=0,
             duration_seconds=round(duration, 1),
             cost_cents=0,
-            message_count=0,
+            message_count=len(data.get("messages", [])),
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
                 + f"{e}"
@@ -14582,7 +14627,10 @@ async def _run_single_task_as_run_user(
             except Exception as exc:
                 print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
         if agent_id:
-            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            try:
+                await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+            except Exception as cleanup_error:
+                logs["failure_evidence"]["errors"].append(f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
             try:
                 if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
                     await delete_agent(base_url, agent_id)

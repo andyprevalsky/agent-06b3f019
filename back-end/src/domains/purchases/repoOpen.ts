@@ -20,7 +20,7 @@ const ACTIVE_PURCHASE_STATUSES = [
  * transaction re-checks active rows while holding a per-user/cart advisory lock, so two first
  * requests cannot create different PurchaseSpend/Stripe/AgentCard idempotency keys.
  */
-export async function createPendingPurchaseWithLock(data: {
+interface PendingPurchaseData {
   userId: string;
   agentId?: string;
   fingerprint: string;
@@ -28,7 +28,9 @@ export async function createPendingPurchaseWithLock(data: {
   merchant: string;
   lineItemsJson: unknown;
   totalCents: number;
-}) {
+}
+
+export async function createPendingPurchaseWithLock(data: PendingPurchaseData) {
   const agentId =
     data.agentId !== undefined && data.agentId.trim() !== '' ? data.agentId.trim() : undefined;
   return runTransactionWithRetry(async (transaction) => {
@@ -90,9 +92,15 @@ export async function createPendingPurchaseWithLock(data: {
       });
       return { created: false as const, purchase };
     }
+    const subscription = await transaction.subscription.findUnique({
+      where: { userId: data.userId },
+    });
     const purchase = await transaction.purchaseSpend.create({
       data: {
         userId: data.userId,
+        stripeLivemode: subscription?.stripeLivemode ?? false,
+        stripeCustomerId: subscription?.stripeCustomerId ?? null,
+        stripeSubscriptionId: subscription?.stripeSubscriptionId ?? null,
         agentId,
         fingerprint: data.fingerprint,
         canonicalFingerprint: data.canonicalFingerprint,
