@@ -997,8 +997,20 @@ async def test_browser_instruction_poll_retains_only_user_sources_and_exact_task
     start = await native_browser_start_source("2026-10-14T00:00:00+00:00", tool_call_id="tool-1")
     other = {"id": "other", "role": "TOOL", "text": "Other task", "metadata": {"task_id": "task-2", "subAgentId": "task-2", "action_type": "task_started"}}
     internal = {"id": "internal", "role": "TOOL", "text": "Large browser state", "metadata": {"task_id": "task-1", "subAgentId": "task-1", "action_type": "read_browser_state"}}
+    # Execute the actual OTP credential writer. Its USER role is internal
+    # machine context, distinguished by native subAgentId provenance.
+    from types import SimpleNamespace
+    from domains.spawn_browser_agent_v3.repo import save_browser_credential_ref_message
+    post = AsyncMock(return_value=SimpleNamespace(status_code=200, is_error=False))
     with (
-        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [user, start, other, internal]})) as fetch,
+        patch("config.load_config", return_value=SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture", api_key="fixture"))),
+        patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=post)),
+    ):
+        assert await save_browser_credential_ref_message(agent_id="agent-1", task_id="other-browser", message="OTP fixture context", role="USER", credential_ref={"kind": "otp", "id": "fixture"})
+    payload = post.await_args.kwargs["json"]
+    otp = {"id": "otp", "role": payload["role"], "text": payload["message"], "metadata": payload["metadata"]}
+    with (
+        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [user, start, other, internal, otp]})) as fetch,
         patch("helpers.messages.activity.heartbeat"),
     ):
         rows = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-1")

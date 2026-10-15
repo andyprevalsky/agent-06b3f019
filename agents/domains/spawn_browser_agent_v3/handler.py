@@ -950,7 +950,7 @@ async def _load_browser_resume_user_instructions(
     tool_call_id = resume_state.get("tool_call_id")
     floor_confirmed = bool(cursor) and resume_state.get("user_message_cursor_is_task_start") is True
     epoch = datetime.fromtimestamp(0, timezone.utc)
-    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00")) if cursor else None
+    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00")) if floor_confirmed else None
     since = cursor_time if floor_confirmed and cursor_time is not None else epoch
     rows = await poll_new_messages(
         agent_id, since - timedelta(microseconds=1),
@@ -965,10 +965,9 @@ async def _load_browser_resume_user_instructions(
             and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
             and (row.get("metadata") or {}).get("action_type") == "session_starting"
         ]
-        if starts:
-            cursor_time = min([*starts, *([cursor_time] if cursor_time is not None else [])])
-        if cursor_time is None:
+        if not starts:
             raise ValueError("Browser task input boundary is unavailable")
+        cursor_time = min(starts)
     messages = list(resume_state.get("user_instruction_messages") or [])
     seen_ids = set(resume_state.get("user_instruction_message_ids") or [])
     for row in sorted(rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))):

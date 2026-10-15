@@ -276,9 +276,9 @@ Exact unchanged commands in the isolated development worktree were
 `agents/venv/bin/python .context/review3_extra.py`.
 `review3-causal-proof.json` records the baseline, SHA-256 of all four permanent
 fixture files, unchanged assertions, exit statuses, durations and before/after
-console paths. Before: seven failures in 1.960s plus the missing projection
-failure and preserved producer control in 0.591s. After: all seven pass in
-2.110s and both projection/producer checks pass in 0.650s.
+console paths. Before: seven failures in 2.347s plus the missing projection
+failure and preserved producer control in 0.629s. After: all seven pass in
+2.256s and both projection/producer checks pass in 0.608s.
 
 Archive searches were `browser heartbeat schema generation verifier IN_PROGRESS`
 and `late committed USER timestamp cursor legacy resume task history`. The
@@ -312,6 +312,35 @@ is not counted as runtime validation. Scoped Ruff, archive validation (871
 cases after main synchronization), compilation and diff checks also pass.
 The main synchronization changed benchmark history and docs under `agents/`,
 not these tested production/owning-test sources.
+
+
+### Development review: trust the proven source, retain internal scope
+
+Independent review of development `485285c08` found two additional errors before
+any new deploy began. An unconfirmed legacy observation cursor was still used
+when the native source was absent, and could widen a valid native task range
+when older than that source. The early USER projection also bypassed the
+existing internal-subagent filter. The actual OTP writer deliberately saves
+machine credential context with role USER plus native `subAgentId` and
+`credential_ref`; this is not authored root feedback.
+
+Three unchanged permanent controls fail on `485285c08`, then pass after the
+repair (`review3-development-review-{before,after}.txt`). The OTP control
+executes the actual credential writer and mocks only HTTP persistence; the
+loader controls cover an advanced legacy cursor with no source and an old
+cursor preceding the real source. The repair deletes the unconfirmed-cursor
+fallback entirely. Only a proved saved start or the exact native manager start
+can establish the range. The same optional poll projection reuses
+`is_internal_subagent_message` to exclude internal USER rows and separately
+permits the exact manager TOOL source. No text classifier, OTP wording match,
+new provenance format or generated conversation message is added.
+
+Known fresh-task fixtures carry their actual scheduling-floor proof. Legacy
+fixtures obtain the actual manager source; the repeated-resume delayed-commit
+control still fails against `9b8b694bb` at the same lost-correction assertion.
+All original seven causal checks and the projection/producer controls were
+replayed unchanged on both sides with the final fixtures, with hashes and
+console artifacts preserved under the dated `review3-causal-*` directory.
 
 ## Human feedback
 

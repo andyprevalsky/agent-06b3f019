@@ -20932,7 +20932,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         input_poll_calls += 1
         if initial_poll_failure and input_poll_calls == 1:
             raise TimeoutError("resume input backend unavailable")
-        return list(correction_rows)
+        return [await native_browser_start_source("2026-10-14T17:21:35.438+00:00"), *correction_rows]
     patch_targets = [
         *([
             patch("domains.spawn_browser_agent_v3.handler._prepare_pending_write_lock_action", pending_preparation),
@@ -23269,6 +23269,7 @@ async def test_browser_resume_loads_ordered_durable_input_after_archived_hydrati
         "delivered_user_instruction_count": 1,
         "user_instruction_message_ids": ["old"],
         "user_message_cursor": "2026-10-14T17:28:33.341000+00:00",
+        "tool_call_id": "tool-1",
     }
     body = json.dumps(archived).encode()
     ref = {"paths": ["fixture-private-snapshot"], "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
@@ -23283,6 +23284,7 @@ async def test_browser_resume_loads_ordered_durable_input_after_archived_hydrati
         {"id": "new-a", "timestamp": "2026-10-14T17:28:33.341Z", "role": "USER", "text": "Include notes."},
         {"id": "tool", "timestamp": "2026-10-14T17:28:33.342Z", "role": "TOOL", "text": "Must not become user input"},
     ]
+    rows.append(await native_browser_start_source("2026-10-14T17:28:33.341000+00:00"))
     poll = AsyncMock(return_value=rows)
     with patch.object(h, "poll_new_messages", poll):
         state = await h._load_browser_resume_user_instructions("agent-1", hydrated)
@@ -23300,6 +23302,7 @@ async def test_browser_resume_loads_ordered_durable_input_after_archived_hydrati
         action_history=SimpleNamespace(get_entries=lambda: []), visited_urls=[], verifier_checkpoints=[],
         browser_turn_messages=turns, user_instruction_messages=delivered,
         user_message_cursor=state["user_message_cursor"], user_instruction_message_ids=state["user_instruction_message_ids"],
+        user_message_cursor_is_task_start=state["user_message_cursor_is_task_start"],
     )
     carried = {}
     h._copy_browser_resume_continuity_fields(parked, carried)
@@ -23453,7 +23456,7 @@ async def test_browser_active_schema_failure_delivers_real_input_and_retries_una
     schema = {"fields": [{"name": "events", "type": "list[str]", "required": True}]}
     row = {"id": "active-schema-timeout", "role": "USER", "text": "Use Andy's shared calendar instead.",
            "timestamp": "2026-10-14T17:28:33+00:00"}
-    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00"}
+    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00", "user_message_cursor_is_task_start": True}
     turns = []
     usage = {"prompt_tokens": 12, "completion_tokens": 6, "actual_model": "schema-model"}
     generation = AsyncMock(side_effect=[TimeoutError("schema provider unavailable"), (schema, None, usage)])
@@ -23503,7 +23506,7 @@ async def test_browser_coalesced_schema_failure_retains_completed_usage_and_late
             raise TimeoutError("later schema refresh unavailable")
         return final_schema, None, usage
 
-    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00"}
+    state = {"user_message_cursor": "2026-10-14T17:00:00+00:00", "user_message_cursor_is_task_start": True}
     turns = []
     with patch.object(h, "poll_new_messages", AsyncMock(side_effect=lambda *args: copy.deepcopy(rows))), patch(
         "helpers.llm._generate_response_schema_with_rose", AsyncMock(side_effect=generate)
@@ -26197,6 +26200,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         "Do not return the events list."
     )
 
+    durable_messages.append(await native_browser_start_source((now - timedelta(minutes=1)).isoformat()))
     poll_calls = 0
     async def fetch_agent_snapshot(agent_id, since, **kwargs):
         nonlocal poll_calls
@@ -26422,11 +26426,11 @@ async def _exercise_browser_delayed_commit_cursor(first_role):
     from domains.spawn_browser_agent_v3 import handler as h
 
     start = datetime(2026, 10, 14, 17, 0, tzinfo=timezone.utc)
-    rows = [{"id": "first", "role": first_role, "text": "First visible row", "timestamp": (start + timedelta(minutes=5)).isoformat()}]
+    rows = [await native_browser_start_source(start.isoformat()), {"id": "first", "role": first_role, "text": "First visible row", "timestamp": (start + timedelta(minutes=5)).isoformat()}]
     async def poll(_agent_id, since, **kwargs):
         return copy.deepcopy([row for row in rows if datetime.fromisoformat(row["timestamp"]) > since])
     with patch.object(h, "poll_new_messages", side_effect=poll):
-        state = await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1", "user_message_cursor": start.isoformat()})
+        state = await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1", "tool_call_id": "tool-1", "user_message_cursor": start.isoformat()})
         # A long transaction assigned its timestamp before the first poll, but
         # becomes visible only after a newer TOOL or USER transaction committed.
         rows.append({"id": "late-commit", "role": "USER", "text": "Preserve this actual correction", "timestamp": (start + timedelta(seconds=1)).isoformat()})
@@ -26435,7 +26439,7 @@ async def _exercise_browser_delayed_commit_cursor(first_role):
             user_instruction_messages=state["user_instruction_messages"],
             user_instruction_message_ids=state["user_instruction_message_ids"], user_message_cursor=state["user_message_cursor"],
         )
-        carried = {"task_id": "task-1"}
+        carried = {"task_id": "task-1", "tool_call_id": "tool-1"}
         h._copy_browser_resume_continuity_fields(parked, carried)
         state = await h._load_browser_resume_user_instructions("agent-1", carried)
         state = await h._load_browser_resume_user_instructions("agent-1", state)
@@ -26466,6 +26470,25 @@ async def test_browser_legacy_resume_uses_its_own_durable_task_start():
     with patch.object(h, "poll_new_messages", AsyncMock(return_value=rows)):
         state = await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1", "tool_call_id": "tool-1"})
     assert state["user_instruction_messages"] == [{"role": "user", "content": "Correction sent while paused"}], "legacy resume replayed unrelated root history"
+
+
+async def test_browser_unconfirmed_legacy_cursor_cannot_replace_missing_task_source():
+    from domains.spawn_browser_agent_v3 import handler as h
+    rows = [{"id": "late", "role": "USER", "text": "Sent before an observed newer row committed", "timestamp": "2026-10-14T17:59:59+00:00"}]
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=rows)):
+        with pytest.raises(ValueError, match="task.*boundary"):
+            await h._load_browser_resume_user_instructions("agent-1", {"tool_call_id": "tool-1", "user_message_cursor": "2026-10-14T18:00:00+00:00"})
+
+
+async def test_browser_native_task_source_overrides_unconfirmed_older_cursor():
+    from domains.spawn_browser_agent_v3 import handler as h
+    rows = [await native_browser_start_source("2026-10-14T17:00:00+00:00"),
+        {"id": "unrelated", "role": "USER", "text": "Previous task", "timestamp": "2026-10-14T16:30:00+00:00"},
+        {"id": "actual", "role": "USER", "text": "Actual current correction", "timestamp": "2026-10-14T17:01:00+00:00"}]
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=rows)):
+        state = await h._load_browser_resume_user_instructions("agent-1", {"tool_call_id": "tool-1", "user_message_cursor": "2026-10-14T16:00:00+00:00"})
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "Actual current correction"}], "legacy observation cursor widened the proven task range"
+    assert state["user_message_cursor"] == "2026-10-14T17:00:00+00:00"
 
 
 async def test_browser_legacy_resume_without_source_boundary_fails_closed():
@@ -26616,7 +26639,7 @@ async def test_browser_second_poll_failure_preserves_admitted_input_schema_and_u
     generation = AsyncMock(return_value=(schema, None, usage))
     turns = []
     with patch.object(h, "poll_new_messages", AsyncMock(side_effect=[[row], TimeoutError("second poll unavailable"), [row]])), patch("helpers.llm._generate_response_schema_with_rose", generation):
-        state, accepted, usages = await h._sync_browser_user_instructions(agent_id="agent-1", goal="Read events", response_schema=schema, instruction_state={"user_message_cursor": "2026-10-14T21:00:00+00:00"}, turn_messages=turns, compute_auth=None)
+        state, accepted, usages = await h._sync_browser_user_instructions(agent_id="agent-1", goal="Read events", response_schema=schema, instruction_state={"user_message_cursor": "2026-10-14T21:00:00+00:00", "user_message_cursor_is_task_start": True}, turn_messages=turns, compute_auth=None)
         assert state["schema_user_instruction_count"] == state["delivered_user_instruction_count"] == 1
         assert state["_user_instruction_poll_confirmed"] is False and usages == [usage]
         json.dumps(state)
@@ -26696,6 +26719,8 @@ async def run_all_tests():
     await r.record_async("browser_late_user_commit_survives_newer_tool_and_resume", test_browser_late_user_commit_survives_newer_tool_and_resume)
     await r.record_async("browser_late_user_commit_survives_newer_user_and_resume", test_browser_late_user_commit_survives_newer_user_and_resume)
     await r.record_async("browser_legacy_resume_uses_its_own_durable_task_start", test_browser_legacy_resume_uses_its_own_durable_task_start)
+    await r.record_async("browser_unconfirmed_legacy_cursor_cannot_replace_missing_task_source", test_browser_unconfirmed_legacy_cursor_cannot_replace_missing_task_source)
+    await r.record_async("browser_native_task_source_overrides_unconfirmed_older_cursor", test_browser_native_task_source_overrides_unconfirmed_older_cursor)
     await r.record_async("browser_legacy_resume_without_source_boundary_fails_closed", test_browser_legacy_resume_without_source_boundary_fails_closed)
     await r.record_async("browser_active_user_feedback_changes_only_browser_output_fields", test_browser_active_user_feedback_changes_only_browser_output_fields)
     await r.record_async("browser_active_user_feedback_updates_model_and_verifier_preserving_fields", test_browser_active_user_feedback_updates_model_and_verifier_preserving_fields)

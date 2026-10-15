@@ -2672,6 +2672,7 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
     now = datetime.now(timezone.utc)
     if not legacy_resume:
         resume_state["user_message_cursor"] = (now - timedelta(minutes=1)).isoformat()
+        resume_state["user_message_cursor_is_task_start"] = True
     rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
              "timestamp": (now - timedelta(seconds=30) if legacy_resume else now).isoformat()}] if user_feedback else []
 

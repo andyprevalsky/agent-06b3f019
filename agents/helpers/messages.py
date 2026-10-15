@@ -17,7 +17,11 @@ from temporalio import activity
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
-from helpers.context_scope import filter_internal_subagent_messages, select_completion_evidence_messages
+from helpers.context_scope import (
+    filter_internal_subagent_messages,
+    is_internal_subagent_message,
+    select_completion_evidence_messages,
+)
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.http_client import get_http_client
 from helpers.tracing import span
@@ -873,7 +877,7 @@ async def poll_new_messages(
             # The same durable read carries actual USER sources and the exact
             # delegated task's native start event. Browser internals and root
             # compaction summaries are not user instructions.
-            return [row for row in new_messages if row.get("role") == "USER" or (
+            return [row for row in new_messages if (row.get("role") == "USER" and not is_internal_subagent_message(row)) or (
                 row.get("role") == "TOOL"
                 and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
                 and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
