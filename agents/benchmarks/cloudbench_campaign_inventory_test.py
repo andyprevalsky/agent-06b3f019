@@ -2759,3 +2759,33 @@ def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_pa
         assert job['controller_pid']==actual['pid']
         if sys.platform.startswith('linux'):assert actual['birth'] is not None
         if setting=='cancel10':assert (tmp_path/'child-term').read_text()==str(actual['pid'])
+
+
+@pytest.mark.parametrize("mode", ["success", "machines-nonzero-json", "volumes-nonzero-json", "malformed-json"])
+def test_campaign_inventory_cli_analytics_scoped_to_shared_reads(tmp_path, mode):
+    """Only CLI analytics changes; real wrapper/status/JSON publication stay fail closed."""
+    trace = tmp_path / "trace"
+    script = (
+        "set -u\nFLEET_DIR=" + shlex.quote(str(tmp_path))
+        + "\nROOT_DIR=" + shlex.quote(str(ROOT)) + "\nAPP=fixture\n"
+        + "source " + shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh")) + "\n"
+        + "source " + shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh")) + "\n"
+        + "MACHINE_READINESS_SCRIPT=" + shlex.quote(str(ROOT / "scripts/cloudbench-machine-readiness.py")) + "\n"
+        + "export FLY_SEND_METRICS=1\n"
+        + "FLY() { printf '%s %s\\n' \"$1\" \"${FLY_SEND_METRICS-unset}\" >> " + shlex.quote(str(trace)) + "; "
+        + ("printf 'broken'; return 0; " if mode == "malformed-json" else "printf '[]'; ")
+        + ("[ \"$1\" != machines ] || return 9; " if mode == "machines-nonzero-json" else "")
+        + ("[ \"$1\" != volumes ] || return 8; " if mode == "volumes-nonzero-json" else "")
+        + "return 0; }\n"
+        + "status=0; _refresh_inventory_snapshot_unlocked || status=$?\n"
+        + 'printf "parent_metrics=%s\\n" "$FLY_SEND_METRICS"\nexit "$status"\n'
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    rows = trace.read_text().splitlines()
+    assert rows == (["machines 0"] if mode == "machines-nonzero-json" else ["machines 0", "volumes 0"])
+    assert result.stdout.strip() == "parent_metrics=1"
+    assert result.returncode == (0 if mode == "success" else 1), result.stderr
+    assert (tmp_path / "machines.json").exists() == (mode == "success")
+    assert (tmp_path / "volumes.json").exists() == (mode == "success")
+    if mode.endswith("nonzero-json"):
+        assert not (tmp_path / "inventory" / "current").exists()

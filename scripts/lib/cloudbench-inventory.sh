@@ -212,8 +212,10 @@ _refresh_inventory_snapshot_unlocked() {
     machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
     volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
     publish_tmp="${INVENTORY_HOME:-$FLEET_DIR}/inventory-publish.tmp.$suffix"
+    # Pinned flyctl sends headless CLI analytics after JSON. Keep that optional
+    # finalizer out of these bounded reads; native EOF/status still decide success.
     inventory_refresh_diagnostic machines-list pending "" "$started" || true
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+    FLY_SEND_METRICS=0 fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
         machines list -a "$APP" --json > "$machines_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
@@ -223,7 +225,7 @@ _refresh_inventory_snapshot_unlocked() {
     fi
     inventory_refresh_diagnostic volumes-list pending "" "$started" || true
     status=0
-    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+    FLY_SEND_METRICS=0 fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
         volumes list -a "$APP" --json > "$volumes_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$volumes_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
