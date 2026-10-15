@@ -26121,6 +26121,15 @@ async def test_browser_exception_terminal_writers_preserve_native_sealing():
         await assert_full_browser_cleanup_failure_boundaries(globals(), terminal_writer_status=status)
 
 
+async def test_browser_error_propagation_writers_preserve_native_sealing():
+    from browser_cleanup_full_activity_support import assert_full_browser_cleanup_failure_boundaries
+    for stage in ("progress", "diagnostic"):
+        for status in (409, 500):
+            await assert_full_browser_cleanup_failure_boundaries(
+                globals(), terminal_writer_status=status, terminal_writer_stage=stage
+            )
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -28470,6 +28479,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_exception_terminal_writers_preserve_native_sealing",
         test_browser_exception_terminal_writers_preserve_native_sealing,
+    )
+    await r.record_async(
+        "browser_error_propagation_writers_preserve_native_sealing",
+        test_browser_error_propagation_writers_preserve_native_sealing,
     )
     return r.all_passed
 

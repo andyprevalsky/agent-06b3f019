@@ -1208,6 +1208,8 @@ async def _propagate_browser_credentials_with_progress(
                 action_type="credential_propagation",
                 tool_call_id=tool_call_id,
             )
+        except WorkflowGenerationSealed:
+            raise
         except Exception as save_error:
             logger.warning(
                 "Credential propagation diagnostic message was not saved",
@@ -10910,6 +10912,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     success=False,
                     message=error_message,
                 )
+            except WorkflowGenerationSealed:
+                raise
             except Exception as propagation_error:
                 logger.warning(
                     "Credential propagation failed after browser error; preserving original browser error",

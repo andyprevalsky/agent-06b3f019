@@ -6,7 +6,7 @@ from pathlib import Path
 import socket
 from unittest.mock import AsyncMock, patch
 
-async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, sealed_only=False, terminal_writer_status=None):
+async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, sealed_only=False, terminal_writer_status=None, terminal_writer_stage="terminal"):
     from domains.spawn_browser_agent_v3 import handler, repo
     from _test_utils import setup_mock, setup_mock_fn, get_captured_requests, clear_captures
     from helpers.workflow_generation import WorkflowGenerationSealed
@@ -23,10 +23,15 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
         if sealed_only:
             cases = [("cancellation", 500, False), ("original_error", 500, False), ("declined_lookup_sealed", 500, False)]
         if terminal_writer_status is not None:
-            cases = [("cancellation", 200, False), ("original_error", 200, False)]
+            cases = [("cancellation", 200, False), ("original_error", 200, False)] if terminal_writer_stage == "terminal" else [("original_error", 200, False)]
         for scenario, http_status, fail_background in cases:
             fixture = 'test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_assistance' if scenario.startswith('declined') else 'test_spawn_browser_activity_failure_completion_message_leads_with_goal' if scenario == 'original_error' else 'test_spawn_browser_activity_verified_completion_message_leads_with_goal'
             node = copy.deepcopy(next((n for n in source.body if isinstance(n, ast.AsyncFunctionDef) and n.name == fixture)))
+            selected_titles = {
+                "terminal": {"Browser Session Cancelled", "Task Failed"},
+                "progress": {"Updating credential state"},
+                "diagnostic": {"Credential state update failed"},
+            }[terminal_writer_stage]
             saves = AsyncMock(wraps=repo.save_browser_action_message) if terminal_writer_status is not None else AsyncMock()
             close = AsyncMock(wraps=repo.close_browser_session)
 
@@ -49,7 +54,9 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                     n = self.generic_visit(n)
                     if isinstance(n.func, ast.Name) and n.func.id == 'patch' and n.args and isinstance(n.args[0], ast.Constant):
                         key = n.args[0].value
-                        if key == 'domains.spawn_browser_agent_v3.handler.fetch_session_info' and scenario.startswith('declined_lookup'):
+                        if key == 'domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials' and terminal_writer_status is not None and terminal_writer_stage == 'diagnostic':
+                            n.args[1] = ast.Name(id='boundary_propagation_failure', ctx=ast.Load())
+                        elif key == 'domains.spawn_browser_agent_v3.handler.fetch_session_info' and scenario.startswith('declined_lookup'):
                             n.args[1] = ast.Name(id='boundary_lookup', ctx=ast.Load())
                         elif key == 'domains.spawn_browser_agent_v3.handler.close_browser_session':
                             n.args[1] = ast.Name(id='boundary_close', ctx=ast.Load())
@@ -63,7 +70,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                 node.body = [n for n in node.body if not isinstance(n, ast.Assert)]
             if scenario != 'original_error':
                 node.body.append(ast.Return(value=ast.Name(id='result', ctx=ast.Load())))
-            namespace = dict(owning_namespace, boundary_close=close, boundary_save=saves, boundary_lookup=boundary_lookup)
+            namespace = dict(owning_namespace, boundary_close=close, boundary_save=saves, boundary_lookup=boundary_lookup, boundary_propagation_failure=AsyncMock(side_effect=RuntimeError("ordinary owned propagation failure")))
             exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'existing-full-activity-fixture', 'exec'), namespace)
             clear_captures()
             setup_mock({'/api/browser-session/close': {'status': http_status, 'json': {'error': 'lifecycle claim held'}}})
@@ -102,7 +109,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                     if terminal_writer_status is not None:
                         import json
                         metadata = json.loads(request.content).get("metadata", {}) if "/messages" in str(request.url) else {}
-                        if metadata.get("title") in {"Browser Session Cancelled", "Task Failed"}:
+                        if metadata.get("title") in selected_titles:
                             if terminal_writer_status == 409:
                                 seal_observed.append(True)
                             return httpx.Response(terminal_writer_status, json={})
@@ -142,15 +149,15 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
             r = {'scenario': scenario, 'backgroundFailureInjected': fail_background, 'httpStatus': http_status, 'error': error, 'requests': len(closecaptures), 'closeAwaitCount': close.await_count, 'terminalStatuses': [str(m['status']) for m in terminal], 'terminalTitles': [m['title'] for m in terminal], 'cleanupReceipts': len(cleanup), 'backgroundTasks': len(owned_tasks), 'connectAttempts': len(connects)}
             results.append(r)
             if terminal_writer_status is not None:
+                r['terminalWriterStatus'] = terminal_writer_status
+                r['terminalWriterStage'] = terminal_writer_stage
                 selected = []
                 for captured in get_captured_requests():
                     import json
                     body = captured.get('requestBody') or {}
                     if isinstance(body, str):
                         body = json.loads(body)
-                    if '/messages' in captured['url'] and body.get('metadata', {}).get('title') in {
-                        'Browser Session Cancelled', 'Task Failed'
-                    }:
+                    if '/messages' in captured['url'] and body.get('metadata', {}).get('title') in selected_titles:
                         selected.append(captured)
                 assert len(selected) == 1 and close.await_count == 1, r
                 if terminal_writer_status == 409:
@@ -170,6 +177,7 @@ async def assert_full_browser_cleanup_failure_boundaries(owning_namespace, *, se
                     else:
                         assert any('No CDP URL provided' in (message.get('extra_metadata') or {}).get('browser_error_message', '') for message in terminal), r
                 r['terminalWriterStatus'] = terminal_writer_status
+                r['terminalWriterStage'] = terminal_writer_stage
                 r['newPostSealRealtimeEnqueues'] = sum(event['afterSeal'] for event in queue_events)
                 continue
             if sealed_only:
