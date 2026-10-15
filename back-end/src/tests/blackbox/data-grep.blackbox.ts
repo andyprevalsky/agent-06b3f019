@@ -1210,87 +1210,6 @@ const SourceStatusResponse = z.object({
 // Multi-source grep: `sources:['email','imessage']` searches MessageRecord and
 // returns 200. The seeded fixture only has EMAIL-channel rows, so email matches
 // (channel-filtered) while imessage returns nothing — proving channel routing.
-async function testCharBudgetPagination(userId: string): Promise<void> {
-  // Regression: MAX_RESULT_CHARS was defined but never applied, so a broad
-  // pattern over a large history returned 240-323 KB pages (agent 599d97e6,
-  // 2026-09-08). Every page must fit the cap and keep paging metadata honest.
-  const { MAX_RESULT_CHARS } = await import('../../domains/data/config');
-  const person = await prisma.person.create({
-    data: {
-      userId,
-      firstName: 'Budget',
-      lastName: 'Thread',
-      email: `budget-${randomUUID()}@grep-benchmark.local`,
-      messagesExchanged: 60,
-    },
-  });
-  const filler = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ';
-  const longBody = `charbudget-marker ${filler.repeat(40)}`; // ~3.2k chars per message
-  await prisma.messageRecord.createMany({
-    data: Array.from({ length: 40 }, (_, index) => ({
-      personId: person.id,
-      channel: 'EMAIL',
-      from: 'budget@example.com',
-      to: 'benchmark@example.com',
-      timestamp: new Date(Date.UTC(2026, 2, 1, 9, index)),
-      externalId: `charbudget-${index}-${randomUUID()}`,
-      message: longBody,
-    })),
-  });
-
-  // 40 matches x ~3.2k chars with 3 records of context each is far over the cap.
-  const { status, data } = await requestGrep(userId, {
-    pattern: 'charbudget-marker',
-    source: 'messages',
-    head_limit: 100,
-    '-C': 3,
-  });
-  assertStatus(status, 200, data);
-  const body = assertBody(data);
-  const contentChars = body.matches.reduce((sum, match) => sum + match.content.length, 0);
-  if (contentChars > MAX_RESULT_CHARS) {
-    throw new Error(
-      `page content ${contentChars} chars exceeds MAX_RESULT_CHARS=${MAX_RESULT_CHARS}`
-    );
-  }
-  const page = data as { char_truncated?: boolean; applied_char_limit?: number };
-  if (page.applied_char_limit !== MAX_RESULT_CHARS || page.char_truncated !== true) {
-    throw new Error(
-      `expected char_truncated page with applied_char_limit, got ${JSON.stringify(page)}`
-    );
-  }
-  if (body.matches.length === 0 || body.total_matches !== 40) {
-    throw new Error(`expected a non-empty page of 40 total matches, got ${JSON.stringify(body)}`);
-  }
-  if (
-    body.has_more !== true ||
-    body.next_offset !== body.matches.length ||
-    body.returned !== body.matches.length
-  ) {
-    throw new Error(`paging metadata must describe the kept prefix, got ${JSON.stringify(body)}`);
-  }
-
-  // Paging from next_offset continues the same result set without overlap.
-  const next = await requestGrep(userId, {
-    pattern: 'charbudget-marker',
-    source: 'messages',
-    head_limit: 100,
-    '-C': 3,
-    offset: body.next_offset,
-  });
-  assertStatus(next.status, 200, next.data);
-  const nextBody = assertBody(next.data);
-  const firstPaths = new Set(body.matches.map((match) => match.path));
-  if (
-    nextBody.matches.length === 0 ||
-    nextBody.matches.some((match) => firstPaths.has(match.path))
-  ) {
-    throw new Error(
-      `next page must continue after the kept prefix, got ${JSON.stringify(nextBody)}`
-    );
-  }
-}
-
 async function testMultiSourceGrep(userId: string): Promise<void> {
   let res = await requestGrep(userId, {
     pattern: 'Aurora budget',
@@ -1476,10 +1395,6 @@ async function runAll(): Promise<void> {
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
     ['summary includes transactions', () => testTransactionSummary(userId)],
     ['summary includes documents', () => testDocumentSummary(userId)],
-    [
-      'pages are bounded by MAX_RESULT_CHARS and keep paging honest',
-      () => testCharBudgetPagination(userId),
-    ],
     ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
     ['per-source connectivity status', () => testSourceStatus(userId)],
     [

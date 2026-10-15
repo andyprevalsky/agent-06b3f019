@@ -373,80 +373,6 @@ async def test_grep_network_source_forwarded():
 # -------------------- service.py tests --------------------
 
 
-def test_bound_grep_result_keeps_whole_matches_and_rewrites_paging():
-    """A page is capped by summed match content; the tail is dropped, not silently lost."""
-    from utils.grep_budget import bound_grep_result
-
-    matches = [{"source": "messages", "path": f"messages/t/{i}", "content": "x" * 1000} for i in range(10)]
-    result = {
-        "matches": matches,
-        "total_matches": 50,
-        "truncated": True,
-        "applied_limit": 10,
-        "applied_offset": 20,
-        "returned": 10,
-        "has_more": True,
-        "next_offset": 30,
-    }
-    bounded = bound_grep_result(result, max_chars=3500)
-    assert [m["path"] for m in bounded["matches"]] == [f"messages/t/{i}" for i in range(3)]
-    assert bounded["returned"] == 3
-    assert bounded["truncated"] is True and bounded["has_more"] is True
-    assert bounded["next_offset"] == 23  # applied_offset + kept, so the model can page on
-    assert bounded["char_truncated"] is True and bounded["applied_char_limit"] == 3500
-    assert bounded["total_matches"] == 50
-    # Untouched when it already fits (same object, no metadata rewrite).
-    assert bound_grep_result(result, max_chars=100_000) is result
-    # A single oversized first match is cut rather than returning an empty page.
-    huge = {"matches": [{"content": "y" * 5000}, {"content": "z"}], "applied_offset": 0}
-    cut = bound_grep_result(huge, max_chars=1200)
-    assert len(cut["matches"]) == 1
-    assert cut["matches"][0]["content"].startswith("y" * 1200)
-    assert "truncated to 1200 chars" in cut["matches"][0]["content"]
-    assert cut["next_offset"] == 1 and cut["returned"] == 1
-
-
-async def test_grep_activity_bounds_oversized_backend_pages():
-    """The activity result (Temporal payload, transcript, context) is bounded.
-
-    Regression: broad patterns over a 10k-message history returned 240-323 KB
-    pages; eight parallel greps put an explore agent at ~737k context tokens and
-    its activity result over Temporal's 2 MB payload limit (agent 599d97e6,
-    2026-09-08). The backend now caps pages too; this guards the agent side.
-    """
-    from domains.grep.config import GREP_RESULT_MAX_CHARS
-
-    big_matches = [
-        {"source": "messages", "path": f"messages/t/{i}", "content": "m" * 20_000} for i in range(12)
-    ]
-    setup_mock({
-        "/api/data/grep": {
-            "status": 200,
-            "json": {
-                "matches": big_matches,
-                "total_matches": 12,
-                "truncated": False,
-                "applied_offset": 0,
-                "applied_limit": 20,
-                "returned": 12,
-                "has_more": False,
-                "next_offset": None,
-            },
-        }
-    })
-    with patch("temporalio.activity.heartbeat"):
-        from tools.grep import grep_activity
-
-        result = await grep_activity({"pattern": "m", "source": "messages"}, user_id="u", agent_id="a")
-
-    total_content = sum(len(m["content"]) for m in result["matches"])
-    assert total_content <= GREP_RESULT_MAX_CHARS
-    assert result["char_truncated"] is True
-    assert result["has_more"] is True and result["truncated"] is True
-    assert result["next_offset"] == result["returned"] == len(result["matches"])
-    assert result["total_matches"] == 12
-
-
 def test_truncate_pattern_short():
     from domains.grep.service import _truncate_pattern
     assert _truncate_pattern("abc") == "abc"
@@ -827,8 +753,6 @@ async def run_all_tests():
     await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)
     await r.record_async("invalid_regex_literal_fallback", test_grep_invalid_regex_retries_as_literal)
     await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)
-    r.record("bound_grep_result_keeps_whole_matches", test_bound_grep_result_keeps_whole_matches_and_rewrites_paging)
-    await r.record_async("grep_activity_bounds_oversized_pages", test_grep_activity_bounds_oversized_backend_pages)
     r.record("truncate_pattern_short", test_truncate_pattern_short)
     r.record("truncate_pattern_long", test_truncate_pattern_long)
     await r.record_async("execute_grep_happy", test_execute_grep_happy)

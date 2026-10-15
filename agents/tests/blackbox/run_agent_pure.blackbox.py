@@ -85,29 +85,6 @@ def test_estimate_tokens_empty():
     assert result == 0
 
 
-def test_bound_tool_result_text_caps_oversized_results_with_marker():
-    """No single tool result may exceed the context cap (compaction cannot shrink one message).
-
-    Regression: an unbounded grep result (323 KB) pushed an explore agent to
-    ~737k tokens and over Temporal's payload limit (agent 599d97e6, 2026-09-08).
-    """
-    from utils.tool_result_bounds import TOOL_RESULT_CONTEXT_MAX_CHARS, bound_tool_result_text
-
-    small, truncated = bound_tool_result_text("ok")
-    assert (small, truncated) == ("ok", False)
-
-    huge = "g" * (TOOL_RESULT_CONTEXT_MAX_CHARS + 5_000)
-    bounded, truncated = bound_tool_result_text(huge)
-    assert truncated is True
-    assert bounded.startswith("g" * TOOL_RESULT_CONTEXT_MAX_CHARS)
-    assert len(bounded) < len(huge)
-    assert f"{TOOL_RESULT_CONTEXT_MAX_CHARS} of {len(huge)} chars shown" in bounded
-    assert "offset" in bounded  # tells the model how to continue
-    # Explicit caps and non-str inputs are handled.
-    text, truncated = bound_tool_result_text({"a": 1}, max_chars=3)
-    assert truncated is True and text.startswith("{'a")
-
-
 async def run_all_tests():
     print("run-agent-pure blackbox tests:")
     r = BlackboxResult()
@@ -115,7 +92,6 @@ async def run_all_tests():
     r.record("estimate_tokens_counts_metadata_payloads", test_estimate_tokens_counts_metadata_payloads)
     r.record("estimate_tokens_excludes_subagent", test_estimate_tokens_excludes_subagent)
     r.record("estimate_tokens_empty", test_estimate_tokens_empty)
-    r.record("bound_tool_result_text_caps_oversized", test_bound_tool_result_text_caps_oversized_results_with_marker)
     teardown_mock()
     return r.all_passed
 

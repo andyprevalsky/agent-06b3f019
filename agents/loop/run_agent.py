@@ -62,7 +62,6 @@ from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from utils.tool_result_bounds import bound_tool_result_text
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
@@ -1923,26 +1922,14 @@ async def run_agent(
                             },
                         }
                     else:
-                        # Last line of defence: no single tool result may exceed the
-                        # context cap. Compaction cannot shrink one oversized message,
-                        # and an unbounded result also overflows Temporal payloads.
-                        bounded_message, result_truncated = bound_tool_result_text(result_message)
-                        if result_truncated:
-                            logger.warning(
-                                "Tool result truncated before entering context",
-                                tool_name=tool_name,
-                                original_chars=len(result_message),
-                                kept_chars=len(bounded_message),
-                            )
                         new_msg = {
                             "role": "TOOL",
-                            "text": bounded_message,
+                            "text": result_message,
                             "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
                                 "toolStatus": "FINISHED",
-                                **({"truncated": True} if result_truncated else {}),
                             },
                         }
                     logger.debug(

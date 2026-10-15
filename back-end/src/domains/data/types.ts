@@ -4,7 +4,6 @@ import type {
   AgentTrajectoryGrepFilters,
 } from './types.agent';
 export type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters } from './types.agent';
-import type { GrepPageCharBounds } from './grepPageBounds';
 
 export const DATA_SOURCE_CONFIGS = {
   messages: {
@@ -249,7 +248,7 @@ export interface GrepMessageRecord {
   relation: 'before' | 'match' | 'after';
 }
 
-export interface GrepResult extends GrepPageCharBounds {
+export interface GrepResult {
   matches: GrepMatch[];
   total_matches: number;
   truncated: boolean;

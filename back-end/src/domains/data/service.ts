@@ -2,8 +2,6 @@
  * Data domain service — business logic for grep and summary operations.
  */
 
-import { MAX_RESULT_CHARS } from './config';
-import { boundMatchesByChars } from './grepPageBounds';
 import { isPostgresRegexError } from './regexSafety';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
@@ -150,13 +148,11 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
         sourceResults.flatMap((result) => result.matches),
         oldestFirst
       );
-  const page = merged.slice(input.offset, input.offset + input.headLimit);
-  const { matches, charTruncated } = boundMatchesByChars(page, MAX_RESULT_CHARS);
+  const matches = merged.slice(input.offset, input.offset + input.headLimit);
   const keysetPage = soleTrajectory && input.offset === 0;
   const truncated = keysetPage
     ? sourceResults[0].hasMore === true
     : totalMatches > input.offset + matches.length;
-  const hasMore = truncated || charTruncated;
   const summaries: GrepResult['summaries'] = {};
   if (input.sources.includes('transactions')) {
     summaries.transactions = await transactionSummaries(userId, input);
@@ -169,18 +165,16 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   return {
     matches,
     total_matches: totalMatches,
-    truncated: hasMore,
+    truncated,
     pattern: input.pattern,
     sources: input.sources,
     applied_limit: input.headLimit,
     applied_offset: input.offset,
     returned: matches.length,
-    has_more: hasMore,
+    has_more: truncated,
     next_offset:
-      hasMore && input.pageAfterMessageId === undefined ? input.offset + matches.length : null,
-    ...(keysetPage ? { next_page_after: hasMore ? (matches.at(-1)?.path ?? null) : null } : {}),
-    applied_char_limit: MAX_RESULT_CHARS,
-    ...(charTruncated ? { char_truncated: true } : {}),
+      truncated && input.pageAfterMessageId === undefined ? input.offset + matches.length : null,
+    ...(keysetPage ? { next_page_after: sourceResults[0].nextPageAfter ?? null } : {}),
     display_order: oldestFirst ? 'oldest_first' : 'newest_first',
     context_unit: contextUnit,
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
