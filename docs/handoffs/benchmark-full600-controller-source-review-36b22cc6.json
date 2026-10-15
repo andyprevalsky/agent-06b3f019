@@ -1,0 +1,57 @@
+{
+  "schema": "finite-selected-controller-session-source-review-v1",
+  "reviewed": true,
+  "reviewer": "Benchmark Infra root",
+  "source_ref": "5bf024edd96cbf8758e474df431975c9dafec420",
+  "source_review_fingerprint": "36b22cc67553b326d0b84291094f537c402097fed537eac60bbe9b371318e21f",
+  "pre_service_boundaries": [
+    "before-stack-launch",
+    "agent-network-index-bootstrap"
+  ],
+  "actual_recipe": {
+    "ref": "5bf024edd96cbf8758e474df431975c9dafec420",
+    "recipe_sha256": "3296c58e13d92a95c517392a41d4310032a79f415c1fc4c60b0dcd113bba768f",
+    "fingerprint": "36b22cc67553b326d0b84291094f537c402097fed537eac60bbe9b371318e21f"
+  },
+  "actual_recipe_receipt_sha256": "6dd226839338ab3cdfe52e2011d12ca49825f9c1a1dadfdab45fe3d5ecdc20d4",
+  "root_review_sha256": "1b458c949d49f85e157c43a14f77d9e74e44b7f9c127e44349ca8018fd2faf02",
+  "root_review": {
+    "schema": "i40-selected-session-source-root-review-v1",
+    "epoch": 1792093155.890444,
+    "source_ref": "5bf024edd96cbf8758e474df431975c9dafec420",
+    "base": "59afa17061ec2455b903dbdf7f1bf8fb550ded90",
+    "packet_sha256": "52e2baaa26ccf4796da55b29aca06557a777f98998a09ff4f503743b13c914ab",
+    "diff_sha256": "a710c16eb44690c75a20d6795f0f9a07eb99817fad5c467f9d6bf595a738fe4f",
+    "all_changed_paths_read": [
+      "agents/benchmarks/cloudbench_campaign_inventory_test.py",
+      "docs/rca/cases/2026-10-05-copy-campaign-duplicated-native-inventory-publishers.md",
+      "scripts/run-bench-campaign.py"
+    ],
+    "git_materialized_bindings_checked": 29,
+    "evidence_logs_checked": 6,
+    "disposition": "SCOPED_ACCEPT; newsource readiness binding and original600 outcome remain",
+    "source_runtime_change": "explicitnice10 selectedcontroller uniquePGID/inheritedSID; default0+unset and publisher/Hub/nested sessions unchanged",
+    "causal_pair_body_sha256": "abada1b802ed52a6dbac73a0cdb6fe88e72face30978f1459c2cd24709cf2277",
+    "causal_statuses": [
+      142,
+      0
+    ],
+    "helper_deadline_seconds": 30,
+    "registered_controls": "14PASS with owning launch3RED and exactgroup cancellation siblings+grandchild/publisher",
+    "source_fingerprint": "36b22cc67553b326d0b84291094f537c402097fed537eac60bbe9b371318e21f",
+    "approved_pre_service_phases": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
+    ],
+    "aggregate_boundary_basis": "25 recipe bytes differ from accepted59afa solely selectedcampaign launch, pre-admission capability guard; boot/DB/index/guest and app bytes unchanged; no new phases",
+    "original_600_outcome_pass": false,
+    "provider_operation": false
+  },
+  "limits": [
+    "Exact source fingerprint and these two existing phases only; every prior approval retained.",
+    "Only selected nice10 launch and pre-admission capability differ in native25; guest/bootstrap/DB/index/app inputs unchanged.",
+    "Registered14 controls and paired142/0 qualify their actual scope, not original600 outcomes.",
+    "Private benchmark causal controls do not authorize task/profile/timeout/TTL or provider limits changes.",
+    "Auxiliary publisher/Hub/nested own sessions remain unchanged; no guard/schema/phase expansion."
+  ]
+}
