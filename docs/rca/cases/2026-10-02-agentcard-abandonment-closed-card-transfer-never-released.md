@@ -533,3 +533,55 @@ receipts. Private verification is `.context/deploy-r10-sandbox-skip-receipt.json
 This exception applies to the observed test-mode transfer only. The original
 production allocation and its strict release/refund gate remain unresolved;
 this sandbox skip does not waive or pass that gate.
+
+### October 15 standing exception: sandbox AND production, automatic on every future run
+
+The user explicitly corrected the scope: "that test is skippable ... update the
+test so that IT IS SKIPPABLE FOR ALL FUTURE RUNS". This instruction supersedes
+the earlier sandbox-only restriction recorded above. The known closed-card
+AgentCard release stall is now a warning SKIP by default in local, cloud and
+production benchmark execution and CI. Future agents must not ask for renewed
+approval or repeat the same production reconciliation indefinitely. An explicit
+`BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0` retains strict diagnostic execution.
+
+The first bad owned boundary was waiver classification: it required an opt-in,
+excluded every production catalog task and rejected native live transfers.
+The command instructions separately told future agents that production stayed
+strict. This is a test-policy persistence defect, not a diagnosis of AgentCard's
+unreleased transfer. The separate Stripe test/live bug does not explain it.
+
+The retained native production snapshot from recovery attempt 34 is committed
+in `agents/tests/fixtures/agentcard-production-release-stall.json`. It shows
+purchase HELD, funding RECLAIMING, CLOSED card/balance0, the exact live transfer
+consumed/transferred100/released0, and no Stripe refund. The permanent benchmark
+blackbox replays this snapshot through both deadline owners and CI with the
+environment flag absent. Before the fix the following command failed with
+`RuntimeError: ... expected 'VOIDED', got 'HELD'`; after it the same test passes:
+
+```bash
+source agents/venv/bin/activate
+cd agents
+PYTHONPATH=.:tests/blackbox python -m pytest --import-mode=importlib tests/blackbox/benchmark.blackbox.py -q -k production_agentcard_release_stall_is_skippable_by_default
+```
+
+The exception retains native evidence and validates all independent catalog
+assertions. It rejects duplicate allocations, pending attention requests,
+Stripe capture mismatches, foreign purchase/card/transfer joins, cross-mode
+observations, actual read failures and cancellation. Task-level catches preserve
+the typed skip and do not start a second financial cleanup after its bounded
+attempt; archive, browser sealing and execution-deletion failures remain ERROR.
+Owned cloud cleanup re-reads the exact purchase and joins its root, purchase,
+card, payment intent, amount and transfer before permitting the warning.
+These controls run in the existing benchmark blackbox domain in `/deploy`;
+the semantic deploy contract also prevents restoring contradictory instructions.
+
+The three separate, unapproved live-only catalog assertions were withdrawn;
+the catalog again matches main. The Stripe-mode implementation and its causal
+tests remain. Saving another live card or minting another allocation is not a
+prerequisite to waive this already observed production failure.
+
+The original ERROR and failed reconciliation receipts are unchanged. A waiver
+is not PASS, native release or a refund; the $1 allocation remains a recorded
+liability. The underlying provider release cause remains open. At 10,000 agents
+this policy adds only local validation of the existing per-root snapshot, no
+new provider calls, polling loops, shared subscriptions or production writes.

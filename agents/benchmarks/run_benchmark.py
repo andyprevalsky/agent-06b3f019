@@ -1733,41 +1733,52 @@ def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None)
 
 AGENTCARD_RELEASE_SKIP_ENV = "BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL"
 AGENTCARD_RELEASE_SKIP_REASON = (
-    "AgentCard sandbox never released the closed card's org transfer (consumed, releasedCents=0); "
-    f"skipped by {AGENTCARD_RELEASE_SKIP_ENV}=1, see "
+    "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); "
+    "skipped under the standing user-approved warning policy, see "
     "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md"
 )
 
 
 class AgentCardReleaseStall(RuntimeError):
-    """The sandbox left a closed card's transfer consumed while Rose waits to reclaim it."""
+    """AgentCard left a closed card's transfer consumed while Rose waits to reclaim it."""
+
+    def __init__(self, message: str, *, lifecycle: dict | None = None):
+        super().__init__(message)
+        self.lifecycle = lifecycle
 
 
 def _agentcard_release_skip_enabled() -> bool:
-    return os.environ.get(AGENTCARD_RELEASE_SKIP_ENV) == "1"
+    # Permanent for local, cloud and production runs; no deploy-specific opt-in.
+    # An explicit 0 remains available for investigating the unresolved release.
+    return os.environ.get(AGENTCARD_RELEASE_SKIP_ENV, "1") == "1"
 
 
 def _agentcard_release_skip_task(task_name: str | None) -> bool:
-    """The release waiver belongs only to known, explicitly sandbox catalog tasks."""
+    """The release waiver belongs to catalog AgentCard lifecycle tasks in either mode."""
     try:
         task = get_task_by_name(task_name)
     except ValueError:
         return False
     lifecycle = task.expected_payment_lifecycle
     transfer = lifecycle.get("orgTransfer") if isinstance(lifecycle, dict) else None
+    if not isinstance(transfer, dict):
+        return False
     return (
         task.production_only is False
         and "agentcard-lifecycle-sandbox" in task.tags
-        and isinstance(transfer, dict)
         and transfer.get("livemode") is False
+    ) or (
+        task.production_only is True
+        and "agentcard-lifecycle-production" in task.tags
+        and transfer.get("livemode") is True
     )
 
 
-def _agentcard_release_stalled(lifecycle: object) -> bool:
-    """Only the AgentCard sandbox's release of a closed card's transfer is outstanding.
+def _agentcard_release_stalled(lifecycle: object, *, livemode: bool = False) -> bool:
+    """AgentCard's release of a closed card's transfer is outstanding in the expected mode.
 
     Rose has closed the card and is reclaiming; AgentCard still reports this card's
-    test-mode transfer as consumed with nothing released. Live transfers never match.
+    transfer as consumed with nothing released. Cross-mode observations never match.
     """
     if not isinstance(lifecycle, dict):
         return False
@@ -1786,13 +1797,46 @@ def _agentcard_release_stalled(lifecycle: object) -> bool:
         and not isinstance(card.get("balanceCents"), bool)
         and isinstance(card.get("id"), str)
         and bool(card["id"].strip())
+        and purchase.get("cardId") == card["id"]
         and isinstance(transfer, dict)
+        and isinstance(transfer.get("id"), str)
+        and bool(transfer["id"].strip())
+        and funding.get("providerTransferId") == transfer["id"]
         and transfer.get("cardId") == card["id"]
         and transfer.get("status") == "consumed"
-        and transfer.get("livemode") is False
+        and transfer.get("livemode") is livemode
         and transfer.get("releasedCents") == 0
         and not isinstance(transfer.get("releasedCents"), bool)
+        and "stripeRefund" in lifecycle
+        and lifecycle["stripeRefund"] is None
     )
+
+
+def _agentcard_release_skip_lifecycle(task_name: str | None, lifecycle: object) -> bool:
+    """Waive only settlement fields; every independent catalog assertion still holds.
+
+    Native lifecycle -> exact closed-card stall -> unchanged independent checks
+      -> warning SKIP; any other mismatch -> normal failure.
+    The filtered contract is local validation only; native evidence is never rewritten.
+    """
+    if not _agentcard_release_skip_task(task_name):
+        return False
+    task = get_task_by_name(task_name)
+    if not _agentcard_release_stalled(lifecycle, livemode=task.production_only):
+        return False
+    pending_fields = {
+        "purchase": {"status"},
+        "walletFunding": {"status"},
+        "orgTransfer": {"status", "transferredCents", "releasedCents"},
+    }
+    contract = dict(task.expected_payment_lifecycle)
+    contract.pop("stripeRefund", None)
+    for section, fields in pending_fields.items():
+        if isinstance(contract.get(section), dict):
+            contract[section] = {key: value for key, value in contract[section].items() if key not in fields}
+    return _validate_payment_lifecycle(
+        replace(task, expected_payment_lifecycle=contract), {"_benchmark": {"payment_lifecycle": lifecycle}}
+    ) is None
 
 
 def _is_permitted_agentcard_release_skip(result: TaskResult) -> bool:
@@ -1807,7 +1851,7 @@ def _is_permitted_agentcard_release_skip(result: TaskResult) -> bool:
 def _warn_agentcard_release_skip(name: str, detail: str) -> None:
     print(
         f"\n    ⚠️⚠️ SKIPPED {name}: {AGENTCARD_RELEASE_SKIP_REASON}\n"
-        f"    ⚠️⚠️ Its Stripe test charge stays captured until AgentCard releases the transfer: {detail}"
+        f"    ⚠️⚠️ Funds remain unreleased and any Stripe refund remains pending: {detail}"
     )
 
 
@@ -3010,18 +3054,17 @@ class _PaymentReconciliationDeadline(TimeoutError):
 def _payment_reconciliation_timeout(
     error: str, lifecycle: object, *, task_name: str | None = None, allow_release_skip: bool = True
 ) -> RuntimeError:
-    """Classify only the approved sandbox release state; keep the existing deadline owner."""
+    """Classify the approved sandbox/live release stall; keep the existing deadline owner."""
     message = (
         "Payment lifecycle did not reach the expected terminal state before timeout: "
         f"{error}{_payment_lifecycle_settlement_state(lifecycle)}"
     )
     if (
         allow_release_skip
-        and _agentcard_release_skip_task(task_name)
         and _agentcard_release_skip_enabled()
-        and _agentcard_release_stalled(lifecycle)
+        and _agentcard_release_skip_lifecycle(task_name, lifecycle)
     ):
-        return AgentCardReleaseStall(message)
+        return AgentCardReleaseStall(message, lifecycle=lifecycle)
     return RuntimeError(message)
 
 
@@ -3344,6 +3387,8 @@ async def ensure_payment_lifecycle_cleanup(
             raise RuntimeError(lifecycle_error)
         print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
         return lifecycle
+    except AgentCardReleaseStall:
+        raise
     except Exception as exc:
         print(f"    ⚠ Payment lifecycle cleanup failed for {agent_id[:12]}: {exc}")
         return None
@@ -6284,8 +6329,8 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
                 await asyncio.sleep(2)
 
 
-async def _owned_payments_release_stalled(base_url: str, evidence: dict) -> bool:
-    """Every still-pending owned purchase is waiting only on the AgentCard sandbox release."""
+async def _owned_payments_release_stalled(base_url: str, evidence: dict, *, task_name: str) -> bool:
+    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode."""
     try:
         pending = cloud_batch_cleanup.pending_root_payments(evidence.get("payment_snapshot") or {})
     except Exception:
@@ -6300,7 +6345,12 @@ async def _owned_payments_release_stalled(base_url: str, evidence: dict) -> bool
     return bool(pending) and all(
         row["status"] == "HELD"
         and row["funding_status"] == "RECLAIMING"
-        and _agentcard_release_stalled(lifecycles[row["agent_id"]])
+        and _agentcard_release_skip_lifecycle(task_name, lifecycles[row["agent_id"]])
+        and lifecycles[row["agent_id"]].get("agentId") == row["agent_id"]
+        and lifecycles[row["agent_id"]]["purchase"].get("id") == row["purchase_id"]
+        and lifecycles[row["agent_id"]]["purchase"].get("stripePaymentIntentId") == row["stripe_payment_intent_id"]
+        and lifecycles[row["agent_id"]]["purchase"].get("totalCents") == row["total_cents"]
+        and lifecycles[row["agent_id"]]["orgTransfer"].get("id") == row["provider_transfer_id"]
         and lifecycles[row["agent_id"]]["orgTransfer"].get("cardId") == row["card_id"]
         for row in pending
     )
@@ -6548,7 +6598,9 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         and result is not None
                         and _agentcard_release_skip_task(result.name)
                         and _agentcard_release_skip_enabled()
-                        and await _owned_payments_release_stalled(base_url, evidence)
+                        and await _owned_payments_release_stalled(
+                            base_url, evidence, task_name=result.name
+                        )
                     ):
                         evidence["warnings"].append(f"payment: {AGENTCARD_RELEASE_SKIP_REASON}")
                         _warn_agentcard_release_skip(result.name if result is not None else aid, f"{aid}: {detail}")
@@ -13811,6 +13863,7 @@ async def _run_single_task_as_run_user(
     auth_test_site_manifest: Optional[dict] = None
     interrupt_cleanup_started = False
     interrupt_cleanup_ready = False
+    evaluated_failure_reason: Optional[str] = None
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -14226,6 +14279,8 @@ async def _run_single_task_as_run_user(
                 failure_reason = f"Agent payment confirmation contract check failed: {e}"
 
         current_lifecycle = data.get("_benchmark", {}).get("payment_lifecycle")
+        if not passed:
+            evaluated_failure_reason = failure_reason or "Task evaluation failed before payment cleanup"
         cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(
             base_url,
             agent_id,
@@ -14567,11 +14622,12 @@ async def _run_single_task_as_run_user(
 
     except Exception as e:
         duration = time.time() - start
-        release_skip = (
+        release_stall = (
             isinstance(e, AgentCardReleaseStall)
-            and _agentcard_release_skip_task(task.name)
+            and _agentcard_release_skip_lifecycle(task.name, e.lifecycle)
             and _agentcard_release_skip_enabled()
         )
+        release_skip = release_stall and evaluated_failure_reason is None
         error_status = "SKIPPED" if release_skip else "ERROR"
         if release_skip:
             _warn_agentcard_release_skip(task.name, str(e))
@@ -14585,6 +14641,8 @@ async def _run_single_task_as_run_user(
             data, logs = await _capture_task_failure_evidence(
                 base_url, agent_id, task, data or last_snapshot, start_time,
             )
+            if release_stall:
+                logs["agentcard_release_stall_lifecycle"] = e.lifecycle
             try:
                 archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
                     base_url,
@@ -14598,6 +14656,8 @@ async def _run_single_task_as_run_user(
             except Exception as archive_error:
                 logs["failure_evidence"]["errors"].append(
                     f"archive: {type(archive_error).__name__}: {archive_error}")
+        if release_skip and logs and logs.get("failure_evidence", {}).get("errors"):
+            error_status = "ERROR"
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -14611,6 +14671,8 @@ async def _run_single_task_as_run_user(
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
                 + f"{e}"
+                + (f" | Prior task failure: {evaluated_failure_reason}" if evaluated_failure_reason else "")
+                + (f" | Independent evidence/cleanup errors: {logs['failure_evidence']['errors']}" if release_skip and error_status == "ERROR" else "")
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
@@ -14628,7 +14690,10 @@ async def _run_single_task_as_run_user(
                 print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
         if agent_id:
             try:
-                await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+                # The typed skip already owns a completed, bounded close/reclaim
+                # attempt. Preserve its liability instead of running that wait twice.
+                if not release_stall:
+                    await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             except Exception as cleanup_error:
                 logs["failure_evidence"]["errors"].append(f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}")
             try:
@@ -14637,8 +14702,12 @@ async def _run_single_task_as_run_user(
                     print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
                 else:
                     print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
-            except Exception:
+            except Exception as deletion_error:
                 print(f"    ⚠ Failed to delete orphaned agent {agent_id[:12]}")
+                if release_skip:
+                    logs["failure_evidence"]["errors"].append(f"delete: {deletion_error}")
+                    result.status = result.benchmark_status = "ERROR"
+                    result.failure_reason = f"Execution cleanup failed after AgentCard release skip: {deletion_error}"
         return result
 
     finally:
