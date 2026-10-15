@@ -8013,8 +8013,8 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     cleanup_start = fleet.index("cleanup() {")
     cleanup_end = fleet.index("\n}", cleanup_start)
     cleanup = fleet[cleanup_start:cleanup_end]
-    assert cleanup.index("trap - EXIT") < cleanup.index("terminate_and_wait")
-    assert cleanup.index("trap '' HUP INT TERM") < cleanup.index("terminate_and_wait")
+    assert cleanup.index("trap - EXIT") < cleanup.index("cloudbench_terminate_tree_and_wait")
+    assert cleanup.index("trap '' HUP INT TERM") < cleanup.index("cloudbench_terminate_tree_and_wait")
     assert (
         'if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \\\n'
         '        "${AUTOSCALER_PIDS[@]:-}"; then'
@@ -8023,7 +8023,10 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
         'if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \\\n'
         '        "${PROVISION_PIDS[@]:-}"; then'
     ) in cleanup
-    assert ('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"') in cleanup
+    assert (
+        'if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \\\n'
+        '        "${CHILD_PIDS[@]:-}"; then'
+    ) in cleanup
     assert "CLOUDBENCH_CHILD_TERM_SECONDS:-30" in fleet
     helper = ENV_HELPER_SCRIPT.read_text()
     assert "cloudbench_terminate_and_wait() {" in helper
