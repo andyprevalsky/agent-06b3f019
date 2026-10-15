@@ -10793,7 +10793,7 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
         # authoritative target id.  Coalesce one fresh API read into the shared
         # snapshot; the normal clone-output path does not call this at all.
         if declare -F refresh_machines_snapshot_after >/dev/null; then
-            if ! refresh_machines_snapshot_after "$prior_snapshot"; then
+            if ! refresh_machines_snapshot_after "$prior_snapshot" "$deadline"; then
                 if [ "$SECONDS" -ge "$deadline" ]; then
                     echo "❌ unresolved clone name '$target_name' after inventory refresh failure" >&2
                     return 1

@@ -460,3 +460,65 @@ verify nice, SID, PGID, autogroup, PID/birth and default/refusal behavior. A rea
 without affecting the shared-session parent, sibling controller or publisher,
 then verifies normal cleanup of the remaining owned groups. The unchanged
 original 600-task outcome remains required before closing the freshness RCA.
+
+### V41: exceptional borrowed refresh can block the parent publisher
+
+**Original 600-task outcome: FAILED; RCA remains OPEN pending the unchanged
+experiment and independent provider-capacity resolution.** The first physical
+attempt `r001-j0077` on source `82b849eee20f9527426beb4f540d02553d83dc80`
+reported “timed out waiting for the serialized inventory refresh,” followed by
+an unresolved clone name. Its original log SHA-256 is
+`f3beb20dcf8230639638cbd31f580afda10ed0d357d864f4628ce58fdee2679b`.
+The last of five clone attempts separately reported the provider organization
+Machine limit. Earlier native clone bodies and the historical refresh-lock
+owner were not captured in that job log. Neither the shared history nor the
+last parent HTTP phase identifies the caller of each failed native read.
+
+Source tracing found an intentional exception to ordinary read-only borrowing:
+`refresh_machines_snapshot_after` allowed a borrowed post-mutation resolver to
+acquire the parent publication lock and run the borrower's native `FLY` commands.
+The parent uses its full-HTTP Machines transport; the borrower uses native CLI.
+Both write the same refresh history. Thus a healthy parent transport can still
+be excluded by a borrower whose native command does not finish. The original
+October 5 policy explicitly allowed this exception; the new policy changes it
+rather than claiming the old implementation violated its documented contract.
+
+The registered two-consumer reproduction runs the actual campaign scheduler,
+producer, birth/token checks, lock, atomic index and cleanup against controlled
+transport executables. The borrower emits complete Machine JSON and then delays
+native completion, while the parent transport remains healthy. Test-only native wrapper,
+parent lock-wait, borrower observation and poll bounds are 6, 4, 6 and 1 seconds
+respectively. These discriminate
+lock ownership without changing production 30-second reads, 95-second refresh
+waits, 20-second clone-name lookup or any benchmark budget. Original source fails
+the permanent regression with the same serialized-refresh error. This proves a
+causal class, not the historical V41 command delay or lock-owner identity.
+A prior negative fixture, in which the parent won the next-generation race,
+is retained separately and is not counted as a failing reproduction.
+
+Borrowed exceptional refresh now waits for the same birth/token-fenced parent
+to publish a different healthy generation. It never takes the publication lock
+or calls native `FLY`. Identity is read before and after the real health check;
+a pointer transition cannot credit an unchecked generation. Empty, missing,
+same-generation, stale or failed output never grants success. The wait uses the
+existing refresh bound and, for clone-name resolution, the minimum of that bound
+and the caller's original absolute lookup deadline. Fatal owner/token failures
+refuse immediately. Standalone explicit refresh retains its original native
+producer, recoverable atomic lock and coalescing behavior. The post-recovery
+capacity consumer still requires a fresh generation before its compact read.
+
+Owning coverage is registered in
+`agents/benchmarks/cloudbench_campaign_inventory_test.py`, including real native
+birth/token failures, stale generation recovery, changed-generation races,
+owner transitions and caller-deadline propagation. Existing standalone lock,
+coalescing and late-publisher controls remain in
+`agents/benchmarks/cloudbench_dependency_sync_test.py`. The old test fixture now
+supplies the parent's controlled HTTP executable and actual capture dependencies;
+missing fixture dependencies are not classified as production feed failures.
+No provider request, current guest edit, task/profile change, stale-data waiver,
+TTL extension or paid retry is part of this repair. The final permanent test fails against the original Git-bound runtime in
+9.82 seconds with the exact serialized-refresh error. The identical final
+selection passes 28 controls in 15.46 seconds on the repair; three existing
+standalone lock controls pass in 2.66 seconds. Earlier fixture timing and missing
+dependency failures remain recorded separately. Same-test GREEN is a mechanism
+result; only the unchanged original 600-task experiment can establish its outcome.

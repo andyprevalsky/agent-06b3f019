@@ -262,7 +262,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -303,17 +303,28 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
     fly = binary / "flyctl"
     fly.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, sys\n"
+        "import json, os, sys, time\n"
         "from pathlib import Path\n"
         "kind=sys.argv[1]\n"
         "if os.environ.get('FIXTURE_POST_CANARY') == '1' and os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') and os.environ.get('CLOUDBENCH_CAMPAIGN_INVENTORY_DIR'): sys.exit(1)\n"
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH'], 'wrong selected credential'\n"
         "payload=Path(os.environ['FIXTURE_'+kind.upper()]).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
-        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload)})+'\\n').encode());os.close(fd)\n"
-        "sys.stdout.buffer.write(payload)\n"
+        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload),'role':'borrower' if os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') else 'publisher'})+'\\n').encode());os.close(fd)\n"
+        "sys.stdout.buffer.write(payload);sys.stdout.buffer.flush()\n"
+        "if os.environ.get('FIXTURE_BORROWED_TRANSPORT_DELAY') == '1' and os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID') and kind == 'machines': time.sleep(10)\n"
     )
     fly.chmod(0o700)
+    # This fixture controls only the parent HTTP transport boundary. The real
+    # publisher, lock, generation publication and both borrowed consumers run.
+    (scripts / "cloudbench-campaign-machines.py").write_text(
+        "import os,json,sys\nfrom pathlib import Path\n"
+        "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH']\n"
+        "payload=Path(os.environ['FIXTURE_MACHINES']).read_bytes()\n"
+        "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
+        "os.write(fd,(json.dumps({'kind':'machines','decoded_bytes':len(payload),'role':'publisher-http-transport'})+'\\n').encode());os.close(fd)\n"
+        "sys.stdout.buffer.write(payload)\n"
+    )
     boundary = ""
     if post_canary:
         fleet = (ROOT / "scripts/run-bench-fleet").read_text()
@@ -359,6 +370,9 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         " while :; do sleep 1; done\n"
         "fi\n"
         'touch "$FLEET_DIR/ready"\n'
+        # Parent contention budget stays four seconds; borrower observation has
+        # six seconds so the parent's unchanged 0..2-second jitter is not a race.
+        'if [ "$FIXTURE_BORROWED_TRANSPORT_DELAY" = 1 ]; then CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS=6; fi\n'
         'if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
         ' while [ ! -e "$FIXTURE_ROOT/r001-j0001/closed" ]; do sleep 0.1; done\n'
         ' inventory_machine_field "$FIXTURE_TARGET" state > "$FLEET_DIR/state"\n'
@@ -389,8 +403,12 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         FIXTURE_POST_CANARY=str(int(post_canary)),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=str(int(shared)),
         CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION=str(int(mutation)),
-        CLOUDBENCH_SNAPSHOT_POLL_SECONDS="60",
+        CLOUDBENCH_SNAPSHOT_POLL_SECONDS="1" if refresh else "60",
+        FIXTURE_BORROWED_TRANSPORT_DELAY=str(int(borrowed_transport_delay)),
     )
+    if borrowed_transport_delay:
+        env.update(CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS="6",
+                   CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS="4")
     if auth:
         env["FLY_BENCH_API_TOKEN"] = "offline-bench-token-selected-123456789"
         env["FLY_API_TOKEN"] = "offline-injected-token-unselected"
@@ -455,6 +473,18 @@ def test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_or
     assert result.returncode == 0, result.stdout + result.stderr
     assert "shared_inventory" not in summary
     assert len([call for call in calls if call["kind"] == "machines"]) == 4, calls
+
+
+def test_campaign_inventory_borrowed_refresh_cannot_block_parent_with_native_completion_delay(tmp_path):
+    result, calls, summary, _ = run_consumers(tmp_path, refresh=True, borrowed_transport_delay=True)
+    feed = Path(summary["shared_inventory"]["directory"])
+    publisher_log = (feed / "publisher.private.log").read_text()
+    assert result.returncode == 0, result.stdout + result.stderr + publisher_log
+    assert not any(call["role"] == "borrower" for call in calls), calls
+    assert "timed out waiting for the serialized inventory refresh" not in publisher_log
+    assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+    assert (tmp_path / "r001-j0002/state").read_text() == "started"
+    assert not (feed / "owner").exists()
 
 
 def test_campaign_inventory_reuses_existing_fleet_credential_precedence(tmp_path):
@@ -2393,6 +2423,11 @@ def test_campaign_inventory_reconciliation_refresh_contract(tmp_path, case):
     start = source.index('# Recovery may have removed active machines.')
     end = source.index('# ── App-wide capacity guard', start)
     block = source[start:end]
+    # Include the real capture dependency introduced by the admission wait
+    # repair; a missing extracted function is fixture failure, not feed failure.
+    for name in ('campaign_inventory_wait', 'campaign_inventory_capture_once', 'campaign_inventory_capture'):
+        function_start = source.index(name + '() {')
+        block = source[function_start:source.index('\n}\n', function_start) + 3] + '\n' + block
     events = tmp_path / "events"
     script = tmp_path / "caller.sh"
     flags = {"noop": ("0", "0"), "stale-mutation": ("1", "0"), "pool-mutation": ("0", "1"), "bad-feed": ("0", "0"), "standalone": ("1", "1")}
@@ -3275,3 +3310,77 @@ def test_campaign_inventory_phase_evidence_distinguishes_owned_term(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize('fault,expected', [
+    ('new-healthy', 0), ('same-generation', 1), ('stale-new-recovers', 0),
+    ('stale-new-expires', 1), ('foreign-token', 1), ('malformed-health', 1),
+    ('publisher-birth-changed', 1), ('parent-birth-changed', 1),
+    ('publisher-dead', 1), ('parent-dead', 1), ('foreign-token-transition', 1),
+    ('publisher-birth-transition', 1), ('missing-generation', 1), ('identity-race', 1),
+    ('caller-deadline', 1), ('expired-caller', 1),
+])
+def test_campaign_inventory_borrowed_refresh_waits_for_same_owned_healthy_generation(tmp_path, fault, expected):
+    # Real health/PID-birth/token checks. Only the existing wait tick is controlled
+    # to publish a generation or advance the same SECONDS clock without sleeping.
+    script = tmp_path / 'wait.sh'
+    script.write_text(
+        'set -euo pipefail\nFLEET_DIR="$1"; APP=fixture; FLEET_OWNER_HOST="$(hostname)"\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}\n'
+        f'source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}\n'
+        'mkdir -p "$INVENTORY_INDEX/current"\n'
+        'SNAPSHOT_LOOP_PID=$$; SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time $$)"\n'
+        'SNAPSHOT_LOOP_TOKEN=fixture; INVENTORY_PUBLISHER_BORROWED=1\n'
+        'INVENTORY_CAMPAIGN_PARENT_PID=$$; INVENTORY_CAMPAIGN_PARENT_START="$SNAPSHOT_LOOP_PID_START"\n'
+        'CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS=4; ticks=0\n'
+        'FLY() { touch "$FLEET_DIR/native-called"; return 91; }\n'
+        'health() { printf "publisher_token=%s\\nvalid_until=%s\\ngeneration=%s\\n" "$1" "$2" "$3" > "$INVENTORY_INDEX/current/health.tmp"; mv "$INVENTORY_INDEX/current/health.tmp" "$INVENTORY_INDEX/current/health"; }\n'
+        'health fixture "$((INVENTORY_CLOCK_EPOCH+120))" old\n'
+        'case "$2" in\n'
+        ' new-healthy) health fixture "$((INVENTORY_CLOCK_EPOCH+120))" new;;\n'
+        ' stale-new-*) health fixture 1 new;;\n'
+        ' foreign-token) health foreign "$((INVENTORY_CLOCK_EPOCH+120))" new;;\n'
+        ' malformed-health) health fixture invalid new;;\n'
+        ' publisher-birth-changed) SNAPSHOT_LOOP_PID_START=wrong;;\n'
+        ' parent-birth-changed) INVENTORY_CAMPAIGN_PARENT_START=wrong;;\n'
+        ' publisher-dead) (exit 0) & SNAPSHOT_LOOP_PID=$!; wait "$SNAPSHOT_LOOP_PID"; SNAPSHOT_LOOP_PID_START=wrong;;\n'
+        ' parent-dead) (exit 0) & INVENTORY_CAMPAIGN_PARENT_PID=$!; wait "$INVENTORY_CAMPAIGN_PARENT_PID"; INVENTORY_CAMPAIGN_PARENT_START=wrong;;\n'
+        ' missing-generation) health fixture "$((INVENTORY_CLOCK_EPOCH+120))" "";;\n'
+        ' identity-race)\n'
+        '   health fixture "$((INVENTORY_CLOCK_EPOCH+120))" new\n'
+        '   eval "$(declare -f machines_snapshot_identity | sed \'1s/machines_snapshot_identity/original_identity/\')"\n'
+        '   machines_snapshot_identity() { if [ -e "$FLEET_DIR/identity-seen" ]; then health foreign "$((INVENTORY_CLOCK_EPOCH+120))" unsafe; else touch "$FLEET_DIR/identity-seen"; fi; original_identity; };;\n'
+        'esac\n'
+        'inventory_refresh_wait_tick() { ticks=$((ticks+1)); SECONDS=$((SECONDS+1)); case "$fault" in stale-new-recovers) health fixture "$((INVENTORY_CLOCK_EPOCH+120))" new;; foreign-token-transition) health foreign "$((INVENTORY_CLOCK_EPOCH+120))" new;; publisher-birth-transition) SNAPSHOT_LOOP_PID_START=wrong;; esac; }\n'
+        # The function runs in the parent shell; its state and budget cannot reset
+        # in a command-substitution subshell on each pending observation.
+        'fault="$2"\n'
+        'deadline=$((SECONDS+20)); [ "$fault" != caller-deadline ] || deadline=$((SECONDS+2))\n'
+        '[ "$fault" != expired-caller ] || deadline="$SECONDS"\n'
+        'status=0; refresh_machines_snapshot_after old "$deadline" || status=$?\n'
+        'printf "%s %s\\n" "$status" "$ticks"\n'
+        'test ! -e "$FLEET_DIR/native-called"; test ! -e "$INVENTORY_REFRESH_LOCK"\n'
+    )
+    result = subprocess.run(['bash', str(script), str(tmp_path), fault], capture_output=True, text=True,
+                            timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    status, ticks = map(int, result.stdout.split())
+    assert status == expected, result.stdout + result.stderr
+    assert ticks == (2 if fault == 'caller-deadline' else 4 if fault in
+                     ('same-generation', 'stale-new-expires', 'missing-generation') else
+                     1 if fault in ('stale-new-recovers', 'identity-race', 'foreign-token-transition', 'publisher-birth-transition') else 0)
+
+
+def test_campaign_inventory_clone_name_wait_passes_original_absolute_deadline(tmp_path):
+    source = (ROOT / 'scripts/run-bench-fleet').read_text()
+    start = source.index('machine_id_for_clone_name() {')
+    function = source[start:source.index('\n}\n', start) + 3]
+    script = tmp_path / 'caller.sh'
+    script.write_text('set -euo pipefail\n' + function + '\n'
+        'machines_snapshot_identity() { printf prior; }\n'
+        'refresh_machines_snapshot_after() { test "$1" = prior; test "$2" = "$deadline"; touch "$1.ok"; return 1; }\n'
+        'deadline="$SECONDS"; status=0; machine_id_for_clone_name target "$deadline" || status=$?\n'
+        'test "$status" = 1; test -e prior.ok\n')
+    result = subprocess.run(['bash', str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=FIXTURE_HOST_GUARD_SECONDS)
+    assert result.returncode == 0, result.stdout + result.stderr

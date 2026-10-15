@@ -535,7 +535,40 @@ machines_snapshot_identity() {
     printf '%s' "$generation"
 }
 
-refresh_machines_snapshot_after() {  # refresh_machines_snapshot_after <prior-identity>
+refresh_machines_snapshot_after() {  # <prior-identity> [original-caller-deadline]
+    if [ "${INVENTORY_PUBLISHER_BORROWED:-0}" = 1 ]; then
+        # Post-mutation borrowers must observe a NEW healthy parent generation.
+        # They never become a second producer or take its refresh mutex: a slow
+        # child native CLI would otherwise prevent the healthy parent publishing.
+        local borrowed_prior="$1" before after health_status wait_seconds deadline caller_deadline="${2:-}"
+        wait_seconds="${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+        case "$wait_seconds" in ''|*[!0-9]*) return 1 ;; esac
+        deadline=$((SECONDS + wait_seconds))
+        if [ -n "$caller_deadline" ]; then
+            case "$caller_deadline" in *[!0-9]*) return 1 ;; esac
+            [ "$caller_deadline" -ge "$deadline" ] || deadline="$caller_deadline"
+        fi
+        while [ "$SECONDS" -lt "$deadline" ]; do
+            before="$(machines_snapshot_identity)"
+            health_status=0
+            inventory_index_healthy || health_status=$?
+            case "$health_status" in
+                0)
+                    after="$(machines_snapshot_identity)"
+                    if [ -n "$before" ] && [ "$before" != missing ] && \
+                        [ "$before" = "$after" ] && [ "$before" != "$borrowed_prior" ]; then
+                        [ "$SECONDS" -lt "$deadline" ] || return 1
+                        return 0
+                    fi
+                    ;;
+                75) ;;  # Only real live, birth/token-fenced availability is pending.
+                *) return 1 ;;
+            esac
+            inventory_refresh_wait_tick || return 1
+        done
+        echo "❌ timed out waiting for a new healthy parent inventory generation" >&2
+        return 1
+    fi
     # Clone output very rarely omits the target id. All exceptional resolvers
     # coalesce behind one bounded refresh. The lock carries a process-start
     # identity so a SIGKILLed owner can never wedge every later refresh.
