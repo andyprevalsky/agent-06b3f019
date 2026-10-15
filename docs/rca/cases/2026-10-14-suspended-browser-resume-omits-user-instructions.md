@@ -293,6 +293,26 @@ They retain native source/operation identity rather than manufacturing user
 turns. Rose's timestamp-only storage is not a commit-order event sequence, so
 removing watermark advancement is the coherent simplification here.
 
+
+The retained incident transcript independently contains the same durable source:
+row `13e9318d-50d3-4a4b-aa74-a8f9be7c40ec` at 17:21:46.577 UTC has native
+`session_starting` and `toolCallId=e52b1fbb7`. Later init row
+`26534b28-5150-422d-93de-b906defc5036` at 17:22:05.354 UTC binds that call to
+browser task `3a5940f4-585a-5744-bdcc-bde9ab0da653`; its separate `task_started`
+row follows at 17:22:05.515 UTC. This is observed producer/storage provenance,
+not an invented fixture-only event.
+
+Combined development validation from `agents/` passed all six owning domains
+in 104.1s: `venv/bin/python scripts/run_blackbox_tests.py
+spawn-browser-agent-v3 world-model-harness messages workflow
+workflow-determinism handle-tool-event`. The permanent runner discovers the
+new cases. An earlier invocation from the worktree root failed three existing
+relative-path fixture reads in 62.7s; that failed attempt remains preserved and
+is not counted as runtime validation. Scoped Ruff, archive validation (871
+cases after main synchronization), compilation and diff checks also pass.
+The main synchronization changed benchmark history and docs under `agents/`,
+not these tested production/owning-test sources.
+
 ## Human feedback
 
 The user asked to continue the RCA and reported "failed to pause agent" on
