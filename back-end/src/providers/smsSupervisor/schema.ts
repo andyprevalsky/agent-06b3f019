@@ -56,6 +56,13 @@ const webSearchCallSchema = z.object({
 const sendUserMessageCallSchema = z.object({
   tool: z.literal('send_user_message'),
   arguments: z.object({
+    reply_to_message_id: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Optional message ID or reference from the reply-target index. Quote that incoming or previously sent message. SMS includes the selected message as quoted text; WhatsApp uses a native reply. Omit or null for an ordinary message.'
+      ),
     message: z
       .string()
       .describe(
@@ -223,3 +230,30 @@ export const SUPERVISOR_RESPONSE_MODEL = responseModel(
 );
 
 export const SUPERVISOR_RESPONSE_SCHEMA = buildOpenAiResponseFormat(SUPERVISOR_RESPONSE_MODEL);
+
+export const SmsSupervisorReactionResponseSchema = z.object({
+  reasoning: z.string(),
+  tool_calls: z
+    .array(
+      z
+        .object({
+          tool: z.literal('react_to_message'),
+          arguments: z
+            .object({
+              emoji: z
+                .string()
+                .describe(
+                  'Choose any single Unicode emoji that fits the incoming message. Compound emoji, skin tones, flags, and keycaps are allowed. No fixed palette or default emoji.'
+                ),
+            })
+            .strict(),
+        })
+        .strict()
+    )
+    .length(1),
+});
+
+export const SUPERVISOR_REACTION_MODEL = responseModel(
+  'sms_supervisor_reaction',
+  SmsSupervisorReactionResponseSchema
+);

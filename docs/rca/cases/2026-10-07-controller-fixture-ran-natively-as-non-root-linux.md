@@ -83,3 +83,30 @@ None recorded.
 ## Reusable lesson
 
 Dispatch a fixture by the capabilities it exercises, such as root privileges, not by operating system alone.
+
+### 2026-10-15 deploy environment recurrence
+
+The default container build failed before fixture execution when Docker Hub
+returned HTTP 502 for the pinned Node22.13.0 base manifest. Docker's public status
+page reported operational; no provider-wide incident attribution was established.
+No verified controller image was cached on this devbox.
+
+The supported root/native route passed its version preflight with an isolated,
+checksum-verified Node22.13.0 distribution and Python3.11.9. Its unchanged
+cache-parent control then failed because the fixture's reduced-privilege child
+could not execute Python beneath the private `/home/boxes` parent. Copying the
+runtime alone retained uv's 0700 directory permissions and failed the same
+assertion again. After granting read/traverse permission only on the newly
+created standard-library runtime copy under `/tmp/rose-controller-native.*`, the
+same unmodified status-service fixture passed all native ownership, three cache
+permission states, atomic generation, and authenticated shutdown controls.
+Original home permissions, source assertions, and application code were unchanged.
+
+Retain `.context/deploy-cloud-controller-r8.log`,
+`.context/deploy-controller-native-r8.log`,
+`.context/deploy-controller-native-r8b.log`, and the passing
+`.context/deploy-controller-native-r8c.log`. Native tool admission establishes
+versions and root privileges; a private interpreter path can still be unusable
+by a fixture child. Use a traversable isolated runtime when selecting this native
+route, or use the recipe-verified offline container. This local fixture setup has
+no agent/runtime cost at 10,000 agents.

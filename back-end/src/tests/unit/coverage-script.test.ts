@@ -85,6 +85,49 @@ assert.match(
   /BLACKBOX_TEST_CAPTURE_OUTBOUND[\s\S]*BLACKBOX_TEST_REPLAY_OUTBOUND/,
   'shared auto-RCA fixtures must fail closed outside capture/replay mode'
 );
+for (const explicitFixture of [
+  '',
+  JSON.stringify({
+    reasoning: 'explicit fixture',
+    reaction_emoji: '🦊',
+    tool_calls: [{ tool: 'send_user_message', arguments: { message: 'explicit reply' } }],
+  }),
+]) {
+  const inherited = execFileSync(
+    'bash',
+    [
+      '-c',
+      'set -e; source "$1"; node --import tsx --eval "$2"',
+      'supervisor-fixture-child',
+      autoRcaEnvPath,
+      `const assert = require('node:assert/strict');
+     const { loadBlackboxSupervisorResponseFixture: load } = require('./src/providers/smsSupervisor/supervisorFixtures.ts');
+     const reaction = load('new-user-without-override', true);
+     assert.ok(reaction, 'new-user reaction must inherit the launcher fixture before backend boot');
+     process.stdout.write(JSON.stringify({ reaction, reply: load('new-user-without-override') }));`,
+    ],
+    {
+      encoding: 'utf8',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        BLACKBOX_TEST_CAPTURE_OUTBOUND: '1',
+        BLACKBOX_TEST_REPLAY_OUTBOUND: '1',
+        BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON: explicitFixture,
+      },
+    }
+  );
+  const fixture = JSON.parse(inherited);
+  assert.equal(fixture.reaction.response.tool_calls[0].tool, 'react_to_message');
+  assert.equal(
+    fixture.reaction.response.tool_calls[0].arguments.emoji,
+    explicitFixture ? '🦊' : '👍'
+  );
+  assert.equal(
+    fixture.reply.response.tool_calls[0].arguments.message,
+    explicitFixture ? 'explicit reply' : 'Blackbox SMS smoke reply'
+  );
+}
 for (const [name, harness] of [
   ['coverage', coverageScript],
   ['blackbox', blackboxScript],

@@ -142,3 +142,53 @@ joined; no signal is authorized by the predicate. Native metadata and failure
 receipts are private under `proof114-backend-fixture-rca`. The first draft's
 escaping failure remains preserved and earns no causal red credit. Independent
 review verifies the final paired files differ only in the predicate.
+
+## October 14 campaign publication assertion recurrence
+
+Group3 `benchmark-live-results` reported 1 failed, 622 passed and 4 skipped in
+337.72 seconds. The failing final-publication control rejected PID 1206645 at
+`cloudbench_campaign_inventory_test.py:1240`. Its marker names publisher 1206637
+and child 1206645. Both PIDs were already absent at first inspection; their
+original birth, parent and execution state cannot be reconstructed. No claim is
+made that the original PID was a zombie or that PID reuse was excluded there.
+The original fixture, marker, summary and logs were copied before cleanup into
+`.context/campaign-publication-rca/original-fixture`; the failure excerpt is
+`original-failure.log`. No original process was signalled.
+
+Archive searches were `owned publication process remains` and `campaign
+cancellation zombie reap`. The campaign blocked-publication case is a relative:
+its production cleanup now uses the canonical seed `stop_get`, which explicitly
+recognizes native Z descendants as terminal and joins its direct publisher.
+This is a recurrence of this case's fixture mistake: a second assertion still
+used numeric PID existence as execution-state evidence.
+
+The unchanged real campaign cancellation test first passed both phases in
+0.91 seconds. For a deterministic causal replay, a local Linux subreaper wraps
+the same unchanged pytest command and retains its adopted exited descendants
+until pytest finishes. This changes only who reaps an orphan, not campaign
+signals, fixtures, budgets or ownership. Command:
+`python3 .context/campaign-publication-rca/replay.py`. Before correction it
+failed both phases in 1.00 seconds (`before.log`): native `/proc` stat proves
+both retained exact descendant PIDs were Z, with the replay as PPID, while
+publisher leaders were absent. After correction the identical command passed
+both phases in 1.03 seconds (`after.log`). The replay then joins only children
+it adopted; it issues no signals. This proves the mechanism, not the vanished
+original PID's historical state.
+
+The permanent `campaign_inventory` test adds a directly owned exited child
+held unreaped, a real live survivor negative control, joined-child absence and
+failed-state-probe rejection. The old predicate failed that unchanged control
+in 0.21 seconds (`control-before.log`). The corrected predicate accepts only
+proven absence or a successful native Z observation, rechecking absence after
+an inconclusive probe; live and unobservable survivors still fail. The real
+campaign control uses that predicate. Production code and all timing bounds
+remain unchanged. The targeted three cases pass in 1.09 seconds
+(`targeted-after.log`). The normal `benchmark-live-results.test.py` wrapper
+already selects `campaign_inventory`, including this new control. The parent
+owns the complete gate rerun; this focused result does not claim it passed.
+
+Scoped `git diff --check` passed. The agents venv has no ruff module, so no
+ruff pass is claimed. No backend, database, provider, deployment or unrelated
+process was touched. The parent delegated this narrow repair while deployment
+was user-authorized. This case remains open pending the full gate and retains
+its explicit historical-state observation gap.

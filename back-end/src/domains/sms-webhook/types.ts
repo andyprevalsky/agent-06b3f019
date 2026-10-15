@@ -11,6 +11,7 @@ export type { SurgeAttachment };
 
 /** Parsed inbound SMS from Surge webhook payload */
 export interface ParsedSurgeMessage {
+  messageId?: string;
   fromPhone: string;
   messageBody: string;
   attachments: SurgeAttachment[];
