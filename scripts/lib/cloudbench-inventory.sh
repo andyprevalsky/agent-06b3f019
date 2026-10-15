@@ -51,6 +51,8 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     while [ "${secs#0}" != "$secs" ]; do secs="${secs#0}"; done
     [ -n "$secs" ] || return 142
     local out notify_fd read_fd pid rc read_status=0 completed running
+    local child_birth=unknown returned=unknown marker_pid marker_birth marker_rc marker_extra stat_line local_shell_pid marker_shell_flags
+    local -a stat_fields
     out="$(mktemp)" || return 1
     if ! mkfifo -m 600 "$out.done"; then
         rm -f "$out"
@@ -73,7 +75,24 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         exec {read_fd}<&-
         # Keep the writer through native exec and EXIT handlers. Production
         # FLY owns a foreground flyctl; detached writers fail at the deadline.
+        # Private, best-effort completion evidence only. No marker grants success;
+        # the original FIFO EOF plus wait status remains the acceptance boundary.
+        local_shell_pid="$BASHPID"
+        child_birth=unknown
+        if [ -r "/proc/$BASHPID/stat" ]; then
+            IFS= read -r stat_line < "/proc/$BASHPID/stat" || true
+            stat_line="${stat_line##*) }"
+            read -r -a stat_fields <<< "$stat_line"
+            child_birth="${stat_fields[19]:-unknown}"
+        fi
+        marker_shell_flags="$-"
+        set -C
+        { printf '%s %s\n' "$local_shell_pid" "$child_birth" > "$out.started"; } 2>/dev/null || true
+        case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
+        set -C
+        { printf '%s\n' "$rc" > "$out.returned"; } 2>/dev/null || true
+        case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         exit "$rc"
     ) &
     pid=$!
@@ -81,6 +100,20 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     IFS= read -r -t "$secs" -u "$read_fd" completed || read_status=$?
     exec {read_fd}<&-
     if [ "$read_status" -ne 1 ]; then
+        if [ -f "$out.started" ] && [ ! -L "$out.started" ]; then
+            IFS=' ' read -r marker_pid marker_birth marker_extra < "$out.started" || true
+            if [ "${marker_pid:-}" = "$pid" ] && [ -z "${marker_extra:-}" ]; then
+                case "${marker_birth:-}" in ''|*[!0-9]*) ;; *) child_birth="$marker_birth" ;; esac
+            fi
+        fi
+        if [ -f "$out.returned" ] && [ ! -L "$out.returned" ]; then
+            IFS=' ' read -r marker_rc marker_extra < "$out.returned" || true
+            case "${marker_rc:-}" in ''|*[!0-9]*) ;; *)
+                [ -n "${marker_extra:-}" ] || returned="$marker_rc" ;;
+            esac
+        fi
+        printf '[warn] FLY_COMPLETION_TIMEOUT shell_pid=%s shell_start_ticks=%s fly_return_status=%s fifo_read_status=%s\n' \
+            "$pid" "$child_birth" "$returned" "$read_status" >&2
         # Only EOF establishes completion. Deadline, interrupted read, and
         # invalid/read-error statuses must never fall through to an unbounded
         # successful wait. A shell job check avoids signalling a reused PID if
@@ -97,12 +130,12 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
             fi
         fi
         wait "$pid" 2>/dev/null || true
-        cat "$out"; rm -f "$out"
+        cat "$out"; rm -f "$out" "$out.started" "$out.returned"
         [ "$read_status" -gt 128 ] && return 142
         return 1
     fi
     if wait "$pid"; then rc=0; else rc=$?; fi
-    cat "$out"; rm -f "$out"
+    cat "$out"; rm -f "$out" "$out.started" "$out.returned"
     return "$rc"
 }
 
