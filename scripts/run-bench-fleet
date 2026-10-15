@@ -11640,16 +11640,13 @@ campaign_inventory_wait() {
         "$@"; return $?
     fi
     # All pre-provision borrowed observations share the existing admission
-    # budget. The first parent-shell borrow establishes it; getters inherit it.
+    # budget. Healthy reads do not start it; first pending or admission does.
     local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
     case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}" in
         *[!0-9:]*) echo "❌ invalid inventory admission wait clock" >&2; return 2 ;;
     esac
     [ "$wait_seconds" -gt 0 ] && [ "$interval" -gt 0 ] || return 2
-    if [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
-        CAPACITY_ADMISSION_DEADLINE=$((SECONDS + wait_seconds))
-    fi
     while :; do
         status=0
         "$@" || status=$?
@@ -11661,6 +11658,9 @@ campaign_inventory_wait() {
             echo "❌ borrowed inventory authority unavailable (status=$status); refusing provisioning" >&2
             return "$status"
         fi
+        if [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
+            CAPACITY_ADMISSION_DEADLINE=$((SECONDS + wait_seconds))
+        fi
         remaining=$((CAPACITY_ADMISSION_DEADLINE - SECONDS))
         if [ "$remaining" -le 0 ]; then
             echo "❌ borrowed inventory remained unavailable within the original admission deadline" >&2
@@ -11670,6 +11670,17 @@ campaign_inventory_wait() {
         echo "⏳ borrowed inventory temporarily unavailable; withholding provisioning within original deadline" >&2
         sleep "$interval"
     done
+}
+
+campaign_inventory_capture_once() {
+    local output_name="$1" captured_inventory
+    shift
+    captured_inventory="$("$@")" || return $?
+    printf -v "$output_name" '%s' "$captured_inventory"
+}
+campaign_inventory_capture() {
+    # Keep the wait/deadline in this parent shell; only the read is substituted.
+    campaign_inventory_wait campaign_inventory_capture_once "$@"
 }
 
 POOL_INVENTORY_JSON=""
@@ -11689,7 +11700,7 @@ reconcile_pool() {
     if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
         # Borrow in this shell; command substitution cannot bind its parent.
         campaign_inventory_wait start_machines_snapshot_loop || return $?
-        machines="$(campaign_inventory_wait fleet_admission_machines_json)" || return $?
+        campaign_inventory_capture machines fleet_admission_machines_json || return $?
     else
         machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
             echo "❌ could not read pool inventory before refresh" >&2
@@ -11837,7 +11848,7 @@ normalize_current_pool_shape() {
     if [ -z "$inventory" ]; then
         if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
             campaign_inventory_wait start_machines_snapshot_loop || return $?
-            inventory="$(campaign_inventory_wait fleet_admission_machines_json)" || return $?
+            campaign_inventory_capture inventory fleet_admission_machines_json || return $?
         else
             inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
         fi
@@ -13032,7 +13043,7 @@ if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     fi
     echo "🧊 independently owned immutable source: $WARM_ID (region $REGION)"
 else
-warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || exit $?
+campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin) or []
@@ -13075,7 +13086,7 @@ if [ "$warm_state" != "stopped" ]; then
         echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
         exit 1
     }
-    warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || exit $?
+    campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
     warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
         echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
     }
@@ -13443,7 +13454,7 @@ if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
             exit 1
         }
     fi
-    warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || {
+    campaign_inventory_capture warm_json fleet_admission_machines_json || {
         echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
         exit 1
     }

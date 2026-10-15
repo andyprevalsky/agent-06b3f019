@@ -33382,11 +33382,11 @@ def test_private_fleet_source_post_recovery_borrow_pending_enters_admission(tmp_
     start = fleet.index('# Recovery may have removed active machines.')
     block = fleet[start:fleet.index('# ── App-wide capacity guard', start)]
     waiter = _extract_fleet_function(fleet, 'admit_app_capacity_with_wait() {')
-    borrowed_wait = _extract_fleet_function(fleet, 'campaign_inventory_wait() {') if 'campaign_inventory_wait() {' in fleet else ''
+    borrowed_wait = '\n'.join(_extract_fleet_function(fleet, name + '() {') for name in ['campaign_inventory_wait', 'campaign_inventory_capture_once', 'campaign_inventory_capture'])
     if stage == "warm-source":
         warm_start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
         warm_end = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', warm_start)
-        getter_start = fleet.index('warm_json="$(', warm_end)
+        getter_start = fleet.index('campaign_inventory_capture warm_json ', warm_end)
         getter_end = fleet.index('\nwarm_pair=', getter_start)
         block = fleet[warm_start:warm_end] + fleet[getter_start:getter_end] + '\n'
 
@@ -33472,3 +33472,67 @@ exit "$status"
         assert "withholding" in result.stderr
     if case == "exhausts":
         assert "borrowed inventory remained unavailable within the original admission deadline" in result.stderr
+
+
+def test_private_fleet_source_healthy_borrow_does_not_spend_pending_budget(tmp_path: Path) -> None:
+    fleet = fleet_source_text()
+    waiter = _extract_fleet_function(fleet, 'campaign_inventory_wait() {')
+    # Actual wait helper; this finite operation models only its typed status
+    # boundary. Native owner/birth/token controls are exercised above.
+    script = """set -u
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=fixture
+INVENTORY_PUBLISHER_BORROWED=1
+SNAPSHOT_LOOP_PID=$$
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=2
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+""" + waiter + """
+healthy() { return 0; }
+campaign_inventory_wait healthy || exit 20
+SECONDS=$((SECONDS+301))
+count=0
+pending_then_fresh() { count=$((count+1)); [ "$count" -gt 1 ] || return 75; }
+campaign_inventory_wait pending_then_fresh || exit 21
+[ "$count" = 2 ] || exit 22
+[ "$CAPACITY_ADMISSION_DEADLINE" -gt 301 ] || exit 23
+printf 'RECOVERED_WITH_ORIGINAL_PENDING_BUDGET\n'
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RECOVERED_WITH_ORIGINAL_PENDING_BUDGET" in result.stdout
+
+
+def test_private_fleet_source_two_getters_and_admission_share_first_pending_clock(tmp_path: Path) -> None:
+    fleet = fleet_source_text()
+    functions = '\n'.join(_extract_fleet_function(fleet, name + '() {') for name in
+                          ['campaign_inventory_wait', 'campaign_inventory_capture_once',
+                           'campaign_inventory_capture', 'admit_app_capacity_with_wait'])
+    script = """set -u
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR=fixture
+INVENTORY_PUBLISHER_BORROWED=1
+SNAPSHOT_LOOP_PID=$$
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=2
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+""" + functions + r'''
+get_once_pending() {
+ if [ ! -e "$ROOT/read-once" ]; then : > "$ROOT/read-once"; return 75; fi
+ printf '[]'
+}
+campaign_inventory_capture warm_json get_once_pending || exit 20
+[ "$warm_json" = '[]' ] || exit 21
+original=$CAPACITY_ADMISSION_DEADLINE
+campaign_inventory_capture warm_json get_once_pending || exit 22
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original" ] || exit 23
+fleet_admission_machines_json() { printf '[]'; }
+enforce_app_capacity_guard() { [ "$warm_json" = '[]' ]; }
+admit_app_capacity_with_wait 1 || exit 24
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original" ] || exit 25
+SECONDS=$original
+always_pending() { return 75; }
+if campaign_inventory_capture warm_json always_pending; then exit 26; fi
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original" ] || exit 27
+printf 'ONE_PARENT_PENDING_CLOCK\n'
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=6,
+                            env={**os.environ, "ROOT": str(tmp_path)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ONE_PARENT_PENDING_CLOCK" in result.stdout

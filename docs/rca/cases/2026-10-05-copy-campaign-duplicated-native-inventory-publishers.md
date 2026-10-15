@@ -270,9 +270,11 @@ An actual owner/birth/token/health fixture reproduced the getter bug on unchange
 permanent pending lacked the admission exhaustion diagnostic (2 failed, 4 passed).
 The finite caller audit also found this status lost at initial warm-source borrow,
 its two compact getters, and conditional pool observation. These reads now use
-one campaign-only pending helper. Its first parent-shell borrow establishes the
-existing capacity admission deadline; all later readers inherit it and admission
-does not reset it. Only an owned borrowed publisher's typed 75 waits at the
+one campaign-only pending helper. Its first actual typed pending response (or
+normal admission, if no earlier pending) establishes the existing capacity
+admission deadline. Parent-shell capture preserves that deadline across JSON
+getters and admission without reset. Healthy observations do not spend the wait
+budget during unrelated normal setup. Only an owned borrowed publisher's typed 75 waits at the
 existing interval. Success still requires a current healthy observation; invalid,
 dead or foreign authority refuses. Standalone reads pass through unchanged.
 No stale JSON, additional native query, TTL, reservation or retry budget is added.
@@ -286,3 +288,12 @@ Warm-source and post-recovery controls additionally cover recovery, exhaustion,
 already-expired original deadline, foreign/dead authority, and exactly one
 reservation only after fresh observation. Full simultaneous 600 execution and
 strictly below 5% infra still require an actual successful campaign.
+
+
+The initial a7 candidate started its clock on a healthy borrow and was withdrawn
+before invocation. An owning counterexample advanced Bash SECONDS by 301 during
+normal healthy work; its first pending response incorrectly exhausted a budget
+that had never waited. The successor moves clock creation to first actual 75,
+with parent-shell JSON capture. A second owning control crosses two getters and
+normal admission, verifies the same deadline, then proves an expired pending read
+cannot obtain a new budget. No slow workload or provider call was needed.
