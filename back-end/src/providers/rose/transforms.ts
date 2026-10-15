@@ -310,7 +310,7 @@ function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
   return out;
 }
 
-/** Returns the value branch of a two-branch `T | null` union, else null. */
+/** Unwrap nullable unions recursively, including combined optional/nullable wrappers. */
 function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const branches = (Array.isArray(schema.anyOf) ? schema.anyOf : schema.oneOf) as
     JsonSchema[] | undefined;

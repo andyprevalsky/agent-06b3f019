@@ -303,7 +303,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, native_read_delay=0):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -344,13 +344,14 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
     fly = binary / "flyctl"
     fly.write_text(
         f"#!{sys.executable}\n"
-        "import json, os, sys\n"
+        "import json, os, sys, time\n"
         "from pathlib import Path\n"
         "kind=sys.argv[1]\n"
+        "time.sleep(float(os.environ['FIXTURE_NATIVE_READ_DELAY']))\n"
         "if os.environ.get('FIXTURE_EXPECT_AUTH'): assert os.environ.get('FLY_API_TOKEN') == os.environ['FIXTURE_EXPECT_AUTH'], 'wrong selected credential'\n"
         "payload=Path(os.environ['FIXTURE_'+kind.upper()]).read_bytes()\n"
         "fd=os.open(os.environ['FIXTURE_CALLS'],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\n"
-        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload)})+'\\n').encode());os.close(fd)\n"
+        "os.write(fd,(json.dumps({'kind':kind,'decoded_bytes':len(payload),'job_id':os.environ.get('RUN_BENCH_CAMPAIGN_JOB_ID')})+'\\n').encode());os.close(fd)\n"
         "sys.stdout.buffer.write(payload)\n"
     )
     fly.chmod(0o700)
@@ -366,6 +367,12 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'FLY() { flyctl "$@"; }\n'
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\nstart_machines_snapshot_loop\n"
+        # A standalone fixture owns its publisher and cancels it on EXIT. Join
+        # the first asynchronous refresh before ending the scenario whose
+        # assertion counts that refresh; startup only joins the initial read.
+        'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
+        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row["job_id"]==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
         '  while [ "$(python3 -c \'import json,os;print(sum(json.loads(s)["kind"]=="machines" for s in open(os.environ["FIXTURE_CALLS"])))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
@@ -403,6 +410,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         FIXTURE_TARGET=target,
         FIXTURE_DEATH=str(int(death)),
         FIXTURE_REFRESH=str(int(refresh)),
+        FIXTURE_NATIVE_READ_DELAY=str(native_read_delay),
         CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=str(int(shared)),
         CLOUDBENCH_SNAPSHOT_POLL_SECONDS="60",
     )
@@ -460,13 +468,14 @@ def test_campaign_inventory_dead_owner_cancels_paused_startup_and_joins_clean_te
     assert len([call for call in calls if call["kind"] == "machines"]) == 2, calls
 
 
-def test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_ordinary_fleet_ownership(tmp_path):
+@pytest.mark.parametrize("native_read_delay", (0, 0.1))
+def test_campaign_inventory_post_mutation_refresh_keeps_native_generation_and_ordinary_fleet_ownership(tmp_path, native_read_delay):
     result, calls, _, _ = run_consumers(tmp_path, refresh=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert len([call for call in calls if call["kind"] == "machines"]) == 3, calls
     ordinary = tmp_path / "ordinary"
     ordinary.mkdir()
-    result, calls, summary, _ = run_consumers(ordinary, shared=False)
+    result, calls, summary, _ = run_consumers(ordinary, shared=False, native_read_delay=native_read_delay)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "shared_inventory" not in summary
     assert len([call for call in calls if call["kind"] == "machines"]) == 4, calls
