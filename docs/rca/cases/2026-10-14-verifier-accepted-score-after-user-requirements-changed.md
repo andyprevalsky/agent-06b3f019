@@ -476,8 +476,9 @@ The two actual activity fixtures fail before and pass after the fix; the two
 continuation/lifecycle fixtures also fail before and pass unchanged afterward.
 The combined owning run passes all four domains (LLM 231, run-agent 65,
 determinism 5, plus the complete workflow suite) in 60.7 seconds before the last
-additive continuation/lifecycle controls; final full coverage qualifies the
-frozen combined source. Five additive actual run_agent cases separately fail
+additive continuation/lifecycle controls; final full agents coverage passes all 110 domains, 184 fast-cache tests and
+134 unit tests at 82%. An additional instrumented workflow/determinism run
+qualifies the final lifecycle and legacy-state repair on the frozen source. Five additive actual run_agent cases separately fail
 against db21 and pass after the mechanical retry-boundary repair. The existing
 60 run_agent test functions and every existing LLM-visible string are AST
 identical; only lifecycle type labels are added. No user/tool narration,
