@@ -2693,3 +2693,16 @@ def test_campaign_inventory_native_completion_evidence_preserves_eof_contract(tm
         assert 'FLY_COMPLETION_TIMEOUT' not in result.stderr
     if mode == 'marker-collision':
         assert protected.read_text() == 'UNCHANGED'
+
+
+def test_campaign_inventory_completion_evidence_preserves_fly_noclobber_for_exit(tmp_path):
+    source = producer_source(ROOT)
+    start = source.index('fly_with_timeout() {')
+    function = source[start:source.index('\n}\n', start)+3]
+    marker = tmp_path/'handler-flags'
+    handler = 'printf "%s" "$-" > '+shlex.quote(str(marker))
+    script = function+'\nFLY() { set -C; trap '+shlex.quote(handler)+' EXIT; printf "[]"; }\nfly_with_timeout 1 machines list\n'
+    result = subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == '[]'
+    assert 'C' in marker.read_text()

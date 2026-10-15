@@ -90,6 +90,7 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         { printf '%s %s\n' "$local_shell_pid" "$child_birth" > "$out.started"; } 2>/dev/null || true
         case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
+        marker_shell_flags="$-"
         set -C
         { printf '%s\n' "$rc" > "$out.returned"; } 2>/dev/null || true
         case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
