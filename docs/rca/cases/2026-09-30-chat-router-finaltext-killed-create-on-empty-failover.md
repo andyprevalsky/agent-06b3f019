@@ -865,3 +865,43 @@ source-bound receipts remain private under the deploy RCA workspace.
 
 Standing user feedback requires robust, compact deploy regressions and rejects
 host-scheduling assumptions as independent runtime acceptance gates.
+
+## Live failover verification recurrence (2026-10-14)
+
+During WhatsApp media deployment, the unchanged `CHAT_ROUTER_FAILOVER_LIVE=1`
+owning gate failed two samples sixty seconds apart. All four attempts used the
+same captured thirty-message request (normalized SHA256 prefix
+`3a15756f1b54ff8b`), with unchanged strict schema, temperature zero, maximum
+1024 output tokens, and minimal reasoning. Three attempts received HTTP 200
+after approximately ten seconds but produced no SSE event/content before the
+existing precontent deadline. The other attempt served through Together in
+946 milliseconds, but was router attempt two and therefore did not satisfy
+the required first-attempt outcome. The second sample ended in the existing
+apology after 30,066 milliseconds.
+
+Evidence: local run `1792016047-246840-7197`, agent IDs
+`ebc333e8-ae2e-443b-9ef4-de53534f3c3b` and
+`bef37f23-ef4e-4449-a1ae-68c60784d4cc`. The exact local LLM dumps, owning
+runner log and backend transport spans were retained. The stalled attempts
+did not reveal a provider host; Together is supported only for the successful
+second attempt. Do not assign the three stalls to it.
+
+Official OpenRouter status reported no unresolved incident. Its earlier
+October 14 Pacific Northwest incident ended at 04:54 UTC, roughly eighteen
+hours before this gate, and does not explain these samples. Current official
+model/routing documentation supports the model and request parameters. The
+runtime evidence establishes a precontent delivery stall, not a newly proven
+owned parser, prompt, timeout-policy or decision defect. No production code,
+prompt, provider selection, assertion or deadline was changed. This preserves
+the earlier owned fix while recording a red live acceptance result.
+
+The deployment remains unqualified pending an unchanged focused retry, due at
+22:24:07 UTC from the 22:14:07 UTC attempt start. Preserve each failed attempt
+and its clocks; do not relabel it as a pass or substitute an offline proxy.
+
+The unchanged retry started at 22:24:28 UTC and passed: local run
+`1792016668-349995-14987`, first-attempt provider Parasail, HTTP 200 at 1,201
+milliseconds, first content at 1,380 milliseconds, and durable escalation at
+4,063 milliseconds. The owning case passed in 4,302 milliseconds (full domain
+5,149 milliseconds). The failed samples remain failures; only this later live
+attempt satisfies the gate. No code or request/acceptance criteria changed.

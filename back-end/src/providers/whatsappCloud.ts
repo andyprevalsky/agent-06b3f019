@@ -383,3 +383,82 @@ export async function sendWhatsAppTemplate(
   };
   return postWhatsAppMessage(requestBody, phoneNumber, options);
 }
+
+async function readWhatsAppMediaBody(response: Response, maxBytes: number): Promise<Buffer> {
+  const declaredBytes = Number(response.headers.get('content-length'));
+  if (declaredBytes > maxBytes) {
+    await response.body?.cancel();
+    throw new Error('WhatsApp media exceeds size cap');
+  }
+  if (!response.body) throw new Error('WhatsApp media response has no body');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error('WhatsApp media exceeds size cap');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (totalBytes === 0) throw new Error('WhatsApp media response is empty');
+  return Buffer.concat(chunks, totalBytes);
+}
+
+/** Resolve a Cloud API media ID and fetch its bytes with the same access token. */
+export async function downloadWhatsAppMedia(
+  mediaId: string,
+  maxBytes: number
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const { accessToken, graphApiVersion } = getWhatsAppConfig();
+  if (!accessToken) throw new Error('WhatsApp credentials not configured');
+  if (!/^[A-Za-z0-9._-]+$/.test(mediaId)) throw new Error('Invalid WhatsApp media ID');
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error('Invalid WhatsApp media size cap');
+  }
+  const requestOptions = {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(15_000),
+  };
+  const metadataResponse = await fetch(
+    `https://graph.facebook.com/${graphApiVersion}/${encodeURIComponent(mediaId)}`,
+    requestOptions
+  );
+  if (!metadataResponse.ok) {
+    await metadataResponse.body?.cancel();
+    throw new Error(`WhatsApp media metadata request failed: ${metadataResponse.status}`);
+  }
+  const metadata: unknown = JSON.parse(
+    (await readWhatsAppMediaBody(metadataResponse, 64 * 1024)).toString('utf8')
+  );
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new Error('Invalid WhatsApp media metadata');
+  }
+  const { url, mime_type: mimeType, file_size: fileSize } = metadata as Record<string, unknown>;
+  if (typeof url !== 'string' || typeof mimeType !== 'string' || !mimeType.trim()) {
+    throw new Error('WhatsApp media metadata is missing URL or MIME type');
+  }
+  const mediaUrl = new URL(url);
+  if (mediaUrl.protocol !== 'https:' || mediaUrl.username || mediaUrl.password) {
+    throw new Error('Invalid WhatsApp media URL');
+  }
+  if (typeof fileSize === 'number' && fileSize > maxBytes) {
+    throw new Error('WhatsApp media exceeds size cap');
+  }
+  const response = await fetch(mediaUrl.toString(), requestOptions);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`WhatsApp media download failed: ${response.status}`);
+  }
+  return {
+    buffer: await readWhatsAppMediaBody(response, maxBytes),
+    mimeType: mimeType.split(';')[0].trim(),
+  };
+}

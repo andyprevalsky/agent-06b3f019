@@ -75,10 +75,9 @@ function collectChanges(body: Record<string, unknown>): Record<string, unknown>[
 }
 
 /**
- * Extract the first inbound TEXT message from a Meta webhook payload. Returns
- * null when there is no inbound text (status-only receipts, non-text media, or
- * a malformed body). Non-text messages are intentionally not parsed in v1 —
- * they require the media-download API and are handled as a follow-up.
+ * Normalize inbound text, images, and audio into the shared supervisor contract.
+ * Media-only turns retain their native media ID even when there is no caption.
+ * Status receipts, unsupported types, and malformed messages do not route.
  */
 export function parseWhatsAppInboundMessages(
   body: Record<string, unknown>
@@ -89,21 +88,39 @@ export function parseWhatsAppInboundMessages(
     for (const raw of messages) {
       if (typeof raw !== 'object' || raw === null) continue;
       const message = raw as Record<string, unknown>;
-      if (message.type !== 'text') continue;
-      const text = message.text as Record<string, unknown> | undefined;
-      const textBody = typeof text?.body === 'string' ? text.body.trim() : '';
       const from = typeof message.from === 'string' ? message.from : '';
       const messageId = typeof message.id === 'string' ? message.id : '';
       // A valid Meta message always carries a `from` and an `id`; the id is
       // required for retry deduplication, so drop anything missing either.
-      if (textBody === '' || from === '' || messageId === '') continue;
-      parsed.push({ fromPhone: normalizeWaId(from), messageBody: textBody, messageId });
+      if (from === '' || messageId === '') continue;
+      if (message.type === 'text') {
+        const text = message.text as Record<string, unknown> | undefined;
+        const textBody = typeof text?.body === 'string' ? text.body.trim() : '';
+        if (textBody !== '') {
+          parsed.push({ fromPhone: normalizeWaId(from), messageBody: textBody, messageId });
+        }
+        continue;
+      }
+      if (message.type !== 'image' && message.type !== 'audio') continue;
+      const media = message[message.type];
+      if (typeof media !== 'object' || media === null) continue;
+      const fields = media as Record<string, unknown>;
+      const mediaId = typeof fields.id === 'string' ? fields.id.trim() : '';
+      if (mediaId === '') continue;
+      parsed.push({
+        fromPhone: normalizeWaId(from),
+        messageBody: typeof fields.caption === 'string' ? fields.caption.trim() : '',
+        messageId,
+        attachments: [
+          { mediaId, type: typeof fields.mime_type === 'string' ? fields.mime_type : null },
+        ],
+      });
     }
   }
   return parsed;
 }
 
-/** First inbound text message in the payload (or null). */
+/** First supported inbound message in the payload (or null). */
 export function parseWhatsAppInbound(body: Record<string, unknown>): ParsedWhatsAppMessage | null {
   return parseWhatsAppInboundMessages(body)[0] ?? null;
 }
