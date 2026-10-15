@@ -1483,7 +1483,10 @@ class AgentWorkflow:
         if not isinstance(response, str):
             return
         normalized = response.strip()
-        if not normalized or (not authored and normalized in ATTENTION_CONTROL_RESPONSES):
+        if not normalized or (not authored and (
+            normalized in ATTENTION_CONTROL_RESPONSES
+            or normalized.casefold() in {"approve", "approved"}
+        )):
             return
         if request_id is not None:
             if request_id in self._response_schema_attention_events:

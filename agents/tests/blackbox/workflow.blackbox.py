@@ -3238,6 +3238,49 @@ def _user_schema_refresh_fixture():
     return wf, fake, replacement
 
 
+async def test_workflow_legacy_approval_protocol_does_not_change_requirements():
+    """Legacy approval producers have no authored-message field on the wire."""
+    for value in ("approve", "Approved", " \tApPrOvEd\n"):
+        for keyed in (False, True):
+            wf, fake, _replacement = _user_schema_refresh_fixture()
+            wf._response_schema_initialized = False
+            original = _patch_workflow(fake)
+            try:
+                signal = json.dumps({"request_id": "approval-1", "response": value}) if keyed else value
+                await wf.receive_user_response(signal)
+                assert wf._response_schema_revision == 0, "approval protocol superseded a genuine verifier"
+                assert wf._response_schema_feedback == []
+                if keyed:
+                    assert wf._signal_responses["approval-1"] == value
+                else:
+                    assert wf._last_signal_response == value and wf._has_new_messages
+                assert not fake.activity_calls
+            finally:
+                _restore_workflow(original)
+
+
+async def test_workflow_authored_approval_words_remain_actual_requirements():
+    """Signal protocol exclusion must not become a classifier of USER text."""
+    for value in ("approve", " \tApPrOvEd\n", "Approve and use Andy's account"):
+        for durable in (False, True):
+            wf, fake, _replacement = _user_schema_refresh_fixture()
+            wf._response_schema_initialized = False
+            original = _patch_workflow(fake)
+            try:
+                if durable:
+                    wf.context = [{"id": "actual-user-row", "role": "USER", "text": value, "metadata": None}]
+                    wf._admit_durable_response_schema_feedback()
+                    wf._admit_durable_response_schema_feedback()
+                else:
+                    await wf.receive_user_response(json.dumps({
+                        "request_id": "actual-authored-approval", "response": "RESOLVED", "user_message": value,
+                    }))
+                assert wf._response_schema_feedback == [value], "actual authored bytes were excluded or normalized"
+                assert wf._response_schema_revision == 1
+            finally:
+                _restore_workflow(original)
+
+
 async def test_workflow_keyed_user_message_updates_native_schema_without_injection():
     wf, fake, replacement = _user_schema_refresh_fixture()
     feedback = "Also include the price for each venue"
@@ -11132,6 +11175,8 @@ async def run_all_tests():
     )
     await r.record_async("wf_schema_failure_continuation_native_retry", test_workflow_failed_schema_continuation_retries_original_input_without_new_feedback)
     await r.record_async("wf_schema_refresh_lifecycle_no_respawn", test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn)
+    await r.record_async("wf_legacy_approval_protocol_no_schema_feedback", test_workflow_legacy_approval_protocol_does_not_change_requirements)
+    await r.record_async("wf_authored_approval_words_preserved", test_workflow_authored_approval_words_remain_actual_requirements)
     await r.record_async("wf_schema_getter_refuses_failed_generation", test_workflow_schema_getter_refuses_old_contract_after_generation_failure)
     await r.record_async("wf_generation_failure_blocks_verifier_provider", test_workflow_generation_failure_blocks_actual_verifier_provider_call)
     await r.record_async("wf_unchanged_contract_accepted_before_db_ack", test_workflow_valid_unchanged_schema_is_accepted_before_persistence_ack)
