@@ -145,6 +145,8 @@ milestones before publishing its percentage; keep that same scope and weights
 for subsequent rates. Starting a substep never resets the agent lifetime.
 Recompute each render from timestamped same-scope history. Warming ends once
 15 minutes of history exist; never leave a cached warming flag or rate frozen.
+After publishing, atomically update the existing latest-card URL and fixed
+checkpoint fields together; do not create competing URL aliases.
 
 ## Benchmark experiment history
 

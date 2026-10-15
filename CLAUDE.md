@@ -35,6 +35,8 @@ links. A file pointer never substitutes for the diff.
   and lifetimes. Every red row names its blocker and corrective action.
   Recompute rates from same-scope history on every render; end warming after
   15 minutes of history instead of reusing a cached rate or warming flag.
+- After publishing, atomically update the existing latest-card URL and fixed
+  checkpoint fields together; do not create competing URL aliases.
 - State blockers plainly: exact limit, measured usage, known cap or explicit
   evidence gap, and what the agent/user can do. A planner ceiling is not a
   measured need for more capacity; reconcile reuse before suggesting more quota.
