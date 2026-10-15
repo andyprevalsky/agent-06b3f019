@@ -2495,10 +2495,16 @@ class AgentWorkflow:
                             model=model,
                         )
                         if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0 and not post_dag_result.get("superseded_by_user_feedback"):
+                            completion_revision = self._response_schema_revision
+                            await self._await_deferred_startup()
+                            await self._drain_fast_mode_explores()
                             await self._wait_for_response_schema_refresh()
                             self._require_current_response_schema_acceptance()
-                            if not _verifier_superseded_by_user_feedback(
-                                post_dag_result, self.context, requirement_revision=self._response_schema_revision,
+                            if (
+                                completion_revision == self._response_schema_revision
+                                and not _verifier_superseded_by_user_feedback(
+                                    post_dag_result, self.context, requirement_revision=self._response_schema_revision,
+                                )
                             ):
                                 workflow.logger.info(
                                     f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
@@ -2596,9 +2602,19 @@ class AgentWorkflow:
         await self._track_tokens_and_cost(execute_result)
 
         if execute_result["status"] == "completed":
+            # Finish native startup/child awaits before deciding whether this
+            # verdict still belongs to the current user requirements.
+            completion_revision = self._response_schema_revision
+            await self._await_deferred_startup()
+            await self._drain_fast_mode_explores()
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
-            if _verifier_superseded_by_user_feedback(execute_result, self.context, requirement_revision=self._response_schema_revision):
+            if (
+                completion_revision != self._response_schema_revision
+                or _verifier_superseded_by_user_feedback(
+                    execute_result, self.context, requirement_revision=self._response_schema_revision,
+                )
+            ):
                 await self._flush_pending_messages()
                 workflow.continue_as_new(args=self._continuation_args(self.context, start_phase="execute_continued"))
                 return execute_result
@@ -5189,8 +5205,17 @@ class AgentWorkflow:
             return {"status": "failed", "reason": "orphaned", "goal": self.goal}
 
         if result["status"] == "max_iterations":
+            completion_revision = self._response_schema_revision
+            if bool(getattr(self, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(self):
+                await self._await_deferred_startup()
+                await self._drain_fast_mode_explores()
             await self._wait_for_response_schema_refresh()
-            if _verifier_superseded_by_user_feedback(result, self.context, requirement_revision=self._response_schema_revision):
+            if (
+                completion_revision != self._response_schema_revision
+                or _verifier_superseded_by_user_feedback(
+                    result, self.context, requirement_revision=self._response_schema_revision,
+                )
+            ):
                 result["verifier_superseded_by_user_feedback"] = True
             verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
             verifier_reasoning = str(result.get("verifier_reasoning") or "")

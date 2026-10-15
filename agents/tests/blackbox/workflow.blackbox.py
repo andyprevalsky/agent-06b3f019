@@ -4209,6 +4209,157 @@ async def _exercise_unaccepted_schema_terminal_outcome(path):
         _restore_workflow(original)
 
 
+async def _exercise_healthy_input_during_terminal_wait(*, schema_changed, boundary="sms", path="execute", feedback=True):
+    from unittest.mock import AsyncMock, patch
+    import workflows.agent_workflow as module
+    from domains.spawn_agent.handler import track_fast_mode_explore
+
+    class Continued(BaseException):
+        pass
+
+    wf, fake, replacement = _user_schema_refresh_fixture()
+    initial = wf.output_schema
+    accepted = replacement if schema_changed else initial
+    correction = "Use the updated venue evidence and include prices where available"
+    fake.activity_returns.update({
+        "poll_new_messages": [], "get_model_context_window": 200_000,
+        "get_agent_source": "WEB", "get_user_context": "", "get_user_system_name": "Rose",
+        "get_user_custom_system_prompt": None, "fetch_compute_token_activity": None,
+        "fetch_agent_config": {"response_schema": initial, "write_lock_enabled": True},
+        "set_response_schema_activity": {"schema": accepted, "usage": {}},
+        "generate_completion_summary": {"summary": "Old completion", "tool_counts": {}, "usage": {}},
+    })
+    started, released, generation_released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    fake.activity_blockers["set_response_schema_activity"] = generation_released
+    continuations = []
+
+    def continue_as_new(**kwargs):
+        continuations.append(kwargs["args"])
+        raise Continued()
+
+    fake.continue_as_new = continue_as_new
+
+    async def sms_handle():
+        started.set()
+        await released.wait()
+
+    async def explore_handle():
+        started.set()
+        await released.wait()
+        return {}
+
+    async def deliver():
+        await started.wait()
+        if feedback:
+            await wf.receive_user_response(correction)
+        released.set()
+        # Let the completion caller return from its native awaited operation
+        # while a successful provider result is still pending.
+        await asyncio.sleep(0)
+        generation_released.set()
+
+    recovered = []
+
+    async def loop(**kwargs):
+        if path == "post_dag":
+            recovered.append(wf._response_schema_revision)
+            assert wf._response_schema_accepted_revision == wf._response_schema_revision > 0
+            return {"status": "completed", "context": [], "structured_response": {"venues": ["Current verdict"], "venue_prices": [10]},
+                    "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision,
+                    "token_count": 3, "context_size": 30}
+        if boundary == "sms":
+            wf._deferred_startup_sms_handle = sms_handle()
+        else:
+            track_fast_mode_explore(wf, explore_handle(), task_id="pending-explore",
+                                    tool_call_id="pending-explore-call", ui_goal="Read venues")
+        return {"status": "max_iterations" if path == "fast_cap" else "completed", "context": [], "structured_response": {"venues": ["Old verdict"]},
+                "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision,
+                "verifier_progress": 1.0, "verifier_reasoning": "Fast Mode cache trajectory ended",
+                "token_count": 3, "context_size": 30}
+
+    async def post_dag(**kwargs):
+        wf._deferred_startup_sms_handle = sms_handle()
+        return {"score": 1.0, "structured_response": {"venues": ["Old verdict"]},
+                "_verified_user_requirement_keys": [], "_verified_requirement_revision": wf._response_schema_revision}
+
+    original = _patch_workflow(fake)
+    delivery = asyncio.create_task(deliver())
+    did_continue = False
+    try:
+        plan = {"tasks": [{"goal": "Read venues", "tool_name": "spawn_explore_agent"}], "dependencies": {}} if path == "post_dag" else None
+        with patch.object(module, "run_agent", loop), patch.object(module, "extract_plan_from_context", return_value=plan), \
+             patch.object(module, "execute_dag", AsyncMock(return_value={"status": "completed", "context": []})), \
+             patch.object(wf, "_attempt_post_dag_completion", post_dag), \
+             patch.object(module, "is_demo_cache_task", return_value=boundary == "drain" or path == "fast_cap"), \
+             patch.object(module, "is_oai_demo_mass_agent_task", return_value=boundary == "drain" or path == "fast_cap"):
+            try:
+                result = await wf.run(wf.agent_id, wf.user_id, wf.goal, "rose-labs/rose-1-flash", 256,
+                             {"type": "FLOAT_LLM_JUDGE"}, start_phase="execute" if path == "post_dag" else "execute_continued")
+            except Continued:
+                did_continue = True
+        await delivery
+        await wf._wait_for_response_schema_refresh()
+        terminal_writes = [args for name, args in fake.activity_calls
+                           if name == "update_agent_status" and args[1] in ("FAILED", "COMPLETED")]
+        if path == "fast_cap":
+            assert result == {"status": "failed", "reason": "max_iterations", "goal": wf.goal}, (
+                "pending healthy feedback was reported as schema failure instead of the existing step limit"
+            )
+            assert len(terminal_writes) == 1 and terminal_writes[0][3] == "Max Steps Reached", (
+                "healthy late input changed the existing step-budget failure into a schema error"
+            )
+            assert not any(name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls)
+            return
+        if path == "post_dag" or not feedback:
+            assert result["status"] == "completed" and not any(args[1] == "FAILED" for args in terminal_writes), (
+                "healthy completion or post-DAG recovery was converted to terminal failure"
+            )
+            assert recovered if path == "post_dag" else wf._response_schema_revision == 0
+            if path == "post_dag":
+                assert wf.output_schema == accepted, "post-DAG recovery lost the new contract"
+            return
+        assert terminal_writes == [], "healthy late input produced terminal success/failure instead of continuing"
+        assert not any(name in ("mark_finished", "generate_completion_summary") for name, _args in fake.activity_calls), (
+            "the old verdict produced completion side effects after healthy late input"
+        )
+        assert did_continue and not wf._is_finished, "superseded completion did not resume native reasoning"
+        state = continuations[0][16]["runtime_state"]
+        assert state["output_schema"] == accepted
+        assert state["response_schema_accepted_revision"] == state["response_schema_revision"] > 0
+        assert correction in state["response_schema_feedback"], "continuation lost the actual late instruction"
+    finally:
+        released.set()
+        generation_released.set()
+        await delivery
+        if wf._response_schema_refresh_task is not None:
+            await wf._response_schema_refresh_task
+        _restore_workflow(original)
+
+
+async def test_workflow_healthy_feedback_during_native_sms_wait_continues_with_changed_schema():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=True)
+
+
+async def test_workflow_healthy_feedback_during_native_sms_wait_continues_with_unchanged_schema():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=False)
+
+
+async def test_workflow_healthy_feedback_during_native_explore_drain_discards_old_completion():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=True, boundary="drain")
+
+
+async def test_workflow_healthy_sms_feedback_post_dag_recovers_current_contract():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=True, path="post_dag")
+
+
+async def test_workflow_healthy_sms_feedback_keeps_fast_mode_step_budget():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=True, path="fast_cap")
+
+
+async def test_workflow_native_sms_completion_without_new_feedback_still_completes():
+    await _exercise_healthy_input_during_terminal_wait(schema_changed=False, feedback=False)
+
+
 async def test_workflow_unaccepted_schema_completion_reaches_durable_failure():
     for path in ("execute", "post_dag", "fast_mode", "deferred"):
         try:
@@ -10769,6 +10920,12 @@ async def run_all_tests():
     await r.record_async("wf_native_acceptance_survives_lost_db_ack", test_workflow_accepted_native_schema_survives_lost_persistence_ack)
     await r.record_async("wf_direct_completion_requires_native_acceptance", test_workflow_direct_completion_bypass_refuses_unaccepted_latest_contract)
     await r.record_async("wf_unaccepted_schema_durable_terminal_failure", test_workflow_unaccepted_schema_completion_reaches_durable_failure)
+    await r.record_async("wf_healthy_native_sms_changed_schema", test_workflow_healthy_feedback_during_native_sms_wait_continues_with_changed_schema)
+    await r.record_async("wf_healthy_native_sms_unchanged_schema", test_workflow_healthy_feedback_during_native_sms_wait_continues_with_unchanged_schema)
+    await r.record_async("wf_healthy_native_explore_drain", test_workflow_healthy_feedback_during_native_explore_drain_discards_old_completion)
+    await r.record_async("wf_healthy_sms_post_dag_recovery", test_workflow_healthy_sms_feedback_post_dag_recovers_current_contract)
+    await r.record_async("wf_healthy_sms_fast_mode_budget", test_workflow_healthy_sms_feedback_keeps_fast_mode_step_budget)
+    await r.record_async("wf_native_sms_no_new_feedback", test_workflow_native_sms_completion_without_new_feedback_still_completes)
     await r.record_async("wf_schema_failure_preserves_unrelated_error", test_workflow_schema_failure_handler_does_not_swallow_unrelated_errors)
     await r.record_async("wf_fast_mode_completion_requires_native_acceptance", test_workflow_fast_mode_completion_refuses_unaccepted_latest_contract)
     await r.record_async(

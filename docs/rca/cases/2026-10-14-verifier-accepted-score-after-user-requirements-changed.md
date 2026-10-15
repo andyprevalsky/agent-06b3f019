@@ -326,6 +326,75 @@ neither an approval flag nor an override was supplied. That result and the
 exact frozen diff are handed to the PR #1511 deployment owner for the required
 authorization disposition. Prompt and trajectory-injection guards pass.
 
+## October 15 follow-up: pending feedback across terminal startup and drain
+
+The final read-only audit of root candidate
+`25c0abcae2bad3dba1e94fb10ae22abbdc42b24c` reproduced a distinct acceptance gap.
+The real workflow returned a completed verdict, then `_mark_complete` awaited
+its actual deferred startup SMS handle. A genuine USER signal arrived during
+that wait while healthy schema generation was still pending. The synchronous
+acceptance guard raised the typed rejection, and the workflow durably failed
+with `No output schema has been accepted for the current user requirements`.
+No generation failure was configured; releasing the provider completed native
+acceptance at revision 1/1. The existing deferred fixture only covered a real
+generator failure, so it could not distinguish this healthy pending revision.
+A second pre-latch wait, the native Fast Mode explore drain, could instead let
+an old completion proceed after genuine input changed its requirements.
+
+The repair consumes the existing SMS and explore waits before each production
+completion caller's final schema wait, acceptance check and verdict decision.
+It captures the native requirement revision before those waits and checks it
+again afterward, including when the generated schema is unchanged. Execute
+uses its existing continuation; post-DAG uses its existing reasoning recovery;
+Fast Mode keeps its existing maximum-step failure when the old trajectory no
+longer certifies completion. The final terminal method retains its idempotent
+startup/drain safeguards. No schema wait was added inside that method to bless
+old output, and the typed generation-failure boundary is unchanged.
+
+The permanent owning cases deliver an actual USER signal while the real
+startup or drain operation is awaiting a controlled handle. They require no
+old completion, no schema-error failure for healthy generation, and the current
+accepted contract plus actual input in native continuation or recovery. The
+changed-schema and unchanged-schema cases both failed on the frozen candidate
+and pass with the same assertions after this repair. Actual generator failures
+and unrelated RuntimeError controls retain their previous outcomes. This is a
+follow-up to the same awaited verifier-consumer boundary, not another proven
+occurrence in the original Calendar run.
+
+The unchanged final fixture produces five causal failures on `25c0abcae` and
+passes its no-input control. Against the repair, those six cases plus the two
+existing error controls all pass (0.001–0.004s per case). Exact commands from
+`agents/`, with the existing agents venv activated:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. --baseline 25c0abcae --runtime workflows.agent_workflow workflow test_workflow_healthy_feedback_during_native_sms_wait_continues_with_changed_schema test_workflow_healthy_feedback_during_native_sms_wait_continues_with_unchanged_schema test_workflow_healthy_feedback_during_native_explore_drain_discards_old_completion test_workflow_healthy_sms_feedback_post_dag_recovers_current_contract test_workflow_healthy_sms_feedback_keeps_fast_mode_step_budget test_workflow_native_sms_completion_without_new_feedback_still_completes
+# Repeat without --baseline and its value for the repaired native source.
+python scripts/run_blackbox_tests.py workflow workflow_determinism
+```
+
+The full owning runner discovers all six additions and passes both domains with
+zero failures in 42.9s. Captures are `root-healthy-terminal-waits-before.log` and
+`root-healthy-terminal-waits-after.log` in the local RCA evidence directory;
+the full transcript is `.context/root-healthy-terminal-full-owning.log` in this
+worktree. Scoped Ruff, compilation, archive validation and diff checks pass.
+Independent read-only review of the exact completion-await patch is clean.
+Prompt and trajectory guards pass; the agent-behavior guard remains flagged
+without an approval or override. No paid probes or deployment ran on this box.
+The existing native continuation is the direct Rose standard; the inspected
+Codex `codex-rs/core/src/session/input_queue.rs:389` similarly preserves input
+under the active turn's custody. Neither claims a direct schema-generation
+analog; this repair keeps current input authoritative through the last awaited
+preparation before terminal acceptance.
+
+Archive searches used `No output schema has been accepted pending schema
+deferred startup` and `feedback during completion SMS drain stale verifier`.
+They returned this verifier case and the related root-intake/browser-contract
+cases. The failure evidence, native source identity and previous acceptance
+controls remain recorded rather than replacing the earlier investigation.
+The previous approval request was explicitly superseded before any approval
+claim; this updated runtime snapshot remains subject to the deployment owner's
+narrow terminal-behavior authorization and final release gates.
+
 ## Human feedback
 
 The user required conditional schema refresh and the same standard for browser
