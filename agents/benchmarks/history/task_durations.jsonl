@@ -6197,3 +6197,4 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 278.6, "cost_cents": 0.0, "timestamp": "2026-10-15T18:59:58.476628+00:00", "agent_id": "75f18948-2bb0-431b-9f87-1b14d7a7a6c2"}
 {"task": "agent-payment-test-shop", "duration_seconds": 192.3, "cost_cents": 0.0, "timestamp": "2026-10-15T18:59:58.476628+00:00", "agent_id": "d5e6c2f1-bb88-4460-a243-2673a072f473"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 269.6, "cost_cents": 1.0, "timestamp": "2026-10-15T18:59:58.476628+00:00", "agent_id": "d2843014-8a9c-409d-844f-5f15eeb863fa"}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 38.7, "cost_cents": 0.0, "timestamp": "2026-10-15T20:50:25.835027+00:00", "agent_id": ""}
