@@ -1,3 +1,4 @@
+import type { ClientSource } from '@/lib/clientSource';
 /**
  * Terminal feature — quick query listener hook.
  *
@@ -44,7 +45,7 @@ export interface QuickQueryDeps {
   authReady: boolean;
   /** What the message input shows as of the last render. */
   messageInput: string;
-  clientSource: string;
+  clientSource: ClientSource;
   pendingPriceLimitCents: number;
   setCurrentView: (v: TerminalView) => void;
   setMessageInput: (v: string) => void;

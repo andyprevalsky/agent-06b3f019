@@ -13,6 +13,7 @@ import type {
   AncestorNode,
   FilePointer,
   CreateAgentPayload,
+  InspectionContext,
 } from '@/lib/api';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
@@ -137,6 +138,7 @@ export interface AgentSlice {
   handleJoinWaitlist: () => void;
   selectedAgentId: string | null;
   agentDetail: AgentDetail | null;
+  inspectionContext?: InspectionContext | null;
   messages: Message[];
   isLoadingAgent: boolean;
   isLoadingNetwork: boolean;

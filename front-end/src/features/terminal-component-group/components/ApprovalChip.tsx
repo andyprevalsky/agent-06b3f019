@@ -9,6 +9,7 @@
  *     |
  *     v (accept/reject)
  * [HIDDEN]
+ * Typed context preserves its original bytes separately from the protocol response.
  *
  * ACTION STATES:
  * [IDLE] <-- actionState: null
@@ -91,7 +92,11 @@ function useApprovalHandlers({
     try {
       setActionState('accepting');
       const responseText = contextInput.trim() || 'Approved';
-      await respondToAttentionRequest(pendingApproval.attentionRequestId, responseText);
+      await respondToAttentionRequest(
+        pendingApproval.attentionRequestId,
+        responseText,
+        contextInput.trim() ? contextInput : undefined,
+      );
       toast({ title: 'Approved', description: 'The agent will continue with the action' });
       setContextInput('');
       onApprovalHandled?.();
@@ -109,7 +114,7 @@ function useApprovalHandlers({
       setActionState('rejecting');
       await rejectAttentionRequest(
         pendingApproval.attentionRequestId,
-        contextInput.trim() || undefined,
+        contextInput.trim() ? contextInput : undefined,
       );
       toast({ title: 'Rejected', description: 'The agent will skip this action and continue' });
       setContextInput('');

@@ -10,7 +10,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Globe } from 'lucide-react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import FastModeToggle from '@/features/terminal-component-group/components/FastModeToggle';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';

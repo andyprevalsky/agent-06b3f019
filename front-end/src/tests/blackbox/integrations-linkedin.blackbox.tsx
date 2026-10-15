@@ -4,7 +4,7 @@
  * Split from integrations.blackbox.tsx to keep both files under the
  * 600-line max-lines budget.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
