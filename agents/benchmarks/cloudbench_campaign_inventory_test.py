@@ -2790,7 +2790,7 @@ def test_campaign_inventory_cli_analytics_scoped_to_shared_reads(tmp_path, mode)
     if mode.endswith("nonzero-json"):
         assert not (tmp_path / "inventory" / "current").exists()
 
-@pytest.mark.parametrize('case', ('ok', '401', '429', '500', '206', 'redirect', 'empty', 'object', 'truncated', 'trailing', 'duplicate', 'bad-guest', 'bad-init', 'trickle', 'oversize', 'late-owner'))
+@pytest.mark.parametrize('case', ('ok', '401', '429', '500', '206', 'redirect', 'empty', 'object', 'truncated', 'trailing', 'duplicate', 'bad-guest', 'bad-init', 'trickle', 'oversize', 'late-owner', 'gzip-ok', 'gzip-truncated', 'gzip-crc', 'gzip-unknown', 'gzip-trailing', 'gzip-throttled'))
 def test_campaign_inventory_full_http_transaction(tmp_path, case):
     """Exercise the actual publisher dispatch, full refresh, index and original deadline."""
     import threading
@@ -2810,17 +2810,31 @@ def test_campaign_inventory_full_http_transaction(tmp_path, case):
             value = [machine, machine] if case == 'duplicate' else [machine]
             if case == 'bad-guest': machine['config']['guest']['cpus'] = True
             if case == 'bad-init': machine['config']['init']['cmd'] = 'sleep'
+            if case == 'gzip-throttled':
+                machine['config']['files'] = [{'guest_path': '/tmp/fixture', 'raw_value': 'x' * 1048576}]
             payload = json.dumps(value).encode()
+            encoding = None
+            if case.startswith('gzip-') and (case != 'gzip-throttled' or self.headers.get('Accept-Encoding') == 'gzip'):
+                import gzip
+                payload = gzip.compress(payload)
+                encoding = 'br' if case == 'gzip-unknown' else 'gzip'
+                if case == 'gzip-truncated': payload = payload[:-5]
+                if case == 'gzip-trailing': payload += b'not-another-response'
+                if case == 'gzip-crc': payload = payload[:-8] + bytes([payload[-8] ^ 1]) + payload[-7:]
             if case == 'empty': payload = b''
             if case == 'object': payload = b'{}'
             if case == 'truncated': payload = b'[{'
             if case == 'trailing': payload += b'{}'
             self.send_response(status)
             if status == 302: self.send_header('Location', 'http://127.0.0.1:9/forbidden')
+            if encoding: self.send_header('Content-Encoding', encoding)
             self.send_header('Content-Length', str(268435457 if case == 'oversize' else len(payload)))
             self.end_headers()
             try:
-                if case == 'trickle':
+                if case == 'gzip-throttled':
+                    for offset in range(0, len(payload), 16384):
+                        self.wfile.write(payload[offset:offset+16384]); self.wfile.flush(); time.sleep(.04)
+                elif case == 'trickle':
                     for b in payload:
                         self.wfile.write(bytes([b])); self.wfile.flush(); time.sleep(.04)
                 else: self.wfile.write(payload)
@@ -2853,7 +2867,7 @@ def test_campaign_inventory_full_http_transaction(tmp_path, case):
         server.shutdown(); server.server_close(); thread.join()
     assert events == [('/v1/apps/fixture/machines', 'Bearer offline-oauth')]
     assert time.monotonic()-started < 8
-    if case == 'ok':
+    if case in ('ok', 'gzip-ok', 'gzip-throttled'):
         assert result.returncode == 0, result.stderr.decode()
         assert (work/'inventory/current/machines/m1').is_file()
         assert b'storage_ready=1' in (work/'inventory/current/machines/m1').read_bytes()
@@ -2945,3 +2959,40 @@ def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, can
     assert process.returncode!=0 and not stdout
     try: assert Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]!=birth
     except FileNotFoundError:pass
+
+
+@pytest.mark.parametrize('case', ['gzip-decoded-cap', 'gzip-wire-cap', 'identity-wire-cap'])
+def test_campaign_inventory_compression_caps_wire_and_decoded_bytes(tmp_path, monkeypatch, case):
+    import base64
+    import gzip
+    import importlib.util
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    spec = importlib.util.spec_from_file_location('bounded_gzip_fixture', ROOT/'scripts/cloudbench-campaign-machines.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'MAX_BYTES', 1024)
+    content = base64.b64encode(os.urandom(4096)).decode() if case == 'gzip-wire-cap' else 'x' * 2048
+    raw = json.dumps([{'id': 'm1', 'config': {'files': [{'raw_value': content}]}}]).encode()
+    wire = raw if case == 'identity-wire-cap' else gzip.compress(raw)
+    events = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            events.append(self.headers.get('Accept-Encoding'))
+            self.send_response(200)
+            if case != 'identity-wire-cap': self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Content-Length', str(len(wire))); self.end_headers()
+            try: self.wfile.write(wire)
+            except (BrokenPipeError, ConnectionResetError): pass
+        def log_message(self, *_): pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever); thread.start()
+    monkeypatch.setenv('FLY_FLAPS_BASE_URL', f'http://127.0.0.1:{server.server_port}')
+    monkeypatch.setenv('FLY_API_TOKEN', 'offline-oauth')
+    monkeypatch.delenv('FLY_FORCE_INSTANCE_ID', raising=False)
+    try:
+        with pytest.raises(module.Refusal): module.fetch('fixture', 1)
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+    assert events == ['gzip']
+    if case == 'gzip-decoded-cap': assert len(wire) < 1024 < len(raw)
+    else: assert len(wire) > 1024

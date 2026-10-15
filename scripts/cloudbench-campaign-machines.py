@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import zlib
 
 MAX_BYTES = 256 * 1024 * 1024
 class Refusal(Exception):
@@ -120,7 +121,7 @@ def fetch(app: str, seconds: float) -> bytes:
         if parsed.scheme != 'https' and not (parsed.scheme == 'http' and loopback):
             raise Refusal('Machines endpoint must use HTTPS')
         header = authorization(os.environ.get('FLY_API_TOKEN', ''), deadline)
-        headers = {'Authorization': header, 'Accept': 'application/json'}
+        headers = {'Authorization': header, 'Accept': 'application/json', 'Accept-Encoding': 'gzip'}
         if os.environ.get('FLY_FORCE_INSTANCE_ID'):
             raise Refusal('unsupported forced instance override')
         url = base + '/v1/apps/' + urllib.parse.quote(app, safe='') + '/machines'
@@ -134,6 +135,19 @@ def fetch(app: str, seconds: float) -> bytes:
             raw = response.read(MAX_BYTES+1)
             if len(raw) > MAX_BYTES or (length is not None and len(raw) != int(length)):
                 raise Refusal('incomplete or oversized Machines response')
+            encoding = response.headers.get('Content-Encoding', '').strip().lower()
+            if encoding == 'gzip':
+                # Bound decoded bytes independently of the wire length. zlib
+                # validates the gzip trailer/CRC; only one complete stream with
+                # no unconsumed or trailing bytes can grant a JSON observation.
+                decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                decoded = decoder.decompress(raw, MAX_BYTES + 1)
+                if (len(decoded) > MAX_BYTES or decoder.unconsumed_tail
+                        or not decoder.eof or decoder.unused_data):
+                    raise Refusal('incomplete or oversized compressed Machines response')
+                raw = decoded
+            elif encoding not in ('', 'identity'):
+                raise Refusal('unsupported Machines content encoding')
         value = validate(json.loads(raw))
         result = json.dumps(value, separators=(',', ':'), allow_nan=False).encode() + b'\n'
         if time.monotonic() >= deadline:
