@@ -19,7 +19,11 @@ function loadOwner(prisma: Prisma): Owner {
 }
 
 /** Include the owner's reachable declarations, replacing only external boundaries. */
-function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T {
+function loadDeclaration<T>(
+  name: string,
+  bindings: Record<string, unknown>,
+  additional?: string
+): T {
   const filename =
     process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH ??
     path.join(process.cwd(), 'src/providers/benchmarkHubStore.ts');
@@ -65,14 +69,23 @@ function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T 
     ts.forEachChild(node, visit);
   };
   include(name);
+  if (additional !== undefined) include(additional);
   assert.ok(included.has(named.get(name)!));
   const declarations = statements.filter((node) => included.has(node));
   const compiled = ts.transpileModule(
-    declarations.map((node) => node.getText()).join('\n') + `\nglobalThis.owner = ${name};`,
-    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }
+    declarations.map((node) => node.getText()).join('\n') +
+      `\nglobalThis.owner = ${name};` +
+      (additional === undefined ? '' : `\nglobalThis.extraOwner = ${additional};`),
+    {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+      },
+    }
   ).outputText;
   const context = vm.createContext({ ...bindings, exports: {} });
   vm.runInContext(compiled, context);
+  if (additional !== undefined) context.owner.mutation = context.extraOwner;
   return context.owner;
 }
 
@@ -81,7 +94,8 @@ type PutRun = (bundle: Bundle, options?: { live?: boolean; source?: string }) =>
 
 function putBoundary(
   beforeWrite: (key: string) => Promise<void> = async () => {},
-  beforeCommit: () => Promise<void> = async () => {}
+  beforeCommit: () => Promise<void> = async () => {},
+  beforeTransaction: () => Promise<void> = async () => {}
 ) {
   const database = databaseBoundary(4);
   const objects = new Map<string, string>();
@@ -90,40 +104,51 @@ function putBoundary(
   let ancestors = 0;
   let cacheUpdates = 0;
   let revision = 0;
-  const putRun = loadDeclaration<PutRun>('putRun', {
-    Promise,
-    coalesceHubRunPuts,
-    prisma: {
-      $transaction: async (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
-        transactions += 1;
-        const result = await database.prisma.$transaction(body, options);
-        await beforeCommit();
-        return result;
+  const putRun = loadDeclaration<PutRun & { mutation: Owner }>(
+    'putRun',
+    {
+      Promise,
+      coalesceHubRunPuts,
+      prisma: {
+        $transaction: async (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
+          transactions += 1;
+          await beforeTransaction();
+          const result = await database.prisma.$transaction(body, options);
+          await beforeCommit();
+          return result;
+        },
       },
+      listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
+      readAgentRunIndexForMutation: async () => ({ revision }),
+      agentIdsFromHubBundle: () => ['fixture-agent'],
+      hubAgentIndexAfterPut: () => ({ revision: ++revision }),
+      putObject: async (key: string, value: string) => {
+        await beforeWrite(key);
+        writes.push({ key, value });
+        objects.set(key, value);
+      },
+      writeAgentRunIndex: async () => {},
+      slotHubAncestorSkeletonsFromBundle: async () => {
+        ancestors += 1;
+      },
+      applyHubRunToResolutionCaches: () => {
+        cacheUpdates += 1;
+      },
+      log: { info: () => {} },
     },
-    listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
-    readAgentRunIndexForMutation: async () => ({ revision }),
-    agentIdsFromHubBundle: () => ['fixture-agent'],
-    hubAgentIndexAfterPut: () => ({ revision: ++revision }),
-    putObject: async (key: string, value: string) => {
-      await beforeWrite(key);
-      writes.push({ key, value });
-      objects.set(key, value);
-    },
-    writeAgentRunIndex: async () => {},
-    slotHubAncestorSkeletonsFromBundle: async () => {
-      ancestors += 1;
-    },
-    applyHubRunToResolutionCaches: () => {
-      cacheUpdates += 1;
-    },
-    log: { info: () => {} },
-  });
+    'withIndexLock'
+  );
   return {
     putRun,
+    mutation: putRun.mutation,
     objects,
     runWrites: () => writes.filter(({ key }) => key.startsWith('runs/')),
-    stats: () => ({ transactions, ancestors, cacheUpdates, ...database.stats() }),
+    stats: () => ({
+      transactions,
+      ancestors,
+      cacheUpdates,
+      ...database.stats(),
+    }),
   };
 }
 
@@ -193,7 +218,12 @@ test('50 Hub mutations wait for process admission before borrowing SQL connectio
   release?.();
   const outcomes = await results;
   assert.equal(outcomes.filter((result) => result.status === 'fulfilled').length, 50);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('Hub mutations are admitted in FIFO order behind the current holder', async () => {
@@ -216,7 +246,12 @@ test('Hub mutations are admitted in FIFO order behind the current holder', async
   release?.();
   assert.deepEqual(await outcomes, ['holder', 'put-cycle', 'delete', 'index-read']);
   assert.deepEqual(admitted, ['holder', 'put-cycle', 'delete', 'index-read']);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('a failed catalog write rejects its whole cycle and an unchanged retry commits', async () => {
@@ -267,8 +302,16 @@ test('a failed Hub mutation releases admission and preserves its rejection', asy
   ]);
   assert.equal(outcomes[0].status, 'rejected');
   if (outcomes[0].status === 'rejected') assert.equal(outcomes[0].reason, marker);
-  assert.deepEqual(outcomes[1], { status: 'fulfilled', value: 'next mutation' });
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(outcomes[1], {
+    status: 'fulfilled',
+    value: 'next mutation',
+  });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('failed transaction acquisition releases admission for the next caller', async () => {
@@ -288,9 +331,17 @@ test('failed transaction acquisition releases admission for the next caller', as
   ]);
   assert.equal(outcomes[0].status, 'rejected');
   if (outcomes[0].status === 'rejected') assert.equal(outcomes[0].reason, marker);
-  assert.deepEqual(outcomes[1], { status: 'fulfilled', value: 'next mutation' });
+  assert.deepEqual(outcomes[1], {
+    status: 'fulfilled',
+    value: 'next mutation',
+  });
   assert.equal(acquisitions, 2);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 1, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 1,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 test('separate backend admissions still serialize through the shared PostgreSQL lock', async () => {
@@ -311,7 +362,12 @@ test('separate backend admissions still serialize through the shared PostgreSQL 
   );
   assert.equal(outcomes.length, 20);
   assert.equal(peakInside, 1);
-  assert.deepEqual(database.stats(), { open: 0, peakOpen: 2, held: 0, peakHeld: 1 });
+  assert.deepEqual(database.stats(), {
+    open: 0,
+    peakOpen: 2,
+    held: 0,
+    peakHeld: 1,
+  });
 });
 
 const packet = {
@@ -334,7 +390,10 @@ test('50 identical pending Hub packets share one publication before SQL admissio
   const requests = [
     first,
     ...Array.from({ length: 49 }, () =>
-      boundary.putRun(JSON.parse(JSON.stringify(packet)), { live: true, source: 'fixture' })
+      boundary.putRun(JSON.parse(JSON.stringify(packet)), {
+        live: true,
+        source: 'fixture',
+      })
     ),
   ];
   gate.resolve();
@@ -408,7 +467,10 @@ test('settled packets are evicted and late live packets preserve the absorbing f
   const second = await boundary.putRun(packet, { live: true });
   assert.notEqual(first, second);
   assert.equal(boundary.runWrites().length, 2);
-  const terminalPacket = { ...packet, tasks: [{ name: 'fixture-task', passed: false }] };
+  const terminalPacket = {
+    ...packet,
+    tasks: [{ name: 'fixture-task', passed: false }],
+  };
   await boundary.putRun(terminalPacket, { live: false });
   const lateLive = await boundary.putRun(packet, { live: true });
   assert.equal(lateLive.live, false);
@@ -595,14 +657,21 @@ test('coalescing follows the same normalized run identity as actual persistence'
   assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
 });
 
-
 test('SQL commit failure rejects queued Hub callers after durable object writes', async () => {
   const marker = new Error('fixture SQL commit failed after callback');
-  const boundary = putBoundary(async () => {}, async () => { throw marker; });
-  const results = await Promise.allSettled(['holder', 'a', 'b'].map((run_id) =>
-    boundary.putRun({ run_id, tasks: [] }, { live: true })
-  ));
-  assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected', 'rejected']);
+  const boundary = putBoundary(
+    async () => {},
+    async () => {
+      throw marker;
+    }
+  );
+  const results = await Promise.allSettled(
+    ['holder', 'a', 'b'].map((run_id) => boundary.putRun({ run_id, tasks: [] }, { live: true }))
+  );
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ['rejected', 'rejected', 'rejected']
+  );
   for (const result of results) {
     assert.equal(result.status, 'rejected');
     if (result.status === 'rejected') assert.equal(result.reason, marker);
@@ -615,13 +684,18 @@ test('SQL commit failure rejects queued Hub callers after durable object writes'
 test('Hub callers and caches remain pending until SQL commit succeeds', async () => {
   const entered = deferred();
   const commit = deferred();
-  const boundary = putBoundary(async () => {}, async () => {
-    entered.resolve();
-    await commit.promise;
-  });
+  const boundary = putBoundary(
+    async () => {},
+    async () => {
+      entered.resolve();
+      await commit.promise;
+    }
+  );
   let settled = false;
   const pending = boundary.putRun({ run_id: 'pending-commit', tasks: [] }, { live: true });
-  void pending.then(() => { settled = true; });
+  void pending.then(() => {
+    settled = true;
+  });
   await entered.promise;
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(settled, false, 'durable object writes alone are not a committed ACK');
@@ -632,4 +706,95 @@ test('Hub callers and caches remain pending until SQL commit succeeds', async ()
   assert.equal(settled, true);
   assert.equal(boundary.stats().cacheUpdates, 1);
   assert.equal(boundary.stats().ancestors, 1);
+});
+
+test('queued PUT cohorts never cross earlier generic mutation barriers', async () => {
+  const entered = deferred();
+  const release = deferred();
+  const events: string[] = [];
+  const boundary = putBoundary(async (key) => {
+    if (key === 'runs/holder.json') {
+      entered.resolve();
+      await release.promise;
+    }
+    if (key.startsWith('runs/')) events.push(key);
+  });
+  const holder = boundary.putRun({ run_id: 'holder', tasks: [] });
+  await entered.promise;
+  const a = boundary.putRun({ run_id: 'a', tasks: [] });
+  const genericA = boundary.mutation(async () => {
+    events.push('generic-a');
+  });
+  const b = boundary.putRun({ run_id: 'b', tasks: [] });
+  const genericB = boundary.mutation(async () => {
+    events.push('generic-b');
+  });
+  const c = boundary.putRun({ run_id: 'c', tasks: [] });
+  release.resolve();
+  await Promise.all([holder, a, genericA, b, genericB, c]);
+  assert.deepEqual(events, [
+    'runs/holder.json',
+    'runs/a.json',
+    'generic-a',
+    'runs/b.json',
+    'generic-b',
+    'runs/c.json',
+  ]);
+  assert.equal(boundary.stats().peakOpen, 1);
+});
+
+
+test('PUT cohorts spill above64 while retaining eight joined write lanes', async () => {
+  const entered = deferred(); const release = deferred();
+  let active = 0; let peak = 0;
+  const boundary = putBoundary(async (key) => {
+    if (key === 'runs/holder.json') { entered.resolve(); await release.promise; return; }
+    if (!key.startsWith('runs/')) return;
+    active++; peak = Math.max(peak, active);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    active--;
+  });
+  const holder = boundary.putRun({ run_id: 'holder', tasks: [] });
+  await entered.promise;
+  const pending = Array.from({ length: 129 }, (_, i) => boundary.putRun({ run_id: `spill-${i}`, tasks: [] }));
+  release.resolve(); await Promise.all([holder, ...pending]);
+  assert.equal(boundary.stats().transactions, 4, 'one holder plus64/64/1 cohorts');
+  assert.equal(boundary.runWrites().length, 130);
+  assert.equal(peak, 8); assert.equal(active, 0); assert.equal(boundary.stats().peakOpen, 1);
+});
+
+test('failed PUT transaction acquisition clears only its cohort and a later cohort recovers', async () => {
+  const gate = deferred(); let fail = true; const marker = new Error('fixture PUT acquisition failed');
+  const boundary = putBoundary(async () => {}, async () => {}, async () => {
+    if (fail) { await gate.promise; throw marker; }
+  });
+  const pending = ['a', 'b', 'c'].map((run_id) => boundary.putRun({ run_id, tasks: [] }));
+  const done = Promise.allSettled(pending); gate.resolve();
+  for (const result of await done) {
+    assert.equal(result.status, 'rejected');
+    if (result.status === 'rejected') assert.equal(result.reason, marker);
+  }
+  assert.equal(boundary.runWrites().length, 0); fail = false;
+  await boundary.putRun({ run_id: 'recovered', tasks: [] });
+  assert.equal(boundary.runWrites().length, 1); assert.equal(boundary.stats().cacheUpdates, 1);
+});
+
+test('a failed write joins every active lane before rejecting its cohort', async () => {
+  const held = deferred(); const release = deferred(); const failed = deferred();
+  const marker = new Error('fixture lane failed'); let active = 0;
+  const boundary = putBoundary(async (key) => {
+    if (!key.startsWith('runs/')) return;
+    active++;
+    try {
+      if (key === 'runs/a.json') { await held.promise; failed.resolve(); throw marker; }
+      held.resolve(); await release.promise;
+    } finally { active--; }
+  });
+  let settled = false;
+  const done = Promise.allSettled(['a', 'b', 'c'].map((run_id) => boundary.putRun({ run_id, tasks: [] }))).then((results) => { settled = true; return results; });
+  await failed.promise; await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false); assert.ok(active > 0);
+  release.resolve(); const outcomes = await done;
+  assert.ok(outcomes.every((result) => result.status === 'rejected' && result.reason === marker));
+  assert.equal(active, 0); assert.equal(boundary.stats().cacheUpdates, 0);
 });

@@ -257,7 +257,10 @@ let indexAdmissionHeld = false;
  * uses subsequent bounded cycles, sharing the catalog round trip per batch.
  * The shared SQL lock orders other processes' admitted writes.
  */
-async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
+async function withIndexLock<T>(operation: () => Promise<T>, putCohort?: QueuedPut[]): Promise<T> {
+  // A generic mutation is a FIFO barrier: later uploads belong to a new
+  // cohort and must register admission after this operation.
+  if (putCohort === undefined) openPutCohort = null;
   // Wait before borrowing a connection. Otherwise concurrent uploads occupy
   // the SQL pool while waiting for the same cross-process advisory lock.
   if (indexAdmissionHeld) {
@@ -317,7 +320,7 @@ async function storeRun(
     tasks.length > 0 && tasks.every((task) => task.status === 'starting') && agentIds.length === 0;
 
   const stored = await new Promise<StoredPut>((resolve, reject) => {
-    queuedPuts.push({
+    const put: QueuedPut = {
       bundle,
       runId,
       tasks,
@@ -326,10 +329,14 @@ async function storeRun(
       startingRegistration,
       resolve,
       reject,
-    });
-    if (!putCycleQueued) {
-      putCycleQueued = true;
-      void commitQueuedPuts();
+    };
+    if (openPutCohort === null) {
+      const cohort = [put];
+      openPutCohort = cohort;
+      void commitQueuedPuts(cohort);
+    } else {
+      openPutCohort.push(put);
+      if (openPutCohort.length === PUT_CYCLE_LIMIT) openPutCohort = null;
     }
   });
   log.info('Stored benchmark run bundle', {
@@ -354,8 +361,7 @@ type QueuedPut = {
 };
 type PutCycle = { index: HubRunSummary[]; agentIndex: HubAgentRunIndexSnapshot | null };
 
-const queuedPuts: QueuedPut[] = [];
-let putCycleQueued = false;
+let openPutCohort: QueuedPut[] | null = null;
 // One cycle's locked work stays bounded; later uploads take the next cycle.
 const PUT_CYCLE_LIMIT = 64;
 const PUT_WRITE_LANES = 8;
@@ -371,15 +377,12 @@ const PUT_WRITE_LANES = 8;
  * validation error rejects only its own upload. A storage failure rejects the
  * whole cycle, whose catalog was not published.
  */
-async function commitQueuedPuts(): Promise<void> {
-  let cycle: QueuedPut[] = [];
+async function commitQueuedPuts(cycle: QueuedPut[]): Promise<void> {
   try {
     const outcomes = await withIndexLock(async () => {
-      cycle = queuedPuts.splice(0, PUT_CYCLE_LIMIT);
-      putCycleQueued = queuedPuts.length > 0;
-      if (putCycleQueued) void commitQueuedPuts();
+      if (openPutCohort === cycle) openPutCohort = null;
       return commitPutCycle(cycle);
-    });
+    }, cycle);
     // Object writes alone do not establish a successful SQL commit. Publish
     // cache state and caller acknowledgements only after the transaction joins.
     for (const { put, stored } of outcomes) {
@@ -389,11 +392,7 @@ async function commitQueuedPuts(): Promise<void> {
       put.resolve(stored);
     }
   } catch (error: unknown) {
-    if (cycle.length === 0) {
-      // Admission failed before this cycle claimed its uploads.
-      cycle = queuedPuts.splice(0);
-      putCycleQueued = false;
-    }
+    if (openPutCohort === cycle) openPutCohort = null;
     for (const put of cycle) put.reject(error);
   }
 }
@@ -432,7 +431,10 @@ async function commitPutCycle(
     cycle.index = [put.summary, ...cycle.index.filter((r) => r.run_id !== put.runId)];
     const fields = runGroupFields({ ...put.summary, run_id: put.runId });
     bundles.push([put.runId, { ...put.bundle, tasks: put.tasks, ...fields }]);
-    outcomes.push({ put, stored: { summary: put.summary, revision: cycle.agentIndex.revision } });
+    outcomes.push({
+      put,
+      stored: { summary: put.summary, revision: cycle.agentIndex.revision },
+    });
   }
   if (bundles.length > 0) {
     const writes = new Map<string, Array<Record<string, unknown>>>();
@@ -657,7 +659,10 @@ function parseRunCatalog(raw: string): HubRunSummary[] {
     const run = value as HubRunSummary;
     return {
       ...run,
-      tasks: run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) })),
+      tasks: run.tasks.map((task) => ({
+        ...task,
+        agent_id: normalizeAgentId(task.agent_id),
+      })),
     };
   });
 }
