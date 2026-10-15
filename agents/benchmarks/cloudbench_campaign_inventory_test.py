@@ -3516,3 +3516,38 @@ def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_pat
     assert (destination/'first-infra-threshold-trigger.private.json').exists() is bool(expected_signals)
     assert (destination/'infra-threshold-parent-term.safe.json').exists() is bool(expected_signals)
     assert len(iterations) == 3
+
+
+@pytest.mark.parametrize('prior', [
+    'threshold-original-parent.private.json', 'first-authentic-infra-summary.private.json',
+    'first-authentic-infra.private.json', 'first-infra-threshold-summary.private.json',
+    'first-infra-threshold-trigger.private.json', 'infra-threshold-parent-term.safe.json',
+    'dangling-trigger'])
+def test_campaign_scheduled_stop_refuses_old_watcher_paths_before_parent(tmp_path, monkeypatch, prior):
+    """Retained evidence from another epoch may never authorize a new launch or stop."""
+    from unittest.mock import patch
+    guard = _scheduled_stop_guard()
+    main = guard['main']
+    namespace = main.__globals__
+    destination = tmp_path / '.context/stress200-host'
+    destination.mkdir(parents=True)
+    if prior == 'dangling-trigger':
+        artifact = destination / 'first-infra-threshold-trigger.private.json'
+        artifact.symlink_to(destination / 'missing-target')
+    else:
+        artifact = destination / prior
+        artifact.write_bytes(b'original private evidence stays untouched\n')
+    original_path = Path
+    def paths(*args):
+        return tmp_path if args == ('/tmp/gate/repo',) else original_path(*args)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF', 'a'*40)
+    with patch.dict(namespace, Path=paths), \
+         patch.object(namespace['subprocess'], 'Popen', side_effect=RuntimeError('parent launch must not occur')) as popen, \
+         patch.object(namespace['sys'], 'argv', ['supervisor', '123.0', 'bash', 'scripts/run-bench']):
+        with pytest.raises(ValueError, match='prior watcher evidence'):
+            main()
+    popen.assert_not_called()
+    if prior == 'dangling-trigger':
+        assert artifact.is_symlink()
+    else:
+        assert artifact.read_bytes() == b'original private evidence stays untouched\n'

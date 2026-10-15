@@ -121,6 +121,16 @@ def main():
     args = sys.argv[2:]
     if not args or args[:2] != ['bash','scripts/run-bench']:
         raise ValueError('unexpected reviewed command')
+    destination = repo/'.context/stress200-host'
+    watcher_files = ('threshold-original-parent.private.json',
+                     'first-authentic-infra-summary.private.json',
+                     'first-authentic-infra.private.json',
+                     'first-infra-threshold-summary.private.json',
+                     'first-infra-threshold-trigger.private.json',
+                     'infra-threshold-parent-term.safe.json')
+    # Preserve old evidence and refuse before launching any new owned process.
+    if any(os.path.lexists(destination/name) for name in watcher_files):
+        raise ValueError('prior watcher evidence requires a fresh reviewed namespace')
     namespace = hashlib.sha256((float(epoch).hex()+':'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()).encode()).hexdigest()[:24]
     campaign_id = 'campaign-qualified600-'+namespace+'-'+str(os.getpid())
     campaign = repo/'.context/benchmarks/campaigns'/campaign_id
@@ -136,7 +146,6 @@ def main():
             parent.send_signal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, forward_owner_stop)
     signal.signal(signal.SIGINT, forward_owner_stop)
-    destination = repo/'.context/stress200-host'
     original_deadline = None
     original_membership = None
     first_reported = False
