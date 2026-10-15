@@ -26143,7 +26143,7 @@ _CALENDAR_FEEDBACK_USER_UPDATE = (
 )
 
 
-async def _run_browser_durable_user_feedback_replay(*, change_fields=False, verifier_feedback=None, schema_failure=False, schema_failures=0, schema_invalid=False, poll_failure_calls=(), capture_error=False, feedback_at_completion=False, emit_tool_stream=False):
+async def _run_browser_durable_user_feedback_replay(*, change_fields=False, verifier_feedback=None, schema_failure=False, schema_failures=0, schema_invalid=False, poll_failure_calls=(), capture_error=False, feedback_at_completion=False, emit_tool_stream=False, fresh=False):
     """Replay ae17b024's durable USER correction through the real activity loop."""
     from contextlib import ExitStack
 
@@ -26202,6 +26202,9 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
     )
 
     durable_messages.append(await native_browser_start_source((now - timedelta(minutes=1)).isoformat()))
+    if fresh:
+        feedback_message["timestamp"] = (now - timedelta(seconds=30)).isoformat()
+        durable_messages.append(feedback_message)
     poll_calls = 0
     async def fetch_agent_snapshot(agent_id, since, **kwargs):
         nonlocal poll_calls
@@ -26301,6 +26304,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", tool_events),
         patch("domains.spawn_browser_agent_v3.handler.fetch_browser_control_state", AsyncMock(return_value="agent")),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value={**session_info, "task_id": "task-1", "browser_url": session_info["debug_url"], "cdp_url": session_info["ws_url"]})),
         patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
         patch(
             "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
@@ -26345,9 +26349,9 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         try:
             result = await spawn_browser_agent_activity_v3(
                 user_id="user-1", agent_id="agent-1", goal=_CALENDAR_FEEDBACK_ORIGINAL_GOAL,
-                tool_call_id="tool-1", task_id="task-1", is_resume=True,
+                tool_call_id="tool-1", task_id="task-1", is_resume=not fresh,
                 output_schema=initial_schema, use_claude_mode=False,
-                write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1",
+                write_lock_resume_state=None if fresh else {"approval_type": "manual_pause", "task_id": "task-1",
                     "user_message_cursor": (now - timedelta(minutes=1)).isoformat()},
             )
         except TimeoutError as failure:
@@ -26686,16 +26690,30 @@ async def test_browser_instruction_generation_seal_still_propagates():
             await h._sync_browser_user_instructions(agent_id="agent-1", goal="Read", response_schema={"fields": []}, instruction_state={}, turn_messages=[], compute_auth=None)
 
 
-async def test_browser_resume_poll_miss_disqualifies_approved_pending_write():
+async def test_browser_transient_resume_poll_miss_preserves_approved_pending_write():
     actor, _judge = await _exercise_browser_resume_user_input(pending_action={"action": "click", "params": {"index": 4}}, initial_poll_failure=True)
-    actor.pending_execution.assert_not_awaited()
+    actor.pending_execution.assert_awaited_once()
+    assert actor.decision_order[0] == "queued_action", "confirmed empty read discarded an approved write"
     assert actor.activity_result["status"] == "completed"
+
+
+@_in_browser_activity_context
+async def test_fresh_browser_retains_user_input_before_activity_scheduling():
+    from dataclasses import replace
+    from temporalio import activity
+    scheduled = replace(activity.info(), scheduled_time=datetime.now(timezone.utc))
+    with patch("domains.spawn_browser_agent_v3.handler.activity.info", return_value=scheduled):
+        replay = await _run_browser_durable_user_feedback_replay(fresh=True)
+    assert replay["result"]["status"] == "completed", replay["result"]
+    assert replay["feedback"] in json.dumps(replay["model_calls"][0]["turn_messages"]), "fresh activity omitted correction after the manager source but before scheduling"
+    replay["generator"].assert_awaited_once()
 
 
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("browser_resume_poll_miss_disqualifies_approved_pending_write", test_browser_resume_poll_miss_disqualifies_approved_pending_write)
+    await r.record_async("browser_transient_resume_poll_miss_preserves_approved_pending_write", test_browser_transient_resume_poll_miss_preserves_approved_pending_write)
+    await r.record_async("fresh_browser_retains_user_input_before_activity_scheduling", test_fresh_browser_retains_user_input_before_activity_scheduling)
     await r.record_async("browser_unconfirmed_input_stops_before_actor_dispatch", test_browser_unconfirmed_input_stops_before_actor_dispatch)
     await r.record_async("browser_instruction_generation_seal_still_propagates", test_browser_instruction_generation_seal_still_propagates)
     await r.record_async("browser_first_completion_feedback_retries_generation_once", test_browser_first_completion_feedback_retries_generation_once)

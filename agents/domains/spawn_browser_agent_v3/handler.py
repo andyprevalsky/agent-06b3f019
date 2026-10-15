@@ -5691,11 +5691,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
     resume = write_lock_resume_state or {}
     output_schema = resume.get("browser_output_schema") or output_schema
     instruction_state = dict(resume)
-    if not resume:
-        instruction_state["user_message_cursor"] = activity.info().scheduled_time.isoformat()
-        instruction_state["user_message_cursor_is_task_start"] = True
     task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
     instruction_state["tool_call_id"] = tool_call_id
+    instruction_state["task_id"] = task_id
     browser_url = "about:blank"
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
@@ -5924,8 +5922,10 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
         previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
         initial_read_confirmed = await sync_user_instructions()
+        if not initial_read_confirmed:
+            await sync_user_instructions(require_confirmed_read=True)
         new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
-        pending_action = None if new_user_input or not initial_read_confirmed else resume.get("pending_action")
+        pending_action = None if new_user_input else resume.get("pending_action")
         if isinstance(pending_action, dict):
             pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
             approved_action_name = str(pending_action.get("action") or "unknown")
@@ -6633,7 +6633,7 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         # An approved queued action predates this input. The actor must decide
         # what to do after reading it, even when write permission remains valid.
-        if not has_new_user_input and write_lock_resume_state.get("_user_instruction_poll_confirmed") is not False:
+        if not has_new_user_input:
             pending_write_lock_action = write_lock_resume_state.get("pending_action")
             pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
         write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
@@ -7797,7 +7797,7 @@ async def _spawn_browser_agent_activity_v3_real(
         user_instruction_messages = _append_browser_user_instructions(
             write_lock_resume_state, browser_turn_messages
         )
-        user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor") or activity.info().scheduled_time.isoformat()
+        user_message_cursor = (write_lock_resume_state or {}).get("user_message_cursor")
         user_instruction_message_ids = list((write_lock_resume_state or {}).get("user_instruction_message_ids") or [])
         otp_history_count = 0
         supervisor_recovery_count = 0
@@ -7813,7 +7813,8 @@ async def _spawn_browser_agent_activity_v3_real(
             "user_instruction_messages": user_instruction_messages,
             "tool_call_id": tool_call_id,
             "user_message_cursor": user_message_cursor,
-            "user_message_cursor_is_task_start": not write_lock_resume_state or bool(write_lock_resume_state.get("user_message_cursor_is_task_start")),
+            "user_message_cursor_is_task_start": bool((write_lock_resume_state or {}).get("user_message_cursor_is_task_start")),
+            "task_id": task_id,
             "user_instruction_message_ids": user_instruction_message_ids,
             "delivered_user_instruction_count": len(user_instruction_messages),
             "schema_user_instruction_count": schema_user_instruction_count,
@@ -7867,9 +7868,6 @@ async def _spawn_browser_agent_activity_v3_real(
                     cache_sequence_id=usage.get("cache_sequence_id"),
                 )
 
-            if instruction_state.get("_user_instruction_poll_confirmed") is False:
-                pending_write_lock_action = None
-                pending_write_lock_target = None
             if require_current_schema or require_confirmed_read:
                 _require_browser_instruction_state(instruction_state, current_schema=require_current_schema)
             return instruction_state.get("_user_instruction_poll_confirmed") is True
