@@ -980,6 +980,226 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
 
 
 
+class PreconfigStartupArchiveTests(unittest.TestCase):
+    """Original admission intent may precede config, lifecycle and guest ACK."""
+    def setUp(self):
+        import runpy
+        self.helper = runpy.run_path(os.environ.get("ROSE_STARTUP_ARCHIVE_HELPER_UNDER_TEST",
+                                    str(REPO / "scripts/cloudbench-startup-failure-archive.py")))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.registry, self.audit = self.base / "owners" / OWNER, self.base / "audits" / OWNER
+        self.run = self.base / "runs" / RUN
+        self.out = self.run / BENCH
+        for p in (self.registry / "clones", self.audit / "fresh", self.out, self.run / "_batch"):
+            p.mkdir(parents=True)
+        pairs(self.registry / "meta", dict(version="2", fleet_owner_token=OWNER, run_id=RUN,
+              runs_root=str(self.run.parent), audit_dir=str(self.audit), app=APP, cleanup_policy="reap"))
+        write(self.registry / "runtime-evidence-unconfirmed", "")
+        pairs(self.audit / "meta", dict(fleet_owner_token=OWNER, run_id=RUN, app=APP))
+        pairs(self.audit / "fresh" / CLONE, dict(version="1", fleet_owner_token=OWNER,
+              run_id=RUN, app=APP, clone_name=CLONE, source="fresh-clone", machine_id=MACHINE,
+              volume_id=VOLUME, source_machine_id="c" * 14, disposition="owned"))
+        pairs(self.registry / "clones" / CLONE, dict(name=CLONE, id=MACHINE, volume_id=VOLUME))
+        write(self.run / "_batch/benches.json", json.dumps([{"name": BENCH, "mode": "REAL"}]))
+        provenance = {"base_sha": "a" * 40, "workspace_patch_sha256": "none"}
+        write(self.run / "execution-provenance.json", json.dumps(provenance))
+        write(self.run / "_batch/run.json", json.dumps({"run_id": RUN, "status": "failed",
+              "controller_exit_code": 1, "execution_provenance": provenance}))
+        for name, body in {".cid": f"clone {MACHINE}\n", "benchmark-child.finished": "125\n",
+                           "boot-config-unapplied": MACHINE + "\n", "worker-clones.ids": ""}.items():
+            write(self.out / name, body)
+        self.owner = {"version": 1, "machine_id": MACHINE, "run_token": TOKEN}
+        for name in ("runtime-evidence.owner.json", "runtime-evidence.pending"):
+            write(self.out / name, json.dumps(self.owner))
+        self.native = {"id": MACHINE, "name": CLONE, "state": "started", "instance_id": "original-instance",
+                       "config": {"init": {"cmd": ["sleep", "infinity"]}, "restart": {"policy": "no"},
+                                  "image": "registry.example/image@sha256:" + "d" * 64,
+                                  "mounts": [{"volume": VOLUME, "path": "/data"}]}}
+        self.before, self.after = self.base / "before.json", self.base / "after.json"
+        write(self.before, json.dumps(self.native))
+        write(self.after, json.dumps(self.native))
+        self.archive = self.base / "originals.tar.gz"
+
+    def test_preconfig_startup_original_tuple_is_eligible_without_synthetic_ack(self):
+        # Replay the former identity boundary when the additive phase is absent.
+        identity = self.helper.get("preconfig_identity", self.helper["identity"])
+        meta, original = identity(self.registry, self.out, MACHINE, TOKEN)
+        self.assertEqual(meta["run_id"], RUN)
+        self.assertEqual(original["volume_id"], VOLUME)
+        self.assertFalse((self.run / "_batch/lifecycle.json").exists())
+        self.assertFalse((self.out / "guest-shutdown.confirmed").exists())
+
+    def capture(self):
+        self.helper["capture_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive)
+
+    def verify(self, native=True):
+        return self.helper["verify_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive,
+                                              self.before if native else None, self.after if native else None)
+
+    def test_preconfig_full_original_archive_is_zero_credit_and_preserves_pending(self):
+        original = {str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}
+        self.capture()
+        receipt = self.verify()
+        self.assertTrue(receipt["preconfig_evidence_verified"])
+        self.assertTrue(receipt["no_guest_admission_verified"])
+        self.assertFalse(receipt["runtime_evidence_complete"])
+        self.assertFalse(receipt["native_release_verified"])
+        self.assertEqual(receipt["proof_credit"], 0)
+        self.assertEqual({str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}, original)
+        self.assertTrue((self.out / "runtime-evidence.pending").exists())
+
+    def test_preconfig_archive_without_native_proof_is_evidence_only(self):
+        self.capture()
+        receipt = self.verify(native=False)
+        self.assertTrue(receipt["evidence_only"])
+        self.assertFalse(receipt["preconfig_evidence_verified"])
+        self.assertFalse(receipt["no_guest_admission_verified"])
+
+    def test_preconfig_missing_marker_and_stale_original_lifecycle_refuse(self):
+        marker = self.out / "boot-config-unapplied"
+        marker.unlink()
+        with self.assertRaises((ValueError, OSError)):
+            self.capture()
+        write(marker, MACHINE + "\n")
+        write(self.run / "_batch/lifecycle.json", json.dumps({"status": "passed", "controller_exit_code": 0}))
+        with self.assertRaises(ValueError):
+            self.capture()
+
+    def test_existing_postconfig_identity_still_requires_real_cleanup_ack(self):
+        (self.out / "boot-config-unapplied").unlink()
+        write(self.run / "_batch/lifecycle.json", json.dumps({"status": "failed", "controller_exit_code": 1}))
+        with self.assertRaises(OSError):
+            self.helper["identity"](self.registry, self.out, MACHINE, TOKEN)
+        write(self.out / "guest-shutdown.confirmed", RUN + "\n")
+        self.helper["identity"](self.registry, self.out, MACHINE, TOKEN)
+
+    def test_preconfig_missing_foreign_and_accepted_local_proof_refuse(self):
+        for name, body in (("boot-config-unapplied", "foreign\n"),
+                           ("benchmark-child.finished", "0\n"),
+                           ("runtime-evidence.pending", "{}"),
+                           ("worker-clones.ids", "foreign-worker\n"),
+                           ("post-config-start.accepted", MACHINE),
+                           ("cloudbench-boot-start.log", "original native start attempted"),
+                           ("guest-shutdown.confirmed", RUN)):
+            with self.subTest(name=name):
+                path = self.out / name
+                before = path.read_bytes() if path.exists() else None
+                write(path, body)
+                with self.assertRaises((ValueError, KeyError)):
+                    self.capture()
+                self.assertFalse(self.archive.exists())
+                if before is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(before)
+
+    def test_preconfig_changed_archive_or_original_refuse(self):
+        self.capture()
+        write(self.out / "new-original.log", "actual new bytes")
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_preconfig_linked_original_and_unsafe_archive_refuse(self):
+        original = self.out / "original.log"
+        write(original, "original private bytes")
+        os.link(original, self.out / "alias.log")
+        with self.assertRaises(ValueError):
+            self.capture()
+        (self.out / "alias.log").unlink()
+        self.capture()
+        with tarfile.open(self.archive, "w:gz") as archive:
+            member = tarfile.TarInfo("../foreign")
+            member.size = 1
+            archive.addfile(member, io.BytesIO(b"x"))
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_preconfig_consumption_receipt_survives_normal_partial_recovery(self):
+        self.capture()
+        base = self.out / "failed-preconfig-runtime-archive"
+        base.mkdir(mode=0o700)
+        receipt = base / "verified.json"
+        commit = self.helper.get("commit_preconfig")
+        if commit is None:
+            self.verify()  # Prior component verifies, but cannot retain this proof across consumption.
+        else:
+            commit(self.registry, self.out, MACHINE, TOKEN, self.archive, self.before, self.after, receipt)
+        (self.out / "runtime-evidence.pending").unlink()
+        (self.registry / "clones" / CLONE).unlink()
+        write(self.audit / "fresh" / CLONE, "disposition=destroyed-verified-absent\n")
+        write(self.run / "_batch/run.json", "{\"status\":\"failed\",\"release_verified\":true}")
+        retry = self.helper.get("verify_preconfig_receipt")
+        result = self.verify() if retry is None else retry(self.registry, self.out, MACHINE, TOKEN, receipt)
+        self.assertTrue(result["preconfig_evidence_verified"])
+        self.assertFalse(result["native_release_verified"])
+        self.assertFalse((self.out / "guest-shutdown.confirmed").exists())
+        self.assertFalse((self.run / "_batch/lifecycle.json").exists())
+
+    def test_preconfig_aggregate_bound_refuses_before_reading_overflow_file(self):
+        collector = self.helper["preconfig_files"]
+        files = collector(self.registry, self.out, MACHINE, TOKEN)[2]
+        reader = Mock(wraps=collector.__globals__["read"])
+        with patch.dict(collector.__globals__, {"MAXIMUM": sum(map(len, files.values())) - 1, "read": reader}):
+            with self.assertRaises(ValueError):
+                self.capture()
+        self.assertFalse(any(Path(call.args[0]) == self.run / "execution-provenance.json"
+                             for call in reader.call_args_list))
+        self.assertFalse(self.archive.exists())
+
+    def test_preconfig_consumption_rejects_evidence_only_and_tampered_receipts(self):
+        self.capture()
+        base = self.out / "failed-preconfig-runtime-archive"
+        base.mkdir(mode=0o700)
+        receipt = base / "verified.json"
+        commit = self.helper["commit_preconfig"]
+        with self.assertRaises(ValueError):
+            commit(self.registry, self.out, MACHINE, TOKEN, self.archive, None, None, receipt)
+        self.assertFalse(receipt.exists())
+        commit(self.registry, self.out, MACHINE, TOKEN, self.archive, self.before, self.after, receipt)
+        original = receipt.read_bytes()
+        proof = json.loads(original)
+        for key, value in (("owner", "f" * 32), ("proof_credit", 1), ("consumption_ready", False),
+                           ("archive_sha256", "0" * 64), ("native_before_sha256", "0" * 64)):
+            with self.subTest(key=key):
+                write(receipt, json.dumps({**proof, key: value}))
+                with self.assertRaises(ValueError):
+                    self.helper["verify_preconfig_receipt"](self.registry, self.out, MACHINE, TOKEN, receipt)
+        receipt.write_bytes(original)
+        self.assertEqual(commit(self.registry, self.out, MACHINE, TOKEN, self.archive,
+                                self.before, self.after, receipt), proof)
+        later_before, later_after = self.base / "later-before.json", self.base / "later-after.json"
+        write(later_before, json.dumps({**self.native, "instance_id": "foreign-new-instance"}))
+        write(later_after, later_before.read_bytes())
+        with self.assertRaises(ValueError):
+            self.helper["verify_preconfig_receipt"](self.registry, self.out, MACHINE, TOKEN,
+                                                    receipt, later_before, later_after)
+
+    def test_preconfig_foreign_accepted_or_changed_native_refuse(self):
+        self.capture()
+        with self.assertRaises(ValueError):
+            self.helper["verify_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive,
+                                            self.before, self.before)
+        for field, value in (("id", "e" * 14), ("instance_id", "changed-instance"),
+                             ("state", "destroyed")):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.native)
+                changed[field] = value
+                write(self.after, json.dumps(changed))
+                with self.assertRaises(ValueError):
+                    self.verify()
+        for config in ({**self.native["config"], "env": {"CLOUDBENCH_RUN_TOKEN": TOKEN}},
+                       {**self.native["config"], "init": {"cmd": ["bash", "/cloudbench-boot.sh"]}},
+                       {**self.native["config"], "init": {"cmd": ["sleep", "infinity"], "exec": ["other"]}},
+                       {**self.native["config"], "mounts": [{"volume": "vol_foreign", "path": "/data"}]}):
+            changed = {**self.native, "config": config}
+            write(self.before, json.dumps(changed))
+            write(self.after, json.dumps(changed))
+            with self.assertRaises(ValueError):
+                self.verify()
+
+
 class MachineExecDeliveryTests(unittest.TestCase):
     """Recorded machine-exec bodies are distinct from the CLI transport status."""
     def setUp(self):
