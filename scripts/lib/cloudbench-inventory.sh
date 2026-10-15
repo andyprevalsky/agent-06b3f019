@@ -533,11 +533,21 @@ inventory_machine_id_for_name() {
 # Keep every clone start behind the same storage lifecycle contract as the
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
-    [ "$(inventory_machine_field "$1" storage_ready 2>/dev/null || true)" = "1" ]
+    local value status=0
+    inventory_index_healthy || status=$?
+    case "$status" in 0) ;; 75) return 75 ;; *) return 2 ;; esac
+    # A missing record or changed generation cannot prove native storage state.
+    value="$(inventory_machine_field "$1" storage_ready)" || return 75
+    case "$value" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
 }
 
 machine_storage_failed() {  # machine_storage_failed <id>
-    [ "$(inventory_machine_field "$1" storage_failed 2>/dev/null || true)" = "1" ]
+    local value status=0
+    inventory_index_healthy || status=$?
+    case "$status" in 0) ;; 75) return 75 ;; *) return 2 ;; esac
+    # A missing record or changed generation cannot prove native storage state.
+    value="$(inventory_machine_field "$1" storage_failed)" || return 75
+    case "$value" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
 }
 
 snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe

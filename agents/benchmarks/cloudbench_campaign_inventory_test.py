@@ -2587,3 +2587,73 @@ def test_configured_snapshot_inventory_uses_current_donor_proof(tmp_path, case):
     assert (result.returncode==0)==(case=='valid'),result.stdout+result.stderr
     assert 'FORBIDDEN_NATIVE' not in result.stderr
     if case=='valid': assert result.stdout.endswith(node+' '+python+' 1791903927 vs_owned')
+
+@pytest.mark.parametrize('field', ['storage_ready', 'storage_failed'])
+@pytest.mark.parametrize('case,expected', [('true', 0), ('false', 1), ('stale', 75), ('invalid-owner', 2), ('missing-record', 75), ('malformed-value', 2)])
+def test_campaign_inventory_storage_observation_keeps_unknown_distinct(tmp_path, field, case, expected):
+    """A stale/missing feed is not a healthy native unready/failed-state verdict."""
+    source_path = os.environ.get("CLOUDBENCH_STORAGE_OBSERVATION_SOURCE")
+    source = Path(source_path).read_text() if source_path else producer_source(ROOT)
+    names = ['machine_storage_observed_field', 'machine_storage_ready', 'machine_storage_failed']
+    parts = []
+    for name in names:
+        marker = name + '() {'
+        if marker in source:
+            start = source.index(marker)
+            parts.append(source[start:source.index('\n}\n', start)+3])
+    health = {'stale': 75, 'invalid-owner': 1}.get(case, 0)
+    value = '1' if case == 'true' else 'bad' if case == 'malformed-value' else '0'
+    function = 'machine_storage_ready' if field == 'storage_ready' else 'machine_storage_failed'
+    script = ('set -u\n'
+              + 'inventory_index_healthy() { return '+str(health)+'; }\n'
+              + 'inventory_machine_field() { '+('return 1' if case == 'missing-record' else 'printf %s '+shlex.quote(value))+'; }\n'
+              + '\n'.join(parts)+'\n'+function+' owned-target\n')
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+    assert result.returncode == expected, (case, result.returncode, result.stderr)
+    assert result.stdout == ''
+
+@pytest.mark.parametrize('observation', [0, 1, 75, 2])
+def test_campaign_inventory_clone_deadline_reports_unavailable_separately(tmp_path, observation):
+    """Exercise the actual clone wait body, preserving the same deadline and refusal."""
+    source_path = Path(os.environ.get('CLOUDBENCH_STORAGE_WAIT_SOURCE', ROOT / 'scripts/run-bench-fleet'))
+    source = source_path.read_text()
+    start = source.index('            while :; do\n                storage_status=0') if '            while :; do\n                storage_status=0' in source else source.index('            while ! machine_storage_ready "$target_id"; do')
+    end = source.index('            if [ -n "$target_id" ]; then', start)
+    script = ('set -u\nSECONDS=10\nstorage_deadline=0\ntarget_id=owned-target\n'
+              + 'diagnostic_log='+shlex.quote(str(tmp_path/'clone.log'))+'\n'
+              + 'machine_storage_ready() { return '+str(observation)+'; }\n'
+              + 'machine_storage_failed() { return '+str(observation if observation in (75,2) else 1)+'; }\n'
+              + 'machines_snapshot_identity() { printf owned-generation; }\n'
+              + 'run_wait() {\n'+source[start:end]+'\n}\nrun_wait\n')
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+    if observation == 0:
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ''
+    else:
+        assert result.returncode == 1, result.stderr
+        if observation in (75,2):
+            assert 'observation unavailable (status='+str(observation)+')' in result.stderr
+            assert 'not mountable' not in result.stderr
+            assert 'status='+str(observation) in (tmp_path/'clone.log').read_text()
+        else:
+            assert 'storage was not mountable' in result.stderr
+            assert 'observation unavailable' not in result.stderr
+
+@pytest.mark.parametrize('handler', ['inherited-parent', 'legitimate-child', 'legitimate-child-blocked'])
+def test_campaign_inventory_timeout_preserves_real_handler_ownership(tmp_path, handler):
+    """An inherited parent trap is not evidence that the native child owns it."""
+    source = producer_source(ROOT)
+    start = source.index('fly_with_timeout() {')
+    function = source[start:source.index('\n}\n', start)+3]
+    marker = tmp_path/'exit-owner'
+    child = '' if handler == 'inherited-parent' else 'trap '+shlex.quote('printf "child\\n" >> '+shlex.quote(str(marker))+'; '+('sleep 2' if handler.endswith('blocked') else ':'))+' EXIT; '
+    script = ('set -u\n'+function+'\n'
+              + 'trap '+shlex.quote('printf "parent\\n" >> '+shlex.quote(str(marker)))+' EXIT\n'
+              + 'FLY() { '+child+'printf "[]"; }\n'
+              + 'fly_with_timeout 1 machines list -a fixture --json\n')
+    result = subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=10)
+    assert result.returncode == (142 if handler.endswith('blocked') else 0), result.stderr
+    assert result.stdout.startswith('[]')
+    rows=marker.read_text().splitlines()
+    assert rows.count('parent') == 1
+    assert rows.count('child') == (0 if handler == 'inherited-parent' else 1)

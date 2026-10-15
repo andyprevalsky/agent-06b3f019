@@ -10835,7 +10835,7 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
         *) return 2 ;;
     esac
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
-    local storage_deadline preallocation_failure reap_status terminal_disposition
+    local storage_deadline storage_status failed_storage_status preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
     # --detach still launches the clone. CMD can be made inert at creation only
     # when no inherited exec/entrypoint takes precedence; use the shared native
@@ -11040,8 +11040,13 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
             # Machine remains `created`. Never publish that unusable target to
             # the boot-config barrier: reap it under this run's durable
             # ownership and spend the next bounded clone attempt instead.
-            while ! machine_storage_ready "$target_id"; do
-                if machine_storage_failed "$target_id"; then
+            while :; do
+                storage_status=0
+                machine_storage_ready "$target_id" || storage_status=$?
+                [ "$storage_status" -eq 0 ] && break
+                failed_storage_status=0
+                machine_storage_failed "$target_id" || failed_storage_status=$?
+                if [ "$failed_storage_status" -eq 0 ]; then
                     printf 'clone id=%s snapshot storage entered terminal failed state\n' \
                         "$target_id" >> "$diagnostic_log"
                     reap_status=0
@@ -11064,8 +11069,15 @@ Error: snapshot storage entered terminal failed state"
                     target_id=""
                     break
                 fi
+                [ "$failed_storage_status" -eq 1 ] || storage_status="$failed_storage_status"
                 if [ "$SECONDS" -ge "$storage_deadline" ]; then
-                    echo "❌ clone $target_id snapshot storage was not mountable within the provisioning deadline; retaining ownership" >&2
+                    if [ "$storage_status" -eq 1 ]; then
+                        echo "❌ clone $target_id storage was not mountable within the provisioning deadline; retaining ownership" >&2
+                    else
+                        echo "❌ clone $target_id storage readiness observation unavailable (status=$storage_status) at the provisioning deadline; retaining ownership" >&2
+                    fi
+                    printf 'storage-readiness id=%s status=%s generation=%s epoch=%s\n' \
+                        "$target_id" "$storage_status" "$(machines_snapshot_identity)" "$(date +%s)" >> "$diagnostic_log"
                     return 1
                 fi
                 sleep 2
