@@ -33085,3 +33085,46 @@ def test_autoscaler_runtime_handoff_capacity_worker_cleanup_failure_outcome_resp
     assert (out / 'autoscaler.failed').exists() is expected_failure
     assert (out / f'worker-{wid}.cleanup-failed').read_text() == 'original joined preservation failure\n'
     assert (out / 'worker-clones.ids').read_text() == (wid + '\n' if tracked else '')
+
+
+@pytest.mark.parametrize("case", ["overridable", "unsafe", "stale", "missing-record", "foreign-health", "missing-field", "invalid-field", "empty-field"])
+def test_private_fleet_source_clone_observation_distinguishes_unavailable(tmp_path: Path, case: str) -> None:
+    """Real clone guard must not label failed/invalid inventory reads as unsafe init."""
+    source = FLEET_SCRIPT.read_text()
+    start = source.index("clone_machine_target() {")
+    function = source[start:source.index("\n}\n", start) + 3]
+    index = tmp_path / "inventory" / "current"
+    (index / "machines").mkdir(parents=True)
+    (index / "health").write_text(
+        "publisher_token=" + ("foreign" if case == "foreign-health" else "owned")
+        + "\nvalid_until=" + str(int(time.time()) + (-30 if case == "stale" else 300)) + "\n"
+    )
+    if case != "missing-record":
+        field = {"unsafe": "0", "invalid-field": "true", "empty-field": ""}.get(case, "1")
+        (index / "machines" / "warm").write_text(
+            "state=stopped\n" if case == "missing-field" else "clone_cmd_overridable=" + field + "\n"
+        )
+    crossed = tmp_path / "past-source-guard"
+    script = (
+        "set -u\nFLEET_DIR=" + shlex.quote(str(tmp_path)) + "\nROOT_DIR=" + shlex.quote(str(ROOT))
+        + "\nAPP=fixture\nsource " + shlex.quote(str(ENV_HELPER_SCRIPT))
+        + "\nsource " + shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))
+        + '\nSNAPSHOT_LOOP_PID=$$\nSNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time $$)"'
+        + "\nSNAPSHOT_LOOP_TOKEN=owned\nINVENTORY_PUBLISHER_BORROWED=0\nSNAP_ID=vs_fixture\nPRIVATE_SOURCE_FILE=\n"
+        + "FLY() { echo FORBIDDEN_NATIVE >&2; return 99; }\n"
+        + "fleet_registry_record_name() { printf entered > " + shlex.quote(str(crossed)) + "; return 1; }\n"
+        + function + "\nclone_machine_target " + shlex.quote(str(tmp_path / "primary.ids"))
+        + " warm shared-cpu-2x 4096 vs_fixture snapshot\n"
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1
+    assert "FORBIDDEN_NATIVE" not in result.stderr
+    assert crossed.exists() == (case == "overridable")
+    if case == "overridable":
+        assert "could not persist durable ownership" in result.stderr
+    elif case == "unsafe":
+        assert "startup cannot be safely overridden" in result.stderr
+        assert "observation unavailable" not in result.stderr
+    else:
+        assert "clone source startup observation unavailable or invalid" in result.stderr
+        assert "startup cannot be safely overridden" not in result.stderr

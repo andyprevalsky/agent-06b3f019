@@ -10840,7 +10840,13 @@ clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] 
     # --detach still launches the clone. CMD can be made inert at creation only
     # when no inherited exec/entrypoint takes precedence; use the shared native
     # inventory and reject unknown shapes before creating any provider resource.
-    if [ "$(inventory_machine_field "$source_id" clone_cmd_overridable)" != "1" ]; then
+    local source_override source_observation_status=0
+    source_override="$(inventory_machine_field "$source_id" clone_cmd_overridable)" || source_observation_status=$?
+    if [ "$source_observation_status" -ne 0 ] || { [ "$source_override" != 0 ] && [ "$source_override" != 1 ]; }; then
+        echo "❌ clone source startup observation unavailable or invalid (inventory status=$source_observation_status); refusing allocation" >&2
+        return 1
+    fi
+    if [ "$source_override" = 0 ]; then
         echo "❌ clone source startup cannot be safely overridden; refusing allocation" >&2
         return 1
     fi
