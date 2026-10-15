@@ -420,6 +420,45 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
         if read:
             dom.get_page_identity.assert_awaited_once()
 
+    from browser_tools.secret_refs import mask_secret_values
+
+    class PrivateURLDOM(SimpleNamespace):
+        def runtime_current_url(self, *, fallback=""):
+            return self.private_url or fallback
+
+    # The captured DOM URL is public, while destination/realm binding must use
+    # the private identity captured with that same state, including collisions
+    # inside a hostname. A stable page must not look like a redirect loop.
+    for destination, refs in (
+        ("https://accounts.google.com/challenge?token=private-fixture-value", {"pwd:fixture": "private-fixture-value"}),
+        ("https://shop739.example/checkout", {"card_cvv": "739"}),
+    ):
+        public_url = mask_secret_values(destination, refs)
+        assert public_url != destination
+        state = {"url": public_url, "title": "Sign-in", "dom_tree": "Sign-in"}
+        dom = PrivateURLDOM(
+            private_url=destination, session=SimpleNamespace(), selector_map={},
+            get_page_identity=AsyncMock(return_value={"url": destination}),
+            get_browser_state=AsyncMock(return_value=state),
+        )
+        auth = AsyncMock(return_value={"auth_realm": urlsplit(destination).hostname, "inventory_status": "available"})
+        with patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value={
+            "success": True, "url": public_url, "formatted_state": "Sign-in",
+        })):
+            result = await execute_action(
+                dom, SimpleNamespace(record_action=AsyncMock()),
+                {"action": "read_browser_state", "params": {}},
+                auth_context_for_url=auth, secret_refs=refs,
+            )
+        auth.assert_awaited_once_with(destination)
+        assert result["success"] is True and result["auth_context"]["inventory_status"] == "available"
+        assert result["current_url"] == public_url
+        assert all(secret not in str(result) for secret in refs.values())
+        history = _browser_tool_result_for_history("read_browser_state", result)
+        assert all(secret not in str(history) for secret in refs.values())
+        dom.get_browser_state.assert_not_awaited()
+        dom.get_page_identity.assert_awaited_once()
+
 
 async def test_unchanged_interactions_reuse_observed_inventory() -> None:
     from unittest.mock import patch

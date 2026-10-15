@@ -837,7 +837,7 @@ class DOMService:
         """
         def omit_media(item: Any) -> Any:
             if isinstance(item, dict):
-                if item.get("type") in {"image_url", "image", "input_image"}:
+                if isinstance(item.get("type"), str) and item["type"] in {"image_url", "image", "input_image"}:
                     return {"type": "text", "text": "[image withheld after private credential entry]"}
                 return {
                     key: omit_media(nested)

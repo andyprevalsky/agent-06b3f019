@@ -13298,6 +13298,24 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
     assert all(secret not in str(history.get_entries()) for secret in all_values)
     assert not history.get_entries()[0].get("screenshot")
 
+    # Page-controlled JSON may use any JSON value for a field named "type".
+    # It stays ordinary data while actual media and credentials are filtered.
+    for page_type in ([], {}, ["image"], {"kind": "image"}, None, 0, True):
+        visible = dom.model_visible_action_result("evaluate", {
+            "success": True,
+            "value": {
+                "type": page_type,
+                "private": refs["card_cvv"],
+                "nested": [{"type": "image", "url": "https://fixture.test/image"}],
+            },
+        })
+        assert visible["success"] is True
+        assert visible["value"]["type"] == page_type
+        assert visible["value"]["private"] == "{{secret:card_cvv}}"
+        assert visible["value"]["nested"] == [{
+            "type": "text", "text": "[image withheld after private credential entry]",
+        }]
+
 
 async def test_private_browser_resume_never_falls_back_to_inline_credentials():
     """Even a tiny redaction registry needs encrypted archive storage or a hard failure."""
@@ -22199,6 +22217,181 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
 
 
+async def test_private_browser_pause_urls_use_protected_continuity():
+    """Activity results expose redacted URLs while exact continuation stays private."""
+    from contextlib import ExitStack
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    secret = "synthetic-private-url-password"
+    realm = secret + ".fixture.test"
+    start_url = "https://" + realm + "/"
+    raw_url = start_url + "checkout?password=" + secret
+    visible_url = raw_url.replace(secret, "{{secret:pwd:url}}")
+    failures = []
+    for pause in ("drain", "write", "payment", "auth", "completed", "max_steps", "declined"):
+        env = ActivityEnvironment()
+        snapshots = []
+        route_calls = []
+        grants = []
+        resuming = False
+        archive_ref = {"paths": ["private-fixture-234"], "sha256": "fixture234"}
+        auth_response = {
+            "id": "request-234", "current_url": raw_url,
+            "request": {"id": "request-234", "browserSessionId": "task-234",
+                        "steelSessionId": "session-234", "authRealm": realm, "mode": "live_view"},
+            "handoff": {"type": "live_view", "steelSessionId": "session-234",
+                        "liveViewUrl": "https://kernel.fixture/view/session-234"},
+        }
+        auth_request = AsyncMock(return_value=auth_response)
+        private_target = {"index": 234, "attrs": {"href": raw_url, "value": secret}}
+
+        class PrivateURLDom(_FakeDomService):
+            def runtime_current_url(self, *, fallback=""):
+                return raw_url
+
+            async def get_page_identity(self):
+                return self.model_visible_value({"url": raw_url, "title": "Checkout"})
+
+            async def get_browser_state(self, include_screenshot=False):
+                return self.model_visible_value({"url": raw_url, "title": "Checkout", "dom_tree": "Checkout"})
+
+        async def persist(**kwargs):
+            snapshots.append(copy.deepcopy(kwargs))
+            return {"browser_resume_context_ref": copy.deepcopy(archive_ref)}
+
+        async def execute(*_args, **kwargs):
+            route_calls.append(kwargs["current_url"])
+            grants.append(copy.deepcopy(kwargs["write_lock_approvals"]))
+            if pause in {"drain", "max_steps"} or resuming:
+                if pause != "max_steps":
+                    env.worker_shutdown()
+                return {"success": True, "current_url": raw_url}
+            if pause == "write":
+                return {"status": "needs_write_approval", "approval_type": "purchase", "question": raw_url}
+            return {"status": "needs_payment_card_approval", "payment_request": {"url": raw_url}}
+
+        action = ("request_user_assistance_for_authentication" if pause == "auth" else
+                  "attempt_completion" if pause == "completed" else "scroll")
+        session_info = {"session_id": "session-1", "ws_url": "ws://fixture", "debug_url": "https://kernel.fixture/view",
+                        "same_session_available": True, "auth_options": {"realm": realm},
+                        "browser_session_metadata": {"provider": "kernel"}, "passwords": []}
+        fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+        prefix = "domains.spawn_browser_agent_v3.handler."
+        patches = [
+            patch(prefix + "load_config", return_value=_fake_config()),
+            patch(prefix + "fetch_session_info", AsyncMock(side_effect=lambda *_args, **_kwargs: copy.deepcopy(session_info))),
+            patch(prefix + "fetch_recent_otps", AsyncMock(return_value=[])),
+            patch(prefix + "get_model_pricing_with_fallback", AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})),
+            patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+            patch(prefix + "_call_browser_use_with_rotation", AsyncMock(return_value={
+                "action": {"action": action, "params": {}}, "usage": {},
+                "_fast_cache_browser_target": private_target,
+            })),
+            patch(prefix + "execute_action", execute),
+            patch(prefix + "_generate_write_lock_notification", AsyncMock(return_value={"question": raw_url, "notification": {"service": {"url": raw_url}}})),
+            patch(prefix + "create_user_auth_assistance_request", auth_request),
+            patch(prefix + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+            patch(prefix + "extract_session_files", AsyncMock(return_value=[])),
+            patch(prefix + "disconnect_browser_after_passkey_capture", AsyncMock()),
+            patch(prefix + "propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
+            patch(prefix + "close_browser_session", AsyncMock()),
+            patch(prefix + "save_browser_action_message", AsyncMock()),
+            patch(prefix + "save_browser_assistant_message", AsyncMock()),
+            patch(prefix + "persist_resume_context", persist),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+            patch("browser_tools.dom_service.DOMService", PrivateURLDom),
+            patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+            patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
+            patch(prefix + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+            patch(prefix + "build_browser_verifier_context", AsyncMock(return_value=[])),
+            patch(prefix + "call_temporal_activity_from_activity", AsyncMock(return_value={
+                "score": 1.0, "structured_response": {"url": raw_url}, "usage": {},
+            })),
+        ]
+        if pause == "max_steps":
+            # Exercise the native terminal branch with a single fixture step.
+            patches.append(patch(prefix + "MAX_ITERATIONS", 1))
+        with ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            result = await env.run(
+                handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
+                tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                start_url=start_url, write_lock_resume_state={
+                    "approval_type": handler.AUTH_ASSISTANCE_DECLINED if pause == "declined" else "manual_pause",
+                    "secret_redaction_refs": {"pwd:url": secret, "card_cvv": "234"},
+                    "secret_values_used": True,
+                },
+            )
+            if pause == "write" and snapshots[-1]["state"].get("private_browser_runtime"):
+                protected = snapshots[-1]["state"]["private_browser_runtime"]
+                assert protected["current_url"] == raw_url
+                assert protected["auth_realm"] == realm
+                assert protected["grant_url"] == raw_url
+                assert protected["pending_action_target"] == private_target
+                assert result["pending_action_target"]["index"] == 234
+                # The manager transports only the opaque archive reference and
+                # the user's decision timestamp, never the exact private URL.
+                public_resume = {
+                    "approval_type": "purchase", "write_lock_approved_at": 123.0,
+                    "pending_action": {"action": "scroll", "params": {}},
+                    "pending_action_target": result["pending_action_target"],
+                    "session_id": "session-1", "task_id": "task-1", "step_count": 1,
+                    "write_lock_approvals": {"purchase": {"domain": "masked.invalid", "approved_at": 123.0}},
+                    "browser_resume_context_ref": result["browser_resume_context_ref"],
+                }
+                assert secret not in str(public_resume)
+                private_resume = {**copy.deepcopy(snapshots[-1]["state"]), **public_resume}
+                stack.enter_context(patch(prefix + "hydrate_resume_context", AsyncMock(return_value=private_resume)))
+                prepare_action = stack.enter_context(patch(
+                    prefix + "_prepare_pending_write_lock_action",
+                    AsyncMock(wraps=handler._prepare_pending_write_lock_action),
+                ))
+                env = ActivityEnvironment()
+                resuming = True
+                resumed = await env.run(
+                    handler.spawn_browser_agent_activity_v3, user_id="u1", agent_id="a1", goal="Inspect checkout",
+                    tool_call_id="tool-1", task_id="task-1", is_resume=True, use_claude_mode=False,
+                    output_schema={"fields": [{"name": "result", "type": "string"}]},
+                    start_url="https://masked.invalid/", write_lock_resume_state=public_resume,
+                )
+                assert resumed["status"] == BROWSER_DRAIN_YIELD_STATUS
+                assert secret not in str(resumed)
+                assert grants[-1]["purchase"] == {"domain": realm, "approved_at": 123.0}
+                assert grants[-1]["site"]["domain"] == "fixture.test"
+                assert route_calls[-1] == raw_url
+                assert prepare_action.await_args.kwargs["target_signature"] == private_target
+        expected = {"drain": BROWSER_DRAIN_YIELD_STATUS, "write": "awaiting_write_approval",
+                    "payment": "awaiting_payment_card_approval", "auth": "awaiting_auth_assistance",
+                    "completed": "completed", "max_steps": "max_iterations", "declined": "completed"}[pause]
+        assert result["status"] == expected
+        if secret in str(result):
+            failures.append(pause)
+        if pause == "auth" and secret in str(auth_request.await_args.kwargs):
+            failures.append("auth-request-metadata")
+        if pause == "auth":
+            visible_auth = result["auth_assistance_request"]
+            assert result["request_id"] == visible_auth["id"] == visible_auth["request"]["id"] == "request-234"
+            assert visible_auth["request"]["browserSessionId"] == "task-234"
+            assert visible_auth["request"]["steelSessionId"] == "session-234"
+            assert visible_auth["handoff"] == auth_response["handoff"]
+        if pause not in {"auth", "completed", "max_steps", "declined"}:
+            assert result["current_url"] in (raw_url, visible_url)
+            assert route_calls and all(url == raw_url for url in route_calls), "public URL redaction changed private action routing"
+        if pause not in {"completed", "max_steps", "declined"}:
+            assert result["browser_resume_context_ref"] == archive_ref, "redaction corrupted a trusted archive reference"
+            assert result["session_id"] == "session-1" and result["task_id"] == "task-1"
+            assert snapshots and snapshots[-1]["force_private"] is True
+            if not snapshots[-1]["state"].get("private_browser_runtime"):
+                failures.append(pause + "-missing-private-continuation")
+    assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
+
+
 async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
     from contextlib import ExitStack
@@ -28115,6 +28308,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "private_browser_pause_urls_use_protected_continuity",
+        test_private_browser_pause_urls_use_protected_continuity,
     )
     await r.record_async(
         "reused_session_yields_before_provider_releases_it",

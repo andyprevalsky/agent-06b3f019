@@ -357,6 +357,41 @@ Verification stabilization (2026-10-15): the second automated review found two m
 
 The complete final-runtime verification passed agent/backend coverage, all twelve controller commands, live probes, eight UI checks, the real E2B smoke, ten effective smoke tasks, all four sandbox card lifecycles without skips, and all five latency tests. Only the separate auth-decline smoke case was excluded under the specific one-release user exception; its earlier native failures remain failures. All fourteen current benchmark roots have fresh canonical FE/recording and latest-whole-tree-call HTTPS evidence. Exact-owned test processes, ports and isolated databases retired; current-campaign payment cleanup is clear. This does not settle older release follow-ups or establish an original-merchant checkout repair.
 
+## Verification review and development stabilization
+
+The final verification review of `6c5a5c6fa5525669417849a9143c408a4c107a46`
+found two more valid boundary defects: private runtime URLs could escape in
+activity results and approval metadata, and a page-controlled JSON `type` list
+could crash post-entry media filtering. The review is retained at
+[review 5541171706](https://github.com/Rose-Ai-Labs/rose/pull/1518#pullrequestreview-5541171706).
+The deployment was recorded blocked / review-unstable at
+2026-10-15T23:34:00Z under its three-cycle limit. It was not merged; its review
+ledger and all previous attempts remain intact.
+
+Development stabilization keeps exact URL, realm, grant and pending-target
+state inside encrypted continuation. The manager transports the existing
+opaque archive reference and a nonsecret approval timestamp; the resumed
+activity applies the existing grant helper to the captured private destination.
+Outward pause, completion, iteration-limit and declined-auth payloads redact
+known credential values while preserving trusted target indices and request /
+archive identifiers. The registered full-activity regression exercises these
+seven outcomes and an approved write resume. Its identical checked-in case
+fails with the exact frozen reviewed handler and passes with the repair.
+
+The existing observation/history regression also reproduces the malformed
+media-type crash before a string-type guard and passes afterward. Actual media
+remains withheld and credential values remain masked. A separate owning auth
+binding regression exposed redacted `read_browser_state` URLs being reused as
+private destinations, producing false redirect failures and potentially wrong
+realms. Query-secret and hostname-collision cases now verify that auth binding
+uses the captured private URL while returned state and history stay redacted.
+Existing redirect and action-failure behavior remains covered.
+
+These development repairs require a fresh deployment lifecycle and complete
+applicable gates. The earlier fourteen passing benchmarks and published
+recordings prove their frozen checkpoint, not this later repair. Payment-flow
+success alone does not establish privacy at activity and approval boundaries.
+
 ## Reusable lesson
 
 Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.

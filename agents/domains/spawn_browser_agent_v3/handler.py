@@ -965,6 +965,7 @@ def _browser_resume_continuity_state(
     reasoning_messages: Optional[List[str]] = None,
     action_summary: Optional[List[str]] = None,
     auth_runtime_state: Optional[AuthRuntimeState] = None,
+    private_runtime_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -985,6 +986,9 @@ def _browser_resume_continuity_state(
             state["action_history"] = action_history.get_entries()
             state["auth_attempts"] = auth_runtime_state.snapshot() if auth_runtime_state is not None else None
             state.update(privacy_state)
+            if privacy_state.get("secret_redaction_refs") and private_runtime_state:
+                # Only the encrypted archive may carry exact routing/grant data.
+                state["private_browser_runtime"] = private_runtime_state
     return state
 
 
@@ -6389,10 +6393,13 @@ async def _spawn_browser_agent_activity_v3_real(
             "output_files": [],
         }
 
+    private_browser_runtime: Dict[str, Any] = {}
     if write_lock_resume_state:
-        write_lock_resume_state = await hydrate_resume_context(
+        hydrated_resume = dict(await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
-        )
+        ))
+        private_browser_runtime = hydrated_resume.pop("private_browser_runtime", {})
+        write_lock_resume_state = hydrated_resume
 
     from browser_tools.dom_service import ActionHistory, DOMService, browser_downloads_path_for_provider
     from browser_tools.humanizer import BrowserHumanizer
@@ -6416,7 +6423,10 @@ async def _spawn_browser_agent_activity_v3_real(
     def _redact_activity_value(value: Any) -> Any:
         # Private hydration can precede DOM binding, and cleanup can outlive
         # its transport. Keep those boundaries under the activity's policy.
-        return redact_current_secret_values(action_history.model_visible_value(value))
+        return mask_secret_values(
+            redact_current_secret_values(action_history.model_visible_value(value)),
+            (write_lock_resume_state or {}).get("secret_redaction_refs"),
+        )
 
     async def _save_browser_action_message(**kwargs: Any) -> Any:
         # Routing IDs stay exact; only user/model-visible payloads are redacted.
@@ -6424,6 +6434,58 @@ async def _spawn_browser_agent_activity_v3_real(
             if key in kwargs:
                 kwargs[key] = _redact_activity_value(kwargs[key])
         return await save_browser_action_message(**kwargs)
+
+    def _pause_continuity_state(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        grant_url = resolve_site_write_lock_grant_url({
+            **(approval_result or {}), "start_url": start_url,
+            "visited_urls": visited_urls, "current_url": current_url,
+        })
+        if "{{secret:" in grant_url:
+            # A model-visible product/notification URL may already be masked.
+            # The exact browser destination is still private, observed state.
+            grant_url = current_url
+        return _browser_resume_continuity_state(
+            action_history=action_history, visited_urls=visited_urls,
+            verifier_checkpoints=verifier_checkpoints, browser_turn_messages=browser_turn_messages,
+            reasoning_messages=reasoning_messages, action_summary=action_summary,
+            auth_runtime_state=auth_runtime_state,
+            private_runtime_state={
+                "current_url": current_url, "auth_realm": auth_realm,
+                "write_lock_approvals": dict(write_lock_approvals), "grant_url": grant_url,
+                **({"pending_action_target": approval_result["pending_action_target"]}
+                   if approval_result and approval_result.get("pending_action_target") else {}),
+            },
+        )
+
+    def _visible_activity_result(result: Dict[str, Any]) -> Dict[str, Any]:
+        # Archive references and routing IDs remain exact protocol values.
+        auth_response = result.get("auth_assistance_request")
+        for key in ("current_url", "question", "write_lock_notification", "payment_request",
+                    "auth_assistance_request", "write_lock_approvals", "auth_realm", "base_site",
+                    "message", "structured_response", "best_effort_response"):
+            if key in result:
+                result[key] = _redact_activity_value(result[key])
+        target = result.get("pending_action_target")
+        if isinstance(target, dict):
+            result["pending_action_target"] = _redact_activity_value(target)
+            if isinstance(target.get("index"), int) and not isinstance(target["index"], bool):
+                result["pending_action_target"]["index"] = target["index"]
+        if isinstance(auth_response, dict):
+            request_ids = ("id", "requestId", "request_id", "attentionRequestId", "agentId", "userId",
+                           "browserSessionId", "steelSessionId", "mode")
+            visible_auth = result["auth_assistance_request"]
+            for key in request_ids:
+                if key in auth_response:
+                    visible_auth[key] = auth_response[key]
+            for key, protocol_keys in (("request", request_ids),
+                                       ("handoff", ("type", "steelSessionId", "liveViewUrl"))):
+                original = auth_response.get(key)
+                if isinstance(original, dict):
+                    visible_auth[key] = _redact_activity_value(original)
+                    for field in protocol_keys:
+                        if field in original:
+                            visible_auth[key][field] = original[field]
+        return result
 
     browser_url = None
     current_url = ""
@@ -6489,12 +6551,25 @@ async def _spawn_browser_agent_activity_v3_real(
     payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
-        pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
-        write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
+        pending_write_lock_target = (private_browser_runtime.get("pending_action_target")
+                                     or write_lock_resume_state.get("pending_action_target"))
+        write_lock_approvals = dict(private_browser_runtime.get("write_lock_approvals")
+                                    or write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
-        auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
+        auth_realm = private_browser_runtime.get("auth_realm") or write_lock_resume_state.get("auth_realm") or auth_realm
+        current_url = str(private_browser_runtime.get("current_url") or "")
+        approved_at = write_lock_resume_state.get("write_lock_approved_at")
+        grant_url = private_browser_runtime.get("grant_url")
+        if grant_url and isinstance(approved_at, (int, float)):
+            if write_lock_resume_state.get("approval_type") == "payment":
+                write_lock_approvals = grant_site_write_lock_approvals(write_lock_approvals, grant_url, approved_at)
+            elif pending_write_lock_action:
+                write_lock_approvals = apply_user_write_lock_grant(
+                    write_lock_approvals, write_lock_resume_state.get("approval_type", "unknown"),
+                    grant_url, approved_at,
+                )
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
         # Belt-and-suspenders: older resume payloads may still carry awaiting tool
         # rows if they were parked before finalize-on-mint shipped.
@@ -6521,7 +6596,7 @@ async def _spawn_browser_agent_activity_v3_real(
         if write_lock_resume_state.get("approval_type") == "payment" and (
             write_lock_resume_state.get("payment_card_refs") or payment_card_last4
         ):
-            merchant_grant_url = resolve_site_write_lock_grant_url(
+            merchant_grant_url = private_browser_runtime.get("grant_url") or resolve_site_write_lock_grant_url(
                 {
                     "start_url": start_url,
                     "visited_urls": visited_urls,
@@ -6540,9 +6615,9 @@ async def _spawn_browser_agent_activity_v3_real(
                     "Browser payment site write-lock unlock healed on resume",
                     agent_id=agent_id,
                     task_id=task_id,
-                    grant_url=merchant_grant_url,
-                    unlock_domain=merchant_domain,
-                    prior_domain=site_entry.get("domain"),
+                    grant_url=_redact_activity_value(merchant_grant_url),
+                    unlock_domain=_redact_activity_value(merchant_domain),
+                    prior_domain=_redact_activity_value(site_entry.get("domain")),
                 )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
@@ -6711,7 +6786,7 @@ async def _spawn_browser_agent_activity_v3_real(
             if declined_session_id:
                 await close_browser_session(config, declined_session_id, pause=False)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
-            return {
+            return _visible_activity_result({
                 "status": "completed",
                 "success": False,
                 "user_declined_auth": True,
@@ -6723,7 +6798,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "session_id": declined_session_id,
                 "structured_response": None,
                 "output_files": [],
-            }
+            })
 
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
@@ -7960,15 +8035,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             agent_id=agent_id,
                             task_id=task_id,
                             force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                            state=_browser_resume_continuity_state(
-                                action_history=action_history,
-                                visited_urls=visited_urls,
-                                verifier_checkpoints=verifier_checkpoints,
-                                browser_turn_messages=browser_turn_messages,
-                                reasoning_messages=reasoning_messages,
-                                action_summary=action_summary,
-                                auth_runtime_state=auth_runtime_state,
-                            ),
+                            state=_pause_continuity_state(),
                         )
                     except Exception as checkpoint_error:
                         drain_checkpoint_failed = True
@@ -7996,7 +8063,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             dom_service = None
                         browser_task_paused_for_resume = True
                         step_timer.finish()
-                        return {
+                        return _visible_activity_result({
                             "status": BROWSER_DRAIN_YIELD_STATUS,
                             "yield_reason": drain_reason,
                             "current_url": current_url,
@@ -8018,7 +8085,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                             ),
                             **drain_continuity,
-                        }
+                        })
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
@@ -8754,11 +8821,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     config,
                     agent_id=agent_id,
                     user_id=user_id,
-                    auth_realm=auth_realm or base_site,
+                    auth_realm=_redact_activity_value(auth_realm or base_site),
                     browser_session_id=task_id,
                     steel_session_id=session_id,
                     browser_url=browser_url,
-                    current_url=auth_handoff_current_url,
+                    current_url=_redact_activity_value(auth_handoff_current_url),
                     mode="live_view",
                 )
                 request_id = (
@@ -8839,19 +8906,11 @@ async def _spawn_browser_agent_activity_v3_real(
                         agent_id=agent_id,
                         task_id=task_id,
                         force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        state=_pause_continuity_state(),
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return resume_result
+                return _visible_activity_result(resume_result)
 
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}
@@ -9616,7 +9675,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             message=context_message,
                         )
 
-                        return {
+                        return _visible_activity_result({
                             "status": "completed",
                             "success": True,
                             "message": context_message,
@@ -9628,7 +9687,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             "session_id": session_id,
                             "structured_response": structured_response,
                             "output_files": output_files,
-                        }
+                        })
 
                     verifier_feedback_thinking = f"""I just checked in with verifier for the task and it said:
 <verifier_response>
@@ -10143,19 +10202,14 @@ Based on this feedback, I need to continue working on the task and address the i
                         agent_id=agent_id,
                         task_id=task_id,
                         force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        state=_pause_continuity_state({
+                            "write_lock_notification": write_lock_notification,
+                            "pending_action_target": llm_result.get("_fast_cache_browser_target"),
+                        }),
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return resume_result
+                return _visible_activity_result(resume_result)
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
                 payment_request = result.get("payment_request", {})
@@ -10285,19 +10339,14 @@ Based on this feedback, I need to continue working on the task and address the i
                         agent_id=agent_id,
                         task_id=task_id,
                         force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                        state=_browser_resume_continuity_state(
-                            action_history=action_history,
-                            visited_urls=visited_urls,
-                            verifier_checkpoints=verifier_checkpoints,
-                            browser_turn_messages=browser_turn_messages,
-                            reasoning_messages=reasoning_messages,
-                            action_summary=action_summary,
-                            auth_runtime_state=auth_runtime_state,
-                        ),
+                        state=_pause_continuity_state({
+                            "payment_request": payment_request,
+                            "write_lock_notification": payment_write_lock_notification,
+                        }),
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return resume_result
+                return _visible_activity_result(resume_result)
 
             if result.get("success", True):
                 awaiting_observation_checkpoint = _preserve_observed_interaction_for_verifier(
@@ -10590,7 +10639,7 @@ Based on this feedback, I need to continue working on the task and address the i
             visited_urls=visited_urls,
         )
 
-        return {
+        return _visible_activity_result({
             "status": "max_iterations",
             "success": False,
             "message": context_message,
@@ -10599,7 +10648,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "execution_time_ms": execution_time_ms,
             "structured_response": latest_structured_response,
             "best_effort_response": best_effort_response,
-        }
+        })
 
     except asyncio.CancelledError as cancellation:
         logger.info("\U0001f534 Browser agent activity cancelled (paused)")
@@ -11296,6 +11345,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "pending_action": result.get("pending_action"),
                             "pending_action_target": result.get("pending_action_target"),
                             "write_lock_approvals": current_approvals,
+                            "write_lock_approved_at": approved_at,
                             "approval_type": approval_type,
                             "step_count": result.get("step_count", 0),
                             "session_id": result.get("session_id"),
@@ -11878,6 +11928,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": current_approvals,
+                        "write_lock_approved_at": workflow.now().timestamp(),
                         "approval_type": "payment",
                         "step_count": result.get("step_count", 0),
                         "session_id": result.get("session_id"),

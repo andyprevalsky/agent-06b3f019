@@ -1932,11 +1932,19 @@ async def _attach_observed_auth_context(
     result = dict(result)
     result.pop("auth_realm", None)
     result.pop("credentials_prepared", None)
+
+    def captured_state_url(state: Dict[str, Any]) -> str:
+        fallback = str(state.get("url") or "")
+        accessor = inspect.getattr_static(dom_service, "runtime_current_url", None)
+        if callable(accessor):
+            return str(dom_service.runtime_current_url(fallback=fallback) or fallback)
+        return fallback
+
     try:
         # Page-state already captured its URL with its DOM; other actions must
         # observe the destination rather than echoing their requested URL.
         destination_url = (
-            str(result.get("url") or "") if action_name == "read_browser_state"
+            captured_state_url(result) if action_name == "read_browser_state"
             else str((await dom_service.get_page_identity()).get("url") or "")
         )
         if (
@@ -1959,7 +1967,7 @@ async def _attach_observed_auth_context(
             if action_name == "read_browser_state":
                 state = await dom_service.get_browser_state(include_screenshot=False)
                 result = _browser_state_action_result(state)
-                destination_url = str(state.get("url") or "")
+                destination_url = captured_state_url(state)
             else:
                 destination_url = live_url
         error = "Page changed during credential preparation"
