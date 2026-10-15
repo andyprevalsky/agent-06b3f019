@@ -13,6 +13,7 @@ import {
 } from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
 import {
+  assertSteelSameProfileReplacement,
   assert,
   assertBrowserUseDownloadFetchIsBounded,
   assertBrowserUseRolloutOptIn,
@@ -50,6 +51,14 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   [
     'Steel first-profile replacement preserves its full binding and the source on failure',
     assertSteelProfileReplacementLifecycle,
+  ],
+  [
+    'Steel same-profile rotation releases before attachment and avoids duplicate cleanup',
+    () => assertSteelSameProfileReplacement(false),
+  ],
+  [
+    'Steel PAUSED replacement failure recovers through release404',
+    () => assertSteelSameProfileReplacement(true),
   ],
   [
     'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
