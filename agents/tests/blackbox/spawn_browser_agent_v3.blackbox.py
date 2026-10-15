@@ -1002,26 +1002,63 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in src
 
 
-def test_max_steps_return_declares_best_effort_and_final_verifier():
-    """The max_iterations exit must wire the best-effort field AND run the final
-    verifier salvage — guards against a silent revert of the RCA fix. Asserts on
-    the compiled source of the exact terminal branch (no live browser needed)."""
-    import inspect
+async def test_max_steps_return_declares_best_effort_and_final_verifier():
+    """Execute max-step exit: final verifier evidence and partial text reach caller."""
+    import ast
+    import copy
+    import socket
+    from pathlib import Path
+    from domains.spawn_browser_agent_v3 import handler, repo
 
-    from domains.spawn_browser_agent_v3 import handler
-
-    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    # Locate the max_iterations terminal return block.
-    marker = 'logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")'
-    assert marker in src
-    tail = src[src.index(marker) :]
-    tail = tail[: tail.index('"status": "max_iterations"') + 400]
-    # (1) final synthesis pass reusing the shared verifier context builder
-    assert "build_browser_verifier_context" in tail
-    assert "check_progress" in tail
-    # (2) best-effort payload surfaced on the terminal return
-    assert "build_best_effort_response" in tail
-    assert '"best_effort_response": best_effort_response' in tail
+    source = ast.parse(Path(__file__).read_text())
+    fixture = copy.deepcopy(next(node for node in source.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "test_spawn_browser_activity_verified_completion_message_leads_with_goal"))
+    verifier = AsyncMock(return_value={"structured_response": {"result": "Final visible heading"}, "usage": {}})
+    context = AsyncMock(return_value=[{"role": "user", "content": "Final browser evidence"}])
+    close = AsyncMock(wraps=repo.close_browser_session)
+    model = AsyncMock()
+    class AdaptFixture(ast.NodeTransformer):
+        def visit_Call(self, node):
+            node = self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id == "patch" and node.args and isinstance(node.args[0], ast.Constant):
+                replacements = {
+                    "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity": "verifier",
+                    "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context": "context",
+                    "domains.spawn_browser_agent_v3.handler.close_browser_session": "close",
+                    "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation": "model",
+                }
+                replacement = replacements.get(node.args[0].value)
+                if replacement:
+                    node.args[1] = ast.Name(id=replacement, ctx=ast.Load())
+            if isinstance(node.func, ast.Name) and node.func.id == "spawn_browser_agent_activity_v3":
+                for keyword in node.keywords:
+                    if keyword.arg == "write_lock_resume_state":
+                        keyword.value = ast.parse(repr({"approval_type": "manual_pause", "task_id": "task-1", "reasoning_messages": ["Partial heading evidence"]}), mode="eval").body
+            return node
+    fixture = AdaptFixture().visit(fixture)
+    fixture.body = [node for node in fixture.body if not isinstance(node, ast.Assert)]
+    fixture.body.append(ast.Return(value=ast.Name(id="result", ctx=ast.Load())))
+    namespace = dict(globals(), verifier=verifier, context=context, close=close, model=model)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fixture], type_ignores=[])), "max-step-activity-fixture", "exec"), namespace)
+    attempts = []
+    def forbid(*args, **kwargs):
+        attempts.append(True)
+        raise AssertionError("unexpected max-step fixture network")
+    setup_mock({"/api/browser-session/close": {"status": 500, "json": {}}})
+    try:
+        with patch.object(socket.socket, "connect", forbid), patch.object(handler, "MAX_ITERATIONS", 0):
+            result = await namespace[fixture.name]()
+            await handler.drain_background_browser_cleanups()
+            assert result["status"] == "max_iterations" and result["success"] is False
+            assert result["best_effort_response"] == "Partial heading evidence"
+            assert result["structured_response"] == {"result": "Final visible heading"}
+            verifier.assert_awaited_once()
+            assert verifier.await_args.kwargs["args"][5] == "verifier_browser_max_steps"
+            context.assert_awaited_once()
+            assert context.await_args.kwargs["browser_state"]["url"] == "https://example.com/login"
+            model.assert_not_awaited()
+            close.assert_awaited_once()
+    finally:
+        assert not attempts, "unexpected network, including swallowed attempts"
 
 def test_browser_step_budget_extends_beyond_productive_step_30_capture():
     """The configured budget must extend beyond a productive captured boundary.
@@ -8496,16 +8533,61 @@ async def test_create_user_auth_assistance_request_posts_payload():
     assert body["browserSessionId"] == "task1"
     assert body["steelSessionId"] == "steel1"
 
-async def test_close_browser_session_swallows_errors():
-    from domains.spawn_browser_agent_v3.repo import close_browser_session
-    from _test_utils import setup_mock_fn
-
-    def fail(req):
-        raise RuntimeError("down")
-
-    setup_mock_fn(fail)
+async def test_close_browser_session_reports_unacknowledged_cleanup():
+    """Actual repo function retains exact identity, bounded request and typed facts."""
+    import asyncio
+    import socket
+    from domains.spawn_browser_agent_v3 import repo
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from types import SimpleNamespace
+    calls = []
+    attempts = []
+    mode = 200
+    sealed_error = WorkflowGenerationSealed("owned typed seal")
+    cancelled_error = asyncio.CancelledError()
+    transport_error = OSError("owned transport failure")
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"timeout": 10.0}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if mode == "sealed":
+                raise sealed_error
+            if mode == "cancelled":
+                raise cancelled_error
+            if mode == "transport":
+                raise transport_error
+            return SimpleNamespace(status_code=mode)
+    def forbid(*args, **kwargs):
+        attempts.append(True)
+        raise AssertionError("unexpected cleanup fixture network")
     cfg = _fake_config()
-    await close_browser_session(cfg, "s1", pause=True, current_url="https://x")
+    with patch.object(repo.httpx, "AsyncClient", Client), patch.object(socket.socket, "connect", forbid):
+        for mode in (200, 500, 409, "transport", "sealed", "cancelled"):
+            for pause in (False, True):
+                calls.clear()
+                error = None
+                try:
+                    await repo.close_browser_session(cfg, "exact-owned-session", pause=pause, current_url="https://page.invalid/")
+                except BaseException as caught:
+                    error = caught
+                assert calls == [(f"{cfg.backend.api_url}/api/browser-session/close", {"headers": {"x-api-key": cfg.backend.api_key or ""}, "json": {"session_id": "exact-owned-session", "pause": pause, "current_url": "https://page.invalid/"}})]
+                if mode == 200:
+                    assert error is None
+                elif mode == "sealed":
+                    assert error is sealed_error
+                elif mode == "cancelled":
+                    assert error is cancelled_error
+                else:
+                    assert error is not None and type(error).__name__ == "BrowserSessionCloseError", error
+                    if mode == "transport":
+                        assert error.__cause__ is transport_error
+                    assert error.receipt() == {"status": "failed", "session_id": "exact-owned-session", "pause": pause, "http_status": mode if isinstance(mode, int) else None}
+    assert not attempts, "unexpected network, including swallowed attempts"
 
 async def test_close_browser_session_success_payload():
     from domains.spawn_browser_agent_v3.repo import close_browser_session
@@ -26291,7 +26373,7 @@ async def run_all_tests():
         "action_history_resume_monotonic_steps",
         test_action_history_resume_preserves_monotonic_step_numbers,
     )
-    r.record(
+    await r.record_async(
         "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
     )
     r.record(
@@ -26838,7 +26920,7 @@ async def run_all_tests():
         "create_auth_assistance_request",
         test_create_user_auth_assistance_request_posts_payload,
     )
-    await r.record_async("close_browser_session_swallows", test_close_browser_session_swallows_errors)
+    await r.record_async("close_browser_session_reports_unacknowledged_cleanup", test_close_browser_session_reports_unacknowledged_cleanup)
     await r.record_async("close_browser_session_success", test_close_browser_session_success_payload)
     await r.record_async("inject_local_storage_success", test_inject_local_storage_success)
     await r.record_async("inject_local_storage_non_200", test_inject_local_storage_non_200_returns_none)
