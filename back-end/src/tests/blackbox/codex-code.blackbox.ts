@@ -3,7 +3,10 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
-import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import {
+  testPersistOutput_coolsExhaustedOAuthCredential,
+  testPersistOutput_coolsFundedKeyForObservedBalanceError,
+} from './codex-code-oauth-feedback.case';
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
   testResolveCodexAuthEnvs_apiKeyFallback,
@@ -452,6 +455,10 @@ async function runAll() {
     {
       name: 'feedback -- failed OAuth fallback cools OAuth and funded credentials',
       fn: testPersistOutput_coolsBothCredentialsAfterFailedFallback,
+    },
+    {
+      name: 'feedback -- observed API balance error cools funded key without masking revocation',
+      fn: testPersistOutput_coolsFundedKeyForObservedBalanceError,
     },
     {
       name: 'feedback -- invalid structured credential event is rejected',

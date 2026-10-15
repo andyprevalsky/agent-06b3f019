@@ -20,6 +20,7 @@ interface Capture {
   method: string;
   requestBody: string | null;
   captureToken: string | null;
+  responseStatus: number | null;
 }
 
 interface TestResult {
@@ -147,6 +148,25 @@ async function testBotMessageIgnored() {
 
 async function testDispatchFailureRequestsSlackRetry() {
   const token = 'slack-dispatch-failure';
+  // Own the response under test: an unseeded dispatch can reach GitHub or
+  // replay a prior response, neither of which guarantees a permanent error.
+  await seedOutbound(
+    'https://api.github.com/repos/Rose-Ai-Labs/rose/dispatches',
+    'POST',
+    JSON.stringify({
+      event_type: 'agent-rca-feedback',
+      client_payload: {
+        slack_channel: CHANNEL,
+        slack_thread_ts: THREAD_TS,
+        slack_message_ts: MESSAGE_TS,
+        slack_user_id: 'U01REVIEWER',
+        slack_event_id: 'Ev01AUTORCAFAILURE',
+        feedback: 'Please cover the retry race and preserve the original error.',
+      },
+    }),
+    '{"message":"Not Found"}',
+    404
+  );
   const response = await postSlack(feedbackEvent({}, 'Ev01AUTORCAFAILURE'), token);
   assert(response.status === 503, `expected retryable 503, got ${response.status}`);
   const outbound = await waitForCaptures(token, 1);
@@ -159,6 +179,7 @@ async function testDispatchFailureRequestsSlackRetry() {
     'reviewer was acknowledged before feedback became durable'
   );
   assert(outbound.length === 1, `permanent 404 should dispatch once, got ${outbound.length}`);
+  assert(outbound[0].responseStatus === 404, 'permanent failure fixture did not return 404');
 }
 
 async function testTransientDispatchFailureRetriesInsideAckWindow() {

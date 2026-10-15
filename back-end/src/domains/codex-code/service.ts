@@ -196,7 +196,7 @@ async function detectAndMarkCodexExhaustion(
   credentialFeedback?: CodexCredentialFeedback[]
 ): Promise<void> {
   const exhaustionPattern =
-    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing/i;
+    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low/i;
   if (
     credentialFeedback !== undefined
       ? credentialFeedback.length === 0
