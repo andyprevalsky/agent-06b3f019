@@ -193,6 +193,37 @@ function parseCodexResetTime(output: string): Date | null {
   return Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now() ? null : parsed;
 }
 
+function isRevokedCodexOAuth(reason: string): boolean {
+  return (
+    reason.trim() === 'oauth_refresh_invalid' ||
+    reason
+      .split('\n')
+      .some((body) => classifyComputeGrantFailure({ status: 401, body }).verdict === 'revoked')
+  );
+}
+
+function hasRevokedCodexDiagnostic(output: string): boolean {
+  let commandOutput = false;
+  const diagnostics = output.split('\n').filter((line) => {
+    if (line.startsWith('[Codex command output]')) {
+      commandOutput = true;
+      return false;
+    }
+    if (line.startsWith('[Codex exit_code]')) {
+      commandOutput = false;
+      return false;
+    }
+    if (commandOutput) return false;
+    return (
+      /^\[Codex\] (?:Error|Turn failed):/.test(line) ||
+      /^\d{4}-\d{2}-\d{2}T\S+\s+ERROR\s+codex_login::auth\S*:\s+Failed to refresh token\b/.test(
+        line
+      )
+    );
+  });
+  return diagnostics.some(isRevokedCodexOAuth) || output.trim() === 'oauth_refresh_invalid';
+}
+
 async function detectAndMarkCodexExhaustion(
   taskId: string,
   output: string,
@@ -211,18 +242,13 @@ async function detectAndMarkCodexExhaustion(
   let oauthReason = '';
   let oauthRevoked = false;
   let fundedKeyReason = '';
-  const isRevoked = (reason: string) =>
-    reason.trim() === 'oauth_refresh_invalid' ||
-    reason
-      .split('\n')
-      .some((body) => classifyComputeGrantFailure({ status: 401, body }).verdict === 'revoked');
   const fundingPattern =
     /no credits remaining|add credits to continue|credit_balance_exhausted|credit balance is too low/i;
 
   if (credentialFeedback !== undefined && credentialFeedback.length > 0) {
     for (const feedback of credentialFeedback) {
       if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
-        const revoked = isRevoked(feedback.reason);
+        const revoked = isRevokedCodexOAuth(feedback.reason);
         if (revoked || !oauthReason) {
           oauthReason = feedback.reason;
           oauthRevoked = revoked;
@@ -249,23 +275,7 @@ async function detectAndMarkCodexExhaustion(
         : hasOAuthCredential
           ? ''
           : output;
-    let commandOutput = false;
-    const diagnostics = oauthSegment.split('\n').filter((line) => {
-      if (line.startsWith('[Codex command output]')) {
-        commandOutput = true;
-        return false;
-      }
-      if (line.startsWith('[Codex exit_code]')) {
-        commandOutput = false;
-        return false;
-      }
-      if (commandOutput) return false;
-      return (
-        /^\[Codex\] (?:Error|Turn failed):/.test(line) ||
-        /^\d{4}-\d{2}-\d{2}T\S+\s+ERROR\s+codex_login::auth\S*:\s+Failed to refresh token\b/.test(line)
-      );
-    });
-    oauthRevoked = diagnostics.some(isRevoked) || oauthSegment.trim() === 'oauth_refresh_invalid';
+    oauthRevoked = hasRevokedCodexDiagnostic(oauthSegment);
     if (oauthRevoked || exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
     if (exhaustionPattern.test(fundedKeySegment) || fundingPattern.test(fundedKeySegment))
       fundedKeyReason = fundedKeySegment;
