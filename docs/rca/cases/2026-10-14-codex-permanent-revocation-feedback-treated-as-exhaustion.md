@@ -340,3 +340,104 @@ run is not the accepted gate evidence. The canonical runner correctly failed.
 This worker change forwards observed native errors; it adds no synthetic LLM
 context, changes no prompt and does not infer failures from printed text. It
 requires the normal agent-runtime production rollout as well as backend deploy.
+
+## Fresh development stabilization: canonical payment dialect parity
+
+The first deploy attempt closed blocked/review-unstable after its third review;
+its ledger is archived at `.context/deploy-review-cycle-attempt1.json`. No fourth
+review was requested. The user still requested finishing deployment, and the
+parent delegated development stabilization before any fresh deploy. Review
+comment4278874829 against fcd9b9f63 exposed a real remaining mismatch:
+`invalid_grant insufficient_quota` takes the native producer's quota fallback,
+but the complete error reason delivered by the worker was classified revoked
+by the canonical backend classifier because its payment vocabulary omitted
+insufficient_quota. The earlier finite precedence controls used usage_limit_reached
+and out-of-credits wording that was already recognized, missing this upstream
+vocabulary mismatch. This is a classifier defect, not a reason to bypass
+canonical payment-first ordering or change the producer/worker.
+
+Archive searches were `invalid_grant insufficient_quota payment precedence`
+and `provider quota dialect classifier expires credential`; the user explicitly
+required this existing case be amended rather than creating a duplicate.
+The finite source audit covers9 actual native quota spellings: usage limit,
+usage_limit, usage_limit_reached, hit your usage limit, purchase more credits,
+check your plan and billing, the full quota-exceeded/billing-plan sentence,
+insufficient_quota and insufficient quota. Four additional dialects come from
+the existing backend funding/exhaustion path (no credits remaining, add credits
+to continue, credit_balance_exhausted, credit balance is too low); two existing
+canonical dialects (out of credits, purchase credits) remain pinned too.
+
+`.context/pr1520-quota-stabilization/audit-native.cjs` executes the actual pure
+classifyOAuthFallbackReason function extracted from the unchanged ws-server
+source; all9 producer dialects retain quota-first fallback. `native-audit.json`
+records results. The actual build_codex_credential_feedback function was also
+executed in isolation from its Python AST with typed error/fallback events;
+`worker-audit.json` proves the insufficient_quota collision retains its complete
+reason as source oauth. Matrix structured inputs exercise the same authoritative
+feedback shape; this does not claim every dialect is emitted verbatim by every
+worker version. No provider, sandbox, producer or worker mutation was involved.
+
+Only canonical PAYMENT_MARKERS changes: extend purchase credits to permit more,
+unify usage limit/reached spellings, and add the existing plan/billing,
+insufficient_quota/insufficient quota and explicit backend funding dialects.
+Payment still precedes revocation; success and429 still return first. No bare
+quota matcher, resource-error classifier, prompt, schema, selection policy or
+producer/worker change is added. The pure negative controls pin bare quota,
+disk quota exceeded, rate quota exceeded and insufficient scope as nonpayment;
+adding genuine invalid_grant to those generic errors still proves revocation.
+Existing credit-balance, unknown-auth and bare invalid_grant behavior remains.
+
+The registered compute-grant-failure suite now has76 tests. Sixty finite
+collision controls combine15 dialects, both token orders and same-line/supported
+indented multiline bodies; each pins statuses400/401/403 as payment,429 as
+rate-limited and200 as success. Existing live-response fixtures remain labelled
+separately from these synthetic combinations. A shared support file supplies
+only test data, not production classification. It needs no independent runner.
+
+The existing discovered codex-code-revocation-feedback suite adds240 real
+persistOutput/Prisma cases: those60 bodies x legacy/structured x user/pool.
+Every one asserts selected Integration remains CONNECTED/active with temporary
+cooldown, selected connection connected/no auth error, no funded cooldown from
+an OAuth-only quota event, and unrelated account/connection untouched. Four
+additional native controls pin bare invalid_grant expiry and bare/disk/rate
+quota remaining healthy. The existing78 cases (including the2 private full
+historical replays) remain unchanged and pass;326 total cases pass with
+--historical,324 self-contained cases run normally. Existing cooldown isolation
+and exact-created-row cleanup are retained; no desired DB effect is mocked.
+
+Exact unchanged pre/post commands, repository root:
+
+```bash
+node --import tsx back-end/src/tests/blackbox/compute-grant-failure.blackbox.ts
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria node --import tsx back-end/src/tests/blackbox/codex-code-revocation-feedback.blackbox.ts --historical
+```
+
+Evidence directory `.context/pr1520-quota-stabilization/` retains the original
+classifier and final fixed copy plus immutable paired logs/exit receipts.
+`classifier-before.log` records exit1,32/76 passed (44 collision failures);
+`classifier-after.log` records exit0,76/76 passed. `db-before.log` records exit1,
+150 passed/176 failed; `db-after.log` records exit0,326/326 passed. The final test
+bodies were byte-for-byte identical across each pair; `result.json` records
+all three test/support hashes. These commands used explicit local Victoria URLs,
+never `.env` production DB. Complete historical transcript SHA256 remains
+b3321937f08d255920ee5f86378548b7e1c9614e13ec66c2a459b9113368406e;
+only synthetic task/account rows received it. Original session/credential rows
+were not mutated and no private body/token/claim was printed.
+
+Independent adversarial review found no actionable issue in marker scope,
+precedence, discovery or ownership assertions. Static receipts live beside the
+paired proof; the parent owns fullR7/TestLoop and any fresh deploy/review cycle.
+No push, commit, provider request or official review was made here. This
+stabilization does not reopen or extend the exhausted prior review ledger.
+
+### Parent acceptance before full R7 gates
+
+The parent reviewed and accepted the final production diff, unchanged paired
+76/76 classifier and326/326 real-DB proofs, lint and typecheck. The separately
+owned producer contract work is complete:7 groups/280 cases and42 controls,
+with14-dialect mapping evidence at
+`.context/attempt2-producer-dialect-proof.json`. That is producer-side evidence,
+not an additional backend or live-provider run. No remaining finite dialect gap
+was identified in the reviewed canonical fix. Source is handed back for parent
+freeze and fullR7 gates; deployment completion is not claimed. No further tests
+or production edits were made after acceptance, and Freedom remains untouched.

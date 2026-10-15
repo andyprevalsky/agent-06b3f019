@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { persistOutput, type CodexCredentialFeedback } from '../../domains/codex-code/service';
 import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
+import { codexQuotaCollisions } from './codex-quota-dialects.support';
 import { codexSmokeCreditSkipReason } from './codex-credit-skip';
 
 async function historicalOutput(): Promise<string> {
@@ -27,11 +28,20 @@ async function main() {
   };
   const captured =
     '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex] Error: You have no credits remaining.';
+  const quotaCollisions = new Map(
+    codexQuotaCollisions().flatMap(({ label, reason }) =>
+      [false, true].map(
+        (structured) =>
+          [`collision-${label}-structured-${structured}`, { reason, structured }] as const
+      )
+    )
+  );
   const failures: string[] = [];
   const taskIds: string[] = [];
   try {
     for (const source of ['user', 'pool']) {
       for (const mode of [
+        ...quotaCollisions.keys(),
         'plain',
         'structured',
         'initial',
@@ -71,6 +81,10 @@ async function main() {
         'native-payment-parity',
         'structured-payment-parity',
         'funded-legacy-payment',
+        'native-invalid-grant',
+        'native-disk-quota',
+        'native-rate-quota',
+        'native-bare-quota',
       ].filter((mode) => mode !== 'historical' || process.argv.includes('--historical'))) {
         try {
           await prisma.integration.deleteMany({ where: sharedWhere });
@@ -227,6 +241,17 @@ async function main() {
             output = '[Codex] Error: invalid_grant; out of credits';
           else if (mode === 'structured-payment-parity')
             feedback = [{ source: 'oauth', reason: 'invalid_grant; out of credits' }];
+          if (mode === 'native-invalid-grant') output = '[Codex] Error: invalid_grant';
+          else if (mode === 'native-disk-quota') output = '[Codex] Error: disk quota exceeded';
+          else if (mode === 'native-rate-quota') output = '[Codex] Error: rate quota exceeded';
+          else if (mode === 'native-bare-quota') output = '[Codex] Error: quota';
+          const collision = quotaCollisions.get(mode);
+          if (collision) {
+            output = `[Codex] Error: ${collision.reason}`;
+            feedback = collision.structured
+              ? [{ source: 'oauth', reason: collision.reason }]
+              : undefined;
+          }
           const healthy = [
             'funded-only',
             'empty-feedback',
@@ -243,8 +268,12 @@ async function main() {
             'funded-legacy-quota',
             'funded-legacy-native',
             'funded-legacy-payment',
+            'native-disk-quota',
+            'native-rate-quota',
+            'native-bare-quota',
           ].includes(mode);
           const quota =
+            collision !== undefined ||
             mode === 'quota' ||
             mode === 'quota-auth' ||
             mode === 'quota-reset' ||

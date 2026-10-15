@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import vm from "node:vm";
@@ -37,6 +38,10 @@ async function replay(event) {
 }
 
 function workerFeedback(events) {
+  return workerFeedbackMany([events])[0];
+}
+
+function workerFeedbackMany(eventLists) {
   // Load the actual pure worker function without importing Temporal/provider dependencies.
   const result = spawnSync("python3", ["-c", `
 import ast, json, sys
@@ -44,8 +49,8 @@ from typing import Any, Dict
 tree = ast.parse(open(sys.argv[1]).read())
 function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_codex_credential_feedback")
 exec(compile(ast.Module(body=[function], type_ignores=[]), sys.argv[1], "exec"))
-print(json.dumps(build_codex_credential_feedback(json.load(sys.stdin))))
-`, workerPath.pathname], { input: JSON.stringify(events), encoding: "utf8" });
+print(json.dumps([build_codex_credential_feedback(events) for events in json.load(sys.stdin)]))
+`, workerPath.pathname], { input: JSON.stringify(eventLists), encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -138,4 +143,74 @@ test("worker mapping of an earlier quota event remains unchanged", async () => {
     { type: "turn.failed", error: { message: "invalid_grant" } },
   ]);
   assert.deepEqual(workerFeedback(result.events), [{ source: "oauth", reason: "usage_limit_reached" }]);
+});
+
+// Finite spellings from every producer quota alternative and worker quota/funding
+// substring. Flags describe existing upstream policy, not backend classification.
+const quotaDialects = [
+  { id: "usage-space", text: "usage limit", producerQuota: true, workerCaptures: false },
+  { id: "usage-underscore", text: "usage_limit", producerQuota: true, workerCaptures: false },
+  { id: "usage-code", text: "usage_limit_reached", producerQuota: true, workerCaptures: true },
+  { id: "usage-full", text: "You've hit your usage limit", producerQuota: true, workerCaptures: true },
+  { id: "usage-hit", text: "hit your usage limit", producerQuota: true, workerCaptures: false },
+  { id: "purchase-more", text: "purchase more credits", producerQuota: true, workerCaptures: true },
+  { id: "insufficient-underscore", text: "insufficient_quota", producerQuota: true, workerCaptures: true },
+  { id: "insufficient-space", text: "insufficient quota", producerQuota: true, workerCaptures: false },
+  { id: "plan-billing", text: "check your plan and billing", producerQuota: true, workerCaptures: false },
+  { id: "plan-full", text: "Quota exceeded. Check your plan and billing details.", producerQuota: true, workerCaptures: true },
+  { id: "funding-none", text: "You have no credits remaining.", producerQuota: false, workerCaptures: true },
+  { id: "funding-add", text: "Add credits to continue.", producerQuota: false, workerCaptures: true },
+  { id: "funding-code", text: "credit_balance_exhausted", producerQuota: false, workerCaptures: true },
+  { id: "funding-low", text: "Your credit balance is too low.", producerQuota: false, workerCaptures: true },
+];
+
+test("all finite quota dialects retain actual renderer/fallback/worker mapping", async () => {
+  const rows = [];
+  const eventLists = [];
+  for (const dialect of quotaDialects) {
+    const messages = [dialect.text, `${dialect.text} invalid_grant`, `invalid_grant ${dialect.text}`, `${dialect.text}\ninvalid_grant`, `invalid_grant\n${dialect.text}`];
+    for (const [form, message] of messages.entries()) {
+      for (const type of ["error", "turn.failed"]) {
+        for (const nested of [false, true]) {
+          const diagnostic = nested ? { error: { message } } : { message };
+          const result = await replay({ type, ...diagnostic });
+          const expectedFallback = dialect.producerQuota ? "usage_limit_reached" : form === 0 ? null : "oauth_refresh_invalid";
+          const reasons = result.events.filter((event) => event.type === "auth_fallback").map((event) => event.reason);
+          assert.deepEqual(reasons, expectedFallback ? [expectedFallback] : [], `${dialect.id}/${form}/${type}/${nested}`);
+          assert.equal(result.runs, expectedFallback ? 2 : 1);
+          assert.ok(result.output.includes(message), "complete native message is retained");
+          rows.push({ dialect: dialect.id, form, type, nested, message, fallbackReason: reasons[0] ?? null, expectedFeedback: [{ source: expectedFallback ? "oauth" : "initial", reason: dialect.workerCaptures ? message : expectedFallback }] });
+          eventLists.push(result.events);
+        }
+      }
+    }
+  }
+  const feedback = workerFeedbackMany(eventLists);
+  assert.equal(feedback.length, rows.length);
+  for (const [index, row] of rows.entries()) {
+    row.workerFeedback = feedback[index];
+    assert.deepEqual(row.workerFeedback, row.expectedFeedback, JSON.stringify(row));
+  }
+  const negativeControls = [];
+  const controlEvents = [];
+  for (const dialect of quotaDialects) {
+    for (const kind of ["command_execution", "mcp_tool_call", "agent_message"]) {
+      const message = `${dialect.text}\ninvalid_grant`;
+      const item = { type: kind, command: "echo fixture", aggregated_output: message, result: message, text: message, exit_code: 1 };
+      const result = await replay({ type: "item.completed", item });
+      assert.equal(result.runs, 1, `${dialect.id}/${kind}: printed text must not cause retry`);
+      assert.equal(result.events.some((event) => event.type === "auth_fallback"), false);
+      negativeControls.push({ dialect: dialect.id, kind, message });
+      controlEvents.push(result.events);
+    }
+  }
+  const controlFeedback = workerFeedbackMany(controlEvents);
+  for (const [index, control] of negativeControls.entries()) {
+    control.workerFeedback = controlFeedback[index];
+    assert.deepEqual(control.workerFeedback, [], JSON.stringify(control));
+  }
+  if (process.env.CODEX_OAUTH_DIALECT_PROOF_PATH) {
+    const hash = (text) => createHash("sha256").update(text).digest("hex");
+    writeFileSync(process.env.CODEX_OAUTH_DIALECT_PROOF_PATH, JSON.stringify({ version: 1, producerSha256: hash(source), workerSha256: hash(readFileSync(workerPath)), dialects: quotaDialects, rowCount: rows.length, rows, negativeControls }, null, 2) + "\n");
+  }
 });
