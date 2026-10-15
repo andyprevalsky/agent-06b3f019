@@ -1294,5 +1294,111 @@ class MachineExecDeliveryTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class ControllerExportContinuationTests(unittest.TestCase):
+    """Real old-source seal and new launch/export, native-free temporary originals."""
+    def setUp(self):
+        import types
+        self.types = types
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve(); self.repo=self.base/'repo';self.repo.mkdir()
+        self.common=self.repo/'.git';self.common.mkdir()
+        (self.repo/'scripts').mkdir(); (self.repo/'.context/controller-workspace-volume').mkdir(parents=True)
+        self.oldref='1'*40;self.newref='2'*40
+        self.collector = subprocess.check_output(['git','-C',str(REPO),'show','659e3d6964f7b88d14a20f66d2fc8f14251beaf9:scripts/cloudbench-controller-export.py'])
+        self.old = {'__name__':'original_fixture_export','__file__':str(self.repo/'scripts/cloudbench-controller-export.py'),'CHECKED_COLLECTOR_SHA256':digest(self.collector)}
+        exec(compile(self.collector,'original-fixture-collector','exec'),self.old)
+        source=Path(os.environ.get('ROSE_CONTROLLER_EXPORT_TEST_SOURCE', str(ROOT/'cloudbench-controller-export.py')))
+        spec=importlib.util.spec_from_file_location('candidate_controller_export',source);self.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.module)
+        self.env=patch.dict(os.environ,{'FLY_MACHINE_ID':'abc123','FLY_APP_NAME':'fixture','GATE_WORKSPACE_VOLUME_ID':'vol_fixture'},clear=False);self.env.start();self.addCleanup(self.env.stop)
+        self.owner=self.repo/'.context/controller-workspace-volume/ownership.json'
+        self.owner.write_text(json.dumps({'source_ref':self.oldref,'app':'fixture','volume_id':'vol_fixture'}));self.original=self.owner.read_bytes()
+        os.environ['GATE_WORKSPACE_VOLUME_SHA256']=digest(self.original)
+        def git(repo,*args):
+            return str(self.common) if '--git-common-dir' in args else (self.oldref if self.phase=='old' else self.newref) if args==('rev-parse','HEAD') else ''
+        self.phase='old';self.birth=lambda pid:'proc-start:fixture-boot:'+str(pid)
+        self.old['git']=git;self.old['birth']=self.birth;self.old['writers']=lambda roots,permitted:[];self.old['record_temp_roots']=lambda repo,common:[]
+        self.oldcaller=self.base/'old-caller.json';self.oldcaller.write_text('{}')
+        self.oldrecord=self.base/'old-launch.json';self.oldarchive=self.base/'old.tar.gz';self.oldmanifest=self.base/'old-manifest.json'
+        self.old['launch'](types.SimpleNamespace(repo=self.repo,ref=self.oldref,driver_pid=791,caller=self.oldcaller,image='image@sha256:fixture',record=self.oldrecord))
+        rc=self.old['export'](types.SimpleNamespace(record=self.oldrecord,archive=self.oldarchive,manifest=self.oldmanifest,pending=self.base/'old-pending.json'));self.assertEqual(rc,0)
+        self.phase='new'
+        self.patches=[patch.object(self.module,'git',git),patch.object(self.module,'birth',self.birth),patch.object(self.module.subprocess,'check_output',return_value=self.collector),patch.object(self.module,'record_temp_roots',return_value=[])]
+        for item in self.patches:item.start();self.addCleanup(item.stop)
+        self.caller=self.base/'new-caller.json';self.caller.write_text('{"epoch":1234}')
+        self.cont=self.base/'continuation.json';self.record=self.base/'new-launch.json'
+        self.args=types.SimpleNamespace(repo=self.repo,ref=self.newref,driver_pid=900,caller=self.caller,image='image@sha256:fixture',epoch=1234.,record=self.cont,old_record=self.oldrecord,old_archive=self.oldarchive,old_manifest=self.oldmanifest)
+        self.launch=types.SimpleNamespace(**{**vars(self.args),'record':self.record,'continuation':self.cont})
+
+    def prepare(self):
+        if not hasattr(self.module,'continue_launch'):
+            # Owning baseline: actual old launch refuses changed-source retained ownership.
+            self.module.launch(self.launch)
+            self.fail('old exporter unexpectedly accepted unsealed continuation')
+        self.module.continue_launch(self.args)
+
+    def test_changed_source_continuation_preserves_original_seal_and_ownership(self):
+        self.prepare();self.module.launch(self.launch)
+        self.assertEqual(self.owner.read_bytes(),self.original)
+        row=json.loads(self.record.read_bytes());self.assertEqual(row['workspace_ownership_sha256'],digest(self.original));self.assertEqual(row['continuation']['old_init_pid'],791)
+        self.assertEqual(json.loads(self.oldrecord.read_bytes())['source_ref'],self.oldref)
+        calls=[]
+        def writers(roots,permitted):calls.append(set(permitted));return []
+        with patch.object(self.module,'writers',side_effect=writers):
+            self.assertEqual(self.module.export(self.types.SimpleNamespace(record=self.record,archive=self.base/'new.tar.gz',manifest=self.base/'new-manifest.json',pending=self.base/'new-pending.json')),0)
+        self.assertTrue(calls);self.assertTrue(all(791 in allowed and 900 in allowed and 1999 not in allowed for allowed in calls))
+        self.module.verify(self.types.SimpleNamespace(record=self.record,archive=self.base/'new.tar.gz',manifest=self.base/'new-manifest.json',ref=self.newref,machine='abc123',app='fixture',image='image@sha256:fixture',caller=self.caller))
+
+    def test_archived_continuation_must_equal_embedded_receipt(self):
+        self.prepare();self.module.launch(self.launch)
+        archive=self.base/'new.tar.gz';manifest=self.base/'new-manifest.json'
+        with patch.object(self.module,'writers',return_value=[]):
+            self.assertEqual(self.module.export(self.types.SimpleNamespace(record=self.record,archive=archive,manifest=manifest,pending=self.base/'pending.json')),0)
+        original_record=self.record.read_bytes();original_manifest=manifest.read_bytes()
+        for key,value in (('old_archive_sha256','f'*64),('unbound_receipt_field','different from archived original')):
+            with self.subTest(key=key):
+                record=json.loads(original_record);record['continuation'][key]=value
+                metadata=json.loads(original_manifest);metadata['record']=record
+                self.record.write_text(json.dumps(record));manifest.write_text(json.dumps(metadata))
+                with self.assertRaisesRegex(ValueError,'archived continuation'):
+                    self.module.verify(self.types.SimpleNamespace(record=self.record,archive=archive,manifest=manifest,ref=self.newref,machine='abc123',app='fixture',image='image@sha256:fixture',caller=self.caller))
+        self.record.write_bytes(original_record);manifest.write_bytes(original_manifest)
+
+    def test_exact_idle_init_permission_does_not_hide_sleep_child(self):
+        self.prepare();self.module.launch(self.launch)
+        with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':self.birth(1999)}]):
+            self.assertEqual(self.module.export(self.types.SimpleNamespace(record=self.record,archive=self.base/'refused.tar.gz',manifest=self.base/'refused-manifest.json',pending=self.base/'pending.json')),75)
+        self.assertFalse((self.base/'refused.tar.gz').exists())
+
+    def test_mismatched_continuation_bindings_refuse_before_launch(self):
+        self.prepare();original=self.cont.read_bytes()
+        faults={'old_ownership_sha256':'f'*64,'new_ref':'f'*40,'new_driver_birth':'wrong','old_init_birth':'wrong','epoch':1235.,'old_record_sha256':'f'*64,'old_manifest_sha256':'f'*64,'old_archive_sha256':'f'*64,'resource_release_verified':True}
+        for key,value in faults.items():
+            with self.subTest(key=key):
+                row=json.loads(original);row[key]=value;self.cont.write_text(json.dumps(row))
+                with self.assertRaises(ValueError):self.module.launch(self.launch)
+                self.assertFalse(self.record.exists())
+        self.cont.write_bytes(original)
+
+    def test_replaced_original_root_or_live_init_refuses(self):
+        self.prepare()
+        with patch.object(self.module,'birth',side_effect=lambda pid:'foreign' if pid==791 else self.birth(pid)):
+            with self.assertRaises(ValueError):self.module.launch(self.launch)
+        self.common.rename(self.repo/'.git-original');self.common.mkdir()
+        with self.assertRaises(ValueError):self.module.launch(self.launch)
+
+    def test_original_collector_and_volume_remain_mandatory(self):
+        self.prepare()
+        with patch.object(self.module.subprocess,'check_output',return_value=self.collector+b'\n# changed'):
+            with self.assertRaises(ValueError):self.module.launch(self.launch)
+        with patch.dict(os.environ,{'GATE_WORKSPACE_VOLUME_ID':'vol_foreign'}):
+            with self.assertRaises(ValueError):self.module.launch(self.launch)
+        with patch.dict(os.environ,{},clear=True):
+            with self.assertRaises(ValueError):self.module.launch(self.launch)
+
+    def test_default_launch_keeps_original_source_guard(self):
+        self.launch.continuation=None
+        with self.assertRaisesRegex(ValueError,'workspace ownership changed'):self.module.launch(self.launch)
+
+
 if __name__ == "__main__":
     unittest.main()

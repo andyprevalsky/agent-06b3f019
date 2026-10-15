@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 import socket
 import pwd
+import math
+import re
+import types
 import stat
 import subprocess
 import tarfile
@@ -109,6 +112,103 @@ def entries(prefix, path):
     else: yield prefix, path
 
 
+def sealed_bytes(path, limit=None):
+    path = Path(path)
+    if path.resolve(strict=True) != path:
+        raise ValueError("continuation source path is redirected")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or (limit is not None and before.st_size > limit):
+            raise ValueError("unsafe continuation source")
+        digest = hashlib.sha256()
+        raw = bytearray() if limit is not None else None
+        for chunk in iter(lambda: source.read(1048576), b""):
+            digest.update(chunk)
+            if raw is not None:
+                raw.extend(chunk)
+                if len(raw) > limit: raise ValueError("continuation source exceeds bound")
+        after = os.fstat(source.fileno())
+    def identity(value):
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+    if identity(before) != identity(after) or identity(after) != identity(path.lstat()):
+        raise ValueError("continuation source changed")
+    return digest.hexdigest(), bytes(raw) if raw is not None else None
+
+
+def continuation_binding(value, repo, ref, driver_pid, caller, image, epoch):
+    """Verify the original seal with its original collector, never with new bytes."""
+    if value.get('resource_release_verified') is not False:
+        raise ValueError('continuation cannot authorize release')
+    if value.get("schema") != "controller-export-continuation-v1":
+        raise ValueError("unknown continuation schema")
+    if type(epoch) not in (int,float) or not math.isfinite(epoch) or epoch <= 0 or value["epoch"] != epoch:
+        raise ValueError("continuation epoch differs")
+    if not re.fullmatch('[0-9a-f]{40}', ref) or value["new_ref"] != ref:
+        raise ValueError("continuation source differs")
+    if value["new_driver_pid"] != driver_pid or value["new_driver_birth"] != birth(driver_pid):
+        raise ValueError("continuation driver differs")
+    caller_sha, _ = sealed_bytes(caller, 1048576)
+    if value['new_caller_path'] != str(Path(caller).resolve(strict=True)): raise ValueError('continuation caller path differs')
+    if value["new_caller_sha256"] != caller_sha: raise ValueError("continuation caller differs")
+    paths = {key:Path(value[key]) for key in ('old_record','old_manifest','old_archive')}
+    raws = {}
+    for key,path in paths.items():
+        digest, raw = sealed_bytes(path, None if key == 'old_archive' else 67108864)
+        if digest != value[key + '_sha256']: raise ValueError("original seal changed")
+        raws[key] = raw
+    record = json.loads(raws['old_record'])
+    old_ref = record['source_ref']
+    if not re.fullmatch('[0-9a-f]{40}', old_ref): raise ValueError("invalid original source")
+    common = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+    if record['repo'] != str(repo) or record['common_git'] != str(common): raise ValueError("continuation roots differ")
+    if record['host'] != socket.gethostname() or record['machine_id'] != os.environ.get('FLY_MACHINE_ID') or record['app'] != os.environ.get('FLY_APP_NAME') or record['image'] != image:
+        raise ValueError("continuation native identity differs")
+    if record['driver_pid'] == driver_pid or birth(record['driver_pid']) != record['driver_birth']:
+        raise ValueError("original idle init identity differs")
+    if value['old_init_pid'] != record['driver_pid'] or value['old_init_birth'] != record['driver_birth']:
+        raise ValueError("continuation idle init differs")
+    if set(record['root_anchors']) != {str(repo),str(common)}: raise ValueError("original root set differs")
+    for name,expected in record['root_anchors'].items():
+        path=Path(name); actual=file_state(path)
+        if path.is_symlink() or any(actual[k] != v for k,v in expected.items()): raise ValueError("original roots changed")
+    owner = repo/'.context/controller-workspace-volume/ownership.json'
+    owner_sha, owner_raw = sealed_bytes(owner, 1048576)
+    ownership = json.loads(owner_raw)
+    if owner_sha != record.get('workspace_ownership_sha256') or owner_sha != value['old_ownership_sha256'] or owner_sha != os.environ.get('GATE_WORKSPACE_VOLUME_SHA256'):
+        raise ValueError("original workspace ownership changed")
+    if ownership['source_ref'] != old_ref or ownership['volume_id'] != os.environ.get('GATE_WORKSPACE_VOLUME_ID') or ownership['app'] != record['app']:
+        raise ValueError("original workspace identity differs")
+    collector = subprocess.check_output(['git','-c','safe.directory='+str(repo),'-C',str(repo),'--no-replace-objects','show',old_ref+':scripts/cloudbench-controller-export.py'])
+    if hashlib.sha256(collector).hexdigest() != record['collector_sha256']:
+        raise ValueError("original collector differs")
+    namespace={'__name__':'original_controller_seal_verifier','__file__':str(repo/'scripts/cloudbench-controller-export.py'),'CHECKED_COLLECTOR_SHA256':record['collector_sha256']}
+    exec(compile(collector, 'original-source-bound-controller-export', 'exec'), namespace)
+    namespace['verify'](types.SimpleNamespace(archive=paths['old_archive'],manifest=paths['old_manifest'],record=paths['old_record'],ref=old_ref,machine=record['machine_id'],app=record['app'],image=image,caller=None))
+    manifest=json.loads(raws['old_manifest'])
+    for member,expected in (('context/controller-workspace-volume/ownership.json',owner_sha),('controller-output/launch.json',value['old_record_sha256'])):
+        if manifest['files'].get(member,{}).get('sha256') != expected: raise ValueError("original archive lacks ownership binding")
+    # The full verification must not race replacements of its inputs.
+    for key,path in paths.items():
+        if sealed_bytes(path)[0] != value[key+'_sha256']: raise ValueError("original seal changed during verification")
+    return record
+
+
+def continue_launch(args):
+    repo=args.repo.resolve(strict=True)
+    if git(repo,'rev-parse','HEAD') != args.ref: raise ValueError("continuation checkout differs")
+    old=json.loads(sealed_bytes(args.old_record, 67108864)[1])
+    value={'schema':'controller-export-continuation-v1','new_ref':args.ref,'epoch':args.epoch,
+           'new_driver_pid':args.driver_pid,'new_driver_birth':birth(args.driver_pid),
+           'new_caller_sha256':sealed_bytes(args.caller,1048576)[0],'new_caller_path':str(args.caller.resolve(strict=True)),
+           'old_ownership_sha256':old.get('workspace_ownership_sha256'),
+           'old_init_pid':old['driver_pid'],'old_init_birth':old['driver_birth'],
+           'resource_release_verified':False}
+    for key in ('old_record','old_manifest','old_archive'):
+        path=getattr(args,key).resolve(strict=True); value[key]=str(path);value[key+'_sha256']=sealed_bytes(path)[0]
+    continuation_binding(value,repo,args.ref,args.driver_pid,args.caller,args.image,args.epoch)
+    sync_json(args.record,value)
+
+
 def launch(args):
     repo = args.repo.resolve(strict=True)
     if git(repo, "rev-parse", "HEAD") != args.ref:
@@ -129,11 +229,20 @@ def launch(args):
              "dependency_layout": {str(path.relative_to(repo)):os.readlink(path) if path.is_symlink() else "directory" if path.is_dir() else "absent"
                                    for path in (repo/"node_modules",repo/"back-end/node_modules",repo/"front-end/node_modules",repo/"agents/venv")},
              "collector_sha256": globals().get("CHECKED_COLLECTOR_SHA256") or hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    continuation_path = getattr(args, 'continuation', None)
+    if continuation_path:
+        continuation_sha, continuation_raw = sealed_bytes(continuation_path, 1048576)
+        continuation = json.loads(continuation_raw)
+        continuation_binding(continuation, repo, args.ref, args.driver_pid, args.caller, args.image, args.epoch)
+        value['continuation'] = continuation
+        value['continuation_sha256'] = continuation_sha
+        value['continuation_path'] = str(continuation_path)
+        value['epoch'] = args.epoch
     if os.environ.get("GATE_WORKSPACE_VOLUME_ID"):
         owner=repo/".context/controller-workspace-volume/ownership.json"
         if owner.is_symlink() or not owner.is_file(): raise ValueError("workspace ownership missing")
         raw=owner.read_bytes();volume=json.loads(raw)
-        if hashlib.sha256(raw).hexdigest()!=os.environ.get("GATE_WORKSPACE_VOLUME_SHA256") or volume["volume_id"]!=os.environ["GATE_WORKSPACE_VOLUME_ID"] or volume["source_ref"]!=args.ref or volume["app"]!=value["app"]:
+        if hashlib.sha256(raw).hexdigest()!=os.environ.get("GATE_WORKSPACE_VOLUME_SHA256") or volume["volume_id"]!=os.environ["GATE_WORKSPACE_VOLUME_ID"] or (volume["source_ref"]!=args.ref and not continuation_path) or volume["app"]!=value["app"]:
             raise ValueError("workspace ownership changed before launch")
         value["workspace_ownership_sha256"]=hashlib.sha256(raw).hexdigest()
     sync_json(args.record, value)
@@ -159,6 +268,14 @@ def export(args):
             raise ValueError("original workspace ownership changed; retain host")
     roots = [repo, common, *[Path(value) for value in record["temp_state_roots"] if Path(value).exists()]]
     permitted = {os.getpid(), record["driver_pid"]}
+    if 'continuation' in record:
+        digest, raw = sealed_bytes(record['continuation_path'],1048576)
+        if digest != record['continuation_sha256'] or json.loads(raw) != record['continuation']:
+            raise ValueError("continuation receipt changed")
+        binding=record['continuation']
+        old = continuation_binding(binding,repo,record['source_ref'],record['driver_pid'],
+                                   Path(binding['new_caller_path']),record['image'],record['epoch'])
+        permitted.add(old['driver_pid'])  # exact verified init only; descendants remain ordinary writers
     active = writers(roots, permitted)
     ownership = common / "cloudbench-fleet-ownership"
     if ownership.exists():
@@ -180,6 +297,8 @@ def export(args):
             with tarfile.open(fileobj=out, mode="w:gz", dereference=False) as archive:
                 selected = sources(repo, common, record["temp_state_roots"])
                 selected.append(("controller-output/launch.json", args.record))
+                if 'continuation' in record:
+                    selected.append(('controller-output/continuation.json',Path(record['continuation_path'])))
                 for prefix, root in selected:
                     for name, path in entries(prefix, root):
                         before = file_state(path)
@@ -240,9 +359,24 @@ def verify(args):
         for chunk in iter(lambda:source.read(1048576), b""): digest.update(chunk)
     if digest.hexdigest() != manifest["archive_sha256"]: raise ValueError("archive bytes differ")
     expected = manifest["files"]
+    if 'continuation' in record:
+        continuation=record['continuation']
+        if continuation.get('new_ref') != record['source_ref'] or continuation.get('new_driver_pid') != record['driver_pid'] or continuation.get('new_driver_birth') != record['driver_birth'] or continuation.get('epoch') != record.get('epoch') or continuation.get('resource_release_verified') is not False:
+            raise ValueError('continuation launch binding differs')
+        if expected.get('controller-output/continuation.json',{}).get('sha256') != record['continuation_sha256']:
+            raise ValueError('continuation original missing from archive')
     with tarfile.open(args.archive, "r:gz") as archive:
         members = archive.getmembers()
         if len(members) != len(expected) or {m.name for m in members} != set(expected): raise ValueError("archive membership differs")
+        if 'continuation' in record:
+            member = archive.getmember('controller-output/continuation.json')
+            if not member.isfile() or member.size > 1048576:
+                raise ValueError('unsafe archived continuation original')
+            source = archive.extractfile(member)
+            if source is None: raise ValueError('missing archived continuation original')
+            raw = source.read(1048577)
+            if len(raw) > 1048576 or hashlib.sha256(raw).hexdigest() != record['continuation_sha256'] or json.loads(raw) != record['continuation']:
+                raise ValueError('archived continuation differs from embedded receipt')
         for member in members:
             if member.name.startswith("/") or ".." in Path(member.name).parts: raise ValueError("unsafe archive name")
             row = expected[member.name]
@@ -262,8 +396,9 @@ def verify(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("caller","launch","export","verify"))
-    for name in ("repo","record","caller","archive","manifest","pending"): parser.add_argument("--"+name,type=Path)
+    parser.add_argument("action", choices=("caller","launch","export","verify","continue"))
+    for name in ("repo","record","caller","archive","manifest","pending","continuation","old-record","old-manifest","old-archive"): parser.add_argument("--"+name,type=Path)
+    parser.add_argument("--epoch", type=float)
     parser.add_argument("--driver-pid", type=int); parser.add_argument("--ref"); parser.add_argument("--image")
     parser.add_argument("--machine"); parser.add_argument("--app")
     args = parser.parse_args()
@@ -272,6 +407,7 @@ def main():
         if not identity: raise ValueError("original caller birth unavailable")
         sync_json(args.record, {"host":socket.gethostname(),"pid":args.driver_pid,"birth":identity})
         return 0
+    if args.action == "continue": continue_launch(args); return 0
     if args.action == "launch": launch(args); return 0
     if args.action == "export":
         try: return export(args)
