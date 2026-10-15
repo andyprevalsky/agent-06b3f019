@@ -103,3 +103,177 @@ claim. Archive only OPEN in isolated checkout, no adoption. Freedom preserved.
 ## Reusable lesson
 
 Separate an observed prerequisite divergence from its unproven cause and from downstream delivery paths that the agent never exercised.
+
+## Follow-up transport audit: replay parity qualification (2026-10-15)
+
+The six original paid decision calls, full private responses, request IDs, timings
+and usage remain unchanged. A later read-only source/serialization audit narrows
+“original-context” above: they replayed captured visible context and raw model/route,
+not a demonstrated byte-identical original HTTP request. This qualification does
+not infer a cache cause, model limitation, repair, or reason for the native handoff.
+
+Original complete_browser_use builds one system message containing an internal
+static/dynamic boundary sentinel. Its post-response dump splits that sentinel into
+two system messages. The executed replay driver passed the dump messages directly
+to collect without restoring that segmentation. Foundry's Responses builder joins
+them into identical instructions, but derives its static cache scope differently:
+original static prefix versus replay joined static+dynamic system text. Namespace
+preservation therefore did not preserve the generated provider prompt_cache_key.
+
+Pure offline actual-builder comparison using a common logical model override proves
+one difference in SOURCE-RECONSTRUCTED bodies: prompt_cache_key. Instructions, input,
+tools and all remaining generated fields match. These are not captured historical
+wire bytes; actual deployment/cooldown/endpoint state was not retained. Source dump
+hash190628c7206c35c8217c03da7dfe7d5de13a7d6ec369e62c9e67c23224fce79a unchanged.
+
+Caller temperature0.3, max_tokens2048 and seedNone above are caller settings only:
+this Foundry Responses builder emits no temperature, output-token-limit or seed
+fields. They cannot establish wire generation settings or explain variability.
+Original inner collect and replay both used dump_contextFalse; old replay changed
+skip_cache_writeFalse toTrue. Foundry does not consume that flag, though other
+fallback transports can. Same logical model/route does not prove same deployment
+or provider cache state. Mutable/prefetch message corruption was not established;
+post-response snapshots cannot independently prove what was at the HTTP send.
+No retained actual outgoing wire body was found in inspected local evidence.
+
+A corrected OFFLINE preparation driver restores the original system segmentation
+and default skip_cache_writeFalse, then compares against independent production
+browser-message construction and the actual provider body builder. It makes no
+HTTP/model/tool/inbox call. In a fixed common model/deployment placeholder context:
+
+- Expected source-derived bodySHA256:d3ee94ba97001c46edb67fd21e720d487036c6f7ea2ba706678088c088deb3fc.
+- Old dump-replay bodySHA256:a79ec64a7a520aedfd7d9cd8a82e984a03374511e35204a41e64f89b03472469.
+- Corrected body equals expected, INCLUDING provider prompt_cache_key. This repairs
+  offline replay preparation parity only, not the authentication task or its cause.
+
+Artifacts: /home/boxes/rose/.context/auth-deploy/native-replay-transport-audit/
+findings.md, serialization-comparison.json, corrected-replay-proof.json and
+old-six-preservation.json. Safe offline command:
+`agents/venv/bin/python .context/auth-deploy/native-replay-transport-audit/prepare_corrected_replay.py`.
+The driver contains no network execution; an actual paid repeat remains unauthorized.
+Read-only peer review confirmed the reconstructed-body claim and historical-wire
+limits. The case remains OPEN/unresolved; no live, runtime or active review-head
+change, cache-causality claim, repair adoption or new paid call follows.
+
+## Corrected bounded native recurrence and identity audit (2026-10-15)
+
+Parent later explicitly authorized at most6 corrected original-context decision-only
+calls after the offline reconstruction above. These are a NEW, separate set; old
+sixcalls0immediate-assistance and all12oldprivate-response/receipt files remain
+unchanged. Stopat6 was honored. No returned tool, site/inbox/DB action, benchmark,
+upgrade, runtime change or further repeat was authorized/performed by this phase.
+
+Prepared kwargs restore original internal system segmentation/cache scope and
+skip_cache_writeFalse, keep dump_contextFalse and the same captured pool/context/
+tools/caller settings. Offline source-derived expected-body assertion passed before
+first call. A body-preserving existing httpx send hook observed already-built POST
+bytes without altering request, headers, URL or arguments. It records sanitized
+hashes/field names, not private body/key/endpoint. Local parse/hash/rebuild/assertion
+adds timing overhead before sending; this is not zero-effect instrumentation or
+historical latency parity.
+
+All6actualoutgoingPOSTcanonicalbodySHA256 values equal
+`d3ee94ba97001c46edb67fd21e720d487036c6f7ea2ba706678088c088deb3fc`, including
+provider prompt_cache_key; each is equal to source-derived expected body using
+that call's actual selected deployment override. Raw modelgpt-6-sol-foundry and
+routefoundry all6. This proves present-body correspondence, not the absent historical
+original wire, headers, endpoint version, deployment/cooldown or provider cache state.
+Caller temperature/max/seed remain absent from emitted Foundry generation fields.
+
+Corrected decisions/request IDs/elapsed:
+
+-1 back-to-sign-in155;4cdc030247b5;6.089s.
+-2 minted-email input110;c7d8dcabccc9;6.436s.
+-3 immediate authentication assistance;12156a6e8657;3.361s.
+-4 minted-email input110;c5826c7e4b75;4.113s.
+-5 minted-email input110;d222e8e5d7ee;5.072s.
+-6 minted-email input110;e7cfa65700f4;4.218s.
+
+Thus the captured unattempted-route prerequisite divergence recurs1/6 under the
+corrected construction. This is bounded decision recurrence, not deterministic
+cause, model intelligence, statistical separation from old0/6, cache causality,
+authentication success or repair. Alternative actions were not executed and could
+still fail later. Allusage/cachemetrics/timings retained:54696prompt/1745completion
+tokens,29.289s sumelapsed including instrumentation; no billing amount invented.
+Artifacts: native-replay-transport-audit/corrected-calls/summary.json,final-proof.json,
+trial1through6 and private responses. Safe retained-file regeneration:
+`agents/venv/bin/python .context/auth-deploy/native-replay-transport-audit/summarize_corrected_calls.py`.
+Do not rerun the paid driver without new authorization.
+
+### Correct baseline comparators and authority distinction
+
+Checksum-verified original e576 campaign minted-email was PASS, root
+ac8e7169-6b29-4c36-bdc2-020140e347a7. Step3 dump1792009006703-eea5a79cb949 chose
+exposed minted email, then requested a code and completed authenticated. This
+case's initial FAIL566.8 refers to a6ae root9a1fa767, NOT an e576 minted-email failure.
+Original e576 emailFAIL3caf15c9 was PASSWORD-email-2fa, a distinct task now passing.
+
+Original e576 magic-link was PASS rootda82a392-4b87-46ec-908a-2a5b07220b56; its
+step2 dump1792010303655-dcdf25bf35e3 clicked the email-link alternative, followed
+by minted email/link retrieval/completion. Current a6ae magic-link root846382aa
+failed568.7 after pre-send assistance. SMS is an original/currentFAIL observed
+recipient/account-lookup recurrence, recorded separately in its existing OPEN case.
+
+At matched original/current email and magic decision points, first static system
+text, Authentication section, assistance-tool definition and raw model label are
+exactly equal. Other native context/URL/index/history/time/provider conditions
+are not controlled. These are verdict comparators, not causal source-regression
+proof. Passing native traces show existing attempt policy can support minted
+sign-in without adding model-visible verified-registration assertions.
+
+Allthree root user goals simply ask for the member number at supplied URL; no
+explicit personal-phone-only account restriction. Child email goal's “logged-in”
+wording was generated by the agent, not an extra user restriction. Task user,
+AgentIdentity custody and fixture holderName/userId align. Fixture privately seeds
+a verified member under minted email/phone for email/SMS/magic; exposed email
+matches creation log in allthree. Private expectedSignInEmail/memberNumber manifest
+is runner authority, not browser inventory. The ordinary goal substitution exposes
+URL, not those answers. No fixture/data/evaluator contradiction was established.
+
+Current actual tool already requires trying available OTP/minted email before help.
+It does not require confirmed registration before a permissible attempt. Distinguish
+attempt permission/policy from certified account match: AgentIdentity proves local
+user custody; enabled MintedAccount does not certify site membership because API
+can create that realm row on read. PhoneProvider is receipt provenance, not account
+registration. Absence of a registration map alone neither excuses premature help
+nor justifies inventing a registry, leaking fixture oracle or forcing identity.
+If guaranteed membership is required by a future product invariant, authority must
+come from explicit user designation or trustworthy site-bound verified auth/signup
+observation, not enabled/realmrow/provider/name.
+
+### Existing runtime telemetry cannot certify semantic exhaustion
+
+Read-only AuthRuntimeState audit: successful typing of a credential ref can mark
+attempted before submit; email/SMS OTP share a boolean; minted_attemptable is email
+presence, not observed current form; no recipient-specific send/resend/timing or
+user-only-step authority exists. Assistance payload carries owner/session/realm/
+URL/mode but no semantic exhaustion proof. Its encrypted continuation snapshot is
+telemetry, not an independent gate predicate.
+
+A blanket minted-unattempted guard could block real app approval or other valid
+help; typed-but-unsubmitted refs could pass incorrectly. Existing no-guard tests
+record current behavior, not a perpetual prohibition on later evidence-backed,
+approved narrow validation. A current-DOM+custody+existing-policy validator remains
+coherent in principle and need not require confirmed membership. No reliable
+general operation-applicability/user-only exception predicate or causal owning
+fail/pass correction has been established here. Do not manufacture an applicability
+flag or replace human fallback with forced recipient use.
+
+Safe independent invariants are existing owner/realm/provenance and admission of
+already eligible worker-owned native input before transfer. The existing bounded
+drain covers the latter; current pre-send incident does not violate it. Handoff's
+constant “options were exhausted” summary overstates pre-send evidence; a neutral
+summary/evidence-integrity correction would not itself repair model selection or
+prove canonical success and is not adopted here.
+
+The deepest causal owned class and Step5b stopping rung remain unproven. A factual
+correction needs an actual authoritative source fact lost/misrepresented at an
+owning boundary and unchanged baseline-fail/candidate-pass controls. A policy
+correction needs meaningful decision/outcome separation with legitimate user-only,
+explicit-account, unknown-membership and challenge controls. A contains-string
+assertion would already pass because must-try text exists. No new prompt/schema/
+gate, blanket identity choice, causal classification or repaired outcome is licensed
+by this diagnostic. Read-only peer review confirmed these limits. Identityaudit
+artifacts live under /home/boxes/rose/.context/auth-deploy/identity-applicability-audit/;
+findings.md,facts.json,passing-baseline-comparators.json,handoff-proof.json retain
+exact sanitized evidence. Case remains OPEN/unresolved.
