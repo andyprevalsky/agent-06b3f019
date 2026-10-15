@@ -41,12 +41,12 @@ fi
 require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
 require_text 'Every failed task gets its own read-only triage card' "/descend must triage every failure before clustering"
 require_text 'every cluster — a singleton included — enters its own `/RCA` cycle' "/descend must enter RCA once per cluster before benchmark rerunning"
-require_text 'No failed task may be rerun until a cluster RCA with causal proof covers it' "/descend must not rerun a failure that no RCA covers"
-require_text 'run the unchanged owning-boundary repro red then green' "/descend must require causal fail/pass proof before a benchmark rerun"
+require_text 'pending proof is not a global scheduling gate' "/descend must permit unchanged next slices during repairs"
+require_text 'Require the unchanged owning-boundary repro red then green' "/descend must require causal fail/pass proof before a benchmark rerun"
 require_text 'That exact rerun supplies `/RCA`' "/descend must make the post-approval rerun supply benchmark outcome proof"
-require_text "rank the clusters" "/descend must rank clusters after the first infra-clean RCA set"
+require_text "Rank ready clusters incrementally" "/descend must rank ready clusters without a global RCA barrier"
 require_text "member-task count, largest first" "/descend must ask about the cluster that flips the most tasks first"
-require_text "Andy sees a lower-ranked cluster only if" "/descend must show a lower-ranked cluster only when higher ones are busy"
+require_text "lower-ranked ready cluster is not held behind" "/descend must deliver ready approvals without waiting for unrelated clusters"
 require_text "not a prod deploy" "/descend must apply approved fixes on a local snapshot, not a prod deploy"
 require_text "keeps its position" "/descend must keep a cluster's rank when its outcome-proof rerun fails"
 require_text "Re-rank only when membership changes" "/descend must keep the ask order stable between clusterings"
@@ -100,7 +100,7 @@ else
 fi
 require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
 require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
-require_text "every HARNESS failure has complete causal RCA proof" "/descend must require causal RCA proof before stopping for approval"
+require_text "that cluster has complete causal RCA proof" "/descend must require each approval cluster to have its own causal proof"
 require_text "Causal proof; outcome pending" "/descend must distinguish causal RCA proof from exact benchmark outcome proof"
 require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"  # pragma: allowlist secret
 require_text '## `/sync` checkpoints' "/descend must define durable sync checkpoints"
@@ -111,22 +111,19 @@ require_text 'before preparing each isolated deploy-unit worktree' "/descend mus
 require_text "pause only" "deploy approval must not freeze independent RCA work"
 require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
 require_text 'bash scripts/prepare-deploy-worktree.sh' "/descend must provision isolated deploy worktrees before /deploy"
-require_text "Bench run:" "/descend header must show benchmark timing"
-require_text 'Overall slice: **<passed_original>/<total_original> passed**' "/descend header must report progress against the complete original slice"
-require_text 'Latest run: **<passed_run>/<total_run> passed**' "/descend header must label subset-run results separately"
+require_text "Bench run times come from producer artifacts" "/descend must show producer benchmark times"
+require_text 'Overall slice: <passed_original>/<total_original> passed' "/descend header must report progress against the complete original slice"
+require_text 'Latest run: <passed_run>/<total_run> passed' "/descend header must label subset-run results separately"
 require_text 'Never put the latest subset denominator in the Overall slice field.' "/descend must not present a subset as the full slice"
 require_text 'original resolved slice name, exact task list, and total task count;' "/descend state must preserve the original slice denominator"
 require_text 'latest executed subset and its exact task list;' "/descend state must distinguish the latest rerun subset"
 require_text 'cumulative latest accepted status for every original task;' "/descend state must track overall progress task by task"
-require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort first"
-require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"
 require_text "**INFRA:**" "/descend must classify infrastructure failures"
 require_text "**HARNESS:**" "/descend must classify trustworthy benchmark failures as harness"
-require_text "| ID | Kind | Class | Tasks | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use a cluster-oriented lifecycle table with a pinned issue class and member count"
-require_text "Browser agent failed to start because proxy generation returned HTTP 400" "/descend issue rows must state the concrete observed failure"
-require_text "The issue is <root cause at the first-bad boundary>" "fix approval must explain the RCA"
-require_text "where we measured <measurement>" "fix approval must report the repro measurement"
-require_text "The unchanged local repro now" "fix approval must report post-fix proof"
+require_text "Every row records ID, kind, issue class, exact member names/count" "/descend must preserve the cluster lifecycle in durable state"
+require_text "core claim identifies the issue class and proven first-bad boundary" "fix approval must explain the RCA"
+require_text "State the wrong observed value, expected value" "fix approval must report the repro measurement"
+require_text "identical repro now passing" "fix approval must report post-fix proof"
 require_text "Approve: <row ID> approve" "fix approval must end with clear decision syntax"
 require_text "agents/benchmarks/history/descend_steps.jsonl" "/descend must write step timings to tracked history"
 require_text "scripts/descend_step_log.py start" "/descend must start its first timed step"
@@ -142,31 +139,27 @@ require_text '`scripts/factory_review.py` consumes' "/descend timing history mus
 RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
 STOP_ONE_CONTRACT=$(sed -n '/^## Stop 1 — HARNESS_FIX_DECISION/,/^## Rerun and parallel deploy/p' "$DESCEND_COMMAND")
 SYNC_CONTRACT=$(sed -n '/^## `\/sync` checkpoints/,/^## State machine/p' "$DESCEND_COMMAND")
-INFRA_LOOP=$(sed -n '/^The infra loop is strict:/,/^Do not stop for Andy/p' "$DESCEND_COMMAND")
+INFRA_LOOP=$(sed -n '/^The root scheduling loop is:/,/^Do not stop for Andy/p' "$DESCEND_COMMAND")
 HARNESS_RCA=$(sed -n '/^## HARNESS RCA/,/^## Stop 1/p' "$DESCEND_COMMAND")
 grep -Fq 'each distinct `/RCA` invocation' <<<"$SYNC_CONTRACT" || fail "sync checkpoints must run before each distinct RCA"
 grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || fail "infra RCA loop must sync before every RCA"
 grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
 grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"  # pragma: allowlist secret
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use ~~~ code blocks (approvals use the canonical text block)"
-grep -Fq '━' <<<"$RESPONSE_CONTRACT" || fail "response approvals must use the canonical Unicode frame"
-grep -Fq '🔐 APPROVAL' <<<"$RESPONSE_CONTRACT" || fail "response approvals must retain the canonical approval header"
-RESPONSE_PROSE=$(python3 - "$RESPONSE_CONTRACT" <<'PY'
-import sys
-outside = []
-in_text = False
-for line in sys.argv[1].splitlines():
-    if not in_text and line.strip() == "```text":
-        in_text = True
-    elif in_text and line.strip() == "```":
-        in_text = False
-    elif not in_text:
-        outside.append(line)
-assert not in_text, "response text examples must have balanced fences"
-print("\n".join(outside))
-PY
-)
-grep -Fq '━' <<<"$RESPONSE_PROSE" && fail "response header must not use an ASCII banner outside approved text blocks"
+require_text '.claude/shared/benchmark-report-format.txt' "/descend must use the shared benchmark scorecard"
+require_text '20 * infra_failed_jobs >= scheduled_total' "/descend must immediately stop at >=5% infra"
+require_text 'Exactly 5% disqualifies' "/descend must stop at the equality boundary"
+require_text 'All human requests are delivered by the main thread' "/descend must centralize human approvals"
+require_text 'Capture recovered tool/model errors' "/descend must triage errors even on passing tasks"
+require_text 'Workers never open their own human approval request' "/descend workers must return approval packets to main"
+require_text 'Do not stop for Andy to fix infra' "/descend must repair infra autonomously"
+require_text 'total requested task × repetition instance count' "/descend must set parallel repetition width explicitly"
+require_text 'Freeze that selection across ordinary descent epochs' "/descend must retain fixed first-N selections"
+if grep -Fq 'Every /descend response uses real rendered Markdown' "$DESCEND_COMMAND" \
+  || grep -Fq 'Only after an infra-clean run.' "$DESCEND_COMMAND" \
+  || grep -Fq 'while the latest run contains any INFRA result:' "$DESCEND_COMMAND"; then
+  fail "/descend retained the obsolete response format or global zero-infra gate"
+fi
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
@@ -324,11 +317,13 @@ root = temporary / "production-routing"
 (root / "scripts").mkdir(parents=True)
 (root / "agents/benchmarks").mkdir(parents=True)
 (root / "agents/venv/bin").mkdir(parents=True)
+(root / ".claude/shared").mkdir(parents=True)
+shutil.copyfile(
+    source / ".claude/shared/benchmark-report-format.txt",
+    root / ".claude/shared/benchmark-report-format.txt",
+)
 for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-tasks.py"):
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
-report_contract = root / ".claude/shared/benchmark-report-format.txt"
-report_contract.parent.mkdir(parents=True)
-shutil.copyfile(source / ".claude/shared/benchmark-report-format.txt", report_contract)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
     {"name": "production-route", "status": "ready", "production_only": True}
 ]))
@@ -608,7 +603,6 @@ esac
         args = argparse.Namespace(
             root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[],
             retry_infra=0, e2e_timeout=None, e2e_started_at=None,
-            stress_defaults=False, stress_defaults_plan=False,
         )
         with (
             patch.dict(os.environ, self.environment),

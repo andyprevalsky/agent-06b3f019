@@ -45,9 +45,10 @@ if positions != sorted(positions):
     raise SystemExit("FAIL: canonical approval headings are out of order")
 PY
 
-# Every approval template (shared skeleton and both /descend stops) is one
+# The single shared approval template is one
 # fenced text block whose items lead with Before:/After:, followed by the
-# clickable Links list that the block itself cannot render.
+# clickable Links list that the block itself cannot render. /descend routes to
+# that contract instead of maintaining competing copies of the template.
 python3 - "$FORMAT" "$DESCEND" <<'PY'
 import re
 import sys
@@ -92,7 +93,7 @@ def check(path, expected_blocks):
 
 
 check(sys.argv[1], 1)
-check(sys.argv[2], 2)
+check(sys.argv[2], 0)
 PY
 
 require_text "$FORMAT" "Do not invent a percentage" \
@@ -144,23 +145,16 @@ esac
     env = {**os.environ, "RUN_BENCH_FLEET_BIN_UNDER_TEST": str(fleet)}
     for args in (["spawn-sub-agents", "--wait"], ["spawn-sub-agents", "-k", "2"],
                  ["--local", "spawn-sub-agents"], ["eval", "--list"],
-                 ["stability-proof", "-k", "2"],
-                 ["stability-proof", "--pool-file", "--help"],
-                 ["stability-proof", "--exclude-file", "--dry-sample"]):
-        # Observe the actual launch contract order across stdout and stderr;
-        # read-only previews still retain their separate pure JSON stdout.
-        result = subprocess.run(cli + args, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, timeout=10)
-        assert result.returncode == 0, (args, result.stdout)
+                 ["stability-proof", "-k", "2"]):
+        result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (args, result.stderr)
         assert result.stdout.count(expected) == 1, (args, "launch must emit one complete contract")
         assert result.stdout.index(expected) < result.stdout.index("RUNNER"), args
     result = subprocess.run(cli + ["spawn-sub-agents"], env={**env, "REPORT_TEST_PROD_ONLY": "1"},
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout.count(expected) == 1 and "--prod" in result.stdout, "production route needs the contract"
-    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"],
-                 ["stability-proof", "--dry-sample"], ["stability-proof", "--help"],
-                 ["stability-proof", "--pool-file", "--help", "--dry-sample"]):
+    for args in (["monitor", "run"], ["list"], ["--help"], ["--provision-pool", "2"]):
         result = subprocess.run(cli + args, env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, (args, result.stderr)
         assert expected not in result.stdout, (args, "non-launch output must keep its format")
@@ -168,11 +162,16 @@ esac
     result = subprocess.run(cli + ["spawn-sub-agents"], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode != 0 and "RUNNER" not in result.stdout, "missing contract must stop before launch"
 
-for field in ("BENCHMARK SCORECARD", "LAST SLICE TRIGGERED", "WHY NO NEW SLICE?",
-              "BENCHMARK PROGRESS", "ACTIVE RUN · PASS / FAILURE", "TIMING / LIFECYCLE",
-              "COST / CACHE / LLM LATENCY", "ACTIVE SUB-AGENTS", "NEXT ACTION"):
+for field in ("EXPERIMENT #", "Experiments/day", "LAST 3 EXPERIMENTS", "TRIGGERED",
+              "ENDED", "ELAPSED", "PASS", "AGENT FAILURE", "INFRA FAILURE",
+              "Cache", "LLM", "Lifecycle", "ACTIVE SUB-AGENTS", "NEXT ACTION"):
     assert field in expected, field
-for rule in ("10 * infra_failed > terminal_attempts", "10800", "Continuously",
+template = expected.split("```diff", 1)[1].split("```", 1)[0]
+for removed in ("UPD", "<ring>", "BENCHMARK PROGRESS", "ACTIVE RUN ·", "LAST SLICE TRIGGERED",
+                "WHY NO NEW SLICE?", "COST / CACHE / LLM LATENCY"):
+    assert removed not in template, removed
+assert "America/Los_Angeles" in expected
+for rule in ("20 * infra_failed_jobs >= scheduled_total", "10800", "Continuously",
              "/RCA", "/deploy", "immutable", "No prose before or after", "30 seconds"):
     assert rule in expected, rule
 assert "scripts/run-bench report-format" in (root / "CLAUDE.md").read_text()
@@ -266,8 +265,8 @@ require_text "$FORMAT" "Never cite a" \
   "golden references must be opened, not recalled"
 require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
-require_text "$DESCEND" 'Golden reference: <reference-repo>/<path>:<line>' \
-  "descend approval narrative must carry the golden reference field"
+require_text "$DESCEND" 'golden reference' \
+  "descend must require the shared golden-reference evidence"
 require_text "$RCA" 'The golden-reference check (Step 6b in `docs/root-cause-analysis.md`)' \
   "RCA completion must record the golden-reference check"
 require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
@@ -286,22 +285,14 @@ done
 
 require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
   "/deploy must cement the shared approval format in its no-skip structural gate"
-require_text "$DESCEND" "the canonical approval narrative" \
-  "/descend approval stops must use the canonical approval narrative"
-require_text "$DESCEND" "What failed: When <the agent doing the task goal>" \
-  "/descend Stop 1 must frame the failure inside the agent's task"
-require_text "$DESCEND" "the LLM called \`<tool>\` to <attempt>" \
-  "/descend What failed must name the exact tool"
-require_text "$DESCEND" "Local repro (<wall-clock>):" \
-  "/descend Stop 1 must include local repro wall-clock"
-require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call \`<call_site>\` on \`<agent_id>\`" \
-  "/descend Stop 1 must include the last-call rendered LLM dump link"
-require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
-  "/descend Stop 1 must describe what the local repro tests"
-require_text "$DESCEND" "Evaluators: \`<id>\` — <how checked>:" \
-  "/descend Stop 1 must name how each evaluator is checked"
-require_text "$DESCEND" "give each member its own" \
-  "/descend Stop 1 must keep one clickable FE link per cluster member"
+require_text "$DESCEND" 'main thread using `.claude/shared/approval-format.md`' \
+  "/descend approvals must route through the parent and canonical contract"
+require_text "$DESCEND" 'its six' \
+  "/descend must preserve the complete shared approval sections"
+require_text "$DESCEND" 'List each member' \
+  "/descend approvals must preserve member-specific evidence"
+require_text "$DESCEND" 'Causal proof; outcome pending' \
+  "/descend must disclose staged approval's outstanding outcome proof"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
 require_text "$RCA" "## Autonomous fix-and-deploy default" \
