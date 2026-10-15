@@ -13,6 +13,7 @@
 import { createLogger } from '../logger';
 import type { ContentBlock } from '../rose';
 import { processUploadedFile, type FilePointer } from '../storage';
+import { downloadWhatsAppMedia } from '../whatsappCloud';
 
 const log = createLogger('SmsInboundMedia');
 
@@ -22,6 +23,13 @@ export interface SurgeAttachment {
   /** Content-type hint from the webhook payload (e.g. "image/jpeg"), if present. */
   type: string | null;
 }
+
+export interface WhatsAppMediaAttachment {
+  mediaId: string;
+  type: string | null;
+}
+
+export type InboundMediaAttachment = SurgeAttachment | WhatsAppMediaAttachment;
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // MMS media is small; 20MB is a generous cap
 // scribe_v2 is the current batch STT model ($0.22/hr); scribe_v1 is removed
@@ -43,7 +51,7 @@ export interface ProcessedInboundMedia {
  * Images are also uploaded so `start_new_agent` can attach FilePointers.
  */
 export async function processInboundAttachments(
-  attachments: SurgeAttachment[],
+  attachments: InboundMediaAttachment[],
   userId: string
 ): Promise<ProcessedInboundMedia> {
   const imageBlocks: ContentBlock[] = [];
@@ -73,7 +81,7 @@ export async function processInboundAttachments(
           );
         } catch (uploadError) {
           log.warn('Inbound image visible to supervisor but upload for agent attach failed', {
-            url: attachment.url.substring(0, 120),
+            url: 'url' in attachment ? attachment.url.substring(0, 120) : attachment.mediaId,
             error: uploadError instanceof Error ? uploadError.message : String(uploadError),
           });
         }
@@ -93,7 +101,7 @@ export async function processInboundAttachments(
       noteLines.push(`[Attachment of type ${mimeType} received — this type is not supported yet]`);
     } catch (error) {
       log.error('Failed to process inbound attachment', {
-        url: attachment.url.substring(0, 120),
+        url: 'url' in attachment ? attachment.url.substring(0, 120) : attachment.mediaId,
         typeHint: attachment.type,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -112,8 +120,11 @@ export async function processInboundAttachments(
 }
 
 async function downloadAttachment(
-  attachment: SurgeAttachment
+  attachment: InboundMediaAttachment
 ): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  if ('mediaId' in attachment) {
+    return downloadWhatsAppMedia(attachment.mediaId, MAX_ATTACHMENT_BYTES);
+  }
   const start = Date.now();
   const response = await fetch(attachment.url);
   if (!response.ok) {
