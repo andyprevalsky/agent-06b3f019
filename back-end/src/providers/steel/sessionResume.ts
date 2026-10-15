@@ -428,12 +428,10 @@ export async function recreateSession(
       `Failed to create Steel replacement after ${attemptsMade} attempts: ${lastError?.message}`
     );
   } finally {
-    try {
-      await handoffLease?.release();
-    } catch (error) {
+    await handoffLease?.release().catch(async (error: unknown) => {
       await validationBrowserForHandoff?.close().catch(() => {});
       throw error;
-    }
+    });
   }
 }
 
