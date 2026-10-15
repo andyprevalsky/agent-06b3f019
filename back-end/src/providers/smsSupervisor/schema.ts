@@ -36,6 +36,13 @@ const startNewAgentCallSchema = z.object({
   tool: z.literal('start_new_agent'),
   arguments: z.object({
     goal: z.string(),
+    notification_message: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Short user-facing kickoff notification for this agent. Include what you are starting, omit internal task instructions and links; the agent link is appended automatically.'
+      ),
     budget_dollars: z
       .number()
       .nullable()

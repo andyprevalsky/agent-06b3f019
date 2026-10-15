@@ -130,6 +130,71 @@ async function testSmsSuccessSurvivesWhatsAppFailure(): Promise<void> {
   }
 }
 
+async function testKickoffUsesNotificationAndLink(): Promise<void> {
+  for (const source of ['SMS', 'WHATSAPP'] as const) {
+    const userId = randomUUID();
+    const captureToken = `kickoff-${userId}`;
+    const phone = `+1555${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`;
+    const goal = 'INTERNAL_TASK_SENTINEL: use the saved account and compare pickup locations.';
+    const notification = "I'll order your usual Blue Bottle coffee.";
+    await prisma.user.create({
+      data: { userId, phone, isAnonymous: true, whatsappReachable: true },
+    });
+    const agent = await prisma.agent.create({
+      data: {
+        userId,
+        goal,
+        source,
+        messages: {
+          create: {
+            text: goal,
+            role: 'USER',
+            metadata: { startNotification: { message: notification } },
+          },
+        },
+      },
+    });
+    try {
+      for (const override of [undefined, "I'll check pickup availability first."]) {
+        const expected = `${override ?? notification}\nhttps://roselabs.ai/?agent-id=${agent.id}`;
+        const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+          method: 'POST',
+          headers: { 'X-API-Key': API_KEY, 'X-Capture-Token': captureToken },
+          body: JSON.stringify({
+            user_id: userId,
+            agent_id: agent.id,
+            event_type: 'agent_started',
+            payload: { goal, notification_message: override },
+          }),
+        });
+        assert(response.status === 200, `kickoff returned ${response.status}`);
+        const calls = await readCaptures(captureToken);
+        const sms = calls.filter((call) => new URL(call.url).hostname === 'api.surge.app');
+        const whatsapp = calls.filter(
+          (call) => new URL(call.url).hostname === 'graph.facebook.com'
+        );
+        assert(sms.length === (override ? 2 : 1), 'expected one SMS per kickoff event');
+        assert(whatsapp.length === sms.length, 'kickoff must reach both messaging channels');
+        const smsBody = JSON.parse(sms.at(-1)!.requestBody!) as { body: string };
+        const whatsappBody = JSON.parse(whatsapp.at(-1)!.requestBody!) as {
+          text: { body: string };
+        };
+        assert(smsBody.body === expected, `Unexpected kickoff SMS: ${smsBody.body}`);
+        assert(whatsappBody.text.body === expected, 'WhatsApp kickoff differs from SMS');
+        const session = await prisma.smsSession.findUnique({ where: { userId } });
+        assert(
+          session?.messages.includes(expected.replaceAll('\n', '\\n')),
+          'kickoff missing from transcript'
+        );
+      }
+      const stored = await prisma.agent.findUnique({ where: { id: agent.id } });
+      assert(stored?.goal === goal, 'kickoff formatting changed the internal agent goal');
+    } finally {
+      await cleanup(userId, agent.id);
+    }
+  }
+}
+
 async function testWriteLockRetriesOnlyRejectedDelivery(): Promise<void> {
   for (const failure of ['ambiguous', 'rejected', 'mixed']) {
     const rejected = failure !== 'ambiguous';
@@ -232,6 +297,8 @@ async function testWriteLockRetriesOnlyRejectedDelivery(): Promise<void> {
 
 async function main(): Promise<void> {
   try {
+    await testKickoffUsesNotificationAndLink();
+    process.stdout.write('PASS SMS and WhatsApp kickoff use the notification plus agent link\n');
     await testSmsSuccessSurvivesWhatsAppFailure();
     process.stdout.write('PASS SMS success survives mirrored WhatsApp 503\n');
     await testWriteLockRetriesOnlyRejectedDelivery();

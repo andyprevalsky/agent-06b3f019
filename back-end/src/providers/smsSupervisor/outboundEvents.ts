@@ -283,7 +283,7 @@ async function rehostMmsAttachmentUrl(userId: string, mediaUrl: string): Promise
  */
 export async function notifyAgentStarted(
   userId: string,
-  agent: { id: string; goal: string },
+  agent: { id: string; goal: string; notificationMessage?: string },
   channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
@@ -302,7 +302,7 @@ export async function notifyAgentStarted(
 
   const prefix = agent.id.substring(0, 6);
   const url = getAgentUrl(agent.id);
-  const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url);
+  const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url, agent.notificationMessage);
 
   const result = await sendLifecycleSms(
     userId,

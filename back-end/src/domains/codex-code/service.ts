@@ -201,7 +201,7 @@ function isRevokedCodexOAuth(reason: string): boolean {
 
 function isCodexExhaustion(reason: string): boolean {
   const exhausted =
-    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing|no credits remaining|add credits to continue|credit_balance_exhausted|credit balance is too low/i;
+    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low/i;
   return (
     exhausted.test(reason) ||
     classifyComputeGrantFailure({ status: 401, body: reason }).verdict === 'payment_required'
