@@ -351,6 +351,12 @@ New observations also cover all four card fields, errors, history, earlier
 realm credentials, and secret-bearing screenshots. The original checkout loss
 and authentication observations remain unresolved.
 
+## Final verification stabilization
+
+Verification stabilization (2026-10-15): the second automated review found two masking transport defects. Registered numeric credentials could corrupt otherwise permitted PNG base64 before private entry and replace numeric targets in prior assistant tool calls. Both owning registered regressions failed unchanged before repair, then passed after cfa726852 (PNG 0.058s; prior target 0.091s). Only trusted screenshot action output transport and recognized action-schema numeric target metadata are restored; page text, nested/evaluate result data remain redacted, and media remains withheld after private entry. Nine neighboring credential cases and the full agent coverage gate passed. These repairs do not establish the original merchant/auth checkout loss or change the separate auth-decline exception into a passing verdict.
+
+The complete final-runtime verification passed agent/backend coverage, all twelve controller commands, live probes, eight UI checks, the real E2B smoke, ten effective smoke tasks, all four sandbox card lifecycles without skips, and all five latency tests. Only the separate auth-decline smoke case was excluded under the specific one-release user exception; its earlier native failures remain failures. All fourteen current benchmark roots have fresh canonical FE/recording and latest-whole-tree-call HTTPS evidence. Exact-owned test processes, ports and isolated databases retired; current-campaign payment cleanup is clear. This does not settle older release follow-ups or establish an original-merchant checkout repair.
+
 ## Reusable lesson
 
 Keep private credential resolution independent of the agent's tool and target choice. A credential reference must never trigger unrequested field selection, additional writes, or fabricated progress. Redact every downstream model boundary, including observations and fatal failures.
