@@ -1,10 +1,22 @@
 /** Real output-service + database credential feedback; no sandbox or provider requests. */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { persistOutput, type CodexCredentialFeedback } from '../../domains/codex-code/service';
 import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 import { codexSmokeCreditSkipReason } from './codex-credit-skip';
+
+async function historicalOutput(): Promise<string> {
+  const raw = JSON.parse(
+    await readFile('.context/pr1520-cycle1-draft/historical-output.private.json', 'utf8')
+  ) as { output: string };
+  assert.equal(
+    createHash('sha256').update(raw.output).digest('hex'),
+    'b3321937f08d255920ee5f86378548b7e1c9614e13ec66c2a459b9113368406e'
+  );
+  return raw.output;
+}
 
 async function main() {
   const userId = randomUUID();
@@ -14,8 +26,9 @@ async function main() {
     accountId: '',
   };
   const captured =
-    '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\nYou have no credits remaining.';
+    '[Codex] Error: 401 token_revoked\n[Codex] Turn failed: refresh_token_invalidated\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex] Error: You have no credits remaining.';
   const failures: string[] = [];
+  const taskIds: string[] = [];
   try {
     for (const source of ['user', 'pool']) {
       for (const mode of [
@@ -35,7 +48,30 @@ async function main() {
         'agent-prose',
         'quota-auth',
         'structured-prose',
-      ]) {
+        'multiline-error',
+        'multiline-turn',
+        'multiline-refresh',
+        'multiline-unrelated',
+        'multiline-command',
+        'oauth-printed-quota',
+        'funded-legacy-printed',
+        'funded-legacy-quota',
+        'funded-legacy-native',
+        'fallback-printed-funding',
+        'quota-reset',
+        'structured-multiline',
+        'historical',
+        'command-fallback-routing',
+        'same-error-quota-revoked',
+        'structured-same-error',
+        'same-error-phrase',
+        'structured-same-phrase',
+        'same-block-quota-revoked',
+        'distinct-block-quota-revoked',
+        'native-payment-parity',
+        'structured-payment-parity',
+        'funded-legacy-payment',
+      ].filter((mode) => mode !== 'historical' || process.argv.includes('--historical'))) {
         try {
           await prisma.integration.deleteMany({ where: sharedWhere });
           const accountId = randomUUID();
@@ -69,6 +105,7 @@ async function main() {
             })),
           });
           const taskId = randomUUID();
+          taskIds.push(taskId);
           await prisma.claudeCodeSession.create({
             data: {
               id: taskId,
@@ -76,7 +113,7 @@ async function main() {
               sandboxId: `offline-revocation-${taskId}`,
               goal: 'captured credential feedback replay',
               claudeTokenSource: source,
-              claudeTokenIntegrationId: selected.id,
+              claudeTokenIntegrationId: mode.startsWith('funded-legacy-') ? null : selected.id,
             },
           });
           let feedback: CodexCredentialFeedback[] | undefined;
@@ -131,7 +168,65 @@ async function main() {
           } else if (mode === 'agent-prose')
             output = '[Codex] Investigated invalid_grant and HTTP401 token_revoked';
           else if (mode === 'quota-auth')
-            output = 'usage_limit_reached\nGoogle OAuth refresh failed: invalid_grant';
+            output =
+              '[Codex] Error: usage_limit_reached\n[application] Google OAuth refresh failed: invalid_grant';
+          if (mode === 'multiline-error')
+            output = '[Codex] Error: OAuth request rejected\n{\n  "error": "invalid_grant"\n}';
+          else if (mode === 'multiline-turn')
+            output = '[Codex] Turn failed: OAuth request rejected\ninvalid_grant';
+          else if (mode === 'multiline-refresh')
+            output =
+              '2026-10-15T00:00:00Z ERROR codex_login::auth: Failed to refresh token\n{ "error": "invalid_grant" }';
+          else if (mode === 'multiline-unrelated')
+            output =
+              '[Codex] Error: connection failed\n[application] OAuth invalid_grant\n  token_revoked';
+          else if (mode === 'multiline-command')
+            output =
+              '[Codex command output]\n[Codex] Error: OAuth request rejected\n{ "error": "invalid_grant" }\n[Codex exit_code] 1';
+          else if (mode === 'oauth-printed-quota')
+            output = '[Codex command output]\nusage_limit_reached\n[Codex exit_code] 0';
+          else if (mode === 'funded-legacy-printed')
+            output =
+              '[Codex command output]\n[Codex] Error: no credits remaining\n[Codex exit_code] 0';
+          else if (mode === 'funded-legacy-quota')
+            output = '[Codex] I read the logs\nno credits remaining\nusage_limit_reached';
+          else if (mode === 'funded-legacy-native')
+            output = '[Codex] Error: provider rejected request\n{ "error": "insufficient_quota" }';
+          else if (mode === 'fallback-printed-funding')
+            output =
+              '[Codex] Error: token_revoked\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex command output]\nno credits remaining\n[Codex exit_code] 0';
+          else if (mode === 'quota-reset')
+            output = '[Codex] Error: usage_limit_reached\n  try again at Oct 16th, 2099 1:00 AM';
+          else if (mode === 'structured-multiline') {
+            output = 'Terminal snapshot';
+            feedback = [{ source: 'oauth', reason: 'OAuth failed\n{ "error": "invalid_grant" }' }];
+          } else if (mode === 'historical') output = await historicalOutput();
+          if (mode === 'command-fallback-routing')
+            output =
+              '[Codex command output]\n[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n[Codex exit_code] 0\n[Codex] Error: usage_limit_reached';
+          else if (mode === 'same-error-quota-revoked')
+            output = '[Codex] Error: usage_limit_reached invalid_grant';
+          else if (mode === 'structured-same-error') {
+            feedback = [{ source: 'oauth', reason: 'usage_limit_reached token_revoked' }];
+          }
+          if (mode === 'same-error-phrase')
+            output = '[Codex] Error: usage_limit_reached OAuth access token has been revoked';
+          else if (mode === 'structured-same-phrase') {
+            feedback = [
+              {
+                source: 'oauth',
+                reason: 'OAuth access token has been revoked; usage_limit_reached',
+              },
+            ];
+          }
+          if (mode === 'same-block-quota-revoked')
+            output = '[Codex] Error: usage_limit_reached\n{ "error": "invalid_grant" }';
+          else if (mode === 'distinct-block-quota-revoked')
+            output = '[Codex] Error: usage_limit_reached\n[Codex] Error: invalid_grant';
+          if (mode === 'native-payment-parity' || mode === 'funded-legacy-payment')
+            output = '[Codex] Error: invalid_grant; out of credits';
+          else if (mode === 'structured-payment-parity')
+            feedback = [{ source: 'oauth', reason: 'invalid_grant; out of credits' }];
           const healthy = [
             'funded-only',
             'empty-feedback',
@@ -141,9 +236,36 @@ async function main() {
             'application-auth',
             'command-auth',
             'agent-prose',
+            'multiline-unrelated',
+            'multiline-command',
+            'oauth-printed-quota',
+            'funded-legacy-printed',
+            'funded-legacy-quota',
+            'funded-legacy-native',
+            'funded-legacy-payment',
           ].includes(mode);
-          const quota = mode === 'quota' || mode === 'quota-auth';
-          const funded = ['plain', 'structured', 'initial'].includes(mode);
+          const quota =
+            mode === 'quota' ||
+            mode === 'quota-auth' ||
+            mode === 'quota-reset' ||
+            mode === 'command-fallback-routing' ||
+            [
+              'same-error-quota-revoked',
+              'structured-same-error',
+              'same-error-phrase',
+              'structured-same-phrase',
+              'same-block-quota-revoked',
+              'native-payment-parity',
+              'structured-payment-parity',
+            ].includes(mode);
+          const funded = [
+            'plain',
+            'structured',
+            'initial',
+            'funded-legacy-native',
+            'historical',
+            'funded-legacy-payment',
+          ].includes(mode);
           await persistOutput(taskId, output, feedback);
           const actual = await prisma.integration.findUniqueOrThrow({
             where: { id: selected.id },
@@ -192,15 +314,15 @@ async function main() {
               null,
               'revocation remains a hard smoke failure'
             );
-            if (funded) {
-              const cooldown = await prisma.integration.findUnique({
-                where: { userId_name_accountId: sharedWhere },
-              });
-              assert.ok(
-                cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil > new Date(),
-                'funded exhaustion still cools shared key'
-              );
-            }
+          }
+          if (funded) {
+            const cooldown = await prisma.integration.findUnique({
+              where: { userId_name_accountId: sharedWhere },
+            });
+            assert.ok(
+              cooldown?.rateLimitedUntil && cooldown.rateLimitedUntil > new Date(),
+              'funded exhaustion still cools shared key'
+            );
           }
           if (!funded) {
             assert.equal(
@@ -211,6 +333,8 @@ async function main() {
               'no funded quota event means no shared-key cooldown'
             );
           }
+          if (mode === 'quota-reset')
+            assert.equal(actual.rateLimitedUntil?.toISOString(), '2099-10-16T01:00:00.000Z');
           if (healthy || quota) {
             assert.equal(actual.isActive, true);
             assert.equal(actual.failureReason, null);
@@ -246,19 +370,7 @@ async function main() {
     }
     assert.deepEqual(failures, [], 'all credential feedback cases must pass');
   } finally {
-    await prisma.claudeCodeSession.deleteMany({
-      where: {
-        sandboxId: { startsWith: 'offline-revocation-' },
-        claudeTokenIntegrationId: {
-          in: (
-            await prisma.integration.findMany({
-              where: { userId },
-              select: { id: true },
-            })
-          ).map((row) => row.id),
-        },
-      },
-    });
+    await prisma.claudeCodeSession.deleteMany({ where: { id: { in: taskIds } } });
     await prisma.integration.deleteMany({ where: { userId } });
     await prisma.computeAccountConnection.deleteMany({ where: { userId } });
   }

@@ -218,3 +218,125 @@ all positive revocation, quota and ownership assertions retained. Proof is
 `.context/deploy-review-structured-before.log` and
 `.context/deploy-review-structured-after.log`. The complete historical raw
 failure remains expiry plus funded cooldown, with credit-skip null.
+
+## October 15 Cycle2: native diagnostic blocks and exhaustion attribution
+
+PR1520 comments4278530049/4278530054 on27513d29f identified two remaining
+compatibility-reader defects. Header-only filtering lost invalid_grant on native
+error continuation lines. Raw OAuth quota/funded scans could cool healthy keys
+from printed output, and a printed fallback marker could redirect attribution.
+Archive searches were `fundedKeySegment command output multiline` and `codex
+native diagnostics continuation quota`; these recur at this existing case's
+legacy-feedback boundary. The producer repair is separately owned.
+
+The service now extracts complete supported native diagnostic blocks first,
+then changes OAuth/funded attribution only at an exact outside-command-block
+fallback marker. Both cooldown and revocation consume those same blocks.
+Native Error/Turn failed and timestamped codex_login::auth refresh diagnostics
+retain JSON/indented/explicit-machine continuation lines. Command output and
+unrelated records are excluded. Producer references remain ws-server.mjs
+renderCodexJsonLine (Error/Turn failed framing, command output/end markers,
+raw stderr append) and codex-rs/login/src/auth/manager.rs:1657 native tracing.
+
+The parent corrected an intermediate policy mistake: the canonical compute
+classifier deliberately gives payment/quota precedence over overlapping
+revocation text in ONE provider error. Word windows or splitting a diagnostic
+into separate classified lines violates that policy. Both were removed. Each
+whole native block and each whole structured feedback reason is now classified
+with the unchanged canonical function. A separate later revoked diagnostic may
+still retire the selected account; one quota diagnostic mentioning revocation
+remains connected with cooldown. The exact oauth_refresh_invalid sentinel is
+preserved. Supplied structured feedback, including[], remains authoritative.
+A canonical payment_required verdict also authorizes cooldown, fixing parity
+for existing payment phrases such as out of credits that narrower regexes miss.
+Existing explicit funding/usage dialects and reset timestamp parsing remain.
+No marker palette, token-window bound or global classifier change is added.
+
+The permanent real-service/Prisma owning suite preserves all original32 cases
+and their exact-selected/unrelated-account assertions, extending to76 ordinary
+finite user/pool cases. Two additional --historical cases replay the private
+hash-checked real transcript against synthetic rows. Controls cover supported
+multiline revocation vs unrelated logs/commands, printed funding/quota/fallback
+markers, native funding, whole-block and structured quota precedence (machine
+codes and natural-language phrases), distinct later revoked diagnostics,
+payment parity, reset time and structured empty-list authority. Existing shared
+funded cooldown isolation is retained. Cleanup records exact created session
+UUIDs, including funded-only sessions without an Integration ID. Desired DB
+mutations are not mocked. Raw representative fixtures use exact native producer
+framing; healthy/cooldown/expiry and ownership assertions are not relaxed.
+
+Exact final paired command, repository root:
+
+```bash
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/victoria node --import tsx back-end/src/tests/blackbox/codex-code-revocation-feedback.blackbox.ts --historical
+```
+
+`.context/pr1520-cycle2-backend/block-before.log` and `.exit` record exit1,
+58 passes/20 failures against the original reviewed service. `block-after.log`
+and `.exit` record exit0,78/78 passes with the identical final test body.
+Final test SHA256: 87d10c9af2aa6789f2cf0a004c2dde7b4ea1efb46eda5ca0b7513842b75842fc.
+The earlier word-window policy and logs are superseded exploratory artifacts,
+not the accepted final proof. `precedence-before/after` additionally prove that
+the prior word-window version wrongly expired quota errors and the block reader
+corrected them; `payment-parity-before/after` isolate canonical payment cooldown
+parity. Those tests were executed unchanged for their respective pairs.
+
+The complete original session6303ae33-d6ca-4b11-b3fe-a02fad90b1b0 transcript
+remains privately retained mode0600:5805 characters/5807 bytes; SHA256
+b3321937f08d255920ee5f86378548b7e1c9614e13ec66c2a459b9113368406e.
+Both historical cases expire exactly the synthetic selected account and cool
+the funded key; the existing credit-skip classifier still returns null. The
+original session/integration is never mutated. No raw body, tokens or claims
+are printed; no paid provider is contacted.
+
+Compatibility remains bounded: unsupported unframed/unindented continuation
+dialects require structured feedback, and malformed command blocks stay
+excluded. Flattened text is not authenticated provenance; deliberately forged
+end-markers or diagnostic-looking multiline prose cannot be made tamper-proof
+here. Full TestLoop/deploy verification and final official review remain parent
+owned. The service functions retain the80-line limit; scoped lint/type/format
+receipts live beside the final proof. INDEX is untouched and no commit is made.
+
+The user resumed deployment; the parent delegated backend ownership and then
+explicitly required canonical quota-first semantics after inspecting the
+classifier. The separately owned producer now preserves that same quota-first
+policy. No prompt, schema, selection scope, environment or producer file was
+changed by this backend repair.
+
+## October 15 producer and worker feedback completion
+
+The real Codex renderer's typed error path did not classify `invalid_grant`.
+The owning `e2b-templates/codex-code/oauth-feedback.test.mjs` executes the actual
+renderer, fallback block and worker feedback function with sandbox/process IO
+replaced. The original producer emitted no fallback or feedback for a complete
+multiline invalid-grant error; the fixed producer emits `oauth_refresh_invalid`
+and the actual worker preserves it. Six test groups retain command/tool/prose
+exclusions and the existing quota-first/first-event policy. The discovered
+backend `codex-oauth-feedback.test.ts` wrapper runs this contract under normal
+unit and coverage gates. Final receipts are
+`.context/cycle2-producer-final-{before,proof,wrapper}.log`.
+
+The preserved historical transcript also contains eleven funded native Error
+or Turn-failed records with `no credits remaining`, and none of those records
+matches the worker's previous quota vocabulary. The worker therefore omitted
+that real funding failure from its authoritative feedback. The existing
+`spawn-claude-code-agent` owning blackbox now checks all four backend-supported
+funding phrases, flat/nested native errors, initial/funded sources, and exclusion
+of command/tool/agent text, other providers and unrelated disk quota errors.
+The exact canonical command was run before and after adding only the four
+funding markers to `build_codex_credential_feedback`:
+
+```bash
+source agents/venv/bin/activate
+python agents/scripts/run_blackbox_tests.py spawn-claude-code-agent
+```
+
+`.context/cycle2-worker-funding-before-gate.log` records exit1 and the new native
+funding case failing (141 cases pass, one fails);
+`.context/cycle2-worker-funding-after-gate.log` records exit0
+and all142 cases passing. The negative controls pass both versions. Running the
+domain file directly had reported the failure but exited zero; that exploratory
+run is not the accepted gate evidence. The canonical runner correctly failed.
+This worker change forwards observed native errors; it adds no synthetic LLM
+context, changes no prompt and does not infer failures from printed text. It
+requires the normal agent-runtime production rollout as well as backend deploy.
