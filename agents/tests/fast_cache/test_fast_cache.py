@@ -2711,6 +2711,7 @@ def test_resolve_fast_cache_context_activity_returns_general_demo_gate(monkeypat
 
     async def body():
         assert await resolve_fast_cache_context_activity("fundraise-root") == {
+            "resolved": True,
             "enabled": True,
             "goal": "Raise me 5m dollars for my company Rose Labs\nNo questions asked",
             "write_enabled": True,

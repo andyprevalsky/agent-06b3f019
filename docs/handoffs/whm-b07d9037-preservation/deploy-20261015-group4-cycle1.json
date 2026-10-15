@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "kind": "group4-cycle1-preservation",
+  "cycle": "C1",
+  "execution_source_sha": "fb24dd0304de82ece7fe011292c12da38e19732a",
+  "qualification": "Historical C1 results only; not results for the later merged source and not approval of deployment/fundraising outcomes.",
+  "clock": {
+    "run_id": "20261015-023445-695311",
+    "started_at": "2026-10-15T02:34:45Z",
+    "started_epoch": 1792031685.2284641,
+    "timing_import_applied": true,
+    "stage_count": 5,
+    "stage_rows": [
+      {
+        "schema_version": 1,
+        "run_id": "20261015-023445-695311",
+        "stage": "claude-code-e2b-smoke",
+        "started_at": "2026-10-15T20:18:21Z",
+        "finished_at": "2026-10-15T20:18:59Z",
+        "started_epoch": 1792095501.1737463,
+        "finished_epoch": 1792095539.7763813,
+        "duration_seconds": 38.6,
+        "status": "passed",
+        "exit_code": 0,
+        "log": "logs/claude-code-e2b-smoke-20261015-201821-19580.log"
+      },
+      {
+        "schema_version": 1,
+        "run_id": "20261015-023445-695311",
+        "stage": "semantic",
+        "started_at": "2026-10-15T20:18:21Z",
+        "finished_at": "2026-10-15T20:19:14Z",
+        "started_epoch": 1792095501.177515,
+        "finished_epoch": 1792095554.7547035,
+        "duration_seconds": 53.6,
+        "status": "passed",
+        "exit_code": 0,
+        "log": "logs/semantic-20261015-201821-19576.log"
+      },
+      {
+        "schema_version": 1,
+        "run_id": "20261015-023445-695311",
+        "stage": "agentcard-lifecycle",
+        "started_at": "2026-10-15T20:18:21Z",
+        "finished_at": "2026-10-15T20:34:54Z",
+        "started_epoch": 1792095501.0290353,
+        "finished_epoch": 1792096494.6176245,
+        "duration_seconds": 993.6,
+        "status": "passed",
+        "exit_code": 0,
+        "log": "logs/agentcard-lifecycle-20261015-201821-19557.log"
+      },
+      {
+        "schema_version": 1,
+        "run_id": "20261015-023445-695311",
+        "stage": "smoke",
+        "started_at": "2026-10-15T20:18:21Z",
+        "finished_at": "2026-10-15T20:35:32Z",
+        "started_epoch": 1792095501.061258,
+        "finished_epoch": 1792096532.030849,
+        "duration_seconds": 1031.0,
+        "status": "failed",
+        "exit_code": 1,
+        "log": "logs/smoke-20261015-201821-19555.log"
+      },
+      {
+        "schema_version": 1,
+        "run_id": "20261015-023445-695311",
+        "stage": "semantic",
+        "started_at": "2026-10-15T20:19:15Z",
+        "finished_at": "2026-10-15T20:45:59Z",
+        "started_epoch": 1792095555.1041465,
+        "finished_epoch": 1792097159.0351481,
+        "duration_seconds": 1603.9,
+        "status": "passed",
+        "exit_code": 0,
+        "log": "logs/semantic-20261015-201915-22051.log"
+      }
+    ],
+    "original_metadata_git_sha": "9beef2ffb7ddc9aa846de7b3d3253226946047a8",
+    "metadata_source_qualification": "Original deployment clock metadata is preserved; execution source is separately bound to fb24dd03.",
+    "root_import_utc": "2026-10-15T21:42:21.413533+00:00",
+    "root_metadata_bytes_unchanged": true
+  },
+  "outcomes": {
+    "overall_lanes_exit": 1,
+    "smoke": {
+      "exit": 1,
+      "passed": 10,
+      "total": 11,
+      "tasks": [
+        {
+          "name": "browser-biometrics-webdecoy",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "spawn-sub-agents",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "browser-smoke",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "browser-auth-member-discount-purchase",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "image-handling",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "parallel-tool-calls",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "claude-code-agent",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "chat-mode",
+          "status": "ACTIVE",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "agent-payment-new-user-journey",
+          "status": "ACTIVE",
+          "benchmark_status": "FAILED",
+          "passed": false
+        },
+        {
+          "name": "browser-auth-saved-password-retry",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "browser-auth-guest-purchase",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        }
+      ],
+      "failure": "agent-payment-new-user-journey Subscription Checkout failed because Python Playwright Chromium headless-shell revision1243 was absent.",
+      "original_failure_preserved": true,
+      "replayed_after_browser_repair": false
+    },
+    "agentcard_lifecycle": {
+      "exit": 0,
+      "passed": 4,
+      "total": 4,
+      "tasks": [
+        {
+          "name": "agent-payment-setup-resume",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "agent-payment-test-shop",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "agent-payment-idempotent-abandonment",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        },
+        {
+          "name": "agent-payment-abandonment",
+          "status": "COMPLETED",
+          "benchmark_status": "PASSED",
+          "passed": true
+        }
+      ]
+    },
+    "claude_code_e2b_smoke": {
+      "exit": 0,
+      "domains_passed": 1,
+      "domains_total": 1,
+      "new_run_executed_by_this_audit": false
+    },
+    "semantic_ui": {
+      "exit": 0,
+      "tests_passed": 8
+    },
+    "semantic_latency": {
+      "exit": 0,
+      "tests_passed": 5
+    }
+  },
+  "preservation": {
+    "root_authenticated_complete_archive": true,
+    "authenticated_members": 13806,
+    "authenticated_manifest_sha256": "587419bacf4894847b734cee4654da84610a725b0ef52075e3be6495f5e1f03d",
+    "ciphertext_sha256": "68f56c0d10ca32a8f5f7f81b35f81ddac19e5320b6f4c1fb68bf421b6ab8f98f",
+    "gzip_sha256": "77ebe88bf8c5c1848b038cd6f9fc8347ebb451a3d5ac9ca841da22baa0700ae9",
+    "root_verification_log_sha256": "9c158cd9c1463f1c082200c0ef6a0b6de9714c229ca912215f1cbe4a215cee74",
+    "ordered_manifest_derivation": "Exact match from13804 ordered embedded member records plus the actual members.json/exclusions.json metadata bytes; original regular uploader JSON encoding preserved.",
+    "members_json_sha256": "8f63e84e087174efa35fd866a87187ee445c2692a7626e38e3391e4968a13e7f",
+    "remote_archive_location_redacted": true,
+    "metadata_qualification": "22 fetched files match authenticated original members. prepared.json, encrypted-receipt.json and later root census are separate metadata, not silently counted as original authenticated files."
+  },
+  "financial_cleanup": {
+    "authority": "Previously captured owning financial records reviewed and attested by root; this audit performs no payment action.",
+    "root_verified_receipt_sha256": "bf35a542e3c47a15af5e7028616ef7901f88188d16edce86cadb5489d219c9c4",
+    "all_fifteen_task_snapshots_reviewed": true,
+    "open_selected_cards": 0,
+    "required_unrefunded_captures": 0,
+    "required_unreclaimed_transfers": 0,
+    "scope": "Six selected actual cards closed with zero balance; required captured obligations terminal under the existing predicate. Fulfilled consumed captures need no refund; the voided/reclaimed case had its required refund.",
+    "limitations": [
+      "No new provider/payment/DB call.",
+      "No global provider inventory assertion.",
+      "No Stripe livemode, invoice or live-canary assertion."
+    ]
+  },
+  "browser_repair": {
+    "normal_python_browser_dependency_repaired_by_root": true,
+    "standalone_empty_launches": [
+      {
+        "consumer": "node",
+        "launch": true,
+        "browser_version": "156.0.8078.4",
+        "contexts": 0
+      },
+      {
+        "consumer": "python",
+        "launch": true,
+        "browser_version": "153.0.8010.12",
+        "pages": 0
+      }
+    ],
+    "launch_receipt_sha256": "a284f3d19aec7def5ffc92460c69640ce8c01ff42b0fbb8e76b3229213a6d3c1",
+    "qualification": "Standalone empty-browser availability only; no task/payment replay and no unchanged smoke PASS."
+  },
+  "retirement": {
+    "old_control_pid6234_absent": true,
+    "old_owned_live_processes": 0,
+    "old_owned_zombies": 0,
+    "old_postgres_stopped": true,
+    "census_utc": "2026-10-15T21:30:06.951444+00:00",
+    "census_sha256": "0a1f43da16baf67755616eff8949353a6ae3e768fa55c9456b29b3e45ef9954b",
+    "census_is_postarchive_root_observation": true,
+    "original_machine_retained": true,
+    "original_volume_retained": true,
+    "old_base_preserved": true,
+    "same_existing_vm_reuse_admitted": true,
+    "reuse_admission_receipt_sha256": "85cfbfd2037c8d1608f7a5fef25b5aef9d99dfde89638336a1cde44b0736fd12",
+    "new_machine_allocated": false,
+    "machine_id": "820224f7e069e8",
+    "volume_id": "vol_r7ymddjdkx9y21gr",
+    "preserved_base": "/data/group4"
+  },
+  "open_gates": [
+    "Original C1smoke remains FAIL10/11.",
+    "Any later source/runtime retry has separate identity and outcomes.",
+    "Full final-source deployment review/normal gates/production verification remain open."
+  ]
+}

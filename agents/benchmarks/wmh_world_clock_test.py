@@ -1,11 +1,15 @@
 """World clock semantics (V4, V5, V7, V8, V10, V11), run by the WMH blackbox gate."""
 
 import asyncio
+import types
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
 from benchmarks.wmh_world_clock import WorldClock
 
+NOW = datetime(2026, 10, 15, tzinfo=timezone.utc)
 DAY = 86_400_000
 
 
@@ -188,3 +192,69 @@ def test_ten_thousand_agents_update_in_logarithmic_time():  # V11
     # Ten thousand heap-backed updates stay far below a quadratic scan.
     assert time.perf_counter() - started < 2.0
     assert clock.shared_time() == 1
+
+
+# Owning cross-boundary clock and activity policy regressions.
+
+@pytest.mark.parametrize('mode',['real','simulate','shadow'])
+def test_phone_actual_activity_options_preserve_real_and_wmh_policy(monkeypatch,mode):
+ from domains.call_phone_number import handler as m
+ from helpers.wmh_activity_policy import wmh_activity_timeout_options
+ captured=[]
+ async def execute(fn,**kwargs):captured.append(kwargs);return {'success':True,'duration':0,'message':'offline'}
+ monkeypatch.setattr(m,'handle_tool_event',AsyncMock())
+ asyncio.run(m.CallPhoneNumberManager().execute_tool(execute,{'to':'+15555550100','system_prompt':'offline'},'call','agent','user',mode))
+ assert len(captured)==1;kw=captured[0];expected=wmh_activity_timeout_options(mode,timedelta(minutes=m.ACTIVITY_TIMEOUT_MINUTES))
+ if mode=='real':expected['heartbeat_timeout']=timedelta(seconds=m.HEARTBEAT_TIMEOUT_SECONDS)
+ assert {k:v for k,v in kw.items() if k.endswith('_timeout')}==expected
+ assert kw['retry_policy'].maximum_attempts==m.MAX_RETRY_ATTEMPTS
+ assert kw['retry_policy'].backoff_coefficient==m.RETRY_BACKOFF_COEFFICIENT
+ assert kw['retry_policy'].initial_interval==timedelta(seconds=m.RETRY_INITIAL_INTERVAL_SECONDS)
+ assert kw['retry_policy'].maximum_interval==timedelta(seconds=m.RETRY_MAX_INTERVAL_SECONDS)
+ assert len(kw['args'])==(6 if mode=='real' else 7)
+
+def test_negative_pinned_date_offset_survives_and_real_is_unchanged():
+ from utils.simulated_clock import simulated_now,advance_simulated_clock,simulated_clock_offset_seconds
+ wf=types.SimpleNamespace(world_model_mode='simulate',simulated_clock_offset_seconds=-86400)
+ assert simulated_now(wf,NOW)==NOW-timedelta(days=1)
+ assert advance_simulated_clock(wf,60)==-86340
+ real=types.SimpleNamespace(world_model_mode='real',simulated_clock_offset_seconds=-86400)
+ assert simulated_clock_offset_seconds(real)==0
+
+@pytest.mark.parametrize('available',[True,False])
+def test_wait_seconds_uses_actual_shared_wait_and_retains_fallback(monkeypatch,available):
+ from domains.wait_seconds import handler as m
+ from domains.wait_for import handler as shared
+ from utils.simulated_clock import simulated_clock_offset_seconds
+ wf=types.SimpleNamespace(world_model_mode='simulate',agent_id='a',simulated_clock_offset_seconds=0)
+ calls=[]
+ async def activity(fn,**kw):calls.append(kw);return {'time_ms':int(NOW.timestamp()*1000)+300000} if available else {'skipped':'no_world_session'}
+ monkeypatch.setattr(shared,'workflow',types.SimpleNamespace(execute_activity=activity,now=lambda:NOW,logger=types.SimpleNamespace(error=lambda *a:None)))
+ async def run():return [e async for e in m.WaitSecondsManager().execute_tool(wf,{'seconds':300},'wait-id')]
+ events=asyncio.run(run());assert len(calls)==1;assert calls[0]['args']==['wait','a',None,{'wait_id':'wait-id','duration_ms':300000}]
+ assert simulated_clock_offset_seconds(wf)==300
+ assert events[-1].metadata['simulatedSkipSeconds']==300
+
+@pytest.mark.parametrize('operation',['register','finish'])
+@pytest.mark.parametrize('first',['exception','skipped','malformed','success'])
+def test_world_clock_ack_retry_and_concurrent_duplicates(monkeypatch,first,operation):
+ import workflows.agent_workflow as m
+ async def run():
+  wf=types.SimpleNamespace(world_model_mode='simulate',agent_id='a',parent_agent_id=None,_world_clock_events=set(),simulated_clock_offset_seconds=0)
+  calls=[];entered=asyncio.Event();release=asyncio.Event()
+  async def activity(*a,**kw):
+   calls.append(kw);entered.set();await release.wait()
+   if len(calls)==1 and first=='exception':raise RuntimeError('offline transient')
+   if len(calls)==1 and first=='skipped':return {'skipped':'no_world_session'}
+   if len(calls)==1 and first=='malformed':return {'time_ms':True}
+   return {'agent_id':'a','time_ms':int(NOW.timestamp()*1000)-86400000}
+  monkeypatch.setattr(m,'workflow',types.SimpleNamespace(execute_activity=activity,now=lambda:NOW))
+  one=asyncio.create_task(m.AgentWorkflow._world_clock_event(wf,operation));await entered.wait()
+  two=asyncio.create_task(m.AgentWorkflow._world_clock_event(wf,operation));await asyncio.sleep(0)
+  assert len(calls)==1 and not two.done(),'duplicate must join in-flight operation'
+  release.set();await asyncio.gather(one,two)
+  assert (operation in wf._world_clock_events)==(first=='success')
+  await m.AgentWorkflow._world_clock_event(wf,operation)
+  assert len(calls)==(1 if first=='success' else 2)
+  assert wf.simulated_clock_offset_seconds==(-86400 if operation=='register' else 0)
+ asyncio.run(run())

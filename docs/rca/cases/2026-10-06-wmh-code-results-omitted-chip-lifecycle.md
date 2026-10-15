@@ -18,11 +18,12 @@ tags:
   - task-complete
   - transcript-replay
 sources:
+  - plan:.context/deploy-rejected-caps-20261015/rca-review-code-chip
   - agent 67885bdc-fd0f-4023-aa65-d3687df7f2ec
   - fleet run 22da47fc-6ac7-4ab2-8cb7-ac2a3ca57b5f
   - plan:docs/plans/active/wmh-local-continuation-20261006.md
 repro: agents/tests/blackbox/spawn_agent.blackbox.py test_simulated_code_posts_code_chip_lifecycle; front-end/src/tests/blackbox/wmh-code-chip.blackbox.tsx
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -95,3 +96,11 @@ fixing future emitted messages would leave their screenshot unrepaired.
 ## Reusable lesson
 
 Preserve specialized tool lifecycle and output contracts in simulated producers and replay their original persisted messages through the full viewer pipeline.
+
+## October 15 deployment recurrence
+
+The same persisted simulated-result/viewer lifecycle contract regressed when a later cancellation row became the latest completion message. Its absent simulated marker re-enabled real-session fetching and hid the earlier recorded body. Legacy lifecycle normalization also needed to be applied consistently before the hook derived output. This is a continuation of the existing simulated code-chip contract, not proof that the simulator predicted a correct task outcome.
+
+The actual six-test frontend file had 3 failures / 3 passes before and 6 passes after. Owning Vitest walls were 7.79s and 7.62s. The applied hook retains recorded simulated output across later lifecycle rows and normalizes legacy rows once; the ordinary real-session fetch control remains passing. Original hook/test snapshots and both logs are preserved under the private handoff. No source/provider/model replay was introduced.
+
+The historical component fix and its original checks above remain recorded. This recurrence reopens the case pending unchanged normal final-source gates and production verification. The fundraiser and full deployment remain unproved; an expandable simulated result is not an external execution receipt.

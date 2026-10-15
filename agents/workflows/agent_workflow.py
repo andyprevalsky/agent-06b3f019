@@ -1842,7 +1842,10 @@ class AgentWorkflow:
             if root_goal:
                 self.fast_cache_root_goal = root_goal
                 self.root_goal = root_goal
-            if isinstance(cache_context, dict):
+            if isinstance(cache_context, dict) and (
+                not workflow.patched("fast-cache-context-resolution-success-v1")
+                or cache_context.get("resolved", isinstance(persisted_goal, str))
+            ):
                 self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
                 self.provider_fast_mode = bool(
                     cache_context.get("provider_fast_mode", self.provider_fast_mode)
@@ -5111,15 +5114,28 @@ class AgentWorkflow:
         """
         if self.world_model_mode != "simulate" or operation in self._world_clock_events:
             return
-        self._world_clock_events.add(operation)
+        pending = getattr(self, "_world_clock_pending_events", None)
+        if pending is None:
+            pending = self._world_clock_pending_events = {}
+        if operation in pending:
+            await pending[operation].wait()
+            return
+        completed = asyncio.Event()
+        pending[operation] = completed
         result = None
-        with contextlib.suppress(Exception):
-            result = await workflow.execute_activity(
-                world_clock_activity,
-                args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        try:
+            with contextlib.suppress(Exception):
+                result = await workflow.execute_activity(
+                    world_clock_activity,
+                    args=[operation, self.agent_id, self.parent_agent_id if operation == "register" else None],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+        finally:
+            pending.pop(operation, None)
+            completed.set()
+        if isinstance(result, dict) and type(result.get("time_ms")) is int:
+            self._world_clock_events.add(operation)
         if operation == "register" and isinstance(result, dict) and type(result.get("time_ms")) is int:
             # This agent's own clock reads world time from its first step: the
             # world starts at its pinned scenario date, not today's date.

@@ -14,7 +14,7 @@ cd ../rose-wmh-resume
 ```
 
 Read `CLAUDE.md`, then
-`docs/plans/active/wmh-local-continuation-20261006.md`. Exact benchmark runs,
+`docs/plans/completed/wmh-local-continuation-20261006.md`. Exact benchmark runs,
 corpus reports, and build metadata are in
 `docs/plans/active/wmh-evidence-20261006/README.md` and the adjacent files.
 This branch is WIP; its WMH changes have not been deployed.
@@ -320,7 +320,7 @@ to discuss subtle browser/simulator role confusion with WMH was completed as a
 diagnostic; it did not establish a causal root.
 
 Start with `CLAUDE.md`, this file, and
-`docs/plans/active/wmh-local-continuation-20261006.md`. The new portable
+`docs/plans/completed/wmh-local-continuation-20261006.md`. The new portable
 checkpoint is
 `docs/plans/active/wmh-evidence-20261006/cache-optimization-20261008/`.
 Its `handoff.json` distinguishes completed work from planned or interrupted work.

@@ -50,7 +50,7 @@ def observe_cooldown(model, remaining_seconds):
         )
 
 
-async def observe_http_failure(model, response, *, cooldown_seconds=None):
+async def observe_http_failure(model, response, *, cooldown_seconds=None, body_read_required=False):
     callback = FAILURE_OBSERVER.get()
     if callback is None:
         return
@@ -95,5 +95,10 @@ async def observe_http_failure(model, response, *, cooldown_seconds=None):
             quota = error.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}
     except (ValueError, UnicodeError):
         pass
+    except Exception:
+        # Observation must not replace a route's existing HTTP-status failure.
+        # A route that already consumes the error body retains its read failure.
+        if body_read_required:
+            raise
     if quota and not safe["permanent"]:
         callback({**safe, "permanent": True})

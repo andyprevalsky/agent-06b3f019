@@ -82,6 +82,7 @@ async def resolve_fast_cache_context_activity(agent_id: str) -> dict[str, Any]:
         await resolve_agent_fast_mode(agent_id)
     )
     result = {
+        "resolved": isinstance(root_agent_id, str),
         "enabled": bool(enabled),
         "goal": goal,
         "write_enabled": bool(write_enabled),

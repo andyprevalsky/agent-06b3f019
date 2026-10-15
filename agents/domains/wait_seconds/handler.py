@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator
 from temporalio import workflow
 
 from domains.wait_seconds.service import format_duration, validate_seconds
+from domains.wait_for.handler import _wait_on_world_clock
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
@@ -61,7 +62,11 @@ class WaitSecondsManager(ToolManager):
         # 2a. World-model simulate: nothing in the WMH-served world changes with
         # wall-clock time, so skip the sleep and advance the simulated clock.
         if simulated_time_skip_enabled(workflow_instance):
-            advance_simulated_clock(workflow_instance, seconds)
+            world_ms = None
+            if getattr(workflow_instance, "agent_id", None):
+                world_ms = await _wait_on_world_clock(workflow_instance, tool_call_id, duration_ms=int(seconds * 1000))
+            if world_ms is None:
+                advance_simulated_clock(workflow_instance, seconds)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=f"\u2713 Waited {duration} (simulated)",

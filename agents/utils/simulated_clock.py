@@ -38,7 +38,8 @@ def simulated_clock_offset_seconds(workflow_instance: Any) -> int:
         return 0
     raw = getattr(workflow_instance, SIMULATED_CLOCK_ATTR, 0)
     try:
-        return max(0, int(raw or 0))
+        parsed = int(raw or 0)
+        return parsed if simulated_time_skip_enabled(workflow_instance) else max(0, parsed)
     except (TypeError, ValueError):
         return 0
 

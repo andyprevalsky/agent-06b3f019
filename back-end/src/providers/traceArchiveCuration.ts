@@ -240,7 +240,11 @@ export const DEFAULT_CURATION_CONCURRENCY = 8;
 export async function curateTraceArchives(
   options: CurateTraceArchiveOptions
 ): Promise<CurateTraceArchiveResult[]> {
-  const concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CURATION_CONCURRENCY));
+  const requestedConcurrency = options.concurrency ?? DEFAULT_CURATION_CONCURRENCY;
+  if (!Number.isFinite(requestedConcurrency) || requestedConcurrency < 1) {
+    throw new Error('concurrency must be a finite number greater than or equal to 1');
+  }
+  const concurrency = Math.floor(requestedConcurrency);
   const results: CurateTraceArchiveResult[] = new Array(options.rootAgentIds.length);
   let next = 0;
   const worker = async (): Promise<void> => {

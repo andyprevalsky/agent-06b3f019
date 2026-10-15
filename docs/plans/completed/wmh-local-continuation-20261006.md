@@ -1,5 +1,9 @@
 # WMH build and fundraiser benchmark: local continuation
 
+Archived on 2026-10-15 for the deployment review. The historical run records
+below remain unchanged; archival does not mark the fundraising goal complete.
+Current status and approval boundaries remain in `WMH_HANDOFF.md`.
+
 Status: WIP continuation on `codex/wmh-experiential-parallel-20261006`, descended
 from the October 6 cloud handoff `codex/wmh-handoff-20261006`. This branch
 preserves the original source and subsequent diagnostics. It is **not merged
@@ -26,7 +30,7 @@ durable replays were verified in a fresh browser. Deployment and merge remain he
 
 The user requested publishing all WIP changes and continuation instructions.
 Read `WMH_HANDOFF.md` first for the current resume point and exact resource
-state. Portable evidence is in `wmh-evidence-20261006/cache-optimization-20261008/`.
+state. Portable evidence is in `../active/wmh-evidence-20261006/cache-optimization-20261008/`.
 The original fundraiser acceptance remains unsuccessful; deployment and merge
 are held. Current main was fetched at `b1e8a47e3` and still needs careful
 integration (209 main-only / 30 branch-only commits before this checkpoint).
@@ -93,7 +97,7 @@ and `published/f8065e19-2fc5-4557-82a8-62dfadde5382/manifest.json`.
 The exact benchmark JSON is
 `agents/benchmarks/runs/20261008_035456_bbbdb300-bde5-4386-8463-cbef0cba9319_raise-5m-rose-labs-brex.json`.
 Portable outcome, cache, cleanup, exact Browser goals and verified share-link
-receipts are in `wmh-evidence-20261006/wmh-fundraiser-distribution-20261008.json`.
+receipts are in `../active/wmh-evidence-20261006/wmh-fundraiser-distribution-20261008.json`.
 Owning checks passed before execution: provider/pricing 88, native 37, and
 Ruff. Fresh full conformance, the broader fundraiser goal and the deferred
 nonzero warm-network environment remain open. Deployment remains held.
@@ -120,7 +124,7 @@ monotonic per producing agent. Authoritative tool/browser timestamps are
 untouched. All changes remain local. No fundraiser rerun or deployment ran.
 
 Portable live receipts and limitations are in
-`wmh-evidence-20261006/wmh-provider-prefix-cache-20261008.json`; causal controls
+`../active/wmh-evidence-20261006/wmh-provider-prefix-cache-20261008.json`; causal controls
 and owning-gate logs are in `.context/wmh-provider-prefix-cache-20261008/`.
 The affinity recurrence is recorded in
 `docs/rca/cases/2026-07-23-provider-cache-affinity-not-scoped-to-one-sequence.md`.
@@ -155,7 +159,7 @@ URL. This establishes a target-resource grounding gap for that lookup, not a
 passing fundraiser or proof that every firm has a public pitch channel.
 Other recognized forms still require unknown Rose company/product facts.
 See the October 6 code-lifecycle and contact-resource RCA cases and the portable
-replay receipt in `wmh-evidence-20261006/contact-replay-diagnosis.json`.
+replay receipt in `../active/wmh-evidence-20261006/contact-replay-diagnosis.json`.
 Prediction behavior, model/corpus selection, benchmark assertions, timeout,
 and production remain unchanged in this follow-up. The contact/fundraiser
 RCA remains open until a general repair and exact outcome verification pass.
@@ -439,14 +443,14 @@ The final observed session snapshot was revision 50; later request snapshots
 prove further activity, but no final post-shutdown state receipt exists.
 All resources owned by this run have now retired. The portable exact-run hash,
 late commits, usage cutoffs and cleanup audit are in
-`wmh-evidence-20261006/native-fundraiser-timeout-cleanup-review.json`.
+`../active/wmh-evidence-20261006/native-fundraiser-timeout-cleanup-review.json`.
 
 Actual Chrome inspection opened the durable root transcript and all eight
 children, expanded browser results, and verified the clean simulated Claude
 Code completion row. Interrupted child rows remain visibly unfinished. This
 is verified transcript replay; simulate mode allocated no browser/code film
 session. The viewer receipt and durable link are in
-`wmh-evidence-20261006/native-fundraiser-viewer-review.json`. Approval evidence
+`../active/wmh-evidence-20261006/native-fundraiser-viewer-review.json`. Approval evidence
 separately selects the latest LLM call across the entire root/child tree;
 the original publisher manifest selected a root-only dump.
 
@@ -458,7 +462,7 @@ All six responses passed the native parser and retained $0 funding, empty
 commitments/instruments/wires, existing company facts and pending approvals.
 Credentials were deliberately held on the original funded route in both
 arms; this does not reproduce normal leased routing. See
-`wmh-evidence-20261006/native-form-policy-controlled-review.json`.
+`../active/wmh-evidence-20261006/native-form-policy-controlled-review.json`.
 The user subsequently authorized local prompt changes without a separate approval until deployment. The exact reviewed policy was applied locally on October 7; deployment remains explicitly on hold.
 Six candidate-only negative controls also passed: two explicit observed
 pages with no route, two forms requiring unknown legal facts, and two
@@ -467,7 +471,7 @@ model and retained private facts, approvals and zero funds. Their measured
 call span was 50.129 seconds and metering was $0.271156. One initial analyzer
 scope mismatch was corrected to allow the explicitly observed form POST URL;
 its failed audit is preserved and no model responses were edited or retried.
-See `wmh-evidence-20261006/native-form-policy-negative-review.json`.
+See `../active/wmh-evidence-20261006/native-form-policy-negative-review.json`.
 These single-call controls do not establish fundraiser acceptance.
 
 Current main `a3585a7bd` was integrated at `f647c1c8b`. Focused Google-source,
@@ -553,10 +557,10 @@ legitimate no reply, so positive future-response capability remains inconclusive
 Native32/provider66/backend24/Python-cache7/cloud-config-and-launch11 owning
 checks pass, with150 old cache keys byte-identical. Fresh matching full
 conformance and clean fundraiser acceptance remain pending. See
-`wmh-evidence-20261006/native-policy-v2-local-review.json`.
+`../active/wmh-evidence-20261006/native-policy-v2-local-review.json`.
 Deployment is held.
-See `wmh-evidence-20261006/native-policy-first-conformance-review.json` and
-`wmh-evidence-20261006/native-policy-conformance-qualification.json`.
+See `../active/wmh-evidence-20261006/native-policy-first-conformance-review.json` and
+`../active/wmh-evidence-20261006/native-policy-conformance-qualification.json`.
 
 1. Read `CLAUDE.md`, `docs/testing.md`, and
    `agents/benchmarks/README.md` (World-model refresh conformance). Set up the

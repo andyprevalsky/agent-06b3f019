@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import { makeChipMessage as makeMsg } from './terminal-component-chips.fixtures';
@@ -29,6 +29,10 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }));
 
+import {
+  useClaudeCodeChip,
+  useClaudeCodeChipState,
+} from '@/features/terminal-component-group/components/claudeCodeChip.hooks';
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
 import { useFilteredMessages } from '@/features/terminal-component-group/components/useMessageFiltering';
@@ -112,5 +116,87 @@ describe('WMH code completion in a durable transcript', () => {
       screen.getByText(/The code agent created four draft fundraising files/),
     ).toBeInTheDocument();
     expect(fetchSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('WMH terminal output survives later lifecycle messages', () => {
+  it.each([true, false])(
+    'keeps the recorded output when a later cancellation has task_id=%s',
+    async (includeTaskId) => {
+      messages.current = [
+        makeMsg({
+          text: 'Predicted code output',
+          metadata: {
+            task_id: 'wmh-sticky',
+            toolCallId: 'sticky-call',
+            action_type: 'task_complete',
+            title: 'Task Completed',
+            world_model_simulated: true,
+          },
+        }),
+        makeMsg({
+          text: 'Unrelated predicted output',
+          metadata: {
+            task_id: 'other-task',
+            toolCallId: 'other-call',
+            action_type: 'task_complete',
+            world_model_simulated: true,
+          },
+        }),
+        makeMsg({
+          text: 'Session cancelled',
+          metadata: {
+            ...(includeTaskId ? { task_id: 'wmh-sticky' } : {}),
+            toolCallId: 'sticky-call',
+            action_type: 'session_cancelled',
+          },
+        }),
+      ];
+      fetchSession.mockClear();
+      const { result } = renderHook(() => useClaudeCodeChip('wmh-sticky', undefined, false));
+      expect(result.current.isComplete).toBe(true);
+      expect(result.current.isSuccess).toBe(false);
+      expect(result.current.terminalTranscript).toBe('Predicted code output');
+      await Promise.resolve();
+      expect(fetchSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the normalized terminal contract once for a legacy cancel sibling', () => {
+    messages.current = [
+      makeMsg({
+        text: '**Status**: ✅ SUCCESS\nRecorded result',
+        metadata: {
+          taskId: 'legacy-cancel',
+          toolCallId: 'legacy-call',
+          toolName: 'spawn_agent',
+          world_model_boundary: 'spawn_claude_code_agent',
+          world_model_simulated: true,
+          toolStatus: 'FINISHED',
+          action_type: 'session_cancelled',
+        },
+      }),
+    ];
+    const { result } = renderHook(() => useClaudeCodeChipState('legacy-cancel'));
+    expect(result.current.isComplete).toBe(true);
+    expect(result.current.isSuccess).toBe(true);
+    expect(result.current.simulatedOutput).toBe('**Status**: ✅ SUCCESS\nRecorded result');
+  });
+
+  it('continues fetching saved output for an ordinary real completed session', async () => {
+    messages.current = [
+      makeMsg({
+        text: 'Done',
+        metadata: {
+          task_id: 'real-complete',
+          action_type: 'task_complete',
+          title: 'Task Completed',
+        },
+      }),
+    ];
+    fetchSession.mockClear();
+    const { result } = renderHook(() => useClaudeCodeChip('real-complete', undefined, false));
+    expect(result.current.simulatedOutput).toBeUndefined();
+    await waitFor(() => expect(fetchSession).toHaveBeenCalledWith('real-complete', 'claude'));
   });
 });

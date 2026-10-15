@@ -1698,6 +1698,14 @@ def test_read_archive_artifact_metadata_never_reads_ciphertext():
                 raise error
             return {"Body": _Body(objects[Key])}
 
+        def head_object(self, *, Bucket: str, Key: str) -> dict:
+            fetched.append(Key)
+            if Key not in objects:
+                error = Exception(f"NoSuchKey: {Key}")
+                error.response = {"Error": {"Code": "NoSuchKey"}}
+                raise error
+            return {}
+
     old_client = trace_archive._R2_CLIENT
     old_env = {key: os.environ.get(key) for key in ["TRACE_ARCHIVE_BACKEND", "R2_BUCKET_TRACE_ARCHIVE"]}
     trace_archive._R2_CLIENT = _Client()

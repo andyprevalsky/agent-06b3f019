@@ -15006,15 +15006,18 @@ async def _run_single_task_as_run_user(
         )
         release_skip = release_stall and evaluated_failure_reason is None
         error_status = "SKIPPED" if release_skip else "ERROR"
-        if release_skip:
-            _warn_agentcard_release_skip(task.name, str(e))
-        else:
-            print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
         agent_id = _recover_owned_native_admission_root(task, agent_id)
         try:
             await _retire_owned_native_world(task, agent_id)
         except Exception:
             pass  # Evidence/archive/agent cleanup must continue after an unproven native join.
+        if getattr(task, "_wmh_retirement_error", None) is not None:
+            release_skip = False
+            error_status = "ERROR"
+        if release_skip:
+            _warn_agentcard_release_skip(task.name, str(e))
+        else:
+            print(f"\n    ❌ {task.name}: ERROR - {type(e).__name__}: {e}")
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None

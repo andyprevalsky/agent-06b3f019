@@ -494,7 +494,7 @@ def read_r2_artifact_metadata(*, root_agent_id: str, path: str) -> Optional[dict
 
     Same contract as ``read_r2_artifact``: ``None`` when the artifact does not
     exist, ``ValueError`` when ciphertext is present without metadata. The
-    existence probe on the miss path opens the object without reading its body.
+    existence probe on the miss path uses HEAD without opening an object body.
     """
     key = _object_key(root_agent_id, path)
     try:
@@ -503,7 +503,7 @@ def read_r2_artifact_metadata(*, root_agent_id: str, path: str) -> Optional[dict
         if not _is_missing_r2_object_error(exc):
             raise
     try:
-        _r2_client().get_object(Bucket=_r2_bucket(), Key=key)
+        _r2_client().head_object(Bucket=_r2_bucket(), Key=key)
     except Exception as exc:
         if _is_missing_r2_object_error(exc):
             return None

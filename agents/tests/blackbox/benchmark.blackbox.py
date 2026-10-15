@@ -22085,6 +22085,75 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             assert not descendant_live(), "native control descendant survived exact cleanup"
 
 
+async def test_agentcard_release_skip_rejects_independent_native_retirement_failure():
+    """A typed payment waiver cannot waive an independently failed owned provider join."""
+    from copy import deepcopy
+    import httpx
+    import uuid
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    lifecycle = json.loads((Path(__file__).parents[1] / 'fixtures' / 'agentcard-production-release-stall.json').read_text())['lifecycle']
+    for native in ('none', 'joined', 'failed'):
+        task = deepcopy(get_task_by_name('agent-payment-production-abandonment'))
+        calls = []
+        task.world_model_mode = 'simulate'
+        if native != 'none':
+            task.wmh_initial_state = {'structured': {'schema':'offline-retirement-control', 'as_of_utc':'2026-10-15T00:00:00Z'}, 'scratchpad':''}
+        else:
+            task.wmh_initial_state = None
+        actual_client = httpx.AsyncClient
+        def transport(request):
+            assert request.url.host == 'fixture.invalid'
+            payload = json.loads(request.content)
+            assert payload['world_model_mode'] == 'simulate'
+            assert request.method == 'POST' and request.url.path == '/api/agents'
+            return httpx.Response(201, json={'agent_id': lifecycle['agentId']})
+        def client(*args, **kwargs):
+            return actual_client(*args, transport=httpx.MockTransport(transport), **kwargs)
+        class NativeClient:
+            def __init__(self, base): assert base == 'http://native.test'
+            async def create_session(self, model, **kwargs):
+                assert model == 'rose-test'
+                assert kwargs['session_scope_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_agent_id'] == lifecycle['agentId']
+                assert kwargs['seed_state']['structured']['root_goal'] == kwargs['task']
+                return 'owned-session'
+            async def end_session(self, model, sid):
+                assert (model, sid) == ('rose-test', 'owned-session')
+                calls.append((model, sid))
+                if native == 'failed': raise RuntimeError('exact owned retirement unavailable')
+                return dict(engine='experiential', join_verified=True, ended=sid, session_id=sid, session_scope_id=lifecycle['agentId'], revision=1, state={}, history=[], usage={})
+        cleanup = AsyncMock(side_effect=AssertionError('duplicate financial cleanup'))
+        delete = AsyncMock()
+        archive = AsyncMock(return_value=(None, None))
+        logs = {'failure_evidence': {'errors': []}}
+        stall = bench._payment_reconciliation_timeout('pending', lifecycle, task_name=task.name)
+        assert isinstance(stall, bench.AgentCardReleaseStall)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'BENCHMARK_WORLD_MODEL_MODE':'simulate','WMH_BASE_URL':'http://native.test','WMH_MODEL_NAME':'rose-test','WMH_ENGINE':'experiential'}))
+            for key in ('WMH_SESSION_ID', 'WORLD_MODEL_SESSION_ID'):
+                stack.enter_context(patch.dict(os.environ))
+                os.environ.pop(key, None)
+            stack.enter_context(patch.object(bench.uuid, 'uuid4', return_value=uuid.UUID(lifecycle['agentId'])))
+            stack.enter_context(patch.object(bench.httpx, 'AsyncClient', client))
+            for name in ('prepare_sandbox_payment_residual', '_preflight_production_payment_identity', '_apply_live_fixtures', '_apply_memory_fixtures', '_apply_auth_test_site', '_restore_live_fixture_scenarios_async', '_release_auth_test_site'):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, value in {'_api_headers':AsyncMock(return_value={}), 'WMHHttpClient':NativeClient, '_run_with_agent_execution_backstop':AsyncMock(side_effect=stall), '_capture_task_failure_evidence':AsyncMock(return_value=({'messages': [], '_benchmark': {'payment_lifecycle':deepcopy(lifecycle)}}, logs)), 'finalize_archive_and_score_world_model':archive, 'ensure_payment_lifecycle_cleanup':cleanup, 'delete_agent':delete, '_run_user_id_override_for_task':lambda *_args:None}.items():
+                stack.enter_context(patch.object(bench, name, value))
+            result = await bench.run_single_task('https://fixture.invalid', task)
+        cleanup.assert_not_awaited(); delete.assert_awaited_once()
+        assert len(calls) == (native != 'none'), calls
+        assert result.logs['agentcard_release_stall_lifecycle'] == lifecycle
+        expected = 'ERROR' if native == 'failed' else 'SKIPPED'
+        assert (result.status, result.benchmark_status, result.passed) == (expected, expected, False), (native, result.status, result.failure_reason)
+        assert bench._is_permitted_agentcard_release_skip(result) is (native != 'failed')
+        assert archive.await_args.kwargs['benchmark_status'] == expected
+        if native == 'failed':
+            assert result.logs['wmh_retirement_error'] == dict(type='RuntimeError', message='exact owned retirement unavailable', session_id='owned-session', session_scope_id=lifecycle['agentId'], join_verified=False, cost_verified=False)
+            assert 'exact owned retirement unavailable' in result.failure_reason
+        elif native == 'joined': assert result.logs['wmh_retirement']['join_verified'] is True
+
+
 async def test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown():
     """A false-live lifecycle cannot turn a production or unknown task into a sandbox skip."""
     from copy import deepcopy
@@ -22221,6 +22290,7 @@ async def run_all_tests():
     r.record("agentcard_release_skip_rejects_independent_failures", test_agentcard_release_skip_rejects_independent_lifecycle_failures)
     await r.record_async("agentcard_cleanup_preserves_release_skip", test_agentcard_cleanup_preserves_the_typed_release_skip)
     await r.record_async("agentcard_release_skip_execution_cleanup", test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup)
+    await r.record_async("agentcard_release_skip_native_retirement_strict", test_agentcard_release_skip_rejects_independent_native_retirement_failure)
     await r.record_async("agentcard_release_skip_preserves_task_failure", test_agentcard_release_stall_cannot_replace_an_independent_task_failure)
     await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
     await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_allows_production_but_rejects_unknown)

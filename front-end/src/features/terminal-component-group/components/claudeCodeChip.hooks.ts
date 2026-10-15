@@ -105,9 +105,8 @@ export function useClaudeCodeChipState(
   const { messages } = useAgentContext();
 
   return useMemo<ChipDerived>(() => {
-    const taskMessages = messages
-      .map(normalizeWMHCodeMessage)
-      .filter((m) => m.metadata?.task_id === taskId);
+    const normalizedMessages = messages.map(normalizeWMHCodeMessage);
+    const taskMessages = normalizedMessages.filter((m) => m.metadata?.task_id === taskId);
     // Handler cancel can omit metadata.task_id while sharing toolCallId with the
     // started/complete siblings. Include those bare session_cancelled rows so
     // the chip leaves spinning_up even when the session fetch fails.
@@ -121,7 +120,7 @@ export function useClaudeCodeChipState(
         ? taskMessages
         : [
             ...taskMessages,
-            ...messages.filter((m) => {
+            ...normalizedMessages.filter((m) => {
               if (m.metadata?.task_id === taskId) return false;
               if (m.metadata?.action_type !== 'session_cancelled') return false;
               const tc = m.metadata?.toolCallId;
@@ -184,8 +183,14 @@ export function useClaudeCodeChipState(
       failureMessage: failureText,
       githubRepoUrl: githubUrl,
       codeProvider: provider,
-      simulatedOutput:
-        completionMsg?.metadata?.world_model_simulated === true ? completionMsg.text : undefined,
+      simulatedOutput: [...relatedMessages]
+        .reverse()
+        .find(
+          (m) =>
+            m.metadata?.world_model_simulated === true &&
+            (m.metadata?.action_type === 'task_complete' ||
+              m.metadata?.action_type === 'session_cancelled'),
+        )?.text,
     };
   }, [initialCodeProvider, messages, taskId]);
 }

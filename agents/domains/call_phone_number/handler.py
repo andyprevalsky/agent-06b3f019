@@ -45,6 +45,7 @@ from domains.call_phone_number.service import (
 )
 from domains.call_phone_number.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
+from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, UsageItem, UsageType, extract_root_error
 
@@ -118,11 +119,13 @@ class CallPhoneNumberManager(ToolManager):
             activity_args = [to, system_prompt, output_schema, agent_id, tool_call_id, user_id]
             if world_model_mode != "real":
                 activity_args.append(world_model_mode)
+            options = wmh_activity_timeout_options(world_model_mode, timedelta(minutes=ACTIVITY_TIMEOUT_MINUTES))
+            if world_model_mode not in {"simulate", "shadow"}:
+                options["heartbeat_timeout"] = timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
             result = await execute_activity(
                 call_phone_number_activity,
                 args=activity_args,
-                start_to_close_timeout=timedelta(minutes=ACTIVITY_TIMEOUT_MINUTES),
-                heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
+                **options,
                 retry_policy=RetryPolicy(
                     maximum_attempts=MAX_RETRY_ATTEMPTS,
                     backoff_coefficient=RETRY_BACKOFF_COEFFICIENT,

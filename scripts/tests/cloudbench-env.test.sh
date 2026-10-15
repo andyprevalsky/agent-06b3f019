@@ -159,7 +159,10 @@ class WorldModelLaunch(unittest.TestCase):
             repo = scratch / "repo"
             (repo / "scripts").mkdir(parents=True)
             (repo / "agents").mkdir()
-            for path in ("scripts/setup-world-model.sh", "agents/requirements-world-model.txt"):
+            for path in ("scripts/setup-world-model.sh", "agents/requirements-world-model.txt",
+                         "agents/vendor/world-model/SOURCES.txt",
+                         "agents/vendor/world-model/experiential-0.7.158+rose.bf75987e-py3-none-any.whl"):
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(root / path, repo / path)
             native = repo / ".context/experiential-venv/bin"
             native.mkdir(parents=True)
@@ -181,8 +184,7 @@ class WorldModelLaunch(unittest.TestCase):
                                     text=True, capture_output=True)
             expected = hashlib.sha256((repo / "agents/requirements-world-model.txt").read_bytes()).hexdigest()
             marker = repo / ".context/experiential-venv/requirements.sha256"
-            self.assertTrue(marker.exists(), result.stderr)
-            self.assertEqual(marker.read_text().strip(), expected)
+            self.assertFalse(marker.exists(), "failed runtime validation must not mark the environment healthy")
             self.assertEqual(len(calls.read_text().splitlines()), 2)
             self.assertNotEqual(result.returncode, 0, "missing pinned native dependency must still fail closed")
             self.assertTrue("Native world model requires Python" in result.stderr
