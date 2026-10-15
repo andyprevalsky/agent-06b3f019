@@ -3384,3 +3384,135 @@ def test_campaign_inventory_clone_name_wait_passes_original_absolute_deadline(tm
     result = subprocess.run(['bash', str(script)], cwd=tmp_path, capture_output=True, text=True,
                             timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _scheduled_stop_guard():
+    import runpy
+    return runpy.run_path(str(ROOT / 'scripts/cloudbench-campaign-stop.py'))
+
+
+def _scheduled_stop_summary(failed=0):
+    jobs = []
+    for index in range(600):
+        attempts = [] if index >= failed else [{'attempt': 1, 'status': 'failed',
+            'finished_at': '2026-10-15T00:00:00Z', 'infra_failure': True}]
+        jobs.append({'job_id': f'r001-j{index+1:04}', 'task': f'task-{index}', 'attempts': attempts})
+    return {'jobs': jobs}
+
+
+@pytest.mark.parametrize('failed, expected', [(1, False), (29, False), (30, True)])
+def test_campaign_scheduled_stop_uses_fixed_600_job_denominator(failed, expected):
+    guard = _scheduled_stop_guard()
+    result = guard['fold'](_scheduled_stop_summary(failed))
+    assert result['trigger'] is expected
+
+
+def test_campaign_scheduled_stop_deduplicates_failed_jobs_across_retries():
+    guard = _scheduled_stop_guard()
+    summary = _scheduled_stop_summary(29)
+    for job in summary['jobs'][:29]:
+        job['attempts'].append({**job['attempts'][0], 'attempt': 2})
+    result = guard['fold'](summary)
+    assert result['trigger'] is False
+    assert result['infra_failed_jobs'] == 29
+    assert result['scheduled_jobs'] == 600
+    assert result['terminal'] == 58  # physical telemetry remains intact
+    assert result['infra_true'] == 58
+
+
+@pytest.mark.parametrize('status, flag, expected', [
+    ('cancelled', True, 30), ('cancelled', None, 29), ('failed', None, 29),
+    ('passed', True, 30), ('passed', False, 29), ('running', True, 29)])
+def test_campaign_scheduled_stop_preserves_confirmed_terminal_infra(status, flag, expected):
+    guard = _scheduled_stop_guard()
+    summary = _scheduled_stop_summary(29)
+    summary['jobs'][29]['attempts'] = [{'attempt': 1, 'status': status,
+        'finished_at': '2026-10-15T00:00:00Z', 'infra_failure': flag}]
+    result = guard['fold'](summary)
+    assert result['trigger'] is (expected == 30)
+    assert result['infra_failed_jobs'] == expected
+    assert result['scheduled_jobs'] == 600
+
+
+def test_campaign_scheduled_stop_logical_cancellation_keeps_physical_infra():
+    guard = _scheduled_stop_guard()
+    summary = _scheduled_stop_summary(30)
+    for job in summary['jobs']:
+        job['status'] = 'cancelled'
+    assert guard['fold'](summary)['infra_failed_jobs'] == 30
+    assert guard['fold'](summary)['trigger'] is True
+
+
+def test_campaign_scheduled_stop_refuses_duplicate_physical_attempt_identity():
+    guard = _scheduled_stop_guard()
+    summary = _scheduled_stop_summary(29)
+    summary['jobs'][0]['attempts'].append(dict(summary['jobs'][0]['attempts'][0]))
+    with pytest.raises(ValueError, match='duplicate physical attempt'):
+        guard['fold'](summary)
+
+
+@pytest.mark.parametrize('change', ['missing', 'duplicate'])
+def test_campaign_scheduled_stop_refuses_changed_scheduled_membership(change):
+    guard = _scheduled_stop_guard()
+    summary = _scheduled_stop_summary(30)
+    if change == 'missing':
+        summary['jobs'].pop()
+    else:
+        summary['jobs'][-1] = summary['jobs'][0]
+    with pytest.raises(ValueError):
+        guard['fold'](summary)
+
+
+@pytest.mark.parametrize('failed, expected_signals', [(1, 0), (29, 0), (30, 1)])
+def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_path, monkeypatch, failed, expected_signals):
+    """Run the actual supervisor loop repeatedly, including its durable stop latch."""
+    import hashlib
+    import runpy
+    from unittest.mock import patch
+    guard = _scheduled_stop_guard()
+    main = guard['main']
+    namespace = main.__globals__
+    original_path = Path
+    epoch = 123.0
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    suffix = hashlib.sha256((float(epoch).hex()+':'+boot).encode()).hexdigest()[:24]
+    campaign_id = f'campaign-qualified600-{suffix}-{os.getpid()}'
+    campaign = tmp_path / '.context/benchmarks/campaigns' / campaign_id
+    manifest_dir = campaign / 'startup-cohorts/c001'
+    destination = tmp_path / '.context/stress200-host'
+    destination.mkdir(parents=True)
+    summary = dict(_scheduled_stop_summary(failed), campaign_id=campaign_id,
+                   e2e_started_at_epoch=epoch, total_jobs=600, concurrency=600)
+    manifest = {'cohort_id': 'c001', 'e2e_deadline_monotonic': 9999.0,
+                'jobs': {j['job_id']: None for j in summary['jobs']}}
+    class Parent:
+        pid = 12345
+        done = False
+        signals = []
+        def poll(self): return 0 if self.done else None
+        def send_signal(self, value): self.signals.append(value)
+        def wait(self): return 0
+    parent = Parent()
+    def launch(*args, **kwargs):
+        manifest_dir.mkdir(parents=True)
+        (campaign / 'summary.json').write_text(json.dumps(summary))
+        (manifest_dir / 'manifest.json').write_text(json.dumps(manifest))
+        return parent
+    iterations = []
+    def advance(_seconds):
+        iterations.append(True)
+        if len(iterations) == 3:
+            parent.done = True
+    def paths(*args):
+        return tmp_path if args == ('/tmp/gate/repo',) else original_path(*args)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF', 'a'*40)
+    with patch.dict(namespace, Path=paths, birth=lambda _pid: 'exact-birth', fence=lambda *args: None), \
+         patch.object(namespace['subprocess'], 'Popen', side_effect=launch), \
+         patch.object(namespace['signal'], 'signal'), \
+         patch.object(namespace['time'], 'sleep', side_effect=advance), \
+         patch.object(namespace['sys'], 'argv', ['supervisor', str(epoch), 'bash', 'scripts/run-bench']):
+        assert main() == 0
+    assert parent.signals == [namespace['signal'].SIGTERM] * expected_signals
+    assert (destination/'first-infra-threshold-trigger.private.json').exists() is bool(expected_signals)
+    assert (destination/'infra-threshold-parent-term.safe.json').exists() is bool(expected_signals)
+    assert len(iterations) == 3
