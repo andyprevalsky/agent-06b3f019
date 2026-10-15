@@ -62,6 +62,7 @@ async def _run_single_iteration(
     gpt_token=None,
     gpt_account_id=None,
     iteration_offset=0,
+    system_prompt_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -174,7 +175,7 @@ async def _run_single_iteration(
         result = await run_agent(
             agent_id="agent-test",
             user_id="user-test",
-            system_prompt=mock_system_prompt,
+            system_prompt=system_prompt_override or mock_system_prompt,
             verifier_prompt_generator=mock_verifier_prompt,
             model="rose-labs/rose-1-flash",
             tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
@@ -788,6 +789,149 @@ async def test_failed_llm_call_does_not_consume_iteration_budget():
     )
     assert executed[0]["tool_name"] == "web_search"
     assert result["status"] != "error"
+
+
+def _with_native_schema_test_transport(test):
+    from functools import wraps
+
+    @wraps(test)
+    async def run():
+        from helpers.messages import flush_realtime_broadcasts_for_tests
+
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200)))
+        with (
+            patch("helpers.messages._get_broadcast_client", return_value=client),
+            patch(
+                "providers.fast_cache.client.resolve_agent_fast_mode",
+                new=AsyncMock(return_value=(False, None, False, None, None, True)),
+            ),
+        ):
+            try:
+                return await test()
+            finally:
+                await flush_realtime_broadcasts_for_tests()
+
+    return run
+
+
+async def _exercise_native_schema_preparation_retry(*, persistent=False, prompt_failure=False):
+    import json
+
+    previous = {"fields": [{"name": "venues", "type": "list[str]", "required": True}]}
+    current = {"fields": [{"name": "venue_prices", "type": "list[int]", "required": True}]}
+    observed = {"schema": previous, "calls": 0, "prompts": []}
+    failure = RuntimeError("current schema temporarily unavailable")
+
+    async def schema():
+        if not prompt_failure:
+            observed["calls"] += 1
+            if persistent or observed["calls"] < 3:
+                raise failure
+        observed["schema"] = current
+        return current
+
+    async def prompt():
+        if prompt_failure:
+            observed["calls"] += 1
+            if persistent or observed["calls"] < 3:
+                raise failure
+        observed["prompts"].append(observed["schema"])
+        return json.dumps(observed["schema"])
+
+    async def productive_tool(*_args):
+        return {"status": "completed", "result": "Current work completed"}
+
+    with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
+        result, posted, _ = await _run_single_iteration(
+            [{"tool": "web_search", "query": "Current venue prices"}], [("web_search", "productive-call", 1.0)],
+            max_iterations=1, response_schema=previous, get_response_schema_override=schema,
+            system_prompt_override=prompt, execute_tool_override=productive_tool,
+        )
+    assert observed["calls"] == 3, "schema preparation bypassed the existing three-attempt pre-acceptance boundary"
+    assert [call.args[0] for call in sleep.await_args_list if call.args[0] >= 1] == [2, 4], (
+        "schema preparation changed the existing retry backoff"
+    )
+    if persistent:
+        assert result["status"] == "error" and str(failure) in result["message"]
+        assert observed["prompts"] == []
+        assert not any(message.get("role") == "ASSISTANT" for message in posted), "failed preparation accepted a provider turn"
+    else:
+        assert result["status"] == "completed", "preparation retries consumed the productive iteration"
+        assert observed["prompts"] == [current], "provider prompt used the previous schema after preparation recovered"
+
+
+@_with_native_schema_test_transport
+async def test_schema_getter_failures_use_existing_native_preacceptance_retry():
+    await _exercise_native_schema_preparation_retry()
+
+
+@_with_native_schema_test_transport
+async def test_schema_getter_persistent_failure_uses_existing_three_attempt_bound():
+    await _exercise_native_schema_preparation_retry(persistent=True)
+
+
+@_with_native_schema_test_transport
+async def test_system_prompt_schema_failures_use_existing_native_retry():
+    await _exercise_native_schema_preparation_retry(prompt_failure=True)
+    await _exercise_native_schema_preparation_retry(prompt_failure=True, persistent=True)
+
+
+@_with_native_schema_test_transport
+async def test_schema_preparation_lifecycle_errors_propagate_without_retry():
+    from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, RetryState
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    failures = [CancelledError("schema read cancelled"), WorkflowGenerationSealed("generation replaced"),
+                GenerationHandoffRequested("replacement-queue")]
+    for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested"):
+        error = ActivityError("schema read failed", scheduled_event_id=1, started_event_id=2, identity="test",
+                              activity_type="schema", activity_id="schema-read", retry_state=RetryState.NON_RETRYABLE_FAILURE)
+        error.__cause__ = ApplicationError("lifecycle boundary", type=kind)
+        failures.append(error)
+    for failure in failures:
+        getter = AsyncMock(side_effect=failure)
+        with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
+            try:
+                await _run_single_iteration([{"tool": "web_search", "query": "unused"}], [("web_search", "unused", 1.0)],
+                                            get_response_schema_override=getter)
+            except BaseException as observed:
+                assert observed is failure, "schema preparation replaced the native lifecycle error"
+            else:
+                raise AssertionError("schema preparation swallowed a native lifecycle error")
+        getter.assert_awaited_once()
+        sleep.assert_not_awaited()
+    getter = AsyncMock(side_effect=asyncio.CancelledError())
+    with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
+        result, _, _ = await _run_single_iteration([], [], get_response_schema_override=getter)
+    assert result["status"] == "paused", "asyncio cancellation lost the existing paused outcome"
+    getter.assert_awaited_once()
+    sleep.assert_not_awaited()
+
+
+@_with_native_schema_test_transport
+async def test_completed_child_optimization_uses_current_native_schema():
+    previous = {"fields": [{"name": "venues", "type": "list[str]", "required": True}]}
+    current = {"fields": [*previous["fields"], {"name": "venue_prices", "type": "list[int]", "required": True}]}
+    context = [{"role": "USER", "text": "Read venues", "timestamp": "2026-10-15T00:00:00Z"}, {
+        "role": "TOOL", "text": "Browser finished", "timestamp": "2026-10-15T00:00:01Z",
+        "metadata": {"toolCallId": "browser-result", "toolName": "spawn_browser_agent", "toolStatus": "FINISHED",
+                     "action_type": "task_complete", "success": True, "structured_response": {"venues": ["Old child field"]}},
+    }]
+    executed = []
+
+    async def tool(name, *_args):
+        executed.append(name)
+        return {"status": "completed", "result": "Current venue prices obtained"}
+
+    result, _, _ = await _run_single_iteration(
+        [{"tool": "web_search", "query": "Get missing venue prices"}], [("web_search", "current-field-work", 1.0)],
+        initial_context=context, skip_verification=False, response_schema=previous,
+        get_response_schema_override=AsyncMock(return_value=current), execute_tool_override=tool,
+        verifier_structured_response={"venues": ["Old child field"]},
+    )
+    assert executed == ["web_search"], "completed-child optimization accepted coverage of the stale local schema"
+    assert result["status"] == "completed"
 
 
 async def test_status_completed_from_tool():
@@ -2783,6 +2927,11 @@ async def run_all_tests(broadcast_client_getter):
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
+    await r.record_async("schema_getter_native_retry", test_schema_getter_failures_use_existing_native_preacceptance_retry)
+    await r.record_async("schema_getter_native_bound", test_schema_getter_persistent_failure_uses_existing_three_attempt_bound)
+    await r.record_async("system_prompt_schema_native_retry", test_system_prompt_schema_failures_use_existing_native_retry)
+    await r.record_async("schema_preparation_lifecycle", test_schema_preparation_lifecycle_errors_propagate_without_retry)
+    await r.record_async("completed_child_current_schema", test_completed_child_optimization_uses_current_native_schema)
     await r.record_async(
         "run_agent_refusal_reroute_crosses_the_temporal_activity_boundary",
         test_run_agent_refusal_reroute_crosses_the_temporal_activity_boundary,

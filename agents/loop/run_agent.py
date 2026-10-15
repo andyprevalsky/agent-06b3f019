@@ -793,40 +793,6 @@ async def run_agent(
         if poll_messages:
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
 
-        # A browser/code child has already run its own verifier before emitting
-        # a terminal structured_response. When that response covers every
-        # parent output field, the parent verifier has a deterministic fast
-        # path for accepting it. Synthesize attempt_completion below so the
-        # normal verifier and completion persistence still run without paying
-        # for (or depending on) an LLM to repeat an action we already know.
-        completed_child_output = None
-        completed_child_tool_call_id = ""
-        if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
-            completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
-            if completed_child_handoff:
-                completed_child_output, completed_child_tool_call_id = completed_child_handoff
-        completion_instruction = None
-        # Keep the provider-visible tool schema stable across turns. The
-        # completion instruction tells the model what to do and required_tool
-        # enforces it at the activity boundary; narrowing this list would move
-        # the native tool/schema block at the front of the provider prompt and
-        # invalidate the growing-conversation cache prefix.
-        turn_tools = tools
-        required_turn_tool = None
-        if completed_child_output is not None:
-            required_turn_tool = "attempt_completion"
-            completion_instruction = (
-                "A previously delegated browser or code task already completed and returned verified structured "
-                "output covering every required parent response field. Do not repeat that work or spawn another "
-                "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
-            )
-            logger.info(
-                "run_agent.completed_child_forces_completion",
-                agent_id=agent_id,
-                iteration=iteration,
-                output_fields=sorted(completed_child_output),
-            )
-
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
         if False:
             # Check if we have any user messages
@@ -1028,103 +994,142 @@ async def run_agent(
                     limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                 )
 
-        # 6. Build system prompt (calls API for fresh shared memory each iteration)
-        async with span(
-            "run_loop.system_prompt",
-            agent_id=agent_id,
-            iteration=iteration,
-            agent_type="explore" if cache_call_site == "explore_agent" else None,
-        ):
-            current_system_prompt = await system_prompt()
-
-        # 7. Build messages for LLM
-        # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
-        async with span(
-            "run_loop.prepare_llm_context",
-            agent_id=agent_id,
-            iteration=iteration,
-            context_messages=len(context),
-            agent_type="explore" if cache_call_site == "explore_agent" else None,
-        ):
-            llm_context = _context_with_plan_fsm_labels(context)
-
-        # A slot left on another worker by an earlier turn (this workflow migrated
-        # away mid-run) never carries this token, so call_llm_activity cannot build
-        # this turn's prompt from that stale conversation.
-        pending_context_seq += 1
-        pending_context_token = f"{stream_id}:{pending_context_seq}"
-
-        if build_messages:
-            async with span(
-                "run_loop.build_messages_custom",
-                agent_id=agent_id,
-                iteration=iteration,
-                context_messages=len(llm_context),
-                agent_type="explore" if cache_call_site == "explore_agent" else None,
-            ):
-                messages = build_messages(llm_context, current_system_prompt)
-        elif not is_inside_temporal_activity:
-            # Workflow context: pre-download files, then defer message building to call_llm_activity
-            # so that base64 content never crosses Temporal's 2MB payload boundary.
-            # The resolve activity populates _file_cache (shared in-process memory).
-            # call_llm_activity reads from _pending_llm_context + _file_cache.
-            pre_resolved_ids = None
-            file_pointer_dicts = extract_file_pointer_dicts(llm_context)
-            if file_pointer_dicts:
-                try:
-                    resolved_list = await execute_activity(
-                        resolve_attachments_activity,
-                        args=[file_pointer_dicts],
-                        start_to_close_timeout=timedelta(seconds=60),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                    pre_resolved_ids = set(resolved_list) if resolved_list else None
-                except Exception as e:
-                    logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
-            # Store context in shared memory — call_llm_activity will build messages inside
-            _pending_llm_context[agent_id] = (
-                llm_context,
-                current_system_prompt,
-                pre_resolved_ids,
-                user_id,
-                pending_context_token,
-            )
-            messages = None  # Signals to use shared state path below
-        else:
-            async with span(
-                "run_loop.build_llm_messages",
-                agent_id=agent_id,
-                iteration=iteration,
-                context_messages=len(llm_context),
-                agent_type="explore" if cache_call_site == "explore_agent" else None,
-            ):
-                messages = await build_llm_messages(
-                    llm_context,
-                    current_system_prompt,
-                    user_id=user_id,
-                )
-        if is_inside_temporal_activity and completion_instruction and messages is not None:
-            messages.append({"role": "user", "content": completion_instruction})
-
-        # Resolve direct compute tokens dynamically when the workflow provides
-        # getters; otherwise use this loop's remembered successful token state.
-        (
-            current_claude_token,
-            current_claude_token_source,
-            current_claude_token_pool_id,
-            current_gpt_token,
-            current_gpt_account_id,
-            current_gpt_token_source,
-            current_gpt_token_pool_id,
-        ) = _resolve_current_compute_credentials()
-
-        # 7. Call LLM with structured streaming
-        # Only a failure BEFORE a usable response is a retry of this iteration.
-        # Once the provider returns and we accept the response, the turn has
-        # really been spent (tokens are charged in _account_llm_usage below), so
-        # a later failure in accounting/broadcast must NOT refund the iteration.
+        # Schema and message preparation share the existing pre-acceptance
+        # retry owner; no provider response or productive turn exists yet.
         llm_response_accepted = False
         try:
+            if get_response_schema:
+                response_schema = await get_response_schema()
+
+            # A browser/code child has already run its own verifier before emitting
+            # a terminal structured_response. When that response covers every
+            # parent output field, the parent verifier has a deterministic fast
+            # path for accepting it. Synthesize attempt_completion below so the
+            # normal verifier and completion persistence still run without paying
+            # for (or depending on) an LLM to repeat an action we already know.
+            completed_child_output = None
+            completed_child_tool_call_id = ""
+            if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
+                completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
+                if completed_child_handoff:
+                    completed_child_output, completed_child_tool_call_id = completed_child_handoff
+            completion_instruction = None
+            # Keep the provider-visible tool schema stable across turns. The
+            # completion instruction tells the model what to do and required_tool
+            # enforces it at the activity boundary; narrowing this list would move
+            # the native tool/schema block at the front of the provider prompt and
+            # invalidate the growing-conversation cache prefix.
+            turn_tools = tools
+            required_turn_tool = None
+            if completed_child_output is not None:
+                required_turn_tool = "attempt_completion"
+                completion_instruction = (
+                    "A previously delegated browser or code task already completed and returned verified structured "
+                    "output covering every required parent response field. Do not repeat that work or spawn another "
+                    "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
+                )
+                logger.info(
+                    "run_agent.completed_child_forces_completion",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    output_fields=sorted(completed_child_output),
+                )
+
+            # 6. Build system prompt (calls API for fresh shared memory each iteration)
+            async with span(
+                "run_loop.system_prompt",
+                agent_id=agent_id,
+                iteration=iteration,
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                current_system_prompt = await system_prompt()
+
+            # 7. Build messages for LLM
+            # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
+            async with span(
+                "run_loop.prepare_llm_context",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                llm_context = _context_with_plan_fsm_labels(context)
+
+            # A slot left on another worker by an earlier turn (this workflow migrated
+            # away mid-run) never carries this token, so call_llm_activity cannot build
+            # this turn's prompt from that stale conversation.
+            pending_context_seq += 1
+            pending_context_token = f"{stream_id}:{pending_context_seq}"
+
+            if build_messages:
+                async with span(
+                    "run_loop.build_messages_custom",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    context_messages=len(llm_context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    messages = build_messages(llm_context, current_system_prompt)
+            elif not is_inside_temporal_activity:
+                # Workflow context: pre-download files, then defer message building to call_llm_activity
+                # so that base64 content never crosses Temporal's 2MB payload boundary.
+                # The resolve activity populates _file_cache (shared in-process memory).
+                # call_llm_activity reads from _pending_llm_context + _file_cache.
+                pre_resolved_ids = None
+                file_pointer_dicts = extract_file_pointer_dicts(llm_context)
+                if file_pointer_dicts:
+                    try:
+                        resolved_list = await execute_activity(
+                            resolve_attachments_activity,
+                            args=[file_pointer_dicts],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
+                        pre_resolved_ids = set(resolved_list) if resolved_list else None
+                    except Exception as e:
+                        logger.warning(f"File resolution failed (continuing without pre-resolved files): {e}")
+                # Store context in shared memory — call_llm_activity will build messages inside
+                _pending_llm_context[agent_id] = (
+                    llm_context,
+                    current_system_prompt,
+                    pre_resolved_ids,
+                    user_id,
+                    pending_context_token,
+                )
+                messages = None  # Signals to use shared state path below
+            else:
+                async with span(
+                    "run_loop.build_llm_messages",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    context_messages=len(llm_context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    messages = await build_llm_messages(
+                        llm_context,
+                        current_system_prompt,
+                        user_id=user_id,
+                    )
+            if is_inside_temporal_activity and completion_instruction and messages is not None:
+                messages.append({"role": "user", "content": completion_instruction})
+
+            # Resolve direct compute tokens dynamically when the workflow provides
+            # getters; otherwise use this loop's remembered successful token state.
+            (
+                current_claude_token,
+                current_claude_token_source,
+                current_claude_token_pool_id,
+                current_gpt_token,
+                current_gpt_account_id,
+                current_gpt_token_source,
+                current_gpt_token_pool_id,
+            ) = _resolve_current_compute_credentials()
+
+            # 7. Call LLM with structured streaming
+            # Only a failure BEFORE a usable response is a retry of this iteration.
+            # Once the provider returns and we accept the response, the turn has
+            # really been spent (tokens are charged in _account_llm_usage below), so
+            # a later failure in accounting/broadcast must NOT refund the iteration.
             if completed_child_output is not None:
                 child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
                 identity_segment = f"{child_identity}-" if child_identity else ""
@@ -1593,6 +1598,11 @@ async def run_agent(
                 "cache_creation_input_tokens": cache_write_total,
             }
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                _pending_llm_context.pop(agent_id, None)
+                raise
             consecutive_llm_failures += 1
             error_message = extract_error_message(e)
             logger.error(f"LLM call failed (consecutive={consecutive_llm_failures}): {error_message}")
