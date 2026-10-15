@@ -374,3 +374,30 @@ def test_private_attempt_request_keeps_exact_fallback_and_timeout_configuration_
     }
     assert "private-lease-marker" not in json.dumps(request)
     assert "private-key-marker" not in json.dumps(request)
+
+
+def test_native_private_writer_keeps_capture_io_free_of_build_imports(tmp_path):
+    """Fresh rejection writers must not initialize unrelated artifact/RAG builders."""
+    code = r'''
+import hashlib,json,sys
+from pathlib import Path
+from benchmarks.wmh_native_prediction_writer import NativePredictionWriter
+root=Path(sys.argv[1]);path=root/'capture.json'
+writer=NativePredictionWriter(root,'offline-artifact','a'*64)
+receipt=writer._write(path,{'content':'unchanged offline observation','api_key':'private-credential-marker'})
+raw=path.read_bytes();record=json.loads(raw)
+assert record['content']=='unchanged offline observation'
+assert 'api_key' not in record and b'private-credential-marker' not in raw
+assert record['world_model_id']=='offline-artifact' and record['prompt_sha256']=='a'*64
+assert record['redaction_count']>=1
+assert receipt['path']=='capture.json' and receipt['sha256_at_write']==hashlib.sha256(raw).hexdigest()
+assert raw.endswith(b'\n')
+assert 'benchmarks.build_experiential_world_model' not in sys.modules, 'Private capture loaded unrelated model-build/RAG import stack'
+'''
+    result = subprocess.run(
+        [_test_native_python(), "-B", "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

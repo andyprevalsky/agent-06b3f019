@@ -275,6 +275,16 @@ class _FakeR2Client:
             raise error
         return {"Body": _FakeR2Body(self.objects[Key])}
 
+    def head_object(self, *, Bucket: str, Key: str) -> dict:
+        if Key not in self.objects:
+            error = Exception(f"NoSuchKey: {Key}")
+            error.response = {"Error": {"Code": "NoSuchKey"}}
+            raise error
+        return {
+            "ContentLength": len(self.objects[Key]),
+            "ETag": f'"{hashlib.md5(self.objects[Key]).hexdigest()}"',
+        }
+
     def list_objects_v2(self, **kwargs) -> dict:
         prefix = kwargs.get("Prefix", "")
         delimiter = kwargs.get("Delimiter")
@@ -293,6 +303,25 @@ class _FakeR2Client:
                 for key in keys
             ],
         }
+
+
+def test_fake_r2_head_preserves_metadata_only_contract():
+    client = _FakeR2Client({"present.enc": b"ciphertext"})
+    # HEAD must not delegate to GET or expose a body, including an orphan hit.
+    def forbidden_get(**kwargs):
+        raise AssertionError("HEAD must not perform GET")
+
+    client.get_object = forbidden_get
+    metadata = client.head_object(Bucket="unit-bucket", Key="present.enc")
+    assert metadata["ContentLength"] == len(b"ciphertext")
+    assert metadata["ETag"] == f'"{hashlib.md5(b"ciphertext").hexdigest()}"'
+    assert "Body" not in metadata
+    try:
+        client.head_object(Bucket="unit-bucket", Key="absent.enc")
+    except Exception as exc:
+        assert exc.response["Error"]["Code"] == "NoSuchKey"
+    else:
+        raise AssertionError("absent HEAD must report missing object")
 
 
 def _local_bundle_to_fake_r2(tmp: str) -> dict[str, bytes]:
@@ -425,14 +454,22 @@ def test_bundle_signature_and_refs_read_metadata_only_under_r2():
             local_restore()
 
         fetched: list[str] = []
+        headed: list[str] = []
         client = _FakeR2Client(objects)
         original_get = client.get_object
+        original_head = getattr(client, "head_object", None)
 
         def recording_get(*, Bucket: str, Key: str) -> dict:
             fetched.append(Key)
             return original_get(Bucket=Bucket, Key=Key)
 
-        client.get_object = recording_get  # type: ignore[method-assign]
+        def recording_head(*, Bucket: str, Key: str) -> dict:
+            headed.append(Key)
+            assert original_head is not None, "fake R2 client must implement HEAD"
+            return original_head(Bucket=Bucket, Key=Key)
+
+        client.get_object = recording_get
+        client.head_object = recording_head
         import helpers.trace_archive as trace_archive
 
         r2_restore = _with_fake_r2_archive(objects)
@@ -456,8 +493,9 @@ def test_bundle_signature_and_refs_read_metadata_only_under_r2():
         assert meta_ref and meta_ref["plaintext_sha256"] == fixture["plaintext_sha256"]
         assert missing is None
         bodies = [key for key in fetched if not key.endswith(".meta.json")]
-        # The only non-metadata GET allowed is the existence probe for a missing artifact.
-        assert bodies == [f"trace-archive/{root_agent_id}/does/not/exist.json.gz.enc"], bodies
+        # A missing artifact is probed by HEAD; no ciphertext GET is allowed.
+        assert bodies == [], bodies
+        assert headed == [f"trace-archive/{root_agent_id}/does/not/exist.json.gz.enc"], headed
 
 
 def test_bundle_signature_r2_tracks_enumerated_ciphertext_without_metadata():
@@ -5655,6 +5693,10 @@ async def run_all_tests():
     r.record(
         "bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata",
         test_bundle_signature_r2_tracks_enumerated_ciphertext_without_metadata,
+    )
+    r.record(
+        "fake_r2_head_preserves_metadata_only_contract",
+        test_fake_r2_head_preserves_metadata_only_contract,
     )
     r.record(
         "bundle_signature_and_refs_read_metadata_only_under_r2",

@@ -12,20 +12,16 @@ import gc
 import hashlib
 import json
 import os
-import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from pathlib import Path
 
 from exp.common.core.artifacts import (
-    SecretBoundaryError,
     SourceIdentity,
     assert_secret_free,
     canonical_json_bytes,
     canonical_jsonl_bytes,
     envelope_matches_manifest,
-    redact_secret_json,
     sha256_json,
     stable_id,
 )
@@ -38,6 +34,11 @@ from exp.simulation.world_model.artifact import grounded_world_model_prompt_sha2
 from exp.simulation.world_model.runtime import load_grounded_world_model_artifact
 
 from benchmarks.experiential_world_model import canonical_tool_schema, lineage_id
+from benchmarks.wmh_archive_io import (
+    _credential_field as _credential_field,
+    atomic_json as atomic_json,
+    redact_archive as redact_archive,
+)
 
 UPSTREAM_REVISION = "bf75987eac5e8c984d8f3868249f84e4095d1733"
 ADAPTER_CONTRACT = "rose-native-canonical-export-v1"
@@ -269,64 +270,6 @@ def republish_ascii(output, name, pool, pool_sha256, source_root=None):
         atomic_json(pointer_path, result)
     print(json.dumps({"stage": "native-ascii-ready", **result}), flush=True)
     return result
-
-
-@lru_cache(maxsize=4096)
-def _credential_field(key):
-    try:
-        assert_secret_free({key: None})
-    except SecretBoundaryError:
-        return True
-    return False
-
-
-def redact_archive(value):
-    """Use upstream's secret rules, also removing its forbidden credential fields."""
-    redacted, total = redact_secret_json(value)
-
-    def fields(item):
-        nonlocal total
-        if isinstance(item, dict):
-            result = {}
-            for key, child in item.items():
-                if _credential_field(key):
-                    total += 1
-                else:
-                    result[key] = fields(child)
-            return result
-        if isinstance(item, list):
-            return [fields(child) for child in item]
-        if isinstance(item, str) and item.lstrip().startswith(("{", "[")):
-            # OTel arguments, observations and snapshots contain encoded JSON.
-            try:
-                decoded = json.loads(item)
-            except ValueError:
-                return item
-            if isinstance(decoded, (dict, list)):
-                safe, count = redact_archive(decoded)
-                total += count
-                if count:
-                    return json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return item
-
-    redacted = fields(redacted)
-    assert_secret_free(redacted)
-    return redacted, total
-
-
-def atomic_json(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=path.name + ".", delete=False) as temporary:
-        name = temporary.name
-        try:
-            json.dump(payload, temporary, indent=2)
-            temporary.write("\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-            os.replace(name, path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
 
 
 def model_capabilities() -> ModelCapabilities:

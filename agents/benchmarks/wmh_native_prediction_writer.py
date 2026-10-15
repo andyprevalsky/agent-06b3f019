@@ -39,7 +39,7 @@ class NativePredictionWriter:
         self.prompt_sha256 = prompt_sha256
 
     def _write(self, path, record):
-        from benchmarks.build_experiential_world_model import atomic_json, redact_archive
+        from benchmarks.wmh_archive_io import atomic_json, redact_archive
 
         safe, redactions = redact_archive(record)
         safe.update(world_model_id=self.world_model_id, prompt_sha256=self.prompt_sha256, redaction_count=redactions)
