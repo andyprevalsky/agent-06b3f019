@@ -420,6 +420,8 @@ class Fly:
                 or not command or "\0" in command
                 or not isinstance(machine_id, str) or not SAFE_TOKEN.fullmatch(machine_id)):
             raise Refusal("invalid bounded machine exec arguments")
+        if seconds > 600:
+            raise Refusal("Machine exec timeout must not exceed 600 seconds")
         if len(command.encode("utf-8")) > max_command_bytes:
             raise Refusal("Machine exec command exceeds caller delivery budget")
         rc, stdout, _ = self.flyctl(seconds, "machine", "exec", machine_id, command,

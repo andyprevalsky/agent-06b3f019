@@ -17,7 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER, MACHINE, VOLUME = "a" * 32, "b" * 14, "vol_bootstrap123"
@@ -994,8 +994,8 @@ class MachineExecDeliveryTests(unittest.TestCase):
             return self.response
         self.client.flyctl = raw
 
-    def execute(self, command="python3 inert-stage.py", budget=7000):
-        return self.client.machine_exec_json(30, MACHINE, command,
+    def execute(self, command="python3 inert-stage.py", budget=7000, seconds=30):
+        return self.client.machine_exec_json(seconds, MACHINE, command,
             max_command_bytes=budget,
             validate_ack=lambda value: (type(value.get("stage")) is int
                 and type(value.get("inert")) is bool and type(value.get("bytes")) is int
@@ -1012,6 +1012,29 @@ class MachineExecDeliveryTests(unittest.TestCase):
         with self.assertRaises(self.capture["Refusal"]):
             self.execute("x" * 15045)
         self.assertEqual(self.calls, [])
+
+    def test_machine_exec_provider_timeout_limit_is_pretransport_refusal(self):
+        # Captured native refusal: "timeout must not exceed 600 seconds".
+        for seconds in (601, 660):
+            with self.subTest(seconds=seconds):
+                with self.assertRaises(self.capture["Refusal"]):
+                    self.execute(seconds=seconds)
+                self.assertEqual(self.calls, [])
+
+    def test_machine_exec_provider_timeout_limit_accepts_600(self):
+        self.assertTrue(self.execute(seconds=600)["inert"])
+        self.assertEqual(self.calls, [(600, ("machine", "exec", MACHINE,
+            "python3 inert-stage.py", "--timeout", "600", "-a", APP, "--json"))])
+
+    def test_machine_exec_timeout_limit_preserves_raw_flyctl_contract(self):
+        self.client.binary, self.client.env = "pinned-flyctl", {"SAFE": "fixture"}
+        raw = self.capture["Fly"].flyctl
+        bounded = Mock(return_value=(0, b"raw-output", b"raw-error"))
+        with patch.dict(raw.__globals__, {"run_bounded": bounded}):
+            self.assertEqual(raw(self.client, 660, "version"),
+                             (0, "raw-output", "raw-error"))
+        bounded.assert_called_once_with(
+            ["pinned-flyctl", "version"], 660, {"SAFE": "fixture"})
 
     def test_machine_exec_utf8_budget_counts_bytes(self):
         with self.assertRaises(self.capture["Refusal"]):
