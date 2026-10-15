@@ -79,7 +79,10 @@ function loadDeclaration<T>(name: string, bindings: Record<string, unknown>): T 
 type Bundle = Record<string, unknown>;
 type PutRun = (bundle: Bundle, options?: { live?: boolean; source?: string }) => Promise<Bundle>;
 
-function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {}) {
+function putBoundary(
+  beforeWrite: (key: string) => Promise<void> = async () => {},
+  beforeCommit: () => Promise<void> = async () => {}
+) {
   const database = databaseBoundary(4);
   const objects = new Map<string, string>();
   const writes: Array<{ key: string; value: string }> = [];
@@ -91,9 +94,11 @@ function putBoundary(beforeWrite: (key: string) => Promise<void> = async () => {
     Promise,
     coalesceHubRunPuts,
     prisma: {
-      $transaction: (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
+      $transaction: async (body: (tx: Transaction) => Promise<unknown>, options: unknown) => {
         transactions += 1;
-        return database.prisma.$transaction(body, options);
+        const result = await database.prisma.$transaction(body, options);
+        await beforeCommit();
+        return result;
       },
     },
     listRunsStrict: async () => JSON.parse(objects.get('index.json') ?? '[]'),
@@ -588,4 +593,43 @@ test('coalescing follows the same normalized run identity as actual persistence'
   assert.equal(boundary.stats().transactions, 2);
   assert.equal(boundary.runWrites().length, 3);
   assert.deepEqual(JSON.parse(boundary.objects.get('runs/42.json')!), firstPacket);
+});
+
+
+test('SQL commit failure rejects queued Hub callers after durable object writes', async () => {
+  const marker = new Error('fixture SQL commit failed after callback');
+  const boundary = putBoundary(async () => {}, async () => { throw marker; });
+  const results = await Promise.allSettled(['holder', 'a', 'b'].map((run_id) =>
+    boundary.putRun({ run_id, tasks: [] }, { live: true })
+  ));
+  assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected', 'rejected']);
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    if (result.status === 'rejected') assert.equal(result.reason, marker);
+  }
+  assert.ok(boundary.runWrites().length > 0, 'failure follows durable object writes');
+  assert.equal(boundary.stats().cacheUpdates, 0, 'failed SQL commit must not publish cache state');
+  assert.equal(boundary.stats().ancestors, 0, 'failed SQL commit must not reach postcommit work');
+});
+
+test('Hub callers and caches remain pending until SQL commit succeeds', async () => {
+  const entered = deferred();
+  const commit = deferred();
+  const boundary = putBoundary(async () => {}, async () => {
+    entered.resolve();
+    await commit.promise;
+  });
+  let settled = false;
+  const pending = boundary.putRun({ run_id: 'pending-commit', tasks: [] }, { live: true });
+  void pending.then(() => { settled = true; });
+  await entered.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'durable object writes alone are not a committed ACK');
+  assert.equal(boundary.stats().cacheUpdates, 0);
+  assert.equal(boundary.stats().ancestors, 0);
+  commit.resolve();
+  await pending;
+  assert.equal(settled, true);
+  assert.equal(boundary.stats().cacheUpdates, 1);
+  assert.equal(boundary.stats().ancestors, 1);
 });

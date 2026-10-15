@@ -374,12 +374,20 @@ const PUT_WRITE_LANES = 8;
 async function commitQueuedPuts(): Promise<void> {
   let cycle: QueuedPut[] = [];
   try {
-    await withIndexLock(async () => {
+    const outcomes = await withIndexLock(async () => {
       cycle = queuedPuts.splice(0, PUT_CYCLE_LIMIT);
       putCycleQueued = queuedPuts.length > 0;
       if (putCycleQueued) void commitQueuedPuts();
-      await commitPutCycle(cycle);
+      return commitPutCycle(cycle);
     });
+    // Object writes alone do not establish a successful SQL commit. Publish
+    // cache state and caller acknowledgements only after the transaction joins.
+    for (const { put, stored } of outcomes) {
+      if (stored.revision !== null) {
+        applyHubRunToResolutionCaches(put.runId, put.agentIds, stored.revision);
+      }
+      put.resolve(stored);
+    }
   } catch (error: unknown) {
     if (cycle.length === 0) {
       // Admission failed before this cycle claimed its uploads.
@@ -390,8 +398,10 @@ async function commitQueuedPuts(): Promise<void> {
   }
 }
 
-async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
-  if (queued.length === 0) return;
+async function commitPutCycle(
+  queued: QueuedPut[]
+): Promise<Array<{ put: QueuedPut; stored: StoredPut }>> {
+  if (queued.length === 0) return [];
   const committed = await listRunsStrict();
   const cycle: PutCycle = {
     index: committed,
@@ -438,18 +448,13 @@ async function commitPutCycle(queued: QueuedPut[]): Promise<void> {
     await writeAgentRunIndex(agentIndex);
     await inLanes([...writes.keys()], (runId) => putObject(`visibility/${runId}.json`, 'true'));
   }
-  log.info('Committed Benchmark Hub upload cycle', {
+  log.info('Staged Benchmark Hub upload cycle', {
     uploads: queued.length,
     stored: bundles.length,
     absorbed: outcomes.length - bundles.length,
     rejected: queued.length - outcomes.length,
   });
-  for (const { put, stored } of outcomes) {
-    if (stored.revision !== null) {
-      applyHubRunToResolutionCaches(put.runId, put.agentIds, stored.revision);
-    }
-    put.resolve(stored);
-  }
+  return outcomes;
 }
 
 /** Bounded concurrent writes; stops claiming items after the first failure. */
