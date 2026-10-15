@@ -25985,6 +25985,18 @@ def test_browser_tool_events_declare_action_type():
     )
 
 
+async def test_browser_cleanup_failures_are_explicit_at_actual_caller_boundaries():
+    from browser_cleanup_failure_support import assert_browser_cleanup_failure_boundaries
+    await assert_browser_cleanup_failure_boundaries()
+    from browser_cleanup_full_activity_support import assert_full_browser_cleanup_failure_boundaries
+    await assert_full_browser_cleanup_failure_boundaries(globals())
+
+
+async def test_browser_cleanup_sealed_inside_exception_handlers_is_local_only():
+    from browser_cleanup_full_activity_support import assert_full_browser_cleanup_failure_boundaries
+    await assert_full_browser_cleanup_failure_boundaries(globals(), sealed_only=True)
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -28305,6 +28317,14 @@ async def run_all_tests():
     r.record(
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
+    )
+    await r.record_async(
+        "browser_cleanup_failures_are_explicit_at_actual_caller_boundaries",
+        test_browser_cleanup_failures_are_explicit_at_actual_caller_boundaries,
+    )
+    await r.record_async(
+        "browser_cleanup_sealed_inside_exception_handlers_is_local_only",
+        test_browser_cleanup_sealed_inside_exception_handlers_is_local_only,
     )
     return r.all_passed
 

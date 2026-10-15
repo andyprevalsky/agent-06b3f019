@@ -130,6 +130,7 @@ from .recording import (
     normalize_simulated_browser_frame,
 )
 from .repo import (
+    BrowserSessionCloseError,
     acknowledge_browser_user_control,
     close_browser_session,
     create_user_auth_assistance_request,
@@ -4408,6 +4409,7 @@ async def _emit_browser_task_terminal_for_fe(
     title: str = "Browser Session Closed",
     message: str = "Browser session closed",
     preparation_cancellation: Optional[Dict[str, Any]] = None,
+    cleanup_failure: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Close the FE live browser chip after recording/session teardown.
 
@@ -4429,16 +4431,17 @@ async def _emit_browser_task_terminal_for_fe(
     with contextlib.suppress(Exception):
         await save_browser_action_message(
             agent_id=agent_id,
-            title=title,
+            title="Browser Session Cleanup Failed" if cleanup_failure else title,
             task_id=task_id,
-            message=message,
-            status=MessageStatus.FINISHED,
+            message="Browser session cleanup failed" if cleanup_failure else message,
+            status=MessageStatus.ERROR if cleanup_failure else MessageStatus.FINISHED,
             browser_url=browser_url or "",
             action_type="task_complete",
             tool_call_id=tool_call_id or str(uuid_module.uuid4()),
             is_completion_message=True,
             extra_metadata={
                 "excludeFromModel": True,
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 **({"browser_preparation_cancellation": preparation_cancellation} if preparation_cancellation else {}),
             },
         )
@@ -4469,6 +4472,7 @@ def _schedule_browser_cleanup(
     local_only_recorders: Optional[List[Any]] = None,
     local_only_setup_tasks: tuple[Any, ...] = (),
     preparation_cancellation: Optional[Dict[str, Any]] = None,
+    cleanup_failure: Optional[Dict[str, Any]] = None,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -4578,6 +4582,7 @@ def _schedule_browser_cleanup(
                     title="Browser Session Closed",
                     message="Browser session closed after teardown",
                     preparation_cancellation=preparation_cancellation,
+                    cleanup_failure=cleanup_failure,
                 )
             if dom_service:
                 try:
@@ -4610,6 +4615,7 @@ def _schedule_browser_cleanup(
                     browser_url=browser_url,
                     title="Browser Session Closed",
                     message="Browser session closed after teardown error",
+                    cleanup_failure=cleanup_failure,
                 )
         finally:
             _clear_browser_activity_memory_buffers(
@@ -6568,6 +6574,22 @@ async def _spawn_browser_agent_activity_v3_real(
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
+    cleanup_failure: Optional[Dict[str, Any]] = None
+
+    async def _close_browser_with_cleanup_receipt(
+        exact_session_id: str, pause: bool = False, current_url: str = ""
+    ) -> None:
+        nonlocal cleanup_failure
+        try:
+            options = {"pause": pause}
+            if current_url:
+                options["current_url"] = current_url
+            await close_browser_session(config, exact_session_id, **options)
+        except BrowserSessionCloseError as cleanup_error:
+            cleanup_failure = cleanup_error.receipt()
+        except asyncio.CancelledError:
+            cleanup_failure = BrowserSessionCloseError(exact_session_id, pause).receipt()
+            raise
     state_prefetch = BrowserStatePrefetch()
 
     try:
@@ -6581,6 +6603,8 @@ async def _spawn_browser_agent_activity_v3_real(
             try:
                 current = await fetch_session_info(config, task_id)
                 declined_session_id = str(current.get("session_id") or declined_session_id or "")
+            except WorkflowGenerationSealed:
+                raise
             except Exception as lookup_error:
                 logger.warning(
                     "Could not look up the declined task's current session; closing the saved one",
@@ -6588,12 +6612,13 @@ async def _spawn_browser_agent_activity_v3_real(
                     error=str(lookup_error),
                 )
             if declined_session_id:
-                await close_browser_session(config, declined_session_id, pause=False)
+                await _close_browser_with_cleanup_receipt(declined_session_id, pause=False)
             logger.info("User declined auth assistance; ending browser task", task_id=task_id)
             return {
                 "status": "completed",
                 "success": False,
                 "user_declined_auth": True,
+                **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                 "message": f"User declined to sign in to {auth_realm or 'the site'}.",
                 "browser_url": browser_url,
                 "task_id": task_id,
@@ -9670,7 +9695,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
-                        await close_browser_session(config, session_id, pause=False)
+                        await _close_browser_with_cleanup_receipt(session_id, pause=False)
 
                         context_message = build_context_summary(
                             success=True,
@@ -9696,6 +9721,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             tool_call_id=tool_call_id,
                             is_completion_message=True,
                             output_schema=response_schema,
+                            extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
                         )
 
                         usage_items = build_usage_items(
@@ -9721,6 +9747,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         return {
                             "status": "completed",
                             "success": True,
+                            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                             "message": context_message,
                             "browser_url": browser_url,
                             "task_id": task_id,
@@ -9814,6 +9841,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         thinking_preview=verifier_feedback_thinking[:200],
                     )
 
+                except (BrowserSessionCloseError, WorkflowGenerationSealed):
+                    raise
                 except Exception as verifier_error:
                     completion_tool_status = "ERROR"
                     logger.error(f"Verifier failed: {verifier_error}")
@@ -10643,7 +10672,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
-        await close_browser_session(config, session_id, pause=False)
+        await _close_browser_with_cleanup_receipt(session_id, pause=False)
 
         context_message = build_context_summary(
             success=False,
@@ -10665,6 +10694,7 @@ Based on this feedback, I need to continue working on the task and address the i
             tool_call_id=tool_call_id,
             is_completion_message=True,
             output_schema=response_schema,
+            extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
@@ -10701,6 +10731,7 @@ Based on this feedback, I need to continue working on the task and address the i
         return {
             "status": "max_iterations",
             "success": False,
+            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
             "message": context_message,
             "browser_url": browser_url,
             "usage_items": usage_items,
@@ -10744,8 +10775,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
-        if session_id:
-            await close_browser_session(config, session_id, pause=True, current_url=current_url)
+        if session_id and cleanup_failure is None:
+            await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
         if task_id:
             with contextlib.suppress(Exception):
@@ -10760,6 +10791,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
                     output_schema=response_schema,
+                    extra_metadata={"browser_cleanup": cleanup_failure} if cleanup_failure else None,
                 )
 
         return {
@@ -10768,11 +10800,13 @@ Based on this feedback, I need to continue working on the task and address the i
             "session_id": session_id,
             "browser_url": browser_url,
             "message": "Browser agent cancelled by user",
+            **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
         }
 
     except WorkflowGenerationSealed:
         generation_sealed = True
         raise
+
     except Exception as e:
         last_action = action_summary[-1] if action_summary else "initialization"
         logger.error(
@@ -10797,10 +10831,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
-        if session_id:
+        if session_id and cleanup_failure is None:
             retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
-            await close_browser_session(
-                config,
+            await _close_browser_with_cleanup_receipt(
                 session_id,
                 pause=retryable_notification_error,
                 current_url=current_url if retryable_notification_error else None,
@@ -10831,6 +10864,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     is_completion_message=True,
                     output_schema=response_schema,
                     extra_metadata={
+                        **({"browser_cleanup": cleanup_failure} if cleanup_failure else {}),
                         "browser_error_type": type(e).__name__,
                         "browser_error_message": extract_error_message(e),
                         "browser_error_context": error_context,
@@ -10915,6 +10949,7 @@ Based on this feedback, I need to continue working on the task and address the i
         _schedule_browser_cleanup(
             agent_id=agent_id,
             preparation_cancellation=preparation_cancellation,
+            cleanup_failure=cleanup_failure,
             task_id=task_id,
             user_id=user_id,
             browser_url=browser_url,
