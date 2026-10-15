@@ -309,6 +309,37 @@ on the candidate. Both complete owning domains passed in 60.4 seconds against
 the unchanged recorded blobs (`browser-transient-owning-frozen-final.txt`).
 Scoped Ruff, compilation, diff checks and archive validation passed.
 
+
+## October 15 heartbeat and verifier-row follow-up
+
+Review of `9b8b694bb` identified sibling lifecycle holes in this same native input
+boundary. Resumed output-schema generation occurred before the existing browser
+heartbeat pump registered; its provider/retry awaits could outlast the unchanged
+Temporal heartbeat window. A passing verifier superseded by real input during
+its await was correctly discarded, but `continue` bypassed the FINISHED update
+of the actual verifier row, leaving the UI progress row IN_PROGRESS.
+
+Two permanent heartbeat tests fail on `9b8b694bb`: schema generation observes no
+registered heartbeat, and a generation seal exits without the lifecycle ever
+registering. The fix moves the existing refresh and its actual usage accounting
+inside the existing protected activity try, after the same heartbeat pump
+starts. Its existing finally unregisters on success and generation sealing.
+There is no new watchdog, retry allowance or timeout change.
+
+The verifier-row regression runs the actual activity with a USER correction
+arriving during the first provider verdict. Both actual verifier rows must
+finish exactly once with the actual provider score and reasoning. It fails on
+`9b8b694bb`, whose first row stays open, then passes after the result is persisted
+before the awaited freshness check. Native instruction/schema acceptance still
+discards the old verdict and structured output. No synthetic superseded-result
+message or modified provider score is introduced. The before/after artifacts
+and immutable test hashes are recorded in the suspended-input case's
+`review3-causal-proof.json`.
+
+The bounded deployment was stopped with findings after its third review. These
+repairs are isolated development stabilization; the original deployment record
+and immutable reviewed candidate remain preserved.
+
 ## Human feedback
 
 The user required schema updates only when needed and the same standard for

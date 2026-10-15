@@ -2384,7 +2384,7 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
                          "timestamp": datetime.now(timezone.utc).isoformat()})
         return policy_results[len(model_inputs) - 1]
     poll_calls = 0
-    async def poll(_agent_id, since):
+    async def poll(_agent_id, since, **kwargs):
         nonlocal poll_calls
         poll_calls += 1
         if poll_calls in poll_failure_calls:
@@ -2493,6 +2493,17 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
         assert all("Output schema revised" not in json.dumps(turns) for turns in model_inputs)
     else:
         generator.assert_not_awaited()
+
+
+async def test_simulated_browser_publishes_native_task_start_for_resume_scope():
+    from _test_utils import native_browser_start_source
+    for mode in ("real", "simulate"):
+        row = await native_browser_start_source("2026-10-14T17:00:00+00:00", mode=mode)
+        assert row["role"] == "TOOL"
+        assert row["metadata"]["toolCallId"] == "tool-1"
+        assert row["metadata"]["toolName"] == "spawn_browser_agent"
+        assert row["metadata"]["action_type"] == "session_starting"
+        assert row["metadata"]["toolStatus"] == "IN_PROGRESS"
 
 
 async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
@@ -2664,8 +2675,12 @@ async def _exercise_simulated_browser_pending_approval(*, user_feedback=False, l
     rows = [{"id": "cancel-pending-order", "role": "USER", "text": correction,
              "timestamp": (now - timedelta(seconds=30) if legacy_resume else now).isoformat()}] if user_feedback else []
 
+    if legacy_resume:
+        from _test_utils import native_browser_start_source
+        rows.insert(0, await native_browser_start_source((now - timedelta(minutes=1)).isoformat(), tool_call_id="tool-browser", mode="simulate"))
+
     pending_poll_calls = 0
-    async def poll(_agent_id, since):
+    async def poll(_agent_id, since, **kwargs):
         nonlocal pending_poll_calls
         pending_poll_calls += 1
         if initial_poll_failure and pending_poll_calls == 1:
@@ -3175,6 +3190,7 @@ def test_simulated_resume_preserves_full_user_instruction_tail():
 async def run_all_tests():
     print("world model harness blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("simulated_browser_publishes_native_task_start_for_resume_scope", test_simulated_browser_publishes_native_task_start_for_resume_scope)
     await r.record_async("simulated_browser_resume_poll_miss_disqualifies_pending_write", test_simulated_browser_resume_poll_miss_disqualifies_pending_write)
     await r.record_async("simulated_browser_unconfirmed_input_blocks_actual_click_transition", test_simulated_browser_unconfirmed_input_blocks_actual_click_transition)
     await r.record_async("simulated_browser_failed_schema_keeps_known_usage", test_simulated_browser_failed_schema_keeps_known_usage)

@@ -986,9 +986,29 @@ async def test_broadcast_to_bus_logs_non_success():
     await _flush_broadcasts()
 
 
+
+async def test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start():
+    from unittest.mock import AsyncMock, patch
+    from helpers.messages import poll_new_messages
+    from datetime import datetime, timezone
+
+    from _test_utils import native_browser_start_source
+    user = {"id": "user", "role": "USER", "text": "Actual authored correction", "metadata": None}
+    start = await native_browser_start_source("2026-10-14T00:00:00+00:00", tool_call_id="tool-1")
+    other = {"id": "other", "role": "TOOL", "text": "Other task", "metadata": {"task_id": "task-2", "subAgentId": "task-2", "action_type": "task_started"}}
+    internal = {"id": "internal", "role": "TOOL", "text": "Large browser state", "metadata": {"task_id": "task-1", "subAgentId": "task-1", "action_type": "read_browser_state"}}
+    with (
+        patch("helpers.messages._fetch_agent_data_impl", AsyncMock(return_value={"messages": [user, start, other, internal]})) as fetch,
+        patch("helpers.messages.activity.heartbeat"),
+    ):
+        rows = await poll_new_messages("agent-1", datetime(2026, 10, 14, tzinfo=timezone.utc), browser_tool_call_id="tool-1")
+    assert rows == [user, start], "native start was filtered or unrelated internal work became user input"
+    fetch.assert_awaited_once_with("agent-1", since="2026-10-14T00:00:00+00:00")
+
 async def run_all_tests():
     print("messages blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("browser_instruction_poll_retains_only_user_sources_and_exact_task_start", test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start)
     await r.record_async("post_message_happy_path", test_post_message_happy_path)
     await r.record_async("post_message_boundary", test_post_message_boundary)
     await r.record_async("post_message_stamps_workflow_generation", test_post_message_stamps_workflow_generation)

@@ -845,6 +845,7 @@ async def poll_new_messages(
     agent_id: str,
     last_checked: Union[datetime, str],
     include_internal_subagent: bool = False,
+    browser_tool_call_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
@@ -868,6 +869,16 @@ async def poll_new_messages(
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(agent_id, since=since.isoformat())
         new_messages = data.get("messages", [])
+        if browser_tool_call_id:
+            # The same durable read carries actual USER sources and the exact
+            # delegated task's native start event. Browser internals and root
+            # compaction summaries are not user instructions.
+            return [row for row in new_messages if row.get("role") == "USER" or (
+                row.get("role") == "TOOL"
+                and (row.get("metadata") or {}).get("toolCallId") == browser_tool_call_id
+                and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
+                and (row.get("metadata") or {}).get("action_type") == "session_starting"
+            )]
         new_messages = project_model_context_after_compaction(new_messages)
 
         # Drop sub-agent internal work-stream rows before crossing the activity

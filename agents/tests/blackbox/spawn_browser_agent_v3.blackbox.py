@@ -28,6 +28,7 @@ import pytest
 
 from _test_utils import (
     BlackboxResult,
+    native_browser_start_source,
     assert_captured_call,
     get_captured_requests,
     setup_mock,
@@ -64,9 +65,12 @@ def _in_browser_activity_context(function):
 
     @functools.wraps(function)
     async def run(*args, **kwargs):
-        # Activity fixtures own the durable root-input dependency as well as
-        # their browser fixture; incident tests override this empty tail.
-        with patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[]), create=True):
+        # Activity fixtures include the native task-start source required by
+        # older snapshots. Incident tests override this with captured USER rows.
+        async def task_sources(_agent_id, _since, **options):
+            tool_call_id = options.get("browser_tool_call_id")
+            return [await native_browser_start_source("1970-01-01T00:00:00+00:00", tool_call_id=tool_call_id)] if tool_call_id else []
+        with patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(side_effect=task_sources), create=True):
             return await ActivityEnvironment().run(function, *args, **kwargs)
 
     return run
@@ -23284,7 +23288,7 @@ async def test_browser_resume_loads_ordered_durable_input_after_archived_hydrati
         state = await h._load_browser_resume_user_instructions("agent-1", hydrated)
     assert poll.await_count == 1
     assert poll.await_args.args[0] == "agent-1"
-    assert poll.await_args.args[1] == datetime(2026, 10, 14, 17, 28, 33, 340999, tzinfo=timezone.utc)
+    assert poll.await_args.args[1] == datetime.fromtimestamp(0, timezone.utc) - timedelta(microseconds=1)
     assert state["user_instruction_message_ids"] == ["new-a", "new-b", "old"]
     assert state["user_instruction_messages"] == [old_message, {"role": "user", "content": "Include notes."}, {"role": "user", "content": "Include notes."}], (
         "durable row identity, not text equality, must own delivery and ordering"
@@ -26194,7 +26198,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
     )
 
     poll_calls = 0
-    async def fetch_agent_snapshot(agent_id, since):
+    async def fetch_agent_snapshot(agent_id, since, **kwargs):
         nonlocal poll_calls
         poll_calls += 1
         if poll_calls in poll_failure_calls:
@@ -26271,6 +26275,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
     generator = AsyncMock(side_effect=generate_schema)
     root_schema_persistence = AsyncMock()
     tool_events = AsyncMock()
+    saved_actions = AsyncMock()
     fake_browser = SimpleNamespace(
         contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock(),
     )
@@ -26305,7 +26310,7 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
         patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials", AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", saved_actions),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
         patch("browser_tools.dom_service.DOMService", _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
@@ -26347,13 +26352,128 @@ async def _run_browser_durable_user_feedback_replay(*, change_fields=False, veri
             result = {"status": "failed", "success": False}
     return {
         "result": result, "error": error, "poll_calls": poll_calls,
-        "tool_events": tool_events,
+        "tool_events": tool_events, "saved_actions": saved_actions,
         "model_calls": model_calls, "verifier_calls": verifier_calls,
         "initial_schema": initial_schema, "expected_schema": expected_schema,
         "feedback": feedback, "generator": generator,
         "second_feedback": second_feedback, "latest_schema": latest_schema,
         "root_schema_persistence": root_schema_persistence,
     }
+
+
+@_in_browser_activity_context
+async def test_browser_schema_refresh_is_covered_by_existing_heartbeat():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    registered = set()
+    def start():
+        registered.add(17)
+        return 17
+    original = h._refresh_browser_output_schema
+    async def refresh(**kwargs):
+        assert registered == {17}, "resumed schema generation begins before heartbeat registration"
+        await asyncio.sleep(0)
+        return await original(**kwargs)
+    with (
+        patch.object(h, "start_browser_activity_heartbeat", side_effect=start) as begin,
+        patch.object(h, "stop_browser_activity_heartbeat", side_effect=registered.remove) as end,
+        patch.object(h, "_refresh_browser_output_schema", side_effect=refresh),
+    ):
+        await _exercise_browser_resume_user_input()
+    begin.assert_called_once()
+    end.assert_called_once_with(17)
+    assert registered == set(), "successful schema startup leaked its heartbeat registration"
+
+
+@_in_browser_activity_context
+async def test_browser_schema_startup_seal_unregisters_heartbeat():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    with (
+        patch.object(h, "start_browser_activity_heartbeat", return_value=19) as begin,
+        patch.object(h, "stop_browser_activity_heartbeat") as end,
+        patch.object(h, "_refresh_browser_output_schema", side_effect=WorkflowGenerationSealed("sealed")),
+    ):
+        with pytest.raises(WorkflowGenerationSealed):
+            await _exercise_browser_resume_user_input()
+    begin.assert_called_once()
+    end.assert_called_once_with(19)
+
+
+@_in_browser_activity_context
+async def test_browser_superseded_verifier_row_finishes_with_actual_result():
+    from tools.base import MessageStatus
+
+    replay = await _run_browser_durable_user_feedback_replay(verifier_feedback="pass")
+    rows = [call.kwargs for call in replay["saved_actions"].await_args_list]
+    starts = [row for row in rows if row.get("action_type") == "system" and row.get("status") == MessageStatus.IN_PROGRESS]
+    assert len(starts) == 2
+    for start in starts:
+        ends = [row for row in rows if row.get("tool_call_id") == start["tool_call_id"] and row.get("status") == MessageStatus.FINISHED]
+        assert len(ends) == 1, "superseded verifier left its actual progress row IN_PROGRESS"
+        assert ends[0]["title"] == "⚖️ Progress: 100%", "provider score was rewritten"
+    first = next(row for row in rows if row.get("tool_call_id") == starts[0]["tool_call_id"] and row.get("status") == MessageStatus.FINISHED)
+    assert first["message"] == "Verdict for the previous events requirement"
+    assert replay["result"]["structured_response"] == {"calendar_accessible": True, "access_account": "andy@roselabs.ai"}
+
+
+async def _exercise_browser_delayed_commit_cursor(first_role):
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    start = datetime(2026, 10, 14, 17, 0, tzinfo=timezone.utc)
+    rows = [{"id": "first", "role": first_role, "text": "First visible row", "timestamp": (start + timedelta(minutes=5)).isoformat()}]
+    async def poll(_agent_id, since, **kwargs):
+        return copy.deepcopy([row for row in rows if datetime.fromisoformat(row["timestamp"]) > since])
+    with patch.object(h, "poll_new_messages", side_effect=poll):
+        state = await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1", "user_message_cursor": start.isoformat()})
+        # A long transaction assigned its timestamp before the first poll, but
+        # becomes visible only after a newer TOOL or USER transaction committed.
+        rows.append({"id": "late-commit", "role": "USER", "text": "Preserve this actual correction", "timestamp": (start + timedelta(seconds=1)).isoformat()})
+        parked = h._browser_resume_continuity_state(
+            action_history=SimpleNamespace(get_entries=lambda: []), visited_urls=[], verifier_checkpoints=[],
+            user_instruction_messages=state["user_instruction_messages"],
+            user_instruction_message_ids=state["user_instruction_message_ids"], user_message_cursor=state["user_message_cursor"],
+        )
+        carried = {"task_id": "task-1"}
+        h._copy_browser_resume_continuity_fields(parked, carried)
+        state = await h._load_browser_resume_user_instructions("agent-1", carried)
+        state = await h._load_browser_resume_user_instructions("agent-1", state)
+    actual = [message["content"] for message in state["user_instruction_messages"]]
+    expected = (["First visible row"] if first_role == "USER" else []) + ["Preserve this actual correction"]
+    assert actual == expected, "timestamp cursor permanently skipped a committed actual USER correction"
+
+
+async def test_browser_late_user_commit_survives_newer_tool_and_resume():
+    await _exercise_browser_delayed_commit_cursor("TOOL")
+
+
+async def test_browser_late_user_commit_survives_newer_user_and_resume():
+    await _exercise_browser_delayed_commit_cursor("USER")
+
+
+async def test_browser_legacy_resume_uses_its_own_durable_task_start():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    rows = [
+        {"id": "old-input", "role": "USER", "text": "Unrelated previous task", "timestamp": "2026-10-14T16:00:00+00:00"},
+        {"id": "old-start", "role": "TOOL", "text": "", "timestamp": "2026-10-14T16:00:01+00:00", "metadata": {"task_id": "old-task", "action_type": "task_started"}},
+        {"id": "task-start", "role": "TOOL", "text": "", "timestamp": "2026-10-14T17:00:00+00:00", "metadata": {"task_id": "task-1", "action_type": "task_started"}},
+        {"id": "correction", "role": "USER", "text": "Correction sent while paused", "timestamp": "2026-10-14T17:01:00+00:00"},
+    ]
+    rows.append(await native_browser_start_source("2026-10-14T17:00:00+00:00"))
+    rows[2]["timestamp"] = "2026-10-14T17:02:00+00:00"
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=rows)):
+        state = await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1", "tool_call_id": "tool-1"})
+    assert state["user_instruction_messages"] == [{"role": "user", "content": "Correction sent while paused"}], "legacy resume replayed unrelated root history"
+
+
+async def test_browser_legacy_resume_without_source_boundary_fails_closed():
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    with patch.object(h, "poll_new_messages", AsyncMock(return_value=[])):
+        with pytest.raises(ValueError, match="task.*boundary"):
+            await h._load_browser_resume_user_instructions("agent-1", {"task_id": "task-1"})
 
 
 @_in_browser_activity_context
@@ -26570,6 +26690,13 @@ async def run_all_tests():
         "payment_card_tool_args_raise_typed_validation_error",
         test_payment_card_tool_args_raise_typed_validation_error,
     )
+    await r.record_async("browser_schema_refresh_is_covered_by_existing_heartbeat", test_browser_schema_refresh_is_covered_by_existing_heartbeat)
+    await r.record_async("browser_schema_startup_seal_unregisters_heartbeat", test_browser_schema_startup_seal_unregisters_heartbeat)
+    await r.record_async("browser_superseded_verifier_row_finishes_with_actual_result", test_browser_superseded_verifier_row_finishes_with_actual_result)
+    await r.record_async("browser_late_user_commit_survives_newer_tool_and_resume", test_browser_late_user_commit_survives_newer_tool_and_resume)
+    await r.record_async("browser_late_user_commit_survives_newer_user_and_resume", test_browser_late_user_commit_survives_newer_user_and_resume)
+    await r.record_async("browser_legacy_resume_uses_its_own_durable_task_start", test_browser_legacy_resume_uses_its_own_durable_task_start)
+    await r.record_async("browser_legacy_resume_without_source_boundary_fails_closed", test_browser_legacy_resume_without_source_boundary_fails_closed)
     await r.record_async("browser_active_user_feedback_changes_only_browser_output_fields", test_browser_active_user_feedback_changes_only_browser_output_fields)
     await r.record_async("browser_active_user_feedback_updates_model_and_verifier_preserving_fields", test_browser_active_user_feedback_updates_model_and_verifier_preserving_fields)
     await r.record_async("browser_feedback_arriving_during_verifier_invalidates_passing_verdict", test_browser_feedback_arriving_during_verifier_invalidates_passing_verdict)

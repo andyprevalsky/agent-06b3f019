@@ -945,20 +945,40 @@ async def _load_browser_resume_user_instructions(
     agent_id: str,
     resume_state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Read durable user input once at the suspension boundary, after hydration."""
-    cursor = resume_state.get("user_message_cursor") or datetime.fromtimestamp(0, timezone.utc).isoformat()
-    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
-    # The overlap includes separately inserted rows sharing the last timestamp.
-    rows = await poll_new_messages(agent_id, cursor_time - timedelta(microseconds=1))
+    """Read the task's durable input range, deduplicating by source row identity."""
+    cursor = resume_state.get("user_message_cursor")
+    tool_call_id = resume_state.get("tool_call_id")
+    floor_confirmed = bool(cursor) and resume_state.get("user_message_cursor_is_task_start") is True
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    cursor_time = datetime.fromisoformat(cursor.replace("Z", "+00:00")) if cursor else None
+    since = cursor_time if floor_confirmed and cursor_time is not None else epoch
+    rows = await poll_new_messages(
+        agent_id, since - timedelta(microseconds=1),
+        **({"browser_tool_call_id": tool_call_id} if tool_call_id else {}),
+    )
+    if not floor_confirmed:
+        starts = [
+            datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+            for row in rows
+            if row.get("timestamp") and tool_call_id
+            and (row.get("metadata") or {}).get("toolCallId") == tool_call_id
+            and (row.get("metadata") or {}).get("toolName") == "spawn_browser_agent"
+            and (row.get("metadata") or {}).get("action_type") == "session_starting"
+        ]
+        if starts:
+            cursor_time = min([*starts, *([cursor_time] if cursor_time is not None else [])])
+        if cursor_time is None:
+            raise ValueError("Browser task input boundary is unavailable")
     messages = list(resume_state.get("user_instruction_messages") or [])
     seen_ids = set(resume_state.get("user_instruction_message_ids") or [])
-    newest = cursor_time
     for row in sorted(rows, key=lambda row: (str(row.get("timestamp") or ""), str(row.get("id") or row.get("message_id") or ""))):
-        raw_timestamp = row.get("timestamp")
-        if raw_timestamp:
-            timestamp = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
-            newest = max(newest, timestamp)
         if str(row.get("role") or "").upper() != "USER" or (row.get("metadata") or {}).get("hidden"):
+            continue
+        raw_timestamp = row.get("timestamp")
+        if not raw_timestamp:
+            continue
+        timestamp = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        if timestamp < cursor_time:
             continue
         message_id = row.get("id") or row.get("message_id")
         text = row.get("text")
@@ -970,7 +990,8 @@ async def _load_browser_resume_user_instructions(
         **resume_state,
         "user_instruction_messages": messages,
         "user_instruction_message_ids": sorted(seen_ids),
-        "user_message_cursor": newest.isoformat(),
+        "user_message_cursor": cursor_time.isoformat(),
+        "user_message_cursor_is_task_start": True,
     }
 
 
@@ -1129,6 +1150,7 @@ def _browser_resume_continuity_state(
     auth_runtime_state: Optional[AuthRuntimeState] = None,
     user_instruction_messages: Optional[List[Dict[str, str]]] = None,
     user_message_cursor: Optional[str] = None,
+    user_message_cursor_is_task_start: bool = False,
     user_instruction_message_ids: Optional[List[str]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
     schema_user_instruction_count: int = 0,
@@ -1145,6 +1167,7 @@ def _browser_resume_continuity_state(
         "user_instruction_messages": list(user_instruction_messages or []),
         "delivered_user_instruction_count": len(user_instruction_messages or []),
         "user_message_cursor": user_message_cursor,
+        "user_message_cursor_is_task_start": user_message_cursor_is_task_start,
         "user_instruction_message_ids": list(user_instruction_message_ids or []),
         "schema_user_instruction_count": schema_user_instruction_count,
         "browser_output_schema": response_schema,
@@ -5327,6 +5350,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "user_instruction_messages",
     "delivered_user_instruction_count",
     "user_message_cursor",
+    "user_message_cursor_is_task_start",
     "user_instruction_message_ids",
     "schema_user_instruction_count",
     "browser_output_schema",
@@ -5670,7 +5694,9 @@ async def _spawn_browser_agent_activity_v3_simulated(
     instruction_state = dict(resume)
     if not resume:
         instruction_state["user_message_cursor"] = activity.info().scheduled_time.isoformat()
+        instruction_state["user_message_cursor_is_task_start"] = True
     task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
+    instruction_state["tool_call_id"] = tool_call_id
     browser_url = "about:blank"
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
@@ -5772,7 +5798,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
     def resume_payload() -> Dict[str, Any]:
         return {key: instruction_state.get(key) for key in (
-            "user_instruction_messages", "user_instruction_message_ids", "user_message_cursor",
+            "user_instruction_messages", "user_instruction_message_ids", "user_message_cursor", "user_message_cursor_is_task_start",
             "delivered_user_instruction_count", "schema_user_instruction_count", "browser_output_schema",
         )} | _simulated_browser_resume_payload(
             browser_state=browser_state,
@@ -6499,6 +6525,7 @@ async def _spawn_browser_agent_activity_v3_real(
         write_lock_resume_state = await hydrate_resume_context(
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
+        write_lock_resume_state["tool_call_id"] = tool_call_id
         if write_lock_resume_state.get("approval_type") != AUTH_ASSISTANCE_DECLINED:
             try:
                 write_lock_resume_state = await _load_browser_resume_user_instructions(
@@ -6676,35 +6703,7 @@ async def _spawn_browser_agent_activity_v3_real(
         raise ValueError(
             "output_schema is required for browser agent - parent agent must provide structured output schema in tool call"
         )
-    response_schema, schema_usage = await _refresh_browser_output_schema(
-        goal=goal,
-        agent_id=agent_id,
-        response_schema=response_schema,
-        resume_state=write_lock_resume_state,
-        compute_auth={
-            "type": "gpt" if gpt_token else "claude",
-            "accessToken": gpt_token or token_state.access_token,
-            "accountId": gpt_account_id if gpt_token else None,
-            "source": gpt_token_source if gpt_token else token_state.source,
-            "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
-            "userId": user_id,
-            "agentId": agent_id,
-            "rootAgentId": agent_id,
-        },
-    )
     schema_user_instruction_count = int((write_lock_resume_state or {}).get("schema_user_instruction_count") or 0)
-    schema_input_tokens = int(schema_usage.get("prompt_tokens") or 0)
-    schema_output_tokens = int(schema_usage.get("completion_tokens") or 0)
-    total_input_tokens += schema_input_tokens
-    total_output_tokens += schema_output_tokens
-    if schema_usage:
-        accumulate_model_usage(
-            usage_by_model, schema_usage.get("actual_model"), schema_input_tokens, schema_output_tokens,
-            cache_read_input_tokens=int(schema_usage.get("cache_read_input_tokens") or 0),
-            cache_creation_input_tokens=int(schema_usage.get("cache_creation_input_tokens") or 0),
-            from_fast_cache=bool(schema_usage.get("from_fast_cache")),
-            cache_sequence_id=schema_usage.get("cache_sequence_id"),
-        )
 
     logger.info(
         "Using response schema from tool call",
@@ -6831,6 +6830,36 @@ async def _spawn_browser_agent_activity_v3_real(
     state_prefetch = BrowserStatePrefetch()
 
     try:
+        response_schema, schema_usage = await _refresh_browser_output_schema(
+            goal=goal,
+            agent_id=agent_id,
+            response_schema=response_schema,
+            resume_state=write_lock_resume_state,
+            compute_auth={
+                "type": "gpt" if gpt_token else "claude",
+                "accessToken": gpt_token or token_state.access_token,
+                "accountId": gpt_account_id if gpt_token else None,
+                "source": gpt_token_source if gpt_token else token_state.source,
+                "poolTokenId": gpt_token_pool_id if gpt_token else token_state.pool_token_id,
+                "userId": user_id,
+                "agentId": agent_id,
+                "rootAgentId": agent_id,
+            },
+        )
+        schema_user_instruction_count = int((write_lock_resume_state or {}).get("schema_user_instruction_count") or 0)
+        schema_input_tokens = int(schema_usage.get("prompt_tokens") or 0)
+        schema_output_tokens = int(schema_usage.get("completion_tokens") or 0)
+        total_input_tokens += schema_input_tokens
+        total_output_tokens += schema_output_tokens
+        if schema_usage:
+            accumulate_model_usage(
+                usage_by_model, schema_usage.get("actual_model"), schema_input_tokens, schema_output_tokens,
+                cache_read_input_tokens=int(schema_usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(schema_usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(schema_usage.get("from_fast_cache")),
+                cache_sequence_id=schema_usage.get("cache_sequence_id"),
+            )
+
         if (write_lock_resume_state or {}).get("approval_type") == AUTH_ASSISTANCE_DECLINED:
             # The user said no, so nothing is left to try. Release the browser
             # that was kept alive for them and end the task; ``finally`` posts
@@ -7783,7 +7812,9 @@ async def _spawn_browser_agent_activity_v3_real(
         instruction_state = {
             **(write_lock_resume_state or {}),
             "user_instruction_messages": user_instruction_messages,
+            "tool_call_id": tool_call_id,
             "user_message_cursor": user_message_cursor,
+            "user_message_cursor_is_task_start": not write_lock_resume_state or bool(write_lock_resume_state.get("user_message_cursor_is_task_start")),
             "user_instruction_message_ids": user_instruction_message_ids,
             "delivered_user_instruction_count": len(user_instruction_messages),
             "schema_user_instruction_count": schema_user_instruction_count,
@@ -8126,6 +8157,7 @@ async def _spawn_browser_agent_activity_v3_real(
                                 schema_user_instruction_count=schema_user_instruction_count,
                                 user_instruction_messages=user_instruction_messages,
                                 user_message_cursor=user_message_cursor,
+                            user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
                                 user_instruction_message_ids=user_instruction_message_ids,
                                 visited_urls=visited_urls,
                                 verifier_checkpoints=verifier_checkpoints,
@@ -9260,6 +9292,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
+                            user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
                             user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,
@@ -9897,17 +9930,8 @@ async def _spawn_browser_agent_activity_v3_real(
                         cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
 
-                    await sync_user_instructions(require_current_schema=True)
-                    if (
-                        verification_instruction_count != len(user_instruction_messages)
-                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
-                    ):
-                        continue
-
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
-                    if progress_result.get("structured_response") is not None:
-                        latest_structured_response = progress_result["structured_response"]
 
                     progress_title = f"\u2696\ufe0f Progress: {float(score or 0.0) * 100:.0f}%"
 
@@ -9921,6 +9945,15 @@ async def _spawn_browser_agent_activity_v3_real(
                         action_type="system",
                         tool_call_id=verifier_call_id,
                     )
+                    await sync_user_instructions(require_current_schema=True)
+                    if (
+                        verification_instruction_count != len(user_instruction_messages)
+                        or int(instruction_state.get("schema_user_instruction_count") or 0) < len(user_instruction_messages)
+                    ):
+                        continue
+
+                    if progress_result.get("structured_response") is not None:
+                        latest_structured_response = progress_result["structured_response"]
                     if browser_recorder:
                         await browser_recorder.mark(
                             f"Verifier progress: {float(score or 0.0) * 100:.0f}%",
@@ -10583,6 +10616,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
+                            user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
                             user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,
@@ -10728,6 +10762,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             schema_user_instruction_count=schema_user_instruction_count,
                             user_instruction_messages=user_instruction_messages,
                             user_message_cursor=user_message_cursor,
+                            user_message_cursor_is_task_start=bool(instruction_state.get("user_message_cursor_is_task_start")),
                             user_instruction_message_ids=user_instruction_message_ids,
                             visited_urls=visited_urls,
                             verifier_checkpoints=verifier_checkpoints,

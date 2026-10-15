@@ -88,10 +88,12 @@ regressions cover the user's broader schema-update request.
 
 ## Solution
 
-The local repair reads the durable USER tail once on activity resume, after
-lossless archive hydration. A persisted timestamp overlap and source-ID ledger
-preserve message order and include distinct rows with the same timestamp while
-preventing duplicate delivery. Hidden generated schema context is excluded.
+The repair reads the durable task input range after lossless archive hydration
+and before active decisions. An immutable task boundary and source-ID ledger
+include late commits and distinct rows sharing a timestamp without duplicate
+delivery. Hidden generated schema context is excluded. The initial advancing
+timestamp implementation and epoch-only legacy fallback were superseded by the
+October 15 follow-up below.
 The browser actor and both verifier paths receive the same actual user
 instructions, with the original delegated goal retained. Real task feedback
 is preserved verbatim. The auth-resume cue and its synthetic USER-message
@@ -225,6 +227,71 @@ The evidence publisher could not produce a share viewer for this deleted
 non-benchmark agent because its current CLI requires a Hub run UUID. The final
 verifier dump 56a48ebda7ec was rendered and published separately with a 7-day
 signed HTTPS URL. The deleted agent's frontend viewer was not validated. Deployment verification is tracked in PR #1511.
+
+
+## October 15 review stabilization: durable task range
+
+The final verification review of immutable `9b8b694bb47f211443b3d3a32fe375036f7bed5c`
+returned valid findings. The three-cycle deployment was recorded blocked as
+review-unstable; no fourth review or merge occurred. These are subsequent
+isolated development fixes, not an approval to merge that reviewed candidate.
+
+Two timestamp defects remained in the initial repair. A new TOOL or USER row
+advanced the observed timestamp past an older USER transaction that had not yet
+committed, permanently excluding that authored input from later reads. A legacy
+snapshot without a cursor read every historical root USER row, including input
+from unrelated tasks. The source-ID ledger deduplicated visible rows but could
+not recover rows omitted by the timestamp query.
+
+The range now stays anchored to the task's native start; it never advances to an
+observed message timestamp. New activities retain Temporal scheduling time.
+Legacy recovery reads the existing manager `session_starting` ToolEvent keyed by
+its actual `toolCallId`, through the same message poll. This event is persisted
+by `helpers/handle_tool_event.py` before scheduling either real or simulated
+browser work. Browser init and `task_started` rows are emitted after preparation
+and cannot supply that earlier boundary. The current tool-call identity is
+reconstructed from the real activity argument, rather than guessed from text.
+A snapshot with neither a saved boundary nor this actual source fails closed.
+
+The message helper's optional projection retains actual USER rows and only the
+exact native manager start. It bypasses model-context compaction for this source
+read and excludes browser internals. Existing source IDs own deduplication;
+there is no second signal replay path, temporal overlap allowance, generated
+user instruction or invented simulated start event. The permanent shared fixture
+executes the actual manager's first yield and the standard ToolEvent handler to
+obtain the source metadata. It proves the producer exists in both modes.
+
+Seven browser causal regressions fail unchanged against `9b8b694bb`, then pass:
+heartbeat startup and cleanup (described in the related active-browser case),
+superseded verifier closure, late USER commits behind newer TOOL and USER rows
+across resume, exclusion of unrelated legacy history, and explicit refusal of a
+missing boundary. The legacy source test places the real correction after the
+manager source but before later browser preparation completion. It therefore
+also rejects a `task_started` timestamp or resumed scheduling-time substitute.
+The message projection regression fails on `9b8b694bb`; its actual producer
+control already passes that baseline. All nine checks pass after the repair.
+
+Exact unchanged commands in the isolated development worktree were
+`agents/venv/bin/python .context/review3_focused.py` and
+`agents/venv/bin/python .context/review3_extra.py`.
+`review3-causal-proof.json` records the baseline, SHA-256 of all four permanent
+fixture files, unchanged assertions, exit statuses, durations and before/after
+console paths. Before: seven failures in 1.960s plus the missing projection
+failure and preserved producer control in 0.591s. After: all seven pass in
+2.110s and both projection/producer checks pass in 0.650s.
+
+Archive searches were `browser heartbeat schema generation verifier IN_PROGRESS`
+and `late committed USER timestamp cursor legacy resume task history`. The
+original suspended-input and active-input cases are the same owned boundary;
+the CDP heartbeat case is related. Golden reference reads included Claude's
+`src/bridge/replBridgeTransport.ts:60` native event delivery identity and server
+sequence cursor, Hermes `agent/agent_runtime_helpers.py:223` identity-based
+validated-prefix handling, Codex `codex-rs/core/src/tasks/regular.rs:120` pending
+input before completion, and OpenClaw
+`src/infra/outbound/delivery-queue-lease.ts:77` independent liveness lifecycle.
+They retain native source/operation identity rather than manufacturing user
+turns. Rose's timestamp-only storage is not a commit-order event sequence, so
+removing watermark advancement is the coherent simplification here.
 
 ## Human feedback
 
