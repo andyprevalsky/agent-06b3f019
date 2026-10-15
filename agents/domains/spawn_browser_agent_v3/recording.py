@@ -56,6 +56,7 @@ def _initialize_archive_owner(recorder: Any) -> None:
     recorder._archive_owner_token = object()
     recorder._archive_tasks = set()
     recorder._archive_futures = {}
+    recorder._archive_waiting_keys = set()
 
 
 def _archive_owner_aborted(recorder: Any) -> bool:
@@ -68,8 +69,13 @@ async def _abort_recording_local(recorder: Any, tasks: list[Any], *, settle_time
     with _CLOSED_RECORDING_LOCK:
         recorder._local_abort.set()
         recorder._closed = True
-        for waiting in _CLOSED_RECORDING_WAITING.values():
-            waiting[:] = [item for item in waiting if item[3] is not recorder]
+        for key in recorder._archive_waiting_keys:
+            waiting = _CLOSED_RECORDING_WAITING.get(key)
+            if waiting is not None:
+                waiting[:] = [item for item in waiting if item[3] is not recorder]
+                if not waiting:
+                    _CLOSED_RECORDING_WAITING.pop(key, None)
+        recorder._archive_waiting_keys.clear()
         exclusive_futures = [future for future, owners in recorder._archive_futures.items()
                              if owners == frozenset({recorder._archive_owner_token})]
     # Running transfers cannot be rolled back; cancel() only removes queued work.
@@ -114,6 +120,9 @@ def _queue_closed_recording_file(
             def flush_waiting() -> None:
                 batch = list(waiting)
                 waiting.clear()
+                for item in batch:
+                    if item[3] is not None:
+                        item[3]._archive_waiting_keys.discard(key)
                 future = trace_archive.archive_closed_files_in_background(
                     root_agent_id=root_agent_id, artifacts=[item[1] for item in batch]
                 )
@@ -127,6 +136,8 @@ def _queue_closed_recording_file(
             if waiting and sum(item[2] for item in waiting) + reservation > trace_archive._BATCH_MAX_BYTES:
                 flush_waiting()
             waiting.append((relative, descriptor, reservation, owner))
+            if owner is not None:
+                owner._archive_waiting_keys.add(key)
             if len(waiting) >= trace_archive._BATCH_MAX_RECORDS:
                 flush_waiting()
     except Exception:
@@ -148,7 +159,10 @@ def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: 
     key = (str(output_dir.resolve()), root_agent_id, task_id)
     with _CLOSED_RECORDING_LOCK:
         closed = dict(_CLOSED_RECORDING_FILES.get(key, {}))
-        _CLOSED_RECORDING_WAITING.pop(key, None)
+        removed_waiting = _CLOSED_RECORDING_WAITING.pop(key, [])
+        for item in removed_waiting:
+            if item[3] is not None:
+                item[3]._archive_waiting_keys.discard(key)
     acknowledged = {}
     for relative, future in closed.items():
         try:

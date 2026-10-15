@@ -4187,6 +4187,8 @@ async def _finalize_browser_recording_for_fe(
                     bytes=len(html_bytes),
                     has_pointer=bool(recording_file_pointer),
                 )
+        except WorkflowGenerationSealed:
+            raise
         except Exception as exc:  # recording upload is best-effort
             logger.warning(
                 "Browser recording upload failed",
@@ -4278,6 +4280,8 @@ async def _finalize_browser_recording_for_fe_resilient(
                 timeout_seconds=timeout_seconds,
             )
             return None
+        except WorkflowGenerationSealed:
+            raise
         except Exception as exc:  # final cleanup should not mask the activity result
             logger.warning(
                 "Browser recording finalization failed after cancellation",
@@ -4295,6 +4299,8 @@ async def _finalize_browser_recording_for_fe_resilient(
             timeout_seconds=timeout_seconds,
         )
         return None
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:  # final cleanup should not mask the activity result
         logger.warning(
             "Browser recording finalization failed",
@@ -4332,6 +4338,8 @@ async def _finalize_browser_diagnostics_for_fe(
         archive_result = await browser_network_recorder.archive_diagnostics_artifacts()
         if isinstance(archive_result, dict):
             trace_archive_refs = archive_result
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:
         logger.warning(
             "Browser diagnostics trace archive failed",
@@ -4354,6 +4362,8 @@ async def _finalize_browser_diagnostics_for_fe(
                 ),
                 timeout=15,
             )
+    except WorkflowGenerationSealed:
+        raise
     except Exception as exc:
         logger.warning(
             "Browser diagnostics attachment upload failed",
@@ -4399,6 +4409,17 @@ async def _finalize_browser_diagnostics_for_fe(
     return metadata
 
 
+@contextlib.contextmanager
+def _suppress_browser_cleanup_errors():
+    """Ordinary cleanup is best-effort; native generation fencing must escape."""
+    try:
+        yield
+    except WorkflowGenerationSealed:
+        raise
+    except Exception:
+        pass
+
+
 async def _emit_browser_task_terminal_for_fe(
     *,
     agent_id: str,
@@ -4426,7 +4447,7 @@ async def _emit_browser_task_terminal_for_fe(
     """
     if not task_id:
         return
-    with contextlib.suppress(Exception):
+    with _suppress_browser_cleanup_errors():
         await save_browser_action_message(
             agent_id=agent_id,
             title=title,
@@ -4473,50 +4494,53 @@ def _schedule_browser_cleanup(
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
         resolved_network_recorder = browser_network_recorder
+        async def dispose_local() -> None:
+            nonlocal resolved_network_recorder
+            # Cancel setup before collecting its registered instances.
+            deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
+            owned_tasks = {task for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
+                           if isinstance(task, asyncio.Task)}
+            if cursor_streamer is not None:
+                cursor_streamer.closed = True
+                if isinstance(cursor_streamer.flush_task, asyncio.Task):
+                    owned_tasks.add(cursor_streamer.flush_task)
+            for owned_task in owned_tasks:
+                owned_task.cancel()
+                owned_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            if owned_tasks:
+                await asyncio.wait(owned_tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+            if resolved_network_recorder is None and network_recorder_task is not None:
+                if network_recorder_task.done() and not network_recorder_task.cancelled():
+                    with contextlib.suppress(Exception):
+                        resolved_network_recorder = network_recorder_task.result()
+            recorders = [browser_recorder, resolved_network_recorder, *(local_only_recorders or [])]
+            aborted = set()
+            for recorder in recorders:
+                if recorder is not None and id(recorder) not in aborted:
+                    aborted.add(id(recorder))
+                    with contextlib.suppress(Exception):
+                        await recorder.abort_local(
+                            settle_timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+                        )
+            if humanizer is not None:
+                with contextlib.suppress(Exception):
+                    await _bounded_browser_terminal_io(humanizer.close(), "sealed humanizer detach")
+            if dom_service is not None:
+                with contextlib.suppress(Exception):
+                    await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
+            await _stop_playwright_resources(
+                playwright_browser, playwright_instance, agent_id,
+                close_browser=False, driver_pid=playwright_driver_pid,
+            )
         try:
             if local_only:
-                # Cancel setup before collecting its registered instances.
-                deadline = asyncio.get_running_loop().time() + BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS
-                owned_tasks = {task for task in (interaction_layer_task, network_recorder_task, *local_only_setup_tasks)
-                               if isinstance(task, asyncio.Task)}
-                if cursor_streamer is not None:
-                    cursor_streamer.closed = True
-                    if isinstance(cursor_streamer.flush_task, asyncio.Task):
-                        owned_tasks.add(cursor_streamer.flush_task)
-                for owned_task in owned_tasks:
-                    owned_task.cancel()
-                    owned_task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
-                if owned_tasks:
-                    await asyncio.wait(owned_tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
-                if resolved_network_recorder is None and network_recorder_task is not None:
-                    if network_recorder_task.done() and not network_recorder_task.cancelled():
-                        with contextlib.suppress(Exception):
-                            resolved_network_recorder = network_recorder_task.result()
-                recorders = [browser_recorder, resolved_network_recorder, *(local_only_recorders or [])]
-                aborted = set()
-                for recorder in recorders:
-                    if recorder is not None and id(recorder) not in aborted:
-                        aborted.add(id(recorder))
-                        with contextlib.suppress(Exception):
-                            await recorder.abort_local(
-                                settle_timeout=max(0.0, deadline - asyncio.get_running_loop().time())
-                            )
-                if humanizer is not None:
-                    with contextlib.suppress(Exception):
-                        await _bounded_browser_terminal_io(humanizer.close(), "sealed humanizer detach")
-                if dom_service is not None:
-                    with contextlib.suppress(Exception):
-                        await _bounded_browser_terminal_io(dom_service.disconnect(), "sealed CDP detach")
-                await _stop_playwright_resources(
-                    playwright_browser, playwright_instance, agent_id,
-                    close_browser=False, driver_pid=playwright_driver_pid,
-                )
+                await dispose_local()
                 return
             if cursor_streamer:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await cursor_streamer.close()
             if input_page and _botsigged_diagnostics_enabled(start_url):
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     capture = await _capture_botsigged_diagnostics(
                         input_page,
                         agent_id=agent_id,
@@ -4540,16 +4564,16 @@ def _schedule_browser_cleanup(
                             },
                         )
             if interaction_layer_task is not None and not interaction_layer_task.done():
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await asyncio.wait_for(asyncio.shield(interaction_layer_task), timeout=10)
             if humanizer:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await humanizer.close()
             if network_recorder_task is not None:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     resolved_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
             if resolved_network_recorder:
-                with contextlib.suppress(Exception):
+                with _suppress_browser_cleanup_errors():
                     await _finalize_browser_diagnostics_for_fe(
                         browser_network_recorder=resolved_network_recorder,
                         agent_id=agent_id,
@@ -4595,6 +4619,8 @@ def _schedule_browser_cleanup(
                 agent_id,
                 driver_pid=playwright_driver_pid,
             )
+        except WorkflowGenerationSealed:
+            await dispose_local()
         except Exception as exc:  # background cleanup must never crash the worker loop
             logger.warning(
                 "Browser cleanup failed in background",
@@ -4603,14 +4629,17 @@ def _schedule_browser_cleanup(
                 error=extract_error_message(exc),
             )
             if emit_task_terminal and not local_only:
-                await _emit_browser_task_terminal_for_fe(
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    browser_url=browser_url,
-                    title="Browser Session Closed",
-                    message="Browser session closed after teardown error",
-                )
+                try:
+                    await _emit_browser_task_terminal_for_fe(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                        browser_url=browser_url,
+                        title="Browser Session Closed",
+                        message="Browser session closed after teardown error",
+                    )
+                except WorkflowGenerationSealed:
+                    await dispose_local()
         finally:
             _clear_browser_activity_memory_buffers(
                 browser_recorder=browser_recorder,
@@ -10857,6 +10886,8 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
+        if generation_sealed and otp_poll_task is not None:
+            otp_poll_task.cancel()
         stop_browser_activity_heartbeat(_heartbeat_token)
         otp_generation_error = None
         try:
@@ -10873,6 +10904,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     asyncio.shield(network_recorder_task),
                     timeout=10,
                 )
+            except WorkflowGenerationSealed as error:
+                generation_sealed = True
+                otp_generation_error = error
+                if otp_poll_task is not None:
+                    otp_poll_task.cancel()
             except Exception as diagnostics_resolve_error:
                 logger.warning(
                     "Browser diagnostics recorder was unavailable before activity return",
@@ -10890,6 +10926,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     browser_url=browser_url,
                 )
                 diagnostics_finalized = True
+            except WorkflowGenerationSealed as error:
+                generation_sealed = True
+                otp_generation_error = error
+                if otp_poll_task is not None:
+                    otp_poll_task.cancel()
             except Exception as diagnostics_error:
                 logger.warning(
                     "Browser diagnostics finalization failed before activity return",
@@ -10904,11 +10945,18 @@ Based on this feedback, I need to continue working on the task and address the i
             else:
                 download_persister_task.cancel()
         if not generation_sealed and browser_download_persister is None and download_persister_task is not None:
-            with contextlib.suppress(Exception):
+            try:
                 browser_download_persister = await asyncio.wait_for(
                     asyncio.shield(download_persister_task),
                     timeout=10,
                 )
+            except WorkflowGenerationSealed as error:
+                generation_sealed = True
+                otp_generation_error = error
+                if otp_poll_task is not None:
+                    otp_poll_task.cancel()
+            except Exception:
+                pass
         if browser_download_persister is not None:
             with contextlib.suppress(Exception):
                 await browser_download_persister.close()

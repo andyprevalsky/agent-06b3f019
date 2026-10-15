@@ -21175,6 +21175,10 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
     from contextlib import ExitStack
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3, drain_background_browser_cleanups
 
+    foreground_seal = case == "foreground_sealed_held_poll"
+    finally_seal = case.startswith("finally_")
+    sealed_case = case.startswith("sealed_") or foreground_seal or finally_seal
+    network_release = None
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     fake_playwright = _FakePlaywright(fake_browser)
     session_info = {
@@ -21198,9 +21202,12 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
     from datetime import datetime, timezone, timedelta
     from domains.spawn_browser_agent_v3.handler import _drain_otp_poll as real_drain, _fetch_and_append_recent_otp_user_messages as real_poll
     delivered, persisted, fetched, poll_completed = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    network_release = asyncio.Event()
+    drain_count = 0
     ordering = []
     poll_events = asyncio.Queue()
     sealed_states = []
+    foreground_poll_deliveries = []
     poll_count = 0
     persistence_attempts = []
     async def poll(**kwargs):
@@ -21214,13 +21221,15 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             ordering.append("poll_completed")
             poll_completed.set()
             this_poll_completed.set()
-            if case.startswith("sealed_"):
+            if foreground_seal:
+                foreground_poll_deliveries.append(len(kwargs["otp_user_messages"]))
+            if sealed_case:
                 sealed_states.append((len(kwargs.get("pending_otp_ref_messages", {})), len(kwargs.get("persisted_otp_refs", set()))))
     async def fetch_emails(*args, **kwargs):
         await delivered.wait()
         if case.startswith("persistence_") and poll_count > 1:
             return []
-        if case in {"empty", "app_approval"}:
+        if case in {"empty", "app_approval"} or finally_seal:
             return []
         if case.startswith("repeated_"):
             from domains.spawn_browser_agent_v3.config import MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
@@ -21237,6 +21246,11 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         return result
     async def persist_otp(*args, **kwargs):
         if kwargs.get("role") == "USER" and (kwargs.get("credential_ref") or {}).get("kind") == "email_otp":
+            if foreground_seal:
+                from domains.spawn_browser_agent_v3.repo import save_browser_credential_ref_message as native_ref_write
+                if sealed_sent.is_set():
+                    dead_generation_writes.append("credential ref POST")
+                return await native_ref_write(**kwargs)
             persistence_attempts.append(dict(kwargs["credential_ref"]))
             persisted.set()
             if case.startswith("persistence_"):
@@ -21252,6 +21266,20 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         return True if case.startswith("repeated_") else None
     sealed_sent = asyncio.Event()
     dead_generation_writes = []
+    async def native_foreground_backend_write(**kwargs):
+        selected_action = "network_recording" if case == "finally_resolution_first_seal" else "diagnostics" if finally_seal else "read_browser_state"
+        if kwargs.get("action_type") == selected_action:
+            from domains.spawn_browser_agent_v3.repo import save_browser_action_message as native_action_write
+            return await native_action_write(**kwargs)
+        return await record_backend_write(**kwargs)
+    async def native_http_post(*args, **kwargs):
+        import httpx
+        body = kwargs["json"]
+        selected_action = "network_recording" if case == "finally_resolution_first_seal" else "diagnostics" if finally_seal else "read_browser_state"
+        if body.get("role") == "TOOL" and body.get("metadata", {}).get("action_type") == selected_action:
+            sealed_sent.set()
+            return httpx.Response(409, request=httpx.Request("POST", "https://fixture.invalid/messages"))
+        return httpx.Response(200, request=httpx.Request("POST", "https://fixture.invalid/messages"))
     async def record_backend_write(**kwargs):
         if sealed_sent.is_set():
             dead_generation_writes.append(kwargs.get("action_type", "backend write"))
@@ -21280,15 +21308,15 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
 
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
-        action = "read_browser_state" if case == "sealed_loop_harvest" and len(model_contexts) == 1 else "request_user_assistance_for_authentication"
+        action = "read_browser_state" if (case == "sealed_loop_harvest" or foreground_seal) and len(model_contexts) == 1 else "request_user_assistance_for_authentication"
         await stream_instances[-1].on_chunk(StreamChunk(kind="tool_call", data={"id": f"handoff-{len(model_contexts)}", "name": action, "arguments": {}}))
         if len(model_contexts) == 1:
-            if case not in {"during_drain", "sealed_during_drain"}:
+            if case not in {"during_drain", "sealed_during_drain", "foreground_sealed_held_poll"}:
                 delivered.set()
             if case in {"fresh", "sealed_harvest", "sealed_loop_harvest"} or case.startswith("persistence_"):
                 await persisted.wait()
                 await poll_completed.wait()
-            elif case not in {"during_drain", "sealed_during_drain"}:
+            elif case not in {"during_drain", "sealed_during_drain", "foreground_sealed_held_poll"}:
                 await fetched.wait()
         if case.startswith(("repeated_", "persistence_")):
             await (await poll_events.get()).wait()
@@ -21296,7 +21324,11 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         return {"action": {"action": action, "thinking": "Verification required", "params": {}}, "usage": {}, "mode": "waterfall"}
 
     async def drain_poll(task, **kwargs):
-        if case in {"during_drain", "sealed_during_drain"}:
+        nonlocal drain_count
+        drain_count += 1
+        if finally_seal and drain_count == 2:
+            network_release.set()
+        if case in {"during_drain", "sealed_during_drain", "foreground_sealed_held_poll"}:
             delivered.set()
         ordering.append("drain_started")
         await real_drain(task, **kwargs)
@@ -21340,12 +21372,12 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
         patch(handler + "save_browser_assistant_message", AsyncMock()),
         patch(handler + "save_browser_credential_ref_message", persist_otp),
         patch(handler + "persist_resume_context", AsyncMock(return_value={})),
-        patch("browser_tools.dom_service.DOMService", HandoffDomService if case == "sealed_loop_harvest" else _FakeDomService),
+        patch("browser_tools.dom_service.DOMService", HandoffDomService if case == "sealed_loop_harvest" or foreground_seal else _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
         patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
-    if case.startswith("sealed_"):
+    if sealed_case:
         targets.extend([
             patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=sealed_browser_recorder)),
             patch(handler + "BrowserNetworkRecorder.create", AsyncMock(return_value=sealed_network_recorder)),
@@ -21357,6 +21389,30 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             patch(handler + "upload_to_storage", forbidden_after_seal("storage upload")),
             patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", forbidden_after_seal("assistant stream write")),
             patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", forbidden_after_seal("tool stream write")),
+        ])
+    if foreground_seal or finally_seal:
+        targets.extend([
+            patch(handler + "save_browser_action_message", native_foreground_backend_write),
+            patch("domains.spawn_browser_agent_v3.repo.get_http_client", return_value=SimpleNamespace(post=native_http_post)),
+            patch("config.load_config", return_value=_fake_config()),
+        ])
+    if finally_seal:
+        from domains.spawn_browser_agent_v3.handler import _finalize_browser_diagnostics_for_fe as native_diagnostics
+        sealed_network_recorder.persists_network_log = case == "finally_resolution_first_seal"
+        sealed_network_recorder.network_dir = Path(".context/cleanup-network")
+        sealed_network_recorder.close = AsyncMock(return_value=Path(".context/cleanup-network/index.json"))
+        sealed_network_recorder.console_index_path = None
+        sealed_network_recorder.archive_diagnostics_artifacts = AsyncMock(return_value={})
+        sealed_network_recorder.export_diagnostics_bundle_bytes = lambda: None
+        async def network_create(**kwargs):
+            if kwargs.get("register_local_owner"):
+                kwargs["register_local_owner"](sealed_network_recorder)
+            if case == "finally_resolution_first_seal":
+                await network_release.wait()
+            return sealed_network_recorder
+        targets.extend([
+            patch(handler + "BrowserNetworkRecorder.create", network_create),
+            patch(handler + "_finalize_browser_diagnostics_for_fe", native_diagnostics),
         ])
     with ExitStack() as stack:
         for target in targets:
@@ -21370,22 +21426,28 @@ async def test_auth_handoff_consumes_otp_received_during_decision(case="fresh", 
             )
         except Exception as error:
             from helpers.workflow_generation import WorkflowGenerationSealed
-            if not case.startswith("sealed_") or not isinstance(error, WorkflowGenerationSealed):
+            if not sealed_case or not isinstance(error, WorkflowGenerationSealed):
                 raise
             result = {"status": "fixture_generation_sealed"}
         finally:
             await drain_background_browser_cleanups()
-    if case.startswith("sealed_"):
+    if sealed_case:
         assert result["status"] == "fixture_generation_sealed", "sealed generation was swallowed by the activity"
         assert len(model_contexts) == 1, "sealed generation made another model decision"
-        create_auth.assert_not_awaited()
+        if finally_seal:
+            create_auth.assert_awaited_once()
+        else:
+            create_auth.assert_not_awaited()
+        if foreground_seal:
+            assert foreground_poll_deliveries == [0], "held native poll appended input after foreground seal"
         assert sealed_states == [(0, 0)], "sealed reference became accepted or ordinary retry pending"
         assert dead_generation_writes == [], f"backend writes after generation seal: {dead_generation_writes}"
         fake_browser.close.assert_not_awaited()
         fake_playwright.stop.assert_awaited_once()
         sealed_browser_recorder.abort_local.assert_awaited_once()
         sealed_network_recorder.abort_local.assert_awaited_once()
-        _FakeDomService.last_instance.disconnect.assert_awaited_once()
+        if not finally_seal:
+            _FakeDomService.last_instance.disconnect.assert_awaited_once()
         return
     if case.startswith("repeated_"):
         from domains.spawn_browser_agent_v3.config import MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
@@ -27795,13 +27857,26 @@ async def run_all_tests():
         test_browser_diagnostics_capture_console_and_redacted_network_metadata,
     )
 
+    from cleanup_sealed_behavior import (
+        assert_first_native_seal_during_background_cleanup,
+        assert_first_native_seal_during_activity_finally,
+    )
+    for cleanup_stage in ("diagnostics", "recording", "terminal"):
+        await r.record_async(f"cleanup_first_seal_{cleanup_stage}", lambda cleanup_stage=cleanup_stage: assert_first_native_seal_during_background_cleanup(cleanup_stage))
+        await r.record_async(f"cleanup_ordinary_error_{cleanup_stage}", lambda cleanup_stage=cleanup_stage: assert_first_native_seal_during_background_cleanup(cleanup_stage, 500))
+    await r.record_async("cleanup_first_seal_fallback_terminal", lambda: assert_first_native_seal_during_background_cleanup("fallback_terminal"))
+    await r.record_async("finally_first_seal_diagnostics", lambda: assert_first_native_seal_during_activity_finally(test_auth_handoff_consumes_otp_received_during_decision))
+    await r.record_async("finally_first_seal_resolution", lambda: assert_first_native_seal_during_activity_finally(test_auth_handoff_consumes_otp_received_during_decision, True))
+
     from recording_abort_behavior import (
         assert_sealed_cleanup_settles_only_its_recorder_archive,
         assert_archive_abort_preserves_same_path_foreign_batches,
         assert_archive_abort_cancels_only_exclusive_queued_futures,
         assert_abort_before_archive_start_releases_admission_slot,
         assert_factory_registers_unreturned_recorder_for_abort,
+        assert_abort_reads_only_its_producer_registered_waiting_keys,
     )
+    await r.record_async("sealed_recorder_bounded_owner_keys", assert_abort_reads_only_its_producer_registered_waiting_keys)
     await r.record_async("sealed_recorder_unreturned_factory", assert_factory_registers_unreturned_recorder_for_abort)
     await r.record_async("sealed_network_unreturned_factory", lambda: assert_factory_registers_unreturned_recorder_for_abort(True))
     await r.record_async("sealed_recorder_abort_before_start", assert_abort_before_archive_start_releases_admission_slot)
@@ -27823,7 +27898,7 @@ async def run_all_tests():
     )
     for supersession_case in ("repeated_fresh", "repeated_duplicate_stale"):
         await r.record_async(f"otp_{supersession_case}", lambda supersession_case=supersession_case: assert_repeated_supersession_is_bounded(test_auth_handoff_consumes_otp_received_during_decision, supersession_case))
-    for sealed_path in ("settled_drain", "during_drain", "loop_harvest"):
+    for sealed_path in ("settled_drain", "during_drain", "loop_harvest", "foreground_held_poll"):
         await r.record_async(f"otp_generation_sealed_{sealed_path}", lambda sealed_path=sealed_path: assert_sealed_otp_poll_stops_activity(test_auth_handoff_consumes_otp_received_during_decision, sealed_path))
     await r.record_async("otp_false_ack_keeps_input_usable", lambda: assert_false_ack_keeps_otp_input_usable(_fake_session_with_event_bus))
     await r.record_async("otp_reference_retries_false_ack", lambda: assert_otp_reference_retries_after_unaccepted_write(test_auth_handoff_consumes_otp_received_during_decision))

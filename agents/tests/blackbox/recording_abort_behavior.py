@@ -199,3 +199,36 @@ async def assert_factory_registers_unreturned_recorder_for_abort(network=False):
                 if not child.done():
                     child.cancel()
             await asyncio.gather(task, *children, return_exceptions=True)
+
+
+async def assert_abort_reads_only_its_producer_registered_waiting_keys():
+    from domains.spawn_browser_agent_v3 import recording
+    owner, foreign = _recorder(), _recorder()
+    accesses = []
+    owned_key = (str(owner.output_dir.resolve()), "bounded-owner", owner.task_id)
+
+    class WatchedRegistry(dict):
+        def values(self):
+            raise AssertionError("abort enumerated every agent waiting queue")
+        def items(self):
+            raise AssertionError("abort enumerated every agent waiting queue")
+        def __iter__(self):
+            raise AssertionError("abort enumerated every agent waiting queue")
+        def get(self, key, *default):
+            accesses.append(key)
+            return super().get(key, *default)
+        def pop(self, key, *default):
+            accesses.append(key)
+            return super().pop(key, *default)
+
+    registry = WatchedRegistry()
+    with _offline_activity_edges(), patch.object(recording, "_CLOSED_RECORDING_WAITING", registry), patch.object(recording, "archive_enabled", return_value=True), patch.object(recording.trace_archive, "closed_file_archive_reservation", return_value=1):
+        recording._queue_closed_recording_file(owner.output_dir, owned_key[1], owner.task_id,
+                                               owner.output_dir / "owned.txt", owner=owner)
+        for i in range(100):
+            recording._queue_closed_recording_file(foreign.output_dir, f"foreign-{i}", foreign.task_id,
+                                                   foreign.output_dir / f"foreign-{i}.txt", owner=foreign)
+        accesses.clear()
+        await owner.abort_local(settle_timeout=10)
+        assert accesses and all(key == owned_key for key in accesses), "abort accessed a foreign waiting key"
+        assert len(registry) == 100, "abort removed foreign queue state"
