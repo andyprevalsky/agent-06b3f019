@@ -513,3 +513,54 @@ and user instructions while preventing stale result acceptance.
 ## Reusable lesson
 
 Accept a verifier result only while both the actual USER sources and native requirement revision it judged remain current, resolving prompt and schema under that same version.
+
+
+### October 15 initial native-retry review stabilization
+
+CodeRabbit review 5540541211 on source 33e returned two substantive findings.
+The existing approval owner accepts legacy `approve` / `approved` responses,
+while the schema-feedback intake only excluded the older uppercase protocol
+set. Real legacy producer signals contain `request_id` and `response` without
+explicit authored-input provenance. The intake now uses that existing approval
+vocabulary only for non-authored signal controls. It retains the approval
+waiter's original signal unchanged. Explicit authored responses and actual
+durable USER rows containing those same words remain requirements, with their
+original bytes and source identities.
+
+Two registered actual receiver/intake regressions prove the distinction. The
+legacy control case fails on unchanged 33e while its authored/durable positive
+control passes; both pass after the minimal intake repair. The complete
+workflow and determinism owners pass in 48.0 seconds. No global USER text
+classifier or extra transport was added.
+
+The verifier's UI-only native ERROR closure also exposed an existing projection
+inconsistency: actor serialization honors `excludeFromModel`, but verifier
+serialization did not. The verifier builder now reuses that same existing
+exclusion predicate. Its actual serializer regression fails before and passes
+after this one-line fix, preserving exact authored input and actual evidence,
+retaining an explicitly visible error, and leaving the durable source context
+unchanged for UI/audit. All 232 LLM cases and five determinism cases pass in
+11.3 seconds. This prevents UI exception text becoming synthetic verifier
+context; it adds no narration, verdict, score or schema-generation policy.
+
+The pre-stabilization 33e local run passed all nine smoke tasks (including the
+51-agent mass task), all four sandbox payment lifecycle tasks, eight UI specs,
+and real E2B. All four owned stacks were stopped with native cleanup and their
+ports freed; Postgres was preserved. The old latency lane was interrupted
+while still waiting for isolated benchmarks, before any samples launched,
+because review fixes superseded that source. It is not recorded as passing;
+the full latency gate remains required on the stabilized source.
+
+### October 15 verifier prerequisite / native retry follow-up
+
+Substantive CodeRabbit review 5540541211 on frozen 33e identified an IN_PROGRESS verifier row left open when prompt/schema resolution raised before the actual verifier provider call. Actual `_run_verifier` and actual `run_agent` causal fixtures confirmed that boundary; no production Calendar outcome is inferred.
+
+The private two-file repair 3acc2a6a24e37b7f24538a6888073c7ba1e500da closes that same toolCallId as UI-only ERROR with raw actual exception text, then preserves original direct-boundary propagation. A further actual-caller fixture proved that ordinary verifier invocation was outside the pre-acceptance LLM catch. The caller now routes genuine raised errors through the SAME existing consecutive_verifier_errors budget, with its original three-failure error outcome, native next iteration and no accepted-turn refund. Successful real provider score/reason/usage handling remains unchanged. Lifecycle exceptions propagate at both ordinary and final callers; no synthetic score, recovery cue, USER narration, counter, loop or limit was introduced.
+
+All eleven final permanent cases run on baseline 33e: nine FAIL and two controls PASS; the identical final fixtures PASS after repair. Controls cover prompt and schema stages, supplied and generated IDs, root-context actual actor projection, same exception, closure-write failures, direct/wrapped cancellation/seal/handoff, current-contract retry, three-failure exhaustion, mixed returned/raised shared counter and healthy reset, max_iterations=1, and the no-tool reset sequence. A mutant removing only the newly necessary no_tool_count reset fails its same assertion. The original 65 test function ASTs remain identical. Full run-agent76 plus workflow-determinism5 PASS in 2.3 seconds; Ruff/compile/diff and archive875 validation PASS. Independent source/test review is clean.
+
+Review also proved the existing verifier serializer ignored excludeFromModel despite actor serialization respecting it. The combined runtime includes the minimal shared filter and actual owning LLM regression described above; the projection dependency is satisfied on the integrated source. Raw behavior guard flags the loop change; no approval flag was claimed. The user's actual rejection of a new terminal FAILED policy and direction to reuse native retries remains controlling.
+
+Searches `verifier IN_PROGRESS prerequisite schema` and `verification error model context tool row` found the existing requirement-version case, September 2 UI-only teardown contract, and August 19 same-call error ownership case. This is a related review follow-up, not proof of recurrence of the exact Calendar outcome. The reference tool executor in claude-code-src/src/services/tools/StreamingToolExecutor.ts:88 closes an unavailable-tool result under the actual tool_use_id; that is an identity/closure analog only, not a verifier/UI exclusion policy. Rose's existing native verifier counter and excludeFromModel contract own this repair.
+
+No new deployment or provider/shared resource action was performed on the handoff box. PR1511 owner must record combined acceptance, review and rollout separately.
