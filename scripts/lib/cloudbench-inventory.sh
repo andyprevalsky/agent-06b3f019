@@ -51,7 +51,7 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     while [ "${secs#0}" != "$secs" ]; do secs="${secs#0}"; done
     [ -n "$secs" ] || return 142
     local out notify_fd read_fd pid rc read_status=0 completed running
-    local child_birth=unknown returned=unknown marker_pid marker_birth marker_rc marker_extra stat_line local_shell_pid marker_shell_flags
+    local child_birth=unknown returned=unknown marker_pid marker_birth marker_rc marker_extra stat_line local_shell_pid marker_shell_flags completion_markers_safe=1 completion_token marker_token returned_pid returned_birth
     local -a stat_fields
     out="$(mktemp)" || return 1
     if ! mkfifo -m 600 "$out.done"; then
@@ -71,6 +71,11 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         return 1
     fi
     rm -f "$out.done"
+    # Existing siblings are not evidence from this invocation. An invocation
+    # token additionally binds records to this exact wrapper rather than a PID.
+    [ ! -e "$out.started" ] && [ ! -L "$out.started" ] && \
+        [ ! -e "$out.returned" ] && [ ! -L "$out.returned" ] || completion_markers_safe=0
+    completion_token="$BASHPID-$RANDOM-$RANDOM"
     (
         exec {read_fd}<&-
         # Keep the writer through native exec and EXIT handlers. Production
@@ -87,12 +92,12 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
         fi
         marker_shell_flags="$-"
         set -C
-        { printf '%s %s\n' "$local_shell_pid" "$child_birth" > "$out.started"; } 2>/dev/null || true
+        { [ "$completion_markers_safe" = 1 ] && printf '%s %s %s\n' "$completion_token" "$local_shell_pid" "$child_birth" > "$out.started"; } 2>/dev/null || true
         case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
         marker_shell_flags="$-"
         set -C
-        { printf '%s\n' "$rc" > "$out.returned"; } 2>/dev/null || true
+        { [ "$completion_markers_safe" = 1 ] && printf '%s %s %s %s\n' "$completion_token" "$local_shell_pid" "$child_birth" "$rc" > "$out.returned"; } 2>/dev/null || true
         case "$marker_shell_flags" in *C*) ;; *) set +C ;; esac
         exit "$rc"
     ) &
@@ -101,16 +106,17 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     IFS= read -r -t "$secs" -u "$read_fd" completed || read_status=$?
     exec {read_fd}<&-
     if [ "$read_status" -ne 1 ]; then
-        if [ -f "$out.started" ] && [ ! -L "$out.started" ]; then
-            IFS=' ' read -r marker_pid marker_birth marker_extra < "$out.started" || true
-            if [ "${marker_pid:-}" = "$pid" ] && [ -z "${marker_extra:-}" ]; then
+        if [ "$completion_markers_safe" = 1 ] && [ -f "$out.started" ] && [ ! -L "$out.started" ]; then
+            IFS=' ' read -r marker_token marker_pid marker_birth marker_extra < "$out.started" || true
+            if [ "${marker_token:-}" = "$completion_token" ] && [ "${marker_pid:-}" = "$pid" ] && [ -z "${marker_extra:-}" ]; then
                 case "${marker_birth:-}" in ''|*[!0-9]*) ;; *) child_birth="$marker_birth" ;; esac
             fi
         fi
-        if [ -f "$out.returned" ] && [ ! -L "$out.returned" ]; then
-            IFS=' ' read -r marker_rc marker_extra < "$out.returned" || true
+        if [ "$completion_markers_safe" = 1 ] && [ -f "$out.returned" ] && [ ! -L "$out.returned" ]; then
+            IFS=' ' read -r marker_token returned_pid returned_birth marker_rc marker_extra < "$out.returned" || true
             case "${marker_rc:-}" in ''|*[!0-9]*) ;; *)
-                [ -n "${marker_extra:-}" ] || returned="$marker_rc" ;;
+                [ "${marker_token:-}" = "$completion_token" ] && [ "${returned_pid:-}" = "$pid" ] && \
+                    [ "${returned_birth:-}" = "$child_birth" ] && [ -z "${marker_extra:-}" ] && returned="$marker_rc" ;;
             esac
         fi
         printf '[warn] FLY_COMPLETION_TIMEOUT shell_pid=%s shell_start_ticks=%s fly_return_status=%s fifo_read_status=%s\n' \
@@ -131,12 +137,14 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
             fi
         fi
         wait "$pid" 2>/dev/null || true
-        cat "$out"; rm -f "$out" "$out.started" "$out.returned"
+        cat "$out"; rm -f "$out"
+        [ "$completion_markers_safe" != 1 ] || rm -f "$out.started" "$out.returned"
         [ "$read_status" -gt 128 ] && return 142
         return 1
     fi
     if wait "$pid"; then rc=0; else rc=$?; fi
-    cat "$out"; rm -f "$out" "$out.started" "$out.returned"
+    cat "$out"; rm -f "$out"
+    [ "$completion_markers_safe" != 1 ] || rm -f "$out.started" "$out.returned"
     return "$rc"
 }
 

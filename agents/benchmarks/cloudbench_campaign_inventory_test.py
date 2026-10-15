@@ -2658,7 +2658,7 @@ def test_campaign_inventory_timeout_preserves_real_handler_ownership(tmp_path, h
     assert rows.count('parent') == 1
     assert rows.count('child') == (0 if handler == 'inherited-parent' else 1)
 
-@pytest.mark.parametrize('mode', ['success', 'nonzero-json', 'running', 'exit-handler', 'detached-writer', 'marker-collision'])
+@pytest.mark.parametrize('mode', ['success', 'nonzero-json', 'running', 'exit-handler', 'detached-writer', 'marker-collision', 'regular-marker-collision'])
 def test_campaign_inventory_native_completion_evidence_preserves_eof_contract(tmp_path, mode):
     """A return marker diagnoses completion; it never substitutes for EOF/status."""
     source_path = os.environ.get('CLOUDBENCH_COMPLETION_SOURCE')
@@ -2672,22 +2672,26 @@ def test_campaign_inventory_native_completion_evidence_preserves_eof_contract(tm
         'exit-handler': "trap 'sleep 2' EXIT; printf '[]'",
         'detached-writer': 'sleep 2 & printf "[]"',
         'marker-collision': 'printf "[]"',
+        'regular-marker-collision': 'printf "[]"; sleep 2',
     }[mode]
     prefix = ''
     protected = tmp_path/'protected'
-    if mode == 'marker-collision':
+    if mode in ('marker-collision', 'regular-marker-collision'):
         output = tmp_path/'controlled-output'
         protected.write_text('UNCHANGED')
-        Path(str(output)+'.started').symlink_to(protected)
-        Path(str(output)+'.returned').symlink_to(protected)
+        if mode == 'marker-collision':
+            Path(str(output)+'.started').symlink_to(protected)
+            Path(str(output)+'.returned').symlink_to(protected)
+        else:
+            Path(str(output)+'.returned').write_text('0\n')
         prefix = 'mktemp() { printf "%s\\n" '+shlex.quote(str(output))+'; }\n'
     result = subprocess.run(['bash', '-c', 'set -u\n'+function+'\n'+prefix+'FLY() { '+command+'; }\nfly_with_timeout 1 machines list -a fixture --json\n'], capture_output=True, text=True, timeout=10)
-    expected = 142 if mode in ('running','exit-handler','detached-writer') else 9 if mode == 'nonzero-json' else 0
+    expected = 142 if mode in ('running','exit-handler','detached-writer','regular-marker-collision') else 9 if mode == 'nonzero-json' else 0
     assert result.returncode == expected, result.stderr
     assert result.stdout.startswith('[]')
     if expected == 142:
         assert 'FLY_COMPLETION_TIMEOUT' in result.stderr
-        assert 'fly_return_status='+('unknown' if mode == 'running' else '0') in result.stderr
+        assert 'fly_return_status='+('unknown' if mode in ('running','regular-marker-collision') else '0') in result.stderr
         assert 'shell_pid=' in result.stderr and 'fifo_read_status=' in result.stderr
     else:
         assert 'FLY_COMPLETION_TIMEOUT' not in result.stderr
