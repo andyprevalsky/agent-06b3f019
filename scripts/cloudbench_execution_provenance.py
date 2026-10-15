@@ -49,6 +49,7 @@ _CONFIG_SCALAR_KEYS = {
     "app",
     "region",
     "donor_region",
+    "fresh_volume_unique_zone",
     "run_timeout_seconds",
     "child_run_timeout_seconds",
     "benchmark_wall_clock_backstop_seconds",

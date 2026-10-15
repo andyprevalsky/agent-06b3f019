@@ -223,3 +223,35 @@ wait clock, renew inventory TTL, re-reserve capacity, fall back to native child
 queries, or accept failed native JSON. This repairs the demonstrated caller
 race; it does not establish the cause of the native Machines-list timeouts or
 prove a successful simultaneous 600-task outcome.
+
+
+### Explicit fresh-volume hardware placement (2026-10-15)
+
+V32 selected task r001-j0048 failed fresh volume creation with `NO CAPACITY
+AVAILABLE IN IAD`; the exact-parent threshold supervisor stopped the campaign.
+The pinned flyctl v0.4.115 clone command defaults
+`--volume-requires-unique-zone=true`, copying the donor mount name and 40 GiB
+size. Fly documents that this excludes hosts already holding a same-name volume
+for the app. The current topology showed 292 same-name IAD volumes across 255
+reported zones. These are existing placements, not available capacity; neither
+the topology nor the error proves anti-affinity was the sole historical cause.
+
+`CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE=false` explicitly opts eligible fresh
+primary and worker clones out of hardware anti-affinity. Each task still gets a
+new independent volume and VM, with the original size, guest, image, mount,
+ownership, admission, retries and deadlines. Unset and explicit `true` retain
+the original native argv. Only literal `true` and `false` are accepted; explicit
+policy is recorded in execution provenance. Snapshot, simulation, private,
+pooled and legacy boot allocation modes refuse this option before allocation;
+exact recovery ignores allocation-only admission. No shared filesystem or
+volume reuse is introduced. Keep IAD constant to test this placement hypothesis.
+
+Actual clone-function controls on unchanged source failed the primary and worker
+flag assertions (2 failed, 13 passed); the finite candidate then passed 37 owning
+controls including provenance and recovery. This is a source-level repair of an
+unneeded placement restriction, not proof of regional capacity or a successful
+600-task run. Normal two-node preflight is a cheap negative/readiness screen;
+only the unchanged full 600 simultaneous campaign can establish the goal.
+
+Pinned implementation: https://raw.githubusercontent.com/superfly/flyctl/v0.4.115/internal/command/machine/clone.go
+Provider semantics: https://community.fly.io/t/fresh-produce-app-wide-volume-unique-zone-handling/24000

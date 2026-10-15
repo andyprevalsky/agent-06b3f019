@@ -33184,11 +33184,12 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         assert result.returncode != 0
 
 @pytest.mark.parametrize("target", ["", "iad"])
-def test_private_fleet_source_fresh_region_provenance_preserves_donor(tmp_path: Path, target: str) -> None:
+@pytest.mark.parametrize("placement", [None, "true", "false"])
+def test_private_fleet_source_fresh_region_provenance_preserves_donor(tmp_path: Path, target: str, placement: str | None) -> None:
     source = FLEET_SCRIPT.read_text()
     start = source.index("PROVENANCE_CONFIG_ARGS=(")
     end = source.index('if ! python3 "$EXECUTION_PROVENANCE_SCRIPT" create', start)
-    script = ("set +u\nREGION=ord\nFRESH_TARGET_REGION=" + shlex.quote(target)
+    script = (("unset CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE\n" if placement is None else "export CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE=" + placement + "\n") + "set +u\nREGION=ord\nFRESH_TARGET_REGION=" + shlex.quote(target)
               + "\nBENCHES=(one)\n" + source[start:end]
               + '\nprintf "%s\\n" "${PROVENANCE_CONFIG_ARGS[@]}"\n')
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
@@ -33199,6 +33200,7 @@ def test_private_fleet_source_fresh_region_provenance_preserves_donor(tmp_path: 
     config = helper.build_config("cloudbench-fleet-config-v1", args[1::2])
     assert config["values"]["region"] == (target or "ord")
     assert config["values"].get("donor_region") == ("ord" if target else None)
+    assert config["values"].get("fresh_volume_unique_zone") == placement
     with pytest.raises(helper.ProvenanceError):
         helper.build_config("cloudbench-fleet-config-v1", ["arbitrary_region_override=iad"])
 
@@ -33300,3 +33302,74 @@ exit "$status"
         assert "remained unavailable within the original admission deadline" in completed.stderr
     if case in {"dead", "foreign", "expired"}:
         assert "POST_ADMISSION_CONTINUED" not in completed.stdout
+
+
+@pytest.mark.parametrize("case", ["default", "primary", "worker", "true", "empty", "invalid", "snapshot", "forced-snapshot", "simulation", "private", "pool", "provision", "legacy", "mixed", "recover"])
+def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones(tmp_path: Path, case: str) -> None:
+    source = FLEET_SCRIPT.read_text()
+    def fn(name):
+        start = source.index(name + "() {")
+        return source[start:source.index("\n}\n", start) + 3]
+    # On unchanged source the absent option helper is represented as a no-op:
+    # the actual clone still routes to ORD, establishing the causal routing RED.
+    helpers = "\n".join(fn(name) if name + "() {" in source else name + "() { :; }"
+                         for name in ["is_sim_on", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination", "fresh_volume_placement_admission"])
+    trace = tmp_path / "native-args"
+    touched = tmp_path / "registry"
+    pool = tmp_path / "pool.ids"
+    if case == "pool":
+        pool.write_text("abc\n")
+    setup = "" if case == "default" else "export CLOUDBENCH_FRESH_TARGET_REGION=" + shlex.quote("" if case == "empty" else "IAD/../" if case == "invalid" else "iad") + "\n"
+    setup += "export CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE=" + shlex.quote("true" if case == "true" else "" if case == "empty" else "0" if case == "invalid" else "false") + "\n" if case != "default" else ""
+    setup += "FRESH_VOLUMES=" + ("0" if case == "snapshot" else "1") + "\n"
+    setup += "PRIVATE_SOURCE_FILE=" + ("private.json" if case == "private" else "") + "\n"
+    setup += "SIM_ON_CSV=" + ("one" if case == "simulation" else "") + "\n"
+    setup += "CLOUDBENCH_BOOT_LAUNCH=" + ("0" if case == "legacy" else "1") + "\n"
+    setup += "RECOVER_STALE_ONLY=" + ("1" if case == "recover" else "0") + "\n"
+    script = (
+        "set -u\nREGION=ord\nexport CLOUDBENCH_REGION=ord\nFRESH_TARGET_REGION=\nPROVISION_POOL=\nBENCHES=(one two)\n"
+        + "CATALOG_MODES=(real " + ("simulate" if case == "mixed" else "real") + ")\n"
+        + "POOL_IDS_FILE=" + shlex.quote(str(pool)) + "\nSNAP_ID=vs_fixture\nWARM_ID=abc\nAPP=fixture\n"
+        + "CLOUDBENCH_CLONE_MAX_ATTEMPTS=1\n" + setup + ("PROVISION_POOL=2\n" if case == "provision" else "") + helpers + "\n"
+        + "inventory_machine_field() { printf 1; }\n"
+        + "fleet_registry_record_name() { printf %s \"$2\" > " + shlex.quote(str(touched)) + "; }\n"
+        + "fleet_registry_release_name() { :; }\nfleet_audit_update_fresh_clone() { :; }\n"
+        + "clone_failure_owned_volume_id() { :; }\nclone_failure_definitively_unallocated() { return 0; }\n"
+        + "fleet_clone_with_queue_admission() { printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
+        + fn("clone_machine_target") + "\n"
+        + "fresh_volume_placement_admission || exit 19\nfresh_target_region_admission || exit 17\nfresh_target_region_bind_destination || exit 18\n"
+        + "child_region=\"$(bash -c 'printf %s \"$CLOUDBENCH_REGION\"')\"\n"
+        + "printf 'donor=%s child=%s\\n' \"$REGION\" \"$child_region\"\n"
+        + "clone_machine_target " + shlex.quote(str(tmp_path / ("worker-clones.ids" if case == "worker" else "primary.ids")))
+        + (" def" if case == "worker" else " abc") + " shared-cpu-2x 4096 vs_fixture " + ("snapshot" if case in ("snapshot", "forced-snapshot") else "fresh") + "\n"
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    eligible = case in ("default", "primary", "worker", "true")
+    assert trace.exists() == eligible, result.stderr
+    assert touched.exists() == eligible, result.stderr
+    if eligible:
+        args = trace.read_text().splitlines()
+        assert args[args.index("--region") + 1] == ("ord" if case == "default" else "iad")
+        assert "--from-snapshot" not in args
+        assert ("--volume-requires-unique-zone=false" in args) == (case in ("primary", "worker"))
+        assert args[args.index("clone") + 1] == ("def" if case == "worker" else "abc")
+        assert touched.read_text() == ("def" if case == "worker" else "abc")
+        assert args[args.index("--vm-size") + 1] == "shared-cpu-2x"
+        assert args[args.index("--vm-memory") + 1] == "4096"
+        assert args[args.index("--override-cmd") + 1] == "sleep infinity"
+        assert "--detach" in args and not any("volume-size" in arg for arg in args)
+        assert "donor=ord child=" + ("ord" if case == "default" else "iad") in result.stdout
+        assert result.returncode == 1  # controlled provider refusal, never real allocation
+    else:
+        assert result.returncode != 0
+
+
+@pytest.mark.parametrize("recovery", ["0", "1"])
+def test_private_fleet_source_placement_option_does_not_block_exact_recovery(tmp_path: Path, recovery: str) -> None:
+    source = FLEET_SCRIPT.read_text()
+    start = source.index('if [ "${RECOVER_STALE_ONLY:-0}" != 1 ]; then\n    fresh_volume_placement_admission')
+    stop = source.index("\nfresh_target_region_bind_destination()", start)
+    result = subprocess.run(["bash", "-c", "set -u\nRECOVER_STALE_ONLY=" + recovery
+                             + "\nfresh_volume_placement_admission() { return 1; }\n" + source[start:stop]],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == (0 if recovery == "1" else 1)
