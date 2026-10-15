@@ -183,6 +183,9 @@ for subsequent rates. Starting a substep never resets the agent lifetime.
   running rate; distinguish stopped rootfs and allocated-volume storage.
   Identify estimate coverage, rates and unknown billed usage; never invent an
   invoice total or treat provisioned maximum rootfs as billed usage.
+- Close each run's idle compute through the normal exact-owner stop guards;
+  retained evidence or warm storage does not require a controller to keep running.
+  Report confirmed STOPPED separately from requests and pending transitions.
 - Explain why capacity is needed from measured workload/reuse evidence. A
   symbolic planner maximum does not justify a quota increase. Give a concrete
   unblock action in the report.

@@ -40,6 +40,9 @@ links. A file pointer never substitutes for the diff.
   separately, with timestamped counts and compute/rootfs/volume costs. Idle
   started Machines remain billable; stopped is not free storage. Preserve
   designated warm resources and never label all running Machines idle.
+- After each run, normally stop exact-owned terminal idle controllers once
+  consumer/process guards pass. Retain data and warm capacity; credit compute
+  savings only after actual STOPPED confirmation, never from a stop request.
 - Infra stop means **5% of the original scheduled total: 30 of 600**. Display
   `infra jobs / scheduled jobs`; never use finished attempts as denominator.
   Earlier wrong 1/1 stops are erroneous early aborts, not valid threshold hits.
