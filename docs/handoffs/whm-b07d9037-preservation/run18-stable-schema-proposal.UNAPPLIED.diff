@@ -1,0 +1,99 @@
+--- a/agents/benchmarks/wmh_response_schema.py
++++ b/agents/benchmarks/wmh_response_schema.py
+@@ -103,24 +103,20 @@
+             or any(not isinstance(value, str) or not value for value in expected_call_ids)):
+         return model
+ 
+-    result_model = create_model(
+-        "CandidateToolResult", __base__=ToolResult,
+-        call_id=(Literal[expected_call_ids], ...),
+-    )
+-
+     def ordered_call_ids(cls, results):
+         if tuple(result.call_id for result in results) != expected_call_ids:
+             raise ValueError("Native result call IDs differ from the candidate action")
+         return results
+ 
+     results_field = (
+-        Annotated[list[result_model], Field(min_length=len(expected_call_ids), max_length=len(expected_call_ids))],
++        list[ToolResult],
+         ...,
+     )
+     validators = {"ordered_call_ids": field_validator("tool_results")(ordered_call_ids)}
+     if model is NativeTransition:
+         return create_model("CandidateNativeTransition", __base__=model,
+-                            __validators__=validators, tool_results=results_field)
++                            __validators__=validators,
++                            tool_results=(Annotated[list[ToolResult], Field(min_length=1)], ...))
+     outcome = TimedOutcome if model is TimedOutcomeDistribution else Outcome
+     outcome_model = create_model("Candidate" + outcome.__name__, __base__=outcome,
+                                  __validators__=validators, tool_results=results_field)
+--- a/agents/benchmarks/wmh_reliability_test.py
++++ b/agents/benchmarks/wmh_reliability_test.py
+@@ -1007,8 +1007,11 @@
+         assert sent_model.__name__ == "CandidateTimedOutcomeDistribution"
+         from providers.rose.schema import build_openai_response_format
+         result_schema = build_openai_response_format(sent_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+-        assert result_schema["items"]["properties"]["call_id"]["const"] == "call-1"
+-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
++        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
++        assert "maxItems" not in result_schema
++        from benchmarks.wmh_response_schema import response_model_for_protocol
++        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
++        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
+         assert detail["rejected_response"] == {
+             "content": rejected,
+             "actual_model": "offline-model",
+@@ -1098,8 +1101,11 @@
+         sent = client.collect.await_args.kwargs
+         from providers.rose.schema import build_openai_response_format
+         result_schema = build_openai_response_format(sent["response_model"])["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+-        assert result_schema["items"]["properties"]["call_id"]["const"] == "wire-call"
+-        assert result_schema["minItems"] == result_schema["maxItems"] == 1
++        assert result_schema["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
++        assert "maxItems" not in result_schema
++        from benchmarks.wmh_response_schema import response_model_for_protocol
++        other_model = response_model_for_protocol(TIMED_DISTRIBUTION_PROTOCOL, expected_call_ids=("other-A", "other-B"))
++        assert build_openai_response_format(other_model)["json_schema"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"] == result_schema
+         assert capture["request"] == {
+             "pool": "rose-1-flash",
+             "messages": sent["messages"],
+--- a/agents/tests/blackbox/rose.blackbox.py
++++ b/agents/tests/blackbox/rose.blackbox.py
+@@ -8649,8 +8649,8 @@
+     def handler(request):
+         body = json.loads(request.content)
+         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
++        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
++        assert "maxItems" not in results
+         assert body["text"]["format"]["strict"] is False
+         from providers.rose.gpt_auth import build_codex_responses_body
+         wire_messages, namespace = observed_wire[-1]
+@@ -8677,6 +8677,14 @@
+         except Captured:
+             pass
+         assert len(seen) == 1
++        packet["candidate_response"]["tool_calls"] = [{"call_id": "different_exact"}]
++        try:
++            await owner._complete_async("Unchanged existing policy.", [types.SimpleNamespace(role="user", content=json.dumps(packet))], max_tokens=16384)
++        except Captured:
++            pass
++        assert len(seen) == 2
++        assert seen[0]["text"]["format"] == seen[1]["text"]["format"], "Candidate ID/count changes must preserve the complete provider schema"
++
+ 
+ 
+ def test_wmh_candidate_id_schema_preserves_native_json_contract():
+@@ -8794,8 +8802,8 @@
+     def handler(request):
+         body = json.loads(request.content)
+         results = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["tool_results"]
+-        assert results["items"]["properties"]["call_id"].get("enum") == expected_ids, "Typed WHM HTTP schema must bind already supplied candidate call IDs"
+-        assert results["minItems"] == results["maxItems"] == len(expected_ids)
++        assert results["items"]["properties"]["call_id"] == {"title": "Call Id", "type": "string"}
++        assert "maxItems" not in results
+         assert body["text"]["format"]["strict"] is False
+         from jsonschema import Draft202012Validator
+         probability = body["text"]["format"]["schema"]["properties"]["outcomes"]["items"]["properties"]["probability"]

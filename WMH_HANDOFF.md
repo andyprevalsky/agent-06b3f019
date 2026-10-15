@@ -522,3 +522,36 @@ The user requested this as a note for later; the environment has not been change
 After every WMH run, report its final WMH cache hit rate, including cache hits
 and total cache lookups. If caching was disabled or counters are unavailable,
 state that explicitly rather than presenting an unmeasured hit rate.
+
+
+## Run18 terminal checkpoint (October 15)
+
+Run18 executed source `fa0314af031672bcc79f644ad865dfdea6d08fd2` for the
+unchanged 60-minute fundraising task with DEMO on. It failed naturally after
+3605 seconds (3753.8 seconds total): 355 verified world commits, initial outreach,
+no personal investor reply, meeting, commitment or proceeds. Approximate goal
+progress is 25/100, an uncalibrated stage estimate. Model-cost projection is
+$107.94, including $105.18 direct Azure; actual billed total remains unknown.
+The exact run, metrics, limitations, cleanup, FE verification and two authenticated
+private archive receipts are in
+`docs/handoffs/whm-b07d9037-preservation/run18-structured-request60m.json`.
+
+All owned benchmark, stack and native owners are terminal; the retained recording
+cache and original fixture remain. Canonical cleanup deleted the isolated run
+database before preservation; no database bytes were reconstructed. The latest
+recorded child dump was published and the FE verified with 135 messages. The
+evidence publisher's root-only selector is repaired with registered controls.
+
+The exact three-file stable-schema proposal is preserved as
+`docs/handoffs/whm-b07d9037-preservation/run18-stable-schema-proposal.UNAPPLIED.diff`
+(SHA256 `0ee10a23c9f77efa90c115463e0ab6c0046657a186eab066a920140f510b27b1`).
+It removes model-visible ID/count hints while retaining exact local/native
+validation, so R18-SCHEMA-STANDARD-2 requires the user's semantic approval.
+It is not applied; live cache benefit is unproved. Its complete approval card and
+verified private links are in the encrypted final supplement and local
+`.context/wmh-resume-generation1/run18-structured-request60m/finalization/`.
+
+This thread is checkpointed for the benchmark coordinator's requested pause.
+Await explicit resumption by `ph71gtg4ntdz4sd4xkzp8qqn2n8g7nss`; do not launch
+another run on an ordinary peer message. Then resolve the exact semantic
+proposal before application or another paid trial. No merge/deploy authorized.

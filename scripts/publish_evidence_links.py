@@ -693,14 +693,33 @@ def verify_agent_reachable(
     return "verified in fresh browser", count
 
 
-def latest_dump_for_agent(agent_id: str) -> Path:
-    dump_dir = REPO_ROOT / ".llm-dumps" / agent_id
-    if not dump_dir.is_dir():
-        raise SystemExit(f"no .llm-dumps directory for {agent_id}: {dump_dir}")
-    dumps = sorted(dump_dir.glob("*.json"))
+def latest_dump_for_agent(agent_id: str, *, bundle: dict | None = None) -> Path:
+    # Canonical logs.tree maps IDs to nodes; follow parent edges rather than
+    # scanning unrelated dump directories or assuming a children array.
+    owned = {agent_id}
+    if bundle is not None:
+        scoped = evidence_bundle_for_agent(bundle, agent_id)
+        for task in scoped.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            logs = task.get("logs") or {}
+            tree = logs.get("tree") if isinstance(logs, dict) else None
+            if not isinstance(tree, dict) or agent_id not in tree:
+                continue
+            changed = True
+            while changed:
+                changed = False
+                for child, node in tree.items():
+                    if (isinstance(child, str) and _AGENT_ID_RE.fullmatch(child)
+                            and isinstance(node, dict)
+                            and node.get("parent_agent_id") in owned and child not in owned):
+                        owned.add(child)
+                        changed = True
+    dumps = [path for owner in owned
+             for path in (REPO_ROOT / ".llm-dumps" / owner).glob("*.json")]
     if not dumps:
-        raise SystemExit(f"no LLM dumps under {dump_dir}")
-    return dumps[-1]
+        raise SystemExit(f"no LLM dumps for captured tree rooted at {agent_id}")
+    return max(dumps, key=lambda path: (path.name, str(path)))
 
 
 def publish_llm_dump(dump: Path, agent_id: str) -> tuple[Path, str]:
@@ -791,7 +810,7 @@ def main() -> int:
     if not _AGENT_ID_RE.fullmatch(run_id):
         raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")
     token = benchmark_share_token(run_id)
-    dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
+    dump = (args.dump or latest_dump_for_agent(agent_id, bundle=bundle if args.run_json else None)).resolve()
     dump_html, dump_https_url = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0

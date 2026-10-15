@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "whm-preservation/e9afcffd/run18-core-20261015-fa0314af0.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "42548a439e3ffc06723eda2171b7e21641087dbae257a98b98f7e1002176d58d",
+  "gzip_sha256": "6589a115483872a3d6f09d46dda8cf0d3480f7953ca21f5b72ce880cc98d01a8",
+  "stored_bytes": 434448116,
+  "frames": 52,
+  "files": 2142,
+  "original_bytes": 1741079697,
+  "manifest_sha256": "7cdf3df2465e2998f82fc02db641803e55c8edbd696fa451b8553fc3d440bcdb",
+  "full_readback_verified": true
+}
