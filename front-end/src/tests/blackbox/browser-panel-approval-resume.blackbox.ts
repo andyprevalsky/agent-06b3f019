@@ -143,7 +143,9 @@ describe('browser init action vocabulary is shared by every consumer', () => {
             task_id: `task-${actionType}`,
             subAgentId: `task-${actionType}`,
             toolName: 'spawn_browser_agent',
-            action_type: actionType,
+            action_type: actionType as NonNullable<
+              Parameters<typeof computeActiveBrowserPanels>[0][number]['metadata']
+            >['action_type'],
             browser_url: 'https://connect.steel.dev/v1/sessions/645c47ec/player',
             toolStatus: 'FINISHED',
           },

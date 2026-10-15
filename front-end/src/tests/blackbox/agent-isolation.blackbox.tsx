@@ -235,7 +235,7 @@ describe('agent view isolation', () => {
       setSelectedModel,
       setSelectedAgentIdContext: vi.fn(),
       setCurrentView: vi.fn(),
-      clientSource: 'WEB',
+      clientSource: 'WEB' as const,
       loadAgents: vi.fn(async () => {}),
     };
     const { result, rerender } = renderHook(

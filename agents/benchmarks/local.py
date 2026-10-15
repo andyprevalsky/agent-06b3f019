@@ -336,7 +336,9 @@ def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, 
     )
 
 
-def _read_cleanup_receipt(path: Path, token: str) -> dict[str, str]:
+def _read_cleanup_receipt(
+    path: Path, token: str, *, allowed_versions: tuple[str, ...] = ("1",)
+) -> dict[str, str]:
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"cleanup receipt is missing or unsafe: {path}")
     values: dict[str, str] = {}
@@ -345,7 +347,7 @@ def _read_cleanup_receipt(path: Path, token: str) -> dict[str, str]:
         if not separator or key in values:
             raise RuntimeError(f"cleanup receipt is malformed: {path}")
         values[key] = value
-    if values.get("version") != "1" or values.get("token") != token or values.get("state") != "clean":
+    if values.get("version") not in allowed_versions or values.get("token") != token or values.get("state") != "clean":
         raise RuntimeError(f"cleanup remains unverified; retaining its recovery authority: {path}")
     return values
 
@@ -1955,6 +1957,28 @@ def start_services(
         _release_port_range(stack.base_port)
 
 
+def _validate_stack_cleanup_receipt(receipt: dict[str, str], owner: dict, *, verified_native_identity: str | None = None) -> None:
+    """Prefer OS-native process identity; legacy wall-clock birth stays a strict fallback."""
+    if receipt.get("stack_pid") != str(owner["pid"]):
+        raise RuntimeError("stack cleanup receipt does not match its original process")
+    if receipt.get("version") not in {"1", "2"}:
+        raise RuntimeError("stack cleanup receipt schema is unsupported")
+    recorded_native = receipt.get("stack_native_identity")
+    if receipt.get("version") == "2" and not recorded_native:
+        raise RuntimeError("stack cleanup receipt requires its native identity")
+    if recorded_native is not None:
+        if recorded_native != owner["native_identity"]:
+            raise RuntimeError("stack cleanup receipt native identity does not match its original process")
+        return
+    if receipt.get("stack_birth") == owner["birth"]:
+        return
+    # Only the invocation that actually verified, signalled and joined this
+    # exact native owner may resolve wall-clock drift in a legacy receipt.
+    if verified_native_identity == owner["native_identity"]:
+        return
+    raise RuntimeError("legacy stack cleanup receipt birth is unverified")
+
+
 def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStack | None = None) -> None:
     if stack is None or not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=False)
@@ -1980,9 +2004,15 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
     ):
         raise RuntimeError("stack cleanup owner does not match this invocation")
     timeout = _owned_shutdown_timeout()
+    verified_native_identity = None
     if process is not None:
+        was_live = process.poll() is None
+        if was_live and _process_identity_tools()["current_identity"](owner["pid"]) != owner["native_identity"]:
+            raise RuntimeError("stack PID was replaced; refusing cleanup")
         _signal_owned_process(process, owner["native_identity"], signal.SIGTERM)
         process.wait(timeout=timeout)
+        if was_live:
+            verified_native_identity = owner["native_identity"]
     else:
         tools = _process_identity_tools()
         try:
@@ -2006,9 +2036,11 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
             )
             if code != 0 or not _wait_for_pid_exit(owner["pid"], timeout):
                 raise RuntimeError("owned stack shutdown remains unverified")
-    receipt = _read_cleanup_receipt(stack.context_dir / "local-stack-cleanup.status", owner["token"])
-    if receipt.get("stack_pid") != str(owner["pid"]) or receipt.get("stack_birth") != owner["birth"]:
-        raise RuntimeError("stack cleanup receipt does not match its original process")
+            verified_native_identity = owner["native_identity"]
+    receipt = _read_cleanup_receipt(
+        stack.context_dir / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
+    )
+    _validate_stack_cleanup_receipt(receipt, owner, verified_native_identity=verified_native_identity)
 
 
 # Isolated --benchmark Prisma pool. Must stay in lockstep with run.sh

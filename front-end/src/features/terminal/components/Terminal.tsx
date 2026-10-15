@@ -78,9 +78,9 @@ export default function Terminal() {
 }
 
 function TerminalContentWithRef({
-  loadAgentsRef,
+  loadAgentsRef: _loadAgentsRef,
 }: {
   loadAgentsRef: React.MutableRefObject<(() => void) | null>;
 }) {
-  return <TerminalContent loadAgentsRef={loadAgentsRef} />;
+  return <TerminalContent />;
 }

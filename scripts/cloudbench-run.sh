@@ -161,18 +161,34 @@ CODEX_AUTH_ADMISSION_TOKEN=""
 CODEX_AUTH_HELPER="${CLOUDBENCH_CODEX_AUTH_HELPER:-$CONTROL_DIR/cloudbench-codex-auth.py}"
 HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
+STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth token_matches=0
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth cleanup_stack_native_identity cleanup_native_count cleanup_identity_matches=0 cleanup_version cleanup_version_count token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
     mkdir -p "${CLEANUP_ACK_FILE%/*}" "${INTERRUPT_CLEANUP_STATUS_FILE%/*}" || return 1
     if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || [ -f "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" ]; then
-        cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
+        if ! awk -F= '
+            { if (index($0, "=") == 0 || seen[$1]++) { invalid=1; exit } }
+            END { if (invalid || seen["state"] != 1 || seen["token"] != 1) exit 1 }
+        ' "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE"; then
+            log "FATAL: benchmark root cleanup evidence is malformed; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+        cleanup_version_count="$(awk -F= '$1 == "version" { count++ } END { print count+0 }' "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE")"
+        cleanup_version="$(awk -F= '$1 == "version" { sub(/^[^=]*=/, ""); print; exit }' "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE")"
+        # Older root receipts omit version. A declared interrupt schema is v1;
+        # stack schema v2 never authorizes root/financial cleanup.
+        if [ "$cleanup_version_count" != 0 ] && [ "$cleanup_version" != 1 ]; then
+            log "FATAL: benchmark root cleanup evidence schema is unsupported; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+        cleanup_state="$(awk -F= '$1 == "state" { sub(/^[^=]*=/, ""); print; exit }' \
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
+        cleanup_token="$(awk -F= '$1 == "token" { sub(/^[^=]*=/, ""); print; exit }' \
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         [ "$cleanup_token" = "$CLOUDBENCH_RUN_TOKEN" ] && token_matches=1
         log "benchmark root cleanup evidence: state=${cleanup_state:-missing} token_match=$token_matches"
@@ -193,11 +209,35 @@ publish_cleanup_ack() {
         fi
     fi
     if [ -n "${STACK_PID:-}" ]; then
-        cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        cleanup_stack_pid="$(awk -F= '$1 == "stack_pid" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        cleanup_stack_birth="$(awk -F= '$1 == "stack_birth" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        if [ -z "${STACK_BIRTH:-}" ] || [ "$cleanup_stack_birth" != "$STACK_BIRTH" ] || [ "$cleanup_state" != clean ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ] || [ "$cleanup_stack_pid" != "$STACK_PID" ]; then
+        # Match the local reader: every line is a key=value and every key is
+        # unique. Unknown optional keys remain valid; required guards exist once.
+        if ! awk -F= '
+            { if (index($0, "=") == 0 || seen[$1]++) { invalid=1; exit } }
+            END { if (invalid || seen["version"] != 1 || seen["state"] != 1 || seen["token"] != 1 || seen["stack_pid"] != 1) exit 1 }
+        ' "$STACK_CLEANUP_STATUS_FILE"; then
+            log "FATAL: stack cleanup receipt is malformed; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+        cleanup_state="$(awk -F= '$1 == "state" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_token="$(awk -F= '$1 == "token" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_pid="$(awk -F= '$1 == "stack_pid" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_birth="$(awk -F= '$1 == "stack_birth" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_native_identity="$(awk -F= '$1 == "stack_native_identity" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_native_count="$(awk -F= '$1 == "stack_native_identity" { count++ } END { print count+0 }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_version="$(awk -F= '$1 == "version" { sub(/^[^=]*=/, ""); print; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_version_count="$(awk -F= '$1 == "version" { count++ } END { print count+0 }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        if [ "$cleanup_version_count" = 1 ]; then
+            if [ "$cleanup_version" = 1 ] && [ "$cleanup_native_count" = 0 ]; then
+                # Genuine legacy receipts retain the original exact birth guard.
+                [ -n "${STACK_BIRTH:-}" ] && [ "$cleanup_stack_birth" = "$STACK_BIRTH" ] && cleanup_identity_matches=1
+            elif { [ "$cleanup_version" = 1 ] || [ "$cleanup_version" = 2 ]; } && [ "$cleanup_native_count" = 1 ]; then
+                # Version 2 requires native identity; a present native field in
+                # either schema never falls back to a cosmetic birth match.
+                [ -n "${STACK_NATIVE_IDENTITY:-}" ] && [ -n "$cleanup_stack_native_identity" ] \
+                    && [ "$cleanup_stack_native_identity" = "$STACK_NATIVE_IDENTITY" ] && cleanup_identity_matches=1
+            fi
+        fi
+        if [ "$cleanup_identity_matches" != 1 ] || [ "$cleanup_state" != clean ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ] || [ "$cleanup_stack_pid" != "$STACK_PID" ]; then
             log "FATAL: stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
         fi
@@ -1157,6 +1197,11 @@ log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH
 rm -f "$STACK_CLEANUP_STATUS_FILE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
 STACK_PID=$!
+if ! STACK_NATIVE_IDENTITY="$(python3 "$CONTROL_DIR/process-identity.py" "$STACK_PID")" \
+    || [ -z "$STACK_NATIVE_IDENTITY" ]; then
+    log "FATAL: could not capture launched stack native identity"
+    finish 1
+fi
 STACK_BIRTH="$(ps -p "$STACK_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
 log "stack pid=$STACK_PID (logs → $STACK_LOG)"
 

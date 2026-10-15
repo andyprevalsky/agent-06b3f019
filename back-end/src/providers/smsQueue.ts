@@ -31,6 +31,14 @@ const log = createLogger('SMS');
  */
 const SURGE_MESSAGE_SETTINGS = { link_shortening: 'disabled' } as const;
 
+async function readSurgeError(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch (error) {
+    return `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 interface SurgeMessageResponse {
   id: string;
   body?: string;
@@ -40,6 +48,8 @@ interface SurgeMessageResponse {
 interface SmsArchiveOptions {
   archiveRootAgentId?: string;
   archiveContext?: Record<string, unknown>;
+  abortSignal?: AbortSignal;
+  onDeliveryAttempt?: () => void;
 }
 
 async function archiveSmsTransportBoundary(params: {
@@ -94,6 +104,7 @@ export async function sendSms(
   messageSid?: string;
   error?: string;
   definitiveFailure?: boolean;
+  statusCode?: number;
 }> {
   const requestBody = {
     to: phoneNumber,
@@ -121,6 +132,7 @@ export async function sendSms(
       seed: mockSeed,
       reason: mockReason,
     });
+    options.onDeliveryAttempt?.();
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
       requestBody,
@@ -145,6 +157,7 @@ export async function sendSms(
   }
 
   try {
+    options.onDeliveryAttempt?.();
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
       method: 'POST',
       headers: {
@@ -152,15 +165,11 @@ export async function sendSms(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
+      signal: options.abortSignal,
     });
 
     if (!response.ok) {
-      let errorText: string;
-      try {
-        errorText = await response.text();
-      } catch (error) {
-        errorText = `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
-      }
+      const errorText = await readSurgeError(response);
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,
@@ -172,8 +181,10 @@ export async function sendSms(
       });
       return {
         success: false,
-        error: `Surge API error: ${response.status}`,
-        definitiveFailure: true,
+        error: `Surge API error: ${response.status}: ${errorText}`,
+        statusCode: response.status,
+        definitiveFailure:
+          response.status >= 400 && response.status < 500 && response.status !== 408,
       };
     }
 
@@ -216,7 +227,13 @@ export async function sendMms(
   message: string,
   mediaUrl: string,
   options: SmsArchiveOptions = {}
-): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  messageSid?: string;
+  error?: string;
+  definitiveFailure?: boolean;
+  statusCode?: number;
+}> {
   const requestBody = {
     to: phoneNumber,
     body: message,
@@ -234,6 +251,7 @@ export async function sendMms(
     return {
       success: false,
       error: `Benchmark MMS mock eligibility lookup failed: ${messageText}`,
+      definitiveFailure: true,
     };
   }
   if (mockReason !== null) {
@@ -243,6 +261,7 @@ export async function sendMms(
       seed: mockSeed,
       reason: mockReason,
     });
+    options.onDeliveryAttempt?.();
     await archiveSmsTransportBoundary({
       rootAgentId: options.archiveRootAgentId,
       requestBody,
@@ -263,10 +282,11 @@ export async function sendMms(
 
   if (!apiKey || !accountId) {
     log.error('Surge credentials not configured');
-    return { success: false, error: 'Surge not configured' };
+    return { success: false, error: 'Surge not configured', definitiveFailure: true };
   }
 
   try {
+    options.onDeliveryAttempt?.();
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
       method: 'POST',
       headers: {
@@ -274,10 +294,11 @@ export async function sendMms(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
+      signal: options.abortSignal,
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await readSurgeError(response);
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,
@@ -287,7 +308,13 @@ export async function sendMms(
         success: false,
         context: options.archiveContext,
       });
-      return { success: false, error: `Surge API error: ${response.status}` };
+      return {
+        success: false,
+        error: `Surge API error: ${response.status}: ${errorText}`,
+        statusCode: response.status,
+        definitiveFailure:
+          response.status >= 400 && response.status < 500 && response.status !== 408,
+      };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;

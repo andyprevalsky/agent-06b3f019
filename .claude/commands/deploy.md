@@ -10,6 +10,34 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the Claude fallback, or the usage-exhaustion skip) is the only review gate.
 
+## Provider outages: report and retry every 10 minutes
+
+When a provider outage blocks a deploy gate, promptly tell the user which
+provider and gate are affected, the observed failure, the official incident
+link when available, the deployment impact, and the next retry time in UTC.
+Distinguish confirmed attribution from a suspected cause supported by an
+incident and matching traces; a status-page incident alone does not prove causality.
+
+Keep the deploy active and retry the affected failed check every 10 minutes.
+Persist each attempt's start time and set its next retry due time to start +
+600 seconds. Before each retry, recheck provider status and report the result
+and next due time. Never overlap attempts: if execution or owned cleanup lasts
+past the due time, join it before starting the next retry. Keep healthy checks
+and independent diagnosis moving; do not rerun successful payment checks or
+other successful lanes merely because an unrelated provider is unavailable.
+
+Preserve every failed attempt, its original clocks, actual source identity,
+artifacts and cleanup evidence. An outage does not waive a gate or turn a
+failure into a pass. Continue this cadence until the affected gate passes, the
+user stops the work, or evidence identifies a different cause requiring the
+normal repair or credential/budget handling. Retain existing authorization,
+financial limits and bounded review cycles; review-provider usage exhaustion
+still follows Step 9a. A retryable outage alone is not a reason to end the turn
+with a terminal blocked handoff or ask the user for another approval.
+This outage path takes precedence over generic failure-handling directions;
+gate criteria, cleanup, credential, financial and review requirements remain
+mandatory.
+
 ## Canonical human-approval format
 
 Every human approval request in this command—including prompt or
@@ -17,7 +45,7 @@ agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
 composing the request. Its code-block presentation and its Before Behavior,
-After Behavior, TL;DR, Evidence, Detail, and Downstream Implications sections
+After Behavior, How, TL;DR, Evidence, Detail, and Downstream Implications sections
 are mandatory and additive to the deploy-specific telemetry, file-link, and
 snapshot rules below.
 
@@ -1272,6 +1300,7 @@ CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   BENCHMARK_ATTEMPT_SUITE=predeploy \
   BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
+  BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
@@ -1292,6 +1321,16 @@ their full purchase, Stripe, AgentCard card, organization transfer, attention,
 and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed
 abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the
 four task results and total cost in `TEST_REPORT`.
+
+One exception is approved for every deploy: `BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1`
+turns the open sandbox stall in
+`docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md`
+into a loud `⚠️⚠️ SKIPPED` instead of a failure. It applies only when Rose closed
+the card and is reclaiming while AgentCard still reports that card's test-mode
+transfer `consumed` with `releasedCents=0`; any other lifecycle, cleanup or live
+(`livemode=true`) failure still fails. Report the skip as `3/4 pass, 1 ⚠️ skipped
+(AgentCard sandbox release stall)` in `TEST_REPORT` and the scorecard. Step 13c's
+production abandonment stays strict.
 
 ## Step 6b: Semantic tests + fix
 
@@ -2462,7 +2501,7 @@ gh run watch "$SEMANTIC_RUN_ID" --exit-status
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; use `gh run rerun "$SEMANTIC_RUN_ID" --failed` once the prior attempt is terminal so only failed jobs are retried. Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two

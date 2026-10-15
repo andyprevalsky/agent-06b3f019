@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
+import type { PlaidItem } from '@/features/integrations/types';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';

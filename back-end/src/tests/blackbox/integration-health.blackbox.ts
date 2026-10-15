@@ -22,6 +22,8 @@
  *
  * Usage:
  *   npx tsx src/tests/blackbox/integration-health.blackbox.ts
+ *   npx tsx src/tests/blackbox/integration-health.blackbox.ts --whatsapp-media-live-only
+ *     Read-only authentication/profile evidence only; does not verify media or STT.
  */
 
 import { config } from 'dotenv';
@@ -299,6 +301,12 @@ async function checkSupabase(): Promise<void> {
 // ==================== RUNNER ====================
 
 async function runAll(): Promise<void> {
+  if (process.argv.includes('--whatsapp-media-live-only')) {
+    const { runWhatsAppMediaLiveCredentialChecks } =
+      await import('./integration-health.whatsapp-media.behavior');
+    await runWhatsAppMediaLiveCredentialChecks();
+    return;
+  }
   console.log('Integration Health Black-Box Checks\n');
   console.log('Validating external credentials used by smoke benchmarks...\n');
 

@@ -690,6 +690,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-boot.sh" \
        "$ROOT_DIR/scripts/cloudbench-boot-payload.py" \
        "$ROOT_DIR/scripts/cloudbench-run.sh" \
+       "$ROOT_DIR/scripts/process-identity.py" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \

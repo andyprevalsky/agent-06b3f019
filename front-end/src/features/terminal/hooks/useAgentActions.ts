@@ -25,7 +25,7 @@ interface UseAgentActionsArgs {
   applyAgentDetail: (agentId: string, data: AgentDetailResponse) => boolean;
   setSelectedAgentIdContext: (id: string | null) => void;
   setCurrentView: (v: TerminalView) => void;
-  clientSource: string;
+  clientSource: AgentDetail['source'];
   loadAgents: () => Promise<void>;
 }
 
