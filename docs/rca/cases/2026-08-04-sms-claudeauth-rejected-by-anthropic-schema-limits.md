@@ -11,6 +11,7 @@ symptoms:
   - 'anthropic.error status=400 Schemas contains too many parameters with union types (27 parameters with type arrays or anyOf) ... limit: 16'
   - 'anthropic.error status=400 A maximum of 4 blocks with cache_control may be provided. Found 5.'
   - waterfall.done claude_auth_failed=RoseInvalidRequest on every SMS-supervisor round
+  - 'send_user_message must declare no nullable unions: expected "0", got "1"'
 tags:
   - sms-supervisor
   - rose
@@ -20,6 +21,7 @@ tags:
 sources:
   - memory: Render prod logs 2026-08-03, 20 union-limit rejections in one window
   - memory: blackbox runs 1785862537-45142-3548 and 1785862932-52590-11344
+  - task backend-coverage-failed-20261014-232329-525786
 repro: back-end/src/tests/blackbox/rose.blackbox.ts (claudeAuth / SMS supervisor lifts native tools without unions; claudeAuth / body stays within the cache_control block budget)
 status: fixed
 ---
@@ -91,6 +93,42 @@ Confirmed live: the real-LLM SMS acceptance now runs on
 `actual_model=claude-sonnet-5-claude` with `cache_read_input_tokens=4204`, zero
 `anthropic.error` lines, and the previously timing-out purchase case delegates
 in ~8s.
+
+### 2026-10-14 recurrence: nested nullable wrappers
+
+Adding an optional, nullable reply target exposed a remaining normalization
+gap. The OpenAI strict schema wraps `nullable(T)` in a second optional-null
+union. The native Anthropic extractor removed only the outer wrapper, so the
+existing SMS supervisor blackbox observed one surviving union on
+`send_user_message`. This is evidence of a violated provider-shape contract;
+this run did not establish that Anthropic rejects a request with just one union.
+
+The smallest reproduction exercised the real extractor and recursive nullable
+normalizer, without a live provider or backend. It failed both assertions on the
+original implementation and passed the identical assertions after changing
+`unwrapNullableUnion` to normalize the surviving value branch recursively:
+
+```bash
+cd back-end
+ROSE_BLACKBOX_TEST_FILTER='SMS supervisor lifts native tools without unions|nullable relaxation keeps' \
+  node --import tsx src/tests/blackbox/rose.blackbox.ts
+```
+
+Pre-fix: `2 failed`, including `expected "0", got "1"`. Post-fix: `2 passed`.
+Logs are retained in `/tmp/rose-schema-lift-rca/before.log` and `after.log`.
+The strengthened permanent cases verify that optional reply targets remain
+optional, message fields remain required, descriptions survive, nullable
+array/map items normalize recursively, genuine unions remain intact, and the
+OpenAI schema is not mutated. The normal full-suite registration is unchanged.
+
+Archive searches used the literal surviving-union failure and the behavioral
+symptom of nested optional-nullable schemas. This is a recurrence of the
+provider adaptation gap, rather than a new SMS prompt failure. The deeper
+owned cause is a one-layer normalization pass over a recursive schema shape;
+the fix unifies normalization at that owner instead of changing the tool
+contract or weakening the test. The independent reference in
+`hermes-agent/tools/schema_sanitizer.py:154` likewise recursively rewrites the
+surviving nullable-union branch. No prompt or product Zod schema changed.
 
 ## Human feedback
 

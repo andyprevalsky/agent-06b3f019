@@ -282,6 +282,11 @@ Returns:
             `The exact SMS message to send to the user. ${SMS_DELIVERY_INSTRUCTIONS}`
           ),
         },
+        reply_to_message_id: {
+          type: 'string' as const,
+          description:
+            'Optional message ID or reference from the reply-target index to quote an incoming or previously sent message. SMS includes the selected text as a quote; WhatsApp uses a native reply. Omit for an ordinary message.',
+        },
       },
       required: ['message'],
     },

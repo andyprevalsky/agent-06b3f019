@@ -439,6 +439,9 @@ model PurchaseSpend {
   lineItemsJson         Json
   totalCents            Int
   status                PurchaseSpendStatus    @default(PENDING_APPROVAL)
+  stripeLivemode        Boolean                @default(false)
+  stripeCustomerId      String?
+  stripeSubscriptionId  String?
   stripePaymentIntentId String?
   provider              String                 @default("agentcard")
   createdAt             DateTime               @default(now())

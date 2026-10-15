@@ -290,3 +290,32 @@ terminal with a recording attached.
 ## Reusable lesson
 
 Route every manager exit that ends a browser task (pause, rejection, purchase outcome, deploy handoff, failure) through one task-scoped terminal producer, and pin each exit with a test, before freezing durable evidence.
+
+
+## 2026-10-15 failure-evidence recurrence (isolated draft)
+
+Production run `d0b6dbf8-0637-4130-a651-0cb42a7d7d79` failed payment
+reconciliation after 581 seconds. Its error handler called `collect_logs` with
+an empty snapshot and returned zero messages, even though the final authoritative
+R2 fixture retained 108 root and 36 child messages plus a closed Kernel session.
+The empty transcript also passed the abandonment seal's vacuous readiness check.
+This is an evidence-loss defect; repairing it does not change the monetary ERROR.
+
+The isolated regression executes the actual task runner's poll, cleanup, and
+cancellation catches, retains the last owned snapshot through unavailable,
+empty, shorter, or foreign reads, and falls back to canonical transcript mapping
+when log transport fails. A real HTTP poll replay additionally proves exact
+purchase ownership survives an exception during reconciliation. Both new tests
+are registered in the existing benchmark blackbox runner. Before-fix logs:
+`.context/deploy-harness-evidence-before.log` and
+`.context/deploy-harness-snapshot-before.log`; corresponding after logs pass.
+
+The repaired artifact retains every original outcome field and all 144 native
+messages. Two late deployment diagnostics copied prior recording-start handles;
+they are not additional media parts when independently saved media, matching
+immutable session identity, and a later task completion prove coverage. The
+publisher regression rejects a fresh session B despite A's earlier completion,
+with and without a task-start row, and rejects foreign-session completions.
+Completion before a posthoc recording upload remains valid. Real native replay
+and fresh-browser verification pass under the isolated draft validator. Source
+and artifact fixes remain separate from the unresolved financial gate outcome.

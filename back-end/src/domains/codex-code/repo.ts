@@ -51,3 +51,11 @@ export async function findAgentFastModeCache(agentId: string): Promise<boolean> 
   });
   return agent?.fastModeCacheEnabled ?? false;
 }
+
+/** Recover the selected credential's owner, including pooled credentials. */
+export async function findCredentialIntegration(id: string) {
+  return prisma.integration.findUnique({
+    where: { id },
+    select: { userId: true, accountId: true },
+  });
+}

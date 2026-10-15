@@ -9,7 +9,7 @@ import {
 import { isClosedCardDetailsError } from './card-provider/errors';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { reversePurchasePaymentIntent, stripe } from './stripe';
+import { reversePurchasePaymentIntent, getStripeClientForLivemode } from './stripe';
 import { reverseStalePurchasePayment } from './purchaseStaleReversal';
 import {
   isWalletFundingConsumedDuringReclaimError,
@@ -136,6 +136,7 @@ export async function cleanupAgentPurchaseCards(
       cardId: true,
       totalCents: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
     },
   });
 
@@ -224,7 +225,11 @@ export async function cleanupAgentPurchaseCards(
         }
         if (purchase.stripePaymentIntentId) {
           try {
-            await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
+            await reversePurchasePaymentIntent(
+              purchase.stripePaymentIntentId,
+              purchase.id,
+              purchase.stripeLivemode
+            );
           } catch (refundError) {
             await prisma.purchaseSpend.update({
               where: { id: purchase.id },
@@ -259,7 +264,7 @@ export async function reconcileFailedPurchaseRefunds(
       status: PurchaseSpendStatus.REFUND_FAILED,
       stripePaymentIntentId: { not: null },
     },
-    select: { id: true, stripePaymentIntentId: true },
+    select: { id: true, stripePaymentIntentId: true, stripeLivemode: true },
   });
 
   for (const purchase of failedRefunds) {
@@ -267,7 +272,8 @@ export async function reconcileFailedPurchaseRefunds(
     try {
       const reversal = await reversePurchasePaymentIntent(
         purchase.stripePaymentIntentId,
-        purchase.id
+        purchase.id,
+        purchase.stripeLivemode
       );
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },
@@ -320,6 +326,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
       cardId: true,
       totalCents: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
     },
   });
 
@@ -371,7 +378,11 @@ export async function reconcileFailedPurchaseFundingReclaims(
           : {}
       );
       if (purchase.stripePaymentIntentId !== null) {
-        await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
+        await reversePurchasePaymentIntent(
+          purchase.stripePaymentIntentId,
+          purchase.id,
+          purchase.stripeLivemode
+        );
       }
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },
@@ -456,6 +467,7 @@ export async function reconcileDissolvedPurchaseHolds(
       cardId: true,
       totalCents: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
     },
   });
 
@@ -466,7 +478,9 @@ export async function reconcileDissolvedPurchaseHolds(
 
     let paymentIntent: unknown;
     try {
-      paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      paymentIntent = await getStripeClientForLivemode(
+        purchase.stripeLivemode
+      ).paymentIntents.retrieve(paymentIntentId);
     } catch (error) {
       log.warn('Could not retrieve Stripe hold while reconciling dissolved purchase hold', {
         purchase_id: purchase.id,
@@ -571,6 +585,7 @@ export async function reconcileStaleChargingPurchases(
       cardId: true,
       totalCents: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
       updatedAt: true,
       walletFunding: { select: { status: true } },
     },
