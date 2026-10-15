@@ -38,6 +38,10 @@ The component correction was applied by the parent during deployment integration
 
 The supporting private candidate diff SHA256 is `9198a95059cd493480a680d8a639c1cdae965be1ee976e1d1b443bac8157ffae`; the source handoff above binds its exact commands, fixture corrections and limits. This hash identifies the component proposal, not a final deployed commit.
 
+### C4 integration correction
+
+The initial reuse imported `domains.wait_for.handler` from `wait_seconds`, violating the existing domain dependency direction. Three unchanged owning structural callbacks failed before a byte-identical helper extraction into `helpers/wait_on_world_clock.py` and passed afterward. The fourth unchanged migration check also rejected the unrelated cache-startup history patch, which was removed under the existing generation replacement contract. Combined registered clock/transport controls passed 43 cases on the applied source in 1.64 seconds; eight existing real/simulated wait callbacks passed in both private controls. The shared helper's signature/body SHA256 remained `123726f6b046c0041176046ce64b6b2b9f1a76556a3e552045bf431a82d7b9b7`. Existing assertion ASTs are unchanged; fixture bindings follow the helper's actual module. These component checks do not substitute for the full final-source deploy gates.
+
 ## Human feedback
 
 The user authorized infrastructure repairs, retained approval gates for new WHM context or policy semantics, rejected the withdrawn global context caps, and required approval before applying the separate R18 schema proposal, which remains unapplied. These component controls do not authorize a new benchmark or prove fundraising success.

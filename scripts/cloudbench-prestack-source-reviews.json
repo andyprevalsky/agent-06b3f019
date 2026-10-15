@@ -188,6 +188,10 @@
     "2fc56aea8ef6c70fa77e0e2778d49fccc09f5bcafb894c04f04499dfc3ee5447": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "8550670ae3ad240b8738dbc36462481521c374c39e58d1c37483e00288f798ab": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   }
 }

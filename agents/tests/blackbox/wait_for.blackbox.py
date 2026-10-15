@@ -249,11 +249,16 @@ class _FakeWFModule:
 def _patch_handler_workflow(fake):
     import domains.wait_for.handler as h
 
+    import importlib
+    shared = importlib.import_module(h._wait_on_world_clock.__module__)
     original = h.workflow
+    original_shared = shared.workflow
     h.workflow = fake
+    shared.workflow = fake
 
     def restore():
         h.workflow = original
+        shared.workflow = original_shared
 
     return restore
 

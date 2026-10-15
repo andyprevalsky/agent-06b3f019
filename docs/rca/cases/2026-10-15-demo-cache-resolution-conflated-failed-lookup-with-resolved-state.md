@@ -31,7 +31,7 @@ This is related to 2026-09-27-general-demo-cache-gate-was-never-loaded-by-workfl
 
 ## Solution
 
-The activity emits an explicit resolved signal based on successful existing root identity; workflow startup preserves existing/restored decisions on failure and accepts an empty successful goal. A Temporal patch preserves prior histories. No DEMO eligibility criterion, cache namespace policy or model context was introduced. The shared transport/cache review batch went 9 FAIL / 12 PASS to 21 PASS; existing general-DEMO activity and metadata callbacks also passed. Full Temporal history replay and unchanged benchmark outcomes remain open.
+The activity emits an explicit resolved signal based on successful existing root identity; workflow startup preserves existing/restored decisions on failure and accepts an empty successful goal. The initial proposal used a Temporal patch. C4's unchanged migration gate rejected that branch because generation replacement forbids accumulated `workflow.patched` decisions. The corrected startup retains the resolved guard without that history branch. No DEMO eligibility criterion, cache namespace policy or model context was introduced. The shared transport/cache review batch went 9 FAIL / 12 PASS to 21 PASS; existing general-DEMO activity and metadata callbacks also passed. Full Temporal history replay and unchanged benchmark outcomes remain open.
 
 The component correction was applied by the parent during deployment integration. Status stays open pending the required unchanged normal gates on the final source, review and production verification. No provider admission or fundraiser outcome follows from offline mocks.
 

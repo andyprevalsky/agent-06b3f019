@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 from temporalio import workflow
 
 from domains.wait_seconds.service import format_duration, validate_seconds
-from domains.wait_for.handler import _wait_on_world_clock
+from helpers.wait_on_world_clock import _wait_on_world_clock
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,

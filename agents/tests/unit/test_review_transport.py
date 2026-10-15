@@ -100,11 +100,12 @@ def test_no_observer_does_not_touch_body():
     ({'enabled':False,'goal':'','provider_fast_mode':True}, (False, True)),
     ({'resolved':True,'enabled':True,'goal':'persisted','provider_fast_mode':False}, (True, False)),
 ])
-@pytest.mark.parametrize('patched', [True, False])
-def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypatch, payload, expected, patched):
+def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypatch, payload, expected):
     from workflows import agent_workflow as owner
     class Observed(BaseException): pass
-    monkeypatch.setattr(owner.workflow, 'patched', lambda _: patched)
+    def forbidden_patch(_):
+        pytest.fail('generation replacement must not call workflow.patched')
+    monkeypatch.setattr(owner.workflow, 'patched', forbidden_patch)
     state = owner.AgentWorkflow()
     from pathlib import Path
     tasks=json.loads((Path(owner.__file__).parents[1]/'benchmarks/tasks.json').read_text())
@@ -138,9 +139,7 @@ def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypa
                 'fast_cache_goal':demo}}))
     assert state.world_model_mode == 'simulate'
     # Observe actual restored DEMO state after the durable-resolution boundary.
-    assert (state.fast_mode_cache_enabled, state.provider_fast_mode) == (
-        expected if patched else (bool(payload['enabled']), bool(payload['provider_fast_mode']))
-    )
+    assert (state.fast_mode_cache_enabled, state.provider_fast_mode) == expected
 
 
 @pytest.mark.parametrize('resolved, expected', [((False,None,False,None,None,True),False), ((False,'',False,'agent','',True),True)])

@@ -556,16 +556,25 @@ mkdir -p "$pg_root/bin" "$pg_root/scripts"
 for tool in pg_isready pg_ctlcluster service su dpkg-query apt-cache; do
   printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/$tool"
 done
+cat >"$pg_root/bin/ls" <<'SH'
+#!/bin/sh
+if [ "${PG_TEST_MISSING_HEADERS:-0}" = 1 ] && [ "$1" = /usr/lib/postgresql ]; then
+  # Own the absent-extension precondition independently of installed host majors.
+  printf '99999\n'
+else
+  /bin/ls "$@"
+fi
+SH
 printf '#!/bin/sh\nexit 1\n' >"$pg_root/bin/docker"
 printf '#!/bin/sh\nexit 0\n' >"$pg_root/bin/find"
 printf '#!/bin/sh\necho "16 main 5432 online postgres /var/lib/postgresql/16/main log"\n' \
   >"$pg_root/bin/pg_lsclusters"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$APT_CALLS"\nexit "${APT_RC:-0}"\n' >"$pg_root/bin/apt-get"
 chmod +x "$pg_root/bin"/*
-run_pg_fallback() { # run_pg_fallback <pinned-build-rc> <apt-rc>
+run_pg_fallback() { # run_pg_fallback <pinned-build-rc> <apt-rc> [missing-headers]
   printf '#!/bin/sh\nexit %s\n' "$1" >"$pg_root/scripts/cloudbench-install-pgvector.sh"
   : >"$pg_root/apt-calls"
-  PATH="$pg_root/bin:$PATH" APT_CALLS="$pg_root/apt-calls" APT_RC="$2" \
+  PATH="$pg_root/bin:$PATH" APT_CALLS="$pg_root/apt-calls" APT_RC="$2" PG_TEST_MISSING_HEADERS="${3:-0}" \
     bash -c 'set -eu; ROOT="$1"; SUDO=""; . "$2"; echo PROVISIONING_CONTINUES' \
     _ "$pg_root" "$pg_fallback_block" 2>&1
 }
@@ -581,6 +590,12 @@ pg_out="$(run_pg_fallback 1 1)" || { echo "FAIL: an unavailable pgvector aborted
 [[ "$pg_out" != *"System Postgres running"* ]] \
   || { echo "FAIL: a fallback without pgvector was reported ready" >&2; exit 1; }
 echo "PASS: an unavailable pgvector marks the fallback unusable without aborting provisioning"
+pg_out="$(run_pg_fallback 1 1 1)" \
+  || { echo "FAIL: unavailable package metadata aborted dependency provisioning" >&2; exit 1; }
+[[ "$pg_out" == *"Could not refresh package metadata"* && "$pg_out" == *"fallback unusable: pgvector unavailable"* && "$pg_out" == *PROVISIONING_CONTINUES* ]] \
+  || { echo "FAIL: missing metadata did not preserve the honest database failure through provisioning" >&2; exit 1; }
+echo "PASS: missing package metadata preserves provisioning and reports the database failure"
+
 # The npm/venv results print first; only then does the missing extension fail the build.
 build_tail="$TMP_ROOT/cloud-build-tail.sh"
 awk '/^\[ \$JS_RC -eq 0 \]/{on=1} on{print}' "$cloud_build_script" >"$build_tail"

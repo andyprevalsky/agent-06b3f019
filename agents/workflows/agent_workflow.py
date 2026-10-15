@@ -1842,9 +1842,8 @@ class AgentWorkflow:
             if root_goal:
                 self.fast_cache_root_goal = root_goal
                 self.root_goal = root_goal
-            if isinstance(cache_context, dict) and (
-                not workflow.patched("fast-cache-context-resolution-success-v1")
-                or cache_context.get("resolved", isinstance(persisted_goal, str))
+            if isinstance(cache_context, dict) and cache_context.get(
+                "resolved", isinstance(persisted_goal, str)
             ):
                 self.fast_mode_cache_enabled = bool(cache_context.get("enabled"))
                 self.provider_fast_mode = bool(

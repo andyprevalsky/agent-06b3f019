@@ -7,12 +7,11 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
 from exp.common.core.artifacts import sha256_json
 
 from benchmarks.build_experiential_world_model import atomic_json, redact_archive
 from benchmarks.experiential_world_model import ParallelWorldModel
-from benchmarks.serve_experiential_world_model import native_provider_complete
+from benchmarks.serve_experiential_world_model import native_provider_complete, native_provider_http_client
 from benchmarks.wmh_execution_policy import execution_identity
 from benchmarks.wmh_native_prediction_writer import NativePredictionWriter
 from benchmarks.wmh_provider_capture import PrivateRejectionRecorder, close_owner, open_owner
@@ -70,9 +69,7 @@ async def run():
         records.append(safe)
         writer(row)
 
-    async with httpx.AsyncClient(
-        base_url=f"http://127.0.0.1:{port}", headers={"X-Rose-Provider-Token": "offline-test-internal"}, trust_env=False
-    ) as client:
+    async with native_provider_http_client(f"http://127.0.0.1:{port}", "offline-test-internal") as client:
 
         async def complete(session, prediction, request):
             return await native_provider_complete(client, root, identity, True, session, prediction, request)
@@ -184,22 +181,32 @@ async def run():
             json.loads(path.read_text())["active"] is True
             for path in (root / "native-provider-capture-owners" / lifecycle.id).glob("*.json")
         )
-        # Another native scope retains independent ContextVar capture ownership.
-        parallel = model.new_session("Inspect independent source", {}, "parallel-scope")
-        assert (await model.step(parallel.id, action, "parallel-invocation"))["content"] == "valid observed result"
-        assert parallel.revision == 1
-        assert len(attempts(parallel.id)) == 1
-        (root / "release-capture").touch()
-        assert (await model.step(lifecycle.id, action, "caller-cancel-invocation"))[
-            "content"
-        ] == "valid observed result"
-        assert lifecycle.revision == len(lifecycle.history) == 1
-        assert len(attempts(lifecycle.id)) == 1
-        assert all(
-            json.loads(path.read_text())["active"] is False
-            for path in (root / "native-provider-capture-owners" / lifecycle.id).glob("*.json")
-        )
-        assert not Path(f"/proc/{pid}").exists(), "Exact writer process remained after rejoin"
+        # Advance only the test event-loop scheduler past an accidental HTTPX
+        # default read deadline while the exact writer is held. No wall sleep,
+        # timeout increase or native/world timestamp mutation is used.
+        loop = asyncio.get_running_loop()
+        original_loop_time = loop.time
+        try:
+            loop.time = lambda: original_loop_time() + 6.0
+            # Another native scope retains independent ContextVar capture ownership.
+            parallel = model.new_session("Inspect independent source", {}, "parallel-scope")
+            assert (await model.step(parallel.id, action, "parallel-invocation"))["content"] == "valid observed result"
+            assert parallel.revision == 1
+            assert len(attempts(parallel.id)) == 1
+            (root / "release-capture").touch()
+            assert (await model.step(lifecycle.id, action, "caller-cancel-invocation"))[
+                "content"
+            ] == "valid observed result"
+            assert lifecycle.revision == len(lifecycle.history) == 1
+            assert len(attempts(lifecycle.id)) == 1
+            assert all(
+                json.loads(path.read_text())["active"] is False
+                for path in (root / "native-provider-capture-owners" / lifecycle.id).glob("*.json")
+            )
+            assert not Path(f"/proc/{pid}").exists(), "Exact writer process remained after rejoin"
+        finally:
+            loop.time = original_loop_time
+
         # Retirement cancels the actual native operation while the writer is admitted.
         (root / "blocked-writer-started").unlink()
         (root / "blocked-writer-pid").unlink()

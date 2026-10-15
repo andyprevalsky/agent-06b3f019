@@ -88,7 +88,8 @@ if ! $IS_MAC; then
         PG_MAJOR=$(ls /usr/lib/postgresql 2>/dev/null | sort -n | tail -1)
         if [ -n "$PG_MAJOR" ] && [ ! -f "/usr/share/postgresql/$PG_MAJOR/extension/vector.control" ]; then
             PG_INSTALLED=$(dpkg-query -W -f='${Version}' "postgresql-$PG_MAJOR" 2>/dev/null || true)
-            $SUDO apt-get update -qq
+            $SUDO apt-get update -qq \
+                || echo "   ⚠️  Could not refresh package metadata; trying the pinned pgvector build"
             if [ -n "$PG_INSTALLED" ] && ! apt-cache madison "postgresql-server-dev-$PG_MAJOR" \
                 | awk -F'|' '{gsub(/ /, "", $2); print $2}' | grep -qxF "$PG_INSTALLED"; then
                 echo "   Refreshing postgresql-$PG_MAJOR $PG_INSTALLED (no matching headers in the archive)"

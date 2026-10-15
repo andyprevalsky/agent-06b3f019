@@ -249,6 +249,17 @@ def create_app(name, model, usage=None, close_provider=None, *, identity=None):
     return app
 
 
+def native_provider_http_client(provider_url, provider_token):
+    """One native-to-bridge transport contract for the service and owning controls."""
+    return httpx.AsyncClient(
+        base_url=provider_url,
+        headers={"X-Rose-Provider-Token": provider_token},
+        timeout=660,
+        limits=httpx.Limits(keepalive_expiry=PROVIDER_CLIENT_KEEPALIVE_SECONDS),
+        trust_env=False,
+    )
+
+
 async def native_provider_complete(
     client, root, effective_identity, capture_enabled, session_id, prediction_id, request
 ):
@@ -326,13 +337,7 @@ def main():
         runtime_config=json.loads(os.environ.get("WMH_RUNTIME_CONFIG_JSON", "null")),
     )
     # Both services bind loopback. Credentials never leave the existing provider.
-    client = httpx.AsyncClient(
-        base_url=args.provider_url,
-        headers={"X-Rose-Provider-Token": os.environ["WMH_PROVIDER_BRIDGE_TOKEN"]},
-        timeout=660,
-        limits=httpx.Limits(keepalive_expiry=PROVIDER_CLIENT_KEEPALIVE_SECONDS),
-        trust_env=False,
-    )
+    client = native_provider_http_client(args.provider_url, os.environ["WMH_PROVIDER_BRIDGE_TOKEN"])
 
     capture_enabled = bool((effective_identity.get("runtime_config") or {}).get("validation_recovery"))
 

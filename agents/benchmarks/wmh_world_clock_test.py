@@ -224,7 +224,8 @@ def test_negative_pinned_date_offset_survives_and_real_is_unchanged():
 @pytest.mark.parametrize('available',[True,False])
 def test_wait_seconds_uses_actual_shared_wait_and_retains_fallback(monkeypatch,available):
  from domains.wait_seconds import handler as m
- from domains.wait_for import handler as shared
+ import importlib
+ shared = importlib.import_module(m._wait_on_world_clock.__module__)
  from utils.simulated_clock import simulated_clock_offset_seconds
  wf=types.SimpleNamespace(world_model_mode='simulate',agent_id='a',simulated_clock_offset_seconds=0)
  calls=[]
