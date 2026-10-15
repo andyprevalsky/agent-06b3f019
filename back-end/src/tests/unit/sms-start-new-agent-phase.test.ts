@@ -55,12 +55,25 @@ async function testInvalidNotificationRejected(): Promise<void> {
       arguments: { goal: 'Order oat milk', notification_message: 42 },
     },
     'unit-test-user',
-    pending,
-    emptyContext
+    pending
   );
   assert.equal(result.success, false);
   assert.equal(pending.length, 0);
-  assert.match(result.error ?? '', /notification_message must be a string or null/);
+  const issues = JSON.parse(result.error ?? '[]') as Array<{
+    code?: string;
+    path?: unknown[];
+    expected?: string;
+    received?: string;
+  }>;
+  assert.ok(
+    issues.some(
+      (issue) =>
+        issue.code === 'invalid_type' &&
+        JSON.stringify(issue.path) === JSON.stringify(['arguments', 'notification_message']) &&
+        issue.expected === 'string' &&
+        issue.received === 'number'
+    )
+  );
 }
 
 async function testNullPhaseQueued(): Promise<void> {
