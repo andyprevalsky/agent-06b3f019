@@ -460,6 +460,13 @@ ordinary read-failure fallback. Permanent controls complete the actual
 background task before the getter and require the identical direct or wrapped
 stop, one generation attempt at most, and zero generation calls when the poll
 itself stops. Ordinary unavailable reads still preserve known actual input.
+The same cause-chain exclusions also apply to the browser schema helper and
+its prerequisite input read, whose former generic catches excluded only the
+direct sealed-generation class. A registered real sync/refresh control covers
+12 direct/wrapped SDK-cancellation, sealed-generation and handoff branches,
+requires the identical stop and no extra read/generation, and fails on the
+unchanged preceding source before passing after this narrow repair. Existing
+ordinary browser schema-failure recovery tests retain their expectations.
 
 Exact local commands (activated agents venv, repository root):
 

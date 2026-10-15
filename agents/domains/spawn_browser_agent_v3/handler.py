@@ -65,7 +65,7 @@ from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
-from utils.error_utils import extract_error_message
+from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
     build_payment_question,
@@ -1030,6 +1030,10 @@ async def _refresh_browser_output_schema(
     except WorkflowGenerationSealed:
         raise
     except Exception as error:
+        if any(error_chain_has_type(error, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
         # Instruction delivery is independent of this optional model request.
         # Keep the accepted contract and leave this input revision retryable.
         logger.warning(
@@ -1066,6 +1070,10 @@ async def _sync_browser_user_instructions(
         except WorkflowGenerationSealed:
             raise
         except Exception as error:
+            if any(error_chain_has_type(error, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
             if retry_poll:
                 retry_poll = False
                 continue

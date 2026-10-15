@@ -23452,6 +23452,39 @@ async def test_browser_schema_failure_keeps_usage_and_generation_fence():
             )
 
 
+async def test_browser_schema_and_input_reads_propagate_lifecycle_stops():
+    from domains.spawn_browser_agent_v3 import handler as h
+    from temporalio.exceptions import ApplicationError, CancelledError
+
+    initial = {"fields": [{"name": "events", "type": "list[str]", "required": True}]}
+    for stop_at in ("poll", "schema"):
+        for failure in (CancelledError("cancelled"),
+                        ApplicationError("sealed", type="WorkflowGenerationSealed"),
+                        ApplicationError("handoff", type="GenerationHandoffRequested")):
+            for wrapped in (False, True):
+                error = RuntimeError("activity failed") if wrapped else failure
+                if wrapped:
+                    error.__cause__ = failure
+                state = {"user_instruction_messages": [{"role": "user", "content": "  Use Andy's account.\n"}],
+                         "schema_user_instruction_count": 0}
+                poll = AsyncMock(side_effect=error) if stop_at == "poll" else AsyncMock(return_value=state)
+                generation = AsyncMock(side_effect=error)
+                with patch.object(h, "_load_browser_resume_user_instructions", poll), \
+                     patch("helpers.llm._generate_response_schema_with_rose", generation):
+                    try:
+                        await h._sync_browser_user_instructions(
+                            agent_id="agent-1", goal="Read calendar events", response_schema=initial,
+                            instruction_state=state, turn_messages=[], compute_auth=None,
+                        )
+                    except BaseException as observed:
+                        assert observed is error
+                    else:
+                        raise AssertionError("browser treated a lifecycle stop as retryable schema feedback")
+                assert poll.await_count == 1
+                assert generation.await_count == (0 if stop_at == "poll" else 1)
+                assert state["schema_user_instruction_count"] == 0
+
+
 async def test_browser_active_schema_failure_delivers_real_input_and_retries_unacknowledged_contract():
     from domains.spawn_browser_agent_v3 import handler as h
 
@@ -28953,6 +28986,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_schema_failure_keeps_usage_and_generation_fence",
         test_browser_schema_failure_keeps_usage_and_generation_fence,
+    )
+    await r.record_async(
+        "browser_schema_and_input_lifecycle_stops",
+        test_browser_schema_and_input_reads_propagate_lifecycle_stops,
     )
     await r.record_async(
         "manager_write_approval_hour_wait_resume",
