@@ -244,6 +244,16 @@ The requested all-tool resolution contract remains in place; restricting entry
 to an action allowlist would contradict the explicit human instruction and
 would not establish network-egress isolation for JavaScript evaluation.
 
+The combined coverage run also exposed a false positive in the new history
+assertions: they stringified the private `dom_service` dependency, including
+arbitrary mock memory addresses. Those digits are not serialized into an
+`ActionHistoryEntry`. A deterministic private metadata value of `17390`
+reproduces both failures with the synthetic CVV `739`; the assertions now
+exclude only that dependency, verify its object identity separately, and still
+inspect every supplied history payload field, returned value, and error/log
+argument. The three public-dispatch regressions pass in 1.308 seconds with that
+collision present. Runtime masking is unchanged by this test correction.
+
 ## Human feedback
 
 The user rejected the automatic payment-entry layer after the narrow tab
