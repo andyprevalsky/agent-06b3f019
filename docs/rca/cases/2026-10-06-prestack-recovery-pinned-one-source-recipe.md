@@ -322,3 +322,32 @@ passed all four unchanged tasks and verified its original process, archive
 and provider cleanup. Final source/input qualification, review and merge remain
 pending. These new results do not grant a historical failed source or a
 pre-service-only canary benchmark credit.
+
+### October 15 cleanup-producer source qualification
+
+Source `f00cc265119f9df7136ec2e334872a22808a4283` changed the required-seed
+bootstrap cleanup producer and therefore derived a new executable recipe:
+`2d079ede1e02975732aa32b5edb5b7100f3e44662e65cd4c2acae1b1eae475ad`.
+R9 correctly rejected this unregistered recipe in the forensic, prestack, and
+compact live-result gates. The source comparison retains 39 of 40 bindings;
+only checkout `scripts/run.sh` changes to
+`5ea3bf05404417617d65088ff3016f57bb42a02c773e0afce540dc07a2ce9ba9`.
+
+Independent review turn `01a13e71-2268-79e1-aaf8-98364408679e` reconstructed
+both recipes, checked all committed bindings, and explicitly approved only
+`before-stack-launch` and `agent-network-index-bootstrap`. The former still
+requires the original matching ACK and absence of stack-launch evidence; the
+latter requires isolated DB/index evidence with application/task artifacts
+absent and rejects later cache, dependency, and tunnel boundaries. Nine focused
+controls passed; the positive registration prerequisite remained blocked until
+this exact entry is committed. Mutation inverses and full qualification remain
+mandatory. No frontend-preflight scope, wildcard, capture-local self-approval,
+receiver change, or historical benchmark acceptance is introduced.
+
+Private trace and audit: `.context/r9-trusted-recipe-audit/proof.json` and
+`.context/deploy-r9-independent-phase-audit.json`. The R9 agents domain also
+exposed an older fixture expecting Docker deletion by mutable name; its existing
+behavioral check now uses a foreign replacement name while requiring the captured
+immutable owned ID. The same owning function rejects the old name-based runtime
+and passes the current ID-based runtime; proof is retained in
+`.context/deploy-r9-owned-id-test-causal.json`. Original R9 failures remain failed.

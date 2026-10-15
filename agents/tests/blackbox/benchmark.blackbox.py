@@ -16777,7 +16777,7 @@ def test_run_sh_required_seed_failure_cleans_exact_owned_database():
                 "-c",
                 cleanup_function
                 + "\nUSE_SYSTEM_PG=false\nSYSTEM_DB_OWNED_BY_US=false\n"
-                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=victoria-db-owned\n"
+                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=foreign-replacement-name\n"
                 + "DB_VOLUME=victoria-pgdata-owned\ncleanup_seed_bootstrap_database\n",
             ],
             env=common_env,
@@ -16787,7 +16787,7 @@ def test_run_sh_required_seed_failure_cleans_exact_owned_database():
         commands = command_log.read_text().splitlines()
         assert commands == [
             "dropdb -h localhost -p 5432 -U postgres --if-exists victoria_bench_owned",
-            "docker rm -f victoria-db-owned",
+            "docker rm -f owned-id",
             "docker volume rm victoria-pgdata-owned",
         ]
 
