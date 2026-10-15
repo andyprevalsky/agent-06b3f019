@@ -2526,14 +2526,30 @@ async def _call_browser_use_with_rotation(
     if dom_service is not None and hasattr(dom_service, "model_visible_value"):
         redact = dom_service.model_visible_value
 
-        def visible_json(text: Any, action_name: str = "") -> Any:
+        def visible_json(text: Any, action_name: str = "", *, tool_arguments: bool = False) -> Any:
             if not isinstance(text, str):
                 return redact(text)
             try:
                 payload = json.loads(text)
             except (ValueError, TypeError):
                 return redact(text)
-            if action_name and hasattr(dom_service, "model_visible_action_result"):
+            if tool_arguments:
+                original = payload
+                payload = redact(payload)
+                # Restore numeric targets only in their advertised action's
+                # top-level arguments, never page-controlled nested payloads.
+                target_fields = {
+                    "click": ("index",), "input_text": ("index",), "scroll": ("index",),
+                    "dropdown_options": ("index",), "select_dropdown": ("index",),
+                    "upload_file": ("index",), "click_coordinates": ("x", "y"),
+                    "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
+                }
+                if isinstance(original, dict) and isinstance(payload, dict):
+                    for key in target_fields.get(action_name, ()):
+                        value = original.get(key)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            payload[key] = value
+            elif action_name and hasattr(dom_service, "model_visible_action_result"):
                 payload = dom_service.model_visible_action_result(action_name, payload)
             else:
                 payload = redact(payload)
@@ -2574,7 +2590,10 @@ async def _call_browser_use_with_rotation(
                     if isinstance(call.get("function"), dict):
                         safe_function = dict(call["function"])
                         if "arguments" in safe_function:
-                            safe_function["arguments"] = visible_json(safe_function["arguments"])
+                            safe_function["arguments"] = visible_json(
+                                safe_function["arguments"], str(safe_function.get("name") or ""),
+                                tool_arguments=True,
+                            )
                         safe_call["function"] = safe_function
                     calls.append(safe_call)
                 safe["tool_calls"] = calls

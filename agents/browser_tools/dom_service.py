@@ -865,6 +865,12 @@ class DOMService:
             return safe
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
+        if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
+            # Only these action outputs contain trusted raster transport.
+            # A coincidental CVV in PNG base64 is not a page-text readback.
+            for key in ("screenshot", "screenshot_b64"):
+                if isinstance(result.get(key), str):
+                    safe[key] = result[key]
         if action_name != "read_browser_state":
             return safe
         for key in ("viewport", "scroll_position", "page_stats"):

@@ -13173,6 +13173,48 @@ async def test_private_numeric_credentials_preserve_only_trusted_browser_mechani
     )
     assert readback["value"] == {"viewport": {"height": "{{secret:card_cvv}}"}, "index": "{{secret:card_cvv}}"}, "page-controlled names bypassed numeric credential masking"
 
+    from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    dom.register_secret_refs({"card_cvv": "234"})
+    argument_cases = [
+        ("input_text", {"index": 234, "text": "234", "payload": {"index": 234}}, {"index"}),
+        ("click_coordinates", {"x": 234, "y": 234, "payload": {"x": 234}}, {"x", "y"}),
+        ("drag", {"source_index": 234, "target_index": 234, "start_x": 234, "start_y": 234,
+                  "end_x": 234, "end_y": 234, "steps": 234},
+         {"source_index", "target_index", "start_x", "start_y", "end_x", "end_y"}),
+        ("evaluate", {"code": "234", "index": 234, "x": 234}, set()),
+    ]
+    messages = [{
+        "role": "assistant", "content": "234", "tool_calls": [{
+            "id": f"call-{name}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }],
+    } for name, arguments, _targets in argument_cases]
+    messages.append({"role": "tool", "name": "evaluate", "tool_call_id": "call-evaluate",
+                     "content": json.dumps({"value": {"index": 234, "x": 234}})})
+    original_messages = copy.deepcopy(messages)
+    client = _FakeRoseClient([{"actions": []}])
+    await _call_browser_use_with_rotation(
+        rose_client=client, task="fixture", dynamic_system_context="", turn_messages=messages,
+        browser_state={}, action_entries=[], config=_fake_config(), user_id="u1", agent_id="a1",
+        iteration=1, token_state=ClaudeTokenState(), gpt_token=None, gpt_account_id=None,
+        gpt_token_source=None, gpt_token_pool_id=None, browser_use_mode=None, dom_service=dom,
+    )
+    visible_messages = client.calls[0]["turn_messages"]
+    for message, (name, arguments, targets) in zip(visible_messages, argument_cases):
+        visible_args = json.loads(message["tool_calls"][0]["function"]["arguments"])
+        for target in targets:
+            assert visible_args[target] == arguments[target], f"prior {name} call lost trusted target {target}"
+        assert {key: value for key, value in visible_args.items() if key not in targets} == dom.model_visible_value(
+            {key: value for key, value in arguments.items() if key not in targets}
+        )
+        assert message["content"] == "{{secret:card_cvv}}"
+    assert json.loads(visible_messages[-1]["content"]) == {
+        "value": {"index": "{{secret:card_cvv}}", "x": "{{secret:card_cvv}}"}
+    }
+    assert messages == original_messages
+
 
 async def test_execute_action_keeps_password_origins_and_trusted_credential_identity():
     """Each ordinary action retains origin restrictions and the exact trusted bookkeeping reference."""
@@ -19000,6 +19042,51 @@ async def test_execute_screenshot_success():
     uploaded = Image.open(BytesIO(uploaded_bytes))
     assert uploaded.size == (1283, 800)
     session.get_or_create_cdp_session.assert_not_called()
+
+    # A synthetic, valid PNG with enough varied pixels to contain a numeric
+    # CVV collision in its binary transport (rather than in any page text).
+    import random
+    import re
+    from browser_tools.dom_service import ActionHistory, DOMService
+
+    png = BytesIO()
+    Image.frombytes("RGB", (16, 16), random.Random(0).randbytes(768)).save(png, format="PNG")
+    trusted_png = base64.b64encode(png.getvalue()).decode("ascii")
+    collision = re.search(r"\d{3}", trusted_png)
+    assert collision is not None
+    dom = DOMService("ws://unused-private-screenshot-fixture")
+    dom.register_secret_refs({"card_cvv": collision.group()})
+    history = ActionHistory()
+    history.bind_dom_service(dom)
+    history.restore_entries([{"step": 1, "action": "screenshot", "screenshot": trusted_png}])
+    assert history.get_entries()[0]["screenshot"] == trusted_png
+    summary = SimpleNamespace(url="https://fixture.test/", title=collision.group(), dom_state=None, tabs=[])
+    dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=summary))
+    with patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value=trusted_png)):
+        state = await dom.get_browser_state(include_screenshot=True)
+    assert state["screenshot"] == trusted_png and state["title"] == "{{secret:card_cvv}}"
+    for action_name in ("screenshot", "read_browser_state"):
+        visible = dom.model_visible_action_result(action_name, {
+            "screenshot": trusted_png, "screenshot_b64": trusted_png,
+            "title": collision.group(), "value": {"screenshot": collision.group()},
+        })
+        assert visible["screenshot"] == trusted_png, f"{action_name} corrupted trusted PNG transport"
+        assert visible["screenshot_b64"] == trusted_png
+        Image.open(BytesIO(base64.b64decode(visible["screenshot"], validate=True))).verify()
+        assert visible["title"] == "{{secret:card_cvv}}"
+        assert visible["value"]["screenshot"] == "{{secret:card_cvv}}"
+    assert dom.model_visible_action_result("evaluate", {"screenshot": collision.group()}) == {
+        "screenshot": "{{secret:card_cvv}}"
+    }
+    dom.mark_secret_used()
+    for action_name in ("screenshot", "read_browser_state", "evaluate"):
+        visible = dom.model_visible_action_result(action_name, {
+            "screenshot": trusted_png, "screenshot_b64": trusted_png,
+            "value": {"screenshot": trusted_png}, "media_candidates": [{"url": "https://fixture.test/image"}],
+        })
+        assert "screenshot" not in visible and "screenshot_b64" not in visible and "media_candidates" not in visible
+        assert "screenshot" not in visible["value"]
+    assert not history.get_entries()[0].get("screenshot")
 
 
 async def test_browser_use_screenshots_get_distinct_remote_names():
