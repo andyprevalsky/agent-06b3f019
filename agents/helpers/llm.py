@@ -999,7 +999,7 @@ def build_verifier_context_messages(
         text = _self_close_trailing_message_reference(msg.get("text", ""))
         metadata = msg.get("metadata", {}) or {}
 
-        if is_internal_subagent_message(msg):
+        if is_excluded_from_model(msg) or is_internal_subagent_message(msg):
             continue
         if role == "SYSTEM":
             continue

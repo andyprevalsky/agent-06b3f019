@@ -5960,6 +5960,30 @@ async def test_build_verifier_json_schema_strict_true_when_no_open_objects():
     assert result["json_schema"]["strict"] is True
 
 
+def test_build_verifier_context_messages_preserves_model_exclusions():
+    from copy import deepcopy
+    from helpers.llm import build_verifier_context_messages
+
+    actual = [
+        {"role": "USER", "text": "Use Andy's account instead", "timestamp": "2026-10-15T17:00:00Z"},
+        {"role": "TOOL", "text": "actual browser evidence", "timestamp": "2026-10-15T17:00:01Z",
+         "metadata": {"toolName": "browser", "toolStatus": "FINISHED"}},
+    ]
+    hidden = [
+        {"role": "TOOL", "text": "schema route timed out", "timestamp": "2026-10-15T17:00:02Z",
+         "metadata": {"toolCallId": "actual-completion", "toolName": "attempt_completion",
+                      "toolStatus": "ERROR", "error": True, "excludeFromModel": True}},
+        {"role": "ASSISTANT", "text": "UI-only reasoning", "timestamp": "2026-10-15T17:00:03Z",
+         "metadata": {"plannedToolName": "reasoning", "excludeFromModel": True}},
+    ]
+    context = deepcopy(actual + hidden)
+    assert build_verifier_context_messages(context, "existing verifier") == build_verifier_context_messages(actual, "existing verifier")
+    assert context == actual + hidden, "projection must retain the durable rows for UI/audit"
+    visible_error = deepcopy(hidden[0])
+    visible_error["metadata"]["excludeFromModel"] = False
+    assert "schema route timed out" in str(build_verifier_context_messages(actual + [visible_error], "existing verifier"))
+
+
 def test_build_verifier_context_messages_screenshot_emits_multimodal():
     """TOOL message with `metadata.screenshot_b64` becomes a multimodal user message."""
     from helpers.llm import build_verifier_context_messages
@@ -9652,6 +9676,7 @@ async def run_all_tests():
     await r.record_async("set_response_schema_activity_cache_lookup_error_falls_through_to_live", test_set_response_schema_activity_cache_lookup_error_falls_through_to_live)
     r.record("verifier_file_evidence_caps_nondeliverable_shortlist_small", test_verifier_file_evidence_caps_nondeliverable_shortlist_small)
     r.record("verifier_file_evidence_keeps_full_top100_deliverable_json", test_verifier_file_evidence_keeps_full_top100_deliverable_json)
+    r.record("build_verifier_context_messages_preserves_model_exclusions", test_build_verifier_context_messages_preserves_model_exclusions)
     r.record("build_verifier_context_messages_skips_budget_for_declared_evaluator", test_build_verifier_context_messages_skips_budget_for_declared_evaluator)
 
     return r.summary()
