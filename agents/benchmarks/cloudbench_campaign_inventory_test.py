@@ -2789,3 +2789,159 @@ def test_campaign_inventory_cli_analytics_scoped_to_shared_reads(tmp_path, mode)
     assert (tmp_path / "volumes.json").exists() == (mode == "success")
     if mode.endswith("nonzero-json"):
         assert not (tmp_path / "inventory" / "current").exists()
+
+@pytest.mark.parametrize('case', ('ok', '401', '429', '500', '206', 'redirect', 'empty', 'object', 'truncated', 'trailing', 'duplicate', 'bad-guest', 'bad-init', 'trickle', 'oversize', 'late-owner'))
+def test_campaign_inventory_full_http_transaction(tmp_path, case):
+    """Exercise the actual publisher dispatch, full refresh, index and original deadline."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    machine = {'id': 'm1', 'name': 'clone', 'state': 'created', 'region': 'iad',
+               'instance_id': 'instance1', 'private_ip': 'fdaa::1',
+               'config': {'guest': {'cpus': 2, 'memory_mb': 2048, 'cpu_kind': 'shared'},
+                          'mounts': [{'volume': 'v1', 'path': '/data', 'size_gb': 40}],
+                          'init': {'cmd': ['sleep', 'infinity']}, 'metadata': {'owner': 'fixture'},
+                          'env': {'PRIVATE_FIXTURE': 'not-a-real-secret'}, 'files': []},
+               'checks': [{'name': 'bg_deployments_compat_x'}, {'name': 'keep'}]}
+    events = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            events.append((self.path, self.headers.get('Authorization')))
+            status = int(case) if case.isdigit() else 302 if case == 'redirect' else 200
+            value = [machine, machine] if case == 'duplicate' else [machine]
+            if case == 'bad-guest': machine['config']['guest']['cpus'] = True
+            if case == 'bad-init': machine['config']['init']['cmd'] = 'sleep'
+            payload = json.dumps(value).encode()
+            if case == 'empty': payload = b''
+            if case == 'object': payload = b'{}'
+            if case == 'truncated': payload = b'[{'
+            if case == 'trailing': payload += b'{}'
+            self.send_response(status)
+            if status == 302: self.send_header('Location', 'http://127.0.0.1:9/forbidden')
+            self.send_header('Content-Length', str(268435457 if case == 'oversize' else len(payload)))
+            self.end_headers()
+            try:
+                if case == 'trickle':
+                    for b in payload:
+                        self.wfile.write(bytes([b])); self.wfile.flush(); time.sleep(.04)
+                else: self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError): pass
+        def log_message(self, *_): pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever); thread.start()
+    bindir = tmp_path/'bin'; bindir.mkdir()
+    cli = bindir/'flyctl'
+    cli.write_text('#!/bin/bash\n[ "$1 $2" = "volumes list" ] || exit 91\nprintf \'[{"id":"v1","state":"created"}]\\n\'\n')
+    cli.chmod(0o755)
+    root = ROOT
+    source = (root/'scripts/cloudbench-campaign-inventory.sh').read_text()
+    dispatch = source[source.index('FLY() {'):source.index('\nSNAPSHOT_LOOP_PID=')]
+    work = tmp_path/'inventory'; work.mkdir()
+    lock = tmp_path/'publish.lock'; lock.write_text('token=actual\n')
+    shell = ('source '+shlex.quote(str(root/'scripts/lib/cloudbench-inventory.sh'))+'\n'+dispatch+
+             '\n_refresh_inventory_snapshot_unlocked\n')
+    env = dict(os.environ, PATH=str(bindir)+':'+os.environ['PATH'], APP='fixture',
+               SOURCE=str(root/'scripts'), FLEET_DIR=str(work),
+               MACHINE_READINESS_SCRIPT=str(root/'scripts/cloudbench-machine-readiness.py'),
+               FLY_API_TOKEN='offline-oauth', FLY_FLAPS_BASE_URL=f'http://127.0.0.1:{server.server_port}',
+               FLY_API_HOSTNAME='https://wrong-endpoint.invalid', CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS='1')
+    if case == 'late-owner':
+        env.update(CLOUDBENCH_INVENTORY_REFRESH_LOCK=str(lock), CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN='foreign')
+    started = time.monotonic()
+    try:
+        result = subprocess.run(['bash', '-c', shell], env=env, capture_output=True, timeout=8)
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+    assert events == [('/v1/apps/fixture/machines', 'Bearer offline-oauth')]
+    assert time.monotonic()-started < 8
+    if case == 'ok':
+        assert result.returncode == 0, result.stderr.decode()
+        assert (work/'inventory/current/machines/m1').is_file()
+        assert b'storage_ready=1' in (work/'inventory/current/machines/m1').read_bytes()
+        assert json.loads((work/'machines.json').read_text())[0]['checks'] == [{'name': 'keep'}]
+    else:
+        assert result.returncode != 0
+        assert not (work/'inventory/current').exists()
+
+
+def test_campaign_inventory_full_http_pinned_cli_consumers(tmp_path):
+    """The real pinned CLI and new full GET yield the same actual keyed/admission consumers."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    cli = Path('/home/boxes/.fly/bin/flyctl')
+    if not cli.is_file(): pytest.skip('pinned offline CLI absent')
+    import hashlib
+    assert hashlib.sha256(cli.read_bytes()).hexdigest() == '5041b9a563fff170fda4238b47048e9a5e714fc7ed2304668fd44bcdcd3bef83'
+    data = [{'id': 'm1', 'name': 'clone', 'state': 'created', 'region': 'iad', 'instance_id': 'v1', 'private_ip': 'fdaa::1',
+             'config': {'guest': {'cpus': 2, 'memory_mb': 2048, 'cpu_kind': 'shared'}, 'init': {'cmd': ['sleep', 'infinity']},
+                        'mounts': [{'volume': 'vol1', 'path': '/data', 'size_gb': 40}], 'metadata': {'fingerprint': 'abc'}, 'env': {'X': 'fixture'}, 'files': []},
+             'checks': [{'name': 'bg_deployments_compat'}, {'name': 'bg_deployments_compat_xyz'}, {'name': 'xbg_deployments_compat'}, {'name': 'BG_DEPLOYMENTS_COMPAT'}]},
+            {'id': 'm2', 'name': 'unreachable', 'state': 'stopped', 'config': None, 'host_status': 'unreachable'}]
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(data).encode(); self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        def log_message(self,*_): pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),H);thread=threading.Thread(target=server.serve_forever);thread.start()
+    env=dict(os.environ, FLY_FLAPS_BASE_URL=f'http://127.0.0.1:{server.server_port}', FLY_API_TOKEN='offline-oauth', FLY_CONFIG_DIR=str(tmp_path),HOME=str(tmp_path),FLY_SEND_METRICS='0',FLY_NO_UPDATE_CHECK='1',CI='1',HTTP_PROXY='http://127.0.0.1:9',HTTPS_PROXY='http://127.0.0.1:9',NO_PROXY='127.0.0.1')
+    (tmp_path/'config.yml').write_text('send_metrics: false\nauto_update: false\n')
+    try:
+        old=subprocess.run([str(cli),'machines','list','-a','fixture','--json'],env=env,capture_output=True,timeout=8)
+        new=subprocess.run([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','3'],env=env,capture_output=True,timeout=8)
+    finally: server.shutdown();server.server_close();thread.join()
+    assert old.returncode==new.returncode==0,(old.stderr,new.stderr)
+    readiness=ROOT/'scripts/cloudbench-machine-readiness.py'
+    volumes=tmp_path/'volumes';volumes.write_text('[{"id":"vol1","state":"created"}]')
+    roots=[]
+    for name,raw in [('old',old.stdout),('new',new.stdout)]:
+        path=tmp_path/name;path.write_bytes(raw);index=tmp_path/(name+'-index')
+        subprocess.run([sys.executable,str(readiness),'--publish-index',str(path),str(volumes),str(index)],check=True,capture_output=True)
+        roots.append(index/'current')
+    for relative in ['machines/m1','machines/m2','names/clone','names/unreachable']:
+        assert (roots[0]/relative).read_bytes()==(roots[1]/relative).read_bytes(),relative
+
+    # Go adds unrelated zero/default fields. Compare every field consumed by
+    # warm/source/shape/ownership readers, rather than inventing byte identity.
+    def consumed(row):
+        config = row.get('config') or {}
+        return ({k: row.get(k) or '' for k in ('id','name','state','region','instance_id','private_ip')},
+                {k: config.get(k) or {} for k in ('guest','init','metadata','env')},
+                config.get('mounts') or [], [x.get('name','') for x in row.get('checks') or []])
+    assert [consumed(x) for x in json.loads(old.stdout)] == [consumed(x) for x in json.loads(new.stdout)]
+
+
+@pytest.mark.parametrize('token,refreshed,expected', (
+    ('oauth', None, 'Bearer oauth'),
+    ('bEaReR oauth1, oauth2', None, 'Bearer oauth1,oauth2'),
+    ('FlyV1 Bearer oauth', None, 'Bearer oauth'),
+    ('oauth,fm2_fixture', 'oauth,fm2_refreshed', 'FlyV1 fm2_refreshed'),
+    ('fm1r_fixture,oauth', 'fm1a_a,fm2_b,oauth', 'FlyV1 fm1a_a,fm2_b'),
+    ('fm2_fixture', '', None),
+    ('', None, None),
+))
+def test_campaign_inventory_full_http_auth(tmp_path, monkeypatch, token, refreshed, expected):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('inventory_full_http',ROOT/'scripts/cloudbench-campaign-machines.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    cli=tmp_path/'flyctl';called=tmp_path/'called'
+    cli.write_text('#!/bin/bash\nprintf called > '+shlex.quote(str(called))+'\nprintf %s '+shlex.quote(json.dumps({'token':refreshed}))+'\n')
+    cli.chmod(0o755);monkeypatch.setenv('PATH',str(tmp_path)+':'+os.environ['PATH'])
+    if expected is None:
+        with pytest.raises(module.Refusal):module.authorization(token,time.monotonic()+2)
+    else:assert module.authorization(token,time.monotonic()+2)==expected
+    assert called.exists() == (refreshed is not None)
+
+@pytest.mark.parametrize('cancel', (False, True))
+def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, cancel):
+    pidfile=tmp_path/'auth.pid';cli=tmp_path/'flyctl'
+    child="import os,time;from pathlib import Path;Path("+repr(str(pidfile))+").write_text(str(os.getpid()));time.sleep(10)"
+    cli.write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' -c '+shlex.quote(child)+'\n');cli.chmod(0o755)
+    env=dict(os.environ, PATH=str(tmp_path)+':'+os.environ['PATH'],FLY_API_TOKEN='fm2_fixture',FLY_FLAPS_BASE_URL='http://127.0.0.1:9')
+    process=subprocess.Popen([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','1'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    until=time.monotonic()+2
+    while not pidfile.exists() and process.poll() is None and time.monotonic()<until:time.sleep(.01)
+    assert pidfile.exists()
+    pid=int(pidfile.read_text());birth=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]
+    if cancel: process.terminate()
+    stdout,stderr=process.communicate(timeout=4)
+    assert process.returncode!=0 and not stdout
+    try: assert Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]!=birth
+    except FileNotFoundError:pass

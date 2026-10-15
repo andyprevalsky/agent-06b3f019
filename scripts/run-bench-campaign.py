@@ -446,6 +446,7 @@ def start_shared_inventory(
         ("cloudbench-inventory.sh", "scripts/lib/cloudbench-inventory.sh"),
         ("cloudbench-env.sh", "scripts/lib/cloudbench-env.sh"),
         ("cloudbench-machine-readiness.py", "scripts/cloudbench-machine-readiness.py"),
+        ("cloudbench-campaign-machines.py", "scripts/cloudbench-campaign-machines.py"),
     ):
         shutil.copyfile(root / relative, source / name)
     log = (directory / "publisher.private.log").open("w")

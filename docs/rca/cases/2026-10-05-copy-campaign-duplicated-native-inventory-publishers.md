@@ -333,3 +333,38 @@ owning controls cover retired lookup followed by current descriptor, replacement
 during open, persistent retired-descriptor exhaustion, and unchanged symlink,
 foreign-owner and hard-link refusals. Full reserve budget, owner and nested
 canary controls remain mandatory; no 600-task success is claimed by this fix.
+
+### V36: complete Machines JSON did not establish native completion
+
+The first selected failure was `r002-j0247` (`message-person-agent-sms`): clone
+`817622b9500918` had a successful native allocation, but its existing 600-second
+storage observation budget expired with status 75. The retained generation had
+expired 11 seconds before the diagnostic and lacked the new clone key. This
+proves unavailable observation, not failed or unmountable provider storage.
+The last retained failed Machines read contained 58,493,720 bytes of complete
+JSON (800 records) while its native wrapper returned 142. All 27 retained
+completion warnings had an unknown foreground return marker. The exact native
+post-render delay remains unknown; complete JSON never grants success to a
+failed CLI call.
+
+Only the campaign parent publisher's full Machines read now uses a bounded
+HTTP GET. It retains the selected Fly session refresh, macaroon preference,
+`FLY_FLAPS_BASE_URL`, full configuration, case-sensitive compat-check filtering,
+and the original absolute read deadline. Non-200, redirect, incomplete, oversized,
+malformed or late responses cannot renew inventory. Volumes, native mutations,
+recovery, child readers, publication fences and TTL remain unchanged. The new
+helper is copied into the publisher's immutable script scope and must be bound
+separately from the existing native recipe inputs.
+
+Owning offline controls exercise the actual full refresh and atomic index,
+including stale ownership, slow bodies and cancellation during credential
+refresh. A pinned CLI fixture proves equivalence of actual keyed and admission
+consumer fields, while acknowledging unrelated Go default-field differences.
+An old-path control produces complete JSON followed by a foreground delay and
+correctly refuses publication; the full HTTP path publishes only after complete
+200/EOF validation under the same fixture deadline. This removes the CLI's
+unneeded completion dependency, but does not prove production latency or fix
+all causes of provider unavailability. Validate the changed path once under the
+existing bounded reader fixture before another paid campaign. Run the normal
+N2 preflight before all 600 controllers under the same original overall budget;
+do not use a near-expiry PASS cache to defer that work into controller startup.
