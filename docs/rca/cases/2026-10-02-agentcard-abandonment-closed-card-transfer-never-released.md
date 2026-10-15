@@ -512,3 +512,24 @@ were read; none has an attached/default live card. A zero-charge hosted setup
 session was prepared against one existing owned customer without DB or
 subscription writes, and human card save is pending. No live Stripe capture or
 completed production financial gate is claimed.
+
+
+#### 2026-10-15 R10 sandbox recurrence (approved skip, production unchanged)
+
+Run `4bf4d3b5-a38c-4cbf-8d11-80ffe12c8888` on `849bea2ca` ended with
+three passed tasks and the existing-policy sandbox skip for
+`agent-payment-abandonment`, root `61164476-ffaa-4fe1-9507-609e1d3d5307`.
+Native evidence records purchase `ec868aaf-1572-4cf7-951c-134d834a33d4`,
+card `card_29c1831d0311cda7f67df2af` CLOSED/balance0 and exact transfer
+`owt_e98fd352fe3dbc39f35d5d11` test-mode/consumed/transferred4396/released0.
+Funding remains RECLAIMING and its test Stripe capture remains unrefunded.
+No new causal explanation is established by this recurrence.
+
+The original SKIPPED verdict and source run JSON remain unchanged. Final native
+cleanup evidence proves the tree sealed, root soft-deleted and owned browser
+resources closed. Canonical FE/last-LLM publication verified all four task roots,
+including the skip, after the controller exited with authenticated clean local
+receipts. Private verification is `.context/deploy-r10-sandbox-skip-receipt.json`.
+This exception applies to the observed test-mode transfer only. The original
+production allocation and its strict release/refund gate remain unresolved;
+this sandbox skip does not waive or pass that gate.

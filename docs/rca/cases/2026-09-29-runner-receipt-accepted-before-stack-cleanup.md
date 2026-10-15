@@ -504,3 +504,52 @@ registry's actual selector includes all six new seed tests; proof is
 `.context/bootstrap-receipt-v2-collection.log`. No registration edits were needed.
 Candidate A's frozen patch, manifest, and evidence remain unchanged. V2 remains
 an isolated draft pending independent review and full deploy qualification.
+
+
+#### PR1522 review 4280661029: an already-absent container stranded its volume
+
+At exact source `849bea2ca2d5b3bcb0ad79a92fcb11b10bba82e1`, bootstrap cleanup
+returned immediately when `docker rm -f` failed for the captured immutable
+container ID. A legitimately absent container therefore prevented any attempt
+to remove its still-owned volume. The native receipt correctly reported failed
+cleanup, but retry could not make progress through this owner-side boundary.
+
+The new existing-suite regression extracts the actual unchanged `run.sh`
+bootstrap functions and invokes the actual native receipt writer and unchanged
+`stop_services` consumer. Only the Docker boundary is faked. The bash owner PID,
+OS-native birth, wall birth, owner journal and token remain real. The original
+source fails `after_seed_absent_container`: its sole Docker operation is the
+immutable-ID removal, the owned volume remains, and its authentic receipt is
+failed. The same assertion passes after the fix: volume removal is attempted,
+the volume is gone, and the unchanged consumer accepts the authentic clean
+cleanup receipt. Bootstrap still exits 1, with no service manifest or task start.
+
+After a removal failure, the owner now requires a successful all-states Docker
+query filtered by the full 64-character immutable ID and empty output before
+continuing to its volume. It never queries or deletes a mutable container name.
+The corresponding already-absent volume path requires successful empty output
+from its owned-name-filtered native query. Because name filters can include
+partial matches, any returned volume conservatively prevents an absence claim;
+there is no removal of returned or foreign volumes. Successful command completion
+is mandatory: daemon, permission, read/API errors and inconclusive output cannot
+certify absence. Original ownership remains on failure.
+
+Primary semantics: Docker documents `--all` as including stopped containers,
+`id` as the container-ID filter and `--no-trunc` as retaining full IDs in its
+[container listing reference](https://docs.docker.com/reference/cli/docker/container/ls/).
+Its [volume listing reference](https://docs.docker.com/reference/cli/docker/volume/ls/)
+documents name filtering. These successful native queries distinguish proven
+absence from an arbitrary nonzero removal or inspection result; error-message
+text is not used as absence proof.
+
+The existing Step 4s compact registry selects both new tests through
+`driver_cleanup_requires_current_stack_receipt_on_normal_completion`. All prior
+eight focused tests plus the two new tests pass (10 total); the inverse test
+exercises ten native receipt scenarios, including removal failure, failed or
+foreign-result probes, unknown ID, volume failure and an already-absent volume.
+Private proof and logs use `.context/bootstrap-absent-container-*`. The detached
+candidate changes only `run.sh`, the existing lifecycle tests and this append.
+Parent R10 source, processes, databases, providers and historical failed runs
+remain untouched. No native-recipe trust registration is changed; parent must
+review the resulting composite recipe and rerun deployment gates. Local causal
+proof does not imply a benchmark or deployment PASS.

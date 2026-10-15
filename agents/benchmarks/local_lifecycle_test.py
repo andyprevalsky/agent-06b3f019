@@ -1163,6 +1163,120 @@ def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_afte
                 assert os.readlink(str(dump)+".publish.lock") == str(os.getpid())
 
 
+def _docker_absence_boundary(folder, scenario, owned_id, volume):
+    """Only Docker is fake; state is the native boundary's authoritative fixture."""
+    binary = folder/"bin"
+    binary.mkdir()
+    state = {"container": scenario in {"removed", "removal-error"}, "volume": scenario != "volume-absent", "foreign": True}
+    (folder/"state.json").write_text(json.dumps(state))
+    executable = binary/"docker"
+    executable.write_text(r"""#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+folder=Path(os.environ['DOCKER_FIXTURE']);scenario=os.environ['DOCKER_SCENARIO']
+args=sys.argv[1:];owned=os.environ['DOCKER_OWNED_ID'];volume=os.environ['DOCKER_OWNED_VOLUME']
+p=folder/'state.json';state=json.loads(p.read_text())
+with (folder/'calls.jsonl').open('a') as log:log.write(json.dumps(args)+'\n')
+if args==['rm','-f',owned]:
+ if scenario=='removed':state['container']=False;p.write_text(json.dumps(state));sys.exit(0)
+ print('Error response from daemon: no such container or removal refused',file=sys.stderr);sys.exit(1)
+if args==['container','ls','--all','--no-trunc','--filter','id='+owned,'--format','{{.ID}}']:
+ if scenario in ('daemon-error','permission-error','read-error'):sys.exit(1)
+ if scenario=='foreign-result':print('b'*64)
+ elif state['container']:print(owned)
+ sys.exit(0)
+if args==['volume','rm',volume]:
+ if scenario in ('volume-error','volume-api-error') or not state['volume']:sys.exit(1)
+ state['volume']=False;p.write_text(json.dumps(state));sys.exit(0)
+if args==['volume','ls','--filter','name='+volume,'--format','{{.Name}}']:
+ if scenario=='volume-api-error':sys.exit(1)
+ if state['volume']:print(volume)
+ sys.exit(0)
+sys.exit(99)
+""")
+    executable.chmod(0o700)
+    return binary
+
+
+def _native_docker_bootstrap_receipt(folder, scenario):
+    """Execute actual run.sh bootstrap functions, writer and unchanged consumer."""
+    import re
+    local = load_local()
+    source = (REPO/"scripts/run.sh").read_text()
+    functions = '\n'.join(re.search(r'^'+name+r'\(\) \{.*?^\}', source, re.M|re.S).group()
+                          for name in ('cleanup_seed_bootstrap_database', 'fail_required_seed_dump', 'release_seed_lock_if_held'))
+    owned = "a"*64 if scenario != "unknown-id" else "unverified-id"
+    volume = "victoria-pgdata-native-fixture"
+    binary = _docker_absence_boundary(folder, scenario, owned, volume)
+    stack = local.ServiceStack("native-docker-bootstrap", folder, folder/"services.json", folder/"services.log", True)
+    env = {"PATH": f"{binary}:{os.environ['PATH']}", "DOCKER_FIXTURE": str(folder), "DOCKER_SCENARIO": scenario,
+           "DOCKER_OWNED_ID": owned, "DOCKER_OWNED_VOLUME": volume, "REVIEW_REPO": str(REPO),
+           "RUN_STACK_CLEANUP_STATUS_FILE": str(folder/"local-stack-cleanup.status"),
+           "RUN_STACK_CLEANUP_TOKEN": "native-docker-fixture-token"}
+    command = r"""
+    while [ ! -f "$DOCKER_FIXTURE/owner-ready" ]; do sleep 0.01; done
+    SCRIPT_DIR="$REVIEW_REPO/scripts"
+    . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+    . "$SCRIPT_DIR/lib/seed-cache.sh"
+    """ + functions + r"""
+    USE_SYSTEM_PG=false; SYSTEM_DB_OWNED_BY_US=false; DB_OWNED_BY_US=true
+    DB_OWNED_CONTAINER_ID="$DOCKER_OWNED_ID"; DB_CONTAINER=foreign-replacement-mutable-name
+    DB_VOLUME="$DOCKER_OWNED_VOLUME"; _SEED_CACHE_TOKEN=fixture-token
+    _SEED_DUMP="$DOCKER_FIXTURE/seed.dump"; _SEED_LOCK_HELD=1
+    acquire_benchmark_seed_lock "$_SEED_DUMP"
+    trap release_seed_lock_if_held EXIT
+    fail_required_seed_dump 'required canonical base fixture unavailable'
+    """
+    with stack.service_log.open("w") as output:
+        child = subprocess.Popen(["bash", "-c", command], env=env, cwd=folder, stdout=output, stderr=subprocess.STDOUT)
+    try:
+        local._record_stack_cleanup_owner(stack, child, env["RUN_STACK_CLEANUP_TOKEN"])
+        (folder/"owner-ready").touch()
+        assert child.wait(timeout=15) == 1, "startup outcome changed"
+    finally:
+        if child.poll() is None:
+            child.terminate(); child.wait(timeout=10)  # Only this direct unreaped fixture owner.
+    owner = json.loads((folder/"local-stack-owner.json").read_text())
+    fields = dict(line.split('=',1) for line in (folder/"local-stack-cleanup.status").read_text().splitlines())
+    assert fields['stack_native_identity'] == owner['native_identity'] and fields['stack_pid'] == str(owner['pid'])
+    assert fields['stack_birth'] == owner['birth'] and fields['token'] == owner['token']
+    assert not stack.manifest_path.exists() and not (folder/"seed.dump.publish.lock").is_symlink()
+    calls = [json.loads(line) for line in (folder/"calls.jsonl").read_text().splitlines()]
+    assert all('foreign-replacement-mutable-name' not in call for call in calls)
+    try:local.stop_services(None, stack=stack)
+    except RuntimeError:accepted=False
+    else:accepted=True
+    state = json.loads((folder/"state.json").read_text())
+    assert state['foreign'] is True
+    proof = {"scenario":scenario,"startupExit":1,"receiptState":fields['state'],"consumerAccepted":accepted,
+             "nativeOwnerPid":owner['pid'],"nativeIdentity":owner['native_identity'],"birth":owner['birth'],
+             "calls":calls,"remaining":state,"noTasksStarted":True}
+    if os.environ.get('BOOTSTRAP_ABSENT_PROOF_LOG'):
+        with open(os.environ['BOOTSTRAP_ABSENT_PROOF_LOG'],'a') as out:out.write(json.dumps(proof)+'\n')
+    return proof
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_absent_container():
+    """A proven absent exact container must not strand its present owned volume."""
+    with tempfile.TemporaryDirectory(prefix="native-container-absent-") as directory:
+        proof = _native_docker_bootstrap_receipt(Path(directory), 'absent')
+        assert ['volume','rm','victoria-pgdata-native-fixture'] in proof['calls'], 'absent exact container stranded owned volume'
+        assert proof['remaining']['volume'] is False
+        assert proof['receiptState']=='clean' and proof['consumerAccepted'] is True
+
+
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion_after_seed_container_absence_inverses():
+    for scenario in ('removed','volume-absent','daemon-error','permission-error','read-error','removal-error',
+                     'foreign-result','unknown-id','volume-error','volume-api-error'):
+        with tempfile.TemporaryDirectory(prefix='native-docker-inverse-') as directory:
+            proof = _native_docker_bootstrap_receipt(Path(directory), scenario)
+            good = scenario in {'removed','volume-absent'}
+            assert proof['consumerAccepted'] is good and proof['receiptState']==('clean' if good else 'failed'), scenario
+            volume_call = ['volume','rm','victoria-pgdata-native-fixture'] in proof['calls']
+            assert volume_call is (good or scenario.startswith('volume-')), scenario
+            if good:assert not proof['remaining']['volume']
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     folder = Path(sys.argv[2]).resolve()

@@ -786,8 +786,19 @@ cleanup_seed_bootstrap_database() {
         SYSTEM_DB_OWNED_BY_US=false
         DB_OWNED_BY_US=false
     elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
-        docker rm -f "$DB_OWNED_CONTAINER_ID" >/dev/null 2>&1 || return 1
-        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || return 1
+        local remaining
+        if ! docker rm -f "$DB_OWNED_CONTAINER_ID" >/dev/null 2>&1; then
+            # A successful all-states query for the full immutable ID can prove
+            # it is already gone. A failed query or any result is not absence.
+            [[ "$DB_OWNED_CONTAINER_ID" =~ ^[a-f0-9]{64}$ ]] || return 1
+            remaining=$(docker container ls --all --no-trunc --filter "id=$DB_OWNED_CONTAINER_ID" --format '{{.ID}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
+        if ! docker volume rm "$DB_VOLUME" >/dev/null 2>&1; then
+            [[ "$DB_VOLUME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+            remaining=$(docker volume ls --filter "name=$DB_VOLUME" --format '{{.Name}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
         DB_OWNED_CONTAINER_ID=""
         DB_OWNED_BY_US=false
     fi
