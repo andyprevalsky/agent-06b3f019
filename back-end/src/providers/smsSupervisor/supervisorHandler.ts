@@ -30,7 +30,11 @@ import { getComputeToken } from './supervisorComputeToken';
 import { isProductionEnvironment } from '../productionEnvironment';
 import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
-import { callWithRetries, dispatchToolSafely, buildToolFailureMessage } from './supervisorResilience';
+import {
+  callWithRetries,
+  dispatchToolSafely,
+  buildToolFailureMessage,
+} from './supervisorResilience';
 import { resolveSendUserMessage, sameSmsBody } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
 import { reactToInboundMessage } from './inboundReaction';
