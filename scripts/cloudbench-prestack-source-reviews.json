@@ -235,6 +235,10 @@
     "36b22cc67553b326d0b84291094f537c402097fed537eac60bbe9b371318e21f": [
       "before-stack-launch",
       "agent-network-index-bootstrap"
+    ],
+    "ac0900ebfd53787c910f42db3665f866ea946ebc4874f6db91594e57154d2dad": [
+      "before-stack-launch",
+      "agent-network-index-bootstrap"
     ]
   },
   "schema_version": 1
