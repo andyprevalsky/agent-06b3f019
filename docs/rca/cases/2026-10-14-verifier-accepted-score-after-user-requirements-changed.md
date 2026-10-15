@@ -247,12 +247,33 @@ python scripts/run_blackbox_tests.py workflow workflow_determinism
 ```
 
 `root-fresh-schema-final-workflow.log` records two domains passed, zero failed
-(37.1s), including all six new tests and five determinism checks. Ruff lint and
+(42.1s), including all seven new tests and five determinism checks. Ruff lint and
 the prompt, trajectory and agent-behavior guards pass against the exact 9b8b694
 base. Independent read-only review found no blocker and independently ran the
 first five causal tests. This is runtime-only development handoff to the PR #1511
 owner for combined validation and deployment; no production rollout or original
 Calendar task success is claimed here.
+
+Final handoff audit added a seventh causal case: an authored signal can already
+be queued when this helper receives its earlier startup-history snapshot.
+Unconditionally claiming and accepting a new revision then consumed that input
+without generating from it. The permanent test
+`test_workflow_fresh_start_keeps_feedback_received_before_generation_pending`
+fails on initial isolated fix 809711d818ba665a9fab275a6e8addc807a3f8f3 and passes
+after the helper detects preexisting pending feedback and defers to the existing
+coalescing worker. It adds no second generator or input poll. Exact command:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. workflow test_workflow_fresh_start_keeps_feedback_received_before_generation_pending
+```
+
+The unchanged invocation failed before that four-line repair (exit 1,
+`fresh-start acceptance consumed earlier queued feedback without generating from
+it`) and passed afterward (exit 0); the corresponding private logs are
+`root-fresh-schema-pending-{before,after}.log`. Independent review also passed
+this follow-up and ran its test. Combined workflow/determinism validation was
+rerun on the final source after this repair: two domains passed, zero failed
+(42.1s). The earlier 37.1s pass was interim.
 
 ## Human feedback
 

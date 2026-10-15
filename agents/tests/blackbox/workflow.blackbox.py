@@ -6999,6 +6999,34 @@ async def test_workflow_fresh_start_discards_schema_superseded_during_generation
         _restore_workflow(original)
 
 
+async def test_workflow_fresh_start_keeps_feedback_received_before_generation_pending():
+    wf, fake, replacement = _user_schema_refresh_fixture()
+    wf._response_schema_initialized = False
+    wf.output_schema = None
+    followup = "Research venue prices"
+    correction = "Actually, return only venue opening hours"
+    fake.activity_returns["poll_new_messages"] = [
+        {"id": "followup", "role": "USER", "text": followup},
+        {"id": "correction", "role": "USER", "text": correction},
+    ]
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response(correction)
+        await wf._regenerate_output_schema_for_new_instruction([{"role": "USER", "text": followup}])
+        wf._response_schema_initialized = True
+        wf._start_response_schema_refresh()
+        await wf._wait_for_response_schema_refresh()
+        generation_inputs = [args[1] for name, args in fake.activity_calls if name == "set_response_schema_activity"]
+        assert any(correction in messages for messages in generation_inputs), (
+            "fresh-start acceptance consumed earlier queued feedback without generating from it"
+        )
+        assert wf._response_schema_accepted_revision == wf._response_schema_revision
+        assert wf.output_schema == replacement
+        assert wf._response_schema_feedback == [correction]
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_skips_stale_plan_after_completion_followup():
     """Post-completion follow-up must not replay the completed DAG.
 
@@ -10469,6 +10497,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_fresh_start_superseded_generation_not_persisted",
         test_workflow_fresh_start_discards_schema_superseded_during_generation,
+    )
+    await r.record_async(
+        "wf_fresh_start_preexisting_feedback_not_consumed",
+        test_workflow_fresh_start_keeps_feedback_received_before_generation_pending,
     )
     await r.record_async(
         "wf_verifier_refreshes_schema_from_feedback",

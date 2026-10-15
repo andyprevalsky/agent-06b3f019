@@ -2898,8 +2898,12 @@ class AgentWorkflow:
         latest = latest_real_user_instruction(context)
         if not latest:
             return
+        pending_feedback = self._response_schema_applied_revision < self._response_schema_revision
         self._response_schema_revision += 1
         target_revision = self._response_schema_revision
+        if pending_feedback:
+            # The coalescing worker owns input already queued before this snapshot.
+            return
         try:
             generated = await workflow.execute_activity(
                 set_response_schema_activity,
