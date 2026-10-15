@@ -2710,3 +2710,52 @@ def test_campaign_inventory_completion_evidence_preserves_fly_noclobber_for_exit
     assert result.returncode == 0, result.stderr
     assert result.stdout == '[]'
     assert 'C' in marker.read_text()
+
+@pytest.mark.parametrize('setting', [None, '0', '10', 'invalid', '', '5', '10.0', 'true', '-1', 'missing', 'unsupported', 'cancel10'])
+def test_campaign_inventory_controller_priority_opt_in_keeps_launch_owner(tmp_path, setting):
+    """Real campaign children change priority without moving parent or PID custody."""
+    if not hasattr(os, 'getpriority') or os.getpriority(os.PRIO_PROCESS, 0) != 0:
+        pytest.skip('actual nice0 parent required for the scheduling contract')
+    scripts = tmp_path/'scripts';scripts.mkdir()
+    child = tmp_path/'child.py'
+    child.write_text('import os,json,time,signal,sys\nfrom pathlib import Path\nr=Path(os.environ["PRIORITY_FIXTURE"])\npid=os.getpid()\nbirth=None\ntry:\n s=Path("/proc",str(pid),"stat").read_text();birth=s[s.rfind(")")+2:].split()[19]\nexcept OSError:pass\n(r/"child.json").write_text(json.dumps({"pid":pid,"parent":os.getppid(),"nice":os.getpriority(os.PRIO_PROCESS,0),"parent_nice":os.getpriority(os.PRIO_PROCESS,os.getppid()),"birth":birth,"sid":os.getsid(0),"argv":sys.argv[1:]}))\ndef stop(*args):\n (r/"child-term").write_text(str(pid));sys.exit(0)\nsignal.signal(signal.SIGTERM,stop)\nif os.environ.get("PRIORITY_CANCEL")=="1":\n while True:time.sleep(.02)\n')
+    (scripts/'run-bench').write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' '+shlex.quote(str(child))+' "$@"\n')
+    env={k:v for k,v in os.environ.items() if not k.startswith(('RUN_BENCH_CAMPAIGN_', 'BENCHMARK_HUB_', 'CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE'))}
+    env.update(PRIORITY_FIXTURE=str(tmp_path), CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0', CLOUDBENCH_CHILD_TERM_SECONDS='1')
+    if setting is not None:env['CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE']='10' if setting in ('missing','unsupported','cancel10') else setting
+    if setting=='cancel10':env['PRIORITY_CANCEL']='1'
+    launcher=tmp_path/'launcher.py'
+    patch=''
+    if setting=='missing':patch='shutil.which=lambda name:None\n'
+    if setting=='unsupported':
+        fake=tmp_path/'unsupported-nice';fake.write_text('#!/bin/bash\nexit 2\n');fake.chmod(0o700)
+        patch='shutil.which=lambda name:'+repr(str(fake))+'\n'
+    source_path = os.environ.get('CLOUDBENCH_CONTROLLER_PRIORITY_SOURCE')
+    execution = ('from pathlib import Path\nexec(compile(Path('+repr(source_path)+').read_text(),'+repr(str(ROOT/'scripts/run-bench-campaign.py'))+',"exec"),{"__name__":"__main__","__file__":'+repr(str(ROOT/'scripts/run-bench-campaign.py'))+'})\n') if source_path else 'runpy.run_path('+repr(str(ROOT/'scripts/run-bench-campaign.py'))+',run_name="__main__")\n'
+    launcher.write_text('import shutil,runpy\n'+patch+execution)
+    command=[sys.executable,str(launcher),'--root',str(tmp_path),'--runs','1','--concurrency','1','--task','owned','--e2e-timeout','30']
+    with (tmp_path/'stdout').open('w') as out, (tmp_path/'stderr').open('w') as err:
+        process=subprocess.Popen(command,env=env,stdout=out,stderr=err)
+        try:
+            if setting=='cancel10':
+                deadline=time.monotonic()+10
+                while not (tmp_path/'child.json').exists() and time.monotonic()<deadline and process.poll() is None:time.sleep(.02)
+                assert (tmp_path/'child.json').is_file(), (tmp_path/'stderr').read_text()
+                process.terminate()
+            process.wait(timeout=15)
+        finally:
+            if process.poll() is None:process.terminate();process.wait(timeout=5)
+    if setting in ('invalid','','5','10.0','true','-1','missing','unsupported'):
+        assert process.returncode!=0
+        assert not (tmp_path/'child.json').exists()
+        assert not (tmp_path/'.context/benchmarks/campaigns').exists()
+    else:
+        actual=json.loads((tmp_path/'child.json').read_text())
+        assert actual['nice']==(10 if setting in ('10','cancel10') else 0)
+        assert actual['parent']==process.pid and actual['parent_nice']==0
+        assert actual['sid']==actual['pid'] and actual['argv']==['owned','--foreground']
+        summary=json.loads(next((tmp_path/'.context/benchmarks/campaigns').glob('*/summary.json')).read_text())
+        job=summary['jobs'][0]
+        assert job['controller_pid']==actual['pid']
+        if sys.platform.startswith('linux'):assert actual['birth'] is not None
+        if setting=='cancel10':assert (tmp_path/'child-term').read_text()==str(actual['pid'])

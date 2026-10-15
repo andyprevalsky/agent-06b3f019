@@ -560,6 +560,27 @@ def main() -> int:
         rows = get_task_metadata(root / "agents/benchmarks/tasks.json", args.task)
         print(json.dumps(stress_default_requirements(root, rows, peak=args.concurrency, baseline=None, repetitions=args.runs if args.concurrency == 600 else 1), indent=2))
         return 2  # Planning only: baseline unknown, no campaign/provider mutation.
+    controller_nice = os.environ.get("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE", "0")
+    if controller_nice not in ("0", "10"):
+        raise SystemExit("CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE must be 0 or 10")
+    controller_prefix: list[str] = []
+    if controller_nice == "10":
+        nice_binary = shutil.which("nice")
+        if nice_binary is None or not hasattr(os, "getpriority"):
+            raise SystemExit("controller nice10 is unsupported; no controller admitted")
+        # Probe the exact launcher before admitting any selected child. The
+        # campaign and its shared publisher retain their original priority.
+        try:
+            probe = subprocess.run(
+                [nice_binary, "-n", "10", sys.executable, "-I", "-S", "-B", "-c",
+                 "import os,sys;sys.exit(0 if os.getpriority(os.PRIO_PROCESS,0)==10 else 1)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SystemExit("controller nice10 is unsupported; no controller admitted") from None
+        if probe.returncode:
+            raise SystemExit("controller nice10 is unsupported; no controller admitted")
+        controller_prefix = [nice_binary, "-n", "10"]
     requested_id = os.environ.get("RUN_BENCH_CAMPAIGN_ID")
     campaign_id = (
         requested_id
@@ -1071,7 +1092,7 @@ def main() -> int:
                 ]
                 log_handle = open(str(job["log"]), "w", encoding="utf-8")
                 process = subprocess.Popen(
-                    command,
+                    controller_prefix + command,
                     cwd=root,
                     env=environment,
                     stdout=log_handle,

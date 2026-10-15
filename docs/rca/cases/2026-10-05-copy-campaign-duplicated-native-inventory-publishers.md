@@ -130,3 +130,40 @@ observations at the scheduler lifetime, while preserving exact owning mutation
 checks and borrower cleanup fences. Count actual native calls and decoded work,
 and report measured cloud E2E independently instead of converting transport
 reduction into a fabricated speedup.
+
+
+## October 15: compact consumers can still contend with their producer
+
+A bounded native-free paired replay on the same retained 16-performance-CPU,
+128-GiB controller used the original 28,903,796-byte Machines response, the
+production 30-second wrapper, the real index publisher, and 600 compact readers.
+Normal-priority readers produced a 21.160-second combined wrapper/publisher
+completion. Lowering only reader children to niceness 10 produced 1.821 seconds;
+wrapper EOF was separately observed at 0.574 seconds and publisher completion at
+1.821 seconds. All 600 readers crossed the barrier and joined with status zero
+in both cases. CPU PSI `some` cumulative deltas were 37,467,396 and 2,430,755
+microseconds respectively. This single pair supports protecting the shared
+producer; it does not prove the cause of historical native exit 142. The second
+run completed fewer reader iterations because readers stopped when the producer
+finished, so these numbers are not reader throughput measurements.
+
+The explicit `CLOUDBENCH_CAMPAIGN_CONTROLLER_NICE=10` option lowers only campaign
+controller children at their existing Popen launch. Unset or `0` preserves the
+original argv. Other values, missing `nice`, or a failed actual-priority probe
+refuse before any selected child is admitted. The parent, shared publisher, and
+external threshold watcher keep their existing priority. Local nested N2 and
+controller helpers inherit the child priority. Provider-created VMs are separate
+OS process trees: `run-bench-cloud` injects `bash /cloudbench-boot.sh` through
+Machine config with an explicit environment mapping; this option does not send
+an OS scheduling setting to that guest or change its task/evaluator definitions.
+This source boundary is not a measurement of current guest niceness.
+
+For bounded remote diagnostics, validate the actual response body rather than
+CLI exit alone. A plain base64 supervisor payload was rejected as PayloadTooLarge
+with CLI exit zero. Zlib level 9 plus base64 reduced the command to 12,085 bytes;
+local round-trip SHA verification proved the exact reviewed supervisor bytes,
+and the request completed the same atomic-mkdir once operation. Preserve the
+rejected request and original clock, never reset or rename the once directory,
+and distinguish transport/setup time from measured load time. The supervisor
+joined all 604 owned Popen objects without signals. Do not use compression to
+change source, bypass a refusal, or duplicate an indeterminate operation.
