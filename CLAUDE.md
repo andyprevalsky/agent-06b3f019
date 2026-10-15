@@ -37,6 +37,8 @@ links. A file pointer never substitutes for the diff.
   15 minutes of history instead of reusing a cached rate or warming flag.
 - After publishing, atomically update the existing latest-card URL and fixed
   checkpoint fields together; do not create competing URL aliases.
+  Refresh lifecycle labels from verified receipts; completed exports must not
+  remain displayed as pending.
 - State blockers plainly: exact limit, measured usage, known cap or explicit
   evidence gap, and what the agent/user can do. A planner ceiling is not a
   measured need for more capacity; reconcile reuse before suggesting more quota.
