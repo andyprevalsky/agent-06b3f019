@@ -114,3 +114,23 @@ export function isStripeResourceMissing(error: unknown): boolean {
     error instanceof Stripe.errors.StripeInvalidRequestError && error.code === 'resource_missing'
   );
 }
+
+/** Exact operator-selected fixture ownership; validate before any provisioning DB write. */
+export async function requireOwnedLiveFixtureCustomer(
+  stripe: Stripe,
+  customerId: string,
+  userId: string
+): Promise<string> {
+  if (customerId.trim() === '') throw new Error('--stripe-customer-id must not be blank');
+  const customer = await stripe.customers.retrieve(customerId);
+  if (
+    customer.deleted === true ||
+    customer.id !== customerId ||
+    customer.livemode !== true ||
+    customer.metadata?.userId !== userId ||
+    customer.metadata?.fixture !== 'agent-payment-production-lifecycle'
+  ) {
+    throw new Error('Selected Stripe customer is not an owned live production lifecycle fixture');
+  }
+  return customer.id;
+}

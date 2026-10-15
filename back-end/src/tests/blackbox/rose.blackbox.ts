@@ -761,6 +761,7 @@ async function testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses() {
  * paid waterfall.
  */
 async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
+  const originalSchema = JSON.stringify(SUPERVISOR_RESPONSE_SCHEMA);
   const extracted = extractToolsFromResponseFormat(SUPERVISOR_RESPONSE_SCHEMA);
   assert(extracted !== null, 'discriminated-union envelope must lift to native tools');
 
@@ -773,6 +774,22 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
     const unions = (serialized.match(/"type":"null"/g) ?? []).length;
     assertEqual(String(unions), '0', `${tool.name as string} must declare no nullable unions`);
   }
+
+  const send = extracted.tools.find((tool) => tool.name === 'send_user_message');
+  const sendArgs = (
+    (send?.input_schema as Record<string, unknown>).properties as Record<string, unknown>
+  ).arguments as { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  const replyTarget = sendArgs.properties.reply_to_message_id;
+  assertEqual(replyTarget.type, 'string', 'native reply target remains a string');
+  assert(
+    !(sendArgs.required ?? []).includes('reply_to_message_id'),
+    'native reply target must be optional after all nullable wrappers collapse'
+  );
+  assert((sendArgs.required ?? []).includes('message'), 'native message must stay required');
+  assert(
+    typeof replyTarget.description === 'string' && replyTarget.description.length > 0,
+    'reply target description must survive nullable normalization'
+  );
 
   // Collapsing the union must not drop the model-facing field documentation.
   const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
@@ -793,6 +810,11 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
   assert(
     (startAgentArgs.required ?? []).includes('start_phase'),
     'start_phase must stay required so the native tool path always chooses a phase'
+  );
+  assertEqual(
+    JSON.stringify(SUPERVISOR_RESPONSE_SCHEMA),
+    originalSchema,
+    'OpenAI strict schema is not mutated'
   );
 }
 
@@ -936,15 +958,33 @@ async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
                       type: 'object',
                       properties: {
                         goal: { type: 'string' },
-                        budget_dollars: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+                        budget_dollars: {
+                          anyOf: [
+                            { oneOf: [{ type: 'number' }, { type: 'null' }] },
+                            { type: 'null' },
+                          ],
+                        },
+                        tags: {
+                          type: 'array',
+                          items: {
+                            oneOf: [
+                              { anyOf: [{ type: 'string' }, { type: 'null' }] },
+                              { type: 'null' },
+                            ],
+                          },
+                        },
+                        choice: { anyOf: [{ type: 'string' }, { type: 'number' }] },
                         meta: {
                           type: 'object',
                           additionalProperties: {
-                            anyOf: [{ type: 'string' }, { type: 'null' }],
+                            anyOf: [
+                              { anyOf: [{ type: 'string' }, { type: 'null' }] },
+                              { type: 'null' },
+                            ],
                           },
                         },
                       },
-                      required: ['goal', 'budget_dollars', 'meta'],
+                      required: ['goal', 'budget_dollars', 'meta', 'tags', 'choice'],
                     },
                   },
                   required: ['tool', 'arguments'],
@@ -978,6 +1018,16 @@ async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
     JSON.stringify(schema.properties?.meta?.additionalProperties),
     '{"type":"string"}',
     'typed map values must be relaxed too, or they keep counting against the cap'
+  );
+  assertEqual(
+    JSON.stringify(schema.properties?.tags?.items),
+    '{"type":"string"}',
+    'nested nullable array items collapse'
+  );
+  assertEqual(
+    JSON.stringify(schema.properties?.choice),
+    '{"anyOf":[{"type":"string"},{"type":"number"}]}',
+    'genuine non-null unions remain intact'
   );
 }
 
@@ -4283,10 +4333,15 @@ async function main(): Promise<void> {
     },
   ];
 
+  const nameFilter = process.env.ROSE_BLACKBOX_TEST_FILTER;
+  const selectedTests = nameFilter
+    ? tests.filter((test) => new RegExp(nameFilter).test(test.name))
+    : tests;
+  if (selectedTests.length === 0) throw new Error('No rose blackbox tests match the name filter');
   const results: TestResult[] = [];
   // Run sequentially — tests share process.env + global.fetch state.
   await withIsolatedFundedKeyCooldowns(async () => {
-    for (const t of tests) {
+    for (const t of selectedTests) {
       const r = await runTest(t.name, t.fn);
       results.push(r);
       console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);

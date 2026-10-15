@@ -423,3 +423,133 @@ pending; the original stack failure and provider capacity rejection remain
 separate, unresolved evidence gaps.
 
 The independent 50-wide recovery exposed two native boundaries in the supplemental Machine-only route. Its app inventory was 32,499,228 bytes, so the inherited 1 MiB receipt reader refused it before intent publication. Only the native inventory reader now uses the existing 128 MiB inventory bound; an oversized inventory retains ownership and prints a stage warning. After the exact destroy, Fly removed the Machine from inventory but continued to return its destroyed tombstone through exact status. Closure now requires that terminal state, full original ID/name/creation/instance identity, unchanged config, fresh list absence and the same retained unattached volume. The distinct supplemental receipt records destroyed-and-unlisted evidence without benchmark credit. Retry verifies that prior retirement and closes its receipt without retiring another sealed peer. Live, stopped, reused, still-listed and uncertain states cannot spend this terminal proof.
+
+
+### October 15 local seed-admission receipt producer gap
+
+R8 isolated runs `1792046695-2672197-85783` and
+`1792046697-2672512-32743` failed canonical fixture admission before application
+services or benchmark tasks started. Both retained `not_started` benchmark
+journals and authentic stack-owner identities, but no stack cleanup receipt.
+Read-only native inspection found both controllers and stack owners absent,
+no exact-run process ownership matches (178 processes read, zero permission
+denials), no listeners in either isolated range, and neither exact isolated
+database nor corresponding PostgreSQL session. These observations do not
+reconstruct historical receipts or change either failed outcome.
+
+The critical path is `required canonical seed miss -> fail_required_seed_dump
+-> bootstrap database cleanup -> exit 1 -> seed-lock-only EXIT trap -> strict
+stop_services receipt read`. The full service cleanup trap is installed later.
+The producer therefore omitted its stack acknowledgement even after successful
+bootstrap cleanup. This is the producer-side relative of the existing receipt
+family; the consumer must continue rejecting absent or unauthenticated receipts.
+Archive searches used `local-stack-cleanup.status missing cleanup receipt
+canonical fixture` and `bootstrap early exit EXIT trap isolated database leaked`;
+the pre-stack recovery and orphaned-backend cases were leads, not substitutes
+for this reproduction.
+
+The existing registered lifecycle suite now executes a byte-identical copy of
+actual `run.sh` through the native cache-miss path. Only external PostgreSQL,
+Docker discovery, socket discovery, and cache executables are faked in a
+secret-free temporary workspace. The original bash PID, native birth, wall
+birth, token, receipt writer, and `stop_services` receiver remain real. The same
+command failed before with `cleanup receipt is missing or unsafe` and passes
+after with exit 1 still required from bootstrap:
+
+```sh
+agents/venv/bin/python -m pytest agents/benchmarks/local_lifecycle_test.py -q -k 'after_seed_bootstrap_miss or after_seed_cleanup_failure'
+```
+
+Before: 1 failed, 1 passed; after: 2 passed. Private logs are
+`.context/bootstrap-receipt-before.log` and `.context/bootstrap-receipt-after.log`.
+The owner now invokes the existing native receipt writer on required-seed
+admission failure only after checking database teardown and releasing its owned
+seed lock. Failed database or lock teardown publishes failed state, never clean.
+Docker teardown addresses the captured immutable container ID and retains
+ownership on teardown errors. No receiver, trap layout, startup exit code,
+benchmark definition, timeout, or historical receipt changes.
+
+Six focused owning tests pass, including wrong token/native identity, missing
+receipt, failed database/lock cleanup, Docker teardown errors, and the existing
+native writer/strict receiver controls. New lifecycle test names include the
+existing canonical selector `driver_cleanup_requires_current_stack_receipt_on_normal_completion`,
+so normal deploy registration discovers them without a new suite. The original
+R8 failures retain no acceptance credit. Parent review and fresh full deploy
+qualification remain pending; these local tests do not claim benchmark success.
+
+
+#### Independent-review correction: uncertain seed-lock reads
+
+The first isolated candidate still treated shell `readlink` I/O failure as
+absence. Independent review reproduced an authenticated clean receipt with the
+original owner's lock retained. A new registered native-bootstrap control,
+`after_seed_readlink_error`, injects only the external readlink fault (no removal
+failure). It fails on candidate A with `state=clean` and passes on v2 with
+`state=failed`, preserving bootstrap exit 1 and the strict consumer.
+
+The residual observation now uses native `os.readlink`: only ENOENT proves
+absence; a successful read of another positive PID proves foreign ownership.
+Retained ownership, EIO, EACCES, malformed ownership, and observer failure cannot
+clear the held marker or authorize clean publication. Separate temporary native
+fault controls prove absence, foreign ownership, retained own lock, EIO,
+permission failure, and EIO even when the path happens to be absent. Eight
+focused tests pass. The exact new readlink control fails before and passes after
+without changed assertions; v2 logs are `.context/bootstrap-receipt-v2-before.log`,
+`.context/bootstrap-receipt-v2-after.log`, and
+`.context/bootstrap-receipt-v2-controls.log`.
+
+Registration belongs to Step 4s's existing `benchmark-live-results.test.py`
+compact registry, not Step 4cb's separate file list. Collect-only with that
+registry's actual selector includes all six new seed tests; proof is
+`.context/bootstrap-receipt-v2-collection.log`. No registration edits were needed.
+Candidate A's frozen patch, manifest, and evidence remain unchanged. V2 remains
+an isolated draft pending independent review and full deploy qualification.
+
+
+#### PR1522 review 4280661029: an already-absent container stranded its volume
+
+At exact source `849bea2ca2d5b3bcb0ad79a92fcb11b10bba82e1`, bootstrap cleanup
+returned immediately when `docker rm -f` failed for the captured immutable
+container ID. A legitimately absent container therefore prevented any attempt
+to remove its still-owned volume. The native receipt correctly reported failed
+cleanup, but retry could not make progress through this owner-side boundary.
+
+The new existing-suite regression extracts the actual unchanged `run.sh`
+bootstrap functions and invokes the actual native receipt writer and unchanged
+`stop_services` consumer. Only the Docker boundary is faked. The bash owner PID,
+OS-native birth, wall birth, owner journal and token remain real. The original
+source fails `after_seed_absent_container`: its sole Docker operation is the
+immutable-ID removal, the owned volume remains, and its authentic receipt is
+failed. The same assertion passes after the fix: volume removal is attempted,
+the volume is gone, and the unchanged consumer accepts the authentic clean
+cleanup receipt. Bootstrap still exits 1, with no service manifest or task start.
+
+After a removal failure, the owner now requires a successful all-states Docker
+query filtered by the full 64-character immutable ID and empty output before
+continuing to its volume. It never queries or deletes a mutable container name.
+The corresponding already-absent volume path requires successful empty output
+from its owned-name-filtered native query. Because name filters can include
+partial matches, any returned volume conservatively prevents an absence claim;
+there is no removal of returned or foreign volumes. Successful command completion
+is mandatory: daemon, permission, read/API errors and inconclusive output cannot
+certify absence. Original ownership remains on failure.
+
+Primary semantics: Docker documents `--all` as including stopped containers,
+`id` as the container-ID filter and `--no-trunc` as retaining full IDs in its
+[container listing reference](https://docs.docker.com/reference/cli/docker/container/ls/).
+Its [volume listing reference](https://docs.docker.com/reference/cli/docker/volume/ls/)
+documents name filtering. These successful native queries distinguish proven
+absence from an arbitrary nonzero removal or inspection result; error-message
+text is not used as absence proof.
+
+The existing Step 4s compact registry selects both new tests through
+`driver_cleanup_requires_current_stack_receipt_on_normal_completion`. All prior
+eight focused tests plus the two new tests pass (10 total); the inverse test
+exercises ten native receipt scenarios, including removal failure, failed or
+foreign-result probes, unknown ID, volume failure and an already-absent volume.
+Private proof and logs use `.context/bootstrap-absent-container-*`. The detached
+candidate changes only `run.sh`, the existing lifecycle tests and this append.
+Parent R10 source, processes, databases, providers and historical failed runs
+remain untouched. No native-recipe trust registration is changed; parent must
+review the resulting composite recipe and rerun deployment gates. Local causal
+proof does not imply a benchmark or deployment PASS.

@@ -1,3 +1,7 @@
+import {
+  testSendUserMessage_rejectsEmojiOnlySms,
+  testSmsQuotedReplies,
+} from './sms-supervisor.reply.behavior';
 import type { PrismaClient } from '@prisma/client';
 import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
@@ -143,7 +147,7 @@ export async function testSendUserMessage_continuesUntilSubstantiveResult(prisma
     });
     if (assistantMessages[0] !== progress || assistantMessages[1] !== result) {
       throw new Error(
-        `Expected progress then substantive result in one run, got ${JSON.stringify(assistantMessages)}`
+        `Expected only progress then substantive result in one run, got ${JSON.stringify(assistantMessages)}`
       );
     }
   } finally {
@@ -592,6 +596,10 @@ export async function testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma: Pr
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
     {
+      name: 'send -- SMS quotes current, earlier, sent, and legacy messages once',
+      fn: () => testSmsQuotedReplies(prisma),
+    },
+    {
       name: 'send -- prompt and schemas teach complete-body SMS limit and correction',
       fn: async () => testSmsMessageLimit_isTaughtOnEverySupervisorPromptSurface(),
     },
@@ -622,6 +630,10 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'send -- progress SMS continues to a later substantive result',
       fn: () => testSendUserMessage_continuesUntilSubstantiveResult(prisma),
+    },
+    {
+      name: 'send -- emoji-only SMS is rejected, substantive text with emoji is allowed',
+      fn: () => testSendUserMessage_rejectsEmojiOnlySms(prisma),
     },
     {
       name: 'send -- identical send_user_message body is delivered once',
