@@ -246,6 +246,47 @@ def test_build_codex_credential_feedback_preserves_fallback_order():
     ]
 
 
+def test_codex_feedback_captures_funding_errors_from_native_events():
+    """Native funding failures survive structured feedback for either key source."""
+    from domains.spawn_claude_code_agent.service import build_codex_credential_feedback
+
+    fallback = {
+        "provider": "codex", "type": "auth_fallback", "reason": "oauth_refresh_invalid"
+    }
+    for message in (
+        "You have no credits remaining.",
+        "Add credits to continue.",
+        "credit_balance_exhausted",
+        "Your credit balance is too low.",
+    ):
+        for nested in (False, True):
+            error = {"provider": "codex", "type": "error"}
+            error.update({"error": {"message": message}} if nested else {"message": message})
+            assert build_codex_credential_feedback([error]) == [
+                {"source": "initial", "reason": message}
+            ]
+            assert build_codex_credential_feedback([fallback, error]) == [
+                {"source": "oauth", "reason": "oauth_refresh_invalid"},
+                {"source": "funded_api_key", "reason": message},
+            ]
+
+
+def test_codex_feedback_ignores_printed_funding_text():
+    """Only native Codex error events can authorize a funding cooldown."""
+    from domains.spawn_claude_code_agent.service import build_codex_credential_feedback
+
+    for kind in ("command_execution", "tool_result", "agent_message", "output"):
+        assert build_codex_credential_feedback([
+            {"provider": "codex", "type": kind, "message": "no credits remaining"}
+        ]) == []
+    assert build_codex_credential_feedback([
+        {"provider": "claude", "type": "error", "message": "no credits remaining"}
+    ]) == []
+    assert build_codex_credential_feedback([
+        {"provider": "codex", "type": "error", "message": "disk quota exceeded"}
+    ]) == []
+
+
 def test_verifier_activity_timeout_allows_llm_call():
     """Claude Code verifier uses the standard LLM activity budget."""
     from domains.spawn_claude_code_agent.service import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
@@ -3636,6 +3677,8 @@ async def _run_all_tests():
         "codex_credential_feedback_order",
         test_build_codex_credential_feedback_preserves_fallback_order,
     )
+    r.record("codex_feedback_native_funding", test_codex_feedback_captures_funding_errors_from_native_events)
+    r.record("codex_feedback_printed_funding", test_codex_feedback_ignores_printed_funding_text)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)

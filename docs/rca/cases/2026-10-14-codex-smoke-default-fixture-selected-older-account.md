@@ -21,6 +21,9 @@ sources:
   - task WhatsApp media RCA deployment backend coverage
   - task backend coverage run 1792015377-10564-17238
   - task local Codex retry run 1792016300-290025-5874
+  - task messaging deploy run 20261014-231005-489109
+  - task local ClaudeCodeSession 6303ae33-d6ca-4b11-b3fe-a02fad90b1b0
+  - task .context/deploy-backend-coverage-r3.log
 repro: back-end/src/tests/blackbox/codex-code.blackbox.ts
 status: mitigated
 ---
@@ -69,3 +72,132 @@ None recorded.
 ## Reusable lesson
 
 Bind a live credential gate and its seed helper to the same explicit isolated account authority before interpreting a failure from a shared multi-account fixture.
+
+
+## Concurrent messaging deployment verification
+
+Consolidated the independently written `2026-10-14-codex-smoke-selected-old-seeded-account` case after main sync exposed the same selected account and fixture boundary. Its full local evidence follows; the companion permanent credential-feedback repair remains a separate product defect.
+
+### Problem
+
+The local backend coverage gate exited 1: 194 API domains passed and two failed.
+The independent Rose native-schema failure has its own existing case. The Codex
+real E2B smoke created a sandbox but its ChatGPT OAuth request returned
+`token_revoked` and `refresh_token_invalidated`. Its existing funded OpenAI
+fallback then reported `no credits remaining`. The registered smoke correctly
+failed without its completion sentinel; it was not an all-funding skip.
+
+The failed coverage command was the unchanged `npm run test:coverage`, launched
+with the documented four blackbox and four unit workers. Its original artifacts
+are retained under
+`.context/test-runs/backend-coverage-failed-20261014-232329-525786/`.
+
+### Diagnosis
+
+Path: canonical local credential sync -> default founder fixture with several
+ChatGPT accounts -> `fetchGptCodeCredentialsWithMeta` least-recently-used
+selection -> older seeded account -> provider revocation -> funded-key
+exhaustion -> strict smoke failure.
+
+The exact failed session `6303ae33-d6ca-4b11-b3fe-a02fad90b1b0` selected integration
+`933aef3b-5183-4c86-a595-4a2076187496`, whose last successful sync was October 8.
+Its account differs from the account imported from the current local auth file.
+The current import was integration `a74f080d-b87a-4ab2-a8c6-c13579e7f5f8`, synced
+on October 14. The native sandbox was `ivlwqv12potgprm1p6qut`; its session is
+CLOSED. Its captured output is 5,805 characters / 5,807 UTF-8 bytes and contains
+revocation before funding exhaustion, with no `CODEX_E2B_DONE`.
+
+`sync-codex-token.ts` deliberately retires superseded copies of the same account
+and legacy empty-account rows, preserving other accounts. `gptCredentials.ts`
+selects eligible user integrations by least-recently-used order. Importing a
+fresh credential therefore did not bind the founder smoke to that authority.
+File presence and nominal expiry alone did not establish authorization; the
+successful real sandbox run below did.
+
+Archive searches used `Codex no credits remaining smoke` and
+`funded key OAuth revoked exhaustion skip`. The September 27 authoritative-auth
+configuration case is a relative; this host had an auth file and the committed
+wrapper was overlaid. The October 1 credit-mask bug is not recurring:
+`codexSmokeCreditSkipReason` correctly refused to hide revoked OAuth behind a
+later funding error. The existing mixed-revocation/funding regression and a
+safe local replay both returned no skip. Tokens, encrypted envelopes, and
+private account claims were not printed.
+
+### Solution
+
+Use the supported fixture configuration to bind the real Codex smoke to an
+isolated UUID user containing only the current local authority:
+
+```bash
+export CODEX_TOKEN_USER_ID=<isolated UUID>
+export CODEX_BLACKBOX_USER_ID="$CODEX_TOKEN_USER_ID"
+export CODEX_AUTH_PATH=/home/boxes/.codex/auth.json
+cd back-end
+bash scripts/run-blackbox-tests.sh codex-code
+```
+
+The canonical runner still syncs and encrypts the real credential, creates a
+real E2B sandbox, executes the unchanged task, checks the actual completion and
+output-file sentinels, and closes the sandbox. No credential or API fallback
+policy, assertion, timeout, classifier, or product integration was changed.
+The UUID is stored privately in `.context/deploy-codex-auth.env` for this deploy.
+Production and other accounts are untouched.
+
+The corrected fixture completed at
+`.context/test-runs/1792020736-868664-28621/`: **27 passed, 0 failed, 0 skipped**;
+the domain took 34.674 seconds. This proves the current authority can serve the
+real smoke, without reauthentication or a gate override. An intermediate trial
+used a non-UUID fixture ID and was rejected by request validation before sandbox
+creation; its artifacts remain under `1792020689-860427-28505` and prove no
+provider outcome.
+
+The complete backend coverage gate subsequently passed with this explicit
+fixture binding: 197/197 API domains, all 270 unit files, 89.61% line coverage,
+and both normal-exit and SIGTERM backend retirement checks. Durable stage output
+is `.context/deploy-backend-coverage-r3.log`. The older account's provider
+authorization remains separate; its observed revocation feedback is repaired
+and covered by the companion permanent-revocation case. Remaining deployment
+lanes are tracked by the deploy run, rather than by this fixture repair.
+
+### Human feedback
+
+The user requested deployment of messaging reactions and replies. No credential
+skip or gate override was approved. An async reauthentication/override question
+was raised before the selected-credential identity was established; it became
+unnecessary after the current authority passed and the user was told to ignore
+it.
+
+### Reusable lesson
+
+Bind credential smoke tests to their declared local authority before treating a
+revoked account chosen from a mixed production seed as proof that the current
+login needs reauthentication.
+
+## October 15 deploy-runner authority scope follow-up
+
+During PR1520 validation, the parent incorrectly sourced the backend-only
+`.context/deploy-codex-auth.env` from a shared test launcher used by agent
+coverage. The benchmark domain's two fixtures deliberately use a non-loopback
+source DSN; inherited explicit Codex authority correctly triggered
+`Explicit Codex auth requires an isolated loopback database`. The guard and the
+fixtures were correct. This is another fixture-authority configuration error,
+not evidence that the credential or production selection path failed.
+
+Archive searches were `Explicit Codex auth requires an isolated loopback database`,
+`fixture-authority`, and `CODEX_TOKEN_USER_ID`; this existing configuration-error
+case owns the follow-up. The failed receipt is
+`.context/deploy-agents-coverage-r6.log`:109/110 domains passed; the benchmark
+domain failed `compute_token_explicit_prod_source` and
+`compute_token_source_contract`. The parent's ignored launcher was corrected
+to scope Codex authority to backend coverage only. The agent lane reran with
+`CODEX_TOKEN_USER_ID`, `CODEX_BLACKBOX_USER_ID`, and `CODEX_AUTH_PATH` removed
+from that command's environment. Backend coverage retained its legitimate
+isolated authority. No production code, fixture assertion, credential, gate,
+or database-safety guard was changed to resolve this launch error.
+
+`.context/deploy-agents-coverage-r6b.log` records the unchanged full agent suite
+passing110/110 domains and82% coverage after the environment correction.
+The same source's backend suite independently passed197/197 domains and271 unit
+files at89.62% line coverage, including its real current-authority Codex smoke.
+These runs establish the scope correction; the original credential-selection
+incident and its mitigation below remain unchanged.

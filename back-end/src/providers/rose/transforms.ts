@@ -319,6 +319,7 @@ function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
   const hasNullBranch = branches.some((b) => b && typeof b === 'object' && b.type === 'null');
   if (!valueBranch || !hasNullBranch) return null;
 
+  // Optional(nullable(T)) produces nested wrappers; collapse every layer.
   const merged: JsonSchema = { ...(unwrapNullableUnion(valueBranch) ?? valueBranch) };
   // The description hangs off the union wrapper, not the value branch, so
   // collapsing without it would silently drop the model-facing field docs.
