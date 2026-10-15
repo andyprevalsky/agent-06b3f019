@@ -3429,6 +3429,96 @@ async def test_workflow_failed_rejection_intake_does_not_release_waiter():
     await _assert_keyed_rejection_waiter_orders_feedback(poll_fails=True)
 
 
+def _rejection_poll_activity_error(cause=None):
+    from temporalio.exceptions import ActivityError, ApplicationError, RetryState
+
+    error = ActivityError("durable USER poll exhausted retries", scheduled_event_id=11, started_event_id=12,
+                          identity="test-worker", activity_type="poll_new_messages", activity_id="poll-user-input",
+                          retry_state=RetryState.MAXIMUM_ATTEMPTS_REACHED)
+    error.__cause__ = cause or ApplicationError("message store unavailable", type="MessageReadUnavailable")
+    return error
+
+
+async def _exercise_rejection_poll_failure_custody(*, existing_feedback):
+    wf, fake, _ = _user_schema_refresh_fixture()
+    wf._response_schema_initialized = False
+    request_id = "poll-unavailable-rejection"
+    correction = {"id": "deferred-rejection-input", "role": "USER", "text": "  Keep the shared account.\nReturn venue prices.  ",
+                  "timestamp": "2026-10-15T01:01:00Z",
+                  "metadata": {"source": "attention_response", "attentionRequestId": request_id}}
+    wf.context = ([{"id": "goal", "role": "USER", "text": wf.goal, "timestamp": "2026-10-15T01:00:00Z"}, correction]
+                  if existing_feedback else [])
+    original_context = list(wf.context)
+    fake.activity_returns["poll_new_messages"] = [correction]
+    native_execute = fake.execute_activity
+    fail_poll = True
+
+    async def execute(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "poll_new_messages" and fail_poll:
+            fake.activity_calls.append(("poll_new_messages", args))
+            raise _rejection_poll_activity_error()
+        return await native_execute(fn, args=args, **kwargs)
+
+    fake.execute_activity = execute
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response(json.dumps({"request_id": request_id, "response": "__REJECTED__"}))
+        assert wf._signal_responses[request_id] == "__REJECTED__", "exhausted optional read lost the request-scoped rejection"
+        assert wf.context == original_context, "failed read fabricated or rewrote a USER row"
+        assert wf._response_schema_feedback == ([correction["text"]] if existing_feedback else []), (
+            "failed read lost already-known authored input or invented unavailable feedback"
+        )
+        assert wf._response_schema_revision == (1 if existing_feedback else 0)
+        assert not any(name == "post_agent_message" for name, _args in fake.activity_calls)
+        fail_poll = False
+        await wf._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+        await wf._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
+        assert wf._response_schema_feedback == [correction["text"]]
+        assert wf._response_schema_revision == 1, "later successful polling repeated or lost the deferred authored event"
+        assert sum(row.get("id") == correction["id"] for row in wf.context) == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_rejection_activity_read_failure_preserves_known_feedback_and_response():
+    await _exercise_rejection_poll_failure_custody(existing_feedback=True)
+
+
+async def test_workflow_rejection_activity_read_failure_defers_unknown_feedback_once():
+    await _exercise_rejection_poll_failure_custody(existing_feedback=False)
+
+
+async def test_workflow_rejection_read_does_not_swallow_cancellation_or_generation_fence():
+    from temporalio.exceptions import ApplicationError, CancelledError as TemporalCancelledError
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    for failure in (asyncio.CancelledError(), WorkflowGenerationSealed("replaced generation"),
+                    GenerationHandoffRequested("replacement-queue"),
+                    _rejection_poll_activity_error(TemporalCancelledError("poll was cancelled")),
+                    _rejection_poll_activity_error(ApplicationError("replaced generation", type="WorkflowGenerationSealed")),
+                    _rejection_poll_activity_error(ApplicationError("handoff requested", type="GenerationHandoffRequested"))):
+        wf, fake, _ = _user_schema_refresh_fixture()
+        wf._response_schema_initialized = False
+
+        async def execute(fn, args=None, **kwargs):
+            raise failure
+
+        fake.execute_activity = execute
+        original = _patch_workflow(fake)
+        try:
+            try:
+                await wf.receive_user_response(json.dumps({"request_id": "cancelled-rejection", "response": "__REJECTED__"}))
+            except BaseException as observed:
+                assert observed is failure, "lifecycle failure was replaced with another error"
+            else:
+                raise AssertionError("cancelled or fenced poll falsely published a successful rejection intake")
+            assert "cancelled-rejection" not in wf._signal_responses
+            assert wf.context == [] and wf._response_schema_feedback == []
+        finally:
+            _restore_workflow(original)
+
+
 async def test_workflow_schema_requirements_preserve_distinct_durable_reversions():
     wf, fake, _replacement = _user_schema_refresh_fixture()
     rows = [
@@ -10835,6 +10925,9 @@ async def run_all_tests():
     await r.record_async("wf_keyed_rejection_durable_feedback", test_workflow_keyed_rejection_polls_durable_user_feedback_without_schema_narration)
     await r.record_async("wf_keyed_rejection_waiter_after_feedback", test_workflow_keyed_rejection_waiter_releases_after_feedback_admission)
     await r.record_async("wf_failed_rejection_intake_keeps_waiter", test_workflow_failed_rejection_intake_does_not_release_waiter)
+    await r.record_async("wf_rejection_activity_failure_known_feedback", test_workflow_rejection_activity_read_failure_preserves_known_feedback_and_response)
+    await r.record_async("wf_rejection_activity_failure_deferred_feedback", test_workflow_rejection_activity_read_failure_defers_unknown_feedback_once)
+    await r.record_async("wf_rejection_read_lifecycle_fences", test_workflow_rejection_read_does_not_swallow_cancellation_or_generation_fence)
     await r.record_async("wf_schema_durable_reversions", test_workflow_schema_requirements_preserve_distinct_durable_reversions)
     await r.record_async("wf_attention_row_before_signal_event_identity", test_workflow_attention_row_before_signal_is_one_requirement_event)
     await r.record_async("wf_attention_signal_distinct_identical_row", test_workflow_attention_signal_does_not_consume_another_identical_event_row)

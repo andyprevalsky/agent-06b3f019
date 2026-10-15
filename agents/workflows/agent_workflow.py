@@ -19,6 +19,7 @@ import structlog
 import structlog.contextvars
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 # Import pass-through for workflow context:
@@ -124,7 +125,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_fetch import web_fetch
     from tools.web_search import web_search
     from utils.attention_requests import REJECTION_SENTINEL
-    from utils.error_utils import extract_error_message
+    from utils.error_utils import error_chain_has_type, extract_error_message
     from utils.format_tool_display import format_tool_display
     from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
     from utils.prompts import (
@@ -1593,7 +1594,14 @@ class AgentWorkflow:
             default=datetime.fromtimestamp(0, tz=timezone.utc),
         )
         last_checked = max(datetime.fromtimestamp(0, tz=timezone.utc), last_checked - timedelta(milliseconds=1))
-        await self._poll_messages(last_checked)
+        try:
+            await self._poll_messages(last_checked)
+        except ActivityError as error:
+            if any(error_chain_has_type(error, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
+            workflow.logger.warning(f"Rejection feedback poll failed; retaining received input: {error}")
         self._admit_durable_response_schema_feedback()
 
     @workflow.signal

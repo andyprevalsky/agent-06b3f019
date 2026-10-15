@@ -259,6 +259,65 @@ repair. Scoped lint, compilation and diff checks pass. This is a related
 fresh-task admission boundary, not a reclassification of the original Calendar
 incident as a root rejection failure.
 
+## October 15 follow-up: exhausted rejection reads must retain known input
+
+Substantive review 5538604849 on immutable PR #1511 source
+`4955bbc90c6f27e4e21baf9c3b70bbc37b1547c0`, discussion 4287248194, identified
+an uncaught activity-read failure in legacy rejection intake. The actual
+`receive_user_response` receiver awaited `_receive_rejection_schema_feedback`,
+which awaited `_poll_messages` before admitting already-known context rows.
+An exhausted `ActivityError` escaped before `_signal_responses[request_id]`
+was assigned. Thus a failed supplemental read could suppress the rejection
+response and skip an actual USER correction already present in context.
+
+The new permanent cases reproduce that receiver-to-activity boundary with a
+real Temporal `ActivityError` marked `MAXIMUM_ATTEMPTS_REACHED`. Both the
+already-known-input case and empty-context case fail on frozen 4955 with
+`durable USER poll exhausted retries`. The repair catches only that activity
+failure, logs it, and runs the existing durable admission operation before the
+receiver publishes the rejection. It does not invent missing feedback. The
+existing later polling path admits a previously unavailable row exactly once;
+the test executes it twice to prove source deduplication.
+
+Cancellation and generation control remain errors. The existing cause-chain
+utility recognizes direct or serialized application-error type names through
+Temporal wrappers, and cancellation, sealed generations and handoff causes
+are re-raised unchanged. Direct workflow RuntimeError remains outside this
+catch; the earlier failed-intake waiter assertion is unchanged. The six lifecycle
+controls require identical raised errors and no falsely published response.
+This is an additional read-failure branch of the existing rejection-admission
+case, not evidence that the Calendar incident failed with ActivityError.
+No handler, backend, new poll, retry mechanism, fabricated USER/TOOL turn,
+provider setting, score, or budget changed.
+
+The three new cases are registered in the normal owning workflow runner.
+Exact baseline command from `agents/` with the existing venv activated:
+
+```bash
+python /home/boxes/rose/.context/rca-ae17b024/run-selected-native-blackboxes.py --root .. --baseline 4955bbc90c6f27e4e21baf9c3b70bbc37b1547c0 --runtime workflows.agent_workflow workflow test_workflow_rejection_activity_read_failure_preserves_known_feedback_and_response test_workflow_rejection_activity_read_failure_defers_unknown_feedback_once test_workflow_rejection_read_does_not_swallow_cancellation_or_generation_fence test_workflow_failed_rejection_intake_does_not_release_waiter
+```
+
+The unchanged final fixture yields two causal failures and passing lifecycle
+and direct RuntimeError controls. Repeating without `--baseline` and its value
+passes all four; the three existing successful intake/order cases also pass.
+Before/after evidence is retained in `root-rejection-poll-before.log` and
+`root-rejection-poll-after.log` in the local RCA evidence directory. Archive
+searches used `rejection poll failure response schema ActivityError` and
+`request scoped waiter signal response durable context feedback`; this case
+was the closest lead and owns the same admission boundary. Its native durable
+admission and later `_poll_messages` are the direct implementation standard;
+no second transport or external schema-generation analog is introduced.
+
+The final full owning command `python scripts/run_blackbox_tests.py workflow
+workflow_determinism` passes both domains with zero failures in 43.0s, retained
+in `.context/root-rejection-poll-full-owning.log` in the isolated worktree.
+Scoped Ruff, compilation, diff and 874-case archive checks pass. Independent
+read-only review of the complete delta is clean. Prompt and trajectory guards
+pass; the incremental agent-behavior guard flags the recovery change without
+any approval or override supplied. The exact scoped snapshot is handed to the
+same PR #1511 owner for the consolidated required decision and final release;
+no paid probe, shared service/database change, merge or deployment ran here.
+
 ## Human feedback
 
 The user asked to follow the root standard and implement missing support there,
