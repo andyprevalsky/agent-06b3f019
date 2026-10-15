@@ -203,6 +203,7 @@ class LanternConfig:
 
     api_url: str = "https://people.lantern.md"
     api_token: str = field(default="", repr=False)
+    credential_broker_url: str = field(default="", repr=False)
 
 
 @dataclass
@@ -374,6 +375,7 @@ def load_config() -> AppConfig:
         lantern=LanternConfig(
             api_url=os.getenv("PEOPLE_API_URL", "https://people.lantern.md"),
             api_token=os.getenv("PEOPLE_API_TOKEN", ""),
+            credential_broker_url=os.getenv("PEOPLE_CREDENTIAL_BROKER_URL", ""),
         ),
         health_check_port=int(os.getenv("HEALTH_CHECK_PORT", "8082")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

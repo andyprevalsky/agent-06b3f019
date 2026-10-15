@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import structlog
 from temporalio import activity
@@ -23,6 +24,27 @@ if TYPE_CHECKING:
     from tools.people_search.types import PeopleSearchResult, PersonResult
 
 logger = structlog.get_logger()
+
+
+def _credential_broker_origin(value: str) -> str:
+    """Validate the separate credential authority before sending machine auth."""
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or "?" in value
+            or "#" in value
+            or "\\" in value
+            or any(character.isspace() or ord(character) < 32 for character in value)
+            or parsed.port == 0
+            or parsed.netloc.endswith(":")
+        ):
+            raise lantern_error("INVALID_CREDENTIAL_BROKER_ORIGIN")
+    except ValueError:
+        raise lantern_error("INVALID_CREDENTIAL_BROKER_ORIGIN") from None
+    return validate_api_origin(value)
 
 
 def clamp_discover_limit(limit: Any) -> int:
@@ -152,9 +174,11 @@ async def execute_people_search(
     async with asyncio.timeout(HTTP_TIMEOUT):
         origin = validate_api_origin(app_config.lantern.api_url)
         token = app_config.lantern.api_token
-        if not token:
+        broker_url = getattr(app_config.lantern, "credential_broker_url", "").strip()
+        broker_origin = _credential_broker_origin(broker_url) if broker_url else None
+        if broker_origin or not token:
             origin, token = await fetch_lantern_connection(
-                backend_url=app_config.backend.api_url,
+                backend_url=broker_origin or app_config.backend.api_url,
                 backend_api_key=app_config.backend.api_key,
                 user_id=user_id,
                 expected_origin=origin,

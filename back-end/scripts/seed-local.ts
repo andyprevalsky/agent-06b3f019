@@ -511,17 +511,19 @@ async function syncIntegrations(options: SyncIntegrationsOptions = {}): Promise<
   // Compute overlays omit agentcard so local agentcard-setup reset/complete fixtures hold.
   activeRemotePoolIntegrationIds.clear();
   const computeTokensOnly = options.computeTokensOnly === true;
-  // Full seed imports every Integration for the user. Compute-token overlays
-  // must stay scoped to claude_code/gpt_code (+ the shared compute pool).
+  // Rotating Lantern grants stay with their dedicated owner, never a seed replica.
+  // Compute overlays remain scoped to claude_code/gpt_code (+ the shared pool).
   const userIntegrations = await findProdIntegrations(
     computeTokensOnly
       ? { userId: SEED_USER_ID, name: { in: [...COMPUTE_INTEGRATION_NAMES] } }
-      : { userId: SEED_USER_ID }
+      : { userId: SEED_USER_ID, name: { not: 'lantern_people' } }
   );
   const poolIntegrations = await findProdIntegrations({
     poolingEnabled: true,
     userId: { not: SEED_USER_ID },
-    ...(computeTokensOnly ? { name: { in: [...COMPUTE_INTEGRATION_NAMES] } } : {}),
+    ...(computeTokensOnly
+      ? { name: { in: [...COMPUTE_INTEGRATION_NAMES] } }
+      : { name: { not: 'lantern_people' } }),
   });
   const previouslyPooledLocalIntegrations = await local.integration.findMany({
     where: {

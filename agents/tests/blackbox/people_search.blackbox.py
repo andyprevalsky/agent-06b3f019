@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -554,6 +555,183 @@ async def test_nested_malformed_native_profiles_are_typed_nonretryable_errors():
     assert not violations, "Malformed nested profiles escaped the typed boundary: " + "; ".join(violations)
 
 
+async def _run_with_broker_env(broker="", *, token="", **kwargs):
+    """Use real config/activity; only environment, heartbeat and external IO are fixtures."""
+    from tools.people_search.handler import people_search_activity
+
+    required = (
+        "TEMPORAL_API_KEY",
+        "TEMPORAL_NAMESPACE",
+        "TEMPORAL_ADDRESS",
+        "TEMPORAL_TASK_QUEUE",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "GEMINI_API_KEY",
+        "BROWSERBASE_API_KEY",
+        "BROWSERBASE_PROJECT_ID",
+    )
+    env = {key: "offline-broker-fixture" for key in required}
+    env.update(
+        {
+            "BACKEND_API_URL": "http://localhost:3001",
+            "BACKEND_API_KEY": "private-machine-key",
+            "PEOPLE_API_URL": "https://people.lantern.md",
+            "PEOPLE_API_TOKEN": token,
+            "PEOPLE_CREDENTIAL_BROKER_URL": broker,
+        }
+    )
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("config._dotenv_loaded", True),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        return await people_search_activity(
+            query="engineer", mode="discover", user_id="trusted-workflow-user", **kwargs
+        )
+
+
+def _install_broker_transport(*, broker_status=200, expected_token="broker-access-token"):
+    import httpx
+
+    teardown_mock()
+    wire = []
+
+    def upstream(request):
+        host = request.url.host
+        wire.append((host, request.url.path, request.method))
+        if request.url.path == "/api/integrations/lantern-people/credentials/token":
+            assert request.headers["x-user-id"] == "trusted-workflow-user"
+            assert request.headers["x-api-key"] == "private-machine-key"
+            if host == "localhost":
+                return httpx.Response(404, json={"code": "LANTERN_NOT_CONNECTED"})
+            assert host == "credential-broker.example.test"
+            if broker_status != 200:
+                return httpx.Response(
+                    broker_status,
+                    json={
+                        "code": "LANTERN_REFRESH_IN_PROGRESS" if broker_status == 503 else "LANTERN_NOT_CONNECTED",
+                        "details": {"retryAfterSeconds": 2},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "apiUrl": "https://people.lantern.md",
+                    "accessToken": "broker-access-token",
+                },
+            )
+        assert host == "people.lantern.md"
+        assert request.url.path == "/v1/operations/find_people"
+        assert request.headers["authorization"] == "Bearer " + expected_token
+        assert "x-api-key" not in request.headers
+        return httpx.Response(200, json={"ok": True, "data": {"people": _people(1)}})
+
+    setup_mock_fn(upstream)
+    return wire
+
+
+async def test_explicit_broker_uses_central_authority_with_actual_activity_config():
+    wire = _install_broker_transport()
+    failure = None
+    try:
+        result = await _run_with_broker_env("https://credential-broker.example.test")
+    except Exception as error:
+        failure = error
+    assert wire == [
+        ("credential-broker.example.test", "/api/integrations/lantern-people/credentials/token", "GET"),
+        ("people.lantern.md", "/v1/operations/find_people", "POST"),
+    ], f"Local broker used instead of configured central authority: {wire}; {failure}"
+    assert failure is None
+    assert result["provider_used"] == "lantern"
+    assert result["results"][0]["source"]["record_id"] == "record-0"
+    for secret in ("broker-access-token", "private-machine-key"):
+        assert secret not in json.dumps(result)
+        assert secret not in json.dumps(get_captured_requests())
+
+
+async def test_explicit_broker_overrides_static_bearer_without_fallback():
+    wire = _install_broker_transport()
+    result = await _run_with_broker_env("https://credential-broker.example.test", token="stale-direct-token")
+    assert result["provider_used"] == "lantern"
+    assert [host for host, _, _ in wire] == ["credential-broker.example.test", "people.lantern.md"]
+
+
+async def test_blank_broker_preserves_static_and_local_default_routes():
+    from temporalio.exceptions import ApplicationError
+
+    wire = _install_broker_transport(expected_token="direct-access-token")
+    result = await _run_with_broker_env("  ", token="direct-access-token")
+    assert result["provider_used"] == "lantern"
+    assert [host for host, _, _ in wire] == ["people.lantern.md"]
+    wire = _install_broker_transport()
+    try:
+        await _run_with_broker_env()
+    except ApplicationError as error:
+        assert "LANTERN_NOT_CONNECTED" in str(error)
+    else:
+        raise AssertionError("Blank broker must retain local backend credential selection")
+    assert [host for host, _, _ in wire] == ["localhost"]
+
+
+async def test_explicit_broker_errors_never_fall_back_and_keep_wait_hint():
+    from temporalio.exceptions import ApplicationError
+
+    for status in (503, 401, 404):
+        wire = _install_broker_transport(broker_status=status)
+        try:
+            await _run_with_broker_env("https://credential-broker.example.test", token="stale-direct-token")
+        except ApplicationError as error:
+            assert error.non_retryable
+            if status == 503:
+                assert error.details[0]["retryAfterSeconds"] == 2
+                assert "Wait" in error.message and "reconnect" not in error.message
+        else:
+            raise AssertionError("Explicit broker errors must propagate without local/static fallback")
+        assert [host for host, _, _ in wire] == ["credential-broker.example.test"]
+
+
+async def test_invalid_explicit_broker_rejects_before_any_auth_http():
+    from temporalio.exceptions import ApplicationError
+
+    for broker in (
+        "http://remote.example.test",
+        "https://user:private-url-secret@credential-broker.example.test",
+        "https://credential-broker.example.test/path",
+        "https://credential-broker.example.test/?key=private-url-secret",
+        "https://credential-broker.example.test/#private-url-secret",
+        "https://credential-broker.example.test:bad",
+        "https://credential-broker.example.test:65536",
+        "http://localhost:0",
+    ):
+        wire = _install_broker_transport()
+        try:
+            await _run_with_broker_env(broker, token="stale-direct-token")
+        except ApplicationError as error:
+            assert error.non_retryable
+            assert "private-url-secret" not in str(error)
+        else:
+            raise AssertionError("Invalid explicit broker must fail closed")
+        assert wire == [], "Invalid broker configuration disclosed auth via HTTP"
+        assert get_captured_requests() == []
+
+
+async def test_configured_broker_fast_mode_still_uses_zero_http():
+    wire = _install_broker_transport()
+    with patch("providers.fast_cache.client.soft_complete_allowed_for_agent", return_value=True):
+        result = await _run_with_broker_env(
+            "https://credential-broker.example.test",
+            token="stale-direct-token",
+            fast_mode_cache_enabled=True,
+            fast_mode_goal="cached goal",
+            agent_id="agent-1",
+        )
+    assert result["providers_attempted"] == []
+    assert result["_fast_cache_hit"] is True
+    assert wire == []
+    assert get_captured_requests() == []
+
+
 async def run_all_tests():
     print("people-search Lantern blackbox tests:")
     result = BlackboxResult()
@@ -580,6 +758,12 @@ async def run_all_tests():
         test_invalid_connection_stops_before_network,
         test_malformed_success_fails,
         test_nested_malformed_native_profiles_are_typed_nonretryable_errors,
+        test_explicit_broker_uses_central_authority_with_actual_activity_config,
+        test_explicit_broker_overrides_static_bearer_without_fallback,
+        test_blank_broker_preserves_static_and_local_default_routes,
+        test_explicit_broker_errors_never_fall_back_and_keep_wait_hint,
+        test_invalid_explicit_broker_rejects_before_any_auth_http,
+        test_configured_broker_fast_mode_still_uses_zero_http,
         test_manager_defaults_usage_criteria_and_entry_point,
         test_manager_reports_error,
     ):
