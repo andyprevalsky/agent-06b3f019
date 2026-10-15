@@ -45,6 +45,7 @@ import {
   resolveWebhookVerification,
   isStatusOnlyEvent,
 } from '../../domains/whatsapp-webhook/service.validation';
+import { createWhatsAppReactionReplyTests } from './whatsapp-webhook.reaction-reply.behavior';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -54,6 +55,15 @@ const CASE_CONCURRENCY = Number(
 const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? '';
 
 const prisma = new PrismaClient();
+const { testInbound_reactionPrecedesReply, testInbound_quotesEarlierIncomingAndSentMessages } =
+  createWhatsAppReactionReplyTests(prisma, {
+    BASE_URL,
+    request,
+    assertStatus,
+    assertEqual,
+    uniqueWaNumber,
+    inboundPayload,
+  });
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -621,6 +631,14 @@ async function runAll() {
           {
             name: 'POST /whatsapp/webhook -- media-only persists, routes, and deduplicates',
             fn: () => testInbound_mediaOnlyPersistsRoutesAndDeduplicates(prisma),
+          },
+          {
+            name: 'POST /whatsapp/webhook -- quote earlier incoming and sent messages',
+            fn: testInbound_quotesEarlierIncomingAndSentMessages,
+          },
+          {
+            name: 'POST /whatsapp/webhook -- native reaction precedes reply',
+            fn: testInbound_reactionPrecedesReply,
           },
           {
             name: 'POST /whatsapp/webhook -- new number provisions + routes to supervisor',

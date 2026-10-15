@@ -10,7 +10,10 @@ import { createLogger } from '../../providers/logger';
 import {
   markGptApiKeyOnCooldown,
   markGptIntegrationRateLimited,
+  markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
+
+import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -185,9 +188,55 @@ function parseCodexResetTime(output: string): Date | null {
     /try again at\s+([A-Z][a-z]{2}\s+\d{1,2}(?:st|nd|rd|th)?,\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))/i
   );
   if (match === null) return null;
-  const withoutOrdinal = match[1].replace(/(\d{1,2})(?:st|nd|rd|th)/i, '$1');
-  const parsed = new Date(`${withoutOrdinal} UTC`);
+  const parsed = new Date(`${match[1].replace(/(\d{1,2})(?:st|nd|rd|th)/i, '$1')} UTC`);
   return Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now() ? null : parsed;
+}
+
+function isRevokedCodexOAuth(reason: string): boolean {
+  return (
+    reason.trim() === 'oauth_refresh_invalid' ||
+    classifyComputeGrantFailure({ status: 401, body: reason }).verdict === 'revoked'
+  );
+}
+
+function isCodexExhaustion(reason: string): boolean {
+  const exhausted =
+    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing|no credits remaining|add credits to continue|credit_balance_exhausted|credit balance is too low/i;
+  return (
+    exhausted.test(reason) ||
+    classifyComputeGrantFailure({ status: 401, body: reason }).verdict === 'payment_required'
+  );
+}
+
+/** Read only native diagnostic records, retaining their JSON/indented continuations. */
+function legacyCodexDiagnostics(output: string): string[] {
+  if (output.trim() === 'oauth_refresh_invalid') return [output.trim()];
+  let commandOutput = false;
+  let diagnostic = false;
+  const lines: string[] = [];
+  for (const line of output.split('\n')) {
+    if (line.startsWith('[Codex command output]')) {
+      commandOutput = true;
+      diagnostic = false;
+    } else if (line.startsWith('[Codex exit_code]')) commandOutput = false;
+    else if (!commandOutput) {
+      const header =
+        /^\[Codex\] (?:Error|Turn failed):/.test(line) ||
+        /^\d{4}-\d{2}-\d{2}T\S+\s+ERROR\s+codex_login::auth\S*:\s+Failed to refresh token\b/.test(
+          line
+        );
+      const fallback =
+        line === '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key';
+      const continuation =
+        /^(?:\s+|[{}"\]]|invalid_grant\b|(?:invalid_)?refresh_token_\w+\b|Your session has ended\b)/i.test(
+          line
+        );
+      if (header || fallback) lines.push(line);
+      else if (diagnostic && continuation) lines[lines.length - 1] += `\n${line}`;
+      diagnostic = header || (diagnostic && continuation);
+    }
+  }
+  return lines;
 }
 
 async function detectAndMarkCodexExhaustion(
@@ -195,30 +244,26 @@ async function detectAndMarkCodexExhaustion(
   output: string,
   credentialFeedback?: CodexCredentialFeedback[]
 ): Promise<void> {
-  const exhaustionPattern =
-    /You've hit your usage limit|usage[ _]limit|usage_limit_reached|purchase more credits|Quota exceeded\.\s*Check your plan and billing details|insufficient[_ ]quota|check your plan and billing/i;
-  if (
-    credentialFeedback !== undefined
-      ? credentialFeedback.length === 0
-      : !exhaustionPattern.test(output)
-  ) {
-    return;
-  }
+  // A supplied structured list is authoritative, including no observed failures.
+  if (credentialFeedback?.length === 0) return;
 
   const session = await repo.findSessionById(taskId);
-  if (session === null) {
-    log.warn(`Codex credential exhaustion detected for unknown session ${taskId}`);
-    return;
-  }
+  if (session === null)
+    return log.warn(`Codex credential exhaustion detected for unknown session ${taskId}`);
 
   const hasOAuthCredential = (session.claudeTokenIntegrationId ?? '') !== '';
   let oauthReason = '';
+  let oauthRevoked = false;
   let fundedKeyReason = '';
 
   if (credentialFeedback !== undefined) {
     for (const feedback of credentialFeedback) {
       if (feedback.source === 'oauth' || (feedback.source === 'initial' && hasOAuthCredential)) {
-        oauthReason ||= feedback.reason;
+        const revoked = isRevokedCodexOAuth(feedback.reason);
+        if (revoked || !oauthReason) {
+          oauthReason = feedback.reason;
+          oauthRevoked = revoked;
+        }
       } else if (
         feedback.source === 'funded_api_key' ||
         (feedback.source === 'initial' && !hasOAuthCredential)
@@ -232,36 +277,57 @@ async function detectAndMarkCodexExhaustion(
     // which is not vulnerable to the 500-row terminal display bound.
     const fallbackMarker =
       '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key';
-    const fallbackIndex = output.indexOf(fallbackMarker);
-    const oauthSegment =
-      fallbackIndex >= 0 ? output.slice(0, fallbackIndex) : hasOAuthCredential ? output : '';
-    const fundedKeySegment =
-      fallbackIndex >= 0
-        ? output.slice(fallbackIndex + fallbackMarker.length)
-        : hasOAuthCredential
-          ? ''
-          : output;
-    if (exhaustionPattern.test(oauthSegment)) oauthReason = oauthSegment;
-    if (exhaustionPattern.test(fundedKeySegment)) fundedKeyReason = fundedKeySegment;
-  }
-
-  if (oauthReason !== '') {
-    const integrationId = session.claudeTokenIntegrationId ?? '';
-    if (integrationId === '') {
-      log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
-    } else {
-      const resetAt = parseCodexResetTime(oauthReason);
-      await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: resetAt });
-      log.warn(`Codex OAuth credential backed off for session ${taskId}`, {
-        integrationId,
-        source: session.claudeTokenSource,
-        resetAt: resetAt?.toISOString(),
-      });
+    let funded = !hasOAuthCredential;
+    for (const diagnostic of legacyCodexDiagnostics(output)) {
+      if (diagnostic === fallbackMarker) {
+        funded = true;
+        continue;
+      }
+      if (funded) {
+        if (isCodexExhaustion(diagnostic)) fundedKeyReason ||= diagnostic;
+      } else {
+        const revoked = isRevokedCodexOAuth(diagnostic);
+        if (revoked || (!oauthReason && isCodexExhaustion(diagnostic))) {
+          oauthReason = diagnostic;
+          oauthRevoked = revoked;
+        }
+      }
     }
   }
 
-  if (fundedKeyReason !== '') {
+  if (oauthReason !== '') await markCodexOAuthFailure(taskId, session, oauthReason, oauthRevoked);
+
+  if (isCodexExhaustion(fundedKeyReason)) {
     await markGptApiKeyOnCooldown('codex_code_insufficient_quota');
     log.warn(`Codex funded API key backed off for session ${taskId}`);
+  }
+}
+
+async function markCodexOAuthFailure(
+  taskId: string,
+  session: NonNullable<Awaited<ReturnType<typeof repo.findSessionById>>>,
+  reason: string,
+  revoked: boolean
+): Promise<void> {
+  const integrationId = session.claudeTokenIntegrationId ?? '';
+  if (integrationId === '')
+    return log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
+  if (revoked) {
+    const integration = await repo.findCredentialIntegration(integrationId);
+    if (integration) {
+      await markGptUserTokenRateLimited(integration.userId, {
+        integrationId,
+        accountId: integration.accountId,
+        failureReason: 'auth_error',
+      });
+    }
+  } else {
+    const resetAt = parseCodexResetTime(reason);
+    await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: resetAt });
+    log.warn(`Codex OAuth credential backed off for session ${taskId}`, {
+      integrationId,
+      source: session.claudeTokenSource,
+      resetAt: resetAt?.toISOString(),
+    });
   }
 }

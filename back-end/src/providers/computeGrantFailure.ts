@@ -71,9 +71,12 @@ const REVOKED_MARKERS: RegExp[] = [
 const PAYMENT_MARKERS: RegExp[] = [
   /credit balance is too low/i,
   /out of credits/i,
-  /purchase credits/i,
-  /usage limit reached/i,
-  /\busage_limit_reached\b/i,
+  /purchase (?:more )?credits/i,
+  // Keep native Codex quota-first fallback and backend full-error feedback aligned.
+  /\busage[ _]limit(?:_reached)?\b/i,
+  /check your plan and billing/i,
+  /\binsufficient[_ ]quota\b/i,
+  /no credits remaining|add credits to continue|\bcredit_balance_exhausted\b/i,
 ];
 
 export interface ClassifyInput {
