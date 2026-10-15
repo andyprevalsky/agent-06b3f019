@@ -244,7 +244,7 @@ def _browser_task_terminal_metadata(
     task_id = source.get("task_id") or started_task_id
     if task_id:
         metadata["task_id"] = task_id
-    for key in ("browser_url", "session_id"):
+    for key in ("browser_url", "session_id", "browser_cleanup"):
         if source.get(key):
             metadata[key] = source[key]
     if code:
@@ -12296,6 +12296,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 final_metadata["authAssistanceDeclined"] = True
             for key in (
                 "task_id",
+                "browser_cleanup",
                 "world_model_simulated",
                 "world_model_session_id",
                 "world_model_name",

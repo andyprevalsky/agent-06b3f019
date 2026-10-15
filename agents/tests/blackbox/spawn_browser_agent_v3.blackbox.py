@@ -22471,6 +22471,62 @@ def test_realm_transition_refreshes_active_session_credential_ref():
     assert "nonlocal session_credential_ref" in helper_source
     assert "session_credential_ref = realm_state.auth_credential_ref" in helper_source
 
+async def test_manager_preserves_business_outcome_and_cleanup_receipt():
+    """Actual manager events preserve resource failure separately from business outcome."""
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.base import MessageStatus
+
+    receipt = {"status": "failed", "session_id": "session-1", "error": "owned close HTTP 500"}
+    for scenario in ("success", "refusal", "cancelled"):
+        for failed in (False, True):
+            result = {
+                "status": "cancelled" if scenario == "cancelled" else "completed",
+                "success": scenario == "success",
+                "message": "Verified goal" if scenario == "success" else "User declined sign-in",
+                "task_id": "task-1", "session_id": "session-1",
+            }
+            if scenario == "refusal":
+                result["user_declined_auth"] = True
+            if failed:
+                result["browser_cleanup"] = receipt
+
+            class Handle:
+                def done(self):
+                    return True
+
+                def __await__(self):
+                    async def returned():
+                        return result
+                    return returned().__await__()
+
+            instance = SimpleNamespace(user_id="user-1", agent_id="agent-1", is_paused=False,
+                                       write_lock_enabled=True, system_name="Rose")
+            with (
+                patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", return_value=Handle()) as started,
+                patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+            ):
+                events = [event async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                    instance, {"goal": "Owned manager fixture"}, "tool-1"
+                )]
+            assert started.call_count == 1, "cleanup receipt must not restart business activity"
+            final = events[-1]
+            serialized = json.loads(json.dumps(final.to_dict()))
+            assert serialized["metadata"] == final.metadata
+            assert serialized["status"] == final.status.value
+            assert final.metadata["action_type"] == "task_complete"
+            assert final.metadata["task_id"] == "task-1"
+            assert final.status == (MessageStatus.ERROR if scenario == "cancelled" else MessageStatus.FINISHED)
+            if scenario != "cancelled":
+                assert final.message == result["message"]
+                assert final.metadata["success"] is (scenario == "success")
+            if scenario == "refusal":
+                assert final.metadata["authAssistanceDeclined"] is True
+            if failed:
+                assert final.metadata["browser_cleanup"] == receipt, (scenario, final.metadata)
+            else:
+                assert "browser_cleanup" not in final.metadata
+
+
 async def test_manager_cancelled_browser_pause_event_is_task_complete():
     """Workflow-owned cancel must persist the durable browser terminal.
 
@@ -28163,6 +28219,10 @@ async def run_all_tests():
     r.record(
         "realm_transition_refreshes_session_credential_ref",
         test_realm_transition_refreshes_active_session_credential_ref,
+    )
+    await r.record_async(
+        "manager_preserves_business_and_cleanup_receipt",
+        test_manager_preserves_business_outcome_and_cleanup_receipt,
     )
     await r.record_async(
         "manager_cancelled_pause_is_task_complete",

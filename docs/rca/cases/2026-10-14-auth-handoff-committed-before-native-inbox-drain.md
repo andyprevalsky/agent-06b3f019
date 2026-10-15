@@ -176,3 +176,10 @@ receiving native OTP). Both retained ordinary empty/stale/no-OTP assistance.
 Across all earlier canonical attempts:3email attempts and1app attempt; reported
 billable agent cost0dollars,427224input/3137outputtokens. Infrastructure,
 subscription opportunity cost and evidence-publication/storage cost unmeasured.
+
+
+## 2026-10-15 review-only action-accounting follow-up
+
+The approved eleven-line native-input admission hunk could supersede an unexecuted handoff at the last action slot but continue without the existing action-budget adjustment. Actual activity controls resume at step249 with MAX_ITERATIONS250: baseline897 reaches max_iterations before consuming the newly delivered input; the private correction refunds only the unexecuted action through the existing bounded adjust_iteration_after_action policy. Exhausted250 runs no model/auth/action; repeated fresh input reaches the existing consecutive refund cap, and duplicate/stale input commits one ordinary handoff without an unbounded loop. No numeric cap, timeout, task or evaluator was changed.
+
+Parent independently inspected Hermes agent/turn_iteration_prep.py:470-490 (bounded refund of a cancelled request with no valid item), alongside Claude src/query.ts:1506-1515 (a counterexample that counts aborted tools because its unit is a turn). Rose's established unit is actions. The analogy does not refund usage or cost. This review-only follow-up has owning offline proof; new trajectory/stop semantics still require exact source review and approval. It does not explain or repair the current minted-email, SMS or magic-link failures, and does not close the original Gmail credential ownership incident.
