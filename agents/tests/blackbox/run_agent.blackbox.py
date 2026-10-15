@@ -63,6 +63,7 @@ async def _run_single_iteration(
     gpt_account_id=None,
     iteration_offset=0,
     system_prompt_override=None,
+    verifier_prompt_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -176,7 +177,7 @@ async def _run_single_iteration(
             agent_id="agent-test",
             user_id="user-test",
             system_prompt=system_prompt_override or mock_system_prompt,
-            verifier_prompt_generator=mock_verifier_prompt,
+            verifier_prompt_generator=verifier_prompt_override or mock_verifier_prompt,
             model="rose-labs/rose-1-flash",
             tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
             initial_context=ctx,
@@ -2084,6 +2085,295 @@ async def test_run_verifier_posts_in_progress_and_finished():
     assert "42" in finished["text"]
 
 
+async def _capture_verifier_prerequisite_failure(stage, failure, *, supplied_id=True, closure_failure=None):
+    from loop.run_agent import _run_verifier
+
+    posted = []
+    provider = AsyncMock(side_effect=AssertionError("prerequisite failure reached the verifier provider"))
+
+    async def post(text, role, metadata=None):
+        posted.append({"text": text, "role": role, "metadata": dict(metadata or {})})
+        if metadata.get("toolStatus") == "ERROR" and closure_failure is not None:
+            raise closure_failure
+
+    prompt = AsyncMock(side_effect=failure) if stage == "prompt" else AsyncMock(return_value="Verify current task")
+    schema = AsyncMock(side_effect=failure) if stage == "schema" else AsyncMock(return_value={"fields": []})
+    observed = None
+    with patch("loop.run_agent._safe_uuid4", return_value="generated-verifier-call"):
+        try:
+            await _run_verifier(
+                execute_activity=provider, context=[], verifier_prompt_generator=prompt,
+                model="test-model", agent_id="agent", task_id=None, post_message=post,
+                get_response_schema=schema, tool_call_id="supplied-verifier-call" if supplied_id else None,
+            )
+        except BaseException as error:
+            observed = error
+    provider.assert_not_awaited()
+    return posted, observed
+
+
+async def _assert_verifier_prerequisite_error_closure(stage, *, supplied_id):
+    from helpers.llm import build_llm_messages
+
+    failure = RuntimeError(f"native {stage} prerequisite failed: exact detail")
+    posted, observed = await _capture_verifier_prerequisite_failure(stage, failure, supplied_id=supplied_id)
+    assert observed is failure, "verifier replaced the original prerequisite error"
+    assert len(posted) == 2, "verifier prerequisite failure left its IN_PROGRESS row open"
+    progress, closure = posted
+    call_id = "supplied-verifier-call" if supplied_id else "generated-verifier-call"
+    assert progress["metadata"]["toolStatus"] == "IN_PROGRESS"
+    assert progress["metadata"]["toolCallId"] == closure["metadata"]["toolCallId"] == call_id
+    assert closure["role"] == "TOOL" and closure["text"] == str(failure)
+    metadata = closure["metadata"]
+    assert metadata["toolName"] == "attempt_completion" and metadata["toolStatus"] == "ERROR"
+    assert metadata["subAgentId"] is None
+    assert metadata["error"] is True and metadata["excludeFromModel"] is True
+    assert not {"verifierMessage", "score", "reasoning", "structured_response"}.intersection(metadata)
+    assert "Take a NEW action" not in closure["text"] and "Verifier score" not in closure["text"]
+    context = [{"role": "USER", "text": "Current task", "timestamp": "2026-10-15T00:00:00Z"}]
+    if supplied_id:
+        context.append({"role": "ASSISTANT", "text": "", "timestamp": "2026-10-15T00:00:01Z",
+                        "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]}})
+    expected = await build_llm_messages(context, "System")
+    actual = await build_llm_messages(context + posted, "System")
+    assert actual == expected, "UI error closure entered model context"
+    assert not any(message.get("tool_call_id") == call_id for message in actual), "UI closure invented a model tool result"
+    assert not any(call.get("id") == call_id for message in actual for call in message.get("tool_calls", [])), "UI closure left an unpaired model tool use"
+
+
+async def test_verifier_prompt_prerequisite_error_closes_supplied_call():
+    await _assert_verifier_prerequisite_error_closure("prompt", supplied_id=True)
+
+
+async def test_verifier_schema_prerequisite_error_closes_generated_call():
+    await _assert_verifier_prerequisite_error_closure("schema", supplied_id=False)
+
+
+def _verifier_prerequisite_lifecycle_failures():
+    from temporalio.exceptions import ActivityError, ApplicationError, CancelledError, RetryState
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    failures = [asyncio.CancelledError(), CancelledError("cancelled"),
+                WorkflowGenerationSealed("generation replaced"), GenerationHandoffRequested("replacement-queue")]
+    for kind in ("CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested"):
+        error = ActivityError("prerequisite activity failed", scheduled_event_id=1, started_event_id=2,
+                              identity="test", activity_type="schema", activity_id="schema-read",
+                              retry_state=RetryState.NON_RETRYABLE_FAILURE)
+        error.__cause__ = ApplicationError("native lifecycle", type=kind)
+        failures.append(error)
+    return failures
+
+
+async def test_verifier_prerequisite_lifecycle_errors_bypass_error_closure():
+    for stage in ("prompt", "schema"):
+        for failure in _verifier_prerequisite_lifecycle_failures():
+            posted, observed = await _capture_verifier_prerequisite_failure(stage, failure)
+            assert observed is failure, "verifier replaced a native lifecycle error"
+            assert len(posted) == 1 and posted[0]["metadata"]["toolStatus"] == "IN_PROGRESS"
+
+
+async def test_verifier_error_closure_failure_preserves_native_error_semantics():
+    failure = RuntimeError("original schema read failure")
+    posted, observed = await _capture_verifier_prerequisite_failure("schema", failure, closure_failure=RuntimeError("write failed"))
+    assert len(posted) == 2, "verifier never attempted to close its failed prerequisite row"
+    assert observed is failure, "ordinary error-closure write failure replaced the prerequisite error"
+    for lifecycle in _verifier_prerequisite_lifecycle_failures():
+        posted, observed = await _capture_verifier_prerequisite_failure("schema", failure, closure_failure=lifecycle)
+        assert len(posted) == 2
+        assert observed is lifecycle, "error closure swallowed a native lifecycle boundary"
+
+
+@_with_native_schema_test_transport
+async def test_attempt_completion_prerequisite_errors_recover_on_next_native_iteration():
+    for stage in ("prompt", "schema"):
+        await _exercise_native_verifier_prerequisite_recovery(stage)
+
+
+async def _exercise_native_verifier_prerequisite_recovery(stage, *, persistent=False, max_iterations=5):
+    failure = RuntimeError(f"actual verifier {stage} prerequisite unavailable")
+    old_schema = {"fields": [{"name": "old", "type": "str"}]}
+    current_schema = {"fields": [{"name": "current", "type": "str"}]}
+    state = {"attempts": 0, "revision": 0, "verifier_schema": False}
+    prompts, schemas, models, posted = [], [], [], []
+    detected = []
+
+    async def system_prompt():
+        prompts.append(state["revision"])
+        return f"Current contract {state['revision']}"
+
+    async def verifier_prompt():
+        state["attempts"] += 1
+        if stage == "prompt" and (persistent or state["attempts"] == 1):
+            state["revision"] = 1
+            raise failure
+        state["verifier_schema"] = True
+        return f"Verify contract {state['revision']}"
+
+    async def schema():
+        verifier_read = state.pop("verifier_schema", False)
+        if verifier_read and stage == "schema" and (persistent or state["attempts"] == 1):
+            state["revision"] = 1
+            raise failure
+        value = current_schema if state["revision"] else old_schema
+        schemas.append((verifier_read, value))
+        return value
+
+    def next_completion():
+        detected[:] = [("attempt_completion", f"native-verifier-{len(models)}", 1.0)]
+        return [{"tool": "attempt_completion"}]
+
+    async def post(text, role, metadata=None):
+        posted.append({"text": text, "role": role, "metadata": dict(metadata or {})})
+
+    provider = AsyncMock(return_value={"score": 1.0, "reasoning": "Actual completed verdict",
+                                      "structured_response": {"current": "done"}, "usage": {}})
+    with patch("loop.run_agent.asyncio.sleep", new=AsyncMock()) as sleep:
+        result, _, _ = await _run_single_iteration(
+            [], detected, skip_verification=False, max_iterations=max_iterations,
+            llm_tool_calls_factory=next_completion, llm_response_models=models,
+            system_prompt_override=system_prompt, verifier_prompt_override=verifier_prompt,
+            get_response_schema_override=schema, verifier_override=provider, post_message_override=post,
+        )
+    assert not any(call.args[0] >= 1 for call in sleep.await_args_list), "verifier errors used preparation backoff"
+    errors = [row for row in posted if row["metadata"].get("toolStatus") == "ERROR"]
+    assert all(row["text"] == str(failure) and row["metadata"].get("excludeFromModel") is True for row in errors)
+    assert not any(row["metadata"].get("verifierMessage") for row in errors)
+    if persistent:
+        expected_turns = min(max_iterations, 3)
+        assert len(models) == expected_turns, "verifier errors refunded or exceeded accepted-turn budget"
+        assert len(errors) == state["attempts"]
+        provider.assert_not_awaited()
+        if max_iterations >= 3:
+            assert state["attempts"] == 3 and result["status"] == "error"
+            assert "Verifier unavailable after 3 consecutive failures" in result["message"]
+            assert str(failure) in result["message"]
+        else:
+            assert result["status"] == "max_iterations" and result.get("score") != 1.0
+    else:
+        assert result["status"] == "completed" and result["score"] == 1.0
+        assert len(models) == state["attempts"] == 2 and len(errors) == 1
+        assert errors[0]["metadata"]["toolCallId"] == "native-verifier-1"
+        assert prompts == [0, 1] and schemas[-1] == (True, current_schema)
+        provider.assert_awaited_once()
+        assert provider.await_args.args[1] == "Verify contract 1" and provider.await_args.args[3] == current_schema
+        assert result["message"] == "Actual completed verdict"
+
+
+@_with_native_schema_test_transport
+async def test_attempt_completion_prerequisite_errors_use_existing_three_error_bound():
+    for stage in ("prompt", "schema"):
+        await _exercise_native_verifier_prerequisite_recovery(stage, persistent=True)
+
+
+@_with_native_schema_test_transport
+async def test_attempt_completion_prerequisite_errors_preserve_iteration_budget():
+    await _exercise_native_verifier_prerequisite_recovery("prompt", persistent=True, max_iterations=1)
+
+
+@_with_native_schema_test_transport
+async def test_native_verifier_callers_propagate_lifecycle_errors_without_extra_turns():
+    for final_caller in (False, True):
+        for failure in _verifier_prerequisite_lifecycle_failures():
+            models = []
+            prompt = AsyncMock(side_effect=failure)
+            provider = AsyncMock(side_effect=AssertionError("lifecycle error reached provider"))
+            tool = "web_search" if final_caller else "attempt_completion"
+            try:
+                await _run_single_iteration(
+                    [{"tool": tool}], [(tool, "native-lifecycle", 1.0)], skip_verification=False,
+                    max_iterations=1 if final_caller else 5, verifier_prompt_override=prompt,
+                    verifier_override=provider, llm_response_models=models,
+                )
+            except BaseException as observed:
+                assert observed is failure, "native verifier caller replaced lifecycle error"
+            else:
+                raise AssertionError("native verifier caller swallowed lifecycle error")
+            assert len(models) == 1, "native lifecycle error started an extra accepted LLM turn"
+            prompt.assert_awaited_once()
+            provider.assert_not_awaited()
+
+
+@_with_native_schema_test_transport
+async def test_native_verifier_returned_and_raised_errors_share_counter_and_reset():
+    for sequence in (("returned", "raised", "returned"),
+                     ("returned", "raised", "healthy_rejection", "raised", "returned", "returned")):
+        models, attempts = [], []
+        state = {}
+        failure = RuntimeError("actual mixed prerequisite failure")
+
+        async def prompt():
+            event = sequence[len(attempts)]
+            attempts.append(event)
+            state["event"] = event
+            if event == "raised":
+                raise failure
+            return "Verify current task"
+
+        async def verdict(*_args, **_kwargs):
+            if state["event"] == "healthy_rejection":
+                return {"score": 0.4, "reasoning": "Actual work remains", "structured_response": None, "usage": {}}
+            return {"score": 0.5, "reasoning": "Progress check failed: actual provider outage",
+                    "structured_response": None, "usage": {}}
+
+        provider = AsyncMock(side_effect=verdict)
+        result, posted, _ = await _run_single_iteration(
+            [{"tool": "attempt_completion"}], [("attempt_completion", "shared-error-counter", 1.0)],
+            skip_verification=False, max_iterations=len(sequence) + 1,
+            verifier_prompt_override=prompt, verifier_override=provider, llm_response_models=models,
+            response_schema={"fields": [{"name": "answer", "type": "str", "required": True}]},
+        )
+        assert result["status"] == "error" and len(models) == len(attempts) == len(sequence)
+        assert "Verifier unavailable after 3 consecutive failures" in result["message"]
+        assert attempts == list(sequence), "returned and raised errors did not share/reset the existing counter"
+        assert provider.await_count == len(sequence) - sequence.count("raised")
+        closures = [row for row in posted if (row.get("metadata") or {}).get("toolStatus") == "ERROR"]
+        assert len(closures) == sequence.count("raised")
+        assert all(row["text"] == str(failure) for row in closures)
+
+
+@_with_native_schema_test_transport
+async def test_raised_verifier_error_preserves_successful_tool_no_tool_reset():
+    failure = RuntimeError("single verifier prerequisite failure")
+    prompt = AsyncMock(side_effect=[failure, "Verify after recovery"])
+    models = []
+    result, posted, _ = await _run_single_iteration(
+        [], [("attempt_completion", "no-tool-reset", 1.0)], skip_verification=False, max_iterations=5,
+        llm_tool_calls_sequence=[[], [], [{"tool": "attempt_completion"}], [], [{"tool": "attempt_completion"}]],
+        verifier_prompt_override=prompt, llm_response_models=models,
+    )
+    assert result["status"] == "completed", "intervening attempt_completion failed to reset consecutive no-tool count"
+    assert len(models) == 5 and prompt.await_count == 2
+    assert len([row for row in posted if (row.get("metadata") or {}).get("toolStatus") == "ERROR"]) == 1
+
+
+async def test_verifier_healthy_prerequisites_preserve_provider_verdict():
+    from loop.run_agent import _run_verifier
+
+    schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
+    verdict = {"score": 0.63, "reasoning": "Actual provider finding", "structured_response": {"answer": "42"},
+               "usage": {"prompt_tokens": 17}}
+    provider = AsyncMock(return_value=verdict)
+    posted = []
+
+    async def post(text, role, metadata=None):
+        posted.append({"text": text, "role": role, "metadata": metadata})
+
+    result = await _run_verifier(
+        execute_activity=provider, context=[], verifier_prompt_generator=AsyncMock(return_value="Actual prompt"),
+        model="test-model", agent_id="agent", task_id="task", post_message=post,
+        get_response_schema=AsyncMock(return_value=schema), tool_call_id="healthy-call",
+    )
+    assert result is verdict and result["score"] == 0.63 and result["reasoning"] == "Actual provider finding"
+    assert result["structured_response"] == {"answer": "42"} and result["resolved_response_schema"] == schema
+    provider.assert_awaited_once()
+    assert provider.await_args.kwargs["args"][1] == "Actual prompt"
+    assert provider.await_args.kwargs["args"][3] == schema
+    assert [row["metadata"]["toolStatus"] for row in posted] == ["IN_PROGRESS", "FINISHED"]
+    assert posted[1]["metadata"]["verifierMessage"] is True and "Verifier score: 63%" in posted[1]["text"]
+    assert not any(row["metadata"].get("error") or row["metadata"].get("excludeFromModel") for row in posted)
+
+
 async def test_run_verifier_dynamic_schema_getter():
     """_run_verifier calls get_response_schema() when provided."""
     from loop.run_agent import _run_verifier
@@ -2968,6 +3258,17 @@ async def run_all_tests(broadcast_client_getter):
         "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished
     )
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
+    await r.record_async("verifier_prompt_prerequisite_error_closure", test_verifier_prompt_prerequisite_error_closes_supplied_call)
+    await r.record_async("verifier_schema_prerequisite_error_closure", test_verifier_schema_prerequisite_error_closes_generated_call)
+    await r.record_async("verifier_prerequisite_lifecycle", test_verifier_prerequisite_lifecycle_errors_bypass_error_closure)
+    await r.record_async("verifier_error_closure_failure_semantics", test_verifier_error_closure_failure_preserves_native_error_semantics)
+    await r.record_async("verifier_healthy_prerequisite_verdict", test_verifier_healthy_prerequisites_preserve_provider_verdict)
+    await r.record_async("attempt_completion_prerequisite_native_recovery", test_attempt_completion_prerequisite_errors_recover_on_next_native_iteration)
+    await r.record_async("attempt_completion_prerequisite_existing_bound", test_attempt_completion_prerequisite_errors_use_existing_three_error_bound)
+    await r.record_async("attempt_completion_prerequisite_iteration_budget", test_attempt_completion_prerequisite_errors_preserve_iteration_budget)
+    await r.record_async("native_verifier_caller_lifecycle", test_native_verifier_callers_propagate_lifecycle_errors_without_extra_turns)
+    await r.record_async("native_verifier_shared_counter_reset", test_native_verifier_returned_and_raised_errors_share_counter_and_reset)
+    await r.record_async("native_verifier_error_no_tool_reset", test_raised_verifier_error_preserves_successful_tool_no_tool_reset)
     await r.record_async("verifier_authored_attention_event_identity", test_verifier_uses_authored_attention_event_identity_across_row_retries)
     await r.record_async("verifier_requirement_completion_boundaries", test_verifier_rechecks_real_user_requirements_at_completion_boundaries)
     await r.record_async("final_verifier_suppresses_stale_completion_data", test_final_verifier_does_not_publish_stale_completion_data)

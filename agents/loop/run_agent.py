@@ -2205,78 +2205,87 @@ async def run_agent(
                 verifier_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
                 verifier_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
 
-                verifier_result = await _run_verifier(
-                    execute_activity=execute_activity,
-                    context=context,
-                    verifier_prompt_generator=verifier_prompt_generator,
-                    model=model,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    post_message=post_message,
-                    response_schema=response_schema,
-                    get_response_schema=get_response_schema,
-                    poll_messages=poll_messages,
-                    get_requirement_revision=get_requirement_revision,
-                    claude_token=verifier_claude_token,
-                    claude_token_source=verifier_claude_token_source,
-                    claude_token_pool_id=verifier_claude_token_pool_id,
-                    claude_token_user_id=user_id,
-                    gpt_token=verifier_gpt_token,
-                    gpt_account_id=verifier_gpt_account_id,
-                    gpt_token_source=verifier_gpt_token_source,
-                    gpt_token_pool_id=verifier_gpt_token_pool_id,
-                    gpt_token_user_id=user_id,
-                    compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-                    is_plan_loop=is_plan_loop,
-                    tool_call_id=tool_call_id,
-                    fast_mode_cache_enabled=fast_mode_cache_enabled,
-                    fast_mode_goal=goal_text,
-                    fast_mode_step=fast_cache_step,
-                )
+                verifier_error = None
+                try:
+                    verifier_result = await _run_verifier(
+                        execute_activity=execute_activity,
+                        context=context,
+                        verifier_prompt_generator=verifier_prompt_generator,
+                        model=model,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        post_message=post_message,
+                        response_schema=response_schema,
+                        get_response_schema=get_response_schema,
+                        poll_messages=poll_messages,
+                        get_requirement_revision=get_requirement_revision,
+                        claude_token=verifier_claude_token,
+                        claude_token_source=verifier_claude_token_source,
+                        claude_token_pool_id=verifier_claude_token_pool_id,
+                        claude_token_user_id=user_id,
+                        gpt_token=verifier_gpt_token,
+                        gpt_account_id=verifier_gpt_account_id,
+                        gpt_token_source=verifier_gpt_token_source,
+                        gpt_token_pool_id=verifier_gpt_token_pool_id,
+                        gpt_token_user_id=user_id,
+                        compute_token_lineage_key=compute_token_lineage_key,
+                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        is_plan_loop=is_plan_loop,
+                        tool_call_id=tool_call_id,
+                        fast_mode_cache_enabled=fast_mode_cache_enabled,
+                        fast_mode_goal=goal_text,
+                        fast_mode_step=fast_cache_step,
+                    )
+                except Exception as error:
+                    if any(error_chain_has_type(error, kind) for kind in (
+                        "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                    )):
+                        raise
+                    verifier_error = error
+                else:
+                    # Track verifier tokens
+                    v_usage = verifier_result.get("usage", {})
+                    v_tokens_in = v_usage.get("prompt_tokens", 0)
+                    v_tokens_out = v_usage.get("completion_tokens", 0)
+                    tokens_in += v_tokens_in
+                    tokens_out += v_tokens_out
+                    token_count += v_usage.get("total_tokens", 0)
 
-                # Track verifier tokens
-                v_usage = verifier_result.get("usage", {})
-                v_tokens_in = v_usage.get("prompt_tokens", 0)
-                v_tokens_out = v_usage.get("completion_tokens", 0)
-                tokens_in += v_tokens_in
-                tokens_out += v_tokens_out
-                token_count += v_usage.get("total_tokens", 0)
+                    # Route verifier cost through on_tokens for proper cost tracking
+                    if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
+                        try:
+                            await on_tokens(
+                                v_tokens_in,
+                                v_tokens_out,
+                                v_usage.get("actual_model"),
+                                cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
+                                cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
+                                call_site="verifier_plan" if is_plan_loop else "verifier_execute",
+                                claude_token_error=v_usage.get("claude_token_error"),
+                                gpt_token_error=v_usage.get("gpt_token_error"),
+                                claude_token_rotated=v_usage.get("claude_token_rotated", False),
+                                gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
+                                compute_token_used=v_usage.get("compute_token_used"),
+                                from_fast_cache=v_usage.get("from_fast_cache", False),
+                                # Do not label a one-shot verifier as the execute
+                                # conversation unless that exact namespace reached
+                                # the provider. The benchmark repeatability metric
+                                # groups by this identity.
+                                cache_sequence_id=v_usage.get("cache_sequence_id"),
+                            )
+                        except Exception as e:
+                            logger.warning(f"on_tokens callback failed for verifier: {e}")
 
-                # Route verifier cost through on_tokens for proper cost tracking
-                if on_tokens and (v_tokens_in > 0 or v_tokens_out > 0):
-                    try:
-                        await on_tokens(
-                            v_tokens_in,
-                            v_tokens_out,
-                            v_usage.get("actual_model"),
-                            cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
-                            cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
-                            call_site="verifier_plan" if is_plan_loop else "verifier_execute",
-                            claude_token_error=v_usage.get("claude_token_error"),
-                            gpt_token_error=v_usage.get("gpt_token_error"),
-                            claude_token_rotated=v_usage.get("claude_token_rotated", False),
-                            gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
-                            compute_token_used=v_usage.get("compute_token_used"),
-                            from_fast_cache=v_usage.get("from_fast_cache", False),
-                            # Do not label a one-shot verifier as the execute
-                            # conversation unless that exact namespace reached
-                            # the provider. The benchmark repeatability metric
-                            # groups by this identity.
-                            cache_sequence_id=v_usage.get("cache_sequence_id"),
-                        )
-                    except Exception as e:
-                        logger.warning(f"on_tokens callback failed for verifier: {e}")
+                    score = verifier_result.get("score", 0.0)
+                    v_reasoning = verifier_result.get("reasoning", "")
+                    structured_response = verifier_result.get("structured_response")
 
-                score = verifier_result.get("score", 0.0)
-                v_reasoning = verifier_result.get("reasoning", "")
-                structured_response = verifier_result.get("structured_response")
-
-                # Track consecutive verifier errors (score=0.5 with "Progress check failed" reasoning)
-                if v_reasoning.startswith("Progress check failed"):
+                # Track raised verifier errors and existing "Progress check failed" results.
+                if verifier_error is not None or v_reasoning.startswith("Progress check failed"):
+                    verifier_failure_reason = extract_error_message(verifier_error) if verifier_error is not None else v_reasoning
                     consecutive_verifier_errors += 1
                     logger.warning(
-                        f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
+                        f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {verifier_failure_reason[:100]}"
                     )
                     if consecutive_verifier_errors >= 3:
                         return {
@@ -2288,10 +2297,14 @@ async def run_agent(
                             "context_size": context_size,
                             "cache_read_input_tokens": cache_read_total,
                             "cache_creation_input_tokens": cache_write_total,
-                            "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
+                            "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {verifier_failure_reason}",
                         }
                 else:
                     consecutive_verifier_errors = 0
+
+                if verifier_error is not None:
+                    no_tool_count = 0
+                    continue
 
                 # Track score history for trend feedback (keep last 5)
                 recent_verifier_scores.append(score)
@@ -2545,6 +2558,10 @@ async def run_agent(
                 final_partial_structured_response = final_verifier_result.get("structured_response")
                 logger.info(f"Final verifier: {final_verifier_progress * 100:.0f}% - {final_verifier_reasoning[:100]}...")
         except Exception as e:
+            if any(error_chain_has_type(e, kind) for kind in (
+                "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+            )):
+                raise
             logger.error(f"Final verifier call failed: {e}")
 
     # Best-effort answer: the model's last synthesized assistant text, so a runaway
@@ -2782,13 +2799,46 @@ async def _run_verifier(
             },
         )
 
-    # Resolve the prompt and schema under the same accepted requirement revision.
-    while True:
-        judged_revision = get_requirement_revision() if get_requirement_revision else None
-        verifier_prompt = await verifier_prompt_generator()
-        current_response_schema = await get_response_schema() if get_response_schema else response_schema
-        if not get_requirement_revision or judged_revision == get_requirement_revision():
-            break
+    try:
+        # Resolve the prompt and schema under the same accepted requirement revision.
+        while True:
+            judged_revision = get_requirement_revision() if get_requirement_revision else None
+            verifier_prompt = await verifier_prompt_generator()
+            current_response_schema = await get_response_schema() if get_response_schema else response_schema
+            if not get_requirement_revision or judged_revision == get_requirement_revision():
+                break
+    except Exception as error:
+        if any(error_chain_has_type(error, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
+        if post_message:
+            try:
+                await post_message(
+                    str(error),
+                    "TOOL",
+                    {
+                        "toolCallId": verifier_call_id,
+                        "toolName": "attempt_completion",
+                        "toolStatus": "ERROR",
+                        "title": "⚖️ Verification error",
+                        "subAgentId": task_id,
+                        "error": True,
+                        "excludeFromModel": True,
+                    },
+                )
+            except Exception as post_error:
+                if any(error_chain_has_type(post_error, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
+                logger.warning(
+                    "Failed to close verifier attempt after prerequisite error",
+                    agent_id=agent_id,
+                    tool_call_id=verifier_call_id,
+                    error=extract_error_message(post_error),
+                )
+        raise
     judged_user_keys = _real_user_requirement_keys(context)
     verification_cursor = datetime.fromtimestamp(0, tz=timezone.utc)
     for message in context:
