@@ -40,6 +40,8 @@ links. A file pointer never substitutes for the diff.
 - State blockers plainly: exact limit, measured usage, known cap or explicit
   evidence gap, and what the agent/user can do. A planner ceiling is not a
   measured need for more capacity; reconcile reuse before suggesting more quota.
+  For Fly, check authenticated organization settings (`machines_per_org_limit`)
+  before asking the user to find the cap; app counts are not organization totals.
 - Report Machines **started / stopped / verified idle / protected warm**
   separately, with timestamped counts and compute/rootfs/volume costs. Idle
   started Machines remain billable; stopped is not free storage. Preserve
@@ -127,6 +129,8 @@ make an iteration pass.
 
 ### Waiting for delegated work
 
+- Never sleep or wait for more than 15 minutes at once; wake sooner for new
+  results or user input, and retain the fixed scorecard deadline.
 - When the next action depends on a sub-agent and no useful independent work
   remains, sleep using an interruptible wait. Resume when a sub-agent reports
   meaningful progress, a failure, a blocker or a decision that needs action.
