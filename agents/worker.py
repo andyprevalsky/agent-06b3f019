@@ -160,8 +160,11 @@ from workflows import AgentWorkflow
 # equals agent_id, this makes all workflow logs filterable by agent_id.
 # ExtraAdder captures these fields into the structured JSON output.
 
+from browser_tools.secret_refs import redact_secret_log_values
+
 shared_processors = [
     structlog.contextvars.merge_contextvars,  # Injects agent_id bound via bind_contextvars()
+    redact_secret_log_values,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.add_log_level,
 ]
