@@ -66,3 +66,118 @@ could not pass.
 A production-only benchmark must never inherit synthetic setup seeding — mixed
 live credentials with sandbox fixture IDs either fail at preflight or pass with
 `livemode=false`, which is worse.
+
+## October 15 local draft: Stripe purchase mode ownership (open)
+
+A new production-gate observation exposed a related mode-integrity boundary,
+not a recurrence of the original inherited AgentCard setup fixture. The parent
+confirmed the exact allocation's PaymentIntent/customer are native Stripe
+livemode=false while the owned AgentCard transfer is livemode=true. The global
+billing test key is deliberate and must remain. Subscription.stripeLivemode
+already distinguishes live checkout ownership, but purchase Stripe operations
+still use the legacy singleton and PurchaseSpend has no immutable mode snapshot.
+Lifecycle output also omits native Stripe livemode, so the current production
+expected result cannot reject the mixed-mode observation. The independent
+AgentCard consumed/released0 release stall remains unchanged; no refund/release
+safety gate may be bypassed because of this mode defect.
+
+The isolated detached worktree is `.context/pr1520-stripe-mode-draft`, pinned to
+6ef22cc55811444f1524fb9faf22f6e97600410e. A normally auto-discovered owning
+`purchases-stripe-mode.blackbox.ts` executes the real saved-customer helper and
+canonical Stripe SDK/client selection against a loopback-only HTTP fixture.
+Synthetic keys and mode-owned customer IDs produce native-shaped resource_missing
+when the actual SDK Authorization mode is wrong. There are no mocked desired
+helper returns, database writes, real provider requests or financial mutations.
+
+Run from that worktree root:
+`node --import tsx back-end/src/tests/blackbox/purchases-stripe-mode.blackbox.ts`.
+The identical final test body fails on the original helper (test customer passes,
+live customer resource_missing; exit1) and passes on the local helper draft
+accepting livemode and selecting getStripeClientForLivemode (both pass; exit0).
+Evidence is `.context/stripe-mode-proof/customer-before.log`, `customer-after.log`,
+exit receipts and result.json inside the isolated worktree. Earlier fixture
+Bearer-header iteration is excluded from this final paired causal proof.
+
+This proves the customer routing mechanism only. It does not prove full purchase
+snapshot persistence, authorization/capture/refund routing, migration, corrected
+production catalog acceptance or a successful live task. The broader local
+proposal and exact unapplied schema/migration/provisioning/catalog diffs are
+`.context/stripe-mode-proof/proposal.txt` and `proposed-contracts.patch` there;
+`initial-customer-fix.patch` is the executed narrow fix plus owning regression.
+A complete draft must bind new purchase ownership once from persisted
+Subscription.stripeLivemode, preserve legacy false snapshots and route all
+retrieval/compensation by the purchase snapshot after later subscription changes.
+Native hold/refund mode must be exposed and production expectations require true.
+
+The schema/migration and benchmark contract remain approval-sensitive proposals.
+No migration, provisioning helper, deployment or production-key change was run.
+Parent owns unchanged-source recovery session53043 and production semantics run
+38685810164. This subcase remains open and incomplete pending the full local
+snapshot implementation, owning mode-switch/cleanup tests, parent review and
+any explicitly authorized deployment/financial acceptance run. The user
+requested the concrete local draft while forbidding production financial writes;
+that authorization is not a claim that a partial patch is deployable.
+
+### Same isolated draft: first implementation batch and contract stop
+
+The next local batch adds immutable purchase mode/customer/subscription snapshots,
+mode-selected authorize/capture/reverse helpers, primary cleanup propagation,
+live fixture persistence and native hold-mode exposure. The owning real-Prisma
+plus real-SDK loopback test fails on baseline runtime and passes12/12 on the draft
+with an unchanged test body and the same local additive schema. Records are
+isolated in victoria_pr1520_stripe_draft and cleaned up; parent generated Prisma
+packages/client are untouched. This is not a live financial outcome.
+
+Implementation stopped at an explicit architecture/contract choice as requested:
+native Stripe Refund has no livemode property. Lifecycle cannot truthfully expose
+that as native evidence. Parent must choose linked PaymentIntent mode with strict
+refund.payment_intent binding (recommended), or retrieve the linked native Charge
+and verify its mode/linkage. No expected/subscription boolean may be substituted.
+The fake direct refund field was removed before handoff. Lifecycle contract tests,
+remaining stale/funding compensation snapshot call sites and static compatibility
+remain incomplete. The first-batch patch is deliberately labelled incomplete and
+must not be applied/deployed as a finished fix. No original allocation or provider
+release/refund guard was changed, no external financial calls occurred, and no
+schema/prompt bytes in LLM-visible tool definitions were changed.
+
+### Completed local-only draft: purchase-owned Stripe account and verified refund provenance
+
+Parent authorized completing the isolated draft and selected linked PaymentIntent
+provenance: Stripe Refund has no native livemode. New PurchaseSpend rows snapshot
+Subscription mode, customer and subscription IDs; legacy rows default false.
+Authorize, capture, ambiguous reads, cancellation, refund, stale reversal,
+unpersisted-intent recovery and funding compensation use that purchase mode after
+Subscription changes. Legacy no-PI retries fail closed on an account-mode switch.
+No resource-missing retry crosses accounts. Dissolved-hold reads also use the
+selected purchase mode and preserve existing reclaim/consumption guards.
+
+Lifecycle reports the native hold livemode. Refund paymentIntentLivemode is
+explicitly derived only after every returned refund's native payment_intent
+(string or expanded ID) matches the retrieved hold and purchase PI. Missing or
+mismatched linkage fails closed; no Refund.livemode is invented and no extra
+Charge request is added. Injected lifecycle callbacks remain lazy; default live
+callbacks still require configured live credentials. Production catalog oracle
+fields now require live hold and verified refund PI mode, with prompt fields
+unchanged.
+
+The additive migration and generated Prisma client were applied only to the new
+loopback victoria_pr1520_stripe_draft database, with both DB variables explicit.
+Generated client, .prisma and prisma package realpaths stay inside the detached
+worktree; shared parent generated dependencies are untouched. Same-test causal
+logs in .context/stripe-mode-proof show original source exit1 versus draft exit0:
+29/29 real-Prisma/real-SDK loopback controls pass after; the separate actual SDK
+customer-selection reproduction also fails before and passes after. Lifecycle
+service unit tests pass20/20 using a synthetic test key (the initial run without
+it failed three pre-existing Stripe-construction checks); transfer tests pass.
+Nine selected-customer controls use eight native SDK loopback GET requests.
+
+Provisioning now accepts explicit --stripe-customer-id only with --live, validates
+nondeleted native live customer ID plus exact userId/fixture metadata before any
+DB write, then reuses it without customer search or creation. No-flag behavior
+remains unchanged. The provisioning helper was not executed. Existing test PI
+history, financial release/refund guards and the original allocation are intact.
+
+This supersedes the incomplete first-batch stop above. It remains a LOCAL draft:
+normal parent review/gates, migration approval/application and any separately
+authorized production acceptance remain outstanding. No production DB writes,
+provider calls, paid benchmarks, commits, pushes or deployment occurred here.

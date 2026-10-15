@@ -4,7 +4,7 @@
   "runtime_head": "352e8c4e6987f51efcd9a621965eda3e89126d93",
   "merged_main": "cdbe16c54ac36e369cc019967390fbc5528a46f5",
   "next_main_observed": "d70436ea5e8c2074ca654b3b665104c9c2bc9669",
-  "next_main_integration": "PENDING; current results do not prove incoming runtime",
+  "next_main_integration": "Conflict resolution complete; merge commit pending; fresh integrated gates not yet run",
   "original_timing_run": "20261012-234924-2614623",
   "original_start_utc": "2026-10-12T18:39:09Z",
   "preservation": {
@@ -142,8 +142,9 @@
     "native_E2B_absent": 3,
     "observed_process_births_absent": 546,
     "canonical_stack_cleanup_state": "failed",
-    "semantic_sandbox_creation": "UNKNOWN under bounded follow-up",
-    "latency": "NOT_RUN"
+    "semantic_sandbox_creation": "RESOLVED: both source-bound original native histories terminate before code sandbox activity scheduling; no allocation by these exact chains",
+    "latency": "NOT_RUN",
+    "no_global_or_inherited_resource_claim": true
   },
   "interrupted_smoke_and_agentcard": {
     "fresh_gate_pass": false,
@@ -196,6 +197,12 @@
       "scope": "current UI E2B recovery",
       "sha256": "d0b218d4c91152a6b568155fc1715109bf2c47340bb86375f6d071eb01873bed",
       "files_readback_verified": 61,
+      "mode": "0600"
+    },
+    {
+      "scope": "semantic Claude exact history/source supplement",
+      "sha256": "b32e4bd5c267b239825638bb6bcab7ae20a83ac2d5e4b0c5406043f8009ffd7e",
+      "files_readback_verified": 28,
       "mode": "0600"
     }
   ],

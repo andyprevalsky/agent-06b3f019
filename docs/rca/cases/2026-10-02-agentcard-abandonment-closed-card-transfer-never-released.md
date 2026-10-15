@@ -510,3 +510,117 @@ message was sent. A concrete vendor-report draft and the sanitized provider
 timeline remain private under `.context/production/agentcard/`, alongside the
 original failure, controller exit receipt, and any separate recovery receipts.
 The case remains open.
+
+
+### Recurrence on 2026-10-15 during PR #1520 production verification
+
+Merged source `6ef22cc55811444f1524fb9faf22f6e97600410e` ran the unchanged
+production-only abandonment task as benchmark run
+`d0b6dbf8-0637-4130-a651-0cb42a7d7d79`, root
+`a1e098ad-02a5-49d6-9b9e-bf8a8163ba6a`. The task failed after581seconds:
+purchaseHELD, walletFundingRECLAIMING, cardCLOSED with zero balance, exact LIVE
+organization transfer consumed/transferred100/released0. The original controller
+also failed final cleanup, preserved the native failed verdict and run bundle,
+and joined exit1; its saved run timestamp is05:26:23UTC. No sandbox warning
+exception applies to a live transfer.
+
+Five owned backend release-observation passes began05:10:32,05:13:47,05:15:57,
+05:18:00 and05:20:54UTC. All30 exact-transfer observations through05:21:56
+returned consumed/100/0. A native read at05:22:08 independently matched the exact
+closed card and unreleased live transfer. These executed observation passes
+separate this occurrence from the GET-only/global-reconciliation bug. The
+underlying cause remains unproved: this does not establish merchant capture,
+shared-cardholder netting, throttling, or a repeated-close clock reset.
+
+After joining the original controller, an independent owner ran the unchanged
+stock cleanup and lifecycle validators on only the same original allocation.
+Recovery05:29:23–05:37:38UTC failed with the same native settlement state and
+created no new card or mint. Retry2 began05:40:27UTC, with the next due time
+05:50:27UTC. Attempts never overlap; exact financial identities, source SHA,
+clocks, snapshots and exit receipts remain under ignored `.context/`. No direct
+DB terminalization, premature Stripe refund, provider-record fabrication, or
+vendor message was used. The strict production gate and this RCA remain open.
+
+A separate mode-ownership audit found that this allocation's funding Stripe PI
+and customer are test-mode despite the task's documented live billing intent;
+the exact AgentCard transfer is live. Existing test PI compensation must remain
+on its original Stripe account. This is a separate gate/fixture coverage issue,
+not proof explaining AgentCard's unreleased transfer. Its local mode-routing
+reproduction and repair draft remain isolated. Four exact-user live customers
+were read; none has an attached/default live card. A zero-charge hosted setup
+session was prepared against one existing owned customer without DB or
+subscription writes, and human card save is pending. No live Stripe capture or
+completed production financial gate is claimed.
+
+
+#### 2026-10-15 R10 sandbox recurrence (approved skip, production unchanged)
+
+Run `4bf4d3b5-a38c-4cbf-8d11-80ffe12c8888` on `849bea2ca` ended with
+three passed tasks and the existing-policy sandbox skip for
+`agent-payment-abandonment`, root `61164476-ffaa-4fe1-9507-609e1d3d5307`.
+Native evidence records purchase `ec868aaf-1572-4cf7-951c-134d834a33d4`,
+card `card_29c1831d0311cda7f67df2af` CLOSED/balance0 and exact transfer
+`owt_e98fd352fe3dbc39f35d5d11` test-mode/consumed/transferred4396/released0.
+Funding remains RECLAIMING and its test Stripe capture remains unrefunded.
+No new causal explanation is established by this recurrence.
+
+The original SKIPPED verdict and source run JSON remain unchanged. Final native
+cleanup evidence proves the tree sealed, root soft-deleted and owned browser
+resources closed. Canonical FE/last-LLM publication verified all four task roots,
+including the skip, after the controller exited with authenticated clean local
+receipts. Private verification is `.context/deploy-r10-sandbox-skip-receipt.json`.
+This exception applies to the observed test-mode transfer only. The original
+production allocation and its strict release/refund gate remain unresolved;
+this sandbox skip does not waive or pass that gate.
+
+### October 15 standing exception: sandbox AND production, automatic on every future run
+
+The user explicitly corrected the scope: "that test is skippable ... update the
+test so that IT IS SKIPPABLE FOR ALL FUTURE RUNS". This instruction supersedes
+the earlier sandbox-only restriction recorded above. The known closed-card
+AgentCard release stall is now a warning SKIP by default in local, cloud and
+production benchmark execution and CI. Future agents must not ask for renewed
+approval or repeat the same production reconciliation indefinitely. An explicit
+`BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0` retains strict diagnostic execution.
+
+The first bad owned boundary was waiver classification: it required an opt-in,
+excluded every production catalog task and rejected native live transfers.
+The command instructions separately told future agents that production stayed
+strict. This is a test-policy persistence defect, not a diagnosis of AgentCard's
+unreleased transfer. The separate Stripe test/live bug does not explain it.
+
+The retained native production snapshot from recovery attempt 34 is committed
+in `agents/tests/fixtures/agentcard-production-release-stall.json`. It shows
+purchase HELD, funding RECLAIMING, CLOSED card/balance0, the exact live transfer
+consumed/transferred100/released0, and no Stripe refund. The permanent benchmark
+blackbox replays this snapshot through both deadline owners and CI with the
+environment flag absent. Before the fix the following command failed with
+`RuntimeError: ... expected 'VOIDED', got 'HELD'`; after it the same test passes:
+
+```bash
+source agents/venv/bin/activate
+cd agents
+PYTHONPATH=.:tests/blackbox python -m pytest --import-mode=importlib tests/blackbox/benchmark.blackbox.py -q -k production_agentcard_release_stall_is_skippable_by_default
+```
+
+The exception retains native evidence and validates all independent catalog
+assertions. It rejects duplicate allocations, pending attention requests,
+Stripe capture mismatches, foreign purchase/card/transfer joins, cross-mode
+observations, actual read failures and cancellation. Task-level catches preserve
+the typed skip and do not start a second financial cleanup after its bounded
+attempt; archive, browser sealing and execution-deletion failures remain ERROR.
+Owned cloud cleanup re-reads the exact purchase and joins its root, purchase,
+card, payment intent, amount and transfer before permitting the warning.
+These controls run in the existing benchmark blackbox domain in `/deploy`;
+the semantic deploy contract also prevents restoring contradictory instructions.
+
+The three separate, unapproved live-only catalog assertions were withdrawn;
+the catalog again matches main. The Stripe-mode implementation and its causal
+tests remain. Saving another live card or minting another allocation is not a
+prerequisite to waive this already observed production failure.
+
+The original ERROR and failed reconciliation receipts are unchanged. A waiver
+is not PASS, native release or a refund; the $1 allocation remains a recorded
+liability. The underlying provider release cause remains open. At 10,000 agents
+this policy adds only local validation of the existing per-root snapshot, no
+new provider calls, polling loops, shared subscriptions or production writes.

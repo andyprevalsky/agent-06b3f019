@@ -30,6 +30,7 @@ import {
 } from '../../providers/smsSupervisor';
 import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
 import { sendOnChannel } from '../../providers/smsSupervisor/channelDelivery';
+import type { WhatsAppMediaAttachment } from '../../providers/smsSupervisor/inboundMedia';
 import { createLogger } from '../../providers/logger';
 import { alertError } from '../../providers/errorAlert';
 
@@ -68,13 +69,22 @@ async function routeToSupervisor(
   userId: string,
   fromPhone: string,
   messageBody: string,
+  messageId: string,
+  attachments: WhatsAppMediaAttachment[],
   requestStart: number
 ): Promise<void> {
-  const mySeq = await recordInboundSms(userId, messageBody);
+  const persistedInbound = [
+    messageBody,
+    attachments.length > 0 ? `[${attachments.length} attachment(s)]` : '',
+  ]
+    .filter((part) => part !== '')
+    .join('\n\n');
+  const mySeq = await recordInboundSms(userId, persistedInbound, messageId);
 
   log.info('Routing to supervisor (WhatsApp)', {
     userId,
     messageLength: messageBody.length,
+    attachmentCount: attachments.length,
     mySeq,
   });
 
@@ -84,8 +94,10 @@ async function routeToSupervisor(
     userId,
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
+    inboundMessageId: messageId,
     mySeq,
     inboundAlreadyPersisted: true,
+    attachments,
     channel: 'WHATSAPP',
   })
     .then((result) => {
@@ -205,7 +217,7 @@ export async function handleInboundWhatsApp(
 
   const body = input.body;
 
-  // Delivery/read receipts for OUTBOUND messages carry no inbound text.
+  // Delivery/read receipts for OUTBOUND messages carry no inbound messages.
   // Acknowledge and drop — never route to the supervisor.
   if (isStatusOnlyEvent(body)) {
     log.info('WhatsApp status-only event, acknowledged', {
@@ -216,10 +228,10 @@ export async function handleInboundWhatsApp(
 
   const messages = parseWhatsAppInboundMessages(body);
   if (messages.length === 0) {
-    // Non-text media, empty, or unrecognized shape. Acknowledge so Meta stops
+    // Unsupported message types, empty, or unrecognized shape. Acknowledge so Meta stops
     // retrying. Log SHAPE only — the raw payload holds the sender's phone number
-    // and message text (PII). (Media handling is a follow-up.)
-    log.warn('No inbound WhatsApp text to route', {
+    // and message text (PII).
+    log.warn('No supported inbound WhatsApp message to route', {
       keys: Object.keys(body),
       entryCount: Array.isArray(body.entry) ? body.entry.length : 0,
     });
@@ -228,7 +240,7 @@ export async function handleInboundWhatsApp(
 
   // Provision each unique sender once, then route every message in the batch.
   const userIdByPhone = new Map<string, string>();
-  for (const { fromPhone, messageBody, messageId } of messages) {
+  for (const { fromPhone, messageBody, messageId, attachments = [] } of messages) {
     if (alreadyProcessedMessage(messageId)) {
       log.info('Duplicate WhatsApp delivery skipped', { messageId });
       continue;
@@ -237,6 +249,7 @@ export async function handleInboundWhatsApp(
     log.info('Inbound WhatsApp received', {
       from: fromPhone.substring(0, 7) + '****',
       bodyLength: messageBody.length,
+      attachmentCount: attachments.length,
       messageId,
     });
 
@@ -267,7 +280,7 @@ export async function handleInboundWhatsApp(
         await markWhatsAppReachable(userId);
       }
 
-      await routeToSupervisor(userId, fromPhone, messageBody, requestStart);
+      await routeToSupervisor(userId, fromPhone, messageBody, messageId, attachments, requestStart);
     } catch (error) {
       // Processing failed (e.g. DB error) → release the dedup reservation so
       // Meta's retry reprocesses this message instead of skipping it as a dup.

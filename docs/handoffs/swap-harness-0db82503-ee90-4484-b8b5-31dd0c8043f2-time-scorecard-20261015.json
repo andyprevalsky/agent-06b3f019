@@ -1,0 +1,55 @@
+{
+  "snapshot": "2026-10-15T18:44:45.083327+00:00",
+  "original_attempts": 31,
+  "resumed_attempts": 294,
+  "all_original_31_attempts_preserved": true,
+  "recorded_attempt_count": 325,
+  "recorded_attempt_status_counts": {
+    "failed": 62,
+    "passed": 263
+  },
+  "canonical_benchmark_receipt_count": 26,
+  "canonical_receipts_unique_by_run_id": true,
+  "current_352_SMS_completed_task_counts": {
+    "total": 3,
+    "passed": 1,
+    "failed": 2
+  },
+  "current_352_SMS_receipt_added_once": true,
+  "current_352_SMS_receipt_sha256": "71a81b09c000a17f1e588e2a78ee9816c02b61c9f97cf1a09f45d0e01d053006",
+  "pending_prompt_snapshot_count": 2,
+  "pending_prompt_ids": [
+    "TAMY-FIXTURE-MENU-1",
+    "TAMY-RETRIEVAL-352"
+  ],
+  "pending_decisions_inferred": false,
+  "pending_overlap_double_counted": false,
+  "interrupted_controller_observation_count": 3,
+  "missing_controller_terminal_receipt_count": 3,
+  "missing_exit_duration_cost_fabricated": false,
+  "nonoverlapping_accounting_seconds": {
+    "recorded_gates_review_control_seconds_NOT_continuous_CPU": 39163.8452539444,
+    "late_collection_unclassified_seconds": 5346.594775676727,
+    "known_approved_or_withdrawn_snapshot_windows_outside_recorded_activity_NOT_measured_idle": 43184.346182346344,
+    "unknown_controller_interruption_observation_gap_seconds_NOT_CPU_idle_or_user_delay": 64557.192519664764,
+    "pending_menu_only_snapshot_window_NOT_measured_idle": 6425.340509414673,
+    "pending_retrieval_only_snapshot_window_NOT_measured_idle": 0,
+    "overlapping_pending_menu_and_retrieval_snapshot_window_counted_once_NOT_measured_idle": 294.87181401252747,
+    "quota_migration_proxy_outside_activity_seconds": 3085.6228880882263,
+    "unclassified_engineering_setup_conditional_authority_wait_seconds_NOT_user_delay": 97478.26938390732
+  },
+  "interval_reconciliation_difference_seconds": 0.0,
+  "unknown_gap_is_NOT_CPU_idle_or_user_delay": true,
+  "cost_limitations": [
+    "Reported receipt totals are preserved privately and do not measure all direct SMS/provider calls.",
+    "Interrupted smoke/card/controller costs remain UNKNOWN, never imputed as zero.",
+    "No paid calls, reruns, tracked source edits or benchmark-ledger edits were made by this scorecard update."
+  ],
+  "private_scorecard_sha256": "ad66849a58f0055a353d9cf6afe6e17e60e548a79cdbe4c7d478cbfae2b48722",
+  "persistent_private_sha_verified": true,
+  "script_sha256": "99c85367e8b0a927cd12016b231e7f68ab569c3a1151e48ed9048c2ebaf4b91e",
+  "original_started_at": "2026-10-12T18:39:09Z",
+  "original_timing_run": "20261012-234924-2614623",
+  "wall_seconds": 259536.08332705498,
+  "ready_to_close": false
+}

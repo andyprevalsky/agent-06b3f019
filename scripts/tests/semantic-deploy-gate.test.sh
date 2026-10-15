@@ -409,6 +409,12 @@ fi
 require_agentcard_command 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
 require_agentcard_command 'BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0' "/deploy AgentCard lane must not count active-worktree attempts toward canary eligibility"
 require_agentcard_command 'BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1' "/deploy AgentCard lane must warn-skip the open sandbox closed-card release stall"
+require_text "$DEPLOY_COMMAND" 'This standing user instruction covers BOTH sandbox' "/deploy must preserve the user's permanent sandbox and production AgentCard release waiver"
+require_text "$DEPLOY_COMMAND" 'No environment opt-in or renewed' "/deploy must not require repeated approval for the AgentCard release waiver"
+require_text "$DEPLOY_COMMAND" 'does not block' "/deploy production release stall must be a warning skip, not a deployment blocker"
+if grep -Fq 'production abandonment stays strict' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not contradict the standing production AgentCard release waiver"
+fi
 require_agentcard_command 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
 require_agentcard_command '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
 if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then

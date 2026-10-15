@@ -363,3 +363,60 @@ receipt requirement, provider call or benchmark acceptance predicate changes.
 Private source hashes and the non-author countersign remain with the continuation
 archive. Source qualification supplies no benchmark credit; fresh canonical
 recovery gates remain necessary for the integrated runtime.
+
+### October 15 cleanup-producer source qualification
+
+Source `f00cc265119f9df7136ec2e334872a22808a4283` changed the required-seed
+bootstrap cleanup producer and therefore derived a new executable recipe:
+`2d079ede1e02975732aa32b5edb5b7100f3e44662e65cd4c2acae1b1eae475ad`.
+R9 correctly rejected this unregistered recipe in the forensic, prestack, and
+compact live-result gates. The source comparison retains 39 of 40 bindings;
+only checkout `scripts/run.sh` changes to
+`5ea3bf05404417617d65088ff3016f57bb42a02c773e0afce540dc07a2ce9ba9`.
+
+Independent review turn `01a13e71-2268-79e1-aaf8-98364408679e` reconstructed
+both recipes, checked all committed bindings, and explicitly approved only
+`before-stack-launch` and `agent-network-index-bootstrap`. The former still
+requires the original matching ACK and absence of stack-launch evidence; the
+latter requires isolated DB/index evidence with application/task artifacts
+absent and rejects later cache, dependency, and tunnel boundaries. Nine focused
+controls passed; the positive registration prerequisite remained blocked until
+this exact entry is committed. Mutation inverses and full qualification remain
+mandatory. No frontend-preflight scope, wildcard, capture-local self-approval,
+receiver change, or historical benchmark acceptance is introduced.
+
+Private trace and audit: `.context/r9-trusted-recipe-audit/proof.json` and
+`.context/deploy-r9-independent-phase-audit.json`. The R9 agents domain also
+exposed an older fixture expecting Docker deletion by mutable name; its existing
+behavioral check now uses a foreign replacement name while requiring the captured
+immutable owned ID. The same owning function rejects the old name-based runtime
+and passes the current ID-based runtime; proof is retained in
+`.context/deploy-r9-owned-id-test-causal.json`. Original R9 failures remain failed.
+
+
+#### PR1522 absent-container cleanup recurrence: second exact reviewed recipe
+
+CodeRabbit finding `4280661029` on `849bea2ca` identified the owner cleanup
+path returning before its volume removal when its immutable container was
+already absent. The actual shell producer regression failed on the original
+source and passed on the fix, while bootstrap still exited 1. All ten focused
+tests and eleven Docker-boundary scenarios preserve native owner PID/birth,
+token and the unchanged strict receipt consumer.
+
+The frozen patch SHA-256 is
+`36c10800365ed19685e8433b205ab43a6d7dbc6289a62477cd57577acd08b69c`;
+its `run.sh` SHA-256 is
+`2d6ecf2f342447f9c16dce31a776a9972a920424e91dba458345d149ff13ca9f`.
+A distinct independent reviewer reproduced the causal proof and reconstructed
+all forty executable bindings. Thirty-nine remain unchanged. Ten composite
+controls passed, including rejection of the unregistered tuple.
+
+That role explicitly approved new composite fingerprint
+`2fc56aea8ef6c70fa77e0e2778d49fccc09f5bcafb894c04f04499dfc3ee5447`
+for only `before-stack-launch` and `agent-network-index-bootstrap`. The prior
+reviewed fingerprints remain. Frontend preflight is not enabled. Parent applied
+the frozen patch and the minimal registration after all R10 benchmark owners
+had authenticated clean receipts and the local root had retired. Dirty-candidate
+qualification was never claimed. Committed-source positives, mutation inverses
+and fresh full R11 verification are still mandatory. Private audit evidence is
+`.context/r11-absent-container-audit/`; it is not a deployment PASS.

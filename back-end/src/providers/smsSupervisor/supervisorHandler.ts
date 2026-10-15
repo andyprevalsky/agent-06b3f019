@@ -6,6 +6,7 @@
  * delivery; argument-free `attempt_completion` only ends a run that sent.
  *
  * Loop pattern:
+ *   0. Call the reaction tool first (native on WhatsApp, silent no-op on SMS)
  *   1. Call LLM → get { reasoning, tool_calls }
  *   2. Execute tools, delivering send_user_message immediately
  *   3. Accept attempt_completion only after a successful delivery
@@ -16,7 +17,7 @@
 import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
-import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
+import { processInboundAttachments, type InboundMediaAttachment } from './inboundMedia';
 import {
   commitPendingWrites,
   dispatchToolCall,
@@ -29,12 +30,16 @@ import { getComputeToken } from './supervisorComputeToken';
 import { isProductionEnvironment } from '../productionEnvironment';
 import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
-import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
+import { callWithRetries, dispatchToolSafely, buildToolFailureMessage } from './supervisorResilience';
 import { resolveSendUserMessage, sameSmsBody } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
+import { reactToInboundMessage } from './inboundReaction';
+import { redactTraceEntry, type SupervisorToolTraceEntry } from './toolTrace';
+import { resolveReplyTarget } from './messageReply';
 
 export type { SupervisorResponse } from './supervisorLlm';
 export { finalizeSupervisorResponse } from './supervisorLlm';
+export { buildToolFailureMessage } from './supervisorResilience';
 
 const log = createLogger('SmsSupervisor');
 
@@ -54,35 +59,6 @@ const SUPERVISOR_LLM_RETRY_BASE_DELAY_MS = 400;
 // still ended in the fallback apology.
 const MAX_CONSECUTIVE_EMPTY_ROUNDS = 2;
 const TOOL_TRACE_RESULT_LIMIT = 2_000;
-
-interface SupervisorToolTraceEntry {
-  sequence: number;
-  round: number;
-  phase: 'dispatch' | 'commit' | 'completion';
-  tool: string;
-  arguments: Record<string, unknown>;
-  success: boolean;
-  result: string;
-  resultTruncated: boolean;
-  error?: string;
-}
-
-/**
- * Drop user content from a trace entry while keeping it useful as evidence.
- *
- * Tool arguments are the model's own words (a search query, a goal) and are the
- * point of the audit, so they stay. Results are whatever the tool read back on
- * the user's behalf and never belong in a shipped log.
- */
-function redactTraceEntry(entry: SupervisorToolTraceEntry): SupervisorToolTraceEntry {
-  return {
-    ...entry,
-    result: `[redacted ${String(entry.result.length)} chars]`,
-    ...(entry.error === undefined
-      ? {}
-      : { error: `[redacted ${String(entry.error.length)} chars]` }),
-  };
-}
 
 // User-facing last-resort line when a run genuinely cannot produce a reply after
 // exhausting retries. Deliberately warmer + actionable than a bare "something
@@ -131,21 +107,6 @@ export interface SmsSupervisorResult {
   committed: boolean;
 }
 
-export function buildToolFailureMessage(
-  failures: readonly ToolResult[],
-  stage: 'execute' | 'commit'
-): string {
-  const failedTools = failures
-    .filter((result) => !result.success)
-    .map((result) => `${result.tool}: ${result.error || result.result || 'failed'}`);
-  const details = failedTools.length > 0 ? failedTools.join('; ') : 'unknown failure';
-  const prefix =
-    stage === 'commit'
-      ? 'I tried to finish that, but one or more actions failed while applying the changes'
-      : 'I tried to finish that, but one or more actions failed';
-  return `${prefix}: ${details}. Please try again or open Rose to check the current state.`;
-}
-
 /**
  * Handle an inbound SMS message through the supervisor agent.
  *
@@ -158,9 +119,12 @@ export async function handleSmsSupervisorMessage(config: {
   userId: string;
   phoneNumber: string;
   inboundMessage: string;
+  /** Provider ID of this exact inbound, required for native WhatsApp reactions. */
+  inboundMessageId?: string;
+  trigger?: 'inbound' | 'scheduled';
   mySeq: number;
   inboundAlreadyPersisted?: boolean;
-  attachments?: SurgeAttachment[];
+  attachments?: InboundMediaAttachment[];
   abortSignal?: AbortSignal;
   commitGuard?: () => Promise<boolean>;
   /**
@@ -184,6 +148,10 @@ export async function handleSmsSupervisorMessage(config: {
     messagePreview: inboundMessage.substring(0, 100),
     attachmentCount: attachments.length,
   });
+
+  const computeToken = await getComputeToken(userId);
+  // React before other tools; SMS silently discards the reaction attempt.
+  const reaction = await reactToInboundMessage(config, computeToken);
 
   // 0. Resolve MMS media: images become multimodal content blocks on the
   // inbound user message; voice notes are transcribed into text lines.
@@ -224,10 +192,6 @@ export async function handleSmsSupervisorMessage(config: {
     durationMs: Date.now() - contextStart,
   });
 
-  // 2. Fetch the user's compute token. Only used off the default Cerebras
-  // route; `callSupervisorLlm` gates it on providerRoute.
-  const computeToken = await getComputeToken(userId);
-
   // 3. Build messages for the LLM. The volatile runtime environment is a
   // synthetic get_environment call/result AFTER the newest inbound SMS. It is
   // not persisted, and placing it last preserves prompt-cache reuse through
@@ -239,14 +203,16 @@ export async function handleSmsSupervisorMessage(config: {
     markCacheable(systemPrompt),
     ...sessionHistory,
     { role: 'user', content: inboundContent },
+    ...(reaction?.messages ?? []),
     ...environment.buildEnvironmentToolMessages(contextUserMessage, mySeq),
   ];
   // 4. LLM call loop. Writes remain deferred behind the sequence gate. SMS
   // delivery is explicit and does not terminate the loop.
-  const allToolsExecuted: string[] = [];
+  const allToolsExecuted: string[] = reaction ? [reaction.toolCall.tool] : [];
   const toolTrace: SupervisorToolTraceEntry[] = [];
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
+  const sentMessageCalls: Array<{ message: string; replyToMessageId?: unknown }> = [];
   let completionAccepted = false;
   let consecutiveEmptyRounds = 0;
   let inboundStoredForRun = inboundAlreadyPersisted;
@@ -269,6 +235,8 @@ export async function handleSmsSupervisorMessage(config: {
       ...(result.error === undefined ? {} : { error: result.error }),
     });
   };
+
+  if (reaction) recordToolTrace(-1, reaction.toolCall, reaction.result, 'dispatch');
 
   const runStillOwnsReply = async (): Promise<boolean> => {
     if (abortSignal?.aborted) return false;
@@ -311,7 +279,10 @@ export async function handleSmsSupervisorMessage(config: {
     });
   };
 
-  const deliverUserMessage = async (message: string): Promise<ToolResult> =>
+  const deliverUserMessage = async (
+    message: string,
+    replyToMessageId?: unknown
+  ): Promise<ToolResult> =>
     withCommitLock(userId, async () => {
       if (!(await runStillOwnsReply())) {
         return {
@@ -321,7 +292,19 @@ export async function handleSmsSupervisorMessage(config: {
           error: 'A newer inbound SMS superseded this run',
         };
       }
-      const smsResult = await sendOnChannel(channel, phoneNumber, message);
+      const replyTarget = await resolveReplyTarget(
+        userId,
+        channel,
+        replyToMessageId,
+        config.inboundMessageId
+      );
+      if (!replyTarget.ok) {
+        return { tool: 'send_user_message', success: false, result: '', error: replyTarget.error };
+      }
+      const smsResult = await sendOnChannel(channel, phoneNumber, message, {
+        replyToMessageId: replyTarget.replyToMessageId,
+        quotedMessage: replyTarget.quotedMessage,
+      });
       if (!smsResult.success) {
         return {
           tool: 'send_user_message',
@@ -330,6 +313,7 @@ export async function handleSmsSupervisorMessage(config: {
           error: smsResult.error ?? 'Message delivery failed',
         };
       }
+      const deliveredBody = smsResult.deliveredBody ?? message;
       // The reply is now DELIVERED. Persistence is best-effort: a throw here must
       // NOT propagate, because an escaped throw would bubble to the webhook's
       // top-level catch and send SUPERVISOR_FALLBACK_MESSAGE on top of the reply
@@ -345,7 +329,7 @@ export async function handleSmsSupervisorMessage(config: {
       const inboundForThisSend = inboundStoredForRun ? undefined : inboundMessage;
       inboundStoredForRun = true;
       try {
-        await appendOutboundSms(userId, message, smsResult.messageSid, inboundForThisSend);
+        await appendOutboundSms(userId, deliveredBody, smsResult.messageSid, inboundForThisSend);
         persisted = true;
       } catch (persistError) {
         log.error('[SmsSupervisor] Outbound SMS delivered but persistence failed', {
@@ -354,11 +338,12 @@ export async function handleSmsSupervisorMessage(config: {
           error: persistError instanceof Error ? persistError.message : String(persistError),
         });
       }
-      sentMessages.push(message);
+      sentMessages.push(deliveredBody);
+      sentMessageCalls.push({ message, replyToMessageId });
       return {
         tool: 'send_user_message',
         success: true,
-        result: persisted ? 'SMS sent and persisted' : 'SMS sent (persistence failed, logged)',
+        result: JSON.stringify({ delivered: true, persisted, message_id: smsResult.messageSid }),
       };
     });
 
@@ -530,7 +515,14 @@ export async function handleSmsSupervisorMessage(config: {
               result: '',
               error: resolved.error,
             };
-          } else if (sentMessages.some((sent) => sameSmsBody(sent, resolved.text))) {
+          } else if (
+            sentMessageCalls.some(
+              (sent) =>
+                sameSmsBody(sent.message, resolved.text) &&
+                (sent.replyToMessageId ?? null) ===
+                  (toolCall.arguments?.reply_to_message_id ?? null)
+            )
+          ) {
             sendResult = {
               tool: 'send_user_message',
               success: false,
@@ -539,7 +531,10 @@ export async function handleSmsSupervisorMessage(config: {
                 'Rejected: this exact message was already delivered this run. Do not resend it.',
             };
           } else {
-            sendResult = await deliverUserMessage(resolved.text);
+            sendResult = await deliverUserMessage(
+              resolved.text,
+              toolCall.arguments?.reply_to_message_id
+            );
           }
           recordResult(toolCall, sendResult);
           allToolsExecuted.push(toolCall.tool);
@@ -731,9 +726,5 @@ export async function handleSmsSupervisorMessage(config: {
     totalDurationMs: Date.now() - overallStart,
   });
 
-  return {
-    responseText,
-    committed,
-    toolsExecuted: allToolsExecuted,
-  };
+  return { responseText, committed, toolsExecuted: allToolsExecuted };
 }

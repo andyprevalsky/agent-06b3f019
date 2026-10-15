@@ -4,14 +4,16 @@
  * that file within the max-lines budget.
  */
 
-import { stripe } from '../../providers/stripe';
+import { getStripeClientForLivemode } from '../../providers/stripe';
 import { PurchaseError } from './errors';
 
 /** Resolve a payment method saved for this customer or its active subscription. */
 export async function getCustomerDefaultPaymentMethodId(
   customerId: string,
-  subscriptionId?: string
+  subscriptionId?: string,
+  livemode = false
 ): Promise<string> {
+  const stripe = getStripeClientForLivemode(livemode);
   const customer = await stripe.customers.retrieve(customerId);
   if ('deleted' in customer && customer.deleted) {
     throw new PurchaseError('Stripe billing customer has been deleted', 402);

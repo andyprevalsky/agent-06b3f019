@@ -68,7 +68,11 @@ async function ensureSession(userId: string): Promise<void> {
  * A superseding run may suppress an obsolete reply, but it can never suppress
  * or overwrite the user message that caused that run.
  */
-export async function recordInboundSms(userId: string, content: string): Promise<number> {
+export async function recordInboundSms(
+  userId: string,
+  content: string,
+  providerMessageId?: string
+): Promise<number> {
   const sessionMessages = storedMessagesArray(Prisma.sql`"SmsSession".messages`);
   const rows = await prisma.$queryRaw<Array<{ lastInboundSeq: number }>>`
     INSERT INTO "SmsSession" (id, "userId", messages, "lastInboundSeq", "createdAt", "updatedAt")
@@ -76,12 +80,13 @@ export async function recordInboundSms(userId: string, content: string): Promise
       ${randomUUID()},
       ${userId},
       to_jsonb(jsonb_build_array(
-        jsonb_build_object(
+        jsonb_strip_nulls(jsonb_build_object(
           'role', 'user',
           'content', ${content},
           'timestamp', ${SESSION_TIMESTAMP_SQL},
-          'inboundSeq', 1
-        )
+          'inboundSeq', 1,
+          'providerMessageId', ${providerMessageId ?? null}::text
+        ))
       )::text),
       1,
       NOW(),
@@ -92,12 +97,13 @@ export async function recordInboundSms(userId: string, content: string): Promise
       "lastInboundSeq" = "SmsSession"."lastInboundSeq" + 1,
       messages = to_jsonb((
         ${sessionMessages} || jsonb_build_array(
-          jsonb_build_object(
+          jsonb_strip_nulls(jsonb_build_object(
             'role', 'user',
             'content', ${content},
             'timestamp', ${SESSION_TIMESTAMP_SQL},
-            'inboundSeq', "SmsSession"."lastInboundSeq" + 1
-          )
+            'inboundSeq', "SmsSession"."lastInboundSeq" + 1,
+            'providerMessageId', ${providerMessageId ?? null}::text
+          ))
         )
       )::text),
       "updatedAt" = NOW()

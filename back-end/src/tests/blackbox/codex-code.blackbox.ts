@@ -42,7 +42,6 @@ import {
 import { waitForCodexOutput } from './codex-ws-output.support';
 import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { assert, assertStatus, request } from './codex-sandbox.support';
-import { waitForCodexOutput } from './codex-smoke-output.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';

@@ -13,6 +13,11 @@ import { buildSessionCredentialPayload } from '../../domains/browser-session/ser
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { resetKernelSessionTabs } from '../../providers/browser/kernel';
 import { prisma } from '../../providers/database';
+import {
+  isOriginPayloadScript,
+  mockOriginPayloadSql,
+  verifyNativeSqlTimeoutInverses,
+} from './browser-session-credential-timeout.cases';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -219,9 +224,13 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     const previousTimeout = process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
     let releasePendingScript: (() => void) | undefined;
     let pendingScriptCalls = 0;
-    let markPendingScriptStarted: (() => void) | undefined;
+    let pendingPageClosed = false;
+    let unrelatedInitCalls = 0;
+    const originRows = await prisma.localStorageOrigin.findMany({ where: { userId } });
+    const sqlTransport = mockOriginPayloadSql(originRows);
+    let signalPendingScript: (() => void) | undefined;
     const pendingScriptStarted = new Promise<void>((resolve) => {
-      markPendingScriptStarted = resolve;
+      signalPendingScript = resolve;
     });
     const pendingScript = new Promise<void>((resolve) => {
       releasePendingScript = resolve;
@@ -231,12 +240,32 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
         {
           ...fakeBrowser.contexts()[0],
           newPage: async () => {
-            throw new Error('synthetic origin restoration unavailable');
+            const page = await fakeBrowser.contexts()[0].newPage();
+            return {
+              ...page,
+              evaluate: async (script: string) => {
+                assert(
+                  isOriginPayloadScript(script) && script.includes('allowed'),
+                  'pending callback is not the fixture origin payload'
+                );
+                pendingScriptCalls += 1;
+                signalPendingScript?.();
+                await pendingScript;
+              },
+              close: async () => {
+                if (!pendingPageClosed) {
+                  pendingPageClosed = true;
+                  await page.close();
+                }
+              },
+            };
           },
-          addInitScript: async () => {
-            pendingScriptCalls += 1;
-            markPendingScriptStarted?.();
-            await pendingScript;
+          addInitScript: async (script: string) => {
+            assert(
+              !isOriginPayloadScript(script),
+              'origin payload unexpectedly used unrelated initScript channel'
+            );
+            unrelatedInitCalls += 1;
           },
         },
       ],
@@ -244,29 +273,52 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
         callerBrowserCloseCount += 1;
       },
     } as unknown as Browser;
-    mock.timers.enable({ apis: ['setTimeout'] });
+    await timeoutBrowser.contexts()[0].addInitScript('unrelated scrollbar fixture');
+    assert(
+      unrelatedInitCalls === 1 && pendingScriptCalls === 0,
+      'unrelated init script satisfied origin barrier'
+    );
+    unrelatedInitCalls = 0;
     process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = '25';
+    mock.timers.enable({ apis: ['setTimeout'] });
     try {
       let injectionError: unknown;
-      try {
-        const preparation = prepareSessionCredentials(
-          sessionId,
-          userId,
-          'https://shop.example.co.uk/login',
-          { browser: timeoutBrowser }
-        );
-        await Promise.race([pendingScriptStarted, preparation]);
-        mock.timers.tick(25);
-        await preparation;
-      } catch (error) {
-        injectionError = error;
-      }
+      let preparationSettled = false;
+      const preparation = prepareSessionCredentials(
+        sessionId,
+        userId,
+        'https://shop.example.co.uk/login',
+        { browser: timeoutBrowser }
+      ).then(
+        () => {
+          preparationSettled = true;
+        },
+        (error: unknown) => {
+          preparationSettled = true;
+          injectionError = error;
+        }
+      );
+      // Select the CDP phase explicitly; SQL staging shares the same budget.
+      await Promise.race([
+        pendingScriptStarted,
+        preparation.then(() => {
+          throw new Error('preparation settled before pending origin payload');
+        }),
+      ]);
+      mock.timers.tick(24);
+      await Promise.resolve();
+      assert(!preparationSettled, 'state injection expired before its exact budget');
+      mock.timers.tick(1);
+      await preparation;
       assert(injectionError instanceof Error, 'state timeout did not reject preparation');
       assert(
         injectionError.message === 'Browser state injection timed out after 25ms',
         'preparation did not preserve the exact state timeout'
       );
-      assert(pendingScriptCalls === 1, 'timeout did not exercise the pending addInitScript');
+      assert(
+        pendingScriptCalls === 1,
+        'timeout did not exercise the pending origin payload evaluation'
+      );
       assert(
         'credentialPayload' in injectionError,
         'state timeout discarded the validated target credential payload'
@@ -313,15 +365,21 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
         'timeout payload includes applied-cookie or restoration claims'
       );
       assert(callerBrowserCloseCount === 0, 'timeout closed the caller-owned browser');
-      console.log('PASS state timeout rejects and preserves complete target credential inventory');
+      console.log(
+        'PASS origin payload entered; state timeout rejects and preserves complete target credential inventory'
+      );
     } finally {
       if (previousTimeout === undefined) delete process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
       else process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = previousTimeout;
       releasePendingScript?.();
       await new Promise<void>((resolve) => setImmediate(resolve));
       mock.timers.reset();
+      sqlTransport.mock.restore();
     }
+    assert(pendingPageClosed, 'timeout did not dispose its owned origin page');
+    assert(unrelatedInitCalls === 0, 'timeout reached unrelated init scripts');
     assert(pendingScriptCalls === 1, 'timeout allowed later browser-state mutations');
+    await verifyNativeSqlTimeoutInverses(sessionId, userId);
 
     const bestEffortBrowser = {
       contexts: () => [

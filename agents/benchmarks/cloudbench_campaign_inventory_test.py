@@ -16,6 +16,52 @@ from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
 ROOT = Path(os.environ.get("CLOUDBENCH_INVENTORY_ROOT_UNDER_TEST", Path(__file__).resolve().parents[2]))
 
 
+def assert_publication_process_retired(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    native = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True
+    )
+    if native.returncode == 0 and native.stdout.strip().startswith("Z"):
+        return
+    # An empty/failed probe is not proof of retirement. Recheck absence to
+    # distinguish a process reaped during observation from an unavailable ps.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    raise AssertionError(f"owned publication process {pid} remains: {native.stdout.strip()!r}")
+
+
+def test_campaign_inventory_publication_retirement_distinguishes_live_zombie_and_absent(monkeypatch):
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        with pytest.raises(AssertionError, match="remains"):
+            assert_publication_process_retired(live.pid)
+        deadline = time.monotonic() + FIXTURE_HOST_GUARD_SECONDS
+        while True:
+            state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True).strip()
+            if state.startswith("Z"):
+                break
+            assert time.monotonic() < deadline, "fixture child did not become terminal"
+            time.sleep(0.01)
+        # Intentionally do not poll/wait: hold our exact exited child unreaped.
+        assert_publication_process_retired(child.pid)
+        child.wait()
+        assert_publication_process_retired(child.pid)
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, "", "probe failed"))
+            with pytest.raises(AssertionError):
+                assert_publication_process_retired(live.pid)
+    finally:
+        child.wait()
+        live.terminate()
+        live.wait()
+
+
 @pytest.mark.parametrize("failure", ("infra", "infra-strict", "infra-parent-owned", "task", "contradictory", "retained", "exhausted", "cutoff", "cutoff-no-retry", "retry-unverified", "retry-handle-missing", "lifecycle-failed"))
 def test_campaign_inventory_retries_only_released_infra_without_restarting_peers(tmp_path, failure):
     """Exercise the real scheduler with owned child processes and terminal artifacts."""
@@ -1233,11 +1279,7 @@ def test_campaign_inventory_group_publication_cancellation_retires_only_its_owne
             assert summary["jobs"][0]["status"] == ("passed" if phase == "final" else "cancelled")
             assert foreign.poll() is None, "cancellation must preserve the unrelated process"
             for owned_pid in owner.values():
-                try:
-                    os.kill(owned_pid, 0)
-                except ProcessLookupError:
-                    continue
-                raise AssertionError(f"owned publication process {owned_pid} remains")
+                assert_publication_process_retired(owned_pid)
         finally:
             release.touch()
             try:

@@ -1,5 +1,5 @@
 import { type CardProvider } from '../../providers/card-provider';
-import { stripe } from '../../providers/stripe';
+import { getStripeClientForLivemode, type Stripe } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
@@ -7,7 +7,7 @@ import { archivePurchaseBoundary } from './archive';
 import { sanitizeDescriptorSuffix } from './chargeHelpers';
 import { PurchaseSpendStatus, type MintPurchaseInput, type PurchaseSpend } from './types';
 
-export type StripePaymentIntent = Awaited<ReturnType<typeof stripe.paymentIntents.create>>;
+export type StripePaymentIntent = Awaited<ReturnType<Stripe['paymentIntents']['create']>>;
 
 /** Mutable side-effect state shared across the charge/mint/rollback steps. */
 export interface ChargeState {
@@ -36,9 +36,13 @@ export async function authorizeStripeHold(
   stripeCustomerId: string,
   stripeSubscriptionId?: string
 ): Promise<StripePaymentIntent> {
+  const stripe = getStripeClientForLivemode(purchase.stripeLivemode);
+  stripeCustomerId = purchase.stripeCustomerId ?? stripeCustomerId;
+  stripeSubscriptionId = purchase.stripeSubscriptionId ?? stripeSubscriptionId;
   const paymentMethodId = await getCustomerDefaultPaymentMethodId(
     stripeCustomerId,
-    stripeSubscriptionId
+    stripeSubscriptionId,
+    purchase.stripeLivemode
   );
   const stripeRequest = {
     amount: input.totalCents,

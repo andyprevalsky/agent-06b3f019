@@ -782,21 +782,38 @@ fi
 
 cleanup_seed_bootstrap_database() {
     if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
-        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || return 1
         SYSTEM_DB_OWNED_BY_US=false
         DB_OWNED_BY_US=false
     elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
-        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
-        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || true
+        local remaining
+        if ! docker rm -f "$DB_OWNED_CONTAINER_ID" >/dev/null 2>&1; then
+            # A successful all-states query for the full immutable ID can prove
+            # it is already gone. A failed query or any result is not absence.
+            [[ "$DB_OWNED_CONTAINER_ID" =~ ^[a-f0-9]{64}$ ]] || return 1
+            remaining=$(docker container ls --all --no-trunc --filter "id=$DB_OWNED_CONTAINER_ID" --format '{{.ID}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
+        if ! docker volume rm "$DB_VOLUME" >/dev/null 2>&1; then
+            [[ "$DB_VOLUME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+            remaining=$(docker volume ls --filter "name=$DB_VOLUME" --format '{{.Name}}' 2>/dev/null) || return 1
+            [ -z "$remaining" ] || return 1
+        fi
         DB_OWNED_CONTAINER_ID=""
         DB_OWNED_BY_US=false
     fi
 }
 
 fail_required_seed_dump() {
+    local cleanup_state=clean
     echo "❌ $1" >&2
     echo "   Expected cache token: $_SEED_CACHE_TOKEN" >&2
-    cleanup_seed_bootstrap_database
+    # Seed admission exits before the service cleanup trap exists. This owner
+    # must release its bootstrap resources before publishing its own receipt.
+    cleanup_seed_bootstrap_database || cleanup_state=failed
+    release_seed_lock_if_held || cleanup_state=failed
+    run_publish_stack_cleanup_status "$cleanup_state" || \
+        echo "❌ could not publish bootstrap stack cleanup status" >&2
     exit 1
 }
 
@@ -1049,6 +1066,23 @@ _SEED_LOCK_HELD=0
 release_seed_lock_if_held() {
     if [ "${_SEED_LOCK_HELD:-0}" = "1" ]; then
         release_benchmark_seed_lock "$_SEED_DUMP"
+        # Distinguish native ENOENT from an unreadable lock; shell readlink
+        # failure alone cannot prove absence or a different owner.
+        if ! python3 - "${_SEED_DUMP}.publish.lock" "${BASHPID:-$$}" <<'PYLOCK'
+import os
+import sys
+
+try:
+    owner = os.readlink(sys.argv[1])
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if owner.isdecimal() and int(owner) > 0 and owner != sys.argv[2] else 1)
+PYLOCK
+        then
+            return 1
+        fi
         _SEED_LOCK_HELD=0
     fi
 }

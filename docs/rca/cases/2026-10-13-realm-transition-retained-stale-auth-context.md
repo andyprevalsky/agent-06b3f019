@@ -261,3 +261,105 @@ until the repository's current-diff approval boundary is satisfied.
 ## Reusable lesson
 
 Bind credential context to the current realm independently of restoration success, and expose restoration failure without retaining another site's identity.
+
+
+### R11 coverage regression: timeout fixture selected the wrong phase
+
+At source `449dc082e3a2dd5b7b6c299905fa42e3cf51d37d`, the owning
+`browser-session-credential-injection` domain failed at its
+`pendingScriptCalls === 1` assertion. The fixture used a real 25 ms whole-state
+budget but assumed SQL staging completed before that budget expired. The actual
+state budget includes transaction acquisition, temporary-table setup and payload
+reads before any browser script. Expiry before `addInitScript` is valid runtime
+behavior, not proof that the cancellation callback was exercised.
+
+The retained R11 trace starts serial injection at 08:49:52.211 UTC and reports
+aborted origin transfer at .278 with zero acknowledged scripts. Its first setup
+statement completed at .231; the next completed only at .281, after timeout
+propagation. The error is therefore specifically a test phase-selection defect.
+The domain's 3586 ms total is not the 25 ms phase duration. Host-pressure snapshots
+showed ample available memory and cannot identify a causal load event. Archive
+searches covered the literal pending-addInitScript failure and browser credential
+injection/setup-budget coverage timing; this is a test-boundary relative of the
+existing realm-inventory case, not a change to credential or timeout policy.
+
+A private V8-instrumented replay extracts the actual owning timeout case and
+executes actual `injectUserData`, origin transfer, timeout and typed payload
+preservation code. Only the external SQL boundary is fake; a controlled 50 ms SQL
+setup response reproduces the observed greater-than-25 ms setup interval. The
+unchanged case fails with the original `timeout did not exercise the pending
+addInitScript` assertion. After the test repair, the identical replay passes:
+a script-entry barrier precedes advancing the test clock by 24 then 1 ms.
+Every original timeout, typed-cause, credential inventory, secret-inspection,
+caller-browser ownership and no-late-mutation assertion remains present.
+
+An additional inverse pauses the external transaction-start boundary, advances
+the same 25 ms test clock, and proves typed target-inventory-preserving rejection
+before any browser mutation. Releasing that boundary after cancellation permits
+no late browser mutation. Both clock and transaction mock are restored. The
+production implementation and configured budgets are unchanged; the fix adds no
+sleep and no provider call. The replay's controlled external SQL latency is only
+causal input, not the test repair.
+
+Private causal logs, V8 data and manifests use `.context/r11-browser-injection-*`.
+The focused boundary replay is not a full-domain PASS: no real database was
+mutated under this task's explicit restriction. Real-DB domain/full coverage
+qualification remains for the parent after the frozen verification owners join.
+The original R11 failure remains recorded. Parent source and prior private
+candidates remain untouched; this isolated patch changes only the existing
+blackbox and this append.
+
+
+### V2 correction: origin-payload acknowledgement, not scrollbar initScript
+
+The preceding V1 qualification is superseded by independent native SQL proof.
+A real `pg_sleep(0.05)` under unchanged `{maxWait:25, timeout:25}` raises P2028,
+but V1 falsely passed because its unrestricted `addInitScript` barrier selected
+scrollbar CSS after the caught storage failure. The real origin transport uses
+`Page.evaluate` with the `rose.origin-state.*` assembler protocol. V1's promise
+barrier therefore did not prove origin-payload cancellation.
+
+V2 binds the pending callback to that actual protocol plus the fixture marker,
+through the owned origin page. It proves an unrelated init script cannot select
+that phase, and confirms disposal after cancellation and no later mutations.
+Only this CDP-phase case replaces external SQL transport with its already-stored
+fixture responses. Production code and both budgets remain unchanged. All 57
+original assertion conditions remain in the owning domain (AST multiset checked).
+The companion `.cases.ts` is called by the existing registered blackbox domain;
+real SQL and the remaining credential-contract coverage still run normally.
+
+Two native SQL inverses use actual PostgreSQL with `pg_sleep(0.05)`, preserving
+25 ms maxWait/timeout and observing P2028. Without JS expiry, the real scrollbar
+callback is observed while the strict origin gate rejects phase selection.
+With JS expiry at SQL start, there are zero origin or browser mutations after
+that start, including after the native query settles. Cookie injection that
+legitimately precedes the state phase is counted in the baseline, not hidden.
+
+A fresh exact-owned localhost review database qualifies the complete domain:
+V1 plus the native fault returns 0 (the reproduced false green), strict-gated V1
+returns 1, and V2 returns 0 with actual origin-payload entry and both native
+inverses. V8 instrumentation is enabled. Every local database is proven absent
+before creation and tracked by catalog OID; after all runners join, zero sessions
+and the same OID are required before drop, followed by catalog absence proof.
+No production provider, primary database, parent source or frozen V1 artifact is
+changed. Private receipts and causal logs use `.context/r11-browser-injection-v2-*`.
+Parent independent review and fresh full deployment gates remain pending.
+
+
+### V3 correction: observe suppressed caller-browser closure
+
+Independent review superseded V2 ownership acceptance: throwing from the fake
+caller browser's close method was insufficient because production suppresses
+close rejection. A real-SQL mutation invoking caller close in preparation's
+finally passed both inverse branches despite two unwanted closes.
+
+V3 increments a caller-close counter before throwing and asserts zero after
+preparation, native SQL settlement and late callbacks in both inverse branches.
+The same external mutation now fails both branches on the actual companion
+assertions; V2 still reproduces its false green. The full positive owning domain
+passes against a fresh exact-owned localhost database with unchanged budgets,
+origin-protocol controls and all 57 original assertion conditions. Its runner is
+joined, exact catalog OID and zero sessions verified before drop, and catalog
+absence confirmed afterward. No backend/provider/primary database or frozen V1/V2
+artifact changed. V3 receipts use `.context/r11-browser-injection-v3-*`; full
+parent coverage and independent review remain pending.

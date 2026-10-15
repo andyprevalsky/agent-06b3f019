@@ -387,7 +387,7 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
       );
     }
 
-    // Session shape: only inbound user message + assistant reply persisted —
+    // Session shape: only the inbound and substantive reply are persisted —
     // not the start_new_agent tool turn. Per WS-1.
     const messages = await waitFor(async () => {
       const session = await prisma.smsSession.findUnique({ where: { userId } });
@@ -399,9 +399,7 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
     });
     const asstMsgs = messages.filter((message) => message.role === 'assistant');
     if (asstMsgs[0].content !== replyText) {
-      throw new Error(
-        `Expected assistant content to match fixture reply, got: ${asstMsgs[0].content?.substring(0, 80)}`
-      );
+      throw new Error(`Expected only the fixture reply, got: ${JSON.stringify(asstMsgs)}`);
     }
   } finally {
     await cleanupAgentScopedUser(prisma, userId);
