@@ -3463,8 +3463,9 @@ def test_campaign_scheduled_stop_refuses_changed_scheduled_membership(change):
         guard['fold'](summary)
 
 
+@pytest.mark.parametrize('scoped', [False, True])
 @pytest.mark.parametrize('failed, expected_signals', [(1, 0), (29, 0), (30, 1)])
-def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_path, monkeypatch, failed, expected_signals):
+def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_path, monkeypatch, failed, expected_signals, scoped):
     """Run the actual supervisor loop repeatedly, including its durable stop latch."""
     import hashlib
     import runpy
@@ -3481,6 +3482,11 @@ def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_pat
     manifest_dir = campaign / 'startup-cohorts/c001'
     destination = tmp_path / '.context/stress200-host'
     destination.mkdir(parents=True)
+    legacy = destination
+    old_evidence = legacy / 'first-infra-threshold-trigger.private.json'
+    if scoped:
+        old_evidence.write_bytes(b'prior epoch evidence must remain untouched\n')
+        destination = legacy / 'watchers-new-original-epoch'
     summary = dict(_scheduled_stop_summary(failed), campaign_id=campaign_id,
                    e2e_started_at_epoch=epoch, total_jobs=600, concurrency=600)
     manifest = {'cohort_id': 'c001', 'e2e_deadline_monotonic': 9999.0,
@@ -3494,6 +3500,9 @@ def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_pat
         def wait(self): return 0
     parent = Parent()
     def launch(*args, **kwargs):
+        assert args[0] == ['bash', 'scripts/run-bench']
+        if scoped:
+            assert destination.stat().st_mode & 0o777 == 0o700
         manifest_dir.mkdir(parents=True)
         (campaign / 'summary.json').write_text(json.dumps(summary))
         (manifest_dir / 'manifest.json').write_text(json.dumps(manifest))
@@ -3510,12 +3519,15 @@ def test_campaign_scheduled_stop_actual_supervisor_sends_one_parent_term(tmp_pat
          patch.object(namespace['subprocess'], 'Popen', side_effect=launch), \
          patch.object(namespace['signal'], 'signal'), \
          patch.object(namespace['time'], 'sleep', side_effect=advance), \
-         patch.object(namespace['sys'], 'argv', ['supervisor', str(epoch), 'bash', 'scripts/run-bench']):
+         patch.object(namespace['sys'], 'argv', ['supervisor', str(epoch), *(['--watcher-scope', 'watchers-new-original-epoch'] if scoped else []), 'bash', 'scripts/run-bench']):
         assert main() == 0
     assert parent.signals == [namespace['signal'].SIGTERM] * expected_signals
     assert (destination/'first-infra-threshold-trigger.private.json').exists() is bool(expected_signals)
     assert (destination/'infra-threshold-parent-term.safe.json').exists() is bool(expected_signals)
     assert len(iterations) == 3
+    if scoped:
+        assert old_evidence.read_bytes() == b'prior epoch evidence must remain untouched\n'
+        assert not (legacy / 'threshold-original-parent.private.json').exists()
 
 
 @pytest.mark.parametrize('prior', [
@@ -3551,3 +3563,64 @@ def test_campaign_scheduled_stop_refuses_old_watcher_paths_before_parent(tmp_pat
         assert artifact.is_symlink()
     else:
         assert artifact.read_bytes() == b'original private evidence stays untouched\n'
+
+
+@pytest.mark.parametrize('scope', ['', '.', '..', '../escape', '/tmp/escape', 'has space', 'ü', 'x' * 97])
+def test_campaign_scheduled_stop_refuses_unsafe_watcher_scope_before_parent(tmp_path, monkeypatch, scope):
+    from unittest.mock import patch
+    namespace = _scheduled_stop_guard()['main'].__globals__
+    legacy = tmp_path / '.context/stress200-host'; legacy.mkdir(parents=True)
+    original = legacy / 'first-infra-threshold-trigger.private.json'; original.write_bytes(b'old original\n')
+    def paths(*args): return tmp_path if args == ('/tmp/gate/repo',) else Path(*args)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF', 'a' * 40)
+    with patch.dict(namespace, Path=paths), \
+         patch.object(namespace['subprocess'], 'Popen') as popen, \
+         patch.object(namespace['sys'], 'argv', ['supervisor', '123.0', '--watcher-scope', scope, 'bash', 'scripts/run-bench']):
+        with pytest.raises(ValueError, match='invalid watcher scope'):
+            namespace['main']()
+    popen.assert_not_called()
+    assert list(legacy.iterdir()) == [original]
+    assert original.read_bytes() == b'old original\n'
+
+
+@pytest.mark.parametrize('prior', ['directory', 'file', 'dangling', 'fifo'])
+def test_campaign_scheduled_stop_preserves_existing_scoped_destination_before_parent(tmp_path, monkeypatch, prior):
+    from unittest.mock import patch
+    namespace = _scheduled_stop_guard()['main'].__globals__
+    legacy = tmp_path / '.context/stress200-host'; legacy.mkdir(parents=True)
+    selected = legacy / 'already-reserved'
+    if prior == 'directory':
+        selected.mkdir(); (selected / 'original').write_bytes(b'prior original\n')
+    elif prior == 'file': selected.write_bytes(b'prior original\n')
+    elif prior == 'dangling': selected.symlink_to(legacy / 'missing')
+    else: os.mkfifo(selected)
+    info = selected.lstat()
+    def paths(*args): return tmp_path if args == ('/tmp/gate/repo',) else Path(*args)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF', 'a' * 40)
+    with patch.dict(namespace, Path=paths), \
+         patch.object(namespace['subprocess'], 'Popen') as popen, \
+         patch.object(namespace['sys'], 'argv', ['supervisor', '123.0', '--watcher-scope', selected.name, 'bash', 'scripts/run-bench']):
+        with pytest.raises(ValueError, match='prior watcher scope'):
+            namespace['main']()
+    popen.assert_not_called()
+    assert selected.lstat() == info
+    if prior == 'directory': assert (selected / 'original').read_bytes() == b'prior original\n'
+    if prior == 'file': assert selected.read_bytes() == b'prior original\n'
+    if prior == 'dangling': assert selected.is_symlink()
+
+
+def test_campaign_scheduled_stop_refuses_linked_scope_parent_before_parent(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    namespace = _scheduled_stop_guard()['main'].__globals__
+    context = tmp_path / '.context'; context.mkdir()
+    protected = tmp_path / 'protected'; protected.mkdir()
+    (context / 'stress200-host').symlink_to(protected, target_is_directory=True)
+    def paths(*args): return tmp_path if args == ('/tmp/gate/repo',) else Path(*args)
+    monkeypatch.setenv('REVIEWED_OPERATOR_SOURCE_REF', 'a' * 40)
+    with patch.dict(namespace, Path=paths), \
+         patch.object(namespace['subprocess'], 'Popen') as popen, \
+         patch.object(namespace['sys'], 'argv', ['supervisor', '123.0', '--watcher-scope', 'new-run', 'bash', 'scripts/run-bench']):
+        with pytest.raises(ValueError, match='unsafe watcher scope parent'):
+            namespace['main']()
+    popen.assert_not_called()
+    assert not list(protected.iterdir())

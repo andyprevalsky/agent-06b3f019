@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -112,6 +113,37 @@ def fence(repo, parent, expected_birth, ref, campaign):
     if not owned or birth(parent.pid) != expected_birth:
         raise ValueError('parent lock owner mismatch')
 
+def watcher_destination(repo, scope):
+    """Opt-in immutable run namespace; legacy receipts are never overwritten."""
+    parent = repo/'.context/stress200-host'
+    if scope is None:
+        return parent
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,95}', scope):
+        raise ValueError('invalid watcher scope')
+    if parent.resolve(strict=True) != parent:
+        raise ValueError('unsafe watcher scope parent')
+    descriptor = os.open(parent, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid():
+            raise ValueError('foreign watcher scope parent')
+        try:
+            os.mkdir(scope, mode=0o700, dir_fd=descriptor)
+        except FileExistsError:
+            raise ValueError('prior watcher scope requires a fresh reviewed namespace') from None
+        child = os.open(scope, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=descriptor)
+        try:
+            actual = os.fstat(child)
+            if actual.st_uid != os.getuid() or stat.S_IMODE(actual.st_mode) != 0o700:
+                raise ValueError('watcher scope is not private and owned')
+            os.fsync(child)
+        finally:
+            os.close(child)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return parent/scope
+
 def main():
     repo = Path('/tmp/gate/repo')
     ref = os.environ['REVIEWED_OPERATOR_SOURCE_REF']
@@ -119,9 +151,14 @@ def main():
         raise ValueError('final source is not bound')
     epoch = float(sys.argv[1])
     args = sys.argv[2:]
+    scope = None
+    if args[:1] == ['--watcher-scope']:
+        if len(args) < 4:
+            raise ValueError('watcher scope requires a reviewed command')
+        scope, args = args[1], args[2:]
     if not args or args[:2] != ['bash','scripts/run-bench']:
         raise ValueError('unexpected reviewed command')
-    destination = repo/'.context/stress200-host'
+    destination = watcher_destination(repo, scope)
     watcher_files = ('threshold-original-parent.private.json',
                      'first-authentic-infra-summary.private.json',
                      'first-authentic-infra.private.json',
