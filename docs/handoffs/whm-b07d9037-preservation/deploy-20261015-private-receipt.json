@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "whm-preservation/e9afcffd/deploy-readiness-20261015-137bf112f5db.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "cba521881bb20f6f91392ffce372f99e5b26c9811d1696d2661c21c7a6105adf",
+  "gzip_sha256": "282beca0d738fc9a2253b6a4ad1c9256539be51f2d10bea2dbda290f48bfc199",
+  "stored_bytes": 569557,
+  "frames": 1,
+  "files": 119,
+  "original_bytes": 1673609,
+  "manifest_sha256": "b1b461f700839d9e0c4d2c2d8ee8fd6d24af99d2a33eed4223f2aa140a71c611",
+  "full_readback_verified": true
+}
