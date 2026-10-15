@@ -11635,6 +11635,43 @@ pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=inv
     printf '%s\n' "$details" | awk '{print $1}'
 }
 
+campaign_inventory_wait() {
+    if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
+        "$@"; return $?
+    fi
+    # All pre-provision borrowed observations share the existing admission
+    # budget. The first parent-shell borrow establishes it; getters inherit it.
+    local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
+    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}" in
+        *[!0-9:]*) echo "❌ invalid inventory admission wait clock" >&2; return 2 ;;
+    esac
+    [ "$wait_seconds" -gt 0 ] && [ "$interval" -gt 0 ] || return 2
+    if [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
+        CAPACITY_ADMISSION_DEADLINE=$((SECONDS + wait_seconds))
+    fi
+    while :; do
+        status=0
+        "$@" || status=$?
+        [ "$status" -ne 0 ] || return 0
+        if [ "$status" -ne 75 ] \
+            || [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] \
+            || [ "${INVENTORY_PUBLISHER_BORROWED:-0}" != 1 ] \
+            || [ -z "${SNAPSHOT_LOOP_PID:-}" ]; then
+            echo "❌ borrowed inventory authority unavailable (status=$status); refusing provisioning" >&2
+            return "$status"
+        fi
+        remaining=$((CAPACITY_ADMISSION_DEADLINE - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "❌ borrowed inventory remained unavailable within the original admission deadline" >&2
+            return 1
+        fi
+        [ "$interval" -le "$remaining" ] || interval="$remaining"
+        echo "⏳ borrowed inventory temporarily unavailable; withholding provisioning within original deadline" >&2
+        sleep "$interval"
+    done
+}
+
 POOL_INVENTORY_JSON=""
 reconcile_pool() {
     local pool_file id st presence claim_path claim_host claim_pid claim_start claim_token
@@ -11651,8 +11688,8 @@ reconcile_pool() {
     # state for the single machine being changed.
     if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
         # Borrow in this shell; command substitution cannot bind its parent.
-        start_machines_snapshot_loop || return 1
-        machines="$(fleet_admission_machines_json 2>/dev/null)" || return 1
+        campaign_inventory_wait start_machines_snapshot_loop || return $?
+        machines="$(campaign_inventory_wait fleet_admission_machines_json)" || return $?
     else
         machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
             echo "❌ could not read pool inventory before refresh" >&2
@@ -11799,8 +11836,8 @@ normalize_current_pool_shape() {
     inventory="$POOL_INVENTORY_JSON"
     if [ -z "$inventory" ]; then
         if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
-            start_machines_snapshot_loop || return 1
-            inventory="$(fleet_admission_machines_json 2>/dev/null)" || return 1
+            campaign_inventory_wait start_machines_snapshot_loop || return $?
+            inventory="$(campaign_inventory_wait fleet_admission_machines_json)" || return $?
         else
             inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
         fi
@@ -12980,12 +13017,7 @@ validate_private_fleet_source() {
         | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
 }
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
-    inventory_status=0
-    start_machines_snapshot_loop || inventory_status=$?
-    [ "$inventory_status" = 0 ] || {
-        echo "❌ campaign inventory unavailable before warm-source lookup" >&2
-        exit "$inventory_status"
-    }
+    campaign_inventory_wait start_machines_snapshot_loop || exit $?
 fi
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     validate_private_fleet_source || exit 1
@@ -13000,7 +13032,7 @@ if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     fi
     echo "🧊 independently owned immutable source: $WARM_ID (region $REGION)"
 else
-warm_json="$(fleet_admission_machines_json 2>/dev/null || echo '[]')"
+warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || exit $?
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin) or []
@@ -13043,7 +13075,7 @@ if [ "$warm_state" != "stopped" ]; then
         echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
         exit 1
     }
-    warm_json="$(fleet_admission_machines_json 2>/dev/null || echo '[]')"
+    warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || exit $?
     warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
         echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
     }
@@ -13411,7 +13443,7 @@ if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
             exit 1
         }
     fi
-    warm_json="$(fleet_admission_machines_json 2>/dev/null)" || {
+    warm_json="$(campaign_inventory_wait fleet_admission_machines_json)" || {
         echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
         exit 1
     }
@@ -13624,7 +13656,8 @@ admit_app_capacity_with_wait() {
         return 2
     fi
     [ "$refresh_inventory" != 1 ] || phase="after infra canary"
-    deadline=$((SECONDS + wait_seconds))
+    deadline="${CAPACITY_ADMISSION_DEADLINE:-$((SECONDS + wait_seconds))}"
+    case "$deadline" in ''|*[!0-9]*) echo "❌ invalid original capacity admission deadline" >&2; return 2 ;; esac
     CAPACITY_ADMISSION_DEADLINE="$deadline"
     while :; do
         inventory_status=0

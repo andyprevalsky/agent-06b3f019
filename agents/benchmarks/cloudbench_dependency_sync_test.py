@@ -33373,3 +33373,102 @@ def test_private_fleet_source_placement_option_does_not_block_exact_recovery(tmp
                              + "\nfresh_volume_placement_admission() { return 1; }\n" + source[start:stop]],
                             capture_output=True, text=True, timeout=5)
     assert result.returncode == (0 if recovery == "1" else 1)
+
+
+@pytest.mark.parametrize("stage", ["post-recovery", "warm-source"])
+@pytest.mark.parametrize("case", ["healthy", "recovers", "exhausts", "expired", "foreign", "dead", "mutation-failed", "mutation-fresh"])
+def test_private_fleet_source_post_recovery_borrow_pending_enters_admission(tmp_path: Path, case: str, stage: str) -> None:
+    fleet = fleet_source_text()
+    start = fleet.index('# Recovery may have removed active machines.')
+    block = fleet[start:fleet.index('# ── App-wide capacity guard', start)]
+    waiter = _extract_fleet_function(fleet, 'admit_app_capacity_with_wait() {')
+    borrowed_wait = _extract_fleet_function(fleet, 'campaign_inventory_wait() {') if 'campaign_inventory_wait() {' in fleet else ''
+    if stage == "warm-source":
+        warm_start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
+        warm_end = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', warm_start)
+        getter_start = fleet.index('warm_json="$(', warm_end)
+        getter_end = fleet.index('\nwarm_pair=', getter_start)
+        block = fleet[warm_start:warm_end] + fleet[getter_start:getter_end] + '\n'
+
+    start = fleet.index('if [ -n "$PROVISION_POOL" ]; then\n    admit_app_capacity_with_wait')
+    first_admission = fleet[start:].splitlines()[1]
+    script = r'''set -uo pipefail
+FLEET_DIR="$ROOT/run"
+source "$ENV_HELPER"
+source "$INVENTORY_HELPER"
+sleep 30 & owned_publisher=$!
+recovery_writer=""
+trap 'kill "$owned_publisher" 2>/dev/null || true; wait "$owned_publisher" 2>/dev/null || true; if [ -n "$recovery_writer" ]; then wait "$recovery_writer" 2>/dev/null || true; fi' EXIT
+APP=fixture-app
+INVENTORY_HOME="$ROOT/shared";INVENTORY_INDEX="$INVENTORY_HOME/index"
+mkdir -p "$INVENTORY_INDEX/current"
+CLOUDBENCH_CAMPAIGN_INVENTORY_DIR="$INVENTORY_HOME"
+INVENTORY_MAX_STALE_SECONDS=90
+INVENTORY_CLOCK_EPOCH=$(date +%s);INVENTORY_CLOCK_SECONDS=$SECONDS
+publisher_birth=$(cloudbench_pid_start_time "$owned_publisher")
+parent_birth=$(cloudbench_pid_start_time "$$")
+printf 'app=%s\npid=%s\npid_start=%s\ntoken=owned-token\nparent_pid=%s\nparent_start=%s\n' "$APP" "$owned_publisher" "$publisher_birth" "$$" "$parent_birth" > "$INVENTORY_HOME/owner"
+healthy() { printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health"; }
+stale() { printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH-1))" > "$INVENTORY_INDEX/current/health"; }
+printf '[]\n' > "$INVENTORY_INDEX/current/admission-machines.json"
+FLY() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
+healthy
+start_machines_snapshot_loop || exit 91
+cp "$INVENTORY_HOME/owner" "$ROOT/original-owner"
+FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=0
+FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=0
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=2
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+CAPACITY_ADMISSION_DEADLINE=$((SECONDS+2))
+original_admission_deadline=$CAPACITY_ADMISSION_DEADLINE
+CAPACITY_INITIAL_INVENTORY_PENDING=0
+CAPACITY_RESERVATION_PUBLISHED=0
+inventory_refresh_lock_acquire() { printf 'REFRESH\n' >> "$ROOT/events"; return 0; }
+inventory_refresh_lock_release() { return 0; }
+_refresh_inventory_snapshot_unlocked() {
+ [ "$CASE" = mutation-fresh ] || return 1
+ healthy
+ printf 'generation=after-mutation\n' >> "$INVENTORY_INDEX/current/health"
+}
+enforce_app_capacity_guard() {
+ [ "$warm_json" = '[]' ] || return 1
+ inventory_index_healthy || return 1
+ [ "$CAPACITY_RESERVATION_PUBLISHED" = 0 ] || return 1
+ CAPACITY_RESERVATION_PUBLISHED=1
+ printf 'RESERVE\n' >> "$ROOT/events"
+ return 0
+}
+case "$CASE" in
+ recovers) stale; (sleep 0.1; healthy) & recovery_writer=$! ;;
+ exhausts) stale ;;
+ expired) stale; CAPACITY_ADMISSION_DEADLINE=$SECONDS; original_admission_deadline=$CAPACITY_ADMISSION_DEADLINE ;;
+ foreign) printf 'publisher_token=foreign\nvalid_until=%s\n' "$((INVENTORY_CLOCK_EPOCH+90))" > "$INVENTORY_INDEX/current/health" ;;
+ dead) kill "$owned_publisher"; wait "$owned_publisher" 2>/dev/null || true ;;
+ mutation-failed|mutation-fresh) FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1 ;;
+esac
+''' + borrowed_wait + '\n' + waiter + '\n(\n' + block + '\n' + first_admission + r'''
+[ "$CAPACITY_ADMISSION_DEADLINE" = "$original_admission_deadline" ] || exit 96
+cmp "$INVENTORY_HOME/owner" "$ROOT/original-owner" || exit 95
+printf 'PROVISION_ALLOWED\n'
+)
+status=$?
+exit "$status"
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10,
+                            env={**os.environ, "ROOT": str(tmp_path), "CASE": case,
+                                 "ENV_HELPER": str(ENV_HELPER_SCRIPT),
+                                 "INVENTORY_HELPER": str(ROOT / "scripts/lib/cloudbench-inventory.sh")})
+    assert "FORBIDDEN_NATIVE" not in result.stderr
+    events = (tmp_path / "events").read_text().splitlines() if (tmp_path / "events").exists() else []
+    if case in {"healthy", "recovers", "mutation-fresh"} or (stage == "warm-source" and case == "mutation-failed"):
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "PROVISION_ALLOWED" in result.stdout
+        assert events == (["REFRESH", "RESERVE"] if stage == "post-recovery" and case == "mutation-fresh" else ["RESERVE"])
+    else:
+        assert result.returncode != 0
+        assert "PROVISION_ALLOWED" not in result.stdout
+        assert events == (["REFRESH"] if case == "mutation-failed" else [])
+    if case == "recovers":
+        assert "withholding" in result.stderr
+    if case == "exhausts":
+        assert "borrowed inventory remained unavailable within the original admission deadline" in result.stderr

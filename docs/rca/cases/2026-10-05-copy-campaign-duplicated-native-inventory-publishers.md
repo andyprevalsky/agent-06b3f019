@@ -255,3 +255,34 @@ only the unchanged full 600 simultaneous campaign can establish the goal.
 
 Pinned implementation: https://raw.githubusercontent.com/superfly/flyctl/v0.4.115/internal/command/machine/clone.go
 Provider semantics: https://community.fly.io/t/fresh-produce-app-wide-volume-unique-zone-handling/24000
+
+### Borrowed inventory before provisioning (2026-10-15, V33)
+
+V33's first selected physical failure was r001-j0160, whose last fatal message
+was the post-stale-recovery capacity observation guard. The same message can
+come from a failed forced refresh or from a compact inventory getter. The
+historical branch/status remains unknown; this is not a new volume-capacity or
+placement failure. The original supervisor's single exact-parent TERM followed
+its first 1/1 terminal infra observation in about 0.173 seconds.
+
+An actual owner/birth/token/health fixture reproduced the getter bug on unchanged
+68e: recoverable borrowed status 75 exited before capacity admission, and
+permanent pending lacked the admission exhaustion diagnostic (2 failed, 4 passed).
+The finite caller audit also found this status lost at initial warm-source borrow,
+its two compact getters, and conditional pool observation. These reads now use
+one campaign-only pending helper. Its first parent-shell borrow establishes the
+existing capacity admission deadline; all later readers inherit it and admission
+does not reset it. Only an owned borrowed publisher's typed 75 waits at the
+existing interval. Success still requires a current healthy observation; invalid,
+dead or foreign authority refuses. Standalone reads pass through unchanged.
+No stale JSON, additional native query, TTL, reservation or retry budget is added.
+
+Forced post-mutation refresh remains mandatory. Its existing helper collapses
+several failure classes into status 1; this patch does not pretend that all such
+failures are pending. Actual-library controls retain failed-refresh refusal and
+prove successful changed-generation refresh before admission. The historical
+status-1 branch therefore remains an explicit limitation, not a claimed cure.
+Warm-source and post-recovery controls additionally cover recovery, exhaustion,
+already-expired original deadline, foreign/dead authority, and exactly one
+reservation only after fresh observation. Full simultaneous 600 execution and
+strictly below 5% infra still require an actual successful campaign.
