@@ -33130,7 +33130,7 @@ def test_private_fleet_source_clone_observation_distinguishes_unavailable(tmp_pa
         assert "startup cannot be safely overridden" not in result.stderr
 
 
-@pytest.mark.parametrize("case", ["default", "primary", "worker", "empty", "invalid", "snapshot", "simulation", "private", "pool", "legacy", "mixed", "recover"])
+@pytest.mark.parametrize("case", ["default", "primary", "worker", "empty", "invalid", "snapshot", "forced-snapshot", "simulation", "private", "pool", "provision", "legacy", "mixed", "recover"])
 def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tmp_path: Path, case: str) -> None:
     source = FLEET_SCRIPT.read_text()
     def fn(name):
@@ -33155,9 +33155,9 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         "set -u\nREGION=ord\nexport CLOUDBENCH_REGION=ord\nFRESH_TARGET_REGION=\nPROVISION_POOL=\nBENCHES=(one two)\n"
         + "CATALOG_MODES=(real " + ("simulate" if case == "mixed" else "real") + ")\n"
         + "POOL_IDS_FILE=" + shlex.quote(str(pool)) + "\nSNAP_ID=vs_fixture\nWARM_ID=abc\nAPP=fixture\n"
-        + "CLOUDBENCH_CLONE_MAX_ATTEMPTS=1\n" + setup + helpers + "\n"
+        + "CLOUDBENCH_CLONE_MAX_ATTEMPTS=1\n" + setup + ("PROVISION_POOL=2\n" if case == "provision" else "") + helpers + "\n"
         + "inventory_machine_field() { printf 1; }\n"
-        + "fleet_registry_record_name() { printf admitted > " + shlex.quote(str(touched)) + "; }\n"
+        + "fleet_registry_record_name() { printf %s \"$2\" > " + shlex.quote(str(touched)) + "; }\n"
         + "fleet_registry_release_name() { :; }\nfleet_audit_update_fresh_clone() { :; }\n"
         + "clone_failure_owned_volume_id() { :; }\nclone_failure_definitively_unallocated() { return 0; }\n"
         + "fleet_clone_with_queue_admission() { printf '%s\\n' \"$@\" > " + shlex.quote(str(trace)) + "; printf fixture-refusal; return 9; }\n"
@@ -33166,7 +33166,7 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         + "child_region=\"$(bash -c 'printf %s \"$CLOUDBENCH_REGION\"')\"\n"
         + "printf 'donor=%s child=%s\\n' \"$REGION\" \"$child_region\"\n"
         + "clone_machine_target " + shlex.quote(str(tmp_path / ("worker-clones.ids" if case == "worker" else "primary.ids")))
-        + " abc shared-cpu-2x 4096 vs_fixture " + ("snapshot" if case == "snapshot" else "fresh") + "\n"
+        + (" def" if case == "worker" else " abc") + " shared-cpu-2x 4096 vs_fixture " + ("snapshot" if case in ("snapshot", "forced-snapshot") else "fresh") + "\n"
     )
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
     eligible = case in ("default", "primary", "worker")
@@ -33176,6 +33176,8 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         args = trace.read_text().splitlines()
         assert args[args.index("--region") + 1] == ("ord" if case == "default" else "iad")
         assert "--from-snapshot" not in args
+        assert args[args.index("clone") + 1] == ("def" if case == "worker" else "abc")
+        assert touched.read_text() == ("def" if case == "worker" else "abc")
         assert "donor=ord child=" + ("ord" if case == "default" else "iad") in result.stdout
         assert result.returncode == 1  # controlled provider refusal, never real allocation
     else:
