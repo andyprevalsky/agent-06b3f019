@@ -80,7 +80,7 @@ from providers.rose.schema import (
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
-from utils.error_utils import extract_error_message
+from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
@@ -809,12 +809,13 @@ async def _generate_response_schema_with_rose(
                         "cache_sequence_id": usage.get("cache_sequence_id"),
                     },
                 )
-            except RoseError as exc:
-                last_error = exc
-                break
             except Exception as exc:
+                if any(error_chain_has_type(exc, kind) for kind in (
+                    "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+                )):
+                    raise
                 last_error = exc
-                if max_tokens < 4000 and "finish_reason=length" in str(exc):
+                if not isinstance(exc, RoseError) and max_tokens < 4000 and "finish_reason=length" in str(exc):
                     continue
                 break
 
@@ -6630,7 +6631,8 @@ async def set_response_schema_activity(
             defer persistence until the workflow accepts the generated revision.
 
     Returns:
-        The generated schema dict with 'fields' array, or None on failure
+        The generated schema dict with 'fields' array. Generation errors are
+        raised so the existing activity retry policy can retry the call.
     """
     import time
 
@@ -6788,14 +6790,18 @@ async def set_response_schema_activity(
         )
         if persist:
             await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        raise
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
+        if any(error_chain_has_type(e, kind) for kind in (
+            "CancelledError", "WorkflowGenerationSealed", "GenerationHandoffRequested",
+        )):
+            raise
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         if persist:
             await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
-        return None
+        raise
 
 
 async def fetch_claude_max_token(user_id: str) -> Optional[Dict[str, Any]]:

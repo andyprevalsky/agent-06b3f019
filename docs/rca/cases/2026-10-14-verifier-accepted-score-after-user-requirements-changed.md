@@ -395,9 +395,109 @@ The previous approval request was explicitly superseded before any approval
 claim; this updated runtime snapshot remains subject to the deployment owner's
 narrow terminal-behavior authorization and final release gates.
 
+## October 15 user correction: reuse native schema and LLM retries
+
+At 21:37Z the user explicitly rejected RCA-TERMINAL-2 and the proposed new
+schema-error-to-FAILED mapping. Their direction was that initial schema
+generation already worked and refresh must reuse the existing timeout and LLM
+retry path. No approval, merge or production rollout of that rejected candidate
+occurred. The previous three-review ledger, rejected card, qualification and
+post-review native histories remain preserved; db21 and its earlier composed
+merge tree are obsolete deployment candidates. The prior terminal-policy
+sections above are historical investigation, not the current product decision.
+
+The new first-bad boundary is independently reproduced through the actual
+`set_response_schema_activity`, actual Rose schema helper and actual
+`call_temporal_activity_from_activity` retry owner. Initial generation succeeds.
+The exact authored correction `  Use Andy's account instead.\n` then meets three
+mocked provider ReadTimeout errors. On db21, exhausted generation is swallowed
+as a successful None, so the existing activity retry never happens. The same
+unchanged fixture passes after the catch rethrows: the next existing activity
+attempt accepts the replacement schema, all retries retain the authored bytes,
+and only the initial accepted generation performs the original schema write.
+The exhaustion control makes nine calls (existing three generation attempts
+inside existing three activity attempts) and propagates the original timeout,
+instead of returning successful None. These are offline boundary proofs; they
+are not evidence of a newly observed live Calendar generation timeout or of
+successful completion of the deleted Calendar agent.
+
+The schema helper already had three attempts, 0.2/0.4-second backoff and
+2000-to-4000 length escalation. RoseClient already owns credential rotation,
+route fallback and its 90-second per-call deadline. The defect was bypassing
+the existing outer owner, then acknowledging a failed requirement revision.
+The repair preserves those model-call budgets and auth/cache behavior and uses
+the shared STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS envelope (600 seconds), which
+normal LLM activities already use. The former 90-second activity envelope
+could preempt the helper's existing three 90-second calls; no provider deadline,
+benchmark timeout, task budget, evaluator or iteration cap is increased.
+
+Root refresh leaves failed requirements pending. The ordinary response-schema
+getter propagates the failed call into run_agent's existing three-consecutive-
+failures boundary, with its existing iteration refund and backoff. The try now
+also encloses prerequisite schema/prompt/message preparation; schema is fetched
+before building that turn's prompt and matching completed-child fields. There
+is no additional retry counter or loop. Actual cancellation, sealed generation
+and generation handoff propagate by the existing cause-chain check. The new
+FAILED wrapper and exception class are removed. After the ordinary retry owner
+really exhausts, its existing error outcome is handled without another schema
+await. Superseded verdicts retain checks after awaited work, and post-DAG
+recovery and Fast Mode's existing step cap remain intact.
+
+Native continuation carries pending revisions and the exact original feedback,
+never an Exception object. Existing persisted snapshots can have
+applied==revision==failed_revision with no accepted field and cleared error;
+restoration reopens that proven failed input, rather than treating processing
+as acceptance or exhausting three getter retries without any generation call.
+A valid native schema with a lost persistence acknowledgement retains its
+acceptance and retries the write without regenerating the schema.
+
+Independent read-only review reproduced a second schedule: a signal-started
+worker finished with SDK cancellation or a generation fence before any getter
+awaited it, then the next getter silently started another call. The repaired
+worker retains its completed exceptional task until the boundary observes it.
+The same lifecycle check precedes the prerequisite durable-message poll's
+ordinary read-failure fallback. Permanent controls complete the actual
+background task before the getter and require the identical direct or wrapped
+stop, one generation attempt at most, and zero generation calls when the poll
+itself stops. Ordinary unavailable reads still preserve known actual input.
+
+Exact local commands (activated agents venv, repository root):
+
+```bash
+agents/venv/bin/python .context/rca-ae17b024/prove-native-schema-retry.py --baseline db21aefc86fa5103c14083575b76cb8ed7223653
+agents/venv/bin/python .context/rca-ae17b024/prove-native-schema-retry.py
+agents/venv/bin/python .context/rca-ae17b024/review2-terminal-replay.py --baseline db21aefc86fa5103c14083575b76cb8ed7223653 --case test_workflow_failed_schema_continuation_retries_original_input_without_new_feedback --case test_workflow_schema_refresh_lifecycle_stop_propagates_without_respawn
+# Omit --baseline and its value for the identical fixed-source assertions.
+cd agents
+python scripts/run_blackbox_tests.py llm workflow workflow_determinism run-agent
+```
+
+The two actual activity fixtures fail before and pass after the fix; the two
+continuation/lifecycle fixtures also fail before and pass unchanged afterward.
+The combined owning run passes all four domains (LLM 231, run-agent 65,
+determinism 5, plus the complete workflow suite) in 60.7 seconds before the last
+additive continuation/lifecycle controls; final full coverage qualifies the
+frozen combined source. Five additive actual run_agent cases separately fail
+against db21 and pass after the mechanical retry-boundary repair. The existing
+60 run_agent test functions and every existing LLM-visible string are AST
+identical; only lifecycle type labels are added. No user/tool narration,
+auth cue, schema-update synthetic USER message or classifier is introduced.
+
+Archive searches `schema generation timeout retry` and `schema refresh user
+feedback None` found the earlier open schema-wall-deadline case and this
+requirement-version family. The September 30 record already shows a failed
+90-second schema call followed by a successful unchanged retry; it does not
+prove the provider cause or close its original evidence gap. This follow-up is
+a retry-contract relative, recorded here with the rejected verifier-terminal
+policy it replaces. The golden reference for this repair is Rose's existing
+LLM activity/loop retry owner; Codex input_queue custody remains the input
+preservation analog, without claiming a schema-generation equivalent.
+
 ## Human feedback
 
-The user required conditional schema refresh and the same standard for browser
+The user explicitly rejected a new FAILED policy for schema errors and directed
+reuse of existing timeout and LLM retries. That instruction supersedes the earlier
+proposed terminal boundary. The user required conditional schema refresh and the same standard for browser
 and root work. Their later direction recorded in the peer case rejects harness
 injections and asks to preserve sent input. The native fix keeps actual verdicts
 and user instructions while preventing stale result acceptance.
