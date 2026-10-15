@@ -143,6 +143,8 @@ Before dispatch, the parent records numeric milestone weights for every agent.
 For an already running agent, establish an evidenced estimate from completed
 milestones before publishing its percentage; keep that same scope and weights
 for subsequent rates. Starting a substep never resets the agent lifetime.
+Recompute each render from timestamped same-scope history. Warming ends once
+15 minutes of history exist; never leave a cached warming flag or rate frozen.
 
 ## Benchmark experiment history
 
