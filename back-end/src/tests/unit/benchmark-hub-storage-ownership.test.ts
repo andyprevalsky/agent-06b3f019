@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import https from 'node:https';
 import { Readable } from 'node:stream';
 import { performance } from 'node:perf_hooks';
+import { randomUUID } from 'node:crypto';
 import { HttpRequest } from '@smithy/core/protocols';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
@@ -34,6 +35,8 @@ function storage<T>(name: string, bindings: Record<string, unknown>): T {
   process.env.BENCHMARK_HUB_OWNER_SOURCE_PATH = `${process.cwd()}/src/providers/benchmarkHubStorage.ts`;
   try {
     return loadDeclaration<T>(name, {
+      randomUUID,
+      hubStorageVersions: () => new Map([['runs/fixture.json', null]]),
       assertHubStorageOwnership,
       ownedHubStorageRequest,
       Buffer,
@@ -70,7 +73,9 @@ test('expired SQL lock wait cannot dispatch the first object write', async (t) =
 test('post-await guard prevents catalog publication and next same-run body', async (t) => {
   const time = clock(t);
   const writes: string[] = [];
-  const owner = loadOwner({ $transaction: async (body) => body({ $executeRaw: async () => {} }) });
+  const owner = loadOwner({
+    $transaction: async (body) => body({ $executeRaw: async () => {} }),
+  });
   await assert.rejects(
     owner(async () => {
       await ownedHubStorageRequest(async () => {
@@ -153,7 +158,10 @@ test('real Smithy handler destroys the local request before later publication', 
     dispatches++;
     return request;
   });
-  const handler = new NodeHttpHandler({ connectionTimeout: 0, requestTimeout: 0 });
+  const handler = new NodeHttpHandler({
+    connectionTimeout: 0,
+    requestTimeout: 0,
+  });
   const putObject = storage<(key: string, data: string) => Promise<void>>('putObject', {
     r2Configured: () => true,
     process: { env: { R2_BUCKET_TRACE_ARCHIVE: 'fixture' } },

@@ -7,6 +7,7 @@ type Ownership = {
   deadline: number;
   controller: AbortController;
   pending: Set<Promise<unknown>>;
+  versions: Map<string, string | null>;
 };
 const ownership = new AsyncLocalStorage<Ownership>();
 
@@ -26,6 +27,7 @@ export async function withHubStorageOwnership<T>(operation: () => Promise<T>): P
     deadline: performance.now() + HUB_SQL_TIMEOUT_MS,
     controller,
     pending: new Set(),
+    versions: new Map(),
   };
   const timer = setTimeout(() => {
     controller.abort(new Error('Benchmark Hub SQL ownership budget expired'));
@@ -59,4 +61,10 @@ export async function ownedHubStorageRequest<T>(
   } finally {
     scope?.pending.delete(pending);
   }
+}
+
+/** Object versions are scoped to one SQL owner, never a process-wide cache. */
+export function hubStorageVersions(): Map<string, string | null> | undefined {
+  assertHubStorageOwnership();
+  return ownership.getStore()?.versions;
 }

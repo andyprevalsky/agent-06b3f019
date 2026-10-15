@@ -3,7 +3,12 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import * as fs from 'node:fs/promises';
 import path from 'path';
-import { assertHubStorageOwnership, ownedHubStorageRequest } from './benchmarkHubStorageOwnership';
+import { randomUUID } from 'node:crypto';
+import {
+  assertHubStorageOwnership,
+  hubStorageVersions,
+  ownedHubStorageRequest,
+} from './benchmarkHubStorageOwnership';
 
 const KEY_PREFIX = 'benchmark-hub';
 const LOCAL_HUB_ROOT = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
@@ -58,7 +63,9 @@ function getS3Client(): S3Client {
 async function streamToBuffer(body: unknown, signal?: AbortSignal): Promise<Buffer> {
   assertHubStorageOwnership();
   if (body instanceof Buffer) return body;
-  const stream = body as AsyncIterable<Uint8Array> & { destroy?: (error: Error) => void };
+  const stream = body as AsyncIterable<Uint8Array> & {
+    destroy?: (error: Error) => void;
+  };
   const abort = () => stream.destroy?.(new Error('Benchmark Hub body ownership ended'));
   signal?.addEventListener('abort', abort, { once: true });
   try {
@@ -78,19 +85,57 @@ async function streamToBuffer(body: unknown, signal?: AbortSignal): Promise<Buff
   }
 }
 
+const PUBLICATION_FORMAT = 'rose-benchmark-hub-publication-v1';
+function encodePublication(data: string): string {
+  return JSON.stringify({
+    format: PUBLICATION_FORMAT,
+    publication: randomUUID(),
+    payload: data,
+  });
+}
+function decodePublication(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return raw;
+  const value = parsed as Record<string, unknown>;
+  if (value.format !== PUBLICATION_FORMAT) return raw;
+  if (
+    typeof value.publication !== 'string' ||
+    !value.publication ||
+    typeof value.payload !== 'string' ||
+    Object.keys(value).length !== 3
+  ) {
+    throw new Error('Invalid Benchmark Hub publication envelope');
+  }
+  return value.payload;
+}
+
 export async function putObject(key: string, data: string): Promise<void> {
   await ownedHubStorageRequest(async (signal) => {
     if (r2Configured()) {
+      const versions = hubStorageVersions();
+      // Preserve the first observation; failed CAS never refreshes or retries.
+      if (versions && !versions.has(key)) await getObjectStrict(key);
+      const expected = versions ? versions.get(key) : (await readRemoteObject(key, signal)).etag;
+      if (expected === undefined) throw new Error('Benchmark Hub write has no object observation');
       assertHubStorageOwnership();
-      await getS3Client().send(
+      const response = await getS3Client().send(
         new PutObjectCommand({
           Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
           Key: `${KEY_PREFIX}/${key}`,
-          Body: data,
+          Body: encodePublication(data),
           ContentType: 'application/json',
+          ...(expected === null ? { IfNoneMatch: '*' } : { IfMatch: expected }),
         }),
         { abortSignal: signal }
       );
+      assertHubStorageOwnership();
+      if (!response.ETag) throw new Error('Benchmark Hub write returned no ETag');
+      versions?.set(key, response.ETag);
       return;
     }
     const target = path.join(LOCAL_DIR, key);
@@ -118,28 +163,41 @@ function isObjectNotFound(error: unknown): boolean {
   );
 }
 
-/** Null means a confirmed missing object; transport/permission faults throw. */
+async function readRemoteObject(
+  key: string,
+  signal?: AbortSignal
+): Promise<{ raw: string | null; etag: string | null }> {
+  try {
+    assertHubStorageOwnership();
+    const response = await getS3Client().send(
+      new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
+        Key: `${KEY_PREFIX}/${key}`,
+      }),
+      { abortSignal: signal }
+    );
+    const raw = (await streamToBuffer(response.Body, signal)).toString('utf-8');
+    assertHubStorageOwnership();
+    if (!response.ETag) throw new Error('Benchmark Hub read returned no ETag');
+    return { raw, etag: response.ETag };
+  } catch (error: unknown) {
+    assertHubStorageOwnership();
+    if (isObjectNotFound(error)) return { raw: null, etag: null };
+    throw error;
+  }
+}
+
+/** Null means confirmed missing; transport, ownership and codec faults throw. */
 export async function getObjectStrict(key: string): Promise<string | null> {
   return ownedHubStorageRequest(async (signal) => {
     if (r2Configured()) {
-      try {
-        assertHubStorageOwnership();
-        const response = await getS3Client().send(
-          new GetObjectCommand({
-            Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-            Key: `${KEY_PREFIX}/${key}`,
-          }),
-          { abortSignal: signal }
-        );
-        return (await streamToBuffer(response.Body, signal)).toString('utf-8');
-      } catch (error: unknown) {
-        assertHubStorageOwnership();
-        if (isObjectNotFound(error)) return null;
-        throw error;
-      }
+      const result = await readRemoteObject(key, signal);
+      const versions = hubStorageVersions();
+      if (versions && !versions.has(key)) versions.set(key, result.etag);
+      return result.raw === null ? null : decodePublication(result.raw);
     }
     try {
-      return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
+      return decodePublication(await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8'));
     } catch (error: unknown) {
       assertHubStorageOwnership();
       if (isObjectNotFound(error)) return null;
