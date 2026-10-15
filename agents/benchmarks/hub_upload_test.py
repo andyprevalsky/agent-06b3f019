@@ -783,3 +783,122 @@ def test_live_response_preserves_phase_and_startup_label_for_terminal_startup(
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize('boundary', ['success', 'open_timeout', 'read_timeout', 'bad_ack', 'bad_echo'])
+def test_live_upload_attempt_has_source_bound_request_join(tmp_path, monkeypatch, boundary):
+    import hashlib
+    import re
+    from pathlib import Path
+    from benchmarks import hub_upload as subject
+
+    monkeypatch.setenv('BENCHMARK_HUB_API_KEY', 'fixture-secret-never-record')
+    monkeypatch.setenv('BENCHMARK_HUB_UPLOAD_URL', 'https://fixture.invalid')
+    captured = []
+
+    class Response:
+        status = 201
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, *args):
+            if boundary == 'read_timeout':
+                raise TimeoutError('fixture-secret-never-record')
+            bundle = json.loads(gzip.decompress(captured[-1][0].data))
+            stored = dict(bundle, live=True)
+            if boundary == 'bad_ack': stored['run_id'] = 'foreign'
+            return json.dumps({'run': stored}).encode()
+        @property
+        def headers(self):
+            value = captured[-1][0].get_header('X-request-id')
+            return {'X-Request-Id': value if boundary != 'bad_echo' else 'unsafe\nsecret'}
+
+    class Opener:
+        def open(self, request, timeout):
+            captured.append((request, timeout))
+            if boundary == 'open_timeout': raise TimeoutError('fixture-secret-never-record')
+            return Response()
+
+    monkeypatch.setattr(subject, '_hub_opener', lambda base: Opener())
+    state = tmp_path / 'publication.json'
+    result = subject.publish_live_report_card({'per_task': [{'name': 'fixture-task', 'status': 'queued'}]}, run_id='fixture-run', state_path=state)
+    assert result is (boundary in {'success', 'bad_echo'})
+    event = json.loads(state.with_suffix('.events.jsonl').read_text())
+    request_id = captured[0][0].get_header('X-request-id')
+    assert isinstance(request_id, str) and re.fullmatch('[0-9a-f]{12}', request_id)
+    attempt = event['attempts'][0]
+    assert attempt['request_id'] == request_id and attempt['attempt'] == 1
+    assert attempt['source_sha256'] == hashlib.sha256(Path(subject.__file__).read_bytes()).hexdigest()
+    assert attempt['effective_timeout'] == captured[0][1]
+    assert attempt['payload_bytes'] == len(gzip.decompress(captured[0][0].data))
+    assert attempt['compressed_bytes'] == len(captured[0][0].data)
+    assert attempt['phase'] == {'open_timeout': 'open', 'read_timeout': 'read', 'bad_ack': 'verify'}.get(boundary, 'complete')
+    assert attempt['response_id_matches'] is (True if boundary in {'success', 'bad_ack', 'read_timeout'} else None)
+    assert attempt['preparation_seconds'] >= 0 and attempt['attempt_seconds'] >= 0
+    assert {'epoch', 'elapsed_seconds', 'verified', 'task_counts'} <= event.keys()
+    assert state.exists() is result
+    assert 'fixture-secret-never-record' not in json.dumps(event)
+    assert 'unsafe' not in json.dumps(event)
+
+
+def test_upload_attempt_join_preserves_required_retry_and_reconciliation(monkeypatch):
+    from benchmarks import hub_upload as subject
+    monkeypatch.setenv('BENCHMARK_HUB_API_KEY', 'fixture-secret')
+    monkeypatch.setenv('BENCHMARK_HUB_UPLOAD_URL', 'https://fixture.invalid')
+    requests, reconciliations, sleeps, events = [], [], [], []
+    class Opener:
+        def open(self, request, timeout):
+            requests.append(request)
+            raise TimeoutError('fixture-secret')
+    monkeypatch.setattr(subject, '_hub_opener', lambda base: Opener())
+    monkeypatch.setattr(subject.time, 'sleep', sleeps.append)
+    monkeypatch.setattr(subject, '_upload_committed', lambda *a, **k: reconciliations.append(k) or len(reconciliations) == 4)
+    assert subject.upload_run_bundle({'run_id': 'fixture-run', 'tasks': []}, required=True, attempt_events=events)
+    assert len(requests) == len(events) == len(reconciliations) == 4
+    assert sleeps == [1, 2, 4, 4]
+    assert len({event['request_id'] for event in events}) == 4
+    assert all(e['phase'] == 'open' for e in events)
+    assert all(k['timeout'] == 5.0 for k in reconciliations)
+
+
+def test_upload_join_records_http_failure_without_changing_required_exhaustion(monkeypatch):
+    from benchmarks import hub_upload as subject
+    monkeypatch.setenv('BENCHMARK_HUB_API_KEY', 'fixture-secret')
+    monkeypatch.setenv('BENCHMARK_HUB_UPLOAD_URL', 'https://fixture.invalid')
+    events, payloads, sleeps = [], [], []
+    class Opener:
+        def open(self, request, timeout):
+            payloads.append(request.data)
+            raise urllib.error.HTTPError('https://fixture.invalid', 503, 'fixture-secret', {}, io.BytesIO(b'fixture-secret'))
+    monkeypatch.setattr(subject, '_hub_opener', lambda base: Opener())
+    monkeypatch.setattr(subject.time, 'sleep', sleeps.append)
+    monkeypatch.setattr(subject, '_upload_committed', lambda *a, **k: False)
+    with pytest.raises(subject.HubVisibilityError):
+        subject.upload_run_bundle({'run_id': 'fixture-run', 'tasks': []}, required=True, attempt_events=events)
+    assert len(events) == len(payloads) == 4 and len(set(payloads)) == 1
+    assert sleeps == [1, 2, 4, 4]
+    assert all(e['status'] == 503 and e['error_class'] == 'HTTPError' and e['phase'] == 'open' for e in events)
+    assert 'fixture-secret' not in json.dumps(events)
+
+
+def test_upload_join_private_event_write_failure_keeps_verified_result(tmp_path, monkeypatch):
+    from pathlib import Path
+    from benchmarks import hub_upload as subject
+    monkeypatch.setenv('BENCHMARK_HUB_API_KEY', 'fixture-secret')
+    monkeypatch.setenv('BENCHMARK_HUB_UPLOAD_URL', 'https://fixture.invalid')
+    class Response:
+        status = 201
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, *args): return b'{"run":{}}'
+    class Opener:
+        def open(self, request, timeout): return Response()
+    monkeypatch.setattr(subject, '_hub_opener', lambda base: Opener())
+    monkeypatch.setattr(subject, 'live_response_matches', lambda *a: True)
+    original_open = Path.open
+    def guarded_open(self, *a, **kw):
+        if self.suffix == '.jsonl': raise OSError('fixture diagnostic write refusal')
+        return original_open(self, *a, **kw)
+    monkeypatch.setattr(Path, 'open', guarded_open)
+    state = tmp_path / 'publication.json'
+    assert subject.publish_live_report_card({'per_task': []}, run_id='fixture-run', state_path=state)
+    assert state.exists()

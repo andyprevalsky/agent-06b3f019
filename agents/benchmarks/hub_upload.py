@@ -16,11 +16,13 @@ their durable verification remain part of the runner contract.
 from __future__ import annotations
 
 import argparse
+import functools
 import gzip
 import hashlib
 import json
 import os
 import re
+import secrets
 import signal
 import sys
 import time
@@ -353,6 +355,15 @@ def _with_run_group(bundle: dict) -> dict:
     return fields
 
 
+@functools.lru_cache(maxsize=1)
+def _upload_source_sha256() -> str | None:
+    """Identify these deployed uploader bytes without changing upload results."""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _post_run_bundle(
     base: str,
     bundle: dict,
@@ -363,7 +374,9 @@ def _post_run_bundle(
     label: str,
     verify_live_response: bool = False,
     max_attempts: int | None = None,
+    attempt_events: list[dict] | None = None,
 ) -> bool:
+    preparation_began = time.monotonic()
     headers = _auth_headers(required=required)
     if headers is None:
         return False
@@ -371,30 +384,84 @@ def _post_run_bundle(
     body.setdefault("source", "manual-run")
     body = fit_bundle_to_upload_limit(body)
     payload = json.dumps(body, default=str).encode("utf-8")
-    effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
+    payload_bytes = len(payload)
+    effective_timeout = upload_timeout_for_payload(payload_bytes, base_timeout=timeout)
     payload = gzip.compress(payload, mtime=0)
+    preparation_seconds = time.monotonic() - preparation_began
     headers = {**headers, "Content-Encoding": "gzip"}
     suffix = "?live=1" if live else ""
-    request = urllib.request.Request(
-        f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
     opener = _hub_opener(base)
     max_attempts = max_attempts if max_attempts is not None else (4 if required else 1)
     if max_attempts < 1:
         raise ValueError("Hub upload attempts must be positive")
     for attempt in range(1, max_attempts + 1):
+        request_id = secrets.token_hex(6)
+        request = urllib.request.Request(
+            f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",
+            data=payload,
+            headers={**headers, "X-Request-Id": request_id},
+            method="POST",
+        )
+        attempt_began = time.monotonic()
+        phase = "open"
+        status = None
+        response_id_matches = None
+        open_seconds = None
+        read_seconds = None
+        error_class = None
         try:
-            with opener.open(request, timeout=effective_timeout) as response:
-                ok = 200 <= response.status < 300
-                if ok and verify_live_response:
-                    stored = json.loads(response.read(1024 * 1024)).get("run") or {}
-                    ok = live_response_matches(body, stored)
-                if ok:
-                    print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
-                return ok
+            try:
+                with opener.open(request, timeout=effective_timeout) as response:
+                    open_seconds = time.monotonic() - attempt_began
+                    phase = "response"
+                    status = response.status
+                    response_headers = getattr(response, "headers", None)
+                    echo = response_headers.get("X-Request-Id", "") if response_headers is not None else ""
+                    if isinstance(echo, str) and re.fullmatch(r"[0-9a-f]{12}", echo):
+                        response_id_matches = echo == request_id
+                    ok = 200 <= response.status < 300
+                    if ok and verify_live_response:
+                        phase = "read"
+                        read_began = time.monotonic()
+                        stored = json.loads(response.read(1024 * 1024)).get("run") or {}
+                        read_seconds = time.monotonic() - read_began
+                        phase = "verify"
+                        ok = live_response_matches(body, stored)
+                    if ok:
+                        phase = "complete"
+                        print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
+                    return ok
+            except Exception as exc:
+                if phase == "read":
+                    read_seconds = time.monotonic() - read_began
+                if isinstance(exc, urllib.error.HTTPError):
+                    status = exc.code
+                error_class = next((name for kind, name in (
+                    (urllib.error.HTTPError, "HTTPError"),
+                    (urllib.error.URLError, "URLError"),
+                    (TimeoutError, "TimeoutError"),
+                    (OSError, "OSError"),
+                    (ValueError, "ValueError"),
+                ) if isinstance(exc, kind)), "Other")
+                raise
+            finally:
+                if attempt_events is not None:
+                    attempt_events.append({
+                        "request_id": request_id,
+                        "attempt": attempt,
+                        "source_sha256": _upload_source_sha256(),
+                        "payload_bytes": payload_bytes,
+                        "compressed_bytes": len(payload),
+                        "effective_timeout": effective_timeout,
+                        "preparation_seconds": preparation_seconds,
+                        "attempt_seconds": time.monotonic() - attempt_began,
+                        "open_seconds": open_seconds,
+                        "read_seconds": read_seconds,
+                        "phase": phase,
+                        "status": status,
+                        "response_id_matches": response_id_matches,
+                        "error_class": error_class,
+                    })
         except Exception as exc:
             if isinstance(exc, urllib.error.HTTPError):
                 try:
@@ -448,6 +515,7 @@ def upload_run_bundle(
     required: bool = False,
     verify_live_response: bool = False,
     max_attempts: int | None = None,
+    attempt_events: list[dict] | None = None,
 ) -> bool:
     """POST the bundle to the hub. Returns True on success, False otherwise."""
     base = _hub_url(required=required)
@@ -462,6 +530,7 @@ def upload_run_bundle(
         label="hub",
         verify_live_response=verify_live_response,
         max_attempts=max_attempts,
+        attempt_events=attempt_events,
     )
 
 
@@ -606,13 +675,15 @@ def publish_live_report_card(card: dict, *, run_id: str, state_path: Path) -> bo
     if previous.get("signature") == [list(row) for row in signature] and now - epoch < 15:
         return True
     began = time.monotonic()
-    verified = upload_run_bundle(bundle, live=True, verify_live_response=True)
+    attempts: list[dict] = []
+    verified = upload_run_bundle(bundle, live=True, verify_live_response=True, attempt_events=attempts)
     # Only metadata: source-bound transport timing, without bodies, headers,
-    # credentials, request IDs, or free-form provider errors.
+    # credentials or free-form provider errors. IDs are random safe correlation only.
     event = {
         "epoch": now,
         "elapsed_seconds": round(time.monotonic() - began, 3),
         "verified": verified,
+        "attempts": attempts,
         "task_counts": {
             status: sum(t["status"] == status for t in bundle["tasks"])
             for status in {t["status"] for t in bundle["tasks"]}
