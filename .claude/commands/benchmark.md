@@ -54,6 +54,65 @@ Behavior:
 
 `/deploy` uses `scripts/run-predeploy-local` → `scripts/run-bench --local` by default, with the history-qualified selector and its hard cap of 20; its explicit cloud alternative uses the same fleet scripts. Production payment verification uses `scripts/run-bench agent-payment-production-abandonment`. Keep compact runner regressions in the existing deploy gates; a large live stress run requires an explicit user request and does not become an automatic deploy stage.
 
+### Hub infrastructure experiment prerequisite
+
+An infrastructure experiment must not wait for the entire `/deploy` workflow.
+Qualify the affected Hub code and its owning controls, then verify that the
+**actual endpoint used by the experiment** serves that source. Keep unrelated
+application deployment gates pending; production promotion still follows its
+normal authorization, qualification and rollback requirements.
+
+The existing endpoint override is `BENCHMARK_HUB_UPLOAD_URL`. Set it inside the
+source-bound remote controller command: `run-cloudbench-controller-gate` does
+not automatically forward the caller's environment to the Machine. The
+campaign publisher inherits that environment; nested canary preflight clears
+parent/group run IDs but retains the endpoint; fleet registration, visibility
+checks and final aggregate publication use it. Guest tasks retain the owned
+parent run ID rather than creating duplicate registrations. Keep authentication
+in the existing managed secret files, never command arguments or public logs.
+Record source, endpoint, storage scope and the normal visibility/publication
+receipts; an environment setting alone is not service-alignment evidence.
+
+A localhost/127.0.0.1 override does not remove durable-publication or canonical
+evidence requirements. Individual result uploads retain their normal mirror,
+but the fleet/campaign aggregate CLI currently publishes only to the configured
+endpoint: it does not invoke that mirror. An override alone therefore does not
+prove durable aggregate publication. Do not bypass that unsupported boundary.
+The conditional-write publication codec requires compatible readers and a
+compatible rollback: an isolated experiment must not write envelopes into an
+old-reader production bucket. A local-file Hub does not qualify the R2 fence.
+An explicitly authorized real-R2 experiment can use
+`BENCHMARK_HUB_STORAGE=r2-isolated` with `BENCHMARK_ISOLATED_RUN=true`, a fresh
+root-issued `BENCHMARK_RUN_ID=hubxp_<32 lowercase hex digits>`, complete existing
+R2 credentials, and `BENCHMARK_HUB_ISOLATION_INTENT` naming its root-owned,
+read-only regular scope file. The intent binds schema
+`benchmark-hub-r2-isolation-v1`, mode, run ID and bucket. The caller must issue
+it with a fresh UUID and exclusive creation; syntax alone does not prove
+freshness. All five Hub key families use the disjoint
+`benchmark-hub-isolated/<run-id>/` prefix in the existing bucket. Do not spoof
+`RENDER`, create a bucket, or fall back to local storage on invalid configuration.
+
+Before and after the experiment, account for every original physical attempt
+in a sealed manifest: its real canonical bundle and existing-CLI publication
+receipt, or an explicit missing-canonical-bundle reason with original ledger
+custody. Preserve all original grades, clocks, identity and private endpoint
+ACKs. Publish each real canonical attempt bundle plus the group afterward with
+existing `hub_upload.py --upload-final`, explicitly targeting production and
+preserving the original publication/group environment. Never copy private
+wire envelopes to the production prefix or fabricate missing/no-agent rows.
+The normal publisher's diagnostic stripping/body limits remain visible; full
+originals stay archived. Use the existing per-agent evidence publisher for
+actual roots/recordings/last LLM dumps. `--verify-visible` alone proves run ID
+visibility, not full-body equality.
+
+If the compatible service/storage or complete original custody/publication
+manifest is unavailable, report that specific prerequisite instead of launching
+against the old Hub, inventing a publisher, creating an unapproved external
+service/bucket, or queuing the full app deployment as an experiment dependency.
+An authorized infrastructure experiment may use the supported owned local
+isolated backend/database and authenticated tunnel. Keep normal source, native
+capacity, ownership, clocks and physical resource guards unchanged.
+
 Ordinary cloud runs automatically reuse verified completed dependency snapshots,
 including from fresh checkouts. Use `scripts/run-bench --help` and CLAUDE.md's
 "Cloud startup reuse" guidance; do not rebuild dependencies for source-only changes.
