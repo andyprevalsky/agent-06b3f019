@@ -740,7 +740,7 @@ async def test_fast_cache_archive_uses_resolved_root_agent_id():
                         "rootAgentId": "root-agent-for-cache",
                     },
                 )
-            return _Response(200, {"ok": True})
+            return _Response(200, {"ok": True, "stored": True})
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)

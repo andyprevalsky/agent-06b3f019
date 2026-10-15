@@ -246,3 +246,8 @@ Run14's private original results and 71 LLM dumps are authenticated in the
 nonsecret receipt `docs/handoffs/whm-b07d9037-preservation/run14-grounded-retry60m.json`.
 The cache/fundraiser case remains open until actual new-run replay coverage
 and task outcome are observed.
+
+
+## 2026-10-15 success-fixture consequence
+
+The integrated deploy's existing `test_fast_cache_archive_uses_resolved_root_agent_id` still mocked HTTP200 `{ok:true}` without the persisted `stored:true` acknowledgement required by the corrected runtime. Its unchanged `ok is True` assertion failed. The fixture now returns `{ok:true,stored:true}`; the production client is unchanged. All 36 registered archive cases passed in the private candidate (5.36s), including unchanged `stored:false`, HTTP503 and transport-error controls. This is a stale success fixture, not a recurrence of the runtime acknowledgement bug. Candidate SHA256: `4478f8d3b0c989381e392a4433e6cdf81621da77359a298ac210fa76a2377f38`.

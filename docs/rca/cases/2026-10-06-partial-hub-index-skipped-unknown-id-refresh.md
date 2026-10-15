@@ -42,3 +42,10 @@ The user requires viewer-visible replay evidence; HTTP 200 and administrative ac
 ## Reusable lesson
 
 An incomplete index may answer known keys; it cannot make a missing key authoritative before its cold readiness boundary.
+
+
+## 2026-10-15 deploy verification
+
+On integrated WHM source `e495585aea7f3659caf17a0d9148ba42c204d63f`, the existing `benchmark-hub-index` blackbox rejected the known mapping in an incomplete compact index. The loader returned the partial snapshot as a backfill seed without installing its known entries. The repair installs both partial and complete snapshots through the existing revision guard, tracks completeness separately, and keeps unknown IDs on the existing coalesced refresh/backoff path. Archived viewer and bug-report callers receive the unchanged agent body; no WHM context acquisition changes.
+
+The unchanged registered blackbox plus actual-caller refresh/body-identity and stale-revision controls failed on the original source and passed with the private candidate (215ms, 16ms and 8ms respectively). These are hermetic IO controls; full deployment coverage remains required. The exact historical merge that lost the implementation is unproved. Candidate SHA256: `c51a8cbca7edf5daec7d9790d6dad1fa035a0251ea7b73e9b3806b6947cec551`.

@@ -37,8 +37,8 @@ INNER="$(ps -o ppid= -p "$LEAF" | tr -d ' ')"
 
 # The snapshot must include every level before any signal is sent.
 DESC="$(descendant_pids "$WRAPPER")"
-echo "$DESC" | grep -qx "$INNER" || fail "descendant_pids missed the inner shell ($INNER) in: $DESC"
-echo "$DESC" | grep -qx "$LEAF" || fail "descendant_pids missed the leaf ($LEAF) in: $DESC"
+grep -qx "$INNER" <<<"$DESC" || fail "descendant_pids missed the inner shell ($INNER) in: $DESC"
+grep -qx "$LEAF" <<<"$DESC" || fail "descendant_pids missed the leaf ($LEAF) in: $DESC"
 
 kill_tree_hard "$WRAPPER"
 sleep 0.5
