@@ -72,6 +72,20 @@ async function assertStartedIn(
         `Expected Agent.workflowStartPhase=${expected}, got ${run.agent?.workflowStartPhase}`
       );
     }
+    const initial = await prisma.message.findFirst({
+      where: { agentId: run.provisionalId, role: 'USER' },
+      select: { text: true, metadata: true },
+    });
+    const expectedNotification = args.notification_message?.trim() || "I'm on it.";
+    if (
+      initial?.text !== run.agent.goal ||
+      JSON.stringify(initial.metadata) !==
+        JSON.stringify({ startNotification: { message: expectedNotification } })
+    ) {
+      throw new Error(
+        'Agent creation must preserve the full goal and store its kickoff separately'
+      );
+    }
     const started = await workflowStartPhase(run.provisionalId);
     if (started !== expected) {
       throw new Error(`Expected the workflow to start in ${expected}, got ${String(started)}`);
@@ -82,7 +96,11 @@ async function assertStartedIn(
 }
 
 export async function testStartNewAgent_executePhaseReachesWorkflow(prisma: PrismaClient) {
-  await assertStartedIn(prisma, { start_phase: 'execute' }, 'execute');
+  await assertStartedIn(
+    prisma,
+    { start_phase: 'execute', notification_message: "I'll order your usual coffee." },
+    'execute'
+  );
 }
 
 export async function testStartNewAgent_omittedPhaseStartsInPlan(prisma: PrismaClient) {
@@ -116,6 +134,13 @@ export function testStartNewAgent_schemaRequiresPhaseChoice() {
   }
   if (!declared.required?.includes('start_phase')) {
     throw new Error('TOOL_SCHEMAS start_new_agent must require start_phase');
+  }
+  const notificationDescription = runtimeArgs?.properties?.notification_message?.description;
+  if (
+    !notificationDescription ||
+    declared.properties?.notification_message?.description !== notificationDescription
+  ) {
+    throw new Error('Both start_new_agent schemas must describe the kickoff notification');
   }
 }
 

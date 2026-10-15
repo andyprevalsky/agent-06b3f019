@@ -201,3 +201,29 @@ The same source's backend suite independently passed197/197 domains and271 unit
 files at89.62% line coverage, including its real current-authority Codex smoke.
 These runs establish the scope correction; the original credential-selection
 incident and its mitigation below remain unchanged.
+
+### Concise kickoff deployment recurrence on October 15
+
+The concise SMS/WhatsApp kickoff deployment initially stopped after the default
+founder fixture selected a revoked seeded account and its funded fallback had
+no credits. Reimporting current production rows did not change that selected
+authority. The current local login belonged to a different account; its presence
+and nominal expiry had not established which account the smoke actually used.
+The credential escalation was therefore premature.
+
+After main sync exposed this case, the deployment used the same supported
+backend-only binding: a dedicated UUID shared by `CODEX_TOKEN_USER_ID` and
+`CODEX_BLACKBOX_USER_ID`, `CODEX_AUTH_PATH=/home/boxes/.codex/auth.json`, pooling
+disabled, and normal credential sync enabled. Agent coverage did not inherit
+those authority variables. No credential, funding, auth-policy, or smoke override
+was needed. The user asked to finish deployment and provided no new credentials
+or gate waiver.
+
+The combined-tree coverage at `0199ab77613b75556c93dde315515022a0ada459`
+passed 199 API domains and 272 unit files with 89.67% line coverage. Its real
+Codex smoke passed in 31.159 seconds. Session
+`b0a45049-97d8-46d9-b8ce-9917a50c5a28` contains `CODEX_E2B_DONE`, has no
+`token_revoked` signal, and is CLOSED with `closedAt` present. The receipts are
+`.context/deploy-runs/20261015-023030-48107/logs/backend-coverage-blackbox-20261015-181801-1416122.log`
+and `.context/kickoff-codex-final-receipt.json`. Bind the actual live gate to the
+intended local account before escalating a different account's revocation.
