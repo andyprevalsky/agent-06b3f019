@@ -5,7 +5,7 @@ Other helpers should import and use _fetch_agent_data_impl directly.
 """
 
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 import structlog
 from temporalio import activity
@@ -16,7 +16,9 @@ from helpers.http_client import get_http_client
 logger = structlog.get_logger()
 
 
-async def _fetch_agent_data_impl(agent_id: str, since: Optional[str] = None) -> Dict[str, Any]:
+async def _fetch_agent_data_impl(
+    agent_id: str, since: Optional[str] = None, browser_tool_call_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Core implementation for fetching agent data.
 
@@ -33,8 +35,13 @@ async def _fetch_agent_data_impl(agent_id: str, since: Optional[str] = None) -> 
     config = load_config()
 
     url = f"{config.backend.api_url}/api/agents/{agent_id}"
+    query = {}
     if since:
-        url += f"?since={quote(since, safe='')}"
+        query["since"] = since
+    if browser_tool_call_id:
+        query["browserToolCallId"] = browser_tool_call_id
+    if query:
+        url += "?" + urlencode(query)
 
     client = get_http_client()
     response = await client.get(

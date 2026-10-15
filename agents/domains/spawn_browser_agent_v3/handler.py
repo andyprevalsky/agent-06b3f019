@@ -954,7 +954,7 @@ async def _load_browser_resume_user_instructions(
     since = cursor_time if floor_confirmed and cursor_time is not None else epoch
     rows = await poll_new_messages(
         agent_id, since - timedelta(microseconds=1),
-        **({"browser_tool_call_id": tool_call_id} if tool_call_id else {}),
+        **({"browser_tool_call_id": tool_call_id, "browser_task_id": resume_state.get("task_id")} if tool_call_id else {}),
     )
     if not floor_confirmed:
         starts = [
@@ -5922,7 +5922,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
 
         previous_instruction_count = len(instruction_state.get("user_instruction_messages") or [])
         initial_read_confirmed = await sync_user_instructions()
-        if not initial_read_confirmed:
+        if not initial_read_confirmed and isinstance(resume.get("pending_action"), dict):
             await sync_user_instructions(require_confirmed_read=True)
         new_user_input = resumed_unread_user_input or previous_instruction_count != len(instruction_state.get("user_instruction_messages") or [])
         pending_action = None if new_user_input else resume.get("pending_action")
@@ -6525,6 +6525,7 @@ async def _spawn_browser_agent_activity_v3_real(
             agent_id=agent_id, resume_state=write_lock_resume_state
         )
         write_lock_resume_state["tool_call_id"] = tool_call_id
+        write_lock_resume_state["task_id"] = task_id or write_lock_resume_state.get("task_id")
         if write_lock_resume_state.get("approval_type") != AUTH_ASSISTANCE_DECLINED:
             try:
                 write_lock_resume_state = await _load_browser_resume_user_instructions(
@@ -11731,6 +11732,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolApproval": True,
                                 "writePermission": True,
+                                "browserTaskId": result.get("task_id") or known_task_id,
                                 "url": result.get("current_url", ""),
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
@@ -11917,6 +11919,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         metadata={
                             "toolApproval": True,
                             "writePermission": True,
+                            "browserTaskId": result.get("task_id") or known_task_id,
                             "url": result.get("current_url", "")
                             or current_start_url
                             or start_url,

@@ -60,6 +60,22 @@ interface AuthoredReply {
   userMessage?: string;
 }
 
+/** Native browser task identity from the locked request, never from reply text. */
+function attentionBrowserTaskId(metadata: unknown): string | undefined {
+  if (metadata === null || typeof metadata !== 'object') return undefined;
+  const values = metadata as Record<string, unknown>;
+  const candidates = [
+    values.browserTaskId,
+    ...(['authAssistance', 'requestUserAuthentication'] as const).map((key) => {
+      const auth = values[key];
+      return auth !== null && typeof auth === 'object' && 'browserSessionId' in auth
+        ? auth.browserSessionId
+        : undefined;
+    }),
+  ];
+  return candidates.find((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
 /** Serialize authored rows with the attention claim; broadcast after commit. */
 export async function persistAttentionUserMessages(
   tx: Prisma.TransactionClient,
@@ -72,6 +88,7 @@ export async function persistAttentionUserMessages(
   if (request === undefined || request.agentId !== reply.agentId) {
     throw new AttentionUserMessageForbiddenError('Attention request ownership is invalid');
   }
+  const browserTaskId = attentionBrowserTaskId(request.metadata);
   const targetAgentIds = new Set([request.agentId, ...(reply.targetAgentIds ?? [])]);
   await assertAttentionAgentOwnership(request.userId, targetAgentIds, tx);
   await assertAttentionWorkflowTargets(
@@ -100,7 +117,13 @@ export async function persistAttentionUserMessages(
         await createUserMessageInTransaction(tx, {
           agentId,
           text: userMessage,
-          metadata: { source: 'attention_response', attentionRequestId: reply.requestId },
+          metadata: {
+            source: 'attention_response',
+            attentionRequestId: reply.requestId,
+            ...(agentId === request.agentId && browserTaskId !== undefined
+              ? { browserTaskId }
+              : {}),
+          },
         })
       );
     }

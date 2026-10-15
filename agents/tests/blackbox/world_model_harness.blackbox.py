@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
-from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
+from _test_utils import BlackboxResult, native_browser_start_source, setup_mock_fn, teardown_mock
 
 
 def _with_archive_env(tmp: str):
@@ -2250,6 +2250,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         browser_pool="rose-1-ultra",
     )
     pricing = AsyncMock(return_value={})
+    native_start = await native_browser_start_source("2026-01-01T00:00:00+00:00", tool_call_id="browser-call", mode="simulate")
     with (
         patch.object(browser_handler.activity, "info", return_value=types.SimpleNamespace(
             scheduled_time=browser_handler.datetime.now(browser_handler.timezone.utc))),
@@ -2259,7 +2260,7 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
         patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
         patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
         patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
-        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[])),
+        patch.object(browser_handler, "poll_new_messages", AsyncMock(return_value=[native_start])),
         patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
         patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
         patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
@@ -2368,6 +2369,7 @@ async def _exercise_simulated_browser_policy(*, active_feedback=False, startup_f
     scheduled_time = datetime.now(timezone.utc) - timedelta(seconds=30)
     rows = [{"id": "prior-task", "role": "USER", "text": "Historical task input",
              "timestamp": (scheduled_time - timedelta(seconds=1)).isoformat()}]
+    rows.append(await native_browser_start_source(scheduled_time.isoformat(), tool_call_id="tool-browser", mode="simulate"))
     if startup_feedback:
         rows.append({"id": "queued-correction", "role": "USER", "text": correction,
                      "timestamp": (scheduled_time + timedelta(seconds=1)).isoformat()})

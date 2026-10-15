@@ -262,11 +262,26 @@ export async function findAncestors(agentId: string) {
 
 /** Fetch messages for an agent ordered by timestamp ascending.
  *  If `since` is provided, only returns messages with timestamp > since. */
-export async function findMessages(agentId: string, since?: Date) {
+export async function findMessages(agentId: string, since?: Date, browserToolCallId?: string) {
   return prisma.message.findMany({
     where: {
       agentId,
       ...(since ? { timestamp: { gt: since } } : {}),
+      ...(browserToolCallId === undefined
+        ? {}
+        : {
+            OR: [
+              { role: 'USER' as const },
+              {
+                role: 'TOOL' as const,
+                AND: [
+                  { metadata: { path: ['toolCallId'], equals: browserToolCallId } },
+                  { metadata: { path: ['toolName'], equals: 'spawn_browser_agent' } },
+                  { metadata: { path: ['action_type'], equals: 'session_starting' } },
+                ],
+              },
+            ],
+          }),
     },
     orderBy: { timestamp: 'asc' },
   });

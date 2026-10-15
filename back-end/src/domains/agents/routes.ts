@@ -100,6 +100,8 @@ router.get(
       const result = await queryService.getAgentDetail(req.params.id, {
         userId,
         since,
+        browserToolCallId:
+          typeof req.query.browserToolCallId === 'string' ? req.query.browserToolCallId : undefined,
         allowBenchmarkArchive: canReadBenchmarkArchive(req),
         inspectionViewerUserId,
       });
