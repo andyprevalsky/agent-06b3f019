@@ -26115,6 +26115,12 @@ async def test_browser_cleanup_sealed_inside_exception_handlers_is_local_only():
     await assert_full_browser_cleanup_failure_boundaries(globals(), sealed_only=True)
 
 
+async def test_browser_exception_terminal_writers_preserve_native_sealing():
+    from browser_cleanup_full_activity_support import assert_full_browser_cleanup_failure_boundaries
+    for status in (409, 500):
+        await assert_full_browser_cleanup_failure_boundaries(globals(), terminal_writer_status=status)
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -28460,6 +28466,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_cleanup_sealed_inside_exception_handlers_is_local_only",
         test_browser_cleanup_sealed_inside_exception_handlers_is_local_only,
+    )
+    await r.record_async(
+        "browser_exception_terminal_writers_preserve_native_sealing",
+        test_browser_exception_terminal_writers_preserve_native_sealing,
     )
     return r.all_passed
 

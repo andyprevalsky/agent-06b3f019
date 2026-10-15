@@ -10808,7 +10808,7 @@ Based on this feedback, I need to continue working on the task and address the i
             await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
 
         if task_id:
-            with contextlib.suppress(Exception):
+            with _suppress_browser_cleanup_errors():
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser Session Cancelled",
@@ -10879,7 +10879,7 @@ Based on this feedback, I need to continue working on the task and address the i
         )
 
         if task_id:
-            with contextlib.suppress(Exception):
+            with _suppress_browser_cleanup_errors():
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title="Task Failed",

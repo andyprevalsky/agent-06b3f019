@@ -57,3 +57,8 @@ Stop new owned publication synchronously on authoritative sealing and dispose on
 ### Golden-reference qualification
 
 Parent independently read OpenClaw src/agents/provider-local-service.ts:542-572 (cancel a waiter while the captured process owner remains until settlement), Hermes gateway/run_agent_cache.py:292-302 (a stale owner cannot clear a newer run), and Codex codex-rs/core/src/tasks/mod.rs:958-990 (bounded abort cleanup before interruption publication). These support exact owner settlement and fencing as architectural analogies; none proves rollback of an already-running provider transfer or the current auth task outcomes.
+
+
+### Final terminal-writer review follow-up
+
+Review of7d3d1aa98aafb07ecae0ee55cefa97c2ae632c7c found the cancellation terminal writer still inside generic Exception suppression. A new actual full-activity control uses real repo.save_browser_action_message with mocked native HTTP409: the signal is swallowed, cancellation returns normally and background teardown emits Browser Session Closed. Replacing that one suppression with the existing typed-preserving cleanup context exposes the identical adjacent Task Failed writer defect; its unchanged control also fails before the second replacement. The final correction is exactly those two context-manager replacements. The same registered control covers cancellation and original-error terminal writes at409, plus ordinary500 positives. All four pass with hard network attempts0; no retry, timeout, user-auth policy or business outcome change. Initial capture-body decoding harness error is retained separately and is not causal proof. This remains review-only and does not repair the three auth-choice task failures.

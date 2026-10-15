@@ -64,3 +64,6 @@ The combined preview preserves the corrected business/resource contract. Its act
 ### Golden-reference qualification
 
 Parent independently read OpenClaw src/infra/outbound/delivery-queue-recovery.ts:833-859, separating post-send finalization failure and unknown-after-send from proven omission. Hermes tools/browser_tool_lifecycle.py:713-742 logs close failure and releases local resources; it does not prove durable remote closure. These are architectural analogies for preserving business outcomes while reporting cleanup uncertainty, not provider shutdown proof.
+
+
+The adjacent cancellation and Task Failed completion writers now preserve a genuine typed native seal through their existing best-effort context. Actual full-activity HTTP409/ordinary500 controls cover both. Ordinary business error/cancellation behavior is preserved; a dead generation's stop signal remains authoritative. See the separate sealed-owned-cleanup case for exact before/intermediate/after evidence.
