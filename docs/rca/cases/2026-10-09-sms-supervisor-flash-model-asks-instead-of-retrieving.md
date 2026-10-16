@@ -403,3 +403,20 @@ does not establish harmless flakiness, model capability causality or a PR-induce
 regression. A valid next experiment must preserve these failures, hold its
 variables constant, and obtain any required exact approval before changing
 LLM-visible inputs.
+
+A bounded same-provider diagnostic comparison is now prepared but unapproved:
+TAMY-MODEL-ONLY-REPLAY-1, at most 12 inference requests (three pairs per saved
+CLOSED/old known-fact FILL prefix), Qwen versus GPT-OSS120B. Offline full-body
+proof shows only the model field differs, and the baseline FILL body matches
+an actual successful Qwen wire capture. The private process-local override is
+restored, fallback/retries are blocked, and online mode requires a positive
+user-approval receipt and exclusive once intent. No business tool executes.
+Both support configured high effort according to current official provider
+documentation; equal underlying reasoning-token budgets are not claimed. This
+is not a proposal to deploy GPT-OSS or presume it superior. It may remain
+inconclusive, and cannot substitute for the canonical task outcome gate.
+The user's existing model-change boundary requires explicit permission before
+this experiment. The approval request was presented; no answer or new model
+inference is inferred. Original MENU/USE-RETRIEVED-FACTS proposals remain separate
+and unapplied. Helper SHA256 is
+`a0be3bee8cf510f74ec04a222685cb4e7927cf2d14323ed47c4b661ff26894a5`.
