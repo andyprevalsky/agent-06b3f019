@@ -32,7 +32,7 @@ import {
   providerRequiredWaitMs,
 } from './rateLimitReset';
 import { parseAnthropicSSE } from './streaming';
-import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
+import { isUncachedContext, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
 import { postAnthropicApiKeyStream, postAnthropicStream } from './transport';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
@@ -129,8 +129,10 @@ function supportsAnthropicFastMode(model: string): boolean {
 }
 
 function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
-  if (messages.length === 0) return;
-  const last = messages[messages.length - 1];
+  let index = messages.length - 1;
+  while (index >= 0 && isUncachedContext(messages[index])) index--;
+  const last = messages[index];
+  if (!last) return;
   if (typeof last.content === 'string') {
     last.content = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
   } else if (Array.isArray(last.content) && last.content.length > 0) {
