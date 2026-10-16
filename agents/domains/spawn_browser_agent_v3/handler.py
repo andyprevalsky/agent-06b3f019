@@ -9413,7 +9413,8 @@ async def _spawn_browser_agent_activity_v3_real(
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result)
+                return resume_result
 
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}
@@ -10724,7 +10725,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result)
+                return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
                 payment_request = result.get("payment_request", {})
@@ -10861,7 +10863,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     )),
                 }
                 browser_task_paused_for_resume = True
-                return _visible_activity_result(resume_result)
+                resume_result = _visible_activity_result(resume_result)
+                return resume_result
 
             if result.get("success", True):
                 awaiting_observation_checkpoint = _preserve_observed_interaction_for_verifier(
