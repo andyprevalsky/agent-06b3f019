@@ -613,7 +613,10 @@ def validate_current_source_termination(files,meta,output,token):
             raise ValueError('current allocation original batch is not terminal failure')
     if presence['worker_ledger'] and files[prefix+'worker-clones.ids']:
         raise ValueError('current original has workers')
-    if all(presence.values()): return
+    runtime_present='registry/runtime-evidence-unconfirmed' in files
+    if not runtime_present and not all('outer/'+name+'.json' in files for name in ('summary','manifest','threshold_parent','parent_term')):
+        raise ValueError('absent runtime latch requires original outer terminal evidence')
+    if all(presence.values()) and runtime_present: return
     summary=json.loads(files['outer/summary.json']);manifest=json.loads(files['outer/manifest.json'])
     threshold=json.loads(files['outer/threshold_parent.json']);term=json.loads(files['outer/parent_term.json'])
     total=summary.get('total_jobs');jobs=summary.get('jobs')
@@ -693,7 +696,11 @@ def current_cold_files(registry, output, machine, token, controller_log, *, oute
     if worker_path.exists() or worker_path.is_symlink():
         if read(worker_path,65536): raise ValueError('current original has workers')
     # These latches remain originals and are never consumed by this policy.
-    read(registry/'runtime-evidence-unconfirmed',65536)
+    runtime_latch=registry/'runtime-evidence-unconfirmed'
+    if runtime_latch.exists() or runtime_latch.is_symlink():
+        read(runtime_latch,65536)
+    elif not outer_files:
+        raise ValueError('absent runtime latch requires original outer terminal evidence')
     guest_latch=registry/'guest-cleanup-unconfirmed'
     if guest_latch.exists() or guest_latch.is_symlink(): read(guest_latch,65536)
     paths={'capture-helper.py':Path(__file__),'controller.log':Path(controller_log)}
@@ -893,7 +900,6 @@ def archived_current_cold_identity(files,registry,output,machine,token):
     if files[prefix+'primary.ids'].splitlines()!=[machine.encode()] or files.get(prefix+'worker-clones.ids',b''):
         raise ValueError('archived current primary/workers differ')
     files[prefix+'primary.log'];files['controller.log']
-    files['registry/runtime-evidence-unconfirmed']
     source_latches=json.loads(files['source-latches.json'])
     expected_latches={name:({'present':True,'sha256':digest(files['registry/'+name])} if 'registry/'+name in files else {'present':False})
         for name in ('guest-cleanup-unconfirmed','runtime-evidence-unconfirmed')}

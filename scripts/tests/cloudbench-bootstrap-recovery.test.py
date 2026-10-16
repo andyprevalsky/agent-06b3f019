@@ -1946,6 +1946,50 @@ class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
         self.assertEqual(json.loads(files['source-local-presence.json']),{'batch_run':False,'worker_ledger':False})
 
 
+    def _capture_absent_runtime_latch(self):
+        outer=self._outer_terminal_fixture()
+        (self.registry/'runtime-evidence-unconfirmed').unlink()
+        observation=lambda:{'kind':'exact-inert-quiescence-v1','machine':MACHINE,'boot':'0'*36,'unknown':[],
+            'inert_sleepers':[{'pid':1,'birth':'1'}],'idle_pinned_agents':[],'idle_platform_hallpass':[],'observed_epoch':1.0}
+        with patch.dict(os.environ,FLY_MACHINE_ID=MACHINE):
+            self.helper['capture_current_cold_guest'](self.data,TOKEN,self.guest,'original-instance','3'*32,observe=observation,
+                dependencies=lambda:{'node':'b'*64,'python':'c'*64},mount=lambda data:{'device':42,'inode':10,'mount_device':'254:2'})
+        self.helper['capture_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,self.guest,
+            self.controller_log,self.native['config']['image'],'3'*32,outer_terminal=outer)
+        self.helper['commit_current_cold'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.volume,self.receipt)
+
+    def test_absent_runtime_latch_round_trip_preserves_typed_absence(self):
+        self._capture_absent_runtime_latch()
+        phase=json.loads(self.receipt.read_bytes())
+        self.assertEqual(phase['source_latches']['runtime-evidence-unconfirmed'],{'present':False})
+        self.assertEqual(phase['historical_runtime'],'UNKNOWN');self.assertEqual(phase['proof_credit'],0)
+        _,files,_=self.helper['read_current_cold_archive'](self.archive)
+        self.assertNotIn('registry/runtime-evidence-unconfirmed',files)
+        without_outer={name:raw for name,raw in files.items() if not name.startswith('outer/')}
+        with self.assertRaisesRegex(ValueError,'absent runtime latch requires original outer'):
+            self.helper['validate_current_cold_semantics'](without_outer,self.registry,self.out,MACHINE,TOKEN)
+        self.helper['export_cold_handoff'](self.source,self.registry,self.out,MACHINE,TOKEN,self.receipt,
+            self.before,self.after,self.target,'2'*32,self.packet,source_endpoint=self.source_endpoint)
+        self.helper['import_cold_handoff'](self.destination,self.target,self.packet,self.before,self.after)
+        self.assertFalse((self.registry/'runtime-evidence-unconfirmed').exists())
+
+    def test_absent_runtime_latch_requires_outer_even_with_local_terminal(self):
+        (self.registry/'runtime-evidence-unconfirmed').unlink()
+        with self.assertRaisesRegex(ValueError,'absent runtime latch requires original outer'):
+            self.helper['current_cold_files'](self.registry,self.out,MACHINE,TOKEN,self.controller_log)
+
+    def test_absent_runtime_latch_reappearance_is_refused(self):
+        self._capture_absent_runtime_latch()
+        write(self.registry/'runtime-evidence-unconfirmed','new latch')
+        with self.assertRaises(ValueError):
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
+    def test_present_runtime_latch_mutation_is_refused(self):
+        self.prepare_current()
+        write(self.registry/'runtime-evidence-unconfirmed','changed latch')
+        with self.assertRaises(ValueError):
+            self.helper['verify_current_cold_receipt'](self.registry,self.out,MACHINE,TOKEN,self.receipt,self.before,self.after)
+
     def test_outer_terminal_requires_exact_source_job_manifest_and_no_workers(self):
         for fault in ('job-pid','manifest-pid','source','log-owner','extra-worker','not-terminal'):
             with self.subTest(fault=fault):
