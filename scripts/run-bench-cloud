@@ -244,6 +244,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Explicit transport selection is frozen before any provider mutation. Never
+# fall back to staged dispatch after an attempted config update.
+case "${CLOUDBENCH_BOOT_TRANSPORT:-config}" in
+    config) ;;
+    staged)
+        [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] && [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] \
+            || { echo "staged boot requires explicitly admitted cold BOOT_LAUNCH" >&2; exit 2; }
+        ;;
+    *) echo "invalid explicit boot transport" >&2; exit 2 ;;
+esac
+
 case "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" in 0|1) ;; *) exit 2 ;; esac
 if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ]; then
     [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] || { echo "Cold primary requires explicit future empty bootstrap" >&2; exit 2; }
@@ -4486,6 +4497,20 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Fail loudly and specifically BEFORE spending a provider round trip. A
     # generic `request body too large` after retries is indistinguishable from a
     # transient provider fault and silently killed a whole campaign.
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then
+        # Reuse the exact boot payload/environment and all BOOT_LAUNCH evidence
+        # handling. The helper admits only already matching inert Machines.
+        printf '%s\0' "${_envargs[@]}" "${_boot_file_args[@]}" | \
+            python3 "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-staged-boot.py" \
+                --app "$APP" --machine "$mid" --run-token "$RUN_LOG_TOKEN" \
+                --output "$OUT_DIR/staged-boot" \
+                --vm-size "$CLOUDBENCH_POOL_BOOT_VM_SIZE" \
+                --vm-memory "$CLOUDBENCH_POOL_BOOT_VM_MEMORY" \
+                --ready-seconds "${CLOUDBENCH_READY_TIMEOUT:-600}" || exit 1
+        printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
+        mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
+        stage_explicit_codex_auth /cloudbench-codex-auth.py || exit 1
+    else
     boot_config_payload_guard "${_boot_file_args[@]}" || exit 1
     echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
@@ -4590,6 +4615,8 @@ except Exception:
     if [ "$_start_ok" = 1 ]; then
         echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
     fi
+    fi
+
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
