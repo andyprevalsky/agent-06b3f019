@@ -250,8 +250,8 @@ if [ "$MODE" != verify-secrets ]; then
 case "${CLOUDBENCH_BOOT_TRANSPORT:-config}" in
     config) ;;
     staged)
-        [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] && [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] \
-            || { echo "staged boot requires explicitly admitted cold BOOT_LAUNCH" >&2; exit 2; }
+        [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = 1 ] \
+            || { echo "staged boot requires explicit BOOT_LAUNCH" >&2; exit 2; }
         ;;
     *) echo "invalid explicit boot transport" >&2; exit 2 ;;
 esac

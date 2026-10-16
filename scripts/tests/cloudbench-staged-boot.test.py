@@ -150,7 +150,7 @@ python3(){ cat >/dev/null; echo STAGED; }
  def test_actual_verify_secrets_ignores_inherited_launch_transport(self):
   result,receipt=self.environment_entry(['--verify-secrets']);self.assertEqual(result.returncode,0,result.stderr);self.assertTrue(receipt.exists());self.assertIn('verified (read-only)',result.stdout)
  def test_actual_task_still_requires_explicit_staged_boot_flags(self):
-  result,receipt=self.environment_entry(['fixture-task','--machine',MID]);self.assertEqual(result.returncode,2);self.assertIn('requires explicitly admitted cold BOOT_LAUNCH',result.stderr);self.assertFalse(receipt.exists())
+  result,receipt=self.environment_entry(['fixture-task','--machine',MID]);self.assertEqual(result.returncode,2);self.assertIn('requires explicit BOOT_LAUNCH',result.stderr);self.assertFalse(receipt.exists())
  def probe_owner(self):
   for n in ('runtime-evidence.owner.json','runtime-evidence.pending'):(self.root/n).unlink()
   self.env['CLOUDBENCH_INFRA_PROBE']='1'
@@ -200,4 +200,54 @@ python3(){ cat >/dev/null; echo STAGED; }
   with patch.dict(ns,Path=path),patch.dict(os.environ,FLY_MACHINE_ID=MID):
    with self.assertRaises(FileExistsError):ns['install'](str(archive),hash_)
   self.assertEqual(len(children),1)
+@unittest.skipUnless(os.geteuid()==0,'canonical claim and return fixture')
+class ReusableStagedBootstrap(unittest.TestCase):
+ def setUp(self):
+  spec=importlib.util.spec_from_file_location('return_fixture',ROOT/'tests/cloudbench-explicit-idle-admission.test.py');self.A=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.A)
+  original=self.A.Worker.setUp
+  def empty(worker):
+   original(worker);obs=self.A.mod.described(worker.request['observation']);obs['workspace']={'kind':'absent'};worker.request['observation']=worker.save(obs)
+   terminal=self.A.mod.described(worker.request['observer_terminal']);terminal['observation_sha256']=worker.request['observation']['sha256'];worker.request['observer_terminal']=worker.save(terminal);worker.request['workspace_policy']='real-empty-bootstrap-v1'
+  self.f=self.A.StagedPrimaryReturn()
+  with patch.object(self.A.Worker,'setUp',empty):self.f.setUp()
+  self.addCleanup(self.f.doCleanups)
+ def cli(self,cold,fresh,boot='1'):
+  source=Path(os.environ.get('ROSE_STAGED_TEST_SOURCE',str(ROOT/'run-bench-cloud'))).read_text();end=source.index('if [ "$IMAGE_BUILD_BUILDER_REQUESTED" = 1 ]')
+  prefix=source[:end]+'\nprintf "CLI_BOOTSTRAP_ACCEPTED=%s:%s\n" "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" "${CLOUDBENCH_FRESH_VOLUME:-0}"\n'
+  env=dict(os.environ,CLOUDBENCH_FLEET_ROOT=str(ROOT.parent),CLOUDBENCH_BOOT_TRANSPORT='staged',CLOUDBENCH_BOOT_LAUNCH=boot,CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP=str(cold),CLOUDBENCH_FRESH_VOLUME=str(fresh))
+  env.pop('CLOUDBENCH_SCRIPT_SNAPSHOT',None)
+  return subprocess.run(['bash','-c',prefix,'cloud-cli','parallel-tool-calls','--machine',self.f.f.mid,'--ref',self.f.source,'--no-simulate'],env=env,capture_output=True,text=True,timeout=10)
+ def next_intent(self,wrong=False):
+  f=self.f;fleet=(ROOT/'run-bench-fleet').read_text();claimfn=__import__('re').search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,__import__('re').M|__import__('re').S).group()
+  cf=dict(line.split('=',1)for line in f.f.claim.read_text().splitlines()) if f.f.claim.exists() else self.claim
+  owner='a'*32;args=['bash','-c',claimfn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(f.f.claim),f.f.mid,f.f.vol,cf['host'],cf['pid'],cf['pid_start'],owner,f.f.request['consumer']['pool_ids_file'],f.f.request['consumer']['pool_meta_file'],self.A.mod.sha(Path(f.f.request['consumer']['pool_meta_file']).read_bytes())]
+  r=subprocess.run(args,capture_output=True,text=True);self.assertEqual(r.returncode,0,r.stderr)
+  out=f.f.root/'next'/'parallel-tool-calls';out.mkdir(parents=True);(out/'.cid').write_text('pool '+f.f.mid+'\n')
+  code=fleet.split("<<'PYCOLD' || return 1\n",1)[1].split('\nPYCOLD',1)[0]
+  env=dict(os.environ,CLOUDBENCH_SCRIPT_SNAPSHOT=str(ROOT));r=subprocess.run([sys.executable,'-c',code,str(f.f.proof),str(out/'cold-primary-bootstrap'),f.f.mid,f.source,'next',owner,str(f.run/'execution-task-matrix.json'),out.name],env=env,capture_output=True,text=True);self.assertEqual(r.returncode,0,r.stderr)
+  if wrong:
+   value=json.loads((out/'cold-primary-bootstrap').read_bytes());value['policy']='real-empty-bootstrap-v1';(out/'cold-primary-bootstrap').write_text(json.dumps(value))
+  fn=__import__('re').search(r'^primary_cold_bootstrap_requested\(\).*?^}\n',fleet,__import__('re').M|__import__('re').S).group()
+  env.update(POOL_COLD_BOOTSTRAP='1',BENCH_REF=f.source,RUN_ID='next',FLEET_OWNER_TOKEN=owner,EXECUTION_TASK_MATRIX_FILE=str(f.run/'execution-task-matrix.json'),PROOF=str(f.f.proof))
+  return subprocess.run(['bash','-c','pool_reuse_proof_file(){ printf "%s" "$PROOF"; }\n'+fn+'\nprimary_cold_bootstrap_requested "$1" "$2"','next-intent',str(out),f.f.mid],env=env,capture_output=True,text=True)
+ def returned(self):
+  f=self.f;self.assertEqual(f.h['current_policy'](f.f.proof),'real-empty-bootstrap-v1');self.claim=dict(line.split('=',1)for line in f.f.claim.read_text().splitlines())
+  r,_=f.audit_refresh();self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(f.h['current_policy'](f.f.proof),'existing-git-reset-v1')
+ def test_first_return_next_claim_intent_and_actual_cli_bootstrap(self):
+  first=self.cli(1,1);self.assertEqual(first.returncode,0,first.stderr)
+  self.returned();before=self.f.f.proof.read_bytes();r=self.next_intent();self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.strip(),'0')
+  next_run=self.cli(r.stdout.strip(),0);self.assertEqual(next_run.returncode,0,next_run.stderr);self.assertIn('CLI_BOOTSTRAP_ACCEPTED=0:0',next_run.stdout);self.assertEqual(self.f.f.proof.read_bytes(),before)
+ def test_changed_return_policy_intent_still_refuses(self):
+  self.returned();self.assertNotEqual(self.next_intent(wrong=True).returncode,0)
+ def test_boot_flag_and_cold_fresh_guards_remain(self):
+  for cold,fresh,boot in [(0,0,'0'),(1,0,'1'),(2,0,'1')]:
+   with self.subTest(cold=cold,fresh=fresh,boot=boot):self.assertNotEqual(self.cli(cold,fresh,boot).returncode,0)
+ def test_existing_checkout_uses_unchanged_reset_path(self):
+  f=self.f;repo=f.f.root/'retained-repo';subprocess.run(['git','init','-q',str(repo)],check=True)
+  (repo/'payload').write_text('committed\n');subprocess.run(['git','-C',str(repo),'add','.'],check=True);subprocess.run(['git','-C',str(repo),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],check=True)
+  ref=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();(repo/'payload').write_text('changed\n');(repo/'untracked').write_text('retained\n')
+  env=dict(os.environ,CLOUDBENCH_REQUIRE_EMPTY_CHECKOUT='0',CLOUDBENCH_FRESH_VOLUME='0');env.pop('CLOUDBENCH_APP_USER',None)
+  r=subprocess.run(['bash',str(ROOT/'cloudbench-fetch-ref.sh'),str(repo),ref],env=env,capture_output=True,text=True,timeout=10)
+  self.assertEqual(r.returncode,0,r.stderr);self.assertIn('already-at '+ref,r.stdout);self.assertEqual((repo/'payload').read_text(),'committed\n');self.assertEqual((repo/'untracked').read_text(),'retained\n')
+
 if __name__=='__main__':unittest.main()
