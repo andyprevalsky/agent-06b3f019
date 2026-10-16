@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import runpy
 from pathlib import Path
 import subprocess
 import tempfile
@@ -588,6 +589,91 @@ reconcile_pool
         result=self.run_reconcile(foreign=False)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertNotIn('unreadable',result.stderr)
+
+class BorrowedPreconfigRecovery(unittest.TestCase):
+    def setUp(self):
+        self.f=Admission();self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.h=runpy.run_path(str(SCRIPT.with_name('cloudbench-explicit-idle-preconfig.py')))
+        req,auth,fd=self.f.authority();mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
+        self.owner='e'*32;self.registry=self.f.common/'cloudbench-fleet-ownership'/self.owner
+        self.audit=self.f.common/'cloudbench-fleet-audits'/self.owner;self.run=self.f.root/'runs'/'failed';self.out=self.run/'parallel-tool-calls'
+        for p in (self.registry/'clones',self.audit/'fresh',self.audit/'expected-fresh',self.audit/'by-machine-id',self.audit/'pool',self.run/'_batch',self.run/'.boot-config-barrier/ready',self.out):p.mkdir(parents=True,exist_ok=True)
+        self.meta=dict(version='2',fleet_owner_token=self.owner,app='app',run_id='failed',runs_root=str(self.run.parent),audit_dir=str(self.audit),host=mod.socket.gethostname(),pid='99999999',pid_start='dead-fixture',cleanup_policy='retain')
+        self.fields(self.registry/'meta',self.meta);self.fields(self.audit/'meta',self.meta)
+        for n in ('owned-clones.ids','owned-clones.names'):(self.audit/n).write_bytes(b'')
+        self.write(self.run/'_batch/lifecycle.json',dict(status='failed',fleet_owner_token=self.owner,run_id='failed',controller_exit_code=1))
+        self.write(self.run/'_batch/benches.json',[dict(name='parallel-tool-calls',mode='REAL')])
+        contract=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')))
+        matrix=contract['build_task_matrix'](['parallel-tool-calls=real']);config=contract['build_config'](contract['CONFIG_SCHEMA_VERSION'],['task_count=1','task_matrix_sha256='+matrix['sha256'],'boot_launch=1','primary_reuse_only=1','cold_primary_bootstrap=1'])
+        prov=dict(schema_version=contract['EXECUTION_SCHEMA_VERSION'],base_sha=self.f.request['consumer']['source_ref'],workspace_patch_sha256='none',controller_snapshot=dict(schema_version=contract['SNAPSHOT_SCHEMA_VERSION'],sha256='f'*64),config=config)
+        self.write(self.run/'execution-provenance.json',prov);self.write(self.run/'execution-task-matrix.json',matrix)
+        self.claim=self.f.common/'cloudbench-pool-claims'/self.f.mid
+        self.fields(self.claim,dict(host=self.meta['host'],pid=self.meta['pid'],pid_start=self.meta['pid_start'],fleet_owner_token=self.owner,cleanup_state='unconfirmed'))
+        self.pool=dict(version='1',fleet_owner_token=self.owner,app='app',run_id='failed',source='borrowed-pool',machine_id=self.f.mid,volume_id=self.f.vol,pool_ledger_file=self.f.request['consumer']['pool_ids_file'],pool_meta_file=self.f.request['consumer']['pool_meta_file'],pool_meta_sha256=mod.sha(Path(self.f.request['consumer']['pool_meta_file']).read_bytes()),disposition='claimed')
+        self.fields(self.audit/'pool'/self.f.mid,self.pool)
+        proof=self.f.common/'cloudbench-pool-reuse'/(self.f.mid+'.json')
+        self.write(self.out/'cold-primary-bootstrap',dict(version=1,policy=mod.current_policy(proof),machine_id=self.f.mid,volume_id=self.f.vol,source_ref=self.f.request['consumer']['source_ref'],run_id='failed',run_token=self.owner+'-0',proof_sha256=mod.sha(proof.read_bytes())))
+        for name,raw in {'.cid':'pool '+self.f.mid+'\n','benchmark-child.finished':'125\n','boot-config-unapplied':self.f.mid+'\n','worker-clones.ids':'','cloudbench-boot-update.log':'Error: organization has reached its machine limit\n'}.items():(self.out/name).write_text(raw)
+        identity=dict(version=1,machine_id=self.f.mid,run_token=self.owner+'-0')
+        self.write(self.out/'runtime-evidence.owner.json',identity);self.write(self.out/'runtime-evidence.pending',identity)
+        (self.registry/'runtime-evidence-unconfirmed').write_text('pending')
+        self.h['B']['pid_birth_state']=lambda *a:'absent'
+        self.native=mod.described(self.f.request['native_before']);self.volume=mod.described(self.f.request['volume'])
+        self.source=self.f.request['consumer']['source_ref']
+    def write(self,p,v):p.write_bytes(mod.canonical(v))
+    def fields(self,p,v):p.write_text(''.join(k+'='+v+'\n' for k,v in v.items()))
+    def recover(self,**kw):return self.h['recover'](self.registry,self.f.common,self.source,lambda mid:copy.deepcopy(self.native),lambda vol:copy.deepcopy(self.volume),**kw)
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_actual_borrowed_pool_preconfig_archives_before_release(self):
+        observed=[]
+        def check(stage):
+            if stage=='archived':self.assertTrue(self.claim.exists());self.assertTrue((self.out/'runtime-evidence.pending').exists());observed.append(stage)
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text()
+        function=re.search(r'^fleet_preconfig_recovery_plan\(\).*?^}\n',fleet,re.M|re.S).group()
+        old=subprocess.run(['bash','-c',function+'\nfleet_preconfig_recovery_plan "$REGISTRY"'],env={**os.environ,'REGISTRY':str(self.registry),'APP':'app','FLEET_AUDIT_ROOT':str(self.audit.parent),'CLOUDBENCH_SCRIPT_SNAPSHOT':str(SCRIPT.parent),'POOL_COLD_BOOTSTRAP':'1','POOL_CLAIMS_DIR':str(self.claim.parent)},capture_output=True,text=True)
+        self.assertNotEqual(old.returncode,0,'fresh-only path must reject borrowed audit')
+        result=self.recover(checkpoint=check)
+        self.assertEqual(result['status'],'RECOVERED_STOPPED');self.assertEqual(observed,['archived'])
+        self.assertFalse(self.claim.exists());self.assertFalse((self.out/'runtime-evidence.pending').exists())
+        self.assertEqual(self.h['fields'](self.audit/'pool'/self.f.mid)['disposition'],'returned-stopped-claim-released')
+        self.assertIn(self.f.mid,Path(self.pool['pool_ledger_file']).read_text())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_absent_infra_runtime_is_not_synthesized(self):
+        (self.out/'runtime-evidence.owner.json').unlink();(self.out/'runtime-evidence.pending').unlink()
+        result=self.recover();self.assertEqual(result['status'],'RECOVERED_STOPPED')
+        self.assertFalse((self.out/'runtime-evidence.owner.json').exists());self.assertFalse(self.claim.exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_mixed_runtime_absence_refuses(self):
+        (self.out/'runtime-evidence.pending').unlink()
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(self.claim.exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_live_owner_refuses_without_archive_or_release(self):
+        self.h['B']['pid_birth_state']=lambda *a:'live'
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(self.claim.exists());self.assertFalse((self.registry/'explicit-idle-preconfig-recovery').exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_start_evidence_refuses(self):
+        (self.out/'post-config-start.accepted').write_text(self.f.mid)
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(self.claim.exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_native_drift_refuses_and_keeps_claim(self):
+        self.native['instance_id']='changed'
+        with self.assertRaises(ValueError):self.recover()
+        self.assertTrue(self.claim.exists());self.assertTrue((self.out/'runtime-evidence.pending').exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_archive_interruption_preserves_claim_and_pending(self):
+        def stop(stage):raise RuntimeError('local interruption')
+        with self.assertRaises(RuntimeError):self.recover(checkpoint=stop)
+        self.assertTrue(self.claim.exists());self.assertTrue((self.out/'runtime-evidence.pending').exists());self.assertTrue((self.registry/'explicit-idle-preconfig-recovery/archive.json').exists())
+    @unittest.skipUnless(os.geteuid()==0,'canonical publication fixture requires root')
+    def test_foreign_claim_and_fresh_cid_refuse(self):
+        self.fields(self.claim,dict(host=self.meta['host'],pid=self.meta['pid'],pid_start=self.meta['pid_start'],fleet_owner_token='a'*32,cleanup_state='unconfirmed'))
+        with self.assertRaises(ValueError):self.recover()
+        self.fields(self.claim,dict(host=self.meta['host'],pid=self.meta['pid'],pid_start=self.meta['pid_start'],fleet_owner_token=self.owner,cleanup_state='unconfirmed'))
+        (self.out/'.cid').write_text('clone '+self.f.mid+'\n')
+        with self.assertRaises(ValueError):self.recover()
 
 
 if __name__=='__main__':unittest.main()

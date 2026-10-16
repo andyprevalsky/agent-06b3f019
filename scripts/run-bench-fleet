@@ -739,6 +739,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-reuse.py" \
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-admission.py" \
+       "$ROOT_DIR/scripts/cloudbench-explicit-idle-preconfig.py" \
        "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-startup-failure-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-controller-export.py" \
@@ -11593,6 +11594,20 @@ PY
             preconfig_candidate=1; break
         fi
     done
+    if [ "$preconfig_candidate" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] \
+        && [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ] && exact_recovery_is_pool_only "$registry"; then
+        # A never-started borrowed explicit-idle cohort retains its original
+        # admission. It must not enter the fresh-clone archive/transfer path.
+        local explicit_recovery_status=0
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-preconfig.py" \
+            --registry "$registry" --common "$GIT_COMMON_DIR" --source "$BENCH_REF" \
+            || explicit_recovery_status=$?
+        if [ "$explicit_recovery_status" = 0 ]; then
+            capacity_release_stale_owner_reservations "$meta" "$token-primary" || explicit_recovery_status=$?
+        fi
+        release_registry_recovery_lock "$registry"
+        return "$explicit_recovery_status"
+    fi
     if [ "$preconfig_candidate" = 1 ] || [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
         if [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] && [ "${POOL_COLD_BOOTSTRAP:-0}" != 1 ]; then
             echo "❌ never-configured primaries lack authenticated warm-volume bootstrap proof; pool admission refused" >&2
