@@ -716,3 +716,14 @@ the assertion, while the follow-up waits and retains STARTED until release.
 All twelve owner cases then pass. This is an offline lock-boundary fixture;
 the deployment owner separately owns real PostgreSQL contention/commit proof.
 The published6b proposal remains preserved as the before snapshot.
+
+
+A bounded access-path follow-up reuses the existing ToolSideEffect.externalId
+index for Agent-scoped reads: new start rows store externalId=agentId, and both
+pending and membership reads constrain that exact identity. Queue retirement
+filters request.queue once per source cohort, instead of every Agent poll
+filtering the fleet-wide JSON journal. No schema or index migration is added;
+the prior proposal has not been deployed. The registered query-shape assertion
+fails on915 and passes with the follow-up; the normal offline owner passes
+thirteen cases and actual caller owner passes twelve. Real PostgreSQL EXPLAIN
+and contention proof remain the deployment owner's separate owning gate.

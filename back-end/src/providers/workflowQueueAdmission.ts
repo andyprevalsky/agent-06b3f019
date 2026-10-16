@@ -119,7 +119,7 @@ export async function claimWorkflowStart(
           operationKey: startAdmissionKey(intent.id),
           operationType: START_ADMISSION_OPERATION,
           status: 'STARTED',
-          externalId: queue,
+          externalId: agentId,
           request: intent as unknown as Prisma.InputJsonObject,
         },
       });
@@ -226,7 +226,10 @@ export async function requireQueueRetirementReady(
     )
       throw new WorkflowStartAdmissionPendingError('Legacy producer/start coverage is unqualified');
     const rows = await tx.toolSideEffect.findMany({
-      where: { operationType: START_ADMISSION_OPERATION, externalId: queue },
+      where: {
+        operationType: START_ADMISSION_OPERATION,
+        request: { path: ['queue'], equals: queue },
+      },
     });
     for (const row of rows) {
       const intent = row.request as unknown as StartAdmission;
@@ -260,7 +263,10 @@ export async function requireQueueRetirementReady(
       queue
     );
     const rows = await tx.toolSideEffect.findMany({
-      where: { operationType: START_ADMISSION_OPERATION, externalId: queue },
+      where: {
+        operationType: START_ADMISSION_OPERATION,
+        request: { path: ['queue'], equals: queue },
+      },
     });
     const pointer = await tx.agentQueuePointer.findUnique({ where: { id: 'singleton' } });
     if (

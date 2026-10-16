@@ -15,6 +15,7 @@ type AgentRow = Record<string, unknown> & {
 };
 type EffectRow = {
   operationKey?: string;
+  externalId?: string;
   request: Record<string, unknown>;
   response?: unknown;
   status?: string;
@@ -99,11 +100,13 @@ export function fixture() {
       findMany: async ({
         where,
       }: {
-        where: { AND: { request: { path: string[]; equals: string } }[] };
+        where: { externalId: string; AND: { request: { path: string[]; equals: string } }[] };
       }) =>
         [...effects.values()]
-          .filter((row) =>
-            where.AND.every((part) => row.request[part.request.path[0]] === part.request.equals)
+          .filter(
+            (row) =>
+              row.externalId === where.externalId &&
+              where.AND.every((part) => row.request[part.request.path[0]] === part.request.equals)
           )
           .map((row) => ({
             operationKey: row.operationKey,
@@ -115,12 +118,14 @@ export function fixture() {
         where,
       }: {
         where: {
+          externalId: string;
           AND: { request: { path: string[]; equals: string } }[];
           OR: { status: string; request?: { path: string[]; equals: string } }[];
         };
       }) =>
         [...effects.values()].find(
           (row) =>
+            row.externalId === where.externalId &&
             where.AND.every((part) => row.request[part.request.path[0]] === part.request.equals) &&
             where.OR.some(
               (option) =>
@@ -353,12 +358,13 @@ export async function withFixtureDatabase<T>(
     prisma.toolSideEffect.findFirst = (async ({
       where,
     }: {
-      where: { AND: { request: { path: string[]; equals: string } }[] };
+      where: { externalId: string; AND: { request: { path: string[]; equals: string } }[] };
     }) => {
       return (
         [...f.effects.values()].find(
           (row) =>
             row.status === 'STARTED' &&
+            row.externalId === where.externalId &&
             where.AND.every((part) => row.request[part.request.path[0]] === part.request.equals)
         ) ?? null
       );

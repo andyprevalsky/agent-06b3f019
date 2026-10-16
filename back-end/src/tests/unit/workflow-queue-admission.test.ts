@@ -1,6 +1,10 @@
 /* eslint-disable no-console */
 import assert from 'node:assert/strict';
 import { prisma } from '../../providers/database';
+import {
+  workflowStartMembership,
+  hasUnacknowledgedWorkflowStart,
+} from '../../providers/workflowStartPending';
 import { setCurrentAgentQueue } from '../../providers/agentQueuePointer';
 import { startAgentWorkflowExecutionWithClient } from '../../providers/temporal';
 import {
@@ -87,11 +91,17 @@ function storage() {
         rows.set(where.operationKey, next);
         return next;
       },
-      findMany: async ({ where }: { where: { operationType: string; externalId: string } }) =>
+      findMany: async ({
+        where,
+      }: {
+        where: { operationType: string; request: { path: string[]; equals: string } };
+      }) =>
         structuredClone(
           [...rows.values()].filter(
             (row) =>
-              row.operationType === where.operationType && row.externalId === where.externalId
+              row.operationType === where.operationType &&
+              (row.request as Record<string, unknown>)[where.request.path[0]] ===
+                where.request.equals
           )
         ),
     },
@@ -466,6 +476,38 @@ async function main() {
         [...rows.values()].find((row) => row.operationType === START_ADMISSION_OPERATION)!.status,
         'COMPLETED'
       );
+    });
+
+    await test('per-agent membership and pending reads constrain the existing externalId index', async () => {
+      const first = prisma.toolSideEffect.findFirst,
+        many = prisma.toolSideEffect.findMany;
+      const reads: Record<string, unknown>[] = [];
+      try {
+        prisma.toolSideEffect.findFirst = (async ({
+          where,
+        }: {
+          where: Record<string, unknown>;
+        }) => {
+          reads.push(where);
+          return null;
+        }) as never;
+        prisma.toolSideEffect.findMany = (async ({ where }: { where: Record<string, unknown> }) => {
+          reads.push(where);
+          return [];
+        }) as never;
+        await hasUnacknowledgedWorkflowStart('indexed-agent', 'indexed-workflow');
+        await workflowStartMembership('indexed-agent', 'indexed-workflow');
+        assert.equal(reads.length, 2);
+        for (const where of reads)
+          assert.equal(
+            where.externalId,
+            'indexed-agent',
+            'per-agent read omitted existing indexed Agent identity'
+          );
+      } finally {
+        prisma.toolSideEffect.findFirst = first;
+        prisma.toolSideEffect.findMany = many;
+      }
     });
   } finally {
     prisma.$transaction = original;

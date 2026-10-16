@@ -9,6 +9,7 @@ function pendingWhere(
 ): Prisma.ToolSideEffectWhereInput {
   return {
     operationType: START_ADMISSION_OPERATION,
+    externalId: agentId,
     OR: [
       { status: 'STARTED' },
       ...(includeAcknowledgedUnknown
@@ -67,6 +68,7 @@ export async function workflowStartMembership(
   const rows = await client.toolSideEffect.findMany({
     where: {
       operationType: START_ADMISSION_OPERATION,
+      externalId: agentId,
       AND: [
         { request: { path: ['agentId'], equals: agentId } },
         ...(workflowId ? [{ request: { path: ['workflowId'], equals: workflowId } }] : []),
