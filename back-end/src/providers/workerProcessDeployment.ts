@@ -40,6 +40,7 @@ export interface WorkerProcessPlan {
   app: string;
   attempt: string;
   previousQueue: string;
+  peopleCredentialBrokerOrigin: typeof WORKER_PROCESS_BACKEND_ORIGIN;
   controlPlane: {
     serviceId: string;
     databaseHost: string;
@@ -136,6 +137,10 @@ function requireValue(condition: unknown, message: string): asserts condition {
 }
 export function validateWorkerProcessPlan(plan: WorkerProcessPlan): void {
   requireValue(plan.version === 1, 'Unsupported worker process plan');
+  requireValue(
+    plan.peopleCredentialBrokerOrigin === WORKER_PROCESS_BACKEND_ORIGIN,
+    'Unqualified people credential broker origin'
+  );
   requireValue(/^[a-z0-9][a-z0-9-]{1,62}$/.test(plan.app), 'Invalid existing worker app');
   requireValue(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(plan.attempt), 'Invalid worker attempt');
   requireValue(/^[a-zA-Z0-9@._-]{1,200}$/.test(plan.previousQueue), 'Missing exact prior queue');
@@ -258,11 +263,16 @@ export function signWorkerEnvelope(
   key: string
 ): Record<string, unknown> {
   requireValue(key.length > 0, 'Missing worker runtime authentication');
+  requireValue(
+    plan.peopleCredentialBrokerOrigin === WORKER_PROCESS_BACKEND_ORIGIN,
+    'Unqualified people credential broker origin'
+  );
   const { artifact } = plan;
   const envelope = {
     version: 1,
     action,
     app: plan.app,
+    peopleCredentialBrokerOrigin: plan.peopleCredentialBrokerOrigin,
     machineId: host.id,
     machineVersion: host.version,
     bootId: facts.bootId,

@@ -10,21 +10,25 @@ import asyncio
 import hashlib
 import math
 import time
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 import structlog
 
 from config import load_config
+from providers.rose.cerebras_schema import project_cerebras_tool_schema
 from providers.rose.errors import RoseError, RoseRateLimitError
-from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
 from providers.rose.transport import post_cerebras_stream
-from providers.rose.types import StreamChunk
 from providers.rose.waterfall import _openrouter_tool_choice, _openrouter_tools
+
+if TYPE_CHECKING:
+    from providers.rose.pools import PoolSpec
+    from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
 
@@ -123,15 +127,11 @@ def _provider_cooldown_seconds(response: httpx.Response) -> Optional[float]:
         try:
             delays.append(float(retry_after))
         except ValueError:
-            try:
+            with suppress(ValueError, TypeError):
                 delays.append((parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
-            except (ValueError, TypeError):
-                pass
     for dimension in exhausted:
-        try:
+        with suppress(ValueError):
             delays.append(float(response.headers.get(f"x-ratelimit-reset-{dimension}", "")))
-        except ValueError:
-            pass
     valid = []
     for delay in delays:
         if math.isfinite(delay):
@@ -201,6 +201,21 @@ def build_cerebras_body(
     effort: Optional[str],
 ) -> Dict[str, Any]:
     openrouter_tools = _openrouter_tools(tools)
+    projections = [project_cerebras_tool_schema(tool["function"].get("parameters")) for tool in openrouter_tools or []]
+    strict_toolset = all(projected is not None for projected, _ in projections)
+    for tool, (projected, reason) in zip(openrouter_tools or [], projections, strict=True):
+        function = tool["function"]
+        function["strict"] = strict_toolset
+        if strict_toolset:
+            function["parameters"] = projected
+        elif reason:
+            logger.warning("cerebras.tool_schema.non_strict", tool_name=function.get("name"), reason=reason)
+    if openrouter_tools and not strict_toolset:
+        # Actual API rejects mixed strict flags. Never close an open schema to
+        # satisfy the uniform request contract; retain all original schemas.
+        logger.warning(
+            "cerebras.toolset.non_strict", reason="provider_requires_uniform_strict", tool_count=len(openrouter_tools)
+        )
     body: Dict[str, Any] = {
         "model": model,
         "messages": _strip_cerebras_cache_control(

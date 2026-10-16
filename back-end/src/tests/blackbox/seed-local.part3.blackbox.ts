@@ -5,6 +5,12 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import ts from 'typescript';
+import type { Integration } from '@prisma/client';
+import {
+  syncIntegrationCredentials,
+  type IntegrationModel,
+} from '../../../scripts/seed-local-credentials';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -72,6 +78,208 @@ test('synthetic benchmark compute access uses the isolated pool without changing
   assert(
     !source.slice(helper, poolCall).includes('userId: process.env'),
     'synthetic benchmark users must never receive copied integration rows'
+  );
+});
+
+test('full seed never replicates rotating Lantern grants or overwrites a dedicated local grant', async () => {
+  // Execute the actual CLI function with only source/target storage edges mocked.
+  // This is the existing seed-credential-retry AST replay convention: no top-level
+  // seed CLI imports, environment loading, real databases or provider calls.
+  const source = readSeedLocalSource();
+  const ast = ts.createSourceFile('seed-local.ts', source, ts.ScriptTarget.ES2022, true);
+  const functions = ast.statements.filter(
+    (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'syncIntegrations'
+  );
+  assert(functions.length === 1, 'expected the actual syncIntegrations declaration');
+  const executable = ts.transpileModule(functions[0].getText(ast), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  const makeRow = (
+    id: string,
+    userId: string,
+    name: string,
+    poolingEnabled = false
+  ): Integration => ({
+    id,
+    userId,
+    name,
+    poolingEnabled,
+    type: 'API',
+    status: 'CONNECTED',
+    isActive: true,
+    lastSyncAt: null,
+    lastSuccessfulSyncAt: null,
+    lastFailedSyncAt: null,
+    failureReason: null,
+    config: { encryptedCredentials: `SYNTHETIC_SOURCE_${id}` },
+    rateLimitedUntil: null,
+    lastUsedAt: null,
+    accountId: '',
+    accountEmail: null,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-01T00:00:00Z'),
+  });
+  const remoteRows = [
+    makeRow('remote-lantern', 'seed-user', 'lantern_people'),
+    makeRow('remote-gpt', 'seed-user', 'gpt_code'),
+    makeRow('remote-agentcard', 'seed-user', 'agentcard'),
+    makeRow('remote-pooled-lantern', 'foreign-lantern', 'lantern_people', true),
+    makeRow('remote-claude', 'pool-owner', 'claude_code', true),
+  ];
+  type Selection = {
+    userId?: string | { not?: string; in?: string[] };
+    name?: { in?: string[]; not?: string };
+    poolingEnabled?: boolean;
+  };
+  for (const computeTokensOnly of [false, true]) {
+    const dedicated = makeRow('local-lantern', 'seed-user', 'lantern_people');
+    dedicated.config = { encryptedCredentials: 'SYNTHETIC_DEDICATED_LOCAL_GRANT' };
+    const localRows = new Map<string, Integration>([
+      ['seed-user:lantern_people:', dedicated],
+      ['seed-user:gpt_code:', makeRow('existing-local-gpt', 'seed-user', 'gpt_code')],
+      [
+        'pool-owner:claude_code:',
+        makeRow('existing-local-claude', 'pool-owner', 'claude_code', true),
+      ],
+    ]);
+    const writes: string[] = [];
+    const poolUsers: string[] = [];
+    const target: IntegrationModel = {
+      upsert: async (args) => {
+        const identity = args.where.userId_name_accountId;
+        assert(identity !== undefined, 'expected actual compound identity');
+        const key = `${identity.userId}:${identity.name}:${identity.accountId}`;
+        const existing = localRows.get(key);
+        const row = {
+          ...(existing ?? args.create),
+          ...args.update,
+          id: existing?.id ?? `local-${identity.name}`,
+        } as Integration;
+        localRows.set(key, row);
+        writes.push(identity.name);
+        return { id: row.id };
+      },
+    };
+    const findProdIntegrations = async (where: Selection) =>
+      remoteRows.filter((row) => {
+        const user = where.userId;
+        return (
+          (typeof user !== 'string' || row.userId === user) &&
+          (typeof user !== 'object' || user.not === undefined || row.userId !== user.not) &&
+          (typeof user !== 'object' || user.in === undefined || user.in.includes(row.userId)) &&
+          (where.name?.in === undefined || where.name.in.includes(row.name)) &&
+          (where.name?.not === undefined || row.name !== where.name.not) &&
+          (where.poolingEnabled === undefined || row.poolingEnabled === where.poolingEnabled)
+        );
+      });
+    const bindings = {
+      SEED_USER_ID: 'seed-user',
+      COMPUTE_INTEGRATION_NAMES: ['claude_code', 'gpt_code'],
+      findProdIntegrations,
+      syncIntegrationCredentials,
+      remote: { user: {} },
+      local: {
+        user: {},
+        integration: {
+          ...target,
+          findMany: async () => [],
+          updateMany: async () => ({ count: 0 }),
+          deleteMany: async (args: { where: { name: { in: string[] } } }) => {
+            const names = args.where.name.in;
+            assert(
+              names.length === 2 &&
+                names.includes('claude_code') &&
+                names.includes('gpt_code') &&
+                !names.includes('lantern_people'),
+              'the actual cleanup predicate must preserve dedicated Lantern and non-compute integrations'
+            );
+            return { count: 0 };
+          },
+        },
+      },
+      syncUserRecord: async (_source: unknown, _target: unknown, userId: string) => {
+        poolUsers.push(userId);
+      },
+      integrationPoolIdentity: (row: Integration) =>
+        JSON.stringify([row.userId, row.name, row.accountId]),
+    };
+    const run = new Function(
+      ...Object.keys(bindings),
+      `let activeRemotePoolIntegrationIds = new Set();\n${executable}\nreturn async options => ({ count: await syncIntegrations(options), pool: [...activeRemotePoolIntegrationIds] });`
+    )(...Object.values(bindings)) as (options: {
+      computeTokensOnly: boolean;
+    }) => Promise<{ count: number; pool: string[] }>;
+    const result = await run({ computeTokensOnly });
+    assert(
+      !writes.includes('lantern_people'),
+      'full seed replicated a rotating Lantern grant into the mocked target'
+    );
+    assert(
+      localRows.get('seed-user:lantern_people:') === dedicated,
+      'a dedicated local Lantern connection must remain untouched'
+    );
+    assert(!poolUsers.includes('foreign-lantern'), 'Lantern-only pool owners must not be hydrated');
+    assert(
+      writes.includes('gpt_code') && writes.includes('claude_code'),
+      'compute credentials must still sync'
+    );
+    assert(
+      writes.includes('agentcard') === !computeTokensOnly,
+      'ordinary integrations retain full/compute mode behavior'
+    );
+    assert(
+      localRows.get('seed-user:gpt_code:')?.id === 'existing-local-gpt',
+      'an existing non-Lantern credential must retain its local primary key'
+    );
+    assert(
+      result.pool.length === 1 && result.pool[0] === 'existing-local-claude',
+      'pool source-to-local ID mapping must exclude user rows without shifting its offset'
+    );
+    assert(
+      result.count === (computeTokensOnly ? 2 : 3),
+      'counts must include only copied integrations'
+    );
+  }
+});
+
+test('credential writer rejects an entire mixed batch before any rotating-grant copy', async () => {
+  const row: Integration = {
+    id: 'synthetic-direct-copy',
+    userId: 'seed-user',
+    name: 'gpt_code',
+    poolingEnabled: false,
+    type: 'API',
+    status: 'CONNECTED',
+    isActive: true,
+    lastSyncAt: null,
+    lastSuccessfulSyncAt: null,
+    lastFailedSyncAt: null,
+    failureReason: null,
+    config: { encryptedCredentials: 'SYNTHETIC_ROTATING_GRANT' },
+    rateLimitedUntil: null,
+    lastUsedAt: null,
+    accountId: '',
+    accountEmail: null,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-01T00:00:00Z'),
+  };
+  let writes = 0;
+  const target: IntegrationModel = {
+    upsert: async () => {
+      writes++;
+      return { id: 'target' };
+    },
+  };
+  let rejected = false;
+  try {
+    await syncIntegrationCredentials(target, [row, { ...row, name: 'lantern_people' }]);
+  } catch (error) {
+    rejected = error instanceof Error && error.message.includes('Lantern');
+  }
+  assert(rejected, 'direct credential sync must reject a batch containing a Lantern grant');
+  assert(
+    writes === 0,
+    'the whole batch must be validated before even an ordinary credential write'
   );
 });
 

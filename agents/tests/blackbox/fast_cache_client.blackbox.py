@@ -19,6 +19,7 @@ These tests drive the real client with a hanging backend and the real
 
 import asyncio
 import json
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -140,7 +141,7 @@ async def test_cancelled_waiter_does_not_poison_shared_get_position():
         except asyncio.CancelledError:
             raise AssertionError(
                 "retry attempt raised CancelledError: the cancelled waiter poisoned the shared get-position future"
-            )
+            ) from None
         assert attempts == 2, f"expected timeout then retry, got {attempts} attempts"
         assert retried == ({"tool_calls": [{"name": "web_search"}]}, "k-pos"), retried
 
@@ -162,16 +163,16 @@ async def test_cancelled_owner_still_resolves_waiters():
         await asyncio.sleep(0)
 
         owner.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await owner
-        except asyncio.CancelledError:
-            pass
         backend.release.set()
 
         try:
             result = await asyncio.wait_for(waiter, timeout=5)
         except asyncio.TimeoutError:
-            raise AssertionError("waiter hung: the cancelled owner never resolved the shared get-position future")
+            raise AssertionError(
+                "waiter hung: the cancelled owner never resolved the shared get-position future"
+            ) from None
         assert result == ({"tool_calls": [{"name": "web_search"}]}, "k-pos"), result
         assert backend.posts.count(("explore_agent", 7)) == 1, (
             f"slot 7 must stay single-flighted, posts={backend.posts}"
@@ -336,11 +337,44 @@ async def test_http_200_skipped_persistence_never_reports_store():
         client, "_backend", return_value=("http://cache.test", "offline")
     ), patch.object(client, "_archive_cache_write", new=AsyncMock()):
         assert await client.cache_set("ack-control", "llm", "ack-control", {}) is False
+def test_candidate_exclusions_shape_cache_request_material():
+    from providers.fast_cache.rose_cache import request_key_material
+    from providers.rose.truncation import model_key
+
+    original = {"pool": "rose-1-flash", "messages": [{"role": "user", "content": "same request"}]}
+    base = request_key_material(original)
+    assert request_key_material({**original, "_skip_models": frozenset()}) == base
+    excluded = request_key_material({**original, "_skip_models": {"qwen/qwen3.8-27b", "qwen-3.8-27b", "gpt-6-sol-gpt"}})
+    assert excluded != base
+    assert excluded["skip_models"] == sorted({model_key("qwen-3.8-27b"), model_key("gpt-6-sol")})
+    assert "skip_models" not in base
+
+
+async def test_excluded_cached_actual_candidate_is_not_replayed():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from providers.fast_cache.rose_cache import lookup_llm_cache
+    import providers.fast_cache.rose_cache as owner
+
+    ctx = SimpleNamespace(llm_lookup_keys=lambda *args: ["key"])
+    for actual, expected in (("candidate-a-gpt", False), ("unknown", False), ("candidate-b-gpt", True)):
+        stored = {"actual_model": actual}
+        with (
+            patch.object(owner.cache_client, "cache_get_first", AsyncMock(return_value=(stored, "key"))),
+            patch.object(owner, "july_gp_resolve_execute", AsyncMock(return_value=(stored, "key"))),
+            patch.object(owner, "july_explore_resolve", AsyncMock(return_value=(stored, "key"))),
+        ):
+            value, _ = await lookup_llm_cache(ctx, "test", {"skip_models": ["candidatea"]})
+        assert (value is not None) is expected
 
 
 async def run_all_tests():
     print("fast-cache-client blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "excluded_cached_candidate_not_replayed", test_excluded_cached_actual_candidate_is_not_replayed
+    )
+    r.record("candidate_exclusions_cache_material", test_candidate_exclusions_shape_cache_request_material)
     await r.record_async(
         "cancelled_waiter_does_not_poison_shared_get_position",
         test_cancelled_waiter_does_not_poison_shared_get_position,

@@ -34,6 +34,7 @@ from providers.fast_cache.normalize import (
 )
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
+from providers.rose.truncation import model_key
 from utils.oai_demo import is_oai_demo_bound_child_goal, is_oai_demo_goal
 
 if TYPE_CHECKING:
@@ -379,7 +380,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             response_schema = response_model.model_json_schema()
         except Exception:
             response_schema = getattr(response_model, "__name__", str(response_model))
-    return {
+    material = {
         "pool": pool_name,
         "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
@@ -404,6 +405,11 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "response_schema": response_schema,
         "env_fingerprint": os.getenv("FAST_MODE_AGENT_ENV_FINGERPRINT", "default"),
     }
+
+    exclusions = sorted({model_key(model) for model in complete_kwargs.get("_skip_models", ()) if model_key(model)})
+    if exclusions:
+        material["skip_models"] = exclusions
+    return material
 
 
 def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
@@ -933,6 +939,12 @@ async def lookup_llm_cache(
                 key_material=key_material,
             )
             stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
+            exclusions = key_material.get("skip_models", []) if isinstance(key_material, dict) else []
+            if stored is not None and exclusions:
+                actual = stored.get("actual_model") if isinstance(stored, dict) else None
+                if not actual or actual == "unknown" or model_key(actual) in exclusions:
+                    logger.warning("fast_cache.candidate_excluded", actual_model=actual, skip_models=exclusions)
+                    return None, None
             return stored, hit_key
         except FastCacheLookupError:
             raise

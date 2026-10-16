@@ -32,6 +32,7 @@ export function fixture() {
       databaseHost: 'qualified.remote.test',
       databaseName: 'production',
     },
+    peopleCredentialBrokerOrigin: 'https://navi-j9a9.onrender.com',
     previousQueue: 'navi-agent-tasks@old-generation',
     hosts: Array.from({ length: 8 }, (_, index) => ({
       id: index.toString(16).padStart(14, '0'),

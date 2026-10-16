@@ -187,14 +187,30 @@ const authCompleted = browserMessage('auth-done', '2026-10-09T20:34:10.619Z', {
 
 describe('live view follows the backend session binding', () => {
   it('projects the latest accepted schema for the same browser task', () => {
-    const firstSchema = { fields: [{ name: 'events', type: 'str', required: true, description: 'Events' }] };
-    const latestSchema = { fields: [{ name: 'auth_blocker', type: 'str', required: true, description: 'Authentication blocker' }] };
+    const firstSchema = {
+      fields: [{ name: 'events', type: 'str', required: true, description: 'Events' }],
+    };
+    const latestSchema = {
+      fields: [
+        {
+          name: 'auth_blocker',
+          type: 'str',
+          required: true,
+          description: 'Authentication blocker',
+        },
+      ],
+    };
     const messages = [
-      { ...sessionInit(REBOUND_STEEL), metadata: { ...sessionInit(REBOUND_STEEL).metadata, output_schema: firstSchema } },
+      {
+        ...sessionInit(REBOUND_STEEL),
+        metadata: { ...sessionInit(REBOUND_STEEL).metadata, output_schema: firstSchema },
+      },
       browserMessage('schema-revision', '2026-10-14T17:33:50Z', { output_schema: latestSchema }),
     ];
     const { result } = renderHook(() => useBrowserStatusBarState(TASK_ID), {
-      wrapper: ({ children }) => <AgentContext.Provider value={agentContext(messages)}>{children}</AgentContext.Provider>,
+      wrapper: ({ children }) => (
+        <AgentContext.Provider value={agentContext(messages)}>{children}</AgentContext.Provider>
+      ),
     });
     expect(result.current.outputSchema).toEqual(latestSchema);
   });

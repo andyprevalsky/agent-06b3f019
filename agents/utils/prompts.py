@@ -637,6 +637,7 @@ EXPLORE_AGENT_SYSTEM_PROMPT = (
     "style tags, like, [1] to reference your sources. End your `result` with a "
     "`Sources:` block mapping each `[N]` tag to its URL or source identifier "
     "(e.g., `[1] https://example.com/article`, `[2] grep:agent_network_user_messages`)."
+    "\n\nInclude any cursors needed for continued exploration, copied exactly from tool results, with the matching query and filters."
 )
 
 

@@ -34,7 +34,11 @@ from typing import Any
 from benchmarks.auth_test_site import (
     AUTH_TEST_SITE_OUTCOME_CHECK,
     AUTH_TEST_SITE_URL_PLACEHOLDER,
+)
+from benchmarks.auth_test_site import (
     declared_scenario as declared_auth_test_site_scenario,
+)
+from benchmarks.auth_test_site import (
     validate_outcome_check as validate_auth_test_site_outcome_check,
 )
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
@@ -43,6 +47,7 @@ CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
 RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
 RUNTIME_STATIC_CHECK_TYPES = {
+    "lantern_people_trace",
     "agent_status",
     "approval_request_count",
     "approval_request_details",
@@ -164,10 +169,7 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
         _require_string_list(env, "live_fixtures", item_id, allow_empty=True)
         unknown = [f for f in live_fixtures if f not in LIVE_FIXTURE_NAMES]
         if unknown:
-            raise ValueError(
-                f"{item_id}: unknown live_fixtures {unknown}; "
-                f"known: {sorted(LIVE_FIXTURE_NAMES)}"
-            )
+            raise ValueError(f"{item_id}: unknown live_fixtures {unknown}; known: {sorted(LIVE_FIXTURE_NAMES)}")
         if mode == "synthetic" and live_fixtures:
             raise ValueError(
                 f"{item_id}: synthetic evals must not declare live_fixtures "
@@ -259,21 +261,16 @@ def _validate_evaluator(evaluator: dict[str, Any], item_id: str, index: int) -> 
                 raise ValueError(f"{item_id}: polar evaluators.rubrics must be a non-empty list")
             for rubric_index, rubric in enumerate(rubrics):
                 if not isinstance(rubric, dict):
-                    raise ValueError(
-                        f"{item_id}: evaluators[{index}].rubrics[{rubric_index}] must be an object"
-                    )
+                    raise ValueError(f"{item_id}: evaluators[{index}].rubrics[{rubric_index}] must be an object")
                 for field in ("id", "requirement", "verification"):
                     value = rubric.get(field)
                     if not isinstance(value, str) or not value.strip():
                         raise ValueError(
-                            f"{item_id}: evaluators[{index}].rubrics[{rubric_index}].{field} "
-                            "must be a non-empty string"
+                            f"{item_id}: evaluators[{index}].rubrics[{rubric_index}].{field} must be a non-empty string"
                         )
     pass_threshold = evaluator.get("pass_threshold")
     if pass_threshold is not None and (
-        not isinstance(pass_threshold, (int, float))
-        or isinstance(pass_threshold, bool)
-        or not 0 <= pass_threshold <= 1
+        not isinstance(pass_threshold, (int, float)) or isinstance(pass_threshold, bool) or not 0 <= pass_threshold <= 1
     ):
         raise ValueError(f"{item_id}: evaluators[{index}].pass_threshold must be between 0 and 1")
     return evaluator
@@ -388,17 +385,18 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     if raw.get("require_attention_order") and not expected_attention_kinds:
         raise ValueError(f"{item_id}: require_attention_order needs expected_attention_kinds")
     if raw.get("complete_subscription_checkout") and (
-        raw.get("simulate_gate_webhook") or not isinstance(raw.get("expected_gate"), dict)
+        raw.get("simulate_gate_webhook")
+        or not isinstance(raw.get("expected_gate"), dict)
         or raw["expected_gate"].get("type") != "subscription"
     ):
-        raise ValueError(f"{item_id}: complete_subscription_checkout needs a subscription gate without a simulated webhook")
+        raise ValueError(
+            f"{item_id}: complete_subscription_checkout needs a subscription gate without a simulated webhook"
+        )
     expected_attention_kind_any_of = raw.get("expected_attention_kind_any_of")
     if expected_attention_kind_any_of is not None:
         _require_string_list(raw, "expected_attention_kind_any_of", item_id)
         if raw.get("expected_approval_count") != 1:
-            raise ValueError(
-                f"{item_id}: expected_attention_kind_any_of requires expected_approval_count=1"
-            )
+            raise ValueError(f"{item_id}: expected_attention_kind_any_of requires expected_approval_count=1")
     attention_contracts = [
         bool(raw.get("expected_attention_kind")),
         bool(expected_attention_kinds),
@@ -453,9 +451,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         if not evaluators:
             raise ValueError(f"{item_id}: enforced declared evaluators must be non-empty")
         unsupported = {
-            evaluator["method"]
-            for evaluator in evaluators
-            if evaluator["method"] not in RUNTIME_EVALUATION_METHODS
+            evaluator["method"] for evaluator in evaluators if evaluator["method"] not in RUNTIME_EVALUATION_METHODS
         }
         if unsupported:
             raise ValueError(

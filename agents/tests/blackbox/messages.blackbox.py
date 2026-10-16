@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -417,9 +419,17 @@ async def test_poll_messages_keeps_explore_chips_when_include_internal():
         "a week with hooks that pair a lab name and a concrete capability claim. "
         "Audience promise is stay-current AI for builders."
     )
-    thinking = {"role": "TOOL", "message": "", "timestamp": "2026-04-05T12:00:30Z",
-                "metadata": {"toolName": "spawn_agent", "title": "Explore agent thinking",
-                             "subAgentId": "explore-wes", "toolStatus": "FINISHED"}}
+    thinking = {
+        "role": "TOOL",
+        "message": "",
+        "timestamp": "2026-04-05T12:00:30Z",
+        "metadata": {
+            "toolName": "spawn_agent",
+            "title": "Explore agent thinking",
+            "subAgentId": "explore-wes",
+            "toolStatus": "FINISHED",
+        },
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/api/agents/" in str(request.url) and request.method == "GET":
@@ -561,9 +571,7 @@ async def test_update_agent_tree_state_stamps_workflow_generation():
         )
 
     patch_call = assert_captured_call(url_contains="/api/agents/agent-tree", method="PATCH")
-    assert patch_call["requestHeaders"]["x-agent-workflow-generation"] == (
-        "agent-tree:replacement:generation-2"
-    )
+    assert patch_call["requestHeaders"]["x-agent-workflow-generation"] == ("agent-tree:replacement:generation-2")
 
 
 async def test_update_agent_tree_state_no_broadcast():
@@ -986,6 +994,88 @@ async def test_broadcast_to_bus_logs_non_success():
     await _flush_broadcasts()
 
 
+def test_broadcast_shutdown_does_not_spawn_an_unowned_drainer():
+    """Runner shutdown must cancel the sender without starting a new batch."""
+    code = """
+import asyncio
+from types import SimpleNamespace
+from helpers import messages
+
+entered = asyncio.Event()
+class Client:
+    async def post(self, *args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+messages._get_broadcast_client = lambda: Client()
+messages.load_config = lambda: SimpleNamespace(supabase=SimpleNamespace(
+    service_role_key="test", anon_key="", url="https://example.invalid"))
+async def main():
+    await messages._queue_realtime_record("test", "TEST", {"id": 1})
+    messages._schedule_broadcast_flush(0)
+    await entered.wait()
+    await messages._queue_realtime_record("test", "TEST", {"id": 2})
+asyncio.run(main())
+assert messages._broadcast_flush_task is None, "shutdown spawned an unowned drainer"
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "different Context" not in result.stderr, result.stderr
+    assert "closing of asynchronous generator" not in result.stderr, result.stderr
+    assert "Task was destroyed" not in result.stderr, result.stderr
+
+
+def test_broadcast_flush_preserves_owner_and_recovers_cancelled_queue():
+    """A live flush retains its sender; a cancelled sender wakes existing flushers."""
+    code = """
+import asyncio
+import sys
+from types import SimpleNamespace
+from helpers import messages
+
+entered = asyncio.Event()
+release = asyncio.Event()
+sent = []
+class Client:
+    async def post(self, *args, **kwargs):
+        ids = [item["payload"]["record"]["id"] for item in kwargs["json"]["messages"]]
+        if ids == [1]:
+            entered.set()
+            await release.wait()
+        sent.extend(ids)
+        return SimpleNamespace(status_code=200)
+messages._get_broadcast_client = lambda: Client()
+messages.load_config = lambda: SimpleNamespace(supabase=SimpleNamespace(
+    service_role_key="test", anon_key="", url="https://example.invalid"))
+async def main():
+    await messages._queue_realtime_record("test", "TEST", {"id": 1})
+    messages._schedule_broadcast_flush(0)
+    await entered.wait()
+    owner = messages._broadcast_flush_task
+    await messages._queue_realtime_record("test", "TEST", {"id": 2})
+    flusher = asyncio.create_task(messages.flush_realtime_broadcasts_for_tests())
+    await asyncio.sleep(0)
+    if sys.argv[1] == "live":
+        assert not owner.cancelling(), "flush cancelled its active sender"
+        assert messages._broadcast_flush_task is owner, "flush replaced its active sender"
+        release.set()
+    else:
+        owner.cancel()
+        try:
+            await owner
+        except asyncio.CancelledError:
+            pass
+    await asyncio.wait_for(flusher, 0.5)
+    assert sent == ([1, 2] if sys.argv[1] == "live" else [2]), sent
+    assert not messages._broadcast_queue
+    assert not messages._broadcast_idle_waiters
+    assert messages._broadcast_flush_task is None
+asyncio.run(main())
+"""
+    for mode in ("live", "cancelled"):
+        result = subprocess.run([sys.executable, "-c", code, mode], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, mode + "\n" + result.stdout + result.stderr
+
+
 
 async def test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start():
     from unittest.mock import AsyncMock, patch
@@ -1057,6 +1147,10 @@ async def test_browser_attention_feedback_is_task_scoped_and_root_input_is_globa
 async def run_all_tests():
     print("messages blackbox tests:")
     r = BlackboxResult()
+    r.record("broadcast_shutdown_owns_drainer", test_broadcast_shutdown_does_not_spawn_an_unowned_drainer)
+    r.record(
+        "broadcast_flush_owner_and_cancelled_queue", test_broadcast_flush_preserves_owner_and_recovers_cancelled_queue
+    )
     await r.record_async("browser_instruction_poll_projects_at_http_boundary", test_browser_instruction_poll_projects_at_http_boundary)
     await r.record_async("browser_attention_feedback_is_task_scoped_and_root_input_is_global", test_browser_attention_feedback_is_task_scoped_and_root_input_is_global)
     await r.record_async("browser_instruction_poll_retains_only_user_sources_and_exact_task_start", test_browser_instruction_poll_retains_only_user_sources_and_exact_task_start)

@@ -17,6 +17,7 @@ import claudeRoutes from './routes.claude';
 import computeRoutes from './routes.compute';
 import plaidRoutes from './routes.plaid';
 import documentRoutes from './routes.documents';
+import lanternRoutes from './routes.lantern';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.use(claudeRoutes);
 router.use(computeRoutes);
 router.use(plaidRoutes);
 router.use(documentRoutes);
+router.use(lanternRoutes);
 
 // ---------------------------------------------------------------------------
 // CRUD routes
@@ -75,6 +77,8 @@ router.post(
       const integration = await service.createIntegration(userId, name, type, config);
       return res.json({ integration });
     } catch (error: unknown) {
+      if (error instanceof service.LanternCredentialError)
+        return res.status(error.status).json({ error: error.code });
       if (error instanceof service.InvalidIntegrationTypeError) {
         return res.status(400).json({ error: error.message });
       }
@@ -100,6 +104,8 @@ router.patch(
       });
       return res.json({ integration: updated });
     } catch (error: unknown) {
+      if (error instanceof service.LanternCredentialError)
+        return res.status(error.status).json({ error: error.code });
       if (error instanceof service.IntegrationNotFoundError) {
         return res.status(404).json({ error: error.message });
       }
@@ -120,6 +126,8 @@ router.delete(
       await service.deleteIntegration(userId, name);
       return res.json({ message: 'Integration deleted successfully' });
     } catch (error: unknown) {
+      if (error instanceof service.LanternCredentialError)
+        return res.status(error.status).json({ error: error.code });
       if (error instanceof service.IntegrationNotFoundError) {
         return res.status(404).json({ error: error.message });
       }

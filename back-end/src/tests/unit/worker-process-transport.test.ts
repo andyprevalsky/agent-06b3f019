@@ -11,6 +11,7 @@ const machineId = '8362dec7769d78';
 const envelope = {
   action: process.argv.includes('--compact') ? 'status' : 'ensure',
   app,
+  peopleCredentialBrokerOrigin: 'https://navi-j9a9.onrender.com',
   machineId,
   machineVersion: 'version-1',
   bootId: 'boot-1',
