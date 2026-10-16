@@ -1385,9 +1385,7 @@ async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
             else:
                 await worker._scale_fleet(4 if phase == "start" else 0, http, stopped)
         expected = ["get"] * 5 + ["post"] if phase == "stop" else (["get", "post"] if phase == "start" else ["get"])
-        assert [method for method, _ in calls] == expected, (
-            f"{phase}: another fleet request began after shutdown"
-        )
+        assert [method for method, _ in calls] == expected, f"{phase}: another fleet request began after shutdown"
 
 
 async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activities():
@@ -1438,10 +1436,979 @@ async def test_autoscaler_scale_down_never_stops_machines_with_in_flight_activit
     assert stopped == ["idle"], f"scale-down stopped {stopped}; only the idle peer may be stopped"
 
 
+async def test_autoscaler_retained_generation_cannot_start_by_matching_rollback_hash():
+    """Only actual active pool custody may participate after a surface returns."""
+    import copy
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    def row(mid, state="stopped"):
+        return {
+            "id": mid,
+            "state": state,
+            "private_ip": "fdaa::1",
+            "config": {
+                "env": {
+                    "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                    "TEMPORAL_WORKER_BUILD_ID": "build",
+                    "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "attempt",
+                },
+                "metadata": {},
+            },
+        }
+
+    def marker(mid):
+        return dict(version=1, phase="active", app="app", id=mid, hash="A", build="build", token="attempt")
+
+    for phase in ("start", "stop"):
+        machines = [row("leader", "started")]
+        for mode in (
+            "idle",
+            "malformed",
+            "foreign",
+            "stale",
+            "protected",
+            "valid",
+            "rolling",
+            "wrong-intent",
+            "legacy",
+        ):
+            value = row(mode, "stopped" if phase == "start" else "started")
+            pool = marker(mode)
+            if mode == "idle":
+                pool["phase"] = "idle"
+            if mode == "foreign":
+                pool["app"] = "foreign"
+            if mode == "stale":
+                pool["token"] = "earlier"
+            if mode in ("rolling", "wrong-intent"):
+                pool["token"] = "earlier"
+                pool["rolling"] = {"build": "build", "token": "attempt" if mode == "rolling" else "other"}
+            if mode == "protected":
+                value["config"]["metadata"]["rose_worker_reuse_protected"] = "true"
+            if mode != "legacy":
+                value["config"]["metadata"]["rose_cooperative_worker_pool"] = (
+                    "[]" if mode == "malformed" else json.dumps(pool)
+                )
+            machines.append(value)
+        original = copy.deepcopy(machines)
+        calls = []
+
+        def handler(request):
+            if request.url.host == "api.machines.dev":
+                if request.method == "GET":
+                    return httpx.Response(200, json=machines)
+                calls.append(request.url.path)
+                return httpx.Response(200, json={})
+            return httpx.Response(200, text="activity_slots_used 0\n")
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLY_APP_NAME": "app",
+                "FLY_API_TOKEN": "fixture",
+                "FLY_MACHINE_ID": "leader",
+                "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                "TEMPORAL_WORKER_BUILD_ID": "build",
+                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "attempt",
+            },
+        ):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                await worker._scale_fleet(20 if phase == "start" else 1, http)
+        assert calls == [f"/v1/apps/app/machines/{mid}/{phase}" for mid in ("valid", "rolling", "legacy")], calls
+        assert machines == original
+
+
+async def test_autoscaler_stopped_workers_require_current_build_and_deployment_attempt():
+    """A matching replay hash and self-consistent old marker cannot revive an old image."""
+    import copy
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    rows = []
+    for index in range(8):
+        rows.append(
+            {
+                "id": f"live-{index}",
+                "state": "started",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "current-build",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+                    }
+                },
+            }
+        )
+    for mode in (
+        "old",
+        "old-legacy",
+        "old-build",
+        "old-attempt",
+        "current",
+        "current-legacy",
+        "rolling",
+        "idle",
+        "protected",
+        "foreign",
+        "foreign-generation",
+    ):
+        build = "old-build" if mode in ("old", "old-legacy", "old-build") else "current-build"
+        token = "old-attempt" if mode in ("old", "old-legacy", "old-attempt") else "current-attempt"
+        marker = {
+            "version": 1,
+            "phase": "active",
+            "app": "app",
+            "id": mode,
+            "hash": "A",
+            "build": build,
+            "token": token,
+        }
+        if mode == "rolling":
+            marker.update(build="old-build", token="old-attempt", rolling={"build": build, "token": token})
+        if mode == "idle":
+            marker["phase"] = "idle"
+        if mode == "foreign":
+            marker["app"] = "foreign"
+        if mode == "foreign-generation":
+            marker["hash"] = "B"
+        metadata = {} if mode.endswith("legacy") else {"rose_cooperative_worker_pool": json.dumps(marker)}
+        if mode == "protected":
+            metadata["rose_worker_reuse_protected"] = "true"
+        rows.append(
+            {
+                "id": mode,
+                "state": "stopped",
+                "config": {
+                    "image": f"registry/app:{build}",
+                    "metadata": metadata,
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "B" if mode == "foreign-generation" else "A",
+                        "TEMPORAL_WORKER_BUILD_ID": build,
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": token,
+                    },
+                },
+            }
+        )
+    original = copy.deepcopy(rows)
+    posts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=rows)
+        posts.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    with patch.dict(
+        os.environ,
+        {
+            "FLY_APP_NAME": "app",
+            "FLY_API_TOKEN": "fixture",
+            "FLY_MACHINE_ID": "live-0",
+            "TEMPORAL_WORKER_SURFACE_HASH": "A",
+            "TEMPORAL_WORKER_BUILD_ID": "current-build",
+            "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await worker._scale_fleet(20, http)
+    assert posts == [f"/v1/apps/app/machines/{mid}/start" for mid in ("current", "current-legacy", "rolling")], posts
+    assert rows == original, "start eligibility must not update/relabel old worker data"
+
+
+async def test_autoscaler_missing_current_provenance_does_not_start_surface_workers():
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    for build, token in (("", "current-attempt"), ("current-build", ""), ("", "")):
+        posts = []
+        rows = [
+            {
+                "id": "stopped",
+                "state": "stopped",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "current-build",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+                    }
+                },
+            }
+        ]
+
+        def handler(request):
+            if request.method == "GET":
+                return httpx.Response(200, json=rows)
+            posts.append(request.url.path)
+            return httpx.Response(200, json={})
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLY_APP_NAME": "app",
+                "FLY_API_TOKEN": "fixture",
+                "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                "TEMPORAL_WORKER_BUILD_ID": build,
+                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": token,
+            },
+        ):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                await worker._scale_fleet(8, http)
+        assert not posts, (build, token, posts)
+
+
+async def test_autoscaler_build_start_filter_preserves_busy_live_worker_scale_down():
+    from unittest.mock import patch
+    import httpx
+    import worker
+
+    rows = []
+    for index, mid in enumerate(("leader", "old-busy", "old-idle", "current-idle")):
+        old = mid.startswith("old-")
+        rows.append(
+            {
+                "id": mid,
+                "state": "started",
+                "private_ip": f"fdaa::{index + 1}",
+                "config": {
+                    "env": {
+                        "TEMPORAL_WORKER_SURFACE_HASH": "A",
+                        "TEMPORAL_WORKER_BUILD_ID": "old" if old else "current",
+                        "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "old-attempt" if old else "current-attempt",
+                    }
+                },
+            }
+        )
+    posts = []
+
+    def handler(request):
+        if request.url.host == "api.machines.dev":
+            if request.method == "GET":
+                return httpx.Response(200, json=rows)
+            posts.append(request.url.path)
+            return httpx.Response(200, json={})
+        return httpx.Response(200, text=f"activity_slots_used {1 if request.url.host == 'fdaa::2' else 0}\n")
+
+    with patch.dict(
+        os.environ,
+        {
+            "FLY_APP_NAME": "app",
+            "FLY_API_TOKEN": "fixture",
+            "FLY_MACHINE_ID": "leader",
+            "TEMPORAL_WORKER_SURFACE_HASH": "A",
+            "TEMPORAL_WORKER_BUILD_ID": "current",
+            "TEMPORAL_WORKER_DEPLOYMENT_TOKEN": "current-attempt",
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            await worker._scale_fleet(1, http)
+    assert posts == [f"/v1/apps/app/machines/{mid}/stop" for mid in ("old-idle", "current-idle")], posts
+
+
+def _production_process_module():
+    spec = importlib.util.spec_from_file_location(
+        "production_worker_process", WORKER_PATH.parent.parent / "scripts/production_worker_process.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _production_process_request():
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    import io
+    import tarfile
+
+    files = {"agents/worker.py": b"print('fixture only')\n", "agents/requirements.txt": b"fixture==1\n"}
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as output:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o644
+            output.addfile(info, io.BytesIO(data))
+    data = gzip.compress(archive.getvalue())
+    request = {
+        "version": 1,
+        "action": "ensure",
+        "app": "fixture-app",
+        "machineId": "0123456789abcd",
+        "machineVersion": "version-1",
+        "bootId": "fixture-boot",
+        "sourceCommit": "a" * 40,
+        "buildId": "a" * 40,
+        "surfaceHash": "b" * 12,
+        "deploymentToken": "fixture-attempt",
+        "namespace": "fixture.namespace",
+        "baseTaskQueue": "navi-agent-tasks",
+        "validationTaskQueue": "fixture-validation",
+        "bundleSHA256": hashlib.sha256(data).hexdigest(),
+        "bundleBase64": base64.b64encode(data).decode(),
+        "healthPort": 0,
+        "sdkMetricsPort": 0,
+        "limits": {
+            "maxAddressBytes": 1073741824,
+            "minFreeAfterMaxAddressBytes": 268435456,
+            "aggregateMemoryBytes": 1073741824,
+            "memoryController": "v1-memory",
+        },
+        "manifest": {
+            "version": 1,
+            "sourceCommit": "a" * 40,
+            "requirementsSHA256": hashlib.sha256(files["agents/requirements.txt"]).hexdigest(),
+            "installedDistributionsSHA256": "d" * 64,
+            "pythonSHA256": "e" * 64,
+            "files": [
+                {"path": name, "sha256": hashlib.sha256(body).hexdigest(), "size": len(body), "mode": 0o644}
+                for name, body in files.items()
+            ],
+        },
+    }
+    key = "fixture-key-do-not-use"
+    request["signature"] = hmac.new(
+        key.encode(), json.dumps(request, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
+    ).hexdigest()
+    return request, key
+
+
+def test_production_process_authenticates_complete_bundle_before_effects():
+    import copy
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, key = _production_process_request()
+    assert set(module.verify_bundle(request)) == {"agents/worker.py", "agents/requirements.txt"}
+    module.authenticate(request, key)
+    for field, value in (("machineId", "foreign"), ("bootId", "other-boot"), ("buildId", "f" * 40)):
+        bad = copy.deepcopy(request)
+        bad[field] = value
+        try:
+            module.authenticate(bad, key)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsigned {field} mutation accepted")
+    bad = copy.deepcopy(request)
+    bad["manifest"]["files"][0]["sha256"] = "0" * 64
+    try:
+        module.verify_bundle(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("tampered complete source accepted")
+    with (
+        patch.object(module, "authenticate", side_effect=ValueError("invalid signature")),
+        patch.object(module, "prepare_slot") as stage,
+    ):
+        try:
+            module.dispatch(request)
+        except ValueError:
+            pass
+        stage.assert_not_called()
+
+
+def test_production_process_environment_preserves_old_owner_and_activation():
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    original = {
+        "BACKEND_API_KEY": "fixture",
+        "TEMPORAL_TASK_QUEUE": "old",
+        "TEMPORAL_NAMESPACE": "fixture.namespace",
+        "PYTHONPATH": "/old/app",
+        "VIRTUAL_ENV": "/old/venv",
+        "HOME": "/old/home",
+        "FLY_MACHINE_ID": request["machineId"],
+    }
+    before = dict(original)
+    environment = module.worker_environment(request, Path("/owned/runtime"), original)
+    assert original == before
+    assert environment["AUTOSCALER_ACTUATE"] == "0"
+    assert environment["TEMPORAL_WORKER_REQUIRE_ACTIVATION"] == "1"
+    assert environment["TEMPORAL_TASK_QUEUE"] == "navi-agent-tasks"
+    assert environment["TEMPORAL_WORKER_SURFACE_HASH"] == "b" * 12
+    assert environment["TEMPORAL_WORKER_BUILD_ID"] == "a" * 40
+    assert environment["TEMPORAL_WORKER_VALIDATION_TASK_QUEUE"] == "fixture-validation"
+    assert environment["HEALTH_CHECK_PORT"] == environment["SDK_METRICS_PORT"] == "0"
+    assert "PYTHONPATH" not in environment and "VIRTUAL_ENV" not in environment
+    for key in ("HOME", "TMPDIR", "BROWSER_AGENT_RECORDINGS_DIR", "TRACE_ARCHIVE_LOCAL_ROOT", "XDG_CACHE_HOME"):
+        assert environment[key].startswith("/owned/runtime/"), (key, environment[key])
+
+
+def test_production_process_unknown_memory_or_native_identity_starts_nothing():
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, key = _production_process_request()
+    native = {
+        "FLY_APP_NAME": request["app"],
+        "FLY_MACHINE_ID": request["machineId"],
+        "FLY_MACHINE_VERSION": request["machineVersion"],
+        "TEMPORAL_NAMESPACE": request["namespace"],
+    }
+    with patch.dict(os.environ, native, clear=True), patch.object(module, "boot_id", return_value="other-boot"):
+        try:
+            module.verify_native(request)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("foreign boot accepted")
+    with (
+        patch.object(module, "available_memory", return_value=128 * 1024 * 1024),
+        patch.object(module.subprocess, "Popen") as spawn,
+    ):
+        try:
+            module.require_memory(request)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("insufficient reserve accepted")
+        spawn.assert_not_called()
+
+
+def test_production_process_rejects_unlisted_linked_duplicate_or_missing_sources():
+    import base64
+    import copy
+    import gzip
+    import hashlib
+    import io
+    import tarfile
+
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    original = base64.b64decode(request["bundleBase64"])
+    for kind in ("extra", "symlink", "duplicate", "missing", "traversal"):
+        output = io.BytesIO()
+        with (
+            tarfile.open(fileobj=io.BytesIO(original), mode="r:gz") as source,
+            tarfile.open(fileobj=output, mode="w") as archive,
+        ):
+            for index, item in enumerate(source):
+                if kind == "missing" and index == 0:
+                    continue
+                data = source.extractfile(item).read()
+                archive.addfile(item, io.BytesIO(data))
+                if kind == "duplicate" and index == 0:
+                    archive.addfile(item, io.BytesIO(data))
+            if kind in ("extra", "symlink", "traversal"):
+                item = tarfile.TarInfo("agents/extra.py" if kind != "traversal" else "agents/../../old.py")
+                if kind == "symlink":
+                    item.type, item.linkname = tarfile.SYMTYPE, "/app/worker.py"
+                archive.addfile(item, io.BytesIO())
+        archive_bytes = gzip.compress(output.getvalue())
+        bad = copy.deepcopy(request)
+        bad["bundleBase64"] = base64.b64encode(archive_bytes).decode()
+        bad["bundleSHA256"] = hashlib.sha256(archive_bytes).hexdigest()
+        try:
+            module.verify_bundle(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{kind} source accepted")
+
+
+def test_production_process_memory_membership_and_uid_precede_exec():
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    events = []
+    group = Path("/sys/fs/cgroup/memory/rose-worker-fixture")
+    contents = {str(group / "cgroup.procs"): "", "/proc/self/oom_score_adj": "0"}
+
+    def write(path, data):
+        contents[str(path)] = data
+        events.append(("write", str(path), data))
+
+    class Libc:
+        def prctl(self, *args):
+            events.append(("prctl", args))
+            return 0
+
+    with (
+        patch.object(module.Path, "read_text", lambda p: contents[str(p)]),
+        patch.object(module.Path, "write_text", write),
+        patch.object(module.os, "getpid", return_value=777),
+        patch.object(module.os, "setgroups", side_effect=lambda value: events.append(("groups", value))),
+        patch.object(module.os, "setgid", side_effect=lambda value: events.append(("gid", value))),
+        patch.object(module.os, "setuid", side_effect=lambda value: events.append(("uid", value))),
+        patch.object(module.os, "getuid", return_value=1000),
+        patch.object(module.os, "geteuid", return_value=1000),
+        patch.object(module.os, "umask"),
+        patch.object(module.resource, "setrlimit", side_effect=lambda *args: events.append(("limit", args))),
+        patch.object(module.ctypes, "CDLL", return_value=Libc()),
+    ):
+        module.child_boundary(group, request)
+    assert events[0] == ("write", str(group / "cgroup.procs"), "777"), events
+    assert [event[0] for event in events] == ["write", "limit", "write", "groups", "gid", "uid", "prctl"], events
+    assert events[1][1][1] == (1073741824, 1073741824)
+    assert events[2] == ("write", "/proc/self/oom_score_adj", "1000")
+    assert ("uid", 1000) in events and ("gid", 1000) in events
+    with (
+        patch.object(module.Path, "read_text", return_value="an existing process"),
+        patch.object(module.os, "setuid") as drop,
+    ):
+        try:
+            module.child_boundary(group, request)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("occupied memory group accepted")
+        drop.assert_not_called()
+
+
+def test_production_process_memory_controller_missing_starts_nothing():
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    with (
+        patch.object(module.Path, "read_text", return_value="no memory controller"),
+        patch.object(module.Path, "mkdir") as create,
+        patch.object(module.subprocess, "Popen") as spawn,
+    ):
+        try:
+            module.memory_group(request, "fixture")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing aggregate controller accepted")
+        create.assert_not_called()
+        spawn.assert_not_called()
+
+
+def test_production_process_status_requires_exact_owned_live_slot():
+    import fcntl
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, key = _production_process_request()
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        patch.object(module, "ROOT", Path(directory)),
+        patch.object(module, "secure"),
+    ):
+        missing = module.status(request)
+        assert missing["phase"] == "MISSING"
+        held = os.open(Path(directory) / "slot.lock", os.O_RDWR)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert module.status(request)["phase"] == "UNKNOWN", "in-flight launch certified absent"
+            child = {"pid": 111, "birthTicks": "20", "bootId": request["bootId"]}
+            state = module.response(
+                request,
+                phase="STANDBY",
+                supervisor=child,
+                child=child,
+                workerLog="worker-111-0.log",
+                observedAt=time.time(),
+            )
+            module.atomic_json(Path(directory) / "state.json", state)
+            with patch.object(module, "same_process", return_value=False):
+                assert module.status(request)["phase"] == "UNKNOWN", "reused/dead PID certified live"
+            with (
+                patch.object(module, "same_process", return_value=True),
+                patch.object(
+                    module,
+                    "observe_health",
+                    return_value={"phase": "RUNNING", "healthPort": 1234, "sdkMetricsPort": 1235},
+                ),
+            ):
+                assert module.status(request)["phase"] == "RUNNING"
+            foreign = dict(request, deploymentToken="foreign-attempt")
+            try:
+                module.status(foreign)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("foreign attempt adopted")
+        finally:
+            os.close(held)
+        assert module.status(request)["phase"] == "UNKNOWN", "lost supervisor lock certified absence"
+    # Compact signed status has precisely the same semantic intent.
+    import hashlib
+    import hmac
+
+    compact = {k: v for k, v in request.items() if k not in ("signature", "bundleBase64")}
+    compact["action"] = "status"
+    compact["signature"] = hmac.new(key.encode(), module.canonical(compact), hashlib.sha256).hexdigest()
+    module.authenticate(compact, key)
+    assert module.intent_digest(compact) == module.intent_digest(request)
+
+
+def test_production_process_detaches_restarts_and_does_not_touch_old_worker():
+    """Real local fork/Popen/socket lifecycle; only privileged host effects mocked."""
+    import base64
+    import gzip
+    import hashlib
+    import hmac
+    import io
+    import tarfile
+
+    module = _production_process_module()
+    request, key = _production_process_request()
+    worker = r"""
+import http.server,json,os,pathlib,resource,socket,threading,time
+home=pathlib.Path(os.environ['HOME'])
+countfile=home/'launches'
+count=int(countfile.read_text())+1 if countfile.exists() else 1
+countfile.write_text(str(count))
+with (home/'observations').open('a') as output:
+    output.write(json.dumps({'pid':os.getpid(),'cwd':os.getcwd(),'limit':resource.getrlimit(resource.RLIMIT_AS),'activation':os.environ['TEMPORAL_WORKER_REQUIRE_ACTIVATION'],'autoscale':os.environ['AUTOSCALER_ACTUATE'],'count':count,'oom':pathlib.Path('/proc/self/oom_score_adj').read_text().strip()})+'\n')
+if count==1:
+    raise SystemExit(17)
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body=json.dumps({'healthy':True,'phase':'standby','build_id':os.environ['TEMPORAL_WORKER_BUILD_ID']}).encode()
+        self.send_response(200);self.end_headers();self.wfile.write(body)
+    def log_message(self,*args): pass
+server=http.server.HTTPServer(('127.0.0.1',0),Handler)
+sdk=socket.socket();sdk.bind(('127.0.0.1',0));sdk.listen()
+thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+print(json.dumps({'event':'Worker observability endpoints bound','health_check_port':server.server_port,'sdk_metrics_port':sdk.getsockname()[1]}),flush=True)
+time.sleep(0.7)
+server.shutdown();thread.join();server.server_close();sdk.close()
+""".encode()
+    files = {"agents/worker.py": worker, "agents/requirements.txt": b"fixture==1\n"}
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name, body in files.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(body), 0o644
+            archive.addfile(info, io.BytesIO(body))
+    compressed = gzip.compress(output.getvalue())
+    request["bundleBase64"] = base64.b64encode(compressed).decode()
+    request["bundleSHA256"] = hashlib.sha256(compressed).hexdigest()
+    request["manifest"]["files"] = [
+        {"path": name, "sha256": hashlib.sha256(body).hexdigest(), "size": len(body), "mode": 0o644}
+        for name, body in files.items()
+    ]
+    request.pop("signature")
+    request["signature"] = hmac.new(key.encode(), module.canonical(request), hashlib.sha256).hexdigest()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        old_source = root / "old-source"
+        old_source.write_text("preserve original source")
+        old = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # This managed test host assigns OOM scores asynchronously. Establish
+        # its actual settled parent/old-process baseline; never write either.
+        oom_deadline = time.monotonic() + 2
+        previous_oom = None
+        stable_samples = 0
+        while time.monotonic() < oom_deadline:
+            current = (Path("/proc/self/oom_score_adj").read_text(), Path(f"/proc/{old.pid}/oom_score_adj").read_text())
+            stable_samples = stable_samples + 1 if current == previous_oom else 0
+            previous_oom = current
+            if stable_samples >= 5 and current[0] == current[1]:
+                break
+            time.sleep(0.05)
+        parent_oom, old_oom = previous_oom
+        launcher = root / "launch.py"
+        launcher.write_text(r"""
+import importlib.util,json,os,pathlib,resource,sys
+path,root,requestfile,key=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('production_worker_process',path)
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.ROOT=pathlib.Path(root)/'slot'
+request=json.loads(pathlib.Path(requestfile).read_text())
+os.environ.update(BACKEND_API_KEY=key,FLY_APP_NAME=request['app'],FLY_MACHINE_ID=request['machineId'],FLY_MACHINE_VERSION=request['machineVersion'],TEMPORAL_NAMESPACE=request['namespace'])
+m.boot_id=lambda:request['bootId']
+m.os.geteuid=lambda:0
+m.secure=lambda *args,**kwargs:None # UID ownership is an external privilege boundary.
+m.os.chown=lambda *args:None
+m.verify_dependencies=lambda request:None # No deployed runtime attestation inferred.
+def memory_group(request,name):
+    group=pathlib.Path(root)/'mock-kernel-group';group.mkdir()
+    (group/'cgroup.procs').write_text('')
+    return group
+m.memory_group=memory_group
+def boundary(group,request):
+    (group/'cgroup.procs').write_text(str(os.getpid()))
+    resource.setrlimit(resource.RLIMIT_AS,(request['limits']['maxAddressBytes'],)*2)
+    pathlib.Path('/proc/self/oom_score_adj').write_text('1000')
+m.child_boundary=boundary
+# The devbox externally rewrites live OOM scores; native kernel proof is separate.
+m.child_oom_score=lambda pid:1000
+observe=m.observe_health
+def diagnostic(*args,**kwargs):
+    try: return observe(*args,**kwargs)
+    except Exception as error:
+        with (pathlib.Path(root)/'health-errors').open('a') as output: output.write(repr(error)+' score='+str(m.child_oom_score(args[0]['pid']))+'\n')
+        raise
+m.observe_health=diagnostic
+real=m.subprocess.Popen
+def launch(*args,**kwargs):
+    child=real(*args,**kwargs)
+    poll=child.poll
+    def observed():
+        code=poll()
+        if code is not None:
+            (pathlib.Path(root)/'mock-kernel-group'/'cgroup.procs').write_text('')
+        return code
+    child.poll=observed
+    return child
+m.subprocess.Popen=launch
+print(json.dumps(m.dispatch(request)),flush=True)
+""")
+        request_file = root / "request.json"
+        request_file.write_text(json.dumps(request))
+        argv = [
+            sys.executable,
+            str(launcher),
+            str(WORKER_PATH.parent.parent / "scripts/production_worker_process.py"),
+            str(root),
+            str(request_file),
+            key,
+        ]
+        daemon = None
+        try:
+            started = time.monotonic()
+            first = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+            assert first.returncode == 0, first.stderr
+            assert time.monotonic() - started < 4, "SSH parent/stdout remained attached to worker"
+            receipt = json.loads(first.stdout)
+            daemon = receipt["supervisor"]
+            assert os.getsid(daemon["pid"]) == daemon["pid"], "supervisor retained SSH session ownership"
+            repeated_live = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+            assert repeated_live.returncode == 0, repeated_live.stderr
+            assert json.loads(repeated_live.stdout)["supervisorPid"] == daemon["pid"], (
+                "lost-ACK ensure spawned another supervisor"
+            )
+            assert module.same_process({**daemon, "bootId": module.boot_id()}), (
+                "detached supervisor exited with launcher"
+            )
+            deadline = time.monotonic() + 16
+            seen_standby = False
+            while time.monotonic() < deadline:
+                state = json.loads((root / "slot" / "state.json").read_text())
+                seen_standby |= state.get("phase") == "STANDBY"
+                if state.get("phase") == "BLOCKED":
+                    break
+                assert old.poll() is None, "pre-existing worker was signaled"
+                time.sleep(0.05)
+            else:
+                raise AssertionError("bounded local supervisor did not finish")
+            assert seen_standby, (
+                state,
+                (root / "health-errors").read_text() if (root / "health-errors").exists() else "no errors",
+                (root / "slot" / module.intent_digest(request) / "runtime/home/observations").read_text(),
+                parent_oom,
+                Path("/proc/self/oom_score_adj").read_text(),
+            )
+            assert state["restarts"] == 2, state
+            runtime = root / "slot" / module.intent_digest(request) / "runtime" / "home"
+            observations = [json.loads(line) for line in (runtime / "observations").read_text().splitlines()]
+            assert len(observations) == 3 and len({item["pid"] for item in observations}) == 3, observations
+            assert all(item["limit"] == [1073741824, 1073741824] for item in observations)
+            assert all(item["oom"] == "1000" for item in observations)
+            assert all(item["activation"] == "1" and item["autoscale"] == "0" for item in observations)
+            assert all(item["cwd"].endswith("/source/agents") for item in observations)
+            assert old_source.read_text() == "preserve original source" and old.poll() is None
+            assert Path("/proc/self/oom_score_adj").read_text() == parent_oom, (
+                parent_oom,
+                Path("/proc/self/oom_score_adj").read_text(),
+            )
+            assert Path(f"/proc/{old.pid}/oom_score_adj").read_text() == old_oom, (
+                old_oom,
+                Path(f"/proc/{old.pid}/oom_score_adj").read_text(),
+            )
+            # After an unreconciled same-boot exit, never spawn by treating it absent.
+            repeated = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+            assert repeated.returncode == 0, repeated.stderr
+            assert json.loads(repeated.stdout)["phase"] == "UNKNOWN"
+            assert len((runtime / "observations").read_text().splitlines()) == 3
+        finally:
+            old.terminate()  # Exact retained fixture process only.
+            old.wait(timeout=5)
+            if daemon is not None:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and module.same_process({**daemon, "bootId": module.boot_id()}):
+                    time.sleep(0.05)
+                assert not module.same_process({**daemon, "bootId": module.boot_id()}), "fixture daemon still live"
+
+
+def test_production_process_memory_limit_readback_and_swap_deny():
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    group = Path("/sys/fs/cgroup/memory/rose-worker-fixture")
+    for mode in ("valid", "readback", "readonly", "swap", "occupied"):
+        writes = []
+        contents = {
+            "/proc/self/mountinfo": "42 20 0:31 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory",
+            "/proc/meminfo": "SwapTotal: 1 kB\n",
+            str(group / "cgroup.procs"): "123" if mode == "occupied" else "",
+            str(group / "memory.use_hierarchy"): "0",
+            str(group / "memory.limit_in_bytes"): "0",
+            str(group / "memory.memsw.limit_in_bytes"): "0",
+        }
+
+        def write(path, value):
+            writes.append((str(path), value))
+            assert path.parent == group, "controller wrote outside its exclusive leaf"
+            if mode == "readonly":
+                raise PermissionError("fixture controller readonly")
+            if not (mode == "readback" and path.name == "memory.limit_in_bytes"):
+                contents[str(path)] = value
+
+        with (
+            patch.object(module.Path, "read_text", lambda p: contents[str(p)]),
+            patch.object(module.Path, "write_text", write),
+            patch.object(module.Path, "mkdir"),
+            patch.object(module.Path, "exists", return_value=mode != "swap"),
+            patch.object(module, "secure"),
+        ):
+            try:
+                result = module.memory_group(request, "fixture")
+            except (ValueError, PermissionError):
+                assert mode != "valid", mode
+            else:
+                assert mode == "valid", f"{mode} memory boundary accepted"
+                assert result == group
+                assert contents[str(group / "memory.limit_in_bytes")] == "1073741824"
+                assert contents[str(group / "memory.memsw.limit_in_bytes")] == "1073741824"
+        if mode == "occupied":
+            assert not writes, "occupied controller changed"
+
+
+def test_production_process_health_requires_child_socket_and_expected_build():
+    from unittest.mock import patch
+
+    module = _production_process_module()
+    request, _ = _production_process_request()
+    child = {"pid": 123, "birthTicks": "1", "bootId": "fixture-boot"}
+    with tempfile.TemporaryDirectory() as directory:
+        log = Path(directory) / "worker.log"
+        log.write_text(
+            json.dumps(
+                {"event": "Worker observability endpoints bound", "health_check_port": 12345, "sdk_metrics_port": 12346}
+            )
+            + "\n[]\n"
+        )
+        with (
+            patch.object(module, "same_process", return_value=True),
+            patch.object(module, "owns_socket", return_value=False),
+            patch.object(module.http.client, "HTTPConnection") as connection,
+        ):
+            try:
+                module.observe_health(child, request, log)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("foreign process health accepted")
+            connection.assert_not_called()
+        with (
+            patch.object(module, "same_process", return_value=True),
+            patch.object(module, "owns_socket", return_value=True),
+            patch.object(module, "child_oom_score", return_value=1000),
+            patch.object(module.http.client, "HTTPConnection") as connection,
+        ):
+            reply = connection.return_value.getresponse.return_value
+            reply.status = 200
+            reply.read.return_value = json.dumps(
+                {"healthy": True, "phase": "standby", "build_id": request["buildId"]}
+            ).encode()
+            state = module.observe_health(child, request, log)
+            assert state["phase"] == "STANDBY" and state["health"]["build_id"] == request["buildId"]
+            with patch.object(module, "child_oom_score", return_value=500):
+                try:
+                    module.observe_health(child, request, log)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("altered child OOM priority accepted")
+            # Long logs/rotation must not erase an already bound endpoint.
+            log.write_text("x" * 200000)
+            assert module.observe_health(child, request, log, state)["phase"] == "STANDBY"
+            reply.read.return_value = json.dumps({"healthy": True, "phase": "standby", "build_id": "foreign"}).encode()
+            try:
+                module.observe_health(child, request, log, state)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("wrong-build health accepted")
+
+
+def test_production_process_bounds_owned_log_after_rotation():
+    module = _production_process_module()
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_blocking(read_fd, False)
+        os.write(write_fd, b"new owned log bytes")
+        with os.fdopen(read_fd, "rb", closefd=False) as stream, tempfile.TemporaryFile("w+b", buffering=0) as output:
+            output.truncate(32 * 1024 * 1024)
+            output.seek(0, os.SEEK_END)
+            module.drain_output(stream, output)
+            assert os.fstat(output.fileno()).st_size <= 32 * 1024 * 1024, "owned log grew past cap after rotation"
+            output.seek(0)
+            assert output.read() == b"new owned log bytes"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
 
 async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
+    r.record("production_process_owned_log_bounded_rotation", test_production_process_bounds_owned_log_after_rotation)
+    r.record(
+        "production_process_memory_readback_swap_denied", test_production_process_memory_limit_readback_and_swap_deny
+    )
+    r.record(
+        "production_process_exact_child_health", test_production_process_health_requires_child_socket_and_expected_build
+    )
+    r.record(
+        "production_process_detached_restart_old_worker_preserved",
+        test_production_process_detaches_restarts_and_does_not_touch_old_worker,
+    )
+    r.record(
+        "production_process_archive_rejects_unlisted_links_duplicates",
+        test_production_process_rejects_unlisted_linked_duplicate_or_missing_sources,
+    )
+    r.record("production_process_group_uid_before_exec", test_production_process_memory_membership_and_uid_precede_exec)
+    r.record(
+        "production_process_missing_controller_denies_spawn",
+        test_production_process_memory_controller_missing_starts_nothing,
+    )
+    r.record("production_process_exact_live_slot_status", test_production_process_status_requires_exact_owned_live_slot)
+    r.record(
+        "production_process_complete_authenticated_bundle",
+        test_production_process_authenticates_complete_bundle_before_effects,
+    )
+    r.record(
+        "production_process_isolated_environment_activation",
+        test_production_process_environment_preserves_old_owner_and_activation,
+    )
+    r.record(
+        "production_process_unknown_memory_native_denied",
+        test_production_process_unknown_memory_or_native_identity_starts_nothing,
+    )
+    await r.record_async(
+        "autoscaler_stopped_current_build_attempt",
+        test_autoscaler_stopped_workers_require_current_build_and_deployment_attempt,
+    )
+    await r.record_async(
+        "autoscaler_missing_current_provenance",
+        test_autoscaler_missing_current_provenance_does_not_start_surface_workers,
+    )
+    await r.record_async(
+        "autoscaler_build_filter_preserves_live_drain",
+        test_autoscaler_build_start_filter_preserves_busy_live_worker_scale_down,
+    )
+    await r.record_async(
+        "autoscaler_retained_pool_rollback_custody",
+        test_autoscaler_retained_generation_cannot_start_by_matching_rollback_hash,
+    )
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
     r.record(
         "worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size

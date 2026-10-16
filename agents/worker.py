@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -33,6 +34,7 @@ if not os.getenv("BACKEND_API_KEY"):
 
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
+from browser_tools.secret_refs import redact_secret_log_values
 from config import load_config
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
@@ -160,8 +162,10 @@ from workflows import AgentWorkflow
 # equals agent_id, this makes all workflow logs filterable by agent_id.
 # ExtraAdder captures these fields into the structured JSON output.
 
+
 shared_processors = [
     structlog.contextvars.merge_contextvars,  # Injects agent_id bound via bind_contextvars()
+    redact_secret_log_values,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.add_log_level,
 ]
@@ -658,8 +662,54 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asynci
         # old-gen pollers mid cooperative drain.
         if my_surface:
             machines = [m for m in machines if _machine_surface(m) == my_surface]
+        # A retained generation can share this surface again after a rollback.
+        # Its stopped pool entries need leased custody reuse before any start.
+        def _owned_active_pool(machine: dict) -> bool:
+            config = machine.get("config") or {}
+            metadata = config.get("metadata") or {}
+            if metadata.get("rose_worker_reuse_protected"):
+                return False
+            if "rose_cooperative_worker_pool" not in metadata:
+                return True
+            try:
+                pool = json.loads(metadata["rose_cooperative_worker_pool"])
+            except (TypeError, ValueError):
+                return False
+            env = config.get("env") or {}
+            actual_attempt = {
+                "build": env.get("TEMPORAL_WORKER_BUILD_ID"),
+                "token": env.get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN"),
+            }
+            return isinstance(pool, dict) and all(
+                (
+                    pool.get("version") == 1,
+                    pool.get("phase") == "active",
+                    pool.get("app") == fly_app,
+                    pool.get("id") == machine.get("id"),
+                    pool.get("hash") == env.get("TEMPORAL_WORKER_SURFACE_HASH"),
+                    bool(actual_attempt["build"]),
+                    bool(actual_attempt["token"]),
+                    (
+                        all(pool.get(key) == value for key, value in actual_attempt.items())
+                        or pool.get("rolling") == actual_attempt
+                    ),
+                )
+            )
+
+        machines = [m for m in machines if _owned_active_pool(m)]
         started = [m for m in machines if m["state"] == "started"]
         stopped = [m for m in machines if m["state"] == "stopped"]
+        # Same-surface rolling deploys leave stopped old images untouched.
+        # Only the running build/attempt may admit a stopped peer back to work.
+        if my_surface:
+            current_build = os.getenv("TEMPORAL_WORKER_BUILD_ID")
+            current_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
+            stopped = [
+                m for m in stopped
+                if current_build and current_token
+                and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_BUILD_ID") == current_build
+                and (m.get("config", {}).get("env") or {}).get("TEMPORAL_WORKER_DEPLOYMENT_TOKEN") == current_token
+            ]
         current = len(started)
 
         if desired > current and stopped:

@@ -14,6 +14,94 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from _test_utils import BlackboxResult, assert_captured_call, setup_mock
 
 
+async def test_evaluate_card_field_names_remain_selectors_and_explicit_refs_resolve() -> None:
+    """A checkout field's name is ordinary JS data; explicit refs carry secrets."""
+    from browser_tools.secret_refs import referenced_evaluate_secret_refs, resolve_evaluate_secret_refs
+    from playwright.async_api import async_playwright
+
+    refs = {
+        "card_number": "4111111111111111",
+        "card_name": "Synthetic Cardholder",
+        "card_expiry": "12/31",
+        "card_cvv": "234",
+        "pwd:fixture": "synthetic-quoted-'\"-password",
+    }
+    selectors = "document.getElementsByName('card_number'); el.name === \"card_cvv\"; `card_expiry`;"
+    assert resolve_evaluate_secret_refs(selectors, refs) == selectors
+    assert referenced_evaluate_secret_refs(selectors, refs) == set()
+    code = """(() => {
+        const names = ['card_number', "card_name", `card_expiry`, 'card_cvv'];
+        document.getElementsByName('card_number')[0].value = '{{secret:card_number}}';
+        document.getElementsByName("card_name")[0].value = "{{secret:card_name}}";
+        document.getElementsByName(`card_expiry`)[0].value = `{{secret:card_expiry}}`;
+        document.getElementsByName('card_cvv')[0].value = {{secret:card_cvv}};
+        return {values: names.map(name => document.getElementsByName(name)[0].value),
+                password: 'pwd:fixture',
+                property: ({'card_number': 'field-name'}).card_number};
+    })()"""
+    resolved = resolve_evaluate_secret_refs(code, refs)
+    assert referenced_evaluate_secret_refs(code, refs) == set(refs)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content("".join(f'<input name="{name}">' for name in refs if not name.startswith("pwd:")))
+            result = await page.evaluate(resolved)
+            assert result == {
+                "values": [refs["card_number"], refs["card_name"], refs["card_expiry"], refs["card_cvv"]],
+                "password": refs["pwd:fixture"],
+                "property": "field-name",
+            }, result
+        finally:
+            await browser.close()
+
+
+async def test_numeric_secret_masking_preserves_other_numbers_and_private_runtime_urls() -> None:
+    """A CVV is masked as a numeric value, without rewriting another number."""
+    from browser_tools.dom_service import DOMService
+    from browser_tools.secret_refs import mask_secret_values
+    from domains.spawn_browser_agent_v3.handler import _prepare_pending_write_lock_action
+    from domains.spawn_browser_agent_v3.service_actions import _browser_state_action_result
+
+    refs = {"card_cvv": "234"}
+    source = "[1234]<button>cvv234</button> forged [234]"
+    masked = mask_secret_values({"dom_tree": source, "value": 234}, refs)
+    assert masked["dom_tree"] == "[1234]<button>cvv{{secret:card_cvv}}</button> forged [{{secret:card_cvv}}]", masked
+    assert masked["value"] == "{{secret:card_cvv}}", masked
+    assert mask_secret_values("prefixpasssuffix", {"pwd:fixture": "pass"}) == "prefix{{secret:pwd:fixture}}suffix"
+
+    raw_url = "https://checkout1234.example/pay?cvv=234"
+    state = SimpleNamespace(
+        url=raw_url, title="cvv234", tabs=[], page_info=None,
+        dom_state=SimpleNamespace(selector_map={1234: SimpleNamespace()}, llm_representation=lambda: source),
+    )
+    dom = DOMService(cdp_url="")
+    dom._session = SimpleNamespace(
+        agent_focus_target_id="fixture-target",
+        get_browser_state_summary=AsyncMock(return_value=state),
+        get_current_page_url=AsyncMock(return_value=raw_url),
+        get_current_page_title=AsyncMock(return_value="Checkout"),
+        get_current_page=AsyncMock(return_value=SimpleNamespace(url=raw_url)),
+    )
+    dom.register_secret_refs(refs)
+    observed = await dom.get_browser_state(include_screenshot=False)
+    rendered = _browser_state_action_result(observed)
+    assert "[1234]<button>" in rendered["formatted_state"], rendered
+    assert "cvv234" not in rendered["formatted_state"], rendered
+    assert observed["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}", observed
+    assert "runtime_current_url" not in observed
+    assert dom.runtime_current_url() == raw_url
+    pending = {"action": "click", "index": 1234, "params": {}}
+    restored_action, restored_state, restored_runtime_url = await _prepare_pending_write_lock_action(dom, pending)
+    assert restored_action == pending
+    assert restored_state["url"] == "https://checkout1234.example/pay?cvv={{secret:card_cvv}}"
+    assert restored_runtime_url == raw_url
+    await dom.get_page_identity()
+    assert dom.runtime_current_url() == raw_url
+    await dom.get_current_url()
+    assert dom.runtime_current_url() == raw_url
+
+
 def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
     """A page-script result that reads a typed password back must not put it in the model's context.
 
@@ -28,24 +116,26 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
         "card_number": "4242424242424242",
         "card_cvv": "123",
         "card_name": "Avery Ross",
+        "card_expiry": "12/31",
     }
     result = {
         "success": True,
         "result": 'email=avery@example.com password="hunter2-correct#7a"',
-        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross"}],
+        "nested": [{"value": "card 4242424242424242 cvv 123 for Avery Ross expiry 12/31"}],
         "count": 3,
         # A page script can echo the typed value back as a dictionary KEY too;
         # what a tool read from the page sits beneath the result's own fields.
         "page": {"entered-hunter2-correct#7a": True},
     }
     masked = mask_secret_values(result, secret_refs)
-    assert masked["page"] == {"entered-pwd:avery@example.com": True}, (
+    assert masked["page"] == {"entered-{{secret:pwd:avery@example.com}}": True}, (
         "secret in a page-supplied key must be masked too: %r" % masked["page"]
     )
-    assert masked["result"] == 'email=avery@example.com password="pwd:avery@example.com"', masked
-    assert masked["nested"][0]["value"] == "card card_number cvv 123 for Avery Ross", masked
+    assert masked["result"] == 'email=avery@example.com password="{{secret:pwd:avery@example.com}}"', masked
+    assert masked["nested"][0]["value"] == "card {{secret:card_number}} cvv {{secret:card_cvv}} for {{secret:card_name}} expiry {{secret:card_expiry}}", masked
     assert masked["count"] == 3 and masked["success"] is True
     assert result["result"].endswith('hunter2-correct#7a"'), "the caller's result is not mutated"
+    assert result["nested"][0]["value"] == "card 4242424242424242 cvv 123 for Avery Ross expiry 12/31"
     assert mask_secret_values("nothing secret here", secret_refs) == "nothing secret here"
     assert mask_secret_values({"result": "x"}, None) == {"result": "x"}
 
@@ -58,7 +148,26 @@ def test_tool_results_never_echo_a_saved_password_or_card_number() -> None:
         {"pwd:avery@example.com": "success"},
     )
     assert failed["success"] is False and failed["status"] == "blocked", failed
-    assert failed["page"] == {"pwd:avery@example.com": "typed pwd:avery@example.com"}, failed
+    assert failed["page"] == {"{{secret:pwd:avery@example.com}}": "typed {{secret:pwd:avery@example.com}}"}, failed
+
+    # Log routing is trusted harness metadata. A coincidental CVV substring
+    # must not make the producing agent impossible to find in its logs.
+    from browser_tools.secret_refs import redact_secret_log_values, secret_logging_context
+
+    owner = "00000123-0000-0000-0000-000000000001"
+    event = {
+        "agent_id": owner,
+        "tool_call_id": "tool-123",
+        "temporal_workflow": {"workflow_id": owner},
+        "event": "transport returned cvv 123",
+        "payload": {"agent_id": "123", "value": 123},
+    }
+    with secret_logging_context(secret_refs, fresh=True):
+        visible = redact_secret_log_values(None, "info", event)
+    for key in ("agent_id", "tool_call_id", "temporal_workflow"):
+        assert visible[key] == event[key], (key, visible)
+    assert "123" not in visible["event"]
+    assert visible["payload"] == {"agent_id": "{{secret:card_cvv}}", "value": "{{secret:card_cvv}}"}
 
 
 async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_typed() -> None:
@@ -86,7 +195,7 @@ async def test_minted_account_is_offered_a_new_password_ref_that_is_saved_when_t
     )
     assert MINTED_NEW_PASSWORD_REF == "pwd:new"
     assert (
-        "- Minted account: Email -> rose.cedar11@mail.example (codes mailed here reach you automatically) | Sign-up password ref (new accounts only): pwd:new | enabled" in section
+        "- Minted account: Email -> rose.cedar11@mail.example (codes mailed here reach you automatically) | Sign-up password ref (new accounts only): {{secret:pwd:new}} | enabled" in section
     ), section
     assert encrypted_refs == {"pwd:new": "envelope"}, "the worker decrypts the ref like any saved password"
     assert credential_refs["pwd:new"] == {"kind": "minted_account", "id": "minted-row-1"}
@@ -310,6 +419,45 @@ async def test_navigation_and_state_results_bind_auth_to_observed_destination() 
         assert "encryptedPassword" not in str(history) and "privateKey" not in str(history)
         if read:
             dom.get_page_identity.assert_awaited_once()
+
+    from browser_tools.secret_refs import mask_secret_values
+
+    class PrivateURLDOM(SimpleNamespace):
+        def runtime_current_url(self, *, fallback=""):
+            return self.private_url or fallback
+
+    # The captured DOM URL is public, while destination/realm binding must use
+    # the private identity captured with that same state, including collisions
+    # inside a hostname. A stable page must not look like a redirect loop.
+    for destination, refs in (
+        ("https://accounts.google.com/challenge?token=private-fixture-value", {"pwd:fixture": "private-fixture-value"}),
+        ("https://shop739.example/checkout", {"card_cvv": "739"}),
+    ):
+        public_url = mask_secret_values(destination, refs)
+        assert public_url != destination
+        state = {"url": public_url, "title": "Sign-in", "dom_tree": "Sign-in"}
+        dom = PrivateURLDOM(
+            private_url=destination, session=SimpleNamespace(), selector_map={},
+            get_page_identity=AsyncMock(return_value={"url": destination}),
+            get_browser_state=AsyncMock(return_value=state),
+        )
+        auth = AsyncMock(return_value={"auth_realm": urlsplit(destination).hostname, "inventory_status": "available"})
+        with patch("domains.spawn_browser_agent_v3.service_actions._execute_inspection_action", AsyncMock(return_value={
+            "success": True, "url": public_url, "formatted_state": "Sign-in",
+        })):
+            result = await execute_action(
+                dom, SimpleNamespace(record_action=AsyncMock()),
+                {"action": "read_browser_state", "params": {}},
+                auth_context_for_url=auth, secret_refs=refs,
+            )
+        auth.assert_awaited_once_with(destination)
+        assert result["success"] is True and result["auth_context"]["inventory_status"] == "available"
+        assert result["current_url"] == public_url
+        assert all(secret not in str(result) for secret in refs.values())
+        history = _browser_tool_result_for_history("read_browser_state", result)
+        assert all(secret not in str(history) for secret in refs.values())
+        dom.get_browser_state.assert_not_awaited()
+        dom.get_page_identity.assert_awaited_once()
 
 
 async def test_unchanged_interactions_reuse_observed_inventory() -> None:
@@ -1548,6 +1696,14 @@ async def run_all_tests():
     runner.record(
         "tool_results_never_echo_a_saved_password_or_card_number",
         test_tool_results_never_echo_a_saved_password_or_card_number,
+    )
+    await runner.record_async(
+        "evaluate_card_field_names_remain_selectors_and_explicit_refs_resolve",
+        test_evaluate_card_field_names_remain_selectors_and_explicit_refs_resolve,
+    )
+    await runner.record_async(
+        "numeric_secret_masking_preserves_other_numbers_and_private_runtime_urls",
+        test_numeric_secret_masking_preserves_other_numbers_and_private_runtime_urls,
     )
     await runner.record_async(
         "ceremony_capable_actions_arm_the_live_target_before_running",

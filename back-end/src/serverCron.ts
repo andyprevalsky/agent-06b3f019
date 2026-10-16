@@ -24,6 +24,34 @@ import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTermina
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
+import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
+
+function scheduleWorkerProcessRecovery(isProduction: boolean): void {
+  if (!isProduction) return;
+  const log = createLogger('WorkerProcessRecovery');
+  let running = false;
+  const run = () => {
+    if (running) return;
+    running = true;
+    recoverConfiguredWorkerProcesses()
+      .then((rows) => {
+        if (rows.length)
+          log.info('Existing worker process recovery observed', {
+            hosts: rows.map(({ id, phase }) => ({ id, phase })),
+          });
+      })
+      .catch((error) =>
+        log.error('Existing worker process recovery held', {
+          reason: error instanceof Error ? error.message : 'Unknown recovery result',
+        })
+      )
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  setInterval(run, 60_000).unref();
+}
 
 function scheduleTraceArchiveFinalizationRetries(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -414,6 +442,7 @@ function scheduleSteelSessionReaper(): void {
 }
 
 export function registerCronJobs(isProduction: boolean): void {
+  scheduleWorkerProcessRecovery(isProduction);
   scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);

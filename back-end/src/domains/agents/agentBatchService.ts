@@ -1,3 +1,4 @@
+import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
  * Agent batch-create service — POST /api/agents/batch.
  *
@@ -203,11 +204,12 @@ async function runPhaseTwoStarts(
       });
       continue;
     }
+    const pendingAdmission = isWorkflowStartAdmissionPending(settled.reason);
     const errMsg =
       settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
     log.error('Batch workflow start failed', { agent_id: agentId, error: errMsg });
     const state = await readDescendantWorkflowStartState(agentId);
-    if (state?.temporalWorkflowStartPending !== true) {
+    if (!pendingAdmission && state?.temporalWorkflowStartPending !== true) {
       await repo
         .failAgentIfStillActive(agentId, 'Failed to start workflow: ' + errMsg)
         .catch((e: unknown) =>
@@ -219,7 +221,7 @@ async function runPhaseTwoStarts(
     }
     out.set(agentId, {
       agent_id: agentId,
-      status: 'FAILED',
+      status: pendingAdmission ? 'STARTING_UP' : 'FAILED',
       temporal_workflow_id: null,
       goal: body.goal,
       model: body.model,

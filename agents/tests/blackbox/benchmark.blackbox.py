@@ -2725,26 +2725,36 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
         native = json.loads((Path(__file__).parents[1] / "fixtures" / "agentcard-production-release-stall.json").read_text())["lifecycle"]
         data["_benchmark"]["payment_lifecycle"] = native
     task = deepcopy(get_task_by_name("agent-payment-abandonment"))
-    task.name = "agent-payment-production-abandonment"; task.tags = []; task.production_only = True
+    task.name = "agent-payment-production-abandonment"
+    task.tags = []
+    task.production_only = True
     async def poll(_base, _agent, _task, _monitor, snapshot):
         snapshot.update(deepcopy(data))
-        if phase == "cancel": raise asyncio.CancelledError()
-        if phase == "poll": raise RuntimeError("actual payment reconciliation release pending")
+        if phase == "cancel":
+            raise asyncio.CancelledError()
+        if phase == "poll":
+            raise RuntimeError("actual payment reconciliation release pending")
         return deepcopy(data), 0, 0, None
     async def execute(_base, _agent, callback, **_kwargs): return await callback({})
     async def get(_base, aid):
         assert aid == root
-        if refresh == "unavailable": raise RuntimeError("authoritative read unavailable")
-        if refresh == "empty": return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
+        if refresh == "unavailable":
+            raise RuntimeError("authoritative read unavailable")
+        if refresh == "empty":
+            return {"agent": {"agent_id": root, "model": "benchmark-hub"}, "messages": []}
         result = deepcopy(data)
-        if refresh == "foreign": result["agent"]["agent_id"] = "foreign-agent"
-        if refresh == "shorter": result["messages"] = result["messages"][:1]
+        if refresh == "foreign":
+            result["agent"]["agent_id"] = "foreign-agent"
+        if refresh == "shorter":
+            result["messages"] = result["messages"][:1]
         return result
     async def collect(_agent, snapshot, _start):
-        if logger_fails: raise RuntimeError("log transport unavailable")
+        if logger_fails:
+            raise RuntimeError("log transport unavailable")
         return {"messages": bench.extract_message_transcript(snapshot)}
     async def cleanup(*_args, **_kwargs):
-        if phase == "cleanup": raise RuntimeError("actual payment reconciliation release pending")
+        if phase == "cleanup":
+            raise RuntimeError("actual payment reconciliation release pending")
         if phase == "cleanup-stall":
             raise bench._payment_reconciliation_timeout("actual payment reconciliation release pending", native, task_name=task.name)
         return None
@@ -2753,7 +2763,8 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
                    "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
                    "subscribe_supabase_realtime_agent", "post_world_model_update_events", "archive_agent_start"]
     with contextlib.ExitStack() as stack:
-        for name in async_names: stack.enter_context(patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else [])))
+        for name in async_names:
+            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=None if name.endswith("auth_test_site") else [])))
         for name, replacement in {
             "create_agent": AsyncMock(return_value=root), "_poll_agent": poll,
             "_run_with_agent_execution_backstop": execute, "get_agent": get,
@@ -2767,7 +2778,8 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
                 return_value=(None, None), side_effect=RuntimeError("archive unavailable") if archive_fails else None),
             "_begin_interrupt_cleanup": lambda: False,
             "delete_agent": AsyncMock(),
-        }.items(): stack.enter_context(patch.object(bench, name, replacement))
+        }.items():
+            stack.enter_context(patch.object(bench, name, replacement))
         result = await bench._run_single_task_as_run_user(
             "https://fixture.invalid", task, True, None, "", None, None, None)
     assert not result.passed
@@ -2777,9 +2789,12 @@ async def _exercise_failure_evidence_exit(phase, refresh, logger_fails=False, ar
     assert result.logs["failure_evidence"]["agent_id"] == root
     assert result.logs["failure_evidence"]["benchmark_state"]["payment_lifecycle"]["purchase"]["id"] == (native["purchase"]["id"] if phase == "cleanup-stall" else "owned-purchase")
     assert result.logs["tree"][root]["messages"] == bench.extract_message_transcript(data)
-    if phase != "cancel": assert "actual payment reconciliation release pending" in result.failure_reason
-    if refresh == "foreign": assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
-    if archive_fails: assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
+    if phase != "cancel":
+        assert "actual payment reconciliation release pending" in result.failure_reason
+    if refresh == "foreign":
+        assert any("another agent" in e for e in result.logs["failure_evidence"]["errors"])
+    if archive_fails:
+        assert any("archive unavailable" in e for e in result.logs["failure_evidence"]["errors"])
     return result
 
 
@@ -3034,6 +3049,136 @@ def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
     paused_with_recording = [recording_started, recording_finished, session_paused]
     assert bench._agent_messages_ready_for_browser_hub_archive(paused_with_recording)
     assert bench._agent_messages_ready_for_browser_hub_archive([])
+
+
+def _resumed_recording_archive_rows():
+    # Captured a806f2a9: saved first part, resumed the SAME browser task, then
+    # paused before the resumed part was attached. No real media is fabricated.
+    identity = dict(
+        toolName="spawn_browser_agent",
+        task_id="owned-resumed-browser",
+        workflowGeneration="owned-root-generation",
+        browser_url="https://fixture.kernel.sh/browser/live/owned-session",
+        browser_session_metadata={"provider": "kernel"},
+    )
+
+    def row(action, status, **extra):
+        return {
+            "metadata": dict(identity, action_type=action, toolStatus=status, **extra)
+        }
+
+    first = row("recording", "IN_PROGRESS", toolCallId="first-start")
+    saved = row(
+        "recording",
+        "FINISHED",
+        toolCallId="first-saved",
+        recording_view_url="https://fixture.invalid/first-part",
+    )
+    resumed = row("recording", "IN_PROGRESS", toolCallId="resumed-start")
+    terminal = row("task_complete", "ERROR", toolCallId="owned-tool")
+    latest = row(
+        "recording",
+        "FINISHED",
+        toolCallId="resumed-saved",
+        recording_view_url="https://fixture.invalid/resumed-part",
+    )
+    return [first, saved, resumed, terminal], latest
+
+
+def test_browser_archive_requires_each_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    before = deepcopy(rows)
+    assert not bench._agent_messages_have_browser_recording_ready(rows), (
+        "earlier task recording concealed missing resumed part"
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(rows)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+    assert rows == before, "readiness mutated captured transcript"
+    complete = rows + [latest]
+    assert bench._agent_messages_ready_for_browser_hub_archive(complete)
+    assert bench._agent_messages_ready_for_durable_browser_evidence(complete)
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(
+        [rows[0], rows[2], latest, rows[3]]
+    ), "a later saved part concealed an earlier missing part"
+    for field, value in (
+        ("workflowGeneration", "foreign-generation"),
+        ("browser_url", "https://fixture.kernel.sh/browser/live/foreign-session"),
+    ):
+        foreign = deepcopy(latest)
+        foreign["metadata"][field] = value
+        assert not bench._agent_messages_ready_for_durable_browser_evidence(
+            rows + [foreign]
+        ), field
+    empty = deepcopy(latest)
+    empty["metadata"].pop("recording_view_url")
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(rows + [empty])
+
+
+async def test_browser_archive_refresh_waits_for_resumed_recording_part():
+    from copy import deepcopy
+    import benchmarks.run_benchmark as bench
+
+    rows, latest = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    incomplete = {"agent": {"status": "PAUSED"}, "messages": rows}
+    complete = {"agent": {"status": "PAUSED"}, "messages": rows + [latest]}
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ) as tree,
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(side_effect=[deepcopy(incomplete), deepcopy(complete)]),
+        ) as get,
+        patch.object(bench.asyncio, "sleep", AsyncMock()),
+    ):
+        observed = await bench._refresh_browser_archive_snapshot(
+            "https://fixture.invalid", root, {}, logs, expected_agent_ids={root}
+        )
+    assert get.await_count == tree.await_count == 2, (
+        "archive owner returned before resumed recording was attached"
+    )
+    assert observed["messages"] == complete["messages"]
+    assert len(logs["tree"][root]["messages"]) == len(complete["messages"])
+
+
+async def test_browser_archive_missing_resumed_part_preserves_existing_deadline():
+    import benchmarks.run_benchmark as bench
+
+    rows, _ = _resumed_recording_archive_rows()
+    root = "owned-root-generation"
+    logs = {}
+    with (
+        patch.object(
+            bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])
+        ),
+        patch.object(
+            bench,
+            "get_agent",
+            AsyncMock(return_value={"agent": {"status": "PAUSED"}, "messages": rows}),
+        ),
+    ):
+        try:
+            await bench._refresh_browser_archive_snapshot(
+                "https://fixture.invalid",
+                root,
+                {},
+                logs,
+                expected_agent_ids={root},
+                timeout_seconds=0.02,
+            )
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError(
+                "missing resumed recording bypassed the archive deadline"
+            )
+    assert logs["browser_archive_observation"]["ready"] is False
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -3983,12 +4128,22 @@ def test_agentcard_release_policy_rejects_incomplete_or_foreign_card_state():
     assert _agentcard_release_stalled(good)
     variants = []
     for field, value in (("id", "card_other"), ("balanceCents", 1), ("balanceCents", False)):
-        row = deepcopy(good); row["agentCard"][field] = value; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"][field] = value
+        variants.append(row)
     for field in ("id", "balanceCents"):
-        row = deepcopy(good); row["agentCard"].pop(field); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"].pop("cardId"); variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["livemode"] = True; variants.append(row)
-    row = deepcopy(good); row["orgTransfer"]["releasedCents"] = False; variants.append(row)
+        row = deepcopy(good)
+        row["agentCard"].pop(field)
+        variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"].pop("cardId")
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["livemode"] = True
+    variants.append(row)
+    row = deepcopy(good)
+    row["orgTransfer"]["releasedCents"] = False
+    variants.append(row)
     for row in variants:
         assert not _agentcard_release_stalled(row), row
 
@@ -21841,7 +21996,8 @@ async def test_agentcard_release_skip_catalog_task_catch_stays_strict():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks import run_benchmark as bench
     for name in ("agent-payment-production-abandonment", "unregistered-agentcard-task", "agent-payment-test-shop", "agent-payment-abandonment"):
-        task = deepcopy(get_task_by_name("agent-payment-abandonment")); task.name = name
+        task = deepcopy(get_task_by_name("agent-payment-abandonment"))
+        task.name = name
         with patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}), \
              patch.object(bench, "prepare_sandbox_payment_residual", AsyncMock(side_effect=bench.AgentCardReleaseStall("injected typed stall", lifecycle=_agentcard_release_stall_lifecycle(livemode=name == "agent-payment-production-abandonment")))), \
              patch.object(bench, "_restore_live_fixture_scenarios_async", AsyncMock()), \
@@ -23610,6 +23766,15 @@ async def run_all_tests():
     r.record(
         "payment_setup_resume_stays_exclusive_beside_event_ticket",
         test_payment_setup_resume_stays_exclusive_beside_event_ticket,
+    )
+    r.record(
+        "browser_archive_each_resumed_recording_part", test_browser_archive_requires_each_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_waits_resumed_recording_part", test_browser_archive_refresh_waits_for_resumed_recording_part
+    )
+    await r.record_async(
+        "browser_archive_missing_resumed_part_deadline", test_browser_archive_missing_resumed_part_preserves_existing_deadline
     )
     r.record(
         "agent_messages_ready_for_browser_hub_archive_waits_for_recording",
