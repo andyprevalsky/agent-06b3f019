@@ -405,7 +405,7 @@ REMOTE_COMMAND_IDENTITY
   if [ "$EXPORT_HOST" = 1 ]; then
     finalize_hubs=""
     [ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"
-    printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"' 
+    printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
   fi
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
