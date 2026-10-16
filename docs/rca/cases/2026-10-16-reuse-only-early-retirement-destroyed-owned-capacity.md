@@ -59,12 +59,23 @@ The new private stop receipt records current role/owner/task token, exact native
 instance/config and source/native hashes, `stopped_only=true` and `pool_credit=0`.
 It grants no historical worker identity or pool admission. Residual owned workers
 remain recoverable until a separate explicit current-worker admission succeeds.
-A failed stop never falls back to delete. Non-reuse legacy behavior is retained.
+A failed stop never falls back to delete. Final cleanup explicitly refuses to
+enter the registry reaper when reuse-only records remain, including native
+delete routes that bypass the common Machine helper. Non-reuse legacy behavior
+is retained.
+
+Fresh worker cloning overrides the command to `sleep infinity` but does not
+explicitly clear inherited environment. The worker role therefore accepts only
+the exact inert command with either empty environment or source REF, task run
+token and current caller barrier credential that match the validated parent
+task. The full native configuration remains pinned. Two additional causal
+controls reproduce the final-reaper and inherited-environment refusals before
+these follow-up corrections.
 
 ## Verification
 
-Eleven new registered controls passed five unchanged final runs; the complete
-30-case affected billing/retirement family also passed. Tests execute the actual
+Thirteen new registered controls passed five unchanged final runs; the complete
+32-case affected billing/retirement family also passed. Tests execute the actual
 branch blocks and canonical stop core with only isolated provider/process seams.
 They cover positive primary/worker stop, foreign worker identities, unknown live
 processes, source drift, once-only dispatch, real ancestry, borrowed return,

@@ -13671,7 +13671,7 @@ stop_current_registry_primaries_for_pool() {  # <joins> <guest-failed> <runtime-
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
-    local claim_digest machine_reap_status runtime_evidence_failed=0 billing_owned_joins=1
+    local claim_digest machine_reap_status record runtime_evidence_failed=0 billing_owned_joins=1
     [ "${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" = 0 ] || billing_owned_joins=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
     ec="$result_ec"
@@ -13975,7 +13975,19 @@ cleanup() {
         # The durable registry is authoritative for primaries AND autoscaler
         # workers. Local per-bench ledgers remain useful for live scaling, but a
         # failed reap stays recoverable even if this workspace is later deleted.
-        if ! reap_registry_clones "$FLEET_REGISTRY_DIR" current; then
+        if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+            # Residual workers remain owned until a separate verified admission.
+            # Never enter the native reaper, which also has direct deletion paths.
+            for record in "$FLEET_REGISTRY_DIR"/clones/*; do
+                if [ -e "$record" ] || [ -L "$record" ]; then
+                    echo "⚠️  reuse-only retains residual ownership for stopped worker admission" >&2
+                    KEEP_CLONES=1
+                    ec=1
+                    teardown_failed=1
+                    break
+                fi
+            done
+        elif ! reap_registry_clones "$FLEET_REGISTRY_DIR" current; then
             echo "⚠️  FAILED to destroy all fleet-owned machines; durable ownership remains at $FLEET_REGISTRY_DIR" >&2
             ec=1
             teardown_failed=1

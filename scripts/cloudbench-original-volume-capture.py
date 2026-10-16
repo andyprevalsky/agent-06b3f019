@@ -1532,8 +1532,21 @@ def billing_stop_current_owned(fly, registry, audit, run_dir, output, mid, role,
             current = _billing_current_source(registry, meta, output, mid, role)
             _billing_require(current == (name, vol, token, binding), 'idle-stop source changed')
             return binding
+        def worker_config(config):
+            _billing_require(config.get('init') == {'cmd': INERT_CMD}, 'worker command is not inert')
+            env = config.get('env')
+            if env not in (None, {}):
+                provenance = json.loads(_billing_file(run_dir/'execution-provenance.json', 1048576))
+                barrier = os.environ.get('CLOUDBENCH_BARRIER_TOKEN')
+                _billing_require(isinstance(env, dict) and 'GATE_REF' not in env
+                                 and env.get('REF') == provenance['base_sha']
+                                 and env.get('CLOUDBENCH_RUN_TOKEN') == token
+                                 and isinstance(barrier, str) and SAFE_TOKEN.fullmatch(barrier)
+                                 and env.get('CLOUDBENCH_BARRIER_TOKEN') == barrier,
+                                 'worker inherited task environment mismatch')
         _billing_stop_one(fly, registry, audit, meta, original, registry.parent.parent,
-                          mid, vol, name, receipts, result, source_check=unchanged)
+                          mid, vol, name, receipts, result, source_check=unchanged,
+                          config_check=worker_config if role == 'worker' else None)
     except (Refusal, OSError, ValueError, TimeoutError, CaptureFailure, NotFound) as error:
         result.update(status='PENDING', reason_class=type(error).__name__)
     finally:
@@ -1546,7 +1559,7 @@ def billing_stop_current_owned(fly, registry, audit, run_dir, output, mid, role,
     return result
 
 
-def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result, *, source_check=None):
+def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result, *, source_check=None, config_check=None):
     import secrets
     # This shared per-Machine inode prevents concurrent claim publication. Any
     # existing claim, even a dead one, is left to its ordinary recovery owner.
@@ -1625,7 +1638,9 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
                              and isinstance(cfg.get('mounts'), list) and len(cfg['mounts']) == 1
                              and isinstance(cfg['mounts'][0], dict)
                              and cfg['mounts'][0].get('volume') == vol, 'unsupported billing config')
-            if cfg.get('init') != {'cmd': INERT_CMD} or cfg.get('env') not in (None, {}):
+            if config_check:
+                config_check(cfg)
+            elif cfg.get('init') != {'cmd': INERT_CMD} or cfg.get('env') not in (None, {}):
                 binding = _billing_configured_source(registry, meta, mid, cfg)
                 if configured_source is None:
                     configured_source, configured_config = binding, cfg

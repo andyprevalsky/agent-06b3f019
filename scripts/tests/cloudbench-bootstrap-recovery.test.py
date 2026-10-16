@@ -3041,6 +3041,20 @@ class BillingStopRetainTests(unittest.TestCase):
         self.assertTrue(result['stopped_only']);self.assertEqual(result['pool_credit'],0)
         self.assertEqual(result['runtime_run_token'],self.owner+'-0')
 
+    def test_current_worker_inherited_task_environment_is_exact(self):
+        for changed in (None,'REF','CLOUDBENCH_RUN_TOKEN','CLOUDBENCH_BARRIER_TOKEN'):
+            with self.subTest(changed=changed):
+                self.setUp();self.configure_current_role('worker')
+                self.machine['config']['env']={'REF':'c'*40,'CLOUDBENCH_RUN_TOKEN':self.owner+'-0',
+                    'CLOUDBENCH_BARRIER_TOKEN':'actual-fleet-credential'}
+                if changed:self.machine['config']['env'][changed]='foreign'
+                result=self.call_current()
+                if changed:
+                    self.assertEqual(result['status'],'PENDING');self.assertEqual(self.fly.posts,[])
+                else:
+                    self.assertEqual(result['status'],'STOPPED_RETAINED',result)
+                    self.assertEqual(self.files(),self.original)
+
     def test_current_primary_stop_defers_pool_return(self):
         self.configure_current_role('primary')
         result=self.call_current('primary')
@@ -3481,6 +3495,28 @@ fleet_reap_registry_record(){ echo destroy; }
 '''+tail
         r=subprocess.run(['bash','-c',script],capture_output=True,text=True)
         self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.strip(),'stop')
+
+    def test_final_cleanup_residual_worker_never_enters_reaper(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        start=source.index('    # Claims are independent recovery roots')
+        end=source.index('    # Clone volume IDs are persisted',start)
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);(root/'clones').mkdir();record=root/'clones/worker';record.write_text('owned worker')
+            script=r'''
+set -u
+POOL_REUSE_ONLY=1;FLEET_REGISTRY_PUBLISHED=1;KEEP_CLONES=0;ec=0;teardown_failed=0
+billing_owned_joins=1;guest_shutdown_failed=0;runtime_evidence_failed=0
+reconcile_current_pool_transfer_claims(){ :; }
+reconcile_current_pool_claims(){ :; }
+stop_current_registry_primaries_for_pool(){ :; }
+return_current_registry_primaries_to_pool(){ :; }
+reap_registry_clones(){ echo FORBIDDEN; }
+'''+source[start:end]+'\necho "$KEEP_CLONES $ec $teardown_failed"\n'
+            r=subprocess.run(['bash','-c',script],env={**os.environ,'FLEET_REGISTRY_DIR':td},capture_output=True,text=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            self.assertNotIn('FORBIDDEN',r.stdout)
+            self.assertEqual(r.stdout.strip(),'1 1 1')
+            self.assertEqual(record.read_text(),'owned worker')
 
     def test_reuse_only_destroy_boundary_refuses_before_native(self):
         source=(REPO/'scripts/run-bench-fleet').read_text();start=source.index('reap_machine() {');end=source.index('\n}\n',start)+3
