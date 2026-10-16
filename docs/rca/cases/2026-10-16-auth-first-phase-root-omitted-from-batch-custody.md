@@ -165,3 +165,42 @@ The reviewed archive-safe candidate is selected for the next combined source
 with upstream d6e8edc6. Canonical combined-source and unchanged native task
 verification remain pending. Private owning proofs and the separately executed
 legacy recoveries do not close the original semantic failure or this OPEN case.
+
+## Combined-source validation follow-up
+
+The ec371 combined source retained two actual validation failures. The complete
+agents run ended with 110 passing domains and one failing benchmark domain; its
+existing `test_live_report_keeps_all_created_roots_for_batch_finalization`
+assertion showed that adding a second graded root replaced the report's first
+graded primary. Custody still retained both allocations. The correction uses
+`setdefault` only for the existing non-fixture primary map; unconditional root
+registration and fixture exclusion remain. The SAME registered assertion fails
+before and passes afterward. Additional real harness controls cover a fixture
+without a graded root, and a fixture followed by two graded roots: the primary
+stays nullable or first-graded respectively, and every allocation stays owned.
+All 2,523 previous assertion ASTs remain, with two additional assertions.
+Private source proof is in
+`.context/auth-deploy/first-graded-primary-review/`; patch SHA256 is
+`3f3a618352637a652d960eb11213e615dc69ca7aed495a2af95f3f17c524e6c2`.
+
+The complete deploy structural registry separately ended 46 passing suites and
+one failing benchmark-live-results suite. Its real boot/interrupt fixture
+returned literal `root-agent` from fake creation. The canonical allocation UUID
+guard correctly rejected that malformed identity before polling. The fixture
+now supplies one fixed valid UUID consistently to creation, tree, exact-owner
+checks and the existing twelve-character creation-log checks. No production
+UUID, duplicate-allocation, shutdown, cancellation, timeout or cleanup-ACK guard
+is weakened. The SAME selected test fails before in 18.80 seconds and passes
+after in 1.64 seconds. All 3,042 assertion ASTs and other source bytes match
+after normalizing the five changed identity literals. The private launcher
+allowed only loopback listeners bound by its own fixture; the passing run made
+30 such connections and no denied or external connections. Earlier preparation
+and guard-setup failures remain retained in
+`.context/auth-deploy/boot-fixture-uuid-review/`. Patch SHA256 is
+`f4ad299cb4f3f21e21bd5178e0478dccf5c2e0da8a5953a84f021e2e982980f3`.
+
+These follow-ups require a fresh combined-source validation run. They do not
+change the original six native task failures, establish a native semantic
+repair, or turn the old ec371 validation attempt into PASS. Its healthy backend
+coverage continues on its immutable checkout while the separate next checkout
+is prepared; no prior gate result is relabeled as a result for the new source.

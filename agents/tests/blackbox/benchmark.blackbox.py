@@ -1431,6 +1431,42 @@ async def test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_li
                     await coordinator
 
 
+async def test_live_report_primary_excludes_fixture_and_keeps_first_graded():
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    fixture = "00000000-0000-4000-8000-000000000021"
+    graded = ["00000000-0000-4000-8000-000000000022", "00000000-0000-4000-8000-000000000023"]
+    for with_graded in (False, True):
+        entered = asyncio.Event()
+        task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+        async def executor(_base_url, actual, *, on_agent_created, **_kwargs):
+            custody = {"task_name": actual.name, "roots": [], "callback": on_agent_created, "graded_creation": "not_started"}
+            token = bench._task_root_custody.set(custody)
+            try:
+                bench._register_task_root(actual.name, fixture, "fixture_first_run")
+                if with_graded:
+                    for aid in graded:
+                        bench._register_task_root(actual.name, aid, "graded")
+                entered.set()
+                await asyncio.Event().wait()
+            finally:
+                bench._task_root_custody.reset(token)
+        namespace, cards = _live_report_producer_harness([task], executor, 1)
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=10)
+                namespace["_tick_report_once"]()
+                url = cards[-1]["per_task"][0]["agent_url"]
+                assert (url.endswith("=" + graded[0]) if with_graded else url is None)
+                assert namespace["_live_task_agent_ids"][task.name] == ([fixture, *graded] if with_graded else [fixture])
+            finally:
+                coordinator.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(coordinator, timeout=10)
+
+
 async def test_live_report_keeps_all_created_roots_for_batch_finalization():
     """Report-row retirement preserves exact root custody for every exit path."""
     from types import SimpleNamespace
@@ -22872,6 +22908,7 @@ async def run_all_tests():
         "live_report_repeated_occurrences_keep_early_outcomes_and_agent_links",
         test_live_report_repeated_occurrences_keep_early_outcomes_and_agent_links,
     )
+    await r.record_async("live_report_primary_excludes_fixture_and_keeps_first_graded", test_live_report_primary_excludes_fixture_and_keeps_first_graded)
     await r.record_async(
         "live_report_keeps_all_created_roots_for_batch_finalization",
         test_live_report_keeps_all_created_roots_for_batch_finalization,

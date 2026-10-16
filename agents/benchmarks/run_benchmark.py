@@ -16198,7 +16198,7 @@ async def main_async(args):
             custody = _task_root_custody.get()
             role = next((root["role"] for root in (custody or {}).get("roots", []) if root["root_agent_id"] == agent_id), None)
             if agent_id and role != "fixture_first_run":
-                _admitted_agent_ids[token] = agent_id
+                _admitted_agent_ids.setdefault(token, agent_id)
 
         async def evaluated(result: TaskResult) -> None:
             from benchmarks.outcome_publication import prepare, wait_for_publication
