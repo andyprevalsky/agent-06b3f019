@@ -41,7 +41,7 @@
 #   --cold-handoff-request <private-request> <sha256>  exact internal cold-only cross-controller handoff
 #   --cold-primary-bootstrap  opt into empty-checkout bootstrap for verified cold primaries
 #   --reuse-pool-only  claim existing authenticated stopped primary pool IDs only;
-#                      refuse misses, never clone primaries (autoscaler unchanged)
+#                      default: refuse misses and new worker allocation without measured admission
 #   --foreground       keep the controller in the launching session (tests/debugging);
 #                      paid fleet runs detach by default so EXIT cleanup survives it
 #   --wait             detach for lifecycle safety, but wait for and return the
@@ -1014,7 +1014,7 @@ WORKER_STAGE_ATTEMPT_WALL_SECONDS="120"
 AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS:-}"
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
-POOL_REUSE_ONLY="0"    # explicit primary-only no-create policy; workers unchanged
+POOL_REUSE_ONLY="1"    # existing primary IDs first; no implicit new Machine allocation
 POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm evidence
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
@@ -1244,14 +1244,16 @@ done
 case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
 reuse_pool_only_admission() {
     [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 0
-    if [ -n "${PROVISION_POOL:-}" ] || [ "${RECOVER_STALE_ONLY:-0}" != 0 ] \
+    # Recovery maintenance allocates no new Machine and must remain available.
+    [ "${RECOVER_STALE_ONLY:-0}" = 0 ] || return 0
+    if [ -n "${PROVISION_POOL:-}" ] \
         || [ "${FRESH_VOLUMES_REQUESTED:-0}" != 0 ] \
         || [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ] \
         || [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
-        echo "❌ reuse-only primaries conflict with provisioning, recovery, or explicit fresh-only policy" >&2
+        echo "❌ existing-Machine reuse conflicts with provisioning or explicit fresh-only policy; no measured new-Machine admission is available" >&2
         return 1
     fi
-    echo "🏊 reuse-only primary admission: no new primary Machines; worker autoscaling remains unchanged" >&2
+    echo "🏊 reuse existing primary Machines; additional workers require an existing eligible worker path (new allocation is withheld)" >&2
 }
 reuse_pool_only_admission || exit 2
 cold_primary_admission() {
@@ -11641,7 +11643,13 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
     )
 }
 
+machine_creation_admission() {  # <target-ledger>; no ambient flag grants organization headroom
+    echo "❌ existing-Machine capacity gap (${1##*/}): new Machine allocation withheld; authenticated measured admission is not available" >&2
+    return 78
+}
+
 clone_machine_target() {  # clone_machine_target <ledger> [source-id] [vm-size] [memory-mb] [snapshot-id] [snapshot|fresh]
+    machine_creation_admission "$1" || return $?
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_snapshot="${5:-$SNAP_ID}"
@@ -13420,10 +13428,61 @@ CHILD_MACHINE=()
 CHILD_RUN_TOKEN=()
 
 
+fleet_billing_stop_retained_idle() {  # <positive-owned-joins>; billing only, never evidence/claim release
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && [ "${KEEP_CLONES:-0}" = 1 ] || return 0
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-original-volume-capture.py" \
+        "$APP" "$FLEET_REGISTRY_DIR" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_DIR" \
+        "$FLEET_OWNER_TOKEN" "$$" "$FLEET_OWNER_PID_START" "$1" <<'PYBILLING'
+import json,os,runpy,signal,sys,time
+from pathlib import Path
+try:
+    if sys.argv[9]!='1':raise ValueError('producer joins are unconfirmed')
+    started=time.monotonic()
+    prior_timer=signal.getitimer(signal.ITIMER_REAL)
+    prior_handler=signal.getsignal(signal.SIGALRM)
+    if prior_timer[1]!=0:raise ValueError('periodic caller timer is unsupported')
+    deadline=started+(min(180,prior_timer[0]) if prior_timer[0]>0 else 180)
+    def expired(*unused):raise TimeoutError('billing caller deadline')
+    signal.signal(signal.SIGALRM,expired)
+    try:
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise TimeoutError('billing caller deadline')
+        signal.setitimer(signal.ITIMER_REAL,remaining)
+        helper=runpy.run_path(sys.argv[1])
+        # Validate current REAP ownership before even refreshing authentication.
+        helper['_billing_local'](Path(sys.argv[3]),Path(sys.argv[4]),Path(sys.argv[5]),
+            sys.argv[6],int(sys.argv[7]),sys.argv[8],True)
+        result=helper['billing_stop_retained_owned'](helper['Fly'](sys.argv[2],os.environ['FLY_API_TOKEN']),
+            Path(sys.argv[3]),Path(sys.argv[4]),Path(sys.argv[5]),Path(sys.argv[5])/'_batch/billing-stop-retain',
+            sys.argv[6],int(sys.argv[7]),sys.argv[8],joins_verified=True)
+        if time.monotonic()>=deadline:raise TimeoutError('billing caller deadline')
+    finally:
+        signal.setitimer(signal.ITIMER_REAL,0)
+        signal.signal(signal.SIGALRM,prior_handler)
+        if prior_timer[0]>0:
+            signal.setitimer(signal.ITIMER_REAL,max(.000001,prior_timer[0]-(time.monotonic()-started)))
+    print(json.dumps(result,sort_keys=True))
+except Exception as error:
+    # Never print a provider body, token, config or generic exception message.
+    pending={'status':'PENDING','reason':'BILLING_STOP_REFUSED','error_class':type(error).__name__,
+             'native_release_verified':False,'proof_credit':0}
+    try:
+        path=Path(sys.argv[5])/'_batch/billing-stop-retain-caller.pending.json'
+        with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as stream:
+            json.dump(pending,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    except OSError:pass  # Preserve an earlier receipt or report storage refusal on stdout.
+    print(json.dumps(pending))
+PYBILLING
+}
+
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
-    local claim_digest machine_reap_status runtime_evidence_failed=0
+    local claim_digest machine_reap_status runtime_evidence_failed=0 billing_owned_joins=1
+    [ "${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" = 0 ] || billing_owned_joins=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
     ec="$result_ec"
     export -n machines 2>/dev/null || true
@@ -13449,6 +13508,7 @@ cleanup() {
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
         "${UNIFIED_AGG_PID:-}" "$snapshot_teardown_pid"; then
         echo "❌ an owned aggregator/snapshot process survived local teardown" >&2
+        billing_owned_joins=0
         ec=1
         teardown_failed=1
     fi
@@ -13487,18 +13547,21 @@ cleanup() {
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
         "${AUTOSCALER_PIDS[@]:-}"; then
         echo "❌ an owned autoscaler process survived local teardown" >&2
+        billing_owned_joins=0
         ec=1
         teardown_failed=1
     fi
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
         "${PROVISION_PIDS[@]:-}"; then
         echo "❌ an owned provisioner process survived local teardown" >&2
+        billing_owned_joins=0
         ec=1
         teardown_failed=1
     fi
     if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
         "${CHILD_PIDS[@]:-}"; then
         echo "❌ an owned collector/native retirement tree survived local teardown" >&2
+        billing_owned_joins=0
         KEEP_CLONES=1
         ec=1
         teardown_failed=1
@@ -13507,7 +13570,7 @@ cleanup() {
         # enter the same bounded mechanism. Every permit must also return;
         # cancellation that lost a permit retains exact ownership fail-closed.
         fleet_native_reap_close && fleet_native_reap_open \
-            || { KEEP_CLONES=1; ec=1; teardown_failed=1; }
+            || { KEEP_CLONES=1; ec=1; teardown_failed=1; billing_owned_joins=0; }
     fi
     # Guest ACK and copied runtime evidence are independent receipts. Keep the
     # durable evidence latch through every crash window until all primary and
@@ -13520,6 +13583,10 @@ cleanup() {
         ec=1
         teardown_failed=1
     fi
+    # Finish all data-plane reads first. Evidence retention does not authorize
+    # provider release; this separate helper may only stop verified idle owned
+    # Machines and retains every latch, audit, claim, file and volume.
+    fleet_billing_stop_retained_idle "$billing_owned_joins"
     # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
     # complete lease records owned by this exact controller/run under the same
     # allocator lock before the snapshotted helper is removed.
@@ -15479,6 +15546,10 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local runtime_run_token="$7"
     [ ! -e "$out/benchmark-child.finished" ] \
         && [ ! -e "$out/autoscaler.runtime-completed" ] || return 0
+    if ! machine_creation_admission "$out/worker-clones.ids"; then
+        printf '%s\n' "No eligible existing worker path; new Machine allocation withheld" > "$out/autoscaler.failed"
+        return 1
+    fi
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     local primary_volume_size worker_snapshot
     local worker_storage

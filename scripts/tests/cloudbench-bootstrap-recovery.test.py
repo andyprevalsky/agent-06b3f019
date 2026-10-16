@@ -1865,5 +1865,302 @@ second="$(claim_pool_machine)" || exit 95
         self.assertNotIn('FORBIDDEN',result.stderr)
         self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
 
+class BillingStopRetainTests(unittest.TestCase):
+    """Real helper/files/locks/timers; only provider transport and PID query mocked."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        self.ns = runpy.run_path(str(REPO/'scripts/cloudbench-original-volume-capture.py'))
+        self.owner, self.mid, self.vol = 'a'*32, 'b'*14, 'vol_owned1'
+        self.name = 'cloudbench-test-owned'
+        self.registry = self.base/'common/cloudbench-fleet-ownership'/self.owner
+        self.audit = self.base/'audit'/self.owner
+        self.run = self.base/'runs/run-owned'
+        for p in (self.registry/'clones', self.audit/'fresh', self.audit/'by-machine-id', self.run/'_batch'):
+            p.mkdir(parents=True)
+        self.receipts = self.run/'_batch/billing-stop-retain'
+        self.meta = dict(version='2',fleet_owner_token=self.owner,cleanup_policy='reap',
+            host=__import__('socket').gethostname(),pid=str(os.getppid()),pid_start='fixture-birth',
+            run_id=self.run.name,app='test-app',workspace_root=str(self.base),
+            runs_root=str(self.run.parent),audit_dir=str(self.audit))
+        self.put(self.registry/'meta', self.meta)
+        self.put(self.audit/'meta',dict(version='1',fleet_owner_token=self.owner,
+            run_id=self.run.name,app='test-app',workspace_root=str(self.base),status='incomplete'))
+        self.put(self.audit/'fresh'/self.name,dict(version='1',fleet_owner_token=self.owner,
+            run_id=self.run.name,app='test-app',source='fresh-clone',source_machine_id='c'*14,
+            clone_name=self.name,machine_id=self.mid,volume_id=self.vol,disposition='owned'))
+        write(self.audit/'by-machine-id'/self.mid, self.name+'\n')
+        self.put(self.registry/'clones'/self.name,dict(name=self.name,id=self.mid,volume_id=self.vol))
+        write(self.registry/'runtime-evidence-unconfirmed', b'original-latch\n')
+        write(self.registry/'guest-cleanup-unconfirmed', b'original-guest-latch\n')
+        self.machine = dict(id=self.mid,name=self.name,instance_id='original-version',state='started',
+            image_ref=dict(digest='pinned-image'),config=dict(init=dict(cmd=['sleep','infinity']),
+            restart=dict(policy='no'),mounts=[dict(volume=self.vol,path='/data')],services=[dict(protocol='tcp')]))
+        self.volume = dict(id=self.vol,attached_machine_id=self.mid)
+        case = self
+        class Provider:
+            app = 'test-app'
+            def __init__(self):
+                self.posts=[]; self.calls=[]; self.probes=0; self.drift=None; self.unknown=False
+                self.fail_stop=False; self.change_owner=False
+            def api(self, method, path, body=None, timeout=60):
+                self.calls.append((method,path))
+                if method == 'POST':
+                    self.posts.append(path)
+                    if self.fail_stop:
+                        raise case.ns['CaptureFailure']('ambiguous transport')
+                    case.machine['state']='stopped'
+                if path.startswith('/volumes/'):
+                    return copy.deepcopy(case.volume)
+                result=copy.deepcopy(case.machine)
+                if self.probes and self.drift:
+                    result[self.drift]='changed'
+                return result
+            def machine_exec_json(self, seconds, machine, command, **kwargs):
+                import ast,shlex
+                self.probes+=1
+                code=shlex.split(command)[-1]
+                tree=ast.parse(code)
+                output=next(n for n in ast.walk(tree) if isinstance(n,ast.Dict)
+                    and any(isinstance(k,ast.Constant)and k.value=='kind'for k in n.keys))
+                values={k.value:v for k,v in zip(output.keys,output.values)if isinstance(k,ast.Constant)}
+                nonce=ast.literal_eval(values['nonce'])
+                row=dict(kind='exact-inert-quiescence-v1',machine=machine,nonce=nonce,
+                    boot='0'*36,unknown=[dict(pid=99)]if self.unknown else[],inert_sleepers=[dict(pid=2,birth='3')])
+                if self.change_owner:
+                    case.put(case.registry/'meta',dict(case.meta,cleanup_policy='retain'))
+                # Exercise the actual production ACK predicate, not a replacement.
+                if not kwargs['validate_ack'](row):
+                    raise case.ns['Refusal']('bad ACK')
+                return row
+        self.fly=Provider()
+        self.original=self.files()
+
+    def put(self,p,v):
+        pairs(p,v)
+
+    def files(self):
+        return {str(p):p.read_bytes()for root in (self.registry,self.audit)
+                for p in root.rglob('*')if p.is_file()}
+
+    def call(self, **kwargs):
+        with patch.dict(self.ns['billing_stop_retained_owned'].__globals__,
+                        pid_birth_state=lambda *args:'live'):
+            return self.ns['billing_stop_retained_owned'](self.fly,self.registry,self.audit,
+                self.run,self.receipts,self.owner,os.getppid(),'fixture-birth',
+                joins_verified=kwargs.get('joins_verified',True))
+
+    def test_exact_inert_primary_or_worker_stops_once_retains_every_record(self):
+        result=self.call()
+        self.assertEqual(result['status'],'COMPLETE',result)
+        self.assertEqual(result['results'][0]['status'],'STOPPED_RETAINED')
+        self.assertEqual(self.fly.posts,['/machines/'+self.mid+'/stop'])
+        self.assertEqual(self.files(),self.original)
+        self.assertFalse(result['evidence_or_task_credit'])
+        second=self.call()
+        self.assertEqual(second['status'],'PENDING')
+        self.assertEqual(len(self.fly.posts),1)
+        self.assertTrue((self.receipts/self.mid/'result.private.json').is_file())
+
+    def test_already_stopped_has_no_probe_or_post_and_retains_latches(self):
+        self.machine['state']='stopped'
+        result=self.call()
+        self.assertEqual(result['results'][0]['status'],'ALREADY_STOPPED_RETAINED',result)
+        self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
+        self.assertEqual(self.files(),self.original)
+
+    def test_unjoined_retain_foreign_and_incomplete_have_no_native_calls(self):
+        for variant in ('unjoined','retain','foreign','partial','symlink'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                if variant=='retain':self.put(self.registry/'meta',dict(self.meta,cleanup_policy='retain'))
+                if variant=='foreign':self.put(self.registry/'meta',dict(self.meta,fleet_owner_token='f'*32))
+                if variant=='partial':self.put(self.audit/'fresh'/self.name,dict(disposition='ownership-pending'))
+                if variant=='symlink':
+                    (self.registry/'clones'/self.name).unlink()
+                    (self.registry/'clones'/self.name).symlink_to(self.audit/'meta')
+                result=self.call(joins_verified=variant!='unjoined')
+                self.assertEqual(result['status'],'PENDING',result)
+                self.assertEqual(self.fly.calls,[])
+
+    def test_config_version_image_volume_and_unknown_process_refuse_stop(self):
+        for variant in ('version','image','config','volume','unknown','claim','recovery'):
+            with self.subTest(variant=variant):
+                self.setUp()
+                if variant=='version':self.fly.drift='instance_id'
+                if variant=='image':self.fly.drift='image_ref'
+                if variant=='config':self.machine['config']['init']={'cmd':['task-driver']}
+                if variant=='volume':self.volume['attached_machine_id']='foreign'
+                if variant=='unknown':self.fly.unknown=True
+                if variant=='claim':write(self.base/'common/cloudbench-pool-claims'/self.mid,'foreign claim')
+                if variant=='recovery':(self.registry/'recovery-lock').mkdir()
+                result=self.call()
+                self.assertEqual(result['status'],'PENDING',result)
+                self.assertEqual(self.fly.posts,[])
+
+    def test_policy_changes_after_probe_refuse_and_ambiguous_stop_never_retries(self):
+        self.fly.change_owner=True
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual(self.fly.posts,[])
+        self.setUp()
+        self.fly.fail_stop=True
+        first=self.call()
+        self.assertEqual(first['status'],'PENDING')
+        self.assertTrue(first['results'][0]['stop_issued'])
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual(len(self.fly.posts),1)
+
+    def test_billing_guest_is_bounded_and_pins_both_platform_hashes(self):
+        code=self.ns['BILLING_GUEST'].replace('TARGET',repr(self.mid)).replace('NONCE',repr('d'*32))
+        compile(code,'billing-guest','exec')
+        import shlex
+        self.assertLessEqual(len(('python3 -I -S -B -c '+shlex.quote(code)).encode()),7000)
+        self.assertIn('7e42662dc2361058814d06b80bafbed13b7e8d6da4f477604001b54dc905ce52',code)
+        self.assertIn('02f70fcb946d386f697ad7fbe16d91a2f9243f85c6db583e3778582cd23b35c0',code)
+
+
+    def test_durable_final_pair_and_all_receipt_links_match_actual_bytes(self):
+        result=self.call()['results'][0]
+        folder=self.receipts/self.mid
+        saved=json.loads((folder/'result.private.json').read_bytes())
+        self.assertEqual(saved,result)
+        for filename,key in [('native-final.private.json','native_final_sha256'),
+                             ('intent.private.json','intent_sha256'),
+                             ('quiescence.private.json','quiescence_sha256')]:
+            p=folder/filename
+            self.assertEqual(hashlib.sha256(p.read_bytes()).hexdigest(),saved[key])
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode),0o600)
+        pair=json.loads((folder/'native-final.private.json').read_bytes())
+        self.assertEqual(pair,dict(machine=self.machine,volume=self.volume))
+        self.assertEqual(pair['machine']['state'],'stopped')
+        self.assertFalse(saved['native_release'])
+
+    def test_duplicate_audit_and_busy_recovery_guard_prevent_any_native_call(self):
+        self.put(self.audit/'fresh'/'cloudbench-duplicate',dict(machine_id=self.mid,volume_id=self.vol))
+        self.assertEqual(self.call()['status'],'PENDING')
+        self.assertEqual(self.fly.calls,[])
+        self.setUp()
+        import fcntl
+        guard=self.base/'common/cloudbench-fleet-recovery-locks'/self.owner
+        guard.parent.mkdir()
+        with guard.open('w')as f:
+            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(self.call()['status'],'PENDING')
+            self.assertEqual(self.fly.calls,[])
+
+    def test_actual_guest_scan_rejects_other_uids_permission_and_missing_exe(self):
+        # Execute the unmodified deployed scan AST over private /proc fixtures;
+        # only proc-root/UID observations are mapped, never the allow decisions.
+        import ast,types
+        tree=ast.parse(self.ns['BILLING_GUEST'])
+        functions=[n for n in tree.body if isinstance(n,ast.FunctionDef)]
+        start=next(i for i,n in enumerate(tree.body)if isinstance(n,ast.Assign)
+                   and any(isinstance(t,ast.Name)and t.id=='entries'for t in n.targets))
+        body=functions+tree.body[start:-1]
+        program=compile(ast.Module(body=body,type_ignores=[]),'actual-billing-scan','exec')
+        proc=self.base/'proc';process=proc/'123';process.mkdir(parents=True)
+        st=['S','1','0']+['0']*17;st[19]='42'
+        write(process/'stat','123 (fixture) '+' '.join(st))
+        write(process/'cmdline',b'sleep\0infinity\0')
+        (process/'exe').symlink_to('/bin/sleep')
+        real_stat=Path.stat;real_read=Path.read_bytes
+        for variant in ('inert','foreign-uid','permission','missing-exe'):
+            with self.subTest(variant=variant):
+                def mapped_path(value):return proc if value=='/proc'else Path(value)
+                def mapped_stat(path,*a,**kw):
+                    if path==process:return types.SimpleNamespace(st_uid=2000 if variant=='foreign-uid' else 1001)
+                    return real_stat(path,*a,**kw)
+                def mapped_read(path):
+                    if variant=='permission'and path==process/'cmdline':raise PermissionError('fixture')
+                    return real_read(path)
+                env=dict(Path=mapped_path,os=os,stat=stat,hashlib=hashlib,ancestors=set(),
+                         expected_sleep=Path('/bin/sleep').resolve(),sleep_stat=Path('/bin/sleep').stat())
+                if variant=='missing-exe':(process/'exe').unlink()
+                with patch.object(Path,'stat',mapped_stat),patch.object(Path,'read_bytes',mapped_read):
+                    if variant=='inert':
+                        exec(program,env)
+                        self.assertEqual(env['unknown'],[])
+                        self.assertEqual(len(env['allowed_sleep']),1)
+                    else:
+                        with self.assertRaises((AssertionError,PermissionError)):exec(program,env)
+
+    def test_actual_platform_identity_requires_each_exact_field(self):
+        import ast
+        function=next(n for n in ast.parse(self.ns['BILLING_GUEST']).body
+                      if isinstance(n,ast.FunctionDef)and n.name=='hallpass_identity')
+        env={};exec(compile(ast.Module(body=[function],type_ignores=[]),'actual-platform-identity','exec'),env)
+        values=[0,1,0,[b'/.fly/hallpass'],'/.fly/hallpass',
+                '7e42662dc2361058814d06b80bafbed13b7e8d6da4f477604001b54dc905ce52',True,True,0]
+        self.assertTrue(env['hallpass_identity'](*values))
+        for index,bad in enumerate([1,2,1,[b'hallpass'],'/tmp/hallpass','f'*64,False,False,1]):
+            altered=list(values);altered[index]=bad
+            self.assertFalse(env['hallpass_identity'](*altered))
+
+
+    def test_whole_cohort_owns_one_clock_and_preserves_shorter_caller_budget(self):
+        import signal
+        second='c'*14
+        row=dict(version='1',fleet_owner_token=self.owner,run_id=self.run.name,app='test-app',
+            source='fresh-clone',source_machine_id='d'*14,clone_name='cloudbench-second',
+            machine_id=second,volume_id='vol_second',disposition='owned')
+        self.put(self.audit/'fresh'/'cloudbench-second',row)
+        self.put(self.registry/'clones'/'cloudbench-second',dict(name='cloudbench-second',id=second,volume_id='vol_second'))
+        write(self.audit/'by-machine-id'/second,'cloudbench-second\n')
+        old_handler=signal.getsignal(signal.SIGALRM)
+        self.addCleanup(signal.signal,signal.SIGALRM,old_handler)
+        self.addCleanup(signal.setitimer,signal.ITIMER_REAL,0)
+        seen=[]
+        def bounded_target(*args):
+            remaining=signal.getitimer(signal.ITIMER_REAL)[0]
+            self.assertGreater(remaining,0,'whole-call clock missing before per-target work')
+            seen.append(remaining)
+            time.sleep(.01)
+        with patch.dict(self.ns['billing_stop_retained_owned'].__globals__,_billing_stop_one=bounded_target):
+            self.call()
+            self.assertEqual(len(seen),2)
+            self.assertLess(seen[1],seen[0])
+            self.assertLessEqual(seen[0],180)
+            self.assertEqual(signal.getitimer(signal.ITIMER_REAL),(0.0,0.0))
+            seen.clear()
+            signal.setitimer(signal.ITIMER_REAL,.5)
+            self.call()
+            self.assertLess(seen[0],.5)
+            self.assertLess(seen[1],seen[0])
+            self.assertLess(signal.getitimer(signal.ITIMER_REAL)[0],seen[0])
+
+
+    def test_metadata_publication_does_not_extend_real_blocking_guest_deadline(self):
+        import signal
+        prior_handler=signal.getsignal(signal.SIGALRM)
+        prior_timer=signal.getitimer(signal.ITIMER_REAL)
+        self.addCleanup(signal.signal,signal.SIGALRM,prior_handler)
+        self.addCleanup(signal.setitimer,signal.ITIMER_REAL,*prior_timer)
+        raw_publish=self.ns['publish_bytes']
+        def delayed_publish(path,data):
+            if path.name=='owner-snapshot.private.json':time.sleep(.25)
+            return raw_publish(path,data)
+        guest_limits=[]
+        def blocking_guest(seconds,*args,**kwargs):
+            guest_limits.append(seconds)
+            time.sleep(3)  # deliberately ignores socket/transport timeout
+            raise AssertionError('absolute wall alarm did not stop guest tail')
+        self.fly.machine_exec_json=blocking_guest
+        signal.signal(signal.SIGALRM,lambda *unused:None)
+        signal.setitimer(signal.ITIMER_REAL,1.5)
+        started=time.monotonic()
+        try:
+            with patch.dict(self.ns['billing_stop_retained_owned'].__globals__,publish_bytes=delayed_publish):
+                result=self.call()
+            elapsed=time.monotonic()-started
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0)
+        self.assertEqual(result['status'],'PENDING')
+        self.assertEqual(self.fly.posts,[])
+        self.assertTrue(guest_limits,'actual guest dispatch must be reached')
+        self.assertLess(elapsed,1.62,'metadata publication was added back to whole-call deadline')
+        self.assertEqual(guest_limits,[1],'integer guest timeout must fit remaining original clock')
+
+
 if __name__ == "__main__":
     unittest.main()

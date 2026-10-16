@@ -253,13 +253,12 @@ per-bench-isolated cloud fleet. Use --local first to opt into local execution.
 Startup reuse:
   Completed dependency snapshots are reused automatically, including from a
   fresh checkout. Source-only changes synchronize code after boot.
-  --provision-pool N  Prepare N stopped, reusable task Machines once. Ordinary
-                      runs automatically claim and return this workspace pool.
-                      Stopped Machines retain billable volume storage.
+  --provision-pool N  Legacy new-pool request; refused without measured new-Machine
+                      admission. Ordinary runs reuse eligible existing pool IDs.
   --cold-handoff-request REQUEST SHA256  Internal exact cold-controller handoff; no provisioning.
   --cold-primary-bootstrap  Explicit future empty-checkout policy for verified cold primaries.
-  --reuse-pool-only  Use eligible owned stopped primary pool IDs only; no primary
-                      cloning. Additional worker admission is unchanged.
+  --reuse-pool-only  Default: eligible owned stopped primary IDs. Pool misses and
+                      additional workers refuse new allocation; no silent clone.
   --recover-stale-owner-to-pool TOKEN
                       Exact canonical recovery, preserving proven stopped
                       primaries in this workspace pool; requires sealed evidence.

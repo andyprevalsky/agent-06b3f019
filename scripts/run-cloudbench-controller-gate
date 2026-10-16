@@ -28,6 +28,14 @@
 set -euo pipefail
 ROOT_DIR="${CLOUDBENCH_GATE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 cd "$ROOT_DIR"
+controller_machine_creation_admission() {
+  echo "Controller capacity gap: reuse an existing retained controller; new Machine creation requires measured admission, which this entrypoint does not provide." >&2
+  return 78
+}
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
+fi
+controller_machine_creation_admission || exit $?
 # Bash reads a script incrementally. A fix landing in this file while a gate is
 # running (2026-10-06) made the running controller resume at a shifted offset
 # and die with a syntax error after GATE_RESULT, before it could fetch the
@@ -97,7 +105,9 @@ CONTROLLER_IMAGE_SUITES=(
 )
 
 SUITES=()
-if [ "${1:-}" = "--" ]; then
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0
+elif [ "${1:-}" = "--" ]; then
   shift
   [ "$#" -gt 0 ] || { echo "usage: scripts/run-cloudbench-controller-gate -- <command to run in the repo on the machine>" >&2; exit 2; }
   # One remote command; each argument stays a separate word on the machine.
@@ -109,6 +119,10 @@ else
   SUITES=("${DEFAULT_SUITES[@]}")
   RUN_CONTROLLER_IMAGE_SUITES=1
 fi
+
+# This public route always allocates a controller. Existing-controller reuse
+# requires the separately verified retained-host caller, never an implicit run.
+controller_machine_creation_admission || exit $?
 
 if [ -z "${FLY_API_TOKEN:-}" ]; then
   FLY_API_TOKEN="$(grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' || true)"
@@ -338,6 +352,7 @@ fd=os.open(Path(path).parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(f
 PY_WORKSPACE_INTENT
 )"
   VOLUME_CREATE_STATUS=0
+  controller_machine_creation_admission || exit $?
   flyctl volumes create "$WORKSPACE_VOLUME_NAME" --app "$APP" --region "$REGION" --size "$WORKSPACE_VOLUME_SIZE_GB" --vm-size "$VM_SIZE" --vm-memory "$VM_MEMORY" --json --yes > "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" 2> "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" || VOLUME_CREATE_STATUS=$?
   python3 -I -B - "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.private.json" "$GATE_EXPORT_LOCAL_DIR/workspace-volume-create.stderr.private.log" <<'PY_SYNC_NATIVE'
 import os,sys
@@ -362,6 +377,7 @@ PY_WORKSPACE_SEAL
   WORKSPACE_VOLUME_SHA="$(sha256sum "$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json" | awk '{print $1}')"
   GATE_EXPORT_FILES+=(-e "GATE_WORKSPACE_VOLUME_ID=$WORKSPACE_VOLUME_ID" -e "GATE_WORKSPACE_VOLUME_SHA256=$WORKSPACE_VOLUME_SHA" --file-local "/tmp/controller-host-workspace.json=$GATE_EXPORT_LOCAL_DIR/workspace-volume.ownership.json")
 fi
+controller_machine_creation_admission || exit $?
 RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"
 # flyctl's own start wait is shorter than a cold 2 GB image pull and then exits
 # non-zero even though the machine comes up; the machine id in its output is

@@ -2526,11 +2526,19 @@ fi
 
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
 # ═════════════════════════════════════════════════════════════════════════════
+warm_source_machine_creation_admission() {
+    echo "❌ warm-source capacity gap: reuse an existing owned warm Machine; new Machine creation is withheld without measured admission" >&2
+    return 78
+}
 if [ "$MODE" = "setup" ]; then
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
     echo ""
 
+    # Resolve before app/secrets/build/volume mutations. An absent or unsafe
+    # warm source is an admission gap, never permission to create another one.
+    setup_existing_machine="$(resolve_machine_id)" || { warm_source_machine_creation_admission; exit 78; }
+    [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
     ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     trap 'release_app_environment_lock' EXIT
@@ -2554,6 +2562,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         echo "✅ Volume $VOLUME_NAME already exists"
     else
         echo "💽 Creating volume $VOLUME_NAME (${VOLUME_SIZE}GB, region $REGION) ..."
+        warm_source_machine_creation_admission || exit $?
         FLY volumes create "$VOLUME_NAME" -a "$APP" --region "$REGION" --size "$VOLUME_SIZE" --yes 2>&1 | sed 's/^/   /' || {
             echo "❌ Failed to create volume"; exit 1
         }
@@ -2571,6 +2580,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         echo "✅ Persistent machine already exists: $mid (image refreshed)"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
+        warm_source_machine_creation_admission || exit $?
         RUN_LOG="$(mktemp)"
         FLY machine run "$IMAGE_REF" \
             -a "$APP" \

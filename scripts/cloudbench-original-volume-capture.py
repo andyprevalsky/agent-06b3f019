@@ -55,6 +55,7 @@ import runpy
 import shutil
 import signal
 import socket
+import shlex
 import stat
 import subprocess
 import sys
@@ -1081,6 +1082,436 @@ def restore_only(args: argparse.Namespace) -> int:
         return 0
     finally:
         lock.release()
+
+
+BILLING_GUEST = r'''from pathlib import Path
+import os,json,hashlib,stat,time,signal
+signal.alarm(20)
+assert os.getuid()==0 and os.environ.get('FLY_MACHINE_ID')==TARGET
+boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip();assert len(boot)==36
+expected_sleep=Path('/bin/sleep').resolve(strict=True);sleep_stat=expected_sleep.stat();assert stat.S_ISREG(sleep_stat.st_mode)and sleep_stat.st_uid==0
+def stable(p,first):
+ last=(p/'stat').read_text().split(') ',1)[1].split();assert last[19]==first[19]and last[0]!='Z'
+ return True
+ancestors={os.getpid()};pid=os.getpid()
+while pid>1:
+ raw=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split();pid=int(raw[1]);ancestors.add(pid)
+def hallpass_identity(uid,ppid,pgid,args,path,digest,birth_stable,regular,owner):
+ return uid==0 and ppid==1 and pgid==0 and args==[b'/.fly/hallpass']and path=='/.fly/hallpass'and digest in {'7e42662dc2361058814d06b80bafbed13b7e8d6da4f477604001b54dc905ce52','02f70fcb946d386f697ad7fbe16d91a2f9243f85c6db583e3778582cd23b35c0'}and birth_stable is True and regular is True and owner==0
+def hallpass_binary(exe):
+ if exe!=Path('/.fly/hallpass'):return 'UNMEASURED',False,-1
+ fd=os.open(exe,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  a=os.fstat(fd)
+  if not stat.S_ISREG(a.st_mode)or a.st_uid!=0 or a.st_size>16777216:return 'UNMEASURED',False,a.st_uid
+  h=hashlib.sha256();count=0
+  while count<a.st_size:
+   b=os.read(fd,min(65536,a.st_size-count));assert b;count+=len(b);h.update(b)
+  z=os.fstat(fd);assert(a.st_dev,a.st_ino,a.st_mode,a.st_uid,a.st_gid,a.st_nlink,a.st_size,a.st_mtime_ns)==(z.st_dev,z.st_ino,z.st_mode,z.st_uid,z.st_gid,z.st_nlink,z.st_size,z.st_mtime_ns)and stat.S_ISREG(z.st_mode)and z.st_uid==0
+  return h.hexdigest(),True,a.st_uid
+ finally:os.close(fd)
+entries=[p for p in Path('/proc').iterdir()if p.name.isdigit()];assert len(entries)<=4096
+unknown=[];allowed_sleep=[];idle_agents=[];platform_hallpass=[]
+for p in entries:
+ if int(p.name)in ancestors:continue
+ try:
+  st=(p/'stat').read_text().split(') ',1)[1].split()
+  if st[0]=='Z':continue
+  args=[x for x in (p/'cmdline').read_bytes().split(b'\0')if x];uid=p.stat().st_uid
+  if not args and uid==0 and int(st[6])&0x200000:continue
+  exe=(p/'exe').resolve(strict=True)
+  if args in [[b'sleep',b'infinity'],[b'/bin/sleep',b'infinity'],[b'/usr/bin/sleep',b'infinity']]and exe==expected_sleep and uid in [0,1001]and (exe.stat().st_dev,exe.stat().st_ino)==(sleep_stat.st_dev,sleep_stat.st_ino)and stable(p,st):allowed_sleep.append({'pid':int(p.name),'birth':st[19]});continue
+  if uid==1001 and st[1]=='1'and args[1:]==[b'agent',b'run']and exe.name=='flyctl'and hashlib.sha256(exe.read_bytes()).hexdigest()=='5041b9a563fff170fda4238b47048e9a5e714fc7ed2304668fd44bcdcd3bef83'and stable(p,st):idle_agents.append({'pid':int(p.name),'birth':st[19]});continue
+  if uid==0 and st[1]=='1'and st[2]=='0'and args==[b'/.fly/hallpass']and exe==Path('/.fly/hallpass'):
+   digest,regular,owner=hallpass_binary(exe)
+   if hallpass_identity(uid,int(st[1]),int(st[2]),args,str(exe),digest,stable(p,st),regular,owner):
+    assert not platform_hallpass,'multiple platform hallpass processes'
+    platform_hallpass.append({'pid':int(p.name),'birth':st[19],'role':'exact-pinned-platform-hallpass'});continue
+  unknown.append({'pid':int(p.name),'birth':st[19],'uid':uid})
+ except FileNotFoundError:
+  try:still=(p/'stat').read_text().split(') ',1)[1].split()
+  except FileNotFoundError:continue
+  assert still[0]=='Z','unreadable still-live process'
+assert not unknown and allowed_sleep
+print(json.dumps({'kind':'exact-inert-quiescence-v1','machine':TARGET,'nonce':NONCE,'boot':boot,'unknown':unknown,'inert_sleepers':allowed_sleep,'idle_pinned_agents':idle_agents,'idle_platform_hallpass':platform_hallpass,'observed_epoch':time.time()}))
+'''
+
+
+# Billing custody is deliberately separate from recovery/evidence acceptance.
+# Only exact fresh inert allocations are supported; other phases remain PENDING.
+BILLING_SCHEMA = 'cloudbench-billing-stop-retain-v1'
+
+
+def _billing_require(ok, reason):
+    if not ok:
+        raise Refusal(reason)
+
+
+def _billing_file(path, limit=65536):
+    path = Path(path)
+    _billing_require(path.resolve() == path, 'unsafe ownership pathname')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        _billing_require(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+                         and before.st_nlink == 1 and before.st_size <= limit,
+                         'unsafe ownership file')
+        data = b''
+        while len(data) <= limit:
+            chunk = os.read(fd, min(65536, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        after, current = os.fstat(fd), path.lstat()
+        identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                              s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        _billing_require(len(data) == before.st_size and identity(before) == identity(after)
+                         == identity(current), 'ownership file changed')
+        return data
+    finally:
+        os.close(fd)
+
+
+def _billing_fields(path):
+    result = {}
+    for line in _billing_file(path).decode().splitlines():
+        key, sep, value = line.partition('=')
+        _billing_require(sep and key and key not in result, 'malformed ownership record')
+        result[key] = value
+    return result
+
+
+def _billing_tree(root):
+    """Bounded metadata originals, including latches; never edit their contents."""
+    result, total = {}, 0
+    paths = [root]
+    while paths:
+        path = paths.pop()
+        _billing_require(len(result) < 8192 and path.resolve() == path, 'ownership tree bound/path')
+        info = path.lstat()
+        _billing_require(info.st_uid == os.getuid(), 'foreign ownership tree')
+        if stat.S_ISDIR(info.st_mode):
+            result[str(path)] = ('directory', info.st_dev, info.st_ino, info.st_mode)
+            paths.extend(sorted(path.iterdir()))
+        else:
+            _billing_require(stat.S_ISREG(info.st_mode), 'unsupported ownership file type')
+            _billing_require(info.st_size <= min(65536, 8388608-total), 'ownership aggregate bound')
+            raw = _billing_file(path)
+            total += len(raw)
+            result[str(path)] = ('file', info.st_dev, info.st_ino, info.st_mode, sha(raw))
+    return result
+
+
+def _billing_lock(path):
+    """Share canonical recovery/claim inodes; never unlink or replace them."""
+    if not path.parent.exists():
+        path.parent.mkdir(mode=0o700)
+        fsync_directory(path.parent.parent)
+    exact_directory(path.parent, 'billing guard parent')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info, current = os.fstat(fd), path.lstat()
+        _billing_require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                         and info.st_nlink == 1 and (info.st_dev, info.st_ino)
+                         == (current.st_dev, current.st_ino), 'unsafe billing guard')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fsync_directory(path.parent)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _billing_local(registry, audit, run_dir, owner, owner_pid, owner_birth, joins_verified):
+    _billing_require(joins_verified is True, 'producer joins are unconfirmed')
+    registry, audit, run_dir = [exact_directory(Path(p), 'billing owner path')
+                                for p in (registry, audit, run_dir)]
+    _billing_require(re.fullmatch(r'[0-9a-f]{32}', owner) and registry.name == audit.name == owner
+                     and registry.parent.name == 'cloudbench-fleet-ownership', 'foreign owner path')
+    meta, am = _billing_fields(registry/'meta'), _billing_fields(audit/'meta')
+    _billing_require(meta.get('version') == '2' and am.get('version') == '1'
+                     and meta.get('cleanup_policy') == 'reap', 'protected or unsupported policy')
+    _billing_require(meta.get('fleet_owner_token') == owner and am.get('fleet_owner_token') == owner
+                     and meta.get('run_id') == am.get('run_id') == run_dir.name
+                     and meta.get('app') == am.get('app') and SAFE_TOKEN.fullmatch(meta.get('app', ''))
+                     and meta.get('workspace_root') == am.get('workspace_root')
+                     and Path(meta.get('audit_dir', '')) == audit
+                     and Path(meta.get('runs_root', '')) / run_dir.name == run_dir,
+                     'owner/audit/run mismatch')
+    _billing_require(str(owner_pid) == meta.get('pid') and owner_birth == meta.get('pid_start')
+                     and meta.get('host') == socket.gethostname()
+                     and pid_birth_state(str(owner_pid), owner_birth) == 'live', 'caller birth mismatch')
+    # The caller is the current joined controller, not a successor guessing that
+    # an old PID is idle. Recovery and migration authority must remain separate.
+    _billing_require(int(owner_pid) == os.getppid(), 'not the current cleanup caller')
+    for name in ('recovery-lock', 'cold-handoff-outgoing'):
+        _billing_require(not lexists(registry/name), 'recovery/migration authority present')
+    _billing_require(am.get('status') == 'incomplete', 'audit is not current')
+    return registry, audit, run_dir, meta
+
+
+def billing_stop_retained_owned(fly, registry, audit, run_dir, receipt_root,
+                                expected_owner, owner_pid, owner_birth, *, joins_verified=False):
+    """One whole-call 180s ceiling, shortened by any existing caller deadline."""
+    import threading
+    pending = {'schema': BILLING_SCHEMA, 'owner': expected_owner, 'status': 'PENDING',
+               'results': [], 'evidence_or_task_credit': False, 'native_release': False,
+               'all_ownership_records_retained': True}
+    if threading.current_thread() is not threading.main_thread():
+        return dict(pending, reason='main-thread-deadline-required')
+    timer, handler = signal.getitimer(signal.ITIMER_REAL), signal.getsignal(signal.SIGALRM)
+    if timer[1] != 0:
+        return dict(pending, reason='periodic-caller-timer-unsupported')
+    started = time.monotonic()
+    budget = min(180, timer[0]) if timer[0] > 0 else 180
+    def expired(*unused):
+        raise TimeoutError('billing whole-call deadline')
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    try:
+        return _billing_stop_retained_owned(fly, registry, audit, run_dir, receipt_root,
+            expected_owner, owner_pid, owner_birth, joins_verified=joins_verified,
+            deadline=started+budget)
+    except TimeoutError:
+        return dict(pending, reason='whole-call-deadline-receipts-retained')
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, handler)
+        if timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, timer[0]-(time.monotonic()-started)))
+
+
+def _billing_stop_retained_owned(fly, registry, audit, run_dir, receipt_root,
+                                 expected_owner, owner_pid, owner_birth, *, joins_verified, deadline):
+    """Physical STOP only. No recovery, grade, latch, claim or policy acceptance.
+
+    Call synchronously from the current fleet cleanup child after all producers
+    and collectors have joined. Receipts use one stable private run directory;
+    an existing per-Machine directory always prevents a repeated STOP attempt.
+    Pool/warm, configured and incomplete allocation phases stay PENDING.
+    """
+    summary = {'schema': BILLING_SCHEMA, 'owner': expected_owner, 'results': [],
+               'evidence_or_task_credit': False, 'native_release': False,
+               'all_ownership_records_retained': True}
+    guard = -1
+    try:
+        import threading
+        _billing_require(threading.current_thread() is threading.main_thread(),
+                         'billing must own a main-thread deadline')
+        registry, audit, run_dir, meta = _billing_local(
+            registry, audit, run_dir, expected_owner, owner_pid, owner_birth, joins_verified)
+        _billing_require(getattr(fly, 'app', None) == meta['app'], 'client app mismatch')
+        common = registry.parent.parent
+        guard = _billing_lock(common/'cloudbench-fleet-recovery-locks'/expected_owner)
+        original = (_billing_tree(registry), _billing_tree(audit))
+        receipts = Path(receipt_root)
+        _billing_require(receipts.parent == run_dir/'_batch' and receipts.name == 'billing-stop-retain',
+                         'receipt root is not the stable run billing namespace')
+        exact_directory(receipts.parent, 'batch')
+        private_capture_dir(receipts, True)
+        _billing_require(receipts.resolve() == receipts, 'unsafe receipt root')
+        # No pool claim is billing-stop authority; preserve those warm resources.
+        fresh = exact_directory(audit/'fresh', 'fresh audit')
+        entries = sorted(fresh.iterdir())
+        _billing_require(len(entries) <= 2048, 'audit cardinality bound')
+        clones = exact_directory(registry/'clones', 'registry clones')
+        _billing_require({p.name for p in clones.iterdir()} <= {p.name for p in entries},
+                         'registry allocation has no audit record')
+        owned_rows = [_billing_fields(record) for record in entries]
+        ids = [row['machine_id'] for row in owned_rows if row.get('machine_id')]
+        volumes = [row['volume_id'] for row in owned_rows if row.get('volume_id')]
+        _billing_require(len(ids) == len(set(ids)) and len(volumes) == len(set(volumes)),
+                         'duplicate allocation ownership')
+        seen = set()
+        for record, row in zip(entries, owned_rows):
+            result = {'record': record.name, 'status': 'PENDING', 'stop_issued': False,
+                      'native_release': False, 'evidence_or_task_credit': False}
+            if time.monotonic() >= deadline:
+                summary['results'].append(dict(result, reason='whole-call-deadline'))
+                continue
+            try:
+                mid, vol = row.get('machine_id', ''), row.get('volume_id', '')
+                _billing_require(row.get('disposition') == 'owned' and row.get('version') == '1'
+                                 and row.get('source') == 'fresh-clone'
+                                 and row.get('fleet_owner_token') == expected_owner
+                                 and row.get('run_id') == run_dir.name and row.get('app') == meta['app']
+                                 and row.get('clone_name') == record.name
+                                 and re.fullmatch(r'cloudbench-[A-Za-z0-9._-]+', record.name)
+                                 and re.fullmatch(r'[0-9a-f]{14}', mid)
+                                 and re.fullmatch(r'vol_[A-Za-z0-9]+', vol)
+                                 and mid not in seen, 'unsupported or ambiguous allocation')
+                seen.add(mid)
+                _billing_require(_billing_file(audit/'by-machine-id'/mid).decode().strip() == record.name
+                                 and _billing_fields(registry/'clones'/record.name)
+                                 == {'name': record.name, 'id': mid, 'volume_id': vol}, 'clone binding mismatch')
+                result['machine'] = mid
+                _billing_stop_one(fly, registry, audit, meta, original, common,
+                                  mid, vol, record.name, receipts, result)
+            except (Refusal, OSError, ValueError, TimeoutError, CaptureFailure, NotFound) as error:
+                result['reason_class'] = type(error).__name__
+            summary['results'].append(result)
+        pool = audit/'pool'
+        if lexists(pool):
+            exact_directory(pool, 'pool audit')
+            for path in sorted(pool.iterdir()):
+                summary['results'].append({'record': path.name, 'status': 'PENDING',
+                                           'reason': 'unsupported-pool-or-warm', 'stop_issued': False})
+        summary['status'] = 'COMPLETE' if summary['results'] and all(
+            r['status'] in ('STOPPED_RETAINED', 'ALREADY_STOPPED_RETAINED')
+            for r in summary['results']) else 'PENDING'
+    except (Refusal, OSError, ValueError, TimeoutError) as error:
+        summary.update(status='PENDING', reason_class=type(error).__name__)
+    finally:
+        if guard >= 0:
+            os.close(guard)
+    return summary
+
+
+def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result):
+    import secrets
+    # This shared per-Machine inode prevents concurrent claim publication. Any
+    # existing claim, even a dead one, is left to its ordinary recovery owner.
+    claims = common/'cloudbench-pool-claims'
+    if not claims.exists():
+        claims.mkdir(mode=0o700)
+        fsync_directory(common)
+    exact_directory(claims, 'claims')
+    lock = _billing_lock(claims/'.locks'/(mid+'.lock'))
+    prior_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
+    target = receipts/mid
+    created = False
+    try:
+        _billing_require(not lexists(claims/mid), 'claim is retained')
+        # mkdir is the once-intent: never resume or retry ambiguous dispatches.
+        target.mkdir(mode=0o700)
+        created = True
+        fsync_directory(receipts)
+        nonce = secrets.token_hex(16)
+        publish_bytes(target/'owner-snapshot.private.json', canonical(original))
+        intent = canonical({'schema': BILLING_SCHEMA,
+            'machine': mid, 'volume': vol, 'owner': registry.name, 'nonce': nonce,
+            'owner_records_sha256': sha(canonical(original)), 'epoch': time.time(),
+            'helper_sha256': sha(_billing_file(Path(__file__).resolve(), 4194304)),
+            'guest_source_sha256': sha(BILLING_GUEST.encode())})
+        publish_bytes(target/'intent.private.json', intent)
+        _billing_require(prior_timer[1] == 0, 'periodic caller timer unsupported')
+        duration = min(180, prior_timer[0]) if prior_timer[0] > 0 else 180
+        deadline = started + duration
+        def expired(*unused):
+            raise TimeoutError('billing absolute deadline')
+        # Publication above consumed the existing whole-call clock. Never add
+        # that elapsed time back when installing the nested target handler.
+        remaining = min(deadline-time.monotonic(), signal.getitimer(signal.ITIMER_REAL)[0])
+        _billing_require(remaining > 0, 'billing deadline expired during publication')
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+        def api(method, path, body=None, bound=deadline):
+            remaining = min(deadline, bound)-time.monotonic()
+            _billing_require(remaining > 0, 'billing deadline expired')
+            before = signal.getitimer(signal.ITIMER_REAL)[0]
+            call_start = time.monotonic()
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, min(before, remaining, 20)))
+            try:
+                answer = fly.api(method, path, body, timeout=min(20, remaining))
+                _billing_require(time.monotonic() < min(deadline, bound), 'late API return')
+                return answer
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, max(0.000001, before-(time.monotonic()-call_start)))
+        pinned = None
+        final_pair = None
+        def pair(bound=deadline):
+            nonlocal pinned, final_pair
+            machine = api('GET', '/machines/'+mid, bound=bound)
+            volume = api('GET', '/volumes/'+vol, bound=bound)
+            _billing_require(isinstance(machine, dict) and isinstance(volume, dict)
+                             and isinstance(machine.get('config'), dict)
+                             and isinstance(machine.get('image_ref'), dict), 'malformed native pair')
+            cfg = machine.get('config', {})
+            identity = (machine.get('id'), machine.get('name'), machine.get('instance_id'),
+                        sha(canonical(cfg)), machine.get('image_ref', {}).get('digest'))
+            _billing_require(identity[0:2] == (mid, name) and bool(identity[2])
+                             and isinstance(identity[4], str) and bool(identity[4])
+                             and machine.get('state') in ('started', 'stopping', 'stopped')
+                             and volume.get('id') == vol and volume.get('attached_machine_id') == mid,
+                             'native ownership mismatch')
+            _billing_require(cfg.get('init') == {'cmd': INERT_CMD} and cfg.get('env') in (None, {})
+                             and cfg.get('restart') == {'policy': 'no'}
+                             and cfg.get('auto_destroy', False) is False
+                             and isinstance(cfg.get('mounts'), list) and len(cfg['mounts']) == 1
+                             and isinstance(cfg['mounts'][0], dict)
+                             and cfg['mounts'][0].get('volume') == vol, 'unsupported inert config')
+            if pinned is None:
+                pinned = identity
+                publish_bytes(target/'native-before.private.json', canonical({'machine': machine, 'volume': volume}))
+            _billing_require(identity == pinned, 'native config/version/image changed')
+            final_pair = {'machine': machine, 'volume': volume}
+            return machine
+        def local_unchanged():
+            _billing_require((_billing_tree(registry), _billing_tree(audit)) == original
+                             and not lexists(claims/mid)
+                             and pid_birth_state(meta['pid'], meta['pid_start']) == 'live',
+                             'owner/claim changed')
+        local_unchanged()
+        machine = pair()
+        if machine['state'] == 'stopped':
+            _billing_require(pair()['state'] == 'stopped', 'stopped state changed')
+            local_unchanged()
+            result['status'] = 'ALREADY_STOPPED_RETAINED'
+        else:
+            _billing_require(machine['state'] == 'started', 'not started')
+            code = BILLING_GUEST.replace('TARGET', repr(mid)).replace('NONCE', repr(nonce))
+            command = 'python3 -I -S -B -c '+shlex.quote(code)
+            _billing_require(len(command.encode()) <= 7000, 'guest command size')
+            def ack(row):
+                return (isinstance(row, dict) and row.get('kind') == 'exact-inert-quiescence-v1'
+                        and row.get('machine') == mid and row.get('nonce') == nonce
+                        and isinstance(row.get('boot'), str) and len(row['boot']) == 36
+                        and row.get('unknown') == [] and bool(row.get('inert_sleepers')))
+            guest_seconds = int(min(30, deadline-time.monotonic()))
+            _billing_require(guest_seconds > 0, 'insufficient guest deadline remaining')
+            guest = fly.machine_exec_json(guest_seconds, mid, command, max_command_bytes=7000,
+                                         max_response_bytes=65536, validate_ack=ack)
+            _billing_require(time.monotonic() < deadline, 'late guest return')
+            _billing_require(ack(guest), 'guest ACK mismatch')
+            publish_bytes(target/'quiescence.private.json', canonical(guest))
+            _billing_require(pair()['state'] == 'started', 'post-probe state changed')
+            local_unchanged()
+            publish_bytes(target/'stop.intent.private.json', canonical({'machine': mid, 'nonce': nonce,
+                                                                        'instance': pinned[2]}))
+            result['stop_issued'] = True
+            api('POST', '/machines/'+mid+'/stop', {})
+            confirmation = min(deadline, time.monotonic()+90)
+            while True:
+                machine = pair(confirmation)
+                if machine['state'] == 'stopped':
+                    break
+                time.sleep(min(2, max(0, confirmation-time.monotonic())))
+            local_unchanged()
+            result['status'] = 'STOPPED_RETAINED'
+        native_final = canonical(final_pair)
+        publish_bytes(target/'native-final.private.json', native_final)
+        result.update(all_config_and_volume_retained=True, native_release=False,
+                      evidence_or_task_credit=False, native_final_sha256=sha(native_final),
+                      intent_sha256=sha(intent), owner_records_sha256=sha(canonical(original)),
+                      helper_sha256=json.loads(intent)['helper_sha256'],
+                      guest_source_sha256=sha(BILLING_GUEST.encode()))
+        if lexists(target/'quiescence.private.json'):
+            result['quiescence_sha256'] = sha(_billing_file(target/'quiescence.private.json'))
+        publish_bytes(target/'result.private.json', canonical(result))
+    except (Refusal, OSError, ValueError, TimeoutError, CaptureFailure, NotFound) as error:
+        result['status'] = 'PENDING'
+        if created and target.is_dir() and not lexists(target/'result.private.json'):
+            # Diagnostic private originals never escape into the safe summary.
+            publish_bytes(target/'failure.original.private.txt', str(error).encode()[:65536])
+        raise
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if prior_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, prior_timer[0]-(time.monotonic()-started)))
+        os.close(lock)
 
 
 def main(argv: list[str]) -> int:

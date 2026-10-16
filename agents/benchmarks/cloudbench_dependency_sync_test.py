@@ -52,7 +52,7 @@ WORKER_SCRIPT = ROOT / "scripts" / "cloudbench-worker.sh"
 FLEET_SCRIPT = Path(os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", ROOT / "scripts" / "run-bench-fleet"))
 FLEET_CANARY_SCRIPT = ROOT / "scripts" / "run-fleet-infra-canary"
 FLEET_CANARY_PREFLIGHT_SCRIPT = ROOT / "scripts" / "cloudbench-infra-canary-preflight.py"
-CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
+CLOUD_SCRIPT = Path(os.environ.get("CLOUDBENCH_CLOUD_SCRIPT_UNDER_TEST", ROOT / "scripts" / "run-bench-cloud"))
 HUB_POLLER_SCRIPT = ROOT / "scripts" / "run-bench-hub-poller"
 CLOUDBENCH_RESULT_SCRIPT = ROOT / "scripts" / "cloudbench_result.py"
 EXECUTION_PROVENANCE_SCRIPT = ROOT / "scripts" / "cloudbench_execution_provenance.py"
@@ -4200,6 +4200,7 @@ bootstrap_checkout_ref
 def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Path) -> None:
     """Storage, upload, and readiness failures must remain diagnosable while
     the failed worker is removed so replacement capacity can be created."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
     reap = "\n".join(
@@ -4362,7 +4363,7 @@ else
 fi
 """
         result = subprocess.run(
-            ["bash", "-c", script],
+            ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
             text=True,
             capture_output=True,
             check=False,
@@ -4433,6 +4434,7 @@ def test_autoscaler_scale_down_cancels_pending_worker_contract_is_rejected(
     tmp_path: Path,
 ) -> None:
     """A transient low target cannot revoke capacity committed to staging."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
     ready_count = _extract_fleet_function(fleet, "_ready_pool_ids() {")
@@ -4565,7 +4567,7 @@ test -e "$OUT/autoscaler.completed-after-child"
 """
 
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         text=True,
         capture_output=True,
         check=False,
@@ -4650,6 +4652,7 @@ def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle
     The original provisioning error stays visible, while the worker id remains
     tracked so controller teardown can retry deletion.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
@@ -4678,7 +4681,7 @@ provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} 
 exit $?
 """
 
-    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], text=True, capture_output=True, check=False, timeout=10)
 
     assert result.returncode != 0
     assert reaped.read_text().strip() == "deadbeef000001"
@@ -4880,6 +4883,7 @@ def test_ready_reconciliation_uses_worker_ledger_lock_and_never_duplicates_id(
     tmp_path: Path,
 ) -> None:
     """Concurrent readiness publishers serialize with cleanup's ownership ledger."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     bundle = "\n".join(
         (
@@ -4908,7 +4912,7 @@ wait "$second"
 test "$(grep -Fxc {worker_id} "$OUT/worker-ready.ids")" = 1
 test ! -e "$OUT/worker-clones.ids.lock"
 """
-    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
 
     cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
@@ -4920,6 +4924,7 @@ test ! -e "$OUT/worker-clones.ids.lock"
 
 def test_worker_numeric_settings_are_validated_independently(tmp_path: Path) -> None:
     """Colon-bearing values must never reach numeric tests or seq."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
@@ -4952,7 +4957,7 @@ test ! -s {shlex.quote(str(output / "worker-clones.ids"))}
 grep -q 'invalid worker stage/readiness timeout configuration' {shlex.quote(str(output / "autoscaler.failed"))}
 exit 0
 """
-        result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
+        result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], text=True, capture_output=True, check=False, timeout=10)
         assert result.returncode == 0, result.stderr + result.stdout
         assert reaped.read_text().strip() == "deadbeef000003"
 
@@ -6255,6 +6260,7 @@ def test_autoscaler_worker_clone_failure_sets_the_fatal_marker(tmp_path: Path) -
     nonzero helper status is insufficient: the durable failure marker is the
     controller's authoritative final gate.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     provision_worker = _extract_fleet_function(fleet_source_text(), "provision_worker() {")
     output = tmp_path / "bench"
     output.mkdir()
@@ -6271,7 +6277,7 @@ cloudbench_capture_worker_runtime_evidence() {{ :; }}
 provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
 """
 
-    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], text=True, capture_output=True, check=False)
 
     assert result.returncode != 0
     failure = output / "autoscaler.failed"
@@ -6326,6 +6332,7 @@ def test_autoscaled_worker_uses_authenticated_fetch_ref_helper(
     joining the benchmark queue; raw git fetch can fail on private refs and
     leave the controller waiting for a health endpoint that will never appear.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     worker = WORKER_SCRIPT.read_text()
     fleet = fleet_source_text()
     token_helper = _extract_fleet_function(fleet, "controller_github_token_b64() {")
@@ -6418,7 +6425,7 @@ done
 [ -e {shlex.quote(str(output / "worker-feedface000001.ready"))} ] || exit 90
 """
 
-    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], text=True, capture_output=True, check=False, timeout=10)
 
     assert result.returncode == 0, result.stderr + result.stdout
     expected_storage = "fresh" if fresh_volumes and not simulate else "snapshot"
@@ -8335,6 +8342,7 @@ reconcile_pool
 def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     tmp_path: Path,
 ) -> None:
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
@@ -8352,6 +8360,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
         + "\n"
         + fleet[function_start:function_end]
     )
+    clone_function += "\nmachine_creation_admission() { return 0; }\n"
     source_id = "6834251fe05798"
     target_id = "d895d2efe7d418"
 
@@ -8366,7 +8375,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
             [
                 "bash",
                 "-c",
-                f"""set -uo pipefail
+                ("machine_creation_admission() { return 0; }\n" + f"""set -uo pipefail
 APP=bench-app
 WARM_ID={source_id}
 SNAP_ID=snapshot-1
@@ -8403,7 +8412,7 @@ machine_storage_failed() {{ return 1; }}
 {clone_function}
 fly_with_timeout() {{ shift; FLY "$@"; }}
 clone_machine_target "$LEDGER"
-""",
+"""),
             ],
             env={
                 "CLONE_OUTPUT": output,
@@ -8488,6 +8497,7 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
     restored snapshot volume has already entered terminal ``failed``.  Such a
     target must be reaped and retried during provisioning; publishing it to the
     boot barrier turns one bad volume into an all-benchmark timeout."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
 
     fleet = fleet_source_text()
     cloner = _clone_machine_bundle(fleet)
@@ -8500,7 +8510,7 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
         [
             "bash",
             "-c",
-            f"""set -uo pipefail
+            ("machine_creation_admission() { return 0; }\n" + f"""set -uo pipefail
 APP=bench-app
 WARM_ID=6834251fe05798
 SNAP_ID=snapshot-1
@@ -8525,7 +8535,7 @@ reap_machine() {{ printf '%s\n' "$1" >> "$REAPED"; }}
 {cloner}
 fly_with_timeout() {{ shift; FLY "$@"; }}
 clone_machine_target "$LEDGER"
-""",
+"""),
         ],
         env={
             "CLONE_COUNT": str(clone_count),
@@ -8650,6 +8660,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
     machine-name reconciliation, durably recorded, and reaped. No app-wide
     volume listing or neighbor-volume deletion is allowed.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -8663,6 +8674,7 @@ def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
             "fleet_registry_release_name() {",
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
+            "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
     )
@@ -8724,7 +8736,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
 [ "$clone_rc" -ne 0 ] || exit 90
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         text=True,
         capture_output=True,
         check=False,
@@ -8768,6 +8780,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
     The exact volume record must exist before the first delete attempt. Neither
     a failed provider read, invalid JSON, nor a live state proves deletion.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -8781,6 +8794,7 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
             "fleet_registry_release_name() {",
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
+            "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
     )
@@ -8849,7 +8863,7 @@ record="$(find "$FLEET_REGISTRY_DIR/clones" -type f | head -1)"
 grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || exit 93
 """
         result = subprocess.run(
-            ["bash", "-c", script],
+            ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
             text=True,
             capture_output=True,
             check=False,
@@ -8875,6 +8889,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
     but a later bounded clone attempt may proceed; only authoritative exact-ID
     absence can retire the first attempt's ownership.
     """
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -8887,6 +8902,7 @@ def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
             "fleet_registry_release_name() {",
             "clone_failure_definitively_unallocated() {",
             "clone_failure_owned_volume_id() {",
+            "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
         )
     )
@@ -9006,7 +9022,7 @@ volume_inventory_contains_id vol_delayed123 >/dev/null || absence_rc=$?
 [ -f "$first_record" ] || exit 95
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         text=True,
         capture_output=True,
         check=False,
@@ -10730,6 +10746,7 @@ def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> 
 @pytest.mark.parametrize("init_override", [None, "exec", "entrypoint"])
 def test_clone_creation_cannot_start_copied_primary(tmp_path: Path, init_override) -> None:
     """Fly clone starts immediately; a later update cannot fence initial boot."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = fleet_source_text()
     booted = tmp_path / "unintended-primary-boot"
     boot = [sys.executable, "-c", f"from pathlib import Path; Path({str(booted)!r}).touch()"]
@@ -10796,7 +10813,7 @@ fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(prov
 clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))}
 """
     env = dict(os.environ, ALLOCATED=str(tmp_path / "allocated"), MACHINES=str(machines))
-    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=5)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], env=env, capture_output=True, text=True, timeout=5)
     assert not booted.exists(), "clone executed primary work before worker staging"
     if init_override:
         assert result.returncode != 0
@@ -10812,6 +10829,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     clone_machine_target retries with a fresh name and returns the id once the
     transient failure clears. Guards the 28-wide synchronized-start barrier
     against one flaky clone tearing down every isolated stack."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
@@ -10864,7 +10882,7 @@ clone_machine_target "$LEDGER"
 """
 
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         env={
             "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
@@ -10894,7 +10912,7 @@ clone_machine_target "$LEDGER"
         'if [ "$n" -lt 2 ]; then : > "${LEDGER%/*}/benchmark-child.finished"; echo',
     )
     worker_result = subprocess.run(
-        ["bash", "-c", worker_script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + worker_script)],
         env={
             "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
@@ -10916,7 +10934,7 @@ clone_machine_target "$LEDGER"
     machines_file.write_text("malformed\n")
     (tmp_path / "benchmark-child.finished").unlink()
     ambiguous = subprocess.run(
-        ["bash", "-c", worker_script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + worker_script)],
         env={
             "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
@@ -10936,6 +10954,7 @@ clone_machine_target "$LEDGER"
 def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
     """Persistent (non-transient) clone failure still fails closed after the
     bounded retry budget — retries must not loop forever."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
@@ -10973,7 +10992,7 @@ clone_machine_target "$LEDGER"
 """
 
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         env={
             "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
@@ -10994,6 +11013,7 @@ def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
     sequential provisioning loop: fly_with_timeout reaps it and the retry loop
     proceeds with a fresh clone. This is the iteration-3 failure (controller
     blocked 25min on one clone → barrier never released → 0/28)."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
@@ -11044,7 +11064,7 @@ clone_machine_target "$LEDGER"
 """
 
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         env={
             "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
@@ -11096,6 +11116,7 @@ def test_fleet_provisions_clones_concurrently() -> None:
 
 def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
     """A 4GB pool cannot host an 8GB task; a matching 8GB pool can."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     assert 'FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"' in fleet
     assert 'FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"' in fleet
@@ -11128,7 +11149,7 @@ def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
         [
             "bash",
             "-c",
-            f"""set -u
+            ("machine_creation_admission() { return 0; }\n" + f"""set -u
 FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
 {shape_helpers}
@@ -11140,7 +11161,7 @@ FLEET_PRIMARY_VM_SIZE=shared-cpu-4x
 FLEET_PRIMARY_VM_MEMORY=8192
 bench_uses_default_pool_shape browser-biometrics-webdecoy || exit 3
 bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
-""",
+"""),
         ],
         text=True,
         capture_output=True,
@@ -12325,6 +12346,7 @@ def test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete(
     persist the exact volume before destroying a terminal-storage-failed
     machine, retain that record when volume deletion fails, and let a later
     exact-owner recovery delete only that volume."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     reap_helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -12374,7 +12396,7 @@ reap_volume vol_exact || reap_status=$?
 [ "$reap_status" -eq 74 ] || exit 90
 """
     postcondition_result = subprocess.run(
-        ["bash", "-c", postcondition_script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + postcondition_script)],
         text=True,
         capture_output=True,
         check=False,
@@ -12415,6 +12437,7 @@ reap_volume vol_exact || reap_status=$?
             "worker_ledger_lock_release() {",
             "registry_record_is_stale_phantom() {",
             "reap_registry_clones() {",
+            "fleet_clone_with_queue_admission() {",
             "clone_machine_target() {",
             "inventory_index_healthy() {",
             "inventory_machine_record_path() {",
@@ -12558,7 +12581,7 @@ grep -Fxq vol_neighbor "$VOLUMES" || exit 29
 if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         text=True,
         capture_output=True,
         check=False,
@@ -24395,6 +24418,7 @@ def test_all_buffered_provider_json_names_are_unexported_before_fleet_execs() ->
 
 def test_worker_capacity_reservation_streams_full_provider_inventory_without_exec_size_limit() -> None:
     """Autoscaler admission must parse provider JSON without exporting it."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     reserve_worker = _extract_fleet_function(fleet, "reserve_worker_machine_slot() {")
     script = f"""set -u
@@ -24411,7 +24435,7 @@ capacity_reserve_slots() {{ printf '%s\n' 'OK 0 0 2 0'; }}
 reserve_worker_machine_slot test-worker
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         env={**os.environ, "inventory": "sentinel"},
         text=True,
         capture_output=True,
@@ -30669,6 +30693,7 @@ def test_autoscaler_runtime_handoff_capacity_observation_pending(
     expected,
 ) -> None:
     """Unknown observations allocate nothing; real serialized ceiling remains hard."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, name + "() {")
@@ -30721,12 +30746,13 @@ else
   if [ "$status" = 75 ]; then test ! -e "$CASE/autoscaler.failed" || exit 17; fi
 fi
 """
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("storage_mode", ["fresh", "snapshot"])
 def test_prebuilt_real_clone_avoids_snapshot_restore_with_exact_ownership(tmp_path: Path, storage_mode: str) -> None:
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = fleet_source_text()
     provider = tmp_path / "provider.py"
     args_path = tmp_path / "provider-args.json"
@@ -30750,7 +30776,7 @@ fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(prov
 clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" shared-cpu-2x 4096 "$SNAP_ID" {storage_mode}
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
         env=dict(os.environ),
         text=True,
         capture_output=True,
@@ -33109,6 +33135,7 @@ def test_autoscaler_runtime_handoff_capacity_worker_cleanup_failure_outcome_resp
 @pytest.mark.parametrize("case", ["overridable", "unsafe", "stale", "missing-record", "foreign-health", "missing-field", "invalid-field", "empty-field"])
 def test_private_fleet_source_clone_observation_distinguishes_unavailable(tmp_path: Path, case: str) -> None:
     """Real clone guard must not label failed/invalid inventory reads as unsafe init."""
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = FLEET_SCRIPT.read_text()
     start = source.index("clone_machine_target() {")
     function = source[start:source.index("\n}\n", start) + 3]
@@ -33135,7 +33162,7 @@ def test_private_fleet_source_clone_observation_distinguishes_unavailable(tmp_pa
         + function + "\nclone_machine_target " + shlex.quote(str(tmp_path / "primary.ids"))
         + " warm shared-cpu-2x 4096 vs_fixture snapshot\n"
     )
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 1
     assert "FORBIDDEN_NATIVE" not in result.stderr
     assert crossed.exists() == (case == "overridable")
@@ -33151,6 +33178,7 @@ def test_private_fleet_source_clone_observation_distinguishes_unavailable(tmp_pa
 
 @pytest.mark.parametrize("case", ["default", "primary", "worker", "empty", "invalid", "snapshot", "forced-snapshot", "simulation", "private", "pool", "provision", "legacy", "mixed", "recover"])
 def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tmp_path: Path, case: str) -> None:
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = FLEET_SCRIPT.read_text()
     def fn(name):
         start = source.index(name + "() {")
@@ -33187,7 +33215,7 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
         + "clone_machine_target " + shlex.quote(str(tmp_path / ("worker-clones.ids" if case == "worker" else "primary.ids")))
         + (" def" if case == "worker" else " abc") + " shared-cpu-2x 4096 vs_fixture " + ("snapshot" if case in ("snapshot", "forced-snapshot") else "fresh") + "\n"
     )
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], capture_output=True, text=True, timeout=10)
     eligible = case in ("default", "primary", "worker")
     assert trace.exists() == eligible, result.stderr
     assert touched.exists() == eligible, result.stderr
@@ -33325,6 +33353,7 @@ exit "$status"
 
 @pytest.mark.parametrize("case", ["default", "primary", "worker", "true", "empty", "invalid", "snapshot", "forced-snapshot", "simulation", "private", "pool", "provision", "legacy", "mixed", "recover"])
 def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones(tmp_path: Path, case: str) -> None:
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = FLEET_SCRIPT.read_text()
     def fn(name):
         start = source.index(name + "() {")
@@ -33362,7 +33391,7 @@ def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones
         + "clone_machine_target " + shlex.quote(str(tmp_path / ("worker-clones.ids" if case == "worker" else "primary.ids")))
         + (" def" if case == "worker" else " abc") + " shared-cpu-2x 4096 vs_fixture " + ("snapshot" if case in ("snapshot", "forced-snapshot") else "fresh") + "\n"
     )
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)], capture_output=True, text=True, timeout=10)
     eligible = case in ("default", "primary", "worker", "true")
     assert trace.exists() == eligible, result.stderr
     assert touched.exists() == eligible, result.stderr
@@ -33628,6 +33657,7 @@ def test_fleet_cleanup_admission_revalidates_unlinked_file_before_acceptance(tmp
 
 @pytest.mark.parametrize('case', ['healthy', 'pending', 'pending-twice', 'healthy-work-first-pending', 'expired', 'expires-before-allocation', 'foreign', 'dead', 'missing-field', 'unsafe'])
 def test_clone_source_owned_pending_consumes_first_native_allowance(tmp_path, case):
+    # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     source = FLEET_SCRIPT.read_text()
     function = _extract_fleet_function(source, 'clone_machine_target() {')
     index = tmp_path / 'inventory/current'
@@ -33675,7 +33705,7 @@ FLY() {{ echo FORBIDDEN_NATIVE >&2; return 99; }}
 [ "$CASE" != healthy-work-first-pending ] || SECONDS=301
 clone_machine_target "$FLEET_DIR/primary.ids" warm shared-cpu-2x 4096 vs_fixture snapshot
 '''
-    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(['bash', '-c', ("machine_creation_admission() { return 0; }\n" + script)], capture_output=True, text=True, timeout=10)
     assert result.returncode != 0
     assert 'FORBIDDEN_NATIVE' not in result.stderr
     if case == 'healthy':
@@ -33709,7 +33739,7 @@ clone_machine_target "$FLEET_DIR/primary.ids" warm shared-cpu-2x 4096 vs_fixture
         ("1", "abc123", 0, True, "", 0, 0),
         ("1", "", 0, False, "", 1, 0),
         ("1", "", 0, True, "iad", 1, 0),
-        ("0", "", 0, True, "", 0, 1),
+        ("0", "", 0, True, "", 1, 0),
         ("0", "abc123", 0, True, "", 0, 0),
     ],
 )
@@ -33717,7 +33747,7 @@ def test_primary_reuse_only_never_allocates_on_pool_miss(
     tmp_path: Path, reuse_only: str, claim: str, claim_status: int,
     shape: bool, fresh: str, expected: int, creates: int,
 ) -> None:
-    """Execute the real admission body, including the old fallback for RED."""
+    """Execute primary admission plus the common allocation guard, never a fake create."""
     fleet = fleet_source_text()
     if "provision_primary_machine() {" in fleet:
         body = _extract_fleet_function(fleet, "provision_primary_machine() {")
@@ -33743,7 +33773,8 @@ primary_clone_storage_mode() {{ printf fresh; }}
 bench_uses_default_pool_shape() {{ return {0 if shape else 1}; }}
 fresh_target_region_admission() {{ return 0; }}
 claim_pool_machine() {{ printf %s {shlex.quote(claim)}; return {claim_status}; }}
-clone_machine_target() {{ printf 'create\\n' >> {shlex.quote(str(calls))}; printf def456; }}
+{_extract_fleet_function(fleet, 'machine_creation_admission() {')}
+{_extract_fleet_function(fleet, 'clone_machine_target() {')}
 {body}
 {invocation}
 '''], text=True, capture_output=True, timeout=5)
@@ -33763,7 +33794,7 @@ def test_reuse_only_admission_preserves_explicit_fresh_policy(conflict: str) -> 
                    "fresh": "FRESH_VOLUMES_REQUESTED=1", "region": "CLOUDBENCH_FRESH_TARGET_REGION=iad",
                    "placement": "CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE=false"}
     result = subprocess.run(["bash", "-c", "set -u\nPOOL_REUSE_ONLY=1\n" + assignments.get(conflict, "") + "\n" + function + "\nreuse_pool_only_admission"], capture_output=True, text=True, timeout=5)
-    assert (result.returncode == 0) == (conflict == "none"), result.stderr
+    assert (result.returncode == 0) == (conflict in {"none", "recover"}), result.stderr
 
 
 @pytest.mark.parametrize("fault", ["none", "changed-baseline", "missing-meta-with-members", "linked-meta", "linked-ledger"])
@@ -34678,3 +34709,225 @@ FLY() {{ flyctl "$@"; }}
     assert (result.returncode==0)==(operation=='fleet_registry_cleanup_state'), result.stderr
     assert not calls.exists(), 'source delegation cannot be reclaimed or started by ordinary cleanup'
     assert (reg/'cold-handoff-outgoing').read_text()=='immutable destination-bound hold'
+
+
+@pytest.mark.parametrize('ledger', ['primary.ids','worker-clones.ids','workspace.ids'])
+def test_common_clone_boundary_requires_measured_allocation_admission(tmp_path: Path, ledger: str) -> None:
+    source=fleet_source_text()
+    functions='\n'.join(_extract_fleet_function(source,name+'() {') for name in ('machine_creation_admission','clone_machine_target') if name+'() {' in source)
+    calls=tmp_path/'provider.calls'
+    result=subprocess.run(['bash','-c',f'''set -uo pipefail
+WARM_ID=aaaaaaaaaaaaaa
+SNAP_ID=snapshot
+APP=fixture-app
+REGION=ord
+FRESH_TARGET_REGION=""
+POOL_REUSE_ONLY=0
+CLOUDBENCH_ALLOW_NEW_MACHINES=1
+inventory_machine_field() {{ printf source-query >> {shlex.quote(str(calls))}; printf 1; }}
+fleet_clone_with_queue_admission() {{ printf create >> {shlex.quote(str(calls))}; printf 'Machine bbbbbbbbbbbbbb has been created...'; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+worker_ledger_lock_acquire() {{ return 0; }}
+worker_ledger_lock_release() {{ return 0; }}
+machine_volume_id() {{ printf vol_fixture; }}
+machine_storage_ready() {{ return 0; }}
+{functions}
+clone_machine_target "$1"
+''','owning-common-clone',str(tmp_path/ledger)],capture_output=True,text=True,timeout=5)
+    assert result.returncode==78,result.stderr
+    assert 'new Machine allocation withheld' in result.stderr
+    assert not calls.exists(), 'even source lookup is withheld before explicit measured admission'
+    assert not (tmp_path/ledger).exists()
+
+
+@pytest.mark.parametrize('terminal', [False,True])
+def test_worker_reuse_gap_refuses_before_reservation_or_provider_work(tmp_path: Path, terminal: bool) -> None:
+    source=fleet_source_text()
+    functions='\n'.join(_extract_fleet_function(source,name+'() {') for name in ('machine_creation_admission','provision_worker'))
+    if terminal:(tmp_path/'benchmark-child.finished').write_text('143\n')
+    calls=tmp_path/'forbidden'
+    result=subprocess.run(['bash','-c',f'''set -uo pipefail
+reserve_worker_machine_slot() {{ printf reserve >> {shlex.quote(str(calls))}; return 0; }}
+machine_volume_size_gb() {{ printf lookup >> {shlex.quote(str(calls))}; return 99; }}
+clone_machine_target() {{ printf create >> {shlex.quote(str(calls))}; return 99; }}
+{functions}
+provision_worker task workspace aaaaaaaaaaaaaa 127.0.0.1 0 "$1" token
+''','actual-worker-entry',str(tmp_path)],capture_output=True,text=True,timeout=5)
+    assert result.returncode==(0 if terminal else 1),result.stderr
+    assert not calls.exists()
+    if not terminal:assert 'No eligible existing worker path' in (tmp_path/'autoscaler.failed').read_text()
+
+
+@pytest.mark.parametrize('route', ['controller','warm-source'])
+def test_outer_controller_and_warm_setup_do_not_silently_create_machines(tmp_path: Path, route: str) -> None:
+    if route=='controller':
+        source=Path(os.environ.get('CLOUDBENCH_CONTROLLER_GATE_SCRIPT_UNDER_TEST',str(ROOT/'scripts/run-cloudbench-controller-gate'))).read_text()
+        name='controller_machine_creation_admission'
+        start=source.index('RUN_LOG="$(mktemp -t cloudbench-gate-run.XXXXXX)"')
+        guard=source.rfind(name+' || exit $?',0,start)
+        start=guard if guard>=0 else start
+        end=source.index('\nMACHINE_ID=',start)
+    else:
+        source=CLOUD_SCRIPT.read_text();name='warm_source_machine_creation_admission'
+        start=source.index('        RUN_LOG="$(mktemp)"',source.index('# MODE: --setup'))
+        guard=source.rfind(name+' || exit $?',source.index('# MODE: --setup'),start)
+        start=guard if guard>=0 else start
+        end=source.index('        mid="$(grep',start)
+    function=_extract_fleet_function(source,name+'() {') if name+'() {' in source else ''
+    calls=tmp_path/'provider-create'
+    script=f'''set -uo pipefail
+RUN_LOG=""
+trap '[ -z "$RUN_LOG" ] || rm -f "$RUN_LOG"' EXIT
+IMAGE_REF=fixture-image
+APP=fixture-app
+REGION=ord
+MACHINE_NAME=fixture-machine
+VM_SIZE=shared-cpu-2x
+VM_MEMORY=4096
+GATE_SCRIPT=/fixture/gate.sh
+GATE_TOKEN_FILE=/fixture/token
+GATE_REF={'a'*40}
+REPO_URL=fixture-repo
+GATE_NODE_VERSION=22
+KEEP_FIXTURE_ON_FAILURE=0
+MACHINE_LIFETIME_ARGS=()
+MACHINE_STORAGE_ARGS=()
+WORKSPACE_VOLUME_ARGS=()
+GATE_EXPORT_FILES=()
+VOLUME_NAME=fixture-volume
+flyctl() {{ printf create >> {shlex.quote(str(calls))}; printf 'Machine ID: bbbbbbbbbbbbbb'; }}
+FLY() {{ flyctl "$@"; }}
+{function}
+{source[start:end]}
+'''
+    result=subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=5)
+    assert result.returncode==78,result.stderr
+    assert not calls.exists(),route+' must require measured admission before any actual machine-run transport'
+
+
+@pytest.mark.parametrize('observation', ['missing','unknown','existing'])
+def test_warm_setup_requires_existing_source_before_any_allocation_side_effect(tmp_path: Path, observation: str) -> None:
+    source=CLOUD_SCRIPT.read_text();start=source.index('if [ "$MODE" = "setup" ]; then');end=source.index('    ensure_app',start)+len('    ensure_app')
+    function=_extract_fleet_function(source,'warm_source_machine_creation_admission() {') if 'warm_source_machine_creation_admission() {' in source else ''
+    calls=tmp_path/'mutation'
+    result=subprocess.run(['bash','-c',f'''set -uo pipefail
+MODE=setup
+APP=fixture
+REGION=ord
+MACHINE_NAME=warm
+VOLUME_NAME=warm-volume
+VM_SIZE=shared-cpu-2x
+VM_MEMORY=4096
+VOLUME_SIZE=64
+resolve_machine_id() {{ printf '%s' {shlex.quote('b'*14 if observation=='existing' else '')}; return {1 if observation=='unknown' else 0}; }}
+ensure_app() {{ printf existing-update >> {shlex.quote(str(calls))}; }}
+{function}
+{source[start:end]}
+fi
+'''],capture_output=True,text=True,timeout=5)
+    assert result.returncode==(0 if observation=='existing' else 78),result.stderr
+    assert calls.exists()==(observation=='existing')
+
+
+@pytest.mark.parametrize('help_only', [False,True])
+def test_actual_public_controller_gate_refuses_before_provider_or_setup(tmp_path: Path, help_only: bool) -> None:
+    binary=tmp_path/'flyctl';calls=tmp_path/'provider-calls'
+    binary.write_text('#!/bin/sh\nprintf called >> "$CALLS"\nexit 99\n');binary.chmod(0o700)
+    env=dict(os.environ,PATH=str(tmp_path)+os.pathsep+os.environ['PATH'],CALLS=str(calls))
+    result=subprocess.run(['bash',str(ROOT/'scripts/run-cloudbench-controller-gate'),*(['--help'] if help_only else ['--','true'])],env=env,capture_output=True,text=True,timeout=5)
+    assert result.returncode==(0 if help_only else 78),result.stderr
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize('failure', ['none','aggregator','autoscaler','provisioner','collector','permit','prior'])
+@pytest.mark.parametrize('workload_exit', [1,143])
+def test_retained_billing_hook_follows_real_join_and_evidence_boundaries(tmp_path: Path, failure: str, workload_exit: int) -> None:
+    source=fleet_source_text();start=source.index('cleanup() {\n');stop=source.index('    fleet_billing_stop_retained_idle "$billing_owned_joins"',start)
+    prefix=source[start:stop]+source[stop:source.index('\n',stop)]+'\n}\n'
+    events=tmp_path/'events';fault={'aggregator':'101','autoscaler':'103','provisioner':'104','collector':'105'}.get(failure,'')
+    result=subprocess.run(['bash','-c',f'''set -uo pipefail
+KEEP_CLONES=0
+LOCAL_PROCESS_TEARDOWN_FAILED={1 if failure=='prior' else 0}
+FLEET_REGISTRY_PUBLISHED=1
+FLEET_REGISTRY_DIR={shlex.quote(str(tmp_path/'registry'))}
+CLAIMED_POOL_FILE={shlex.quote(str(tmp_path/'claimed.ids'))}
+UNIFIED_AGG_PID=101
+SNAPSHOT_LOOP_PID=102
+AUTOSCALER_PIDS=(103)
+PROVISION_PIDS=(104)
+CHILD_PIDS=(105)
+FLEET_NATIVE_REAP_ENABLED=1
+release_cleanup_disk_reserve() {{ return 0; }}
+cloudbench_terminate_tree_and_wait() {{ printf 'join:%s\\n' "$2" >> {shlex.quote(str(events))}; [ "$2" != {shlex.quote(fault)} ]; }}
+cloudbench_confirm_guest_shutdowns() {{ return 0; }}
+fleet_registry_confirm_guest_teardown() {{ return 0; }}
+fleet_native_reap_close() {{ printf 'permit\\n' >> {shlex.quote(str(events))}; return {1 if failure=='permit' else 0}; }}
+fleet_native_reap_open() {{ return 0; }}
+cloudbench_collect_remaining_runtime_evidence() {{ printf 'evidence-read-complete\\n' >> {shlex.quote(str(events))}; return 1; }}
+fleet_billing_stop_retained_idle() {{ printf 'billing:%s:keep=%s:workload=%s\\n' "$1" "$KEEP_CLONES" "$result_ec" >> {shlex.quote(str(events))}; }}
+{prefix}
+original_workload() {{ return {workload_exit}; }}
+original_workload
+cleanup
+'''],capture_output=True,text=True,timeout=5)
+    assert result.returncode==0,result.stderr
+    rows=events.read_text().splitlines()
+    assert rows[-2]=='evidence-read-complete'
+    assert rows[-1]==f'billing:{1 if failure=="none" else 0}:keep=1:workload={workload_exit}'
+    assert rows[:4]==['join:101','join:103','join:104','join:105']
+
+
+@pytest.mark.parametrize('case', ['unjoined','retain','blocking','ready'])
+def test_actual_billing_caller_preflight_and_auth_share_inherited_deadline(tmp_path: Path, case: str) -> None:
+    # Execute the actual inline caller. Only its transport constructor/local
+    # ownership observations are fixtures; no provider or guest is contacted.
+    source=FLEET_SCRIPT.read_text()
+    body=source.split("<<'PYBILLING'\n",1)[1].split('\nPYBILLING',1)[0]
+    events=tmp_path/'events';helper=tmp_path/'helper.py';run=tmp_path/'run'
+    (run/'_batch').mkdir(parents=True)
+    helper.write_text(f"""import time
+from pathlib import Path
+EVENTS=Path({str(events)!r})
+def event(value):
+    with EVENTS.open('a') as stream:stream.write(value+'\\n')
+def _billing_local(*args):
+    event('preflight')
+    if {case!r}=='retain':raise ValueError('protected owner')
+class Fly:
+    def __init__(self,*args):
+        event('constructor')
+        if {case!r}=='blocking':time.sleep(.65)
+def billing_stop_retained_owned(*args,**kwargs):
+    event('billing')
+    return {{'status':'FIXTURE_COMPLETE'}}
+""")
+    prelude="""import signal,time,json,sys
+seen=[]
+def inherited(*args):seen.append('inherited')
+signal.signal(signal.SIGALRM,inherited)
+signal.setitimer(signal.ITIMER_REAL,.25)
+started=time.monotonic()
+"""
+    tail="""
+remaining=signal.getitimer(signal.ITIMER_REAL)[0]
+restored=signal.getsignal(signal.SIGALRM) is inherited
+signal.setitimer(signal.ITIMER_REAL,0)
+print(json.dumps({'elapsed':time.monotonic()-started,'remaining':remaining,'restored':restored}))
+"""
+    result=subprocess.run([sys.executable,'-c',prelude+body+tail,str(helper),'fixture',str(tmp_path/'registry'),str(tmp_path/'audit'),str(run),'a'*32,'123','birth','0' if case=='unjoined' else '1'],env=dict(os.environ,FLY_API_TOKEN='fixture'),capture_output=True,text=True,timeout=3)
+    assert result.returncode==0,result.stderr
+    output=[json.loads(line) for line in result.stdout.splitlines()]
+    rows=events.read_text().splitlines() if events.exists() else []
+    if case in ('unjoined','retain'):
+        assert 'constructor' not in rows
+        assert output[0]['status']=='PENDING'
+    elif case=='blocking':
+        assert output[-1]['elapsed']<.5
+        assert rows==['preflight','constructor']
+        assert output[0]['status']=='PENDING'
+    else:
+        assert rows==['preflight','constructor','billing']
+        assert output[0]['status']=='FIXTURE_COMPLETE'
+        assert 0<output[-1]['remaining']<.25
+    assert output[-1]['restored'] is True
