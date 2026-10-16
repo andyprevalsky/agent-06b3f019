@@ -15,6 +15,36 @@ Compare material details stated in either receipt: products, variants, per-item 
 URLs can encode identity or terms. Ignore only nonmaterial navigation or tracking differences, paraphrases, reviews and images.
 Assess candidates independently and return a matching candidate, or null if none qualifies. Uncertainty requires null; never authorize a new purchase.`;
 
+/** Missing identity or unknown fee obligations cannot establish purchase consent. */
+function hasCompleteConsentReceipt(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const receipt = value as Record<string, unknown>;
+  const nonblank = (field: unknown): boolean => typeof field === 'string' && field.trim() !== '';
+  return (
+    Array.isArray(receipt.lineItems) &&
+    receipt.lineItems.length > 0 &&
+    receipt.lineItems.every(
+      (item: unknown) =>
+        typeof item === 'object' &&
+        item !== null &&
+        !Array.isArray(item) &&
+        'name' in item &&
+        nonblank(item.name) &&
+        'productUrl' in item &&
+        nonblank(item.productUrl)
+    ) &&
+    Array.isArray(receipt.fees) &&
+    receipt.fees.every(
+      (fee: unknown) =>
+        typeof fee === 'object' &&
+        fee !== null &&
+        !Array.isArray(fee) &&
+        'label' in fee &&
+        nonblank(fee.label)
+    )
+  );
+}
+
 /** Scoped economic candidates -> consent fields only -> one semantic decision. */
 function consentReceipt(value: unknown): Record<string, unknown> {
   if (
@@ -110,7 +140,13 @@ export async function findApprovedPurchaseRetry(
 ): Promise<PurchaseSpend | null> {
   const agentId = input.agentId?.trim();
   const signature = cartPriceSignature(input, input.totalCents);
-  if (agentId === undefined || agentId === '' || signature === null) return null;
+  if (
+    agentId === undefined ||
+    agentId === '' ||
+    signature === null ||
+    !hasCompleteConsentReceipt(input)
+  )
+    return null;
   const held = await repo.findHeldPurchasesForAgentCart({
     userId: input.userId,
     agentId,
@@ -120,7 +156,9 @@ export async function findApprovedPurchaseRetry(
     take: 20,
   });
   const candidates = held.filter(
-    (purchase) => cartPriceSignature(purchase.lineItemsJson, purchase.totalCents) === signature
+    (purchase) =>
+      hasCompleteConsentReceipt(purchase.lineItemsJson) &&
+      cartPriceSignature(purchase.lineItemsJson, purchase.totalCents) === signature
   );
   if (candidates.length === 0) return null;
   // A financial fingerprint can discard product-description details. Only full
