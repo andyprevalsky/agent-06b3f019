@@ -30657,6 +30657,7 @@ def test_prebuilt_checkout_browser_cache_parent_is_runtime_writable(tmp_path, pa
     tmp_path.chmod(0o755)
     data = tmp_path / "data"
     data.mkdir(mode=0o755)
+    data.chmod(0o755)
     cache = data / "cloudbench-cache"
     private = None
     if parent_state != "missing":
