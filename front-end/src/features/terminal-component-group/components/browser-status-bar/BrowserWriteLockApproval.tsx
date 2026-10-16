@@ -101,7 +101,11 @@ function useApprovalActions(
       onApprovalHandled?.();
     } catch (error) {
       console.error('Failed to accept:', error);
-      toast({ title: 'Error', description: 'Failed to approve action', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to approve action',
+        variant: 'destructive',
+      });
     } finally {
       setActionState(null);
     }

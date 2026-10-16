@@ -1,0 +1,52 @@
+{
+  "approved": {
+    "fees": [
+      {
+        "label": "Estimated tax",
+        "amountCents": 0
+      }
+    ],
+    "currency": "USD",
+    "merchant": "ChatGPT (OpenAI)",
+    "lineItems": [
+      {
+        "name": "ChatGPT Pro 500 (Max usage) - Monthly subscription, renews monthly",
+        "rating": "0 stars",
+        "imageUrl": null,
+        "quantity": 1,
+        "productUrl": "https://chatgpt.com/pricing",
+        "reviewCount": "0 reviews",
+        "lineTotalCents": 50000,
+        "unitPriceCents": 50000
+      }
+    ],
+    "totalCents": 50000,
+    "fingerprint": "942e6fe9bef56a81ecb1bf7cdcaca79a2578f1d3910fc3b7d8ac14f49044098e",
+    "subtotalCents": 50000
+  },
+  "retry": {
+    "fees": [
+      {
+        "label": "Estimated tax",
+        "amountCents": 0
+      }
+    ],
+    "currency": "USD",
+    "merchant": "ChatGPT (OpenAI)",
+    "lineItems": [
+      {
+        "name": "ChatGPT Pro - Max usage (Pro 500) - Monthly subscription, $500/month",
+        "rating": "0 stars",
+        "imageUrl": null,
+        "quantity": 1,
+        "productUrl": "https://chatgpt.com/#pricing",
+        "reviewCount": "0 reviews",
+        "lineTotalCents": 50000,
+        "unitPriceCents": 50000
+      }
+    ],
+    "totalCents": 50000,
+    "fingerprint": "4652b2e2c7876e4c644df0f6547431e07170f66aa84526ccdd8d76964a82edb0",
+    "subtotalCents": 50000
+  }
+}

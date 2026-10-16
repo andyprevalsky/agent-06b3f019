@@ -230,6 +230,30 @@ def _approval_plain_text(value: Any) -> str:
     return text.translate(str.maketrans({character: f"\\{character}" for character in r"\`*_{}[]<>()#+-.!|"}))
 
 
+def reuse_payment_approval(
+    lookup: Dict[str, Any],
+    payload: Dict[str, Any],
+    agent_id: str,
+    pending_approval: Any = None,
+) -> Dict[str, Any] | None:
+    """Bind existing consent to one held purchase; otherwise use the normal prompt."""
+    purchase = lookup.get("purchase")
+    if (
+        pending_approval is not None
+        or lookup.get("error")
+        or lookup.get("found") is not True
+        or lookup.get("reusable") is not True
+        or not isinstance(purchase, dict)
+        or purchase.get("agentId") != agent_id
+        or purchase.get("status") != "HELD"
+        or not purchase.get("id")
+        or not purchase.get("cardId")
+    ):
+        return None
+    payload["reusePurchaseId"] = purchase["id"]
+    return {"attention_request_id": None, "reused_purchase_id": purchase["id"]}
+
+
 def build_payment_question(payload: Dict[str, Any]) -> str:
     total = (payload.get("totalCents") or 0) / 100
     merchant = _approval_plain_text(payload.get("merchant") or "this merchant")

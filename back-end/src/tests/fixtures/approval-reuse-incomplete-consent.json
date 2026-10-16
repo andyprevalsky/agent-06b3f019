@@ -1,0 +1,217 @@
+[
+  {
+    "id": "blank-product-identity",
+    "reason": "Both receipts omit every product identity field; equal economics do not establish consent.",
+    "expectedPurchaseId": null,
+    "expectedSemanticCalls": 0,
+    "approved": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "",
+          "productUrl": "",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    },
+    "requested": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "",
+          "productUrl": "",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    }
+  },
+  {
+    "id": "absent-product-identity",
+    "reason": "Missing stored and requested identity keys must not collapse into permission through JSON omission.",
+    "expectedPurchaseId": null,
+    "expectedSemanticCalls": 0,
+    "approved": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    },
+    "requested": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    }
+  },
+  {
+    "id": "whitespace-product-identity",
+    "reason": "Whitespace-only identity fields contain no actual product identity.",
+    "expectedPurchaseId": null,
+    "expectedSemanticCalls": 0,
+    "approved": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": " \t ",
+          "productUrl": " \n ",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    },
+    "requested": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": " \t ",
+          "productUrl": " \n ",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    }
+  },
+  {
+    "id": "malformed-stored-fee-obligations",
+    "reason": "The requested receipt is complete but the stored receipt omits the required fee list; defaulting an unknown obligation to empty cannot grant reuse.",
+    "expectedPurchaseId": null,
+    "expectedSemanticCalls": 0,
+    "approved": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Trail field notebook A5 dotted natural cover",
+          "productUrl": "https://pine-harbor.invalid/products/trail-notebook-a5-dotted-natural",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "subtotalCents": 100,
+      "totalCents": 100
+    },
+    "requested": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Trail field notebook A5 dotted natural cover",
+          "productUrl": "https://pine-harbor.invalid/products/trail-notebook-a5-dotted-natural",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    }
+  },
+  {
+    "id": "complete-identical-consent-control",
+    "reason": "Complete product, URL, amounts and fee obligations agree; image/review metadata does not change identity.",
+    "expectedPurchaseId": "approved-1",
+    "expectedSemanticCalls": 0,
+    "approved": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Trail field notebook A5 dotted natural cover",
+          "productUrl": "https://pine-harbor.invalid/products/trail-notebook-a5-dotted-natural",
+          "rating": "4.8",
+          "reviewCount": "12",
+          "imageUrl": null,
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    },
+    "requested": {
+      "merchant": "Fictional Pine Harbor Paper",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "Trail field notebook A5 dotted natural cover",
+          "productUrl": "https://pine-harbor.invalid/products/trail-notebook-a5-dotted-natural",
+          "rating": "untrusted different review text",
+          "reviewCount": "999",
+          "imageUrl": "https://images.pine-harbor.invalid/alternate.png",
+          "unitPriceCents": 100,
+          "quantity": 1,
+          "lineTotalCents": 100
+        }
+      ],
+      "fees": [],
+      "subtotalCents": 100,
+      "totalCents": 100
+    }
+  }
+]
