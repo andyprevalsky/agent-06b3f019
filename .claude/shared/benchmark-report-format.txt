@@ -120,16 +120,16 @@ Measurement contract
   Keep DEMO response replay separate from agent and WMH prompt-cache rates; show
   their actual hit/look-up or cached-input/all-input denominators. An enabled flag
   does not prove a hit. Report agent and WMH LLM avg/p95/p99 separately.
-- Active sub-agents: one line each, one status emoji + short name/work + integer
-  0–100% + signed rolling 15-minute pp/min. LIFE is the fixed far-right column;
-  remove UPD and progress wheels. Retain original agent start or known lifetime
-  lower bound, actual evidence timestamps and freshness checks internally.
-  Same-scope history is required; a new window is warming <age>, never a false
-  zero. Positive rates are green, zero/negative red. Immediately below each red
-  row, state the cause and concrete corrective owner/action. 🚨 marks verified
-  no milestone gain over 15m in advancing work, not healthy MONITORING or completed
-  custody. No legends. Keep assignment milestone weights and lifetime across
-  substeps. A local candidate is not original-outcome completion.
+- Active sub-agents: one line each, one status emoji + short name/work + recorded
+  current-assignment tokens spent + rolling 15-minute tokens/min. LIFE stays at
+  the far right; remove PCT, pp/min, UPD and progress wheels. Use actual harness
+  input + output counters including cached input, without double-counting
+  reasoning output. Keep source counters, scope baseline, original lifetime and
+  observation times. Missing coverage reads UNMETERED; less than a full window
+  reads warming <age>. Tokens are usage, not completion or billed credits.
+  Keep actual milestones and result counts separately. Low usage alone is not
+  a stall. Every red row names its real blocker and corrective owner/action;
+  completed work and healthy monitoring get no false stall alarm. No legends.
   If any worker blocks the next action, put the whole agent section above LAST 3
   EXPERIMENTS; otherwise put it after that history. Include it once. Show No active
   agents when empty. Do not pause workers to edit or discuss their scorecard.
@@ -161,8 +161,8 @@ row and its subrows for up to three launched experiments, newest first):
    🟠 <warning or unmeasured coverage>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @@ ACTIVE SUB-AGENTS / PARENT
- AGENT / WORK                    PCT    Δ15m/min          LIFE
- <status> <name>/<work>          <%>    <rate/warming>    <life>
+ AGENT / WORK                    TOKENS    15m tok/min     LIFE
+ <status> <name>/<work>          <tokens>  <tok/min/warming> <life>
    <For every red row: cause; corrective owner/action>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @@ ISSUES / NEXT ACTION

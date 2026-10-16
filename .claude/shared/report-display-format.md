@@ -18,38 +18,31 @@ each workflow's required evidence, fields and approval boundaries.
   in stored telemetry, JSON, raw logs, commands, task prompts and diffs remain
   byte-for-byte intact. This rule changes presentation, not those artifacts.
 
-## Sub-agent progress
+## Sub-agent usage and work
 
-Show every active sub-agent on one compact row with one status emoji and an
-integer percentage from **0% to 100%**. Replace progress wheels with the status
-emoji; do not add a second ring or spinner.
+Show every active worker and parent on one compact row with one status emoji,
+**tokens spent on the current assignment**, rolling **15-minute tokens/min**,
+and LIFE at the far right. This replaces percentage and pp/min columns.
 
 ```text
- AGENT / WORK                    PCT    Δ15m/min          LIFE
- <status> <name>/<work>          <%>    <signed pp/min>   <life>
+ AGENT / WORK                    TOKENS    15m tok/min     LIFE
+ <status> <name>/<work>          <tokens>  <tokens/min>    <life>
 ```
 
 Use `⛔` for a blocking dependency, `🔄` for active independent work, `🚀` for
 deployment, `✅` for completed work and `🚨` for a verified advancing stall.
-A healthy monitoring row may use `MONITORING` as its stage instead of inventing
-a completion percentage. Keep the layout consistent for the parent and workers.
+Keep actual milestones, gate results and batch item counts as separate facts.
+Tokens measure usage; they do not certify completion, success or billing cost.
 
-Compute progress from completed, evidenced milestones in the agent's assigned
-scope, rather than elapsed time, tokens spent or merely being alive. Round to
-the nearest whole percentage, with halves rounded up. Use 100% only after all
-required assignment milestones are verified; cap an incomplete assignment at
-99% if rounding would otherwise reach 100%. Define the
-milestones at dispatch and retain their denominator. For agents already running
-when this format is adopted, record the milestone basis with their first
-percentage update. Never silently reuse percentages from a previous scope.
-Mark the percentage as
-an estimate when the milestone weights are approximate. A completed local
-candidate is not 100% of an assignment that still requires outcome proof or
-cleanup. Read the latest worker report or status before publishing a card.
-Retain the last known percentage when a newer update is unavailable, and retain
-its actual evidence timestamp internally. If it is overdue, mark the state
-`STALE <age>` in a concise action line. A missing
-update is not zero progress and is not proof that the agent is stalled.
+Use timestamped harness counters for recorded input + output, including cached
+input. Reasoning output is already a subtype of output and must not be added
+again. Retain source/session identity, capture time and the counter baseline at
+or immediately before the assignment start. A request crossing that boundary
+uses its recorded accounting timestamp; preserve the baseline method. Never
+estimate tokens from text length, elapsed time or milestone percentages.
+Show `UNMETERED` for an unavailable counter or scope baseline, never an invented
+zero. Keep original scope and lifetime across retries. Freeze completed usage
+at its actual completion receipt; later assignments get their own baseline.
 
 ### Lifetime: always the far-right column
 
@@ -66,46 +59,26 @@ update is not zero progress and is not proof that the agent is stalled.
   wake idle agents solely to freshen a label. Mark overdue evidence `STALE` with
   its actual age without delaying safety notifications.
 
-### Rolling progress and stalled work
+### Rolling token usage and stalled work
 
-- Persist timestamped progress observations with agent ID, scope ID, milestone
-  basis, original start, observation time, percentage, state and evidence ref.
-  Retain history for at least the full previous 15 minutes; a new scope starts
-  a new comparable series while retaining the agent's lifetime.
-- `Δ15m/min = (current percent − percent 15 minutes ago) / 15`, measured in
-  **percentage points per minute**, not percent growth or elapsed-time progress.
-  Use a same-scope observation at the cutoff, or documented sample-and-hold
-  between verified milestones. Record the baseline timestamp/method. Never
-  interpolate invented progress, compare different denominators, divide a
-  shorter window by 15, or reuse a previous scope's percentage.
-- Show a signed value to two decimal places, e.g. `+0.67pp/m` or `-0.20pp/m`.
-  Positive is green; zero or negative is red. Use CSS text colors in the
-  rendered HTML scorecard. For a plain fallback, use a single `diff` fence:
-  prefix positive rate rows with `+`, and zero or
-  negative rate rows with `-`, for syntax color. Emoji retain the sign's color
-  when syntax highlighting is unavailable. With less than a full comparable
-  window, write `warming <age>` and record its start; never fabricate a zero rate.
-- Show `🚨` on an actively advancing assignment with a verified full 15-minute
-  window and no milestone gain (`delta <= 0`); describe it as `no milestone gain
-  15m` or `regressed`, not proof that the process is dead. Missing/stale evidence
-  is an observability gap, not proof of a stall. Healthy `MONITORING`, completed,
-  queued or explicitly expected waits do not get a false stall alarm; show that
-  state and the next expected milestone/condition instead.
-- Immediately beneath every red progress row, put one short line naming why
-  there was no gain and the specific action/owner addressing it. For completed
-  work or steady monitoring, state that condition and its remaining action
-  without falsely calling it stalled. A repeated real stall requires a changed
-  approach, not another identical explanation.
-- Apply the same rate/freshness rules to the parent agent when included. Keep
-  qualified-task progress separate from a terminal-outcome completion bar.
-  Do not rewrite exact prompt/diff/approval payloads for color: approval blocks
-  retain their required `text` fence and use the colored rate markers.
-
-Use 0% only for an explicitly queued/not-started assignment or a verified zero
-completed-milestone report. If no percentage is known, inspect the actual stage
-and give an evidenced milestone estimate; if that is still unavailable, show
-`MILESTONES UNDEFINED` and obtain a report instead of inventing 0%. Keep
-start/block clocks and frozen checkpoints where applicable.
+- Persist timestamped usage observations with agent/session ID, scope ID,
+  original start, baseline counters, current counters, state and source ref.
+  Retain at least 15 minutes and preserve earlier assignment histories.
+- `15m tokens/min = (current scoped tokens - scoped tokens 15 minutes ago) / 15`.
+  Use actual same-scope counter observations with documented sample-and-hold.
+  Do not divide a shorter window by 15, infer missing tokens, mix scopes or
+  treat a counter reset as zero usage. Show `warming <age>` until a complete
+  comparable window exists; show `UNMETERED` for missing continuity.
+- Format large totals and rates compactly (for example `2.31M`, `154K/min`),
+  retaining exact counters and input/cache/output breakdown in telemetry or
+  expandable details. A completed row may show `complete` for its rate.
+- Keep actual text colors for work status. High token use is not a verified
+  success, and low or zero use alone is not a stall. A verified lack of outcome
+  or milestone gain may still need `🚨` and a concrete corrective action.
+  Healthy monitoring, completed, queued and expected waits get no false alarm.
+- Beneath every red row, state the real blocker and corrective owner/action.
+  Preserve qualified-task counts separately from token usage. Exact prompt,
+  diff and approval payloads retain their required format and bytes.
 
 ## Conditional placement
 
@@ -139,12 +112,11 @@ metric does not become a scheduling gate merely to move its section upward.
   cancellations/skips or unknown classifications in one coverage note;
   never convert them into agent/infra failures to fill the three rows.
 
-Before dispatch, the parent records numeric milestone weights for every agent.
-For an already running agent, establish an evidenced estimate from completed
-milestones before publishing its percentage; keep that same scope and weights
-for subsequent rates. Starting a substep never resets the agent lifetime.
-Recompute each render from timestamped same-scope history. Warming ends once
-15 minutes of history exist; never leave a cached warming flag or rate frozen.
+Before dispatch, record the assignment and its actual token-counter baseline.
+For running agents, recover that baseline from timestamped harness usage when
+available; otherwise show UNMETERED. Starting a substep never resets LIFE.
+Recompute usage rates from the same-scope history on every render. Warming
+ends after 15 minutes of comparable history; never reuse cached rates.
 After publishing, atomically update the existing latest-card URL and fixed
 checkpoint fields together; do not create competing URL aliases.
 
@@ -193,9 +165,9 @@ checkpoint fields together; do not create competing URL aliases.
 - Explain why capacity is needed from measured workload/reuse evidence. A
   symbolic planner maximum does not justify a quota increase. Give a concrete
   unblock action in the report.
-- Bind worker percentages/rates to the current assignment. Retain blocked prior
-  scopes separately; do not leave old RCA percentages on unrelated active work,
-  reset history to hide a stall, or manufacture milestone gains.
+- Bind worker token totals/rates to the current assignment. Retain prior scopes
+  separately; do not charge old RCA usage to unrelated work, reset history to
+  hide usage, or manufacture milestones from tokens spent.
 
 ## Card colors
 

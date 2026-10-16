@@ -4,13 +4,15 @@ For code review or approval requests, never give file pointers (paths or line li
 
 All user-facing code-block displays from any skill or command follow
 `.claude/shared/report-display-format.md`: 12-hour America/Los_Angeles time
-(PDT/PST by date), one status emoji per worker and evidenced milestone progress.
-Keep LIFE at the far right; remove UPD and progress wheels. Show rolling
-15-minute percentage points/min: positive green, zero/negative red, and 🚨 for
-verified stalled advancing work. Beneath every red row, state the reason and
-corrective owner/action. Preserve same-scope history and original lifetime;
-new history reads warming <age>. Healthy monitoring and completed custody need
-no false stall alarm or status refresh. No nulls or explanatory legends.
+(PDT/PST by date), one status emoji per worker and recorded token usage.
+Show current-assignment tokens spent and rolling 15-minute tokens/min instead
+of PCT and pp/min. Count recorded input + output, including cached input; do not
+double-count reasoning output or infer credits, cost or completion from tokens.
+Keep LIFE at the far right; remove UPD and progress wheels. Preserve same-scope
+usage history and original lifetime; less than 15 minutes reads warming <age>,
+missing counters read UNMETERED. Beneath red rows, state the blocker and
+corrective owner/action. Completed work and healthy monitoring need no false
+stall alarm. No nulls or explanatory legends.
 Benchmark cards start with the Experiment Number and numeric experiments/day
 for this goal. Show only the latest three actual experiments with concise timing,
 queue/verdict, cost/cache/LLM and lifecycle subrows, replacing the old standalone
@@ -32,15 +34,19 @@ links. A file pointer never substitutes for the diff.
   Pacific local time, one status emoji, no UPD/nulls, and LIFE far right.
 - Show the live HTML scorecard inline in the answer, with readable text and a
   compact first view; keep QA screenshots private and never send image previews.
-- Track the worker's **current assignment** with timestamped milestones. Show
-  real 15-minute pp/min; new scopes read `warming <age>`. Keep earlier scopes
-  and lifetimes. Every red row names its blocker and corrective action.
-  Recompute rates from same-scope history on every render; end warming after
-  15 minutes of history instead of reusing a cached rate or warming flag.
-  Timestamp milestones from their actual receipts; rereading old evidence
-  must not create a new progress delta after an interruption.
-  For long batches, derive progress from fixed-cohort per-item receipt events;
-  preserve superseded estimates instead of mixing different percentage bases.
+- Show **current-assignment tokens spent** and rolling **15-minute tokens/min**
+  in worker and parent rows, replacing percentages and pp/min. Use actual
+  timestamped harness counters (input + output, including cached input), with a
+  recorded baseline before the assignment. Preserve previous scopes and LIFE;
+  show UNMETERED when counters or the scope baseline are unavailable. Never
+  estimate tokens from text length, elapsed time or milestone percentages.
+- Record verified milestones and outcomes separately: spending tokens is not
+  evidence of completion, success, savings or billed dollars. Do not add
+  reasoning-output tokens again when already included in output. Rates use
+  same-scope counter differences over a full 15 minutes; show warming <age>
+  before that, and never bridge a counter reset without verified continuity.
+- Keep fixed-cohort receipt counts for long batches and original clocks. A new
+  rendering or reread of old evidence must not create a usage or outcome delta.
 - After publishing, atomically update the existing latest-card URL and fixed
   checkpoint fields together; do not create competing URL aliases.
   Refresh lifecycle labels from verified receipts; completed exports must not
@@ -166,8 +172,9 @@ make an iteration pass.
   embed reusable learnings in the owning instructions or command. Include the
   chosen speedup in the scorecard, or state briefly that no concrete speedup
   was found. Then return to waiting; do not create status-only busywork.
-- A red progress interval is a control signal. Its row must be followed by one
-  line naming the blocker and the concrete action taken or already in flight.
+- Verified lack of milestone gain is a control signal; token burn alone is not
+  progress. Its row must name the blocker and the concrete action taken or
+  already in flight.
   Narrow a failing hypothesis, remove a redundant dependency, split independent
   work, reassign an idle owner or choose a more discriminating experiment.
   If the same blocker persists at the next checkpoint without new causal
@@ -655,8 +662,8 @@ Experiment Number; include actual launches/day for this goal and a compact table
 of the last three experiments with their own original trigger/end/elapsed,
 queued/running/terminal counts, PASS/AGENT FAILURE/INFRA FAILURE, unknown outcomes,
 cost/cache/LLM coverage and lifecycle evidence. Use one status emoji per worker,
-verified rolling 15-minute rates and LIFE at the far right. Remove UPD, wheels
-and the old standalone active-run/progress/metrics and last-slice sections.
+recorded scope tokens spent, rolling 15-minute tokens/min and LIFE at the far
+right. Remove UPD, wheels and the old standalone active-run/progress/metrics and last-slice sections.
 A delay needing action belongs in ISSUES / NEXT ACTION with an owner and concrete
 correction. Do not reset clocks or discard attempts.
 
