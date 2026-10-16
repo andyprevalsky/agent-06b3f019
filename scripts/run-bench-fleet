@@ -13588,6 +13588,54 @@ except Exception as error:
 PYBILLING
 }
 
+# The live-owner plan shares the return-to-pool ownership/provenance guards.
+# Guest shutdown and owned joins must already have completed before this call.
+stop_current_registry_primaries_for_pool() {  # <joins> <guest-failed> <runtime-failed>
+    local plan baseline id name volume details state seen_name mounted budget pending
+    local seconds="${CLOUDBENCH_GUEST_NATIVE_STOP_SECONDS:-20}" deadline
+    local -a ids=() names=() volumes=() states=()
+    plan="$(current_registry_primaries_to_pool_plan "$@")" || return 1
+    baseline="${plan%%$'\n'*}"
+    [ "$plan" != "$baseline" ] || return 0
+    case "$seconds" in ''|*[!0-9]*|0) seconds=20 ;; esac
+    deadline=$((SECONDS + seconds))
+    # Validate the complete exact set before issuing any STOP.
+    while IFS=$'\t' read -r id name volume; do
+        [ -n "$id" ] || continue
+        [ "$id" != "${WARM_ID:-}" ] && [ "$id" != "${SHARED_WARM_ID:-}" ] \
+            && [ "$volume" != "${WARM_VOLUME_ID:-}" ] && [ "$volume" != "${SHARED_WARM_VOLUME_ID:-}" ] || return 1
+        budget="$(fleet_native_stop_call_budget "$deadline")" || return 1
+        details="$(registry_machine_details "$id" "$budget")" || return 1
+        read -r state seen_name _ <<< "$details"
+        budget="$(fleet_native_stop_call_budget "$deadline")" || return 1
+        mounted="$(machine_volume_id "$id" "$budget")" || return 1
+        [ "$seen_name" = "$name" ] && [ "$mounted" = "$volume" ] || return 1
+        case "$state" in started|stopping|stopped) ;; *) return 1 ;; esac
+        ids+=("$id"); names+=("$name"); volumes+=("$volume"); states+=("$state")
+    done < <(printf '%s\n' "$plan" | tail -n +2)
+    for id in "${!ids[@]}"; do
+        if [ "${states[$id]}" = started ]; then
+            # An ACK is only a request result. Verification below owns success.
+            fleet_native_stop_send "${ids[$id]}" "$deadline" || true
+        fi
+    done
+    while :; do
+        pending=0
+        for id in "${!ids[@]}"; do
+            budget="$(fleet_native_stop_call_budget "$deadline")" || return 1
+            details="$(registry_machine_details "${ids[$id]}" "$budget")" || return 1
+            read -r state seen_name _ <<< "$details"
+            budget="$(fleet_native_stop_call_budget "$deadline")" || return 1
+            mounted="$(machine_volume_id "${ids[$id]}" "$budget")" || return 1
+            [ "$seen_name" = "${names[$id]}" ] && [ "$mounted" = "${volumes[$id]}" ] || return 1
+            case "$state" in stopped) ;; started|stopping) pending=1 ;; *) return 1 ;; esac
+        done
+        [ "$pending" = 1 ] || return 0
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 1
+    done
+}
+
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}" publication_failed=0
     local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
@@ -13879,6 +13927,17 @@ cleanup() {
         echo "❌ could not reconcile this controller's exact pool claims" >&2
         ec=1
         teardown_failed=1
+    fi
+    if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
+        if ! stop_current_registry_primaries_for_pool "$billing_owned_joins" \
+                "$guest_shutdown_failed" "$runtime_evidence_failed" \
+            || ! return_current_registry_primaries_to_pool "$billing_owned_joins" \
+                "$guest_shutdown_failed" "$runtime_evidence_failed"; then
+            echo "❌ fresh primary STOP/pool return was not verified; retaining exact ownership and data" >&2
+            KEEP_CLONES=1
+            ec=1
+            teardown_failed=1
+        fi
     fi
     if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
         # The durable registry is authoritative for primaries AND autoscaler

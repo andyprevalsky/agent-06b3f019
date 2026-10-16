@@ -3199,5 +3199,69 @@ run(){
         row=self.branch(owned=False)
         self.assertFalse(row['stops']);self.assertTrue(row['claim'])
 
+class FreshPrimaryPoolReturnTests(unittest.TestCase):
+    """Teardown stops exact healthy primaries before the live-owner handoff."""
+    def helper(self, *, never_stopped=False, foreign=False, denied=False, already=False, warm=False):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        start=source.index('stop_current_registry_primaries_for_pool() {')
+        end=source.index('\ncleanup() {',start)
+        with tempfile.TemporaryDirectory() as tmp:
+            script=r'''
+set -u
+current_registry_primaries_to_pool_plan(){ [ "$DENIED" = 0 ] || return 1; printf 'baseline\nmachine\tclone\tvolume\n'; }
+fleet_native_stop_call_budget(){ c=0;[ ! -f "$ROOT/reads" ] || c=$(cat "$ROOT/reads");[ "$c" -lt 5 ] || return 1;echo 1; }
+registry_machine_details(){
+ c=0;[ ! -f "$ROOT/reads" ] || c=$(cat "$ROOT/reads");c=$((c+1));echo "$c" > "$ROOT/reads"
+ state=started;[ "$ALREADY" = 0 ] || state=stopped
+ if [ -f "$ROOT/stop" ] && [ "$NEVER" = 0 ];then state=stopping;[ "$c" -lt 3 ] || state=stopped;fi
+ echo "$state clone"
+}
+machine_volume_id(){ [ "$FOREIGN" = 0 ] && echo volume || echo other; }
+fleet_native_stop_send(){ echo stop >> "$ROOT/stop"; }
+sleep(){ :; }
+''' + source[start:end] + '\nstop_current_registry_primaries_for_pool 1 0 0\n'
+            r=subprocess.run(['bash','-c',script],env={**os.environ,'ROOT':tmp,'NEVER':str(int(never_stopped)),'FOREIGN':str(int(foreign)),'DENIED':str(int(denied)),'ALREADY':str(int(already)), 'WARM_ID':'machine' if warm else ''},capture_output=True,text=True,timeout=10)
+            root=Path(tmp)
+            return r.returncode,(root/'stop').exists(),int((root/'reads').read_text()) if (root/'reads').exists() else 0
+
+    def callsite(self, stop_failure=False, return_failure=False):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        start=source.index('    # Claims are independent recovery roots')
+        end=source.index('    # Clone volume IDs are persisted',start)
+        with tempfile.TemporaryDirectory() as tmp:
+            script=r'''
+set -u
+reconcile_current_pool_transfer_claims(){ :; }
+reconcile_current_pool_claims(){ :; }
+stop_current_registry_primaries_for_pool(){ echo stop >> "$ROOT/events";return "$STOP_FAIL"; }
+return_current_registry_primaries_to_pool(){ echo return >> "$ROOT/events";return "$RETURN_FAIL"; }
+reap_registry_clones(){ echo reap >> "$ROOT/events"; }
+run(){
+ local ec=0 teardown_failed=0 KEEP_CLONES=0 FLEET_REGISTRY_PUBLISHED=1 FLEET_REGISTRY_DIR=registry
+ local billing_owned_joins=1 guest_shutdown_failed=0 runtime_evidence_failed=0
+''' + source[start:end] + '\n echo "$ec $KEEP_CLONES $teardown_failed" > "$ROOT/result"\n}\nrun\n'
+            r=subprocess.run(['bash','-c',script],env={**os.environ,'ROOT':tmp,'STOP_FAIL':str(int(stop_failure)),'RETURN_FAIL':str(int(return_failure))},capture_output=True,text=True,timeout=10)
+            self.assertEqual(r.returncode,0,r.stderr);p=Path(tmp)
+            return (p/'events').read_text().splitlines(),(p/'result').read_text().strip()
+
+    def test_native_stop_ack_requires_observed_stopped_before_success(self):
+        rc,posted,reads=self.helper();self.assertEqual(rc,0);self.assertTrue(posted);self.assertGreaterEqual(reads,3)
+        rc,posted,reads=self.helper(never_stopped=True);self.assertNotEqual(rc,0);self.assertTrue(posted)
+
+    def test_foreign_or_unverified_owner_plan_never_stops(self):
+        for flags in ({'foreign':True},{'denied':True},{'warm':True}):
+            with self.subTest(flags=flags):self.assertFalse(self.helper(**flags)[1])
+
+    def test_already_stopped_is_rechecked_without_stop_request(self):
+        rc,posted,reads=self.helper(already=True);self.assertEqual(rc,0);self.assertFalse(posted);self.assertGreaterEqual(reads,2)
+
+    def test_successful_teardown_stops_then_returns_before_remaining_reap(self):
+        events,result=self.callsite();self.assertEqual(events,['stop','return','reap']);self.assertEqual(result,'0 0 0')
+
+    def test_failed_stop_or_return_retains_without_reap(self):
+        for stop_failure,return_failure in [(True,False),(False,True)]:
+            with self.subTest(stop_failure=stop_failure):
+                events,result=self.callsite(stop_failure,return_failure);self.assertNotIn('reap',events);self.assertEqual(result,'1 1 1')
+
 if __name__ == "__main__":
     unittest.main()
