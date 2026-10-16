@@ -19,19 +19,25 @@ async def assert_auth_assessment_controls(owning_fixture):
     observations = []
     # The old real activity pauses immediately at the first declaration, even
     # though that same declaration says an applicable supplied operation remains.
+    before_other_recipient = assessment(phone="remaining")
+    before_other_recipient["attempted_recipient_options"] = [{"method": "sms_otp", "recipient": "+15550000001", "status": "exhausted", "evidence": "The submitted personal recipient was rejected", "evidence_steps": [1,2]}]
+    final = assessment(phone="exhausted");final["recipient_options"][1]["evidence_steps"] = [5]
+    final["attempted_recipient_options"] = deepcopy(before_other_recipient["attempted_recipient_options"])
     r = {"inventory": deepcopy(INVENTORY), "actions": [
-        handoff(assessment(phone="remaining")),
+        {"action": "input_text", "index": 7, "params": {"text": "+15550000001"}},
+        {"action": "click", "index": 8, "params": {}},
+        handoff(before_other_recipient),
         {"action": "input_text", "index": 7, "params": {"text": "+15550000002"}, "thinking": "Use the supplied phone on the current form"},
         {"action": "click", "index": 8, "params": {}, "thinking": "Submit the supplied recipient"},
-        handoff(assessment(phone="exhausted")),
+        handoff(final),
     ]}
     with _offline_activity_edges():
         await owning_fixture("empty", auth_review=r)
-    assert [x["params"]["text"] for x in r["executed"] if x["action"] == "input_text"] == ["+15550000002"]
-    assert "action_step" in str(r["contexts"][3]["turn_messages"])
-    assert "authentication_options_remaining" in str(r["contexts"][1]["turn_messages"])
-    assert r["result"]["auth_assessment"] == assessment(phone="exhausted")
-    observations.append({"case": "remaining_sms_to_native_input", "decisions": len(r["contexts"]), "inputs": 1})
+    assert [x["params"]["text"] for x in r["executed"] if x["action"] == "input_text"] == ["+15550000001", "+15550000002"]
+    assert "action_step" in str(r["contexts"][5]["turn_messages"])
+    assert "authentication_options_remaining" in str(r["contexts"][3]["turn_messages"])
+    assert r["result"]["auth_assessment"] == final
+    observations.append({"case": "remaining_sms_to_native_input", "decisions": len(r["contexts"]), "inputs": 2})
     # Named account exclusion / unknown reader are deliberate model judgements,
     # never automatic ownership=>registration or automatic account retargeting.
     for a in [

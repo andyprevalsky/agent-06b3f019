@@ -46,6 +46,20 @@ def auth_assistance_assessment_result(
     reason = assessment.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         return incomplete("The current authentication blocker has no evidence description.")
+    past_attempts = assessment.get("attempted_recipient_options") or []
+    if not isinstance(past_attempts, list):
+        return incomplete("Past authentication attempts are malformed.")
+    entries_by_step = {entry.get("step"): entry for entry in action_history}
+    for attempt in past_attempts:
+        if not isinstance(attempt, dict) or attempt.get("method") not in {"email_otp", "sms_otp"}:
+            return incomplete("A past authentication attempt has no recognized method.")
+        steps = attempt.get("evidence_steps") or []
+        if not isinstance(steps, list) or not steps or any(type(step) is not int or step not in entries_by_step for step in steps):
+            return incomplete("A past attempt has no valid action receipts.")
+        if not any(entries_by_step[step].get("action") == "input_text" and
+                   (entries_by_step[step].get("params") or {}).get("text") == attempt.get("recipient")
+                   for step in steps):
+            return incomplete("A past recipient is not bound to a cited input action.")
     blocker = assessment.get("blocker")
     # Never require trying another identity during an accepted/user-only step.
     if blocker in {"user_only_verification", "account_locked"}:
