@@ -27300,6 +27300,9 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
     funcs = "\n".join(
         _extract_fleet_function(fleet, sig)
         for sig in (
+            "campaign_inventory_wait() {",
+            "campaign_inventory_capture_once() {",
+            "campaign_inventory_capture() {",
             "pool_machine_shape_from_json() {",
             "snapshot_created_epoch() {",
             "snapshot_is_complete_exact() {",
@@ -27403,6 +27406,10 @@ def test_private_fleet_source_rejects_unproven_input(tmp_path: Path, corrupt: st
 def test_private_fleet_source_cannot_be_claimed_from_contaminated_pool(tmp_path: Path) -> None:
     fleet = fleet_source_text()
     claim = _extract_fleet_function(fleet, "claim_pool_machine() {")
+    claim += "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in ("pool_reuse_proof_file", "pool_verify_reuse_proof")
+    )
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     for source, volume in (
         ("feedface000001", "vol_private"),
@@ -27420,6 +27427,7 @@ SHARED_WARM_ID=683e47df5094d8
 SHARED_WARM_VOLUME_ID=vol_shared
 POOL_IDS_FILE="$FIXTURE/pool.ids"
 FLEET_DIR="$FIXTURE"
+GIT_COMMON_DIR="$FIXTURE/common"
 POOL_CLAIMS_DIR="$FIXTURE/claims"
 CLAIMED_POOL_FILE="$FIXTURE/claimed"
 POOL_INVENTORY_JSON='[]'
@@ -32864,7 +32872,10 @@ def test_private_fleet_source_compact_inventory_binding_survives_caller_substitu
     fleet = fleet_source_text()
     start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
     stop = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', start)
-    binding = fleet[start:stop]
+    binding = "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in ("campaign_inventory_wait", "campaign_inventory_capture_once", "campaign_inventory_capture")
+    ) + "\n" + fleet[start:stop]
     warm = binding + 'warm_json="$(fleet_admission_machines_json)"\n'
     inventory = (ROOT / "scripts/lib/cloudbench-inventory.sh").read_text()
     helpers = "\n".join(_extract_fleet_function(inventory, name) for name in ("_fresh_snapshot_or() {", "fleet_admission_machines_json() {"))
@@ -32922,7 +32933,10 @@ def test_private_fleet_source_compact_private_binding_and_standalone_refresh(tmp
     fleet = fleet_source_text()
     start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('validate_private_fleet_source() {'))
     stop = fleet.index('if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then', start)
-    binding = fleet[start:stop]
+    binding = "\n".join(
+        _extract_fleet_function(fleet, name + "() {")
+        for name in ("campaign_inventory_wait", "campaign_inventory_capture_once", "campaign_inventory_capture")
+    ) + "\n" + fleet[start:stop]
     start = fleet.index('if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then', fleet.index('reap_orphaned_fleet_proxies\n'))
     stop = fleet.index('# ── App-wide capacity guard', start)
     refresh = fleet[start:stop]
@@ -33463,6 +33477,7 @@ stale() { printf 'publisher_token=owned-token\nvalid_until=%s\n' "$((INVENTORY_C
 printf '[]\n' > "$INVENTORY_INDEX/current/admission-machines.json"
 FLY() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
 healthy
+printf 'generation=before-mutation\n' >> "$INVENTORY_INDEX/current/health"
 start_machines_snapshot_loop || exit 91
 cp "$INVENTORY_HOME/owner" "$ROOT/original-owner"
 FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=0
@@ -33473,9 +33488,12 @@ CAPACITY_ADMISSION_DEADLINE=$((SECONDS+2))
 original_admission_deadline=$CAPACITY_ADMISSION_DEADLINE
 CAPACITY_INITIAL_INVENTORY_PENDING=0
 CAPACITY_RESERVATION_PUBLISHED=0
-inventory_refresh_lock_acquire() { printf 'REFRESH\n' >> "$ROOT/events"; return 0; }
-inventory_refresh_lock_release() { return 0; }
-_refresh_inventory_snapshot_unlocked() {
+# Borrowers wait for the parent publisher; drive its next generation at the
+# wait boundary while retaining the real generation/health/owner checks.
+inventory_refresh_lock_acquire() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
+_refresh_inventory_snapshot_unlocked() { printf 'FORBIDDEN_NATIVE\n' >&2; return 93; }
+inventory_refresh_wait_tick() {
+ printf 'REFRESH\n' >> "$ROOT/events"
  [ "$CASE" = mutation-fresh ] || return 1
  healthy
  printf 'generation=after-mutation\n' >> "$INVENTORY_INDEX/current/health"

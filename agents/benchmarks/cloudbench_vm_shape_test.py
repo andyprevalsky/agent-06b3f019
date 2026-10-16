@@ -95,6 +95,9 @@ def test_claim_prefers_exact_performance_shape_over_earlier_candidates(tmp_path)
     source = (ROOT / "scripts/run-bench-fleet").read_text()
     start = source.index("claim_pool_machine() {")
     function = source[start:source.index("\n}\n", start) + 3]
+    for name in ("pool_reuse_proof_file", "pool_verify_reuse_proof"):
+        helper_start = source.index(name + "() {")
+        function += source[helper_start:source.index("\n}\n", helper_start) + 3]
     ids = tmp_path / "pool.ids"
     ids.write_text("a1\nb2\nc3\n")
     (tmp_path / "pool-shapes.tsv").write_text(
@@ -113,6 +116,7 @@ def test_claim_prefers_exact_performance_shape_over_earlier_candidates(tmp_path)
     result = subprocess.run(
         ["bash", str(script)],
         env={**os.environ, "POOL_IDS_FILE": str(ids), "FLEET_DIR": str(tmp_path),
+             "GIT_COMMON_DIR": str(tmp_path / "common"),
              "POOL_CLAIMS_DIR": str(tmp_path / "claims"),
              "CLAIMED_POOL_FILE": str(tmp_path / "claimed.ids")},
         capture_output=True, text=True, timeout=10,
