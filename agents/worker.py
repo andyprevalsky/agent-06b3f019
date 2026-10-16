@@ -34,6 +34,7 @@ if not os.getenv("BACKEND_API_KEY"):
 
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
+from browser_tools.secret_refs import redact_secret_log_values
 from config import load_config
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
@@ -161,7 +162,6 @@ from workflows import AgentWorkflow
 # equals agent_id, this makes all workflow logs filterable by agent_id.
 # ExtraAdder captures these fields into the structured JSON output.
 
-from browser_tools.secret_refs import redact_secret_log_values
 
 shared_processors = [
     structlog.contextvars.merge_contextvars,  # Injects agent_id bound via bind_contextvars()

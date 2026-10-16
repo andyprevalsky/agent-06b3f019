@@ -484,6 +484,12 @@ existing canonical port allocator outside the kernel ephemeral range; worker
 port validation and the frozen runtime were unchanged. The original competing
 socket owner was not captured and remains an observability gap.
 
+The second fresh review subsequently found a separate
+[stopped-worker build-provenance defect](2026-10-16-stopped-worker-rollout-provenance.md)
+in the retained-worker deployment repair. The credential campaign above stays
+native PASS with its immutable evidence, while the additional worker runtime
+repair requires full release requalification before the last review cycle.
+
 Final release review and production verification are separate. Production
 admission remains held: 999 Machine objects against cap 1000, with no verified
 eight-worker same-app spare pool for the required changed-generation overlap.
