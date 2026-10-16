@@ -69,12 +69,25 @@ private source remains rejected. The final owning suites pass: 31 bootstrap and
 causal logs, adopted the exact commit, and ran the same three new controls with
 three PASS. Full combined deployment qualification remains a separate gate.
 
-The exact adopted fixture SHA256 is
+The original adopted proposal's fixture SHA256 was
 `642bdb3d5e1d5aef3b8612177f47ec04224a5422cd66b810bfc76d50bedd4976`.
 Before/after and complete owning-suite logs are retained in the source owner's
 frozen handoff; root's independent output is in
 `.context/admission-integration-checks/snapshot-fixture-root-adoption.log` under
 the preserved deployment checkout.
+
+Root also cleared all 24 static diagnostics exposed by the touched fixture:
+dictionary literals, explicit `check=False` where return codes are asserted,
+binding the per-iteration mutation path, combined contexts, and removing a
+shebang from a non-executable module. The full unfiltered Ruff 0.17.0 command
+changes from 24 findings to zero; no suppression or configuration was added.
+All 82 assertion ASTs and all test names are identical across this cleanup.
+The final complete suites pass again: 31 bootstrap tests in 54.183 seconds and
+15 forensic/quiesced tests in 38.040 seconds. An initial misspelled companion
+test filename supplied no test credit; the recorded passing command uses the
+actual `cloudbench-forensic-quiesced.test.py` owner. Production bytes remain
+unchanged. Root's static logs and assertion-preservation manifest are retained
+in `.context/fixture-static-cleanup` in the final development checkout.
 
 At 10k agents this changes no runtime, provider call, per-agent query or polling.
 It reuses a bounded deployment-fixture controller copy and its established exact
