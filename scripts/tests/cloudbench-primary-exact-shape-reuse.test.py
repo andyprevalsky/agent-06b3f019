@@ -180,5 +180,75 @@ class StagedPrimaryExactShape(unittest.TestCase):
         self.assertEqual(cid, 'pool abcd\n')
         self.assertEqual(actions, ['audit', 'proof'])
 
+class ExplicitPoolNormalization(unittest.TestCase):
+    def case(self, inventory, rows, proofs):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'cloudbench-pool-reuse').mkdir()
+            (root / 'pool.ids').write_text(''.join(mid + '\n' for mid in rows))
+            (root / 'native.json').write_text(inventory if isinstance(inventory, str) else __import__('json').dumps(inventory))
+            for mid, proof in proofs.items():
+                (root / 'cloudbench-pool-reuse' / (mid + '.json')).write_text(proof)
+            script = "set -uo pipefail\n" + function('pool_machine_shape_from_json') + function('normalize_current_pool_shape') + r'''
+GIT_COMMON_DIR="$CASE_DIR"; FLEET_DIR="$CASE_DIR"; POOL_IDS_FILE="$CASE_DIR/pool.ids"
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x; FLEET_PRIMARY_VM_MEMORY=4096
+FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x; FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1; FLEET_POOL_RECONCILIATION_MAY_HAVE_MUTATED=0
+POOL_INVENTORY_JSON="$(cat "$CASE_DIR/native.json")"
+python3() {
+ case "$*" in *'try: machines = json.load'*) printf x >> "$CASE_DIR/full-parses" ;; esac
+ command python3 "$@"
+}
+resize_pool_machine() { printf '%s\n' "$1" >> "$CASE_DIR/resized"; return 9; }
+FLY() { printf 'unexpected-provider\n' >&2; return 90; }
+normalize_current_pool_shape
+'''
+            r = subprocess.run(['bash', '-c', script], env={**os.environ, 'CASE_DIR': str(root)}, capture_output=True, text=True, timeout=30)
+            count = len((root / 'full-parses').read_text()) if (root / 'full-parses').exists() else 0
+            resized = (root / 'resized').read_text().splitlines() if (root / 'resized').exists() else []
+            self.assertEqual((root / 'pool.ids').read_text(), ''.join(mid + '\n' for mid in rows))
+            for mid, proof in proofs.items():
+                self.assertEqual((root / 'cloudbench-pool-reuse' / (mid + '.json')).read_text(), proof)
+            return r, count, resized
+
+    @staticmethod
+    def row(mid, *, state='stopped', cpus=2, memory=4096):
+        return dict(id=mid, state=state, config=dict(guest=dict(cpu_kind='shared', cpus=cpus, memory_mb=memory)))
+
+    def test_full_447_explicit_rows_and_duplicates_never_parse_or_resize(self):
+        ids = [f'{i:014x}' for i in range(1, 448)]
+        rows = ids + ids[:7]
+        inventory = [self.row(f'{i:014x}', cpus=4, memory=8192) for i in range(1, 987)]
+        r, count, resized = self.case(inventory, rows, {mid:'{"explicit_idle":{}}' for mid in ids})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((count, resized), (0, []))
+
+    def test_malformed_missing_and_nonexplicit_proofs_keep_native_lookup(self):
+        ids = ['malformed', 'missing', 'legacy']
+        r, count, resized = self.case([self.row(mid) for mid in ids], ids, {'malformed':'{', 'legacy':'{}'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((count, resized), (3, []))
+
+    def test_malformed_and_missing_native_still_cannot_authorize_resize(self):
+        for inventory in ('{', '[]', '[{"id":"x","config":3}]'):
+            with self.subTest(inventory=inventory):
+                r, count, resized = self.case(inventory, ['x'], {'x':'{}'})
+                self.assertEqual(r.returncode, 0)
+                self.assertEqual((count, resized), (1, []))
+
+    def test_exact_original_key_presence_semantics_preserved(self):
+        r, count, resized = self.case('{', ['x'], {'x':'{"explicit_idle":false}'})
+        self.assertEqual((r.returncode, count, resized), (0, 0, []))
+
+    def test_nonexplicit_wrong_shape_still_attempts_resize_and_refuses(self):
+        r, count, resized = self.case([self.row('x', cpus=8, memory=16384)], ['x'], {'x':'{}'})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual((count, resized), (1, ['x']))
+
+    def test_legacy_duplicate_first_match_and_transitional_skip_unchanged(self):
+        r, count, resized = self.case([self.row('x', state='starting', cpus=8),self.row('x')], ['x'], {})
+        self.assertEqual((r.returncode, count, resized), (0, 1, []))
+
+
 if __name__ == '__main__':
     unittest.main()

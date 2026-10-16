@@ -12934,9 +12934,8 @@ normalize_current_pool_shape() {
     fi
     while read -r id; do
         [ -n "$id" ] || continue
-        shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
-        read -r state kind cpus memory <<< "$shape"
-        [ "$state" = "stopped" ] || continue
+        # An explicit admission already forbids normalization of this Machine.
+        # Check the same exclusion before parsing the full app inventory.
         if python3 - "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" <<'PY' 2>/dev/null
 import json,sys
 assert 'explicit_idle' in json.load(open(sys.argv[1]))
@@ -12944,6 +12943,9 @@ PY
         then
             continue
         fi
+        shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
+        read -r state kind cpus memory <<< "$shape"
+        [ "$state" = "stopped" ] || continue
         # Dynamic fleets can reuse an already-proven large primary directly.
         # Shrinking it here forces another host-local CPU reservation when the
         # next browser task grows it again; that reservation can be unavailable
