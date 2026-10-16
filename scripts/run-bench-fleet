@@ -6158,9 +6158,9 @@ release_registry_recovery_lock() {
 }
 
 reserve_cleanup_disk_space() {
-    # One native filesystem transaction admits the pending cohort fairly before
-    # allocating real cleanup blocks. Defaults and explicit storage floors stay
-    # unchanged; exact owner files are still released by the existing finalizer.
+    # Short filesystem transactions debit and commit the sealed cohort budget;
+    # physical allocation runs concurrently outside the accounting lock. Defaults
+    # and storage floors stay unchanged; the finalizer releases exact owner files.
     local reserve_mb="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-512}"
     local headroom_mb="${CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB:-256}"
     local minimum_mb="${CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB:-32}"
@@ -6192,6 +6192,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 path = Path(sys.argv[1]).absolute()
 preferred, headroom, minimum = map(int, sys.argv[2:5])
@@ -6242,24 +6243,37 @@ def free_mb():
     return int(fields[3]) // 1024
 
 
-def capture_births():
-    result = subprocess.run(["ps", "-axo", "pid=,lstart="], env={**os.environ, "TZ": "UTC"}, capture_output=True, text=True, check=True)
-    births = {}
+def capture_processes():
+    # One coherent enumeration supplies both liveness and nested ancestry.
+    result = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart="], env={**os.environ, "TZ": "UTC"}, capture_output=True, text=True, check=True)
+    births, parents = {}, {}
     for line in result.stdout.splitlines():
-        fields = line.split(None, 1)
-        if len(fields) == 2 and fields[0].isdigit():
-            births[int(fields[0])] = " ".join(fields[1].split())
-    return births
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit():
+            pid = int(fields[0])
+            births[pid] = " ".join(fields[2].split())
+            if fields[1].isdigit():
+                parents[pid] = int(fields[1])
+    return births, parents
 
 
 def native_birth(pid):
-    return birth_snapshot.get(pid, "")
+    if pid not in birth_snapshot:
+        # A caller can publish after our pre-lock snapshot. Missing there is
+        # uncertainty; only a fresh targeted native lookup may release its floor.
+        try:
+            birth_snapshot[pid] = capture_owner_birth(pid)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1 or exc.output:
+                raise
+            birth_snapshot[pid] = ""
+    return birth_snapshot[pid]
 
 
-def capture_parents():
-    result = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=True)
-    return {int(fields[0]): int(fields[1]) for line in result.stdout.splitlines()
-            if len(fields := line.split()) == 2 and all(field.isdigit() for field in fields)}
+def capture_owner_birth(pid):
+    # Only this owner is rechecked after allocation; do not rescan all peers.
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], env={**os.environ, "TZ": "UTC"}, capture_output=True, text=True, check=True)
+    return " ".join(result.stdout.split())
 
 
 def descendant_of(pid, ancestor):
@@ -6312,8 +6326,21 @@ def canary_descendant(pid, ancestor):
 
 
 def live_consumers(group):
-    return {member: owner for member, owner in group["consumed"].items()
-            if native_birth(owner["pid"]) == owner["birth"]}
+    result = {}
+    for member, owner in group["consumed"].items():
+        observed = native_birth(owner["pid"])
+        if observed != owner["birth"]:
+            # A mismatched pre-lock snapshot cannot prove this newer owner dead.
+            try:
+                observed = capture_owner_birth(owner["pid"])
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode != 1 or exc.output:
+                    raise
+                observed = ""
+            birth_snapshot[owner["pid"]] = observed
+        if observed == owner["birth"]:
+            result[member] = owner
+    return result
 
 
 def pending_members(group):
@@ -6470,15 +6497,20 @@ def future_nested_liability(live, key, owner_pid):
     return extra_floor, extra_needed, extra_pending
 
 
-def persist(state_file, groups):
+def persist(state_file, groups, inflight, failures):
     descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=state_file.parent)
     try:
         with os.fdopen(descriptor, "w") as stream:
-            json.dump({"version": 1, "groups": groups}, stream)
+            json.dump({"version": 2, "groups": groups, "inflight": inflight, "failures": failures}, stream)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, state_file)
+        directory_fd = os.open(state_file.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -6536,22 +6568,158 @@ def allocate(fd, size):
         try:
             allocate_cleanup_reserve(fd, size)
         except CleanupReserveAllocationUnsupported:
-            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=notrunc,fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL, pass_fds=(fd,))
     elif sys.platform == "linux" and hasattr(os, "posix_fallocate"):
         try:
             os.posix_fallocate(fd, 0, size)
         except OSError as exc:
             if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
                 raise
-            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=notrunc,fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL, pass_fds=(fd,))
     else:
-        subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["bash", "-c", 'dd if=/dev/zero of="$1" bs=1048576 count="$2" conv=notrunc,fsync', "reserve", str(path), str(size // MB)], check=True, stdout=subprocess.DEVNULL, pass_fds=(fd,))
     os.fsync(fd)
     observed = os.fstat(fd)
     if (observed.st_dev, observed.st_ino) != reserve_identity or not stat.S_ISREG(observed.st_mode) or observed.st_size != size or observed.st_blocks * 512 < size:
         raise OSError(errno.EIO, "cleanup reserve physical allocation could not be verified")
 
 
+def load_state(state_file):
+    if not state_file.exists():
+        return {}, {}, {}
+    regular(state_file)
+    if state_file.stat().st_size > 1048576:
+        raise ValueError("oversized cleanup admission state")
+    value = json.loads(state_file.read_text())
+    if value.get("version") == 1 and set(value) == {"version", "groups"}:
+        value.update(version=2, inflight={}, failures={})
+    if set(value) != {"version", "groups", "inflight", "failures"} or value["version"] != 2 or any(not isinstance(value[field], dict) for field in ("groups", "inflight", "failures")):
+        raise ValueError("invalid cleanup admission state")
+    groups, inflight, failures = value["groups"], value["inflight"], value["failures"]
+    for identifier, group in groups.items():
+        if not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            raise ValueError("invalid cleanup admission group identity")
+        validate_group(identifier, group)
+    for identifier, record in inflight.items():
+        if set(record) != {"group", "job", "pid", "birth", "allocator_pid", "allocator_birth", "path", "identity", "amount"}:
+            raise ValueError("malformed cleanup allocation debit")
+        if not isinstance(record["path"], str) or not Path(record["path"]).is_absolute() or identifier != hashlib.sha256(record["path"].encode()).hexdigest():
+            raise ValueError("invalid cleanup allocation path")
+        if record["group"] not in groups or groups[record["group"]]["consumed"].get(record["job"]) != {"pid": record["pid"], "birth": record["birth"]}:
+            raise ValueError("cleanup allocation debit owner changed")
+        if type(record["amount"]) is not int or not 1 <= record["amount"] <= 4096 or type(record["allocator_pid"]) is not int or record["allocator_pid"] < 1 or not isinstance(record["allocator_birth"], str) or not record["allocator_birth"]:
+            raise ValueError("invalid cleanup allocation debit identity")
+        if not isinstance(record["identity"], list) or len(record["identity"]) != 2 or any(type(field) is not int or field < 0 for field in record["identity"]):
+            raise ValueError("invalid cleanup allocation inode")
+    return groups, inflight, failures
+
+
+def allocator_may_live(record):
+    observed = birth_snapshot.get(record["allocator_pid"])
+    if observed == record["allocator_birth"]:
+        return True
+    try:
+        os.kill(record["allocator_pid"], 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A missing snapshot is uncertainty, not death. A different native birth
+    # still requires the exact inode's kernel lock to be released below.
+    return not observed
+
+
+def retire_debit(groups, inflight, failures, identifier, reason):
+    record = inflight[identifier]
+    groups[record["group"]]["consumed"].pop(record["job"])
+    failure = {**record, "outcome": reason}
+    failure_id = hashlib.sha256(json.dumps(failure, sort_keys=True).encode()).hexdigest()
+    failures[failure_id] = failure
+    del inflight[identifier]
+
+
+def recover_debits(state_file, groups, inflight, failures):
+    for identifier, record in list(inflight.items()):
+        if allocator_may_live(record):
+            continue
+        target = Path(record["path"])
+        try:
+            observed = regular(target)
+        except FileNotFoundError:
+            # The inode may still have an inherited writer FD. Without its
+            # kernel lock we cannot prove physical retirement: retain liability.
+            continue
+        if [observed.st_dev, observed.st_ino] != record["identity"]:
+            raise ValueError("pending cleanup allocation inode changed")
+        fd = os.open(target, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(fd)
+            if [opened.st_dev, opened.st_ino] != record["identity"]:
+                raise ValueError("pending cleanup allocation inode changed while opening")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            # Never release accounting while physical blocks remain unknown.
+            current = regular(target)
+            if [current.st_dev, current.st_ino] != record["identity"]:
+                raise ValueError("pending cleanup allocation path changed")
+            target.unlink()
+            retire_debit(groups, inflight, failures, identifier, "allocator-retired-exact-file-reclaimed")
+            # Commit each exact retirement before examining another record:
+            # a later malformed inode must not lose this physical cleanup proof.
+            persist(state_file, groups, inflight, failures)
+        finally:
+            os.close(fd)
+
+
+def remaining_debit_mb(inflight):
+    # Observe every exact inode BEFORE df. Pending writers only grow allocation:
+    # fallocate is idempotent, dd is notrunc, and rollback requires this lock.
+    # Thus an older blocks observation can only overstate the remaining debit.
+    remaining_bytes = 0
+    for record in inflight.values():
+        amount_bytes = record["amount"] * MB
+        try:
+            observed = regular(Path(record["path"]))
+        except FileNotFoundError:
+            remaining_bytes += amount_bytes
+            continue
+        if [observed.st_dev, observed.st_ino] != record["identity"]:
+            # An unobservable/replaced old inode never grants a byte credit.
+            remaining_bytes += amount_bytes
+            continue
+        allocated = min(amount_bytes, max(0, observed.st_blocks * 512))
+        remaining_bytes += amount_bytes - allocated
+    # Round the outstanding liability upward, never round free space upward.
+    return (remaining_bytes + MB - 1) // MB
+
+
+def budget(groups, key):
+    floor = pending = needed = 0
+    for identifier, group in groups.items():
+        active = parent_active(group) or (identifier == key and group["directory"] is None)
+        remaining = pending_members(group) if active else 0
+        peers = remaining + len(live_consumers(group))
+        floor += peers * group["headroom"]
+        pending += remaining
+        needed += remaining * group["minimum"]
+    extra_floor, extra_needed, extra_pending = future_nested_liability(groups, key, owner_pid)
+    return floor + extra_floor, needed + extra_needed, pending + extra_pending
+
+
+def retry_pause(attempt, deadline):
+    delay = min(0.05 * (2 ** attempt), 1.0)
+    if time.monotonic() + delay >= deadline:
+        return False
+    time.sleep(delay)
+    return True
+
+
+lock_fd = None
+state_file = None
+debit_id = hashlib.sha256(str(path).encode()).hexdigest()
+debit_record = None
 try:
     parent = directory(path.parent)
     root = Path("/tmp") / ("rose-cloudbench-cleanup-admission-" + str(os.getuid())) / str(parent.st_dev)
@@ -6561,40 +6729,40 @@ try:
     directory(root)
     lock = root / "admission.lock"
     lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        regular(lock)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        birth_snapshot = capture_births()
-        parent_snapshot = capture_parents()
+    regular(lock)
+    state_file = root / "state.json"
+    # No fixed worker batch: each controller enters allocation independently
+    # after one durable budget debit. Backoff never holds the accounting lock.
+    retry_deadline = time.monotonic() + 30
+    for attempt in range(32):
+        birth_snapshot, parent_snapshot = capture_processes()
         initial_owner_birth = native_birth(owner_pid)
-        if not initial_owner_birth:
+        allocator_birth = native_birth(os.getpid())
+        if not initial_owner_birth or not allocator_birth:
             raise ValueError("cleanup reserve initial owner identity is unavailable")
         key, captured = capture_cohort()
-        state_file = root / "state.json"
-        if state_file.exists():
-            regular(state_file)
-            if state_file.stat().st_size > 1048576:
-                raise ValueError("oversized cleanup admission state")
-            state = json.loads(state_file.read_text())
-            if set(state) != {"version", "groups"} or state["version"] != 1 or not isinstance(state["groups"], dict):
-                raise ValueError("invalid cleanup admission state")
-            groups = state["groups"]
-        else:
-            groups = {}
-        live = {}
-        for identifier, group in groups.items():
-            if not re.fullmatch(r"[0-9a-f]{64}", identifier):
-                raise ValueError("invalid cleanup admission group identity")
-            validate_group(identifier, group)
-            if parent_active(group):
-                live[identifier] = group
-            else:
-                group["consumed"] = live_consumers(group)
-                if group["consumed"]:
+        if captured["directory"] is not None:
+            manifest = json.loads((Path(captured["directory"]) / "manifest.json").read_text())
+            retry_deadline = min(retry_deadline, manifest.get("e2e_deadline_monotonic", retry_deadline))
+        busy = False
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            groups, inflight, failures = load_state(state_file)
+            recover_debits(state_file, groups, inflight, failures)
+            if debit_id in inflight:
+                raise ValueError("cleanup reserve path already has a pending allocation debit")
+            live = {}
+            for identifier, group in groups.items():
+                # A live allocator's debit survives parent/owner retirement.
+                debited = any(record["group"] == identifier for record in inflight.values())
+                if parent_active(group) or debited:
                     live[identifier] = group
-        if captured["directory"] is None:
-            job = captured["members"][0]
-        if captured is not None:
+                else:
+                    group["consumed"] = live_consumers(group)
+                    if group["consumed"]:
+                        live[identifier] = group
+            if captured["directory"] is None:
+                job = captured["members"][0]
             if key in live:
                 previous = live[key]
                 if any(previous[field] != captured[field] for field in ("directory", "parent_lock_identity", "members", "preferred", "headroom", "minimum")):
@@ -6603,66 +6771,107 @@ try:
             if job in captured["consumed"]:
                 raise ValueError("cleanup cohort member already admitted")
             live[key] = captured
-        floor = 0
-        pending = 0
-        needed = 0
-        for identifier, group in live.items():
-            active = parent_active(group) or (identifier == key and group["directory"] is None)
-            remaining = pending_members(group) if active else 0
-            peers = remaining + len(live_consumers(group))
-            floor += peers * group["headroom"]
-            pending += remaining
-            needed += remaining * group["minimum"]
-        # Every sealed cohort invokes the same root-owned canary transaction
-        # lock: N=2 runs in ONE extra fleet controller, not two campaign jobs.
-        # Keep its future working/cleanup floor in the adaptive distribution.
-        # When that exact live descendant joins as a standalone controller, its
-        # real floor replaces the virtual one; do not count the liability twice.
-        extra_floor, extra_needed, extra_pending = future_nested_liability(live, key, owner_pid)
-        floor += extra_floor
-        needed += extra_needed
-        pending += extra_pending
-        available = free_mb() - floor
-        if available < needed or pending < 1:
-            raise OSError(errno.ENOSPC, "insufficient physical cleanup floors for pending controllers")
-        amount = min(preferred, minimum + (available - needed) // pending)
-        # A previous exact owner file is released before its replacement, as in
-        # the original reserve function. Other controller paths are untouched.
+            floor, needed, pending = budget(live, key)
+            # Credit only blocks already observed on exact pending inodes, then
+            # sample free space. No artificial wave waits for ledger commits.
+            outstanding = remaining_debit_mb(inflight)
+            physical_available = free_mb() - floor
+            available = physical_available - outstanding
+            if available < needed or pending < 1:
+                if inflight and pending >= 1 and physical_available >= needed:
+                    busy = True
+                else:
+                    raise OSError(errno.ENOSPC, "insufficient physical cleanup floors for pending controllers")
+            else:
+                if capture_owner_birth(owner_pid) != initial_owner_birth:
+                    raise ValueError("cleanup reserve owner identity changed before debit")
+                amount = min(preferred, minimum + (available - needed) // pending)
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                opened_reserve = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(opened_reserve, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed = os.fstat(opened_reserve)
+                reserve_identity = (observed.st_dev, observed.st_ino)
+                debit_record = {"group": key, "job": job, "pid": owner_pid, "birth": initial_owner_birth,
+                                "allocator_pid": os.getpid(), "allocator_birth": allocator_birth,
+                                "path": str(path), "identity": list(reserve_identity), "amount": amount}
+                captured["consumed"][job] = {"pid": owner_pid, "birth": initial_owner_birth}
+                inflight[debit_id] = debit_record
+                persist(state_file, live, inflight, failures)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        if not busy:
+            break
+        if not retry_pause(attempt, retry_deadline):
+            raise OSError(errno.ENOSPC, "cleanup admission pending in-flight allocations; retry window exhausted")
+    else:
+        raise OSError(errno.ENOSPC, "cleanup admission pending in-flight allocations; retry count exhausted")
+
+    # Physical allocation and its fsync run with NO global lock held. Retrying
+    # an interrupted allocation is idempotent on this same exclusively held FD;
+    # it does not create another debit, file or native resource.
+    for attempt in range(8):
         try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        opened_reserve = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        observed = os.fstat(opened_reserve)
-        reserve_identity = (observed.st_dev, observed.st_ino)
-        allocate(opened_reserve, amount * MB)
+            allocate(opened_reserve, amount * MB)
+            break
+        except OSError as exc:
+            if exc.errno not in (errno.EINTR, errno.EAGAIN, errno.EBUSY) or not retry_pause(attempt, retry_deadline):
+                raise
+    else:
+        raise OSError(errno.EAGAIN, "cleanup physical allocation retry count exhausted")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        identity = capture_owner_birth(owner_pid)
+        if identity != initial_owner_birth:
+            raise ValueError("cleanup reserve owner identity changed during admission")
+        groups, inflight, failures = load_state(state_file)
+        if inflight.get(debit_id) != debit_record:
+            raise ValueError("cleanup allocation debit changed before commit")
+        if captured["directory"] is not None and not parent_active(captured):
+            raise ValueError("cleanup cohort parent retired during admission")
+        floor, _, _ = budget(groups, key)
         if free_mb() < floor:
             raise OSError(errno.ENOSPC, "cleanup reserve consumed controller operating headroom")
-        if captured is not None:
-            if captured["directory"] is not None and not parent_active(captured):
-                raise ValueError("cleanup cohort parent retired during admission")
-            birth_snapshot = capture_births()
-            identity = native_birth(owner_pid)
-            if identity != initial_owner_birth:
-                raise ValueError("cleanup reserve owner identity changed during admission")
-            captured["consumed"][job] = {"pid": owner_pid, "birth": identity}
-        persist(state_file, live)
-        print(amount)
+        current = regular(path)
+        if (current.st_dev, current.st_ino) != reserve_identity:
+            raise ValueError("cleanup allocation path changed before commit")
+        del inflight[debit_id]
+        persist(state_file, groups, inflight, failures)
     finally:
-        os.close(lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    print(amount)
 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
     if opened_reserve is not None:
+        # Keep the kernel FD lock until exact physical cleanup and ledger
+        # rollback finish. Failed rollback leaves the durable debit recoverable.
         try:
-            observed = path.lstat()
-            if (observed.st_dev, observed.st_ino) == reserve_identity:
+            if lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                observed = path.lstat()
+                if (observed.st_dev, observed.st_ino) != reserve_identity:
+                    raise ValueError("failed cleanup allocation path changed")
                 path.unlink()
-        except FileNotFoundError:
-            pass
+                if state_file is not None:
+                    groups, inflight, failures = load_state(state_file)
+                    if inflight.get(debit_id) == debit_record:
+                        retire_debit(groups, inflight, failures, debit_id, "allocation-failed: " + str(exc))
+                        persist(state_file, groups, inflight, failures)
+            finally:
+                if lock_fd is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except (OSError, ValueError, TypeError, KeyError) as rollback_error:
+            print("cleanup reserve rollback pending: " + str(rollback_error), file=sys.stderr)
     print("cleanup reserve admission failed: " + str(exc), file=sys.stderr)
     raise SystemExit(1)
 finally:
     if opened_reserve is not None:
         os.close(opened_reserve)
+    if lock_fd is not None:
+        os.close(lock_fd)
+
 PY
 )" || return 1
     if [ "$allocated_mb" -lt "$reserve_mb" ]; then
@@ -12454,11 +12663,6 @@ Error: snapshot storage entered terminal failed state"
                 return 0
             fi
         fi
-        if [ "$attempt" -ge "$max_attempts" ]; then
-            echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
-            printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
-            return 1
-        fi
         # Exponential backoff + jitter. Fly returns `resource_exhausted: rate limit
         # exceeded` on clone/create-volume when the fleet fires N clones at once; a
         # FIXED short delay makes every retry land back inside the SAME saturation
@@ -12470,6 +12674,24 @@ Error: snapshot storage entered terminal failed state"
         this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
         [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
         this_delay=$(( this_delay + (RANDOM % 5) ))
+        if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then
+            local rate_code="" shared_delay="$this_delay"
+            if printf '%s\n' "$clone_out" | grep -Eiq '(^|[^[:alnum:]])429([^[:alnum:]]|$)'; then rate_code=429
+            elif printf '%s\n' "$clone_out" | grep -Eiq 'resource_exhausted'; then rate_code=resource_exhausted; fi
+            if [ -n "$rate_code" ]; then
+                [ "$shared_delay" -ge 1 ] || shared_delay=1
+                [ "$shared_delay" -le 90 ] || shared_delay=90
+                cloudbench_mutation_admission "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-campaign-mutation.py" backoff \
+                    --app "$APP" --root "${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}" \
+                    --owner-pid "$$" --owner-start "$FLEET_OWNER_PID_START" \
+                    --response-code "$rate_code" --retry-after "$shared_delay" || return 1
+            fi
+        fi
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
+            printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+            return 1
+        fi
         echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${this_delay}s ..." >&2
         sleep "$this_delay"
         attempt=$((attempt + 1))
@@ -15313,9 +15535,9 @@ enforce_app_capacity_guard() {
     primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; primary_nx="${primary_nx%x}"
     case "$primary_nx" in ''|*[!0-9]*) primary_shared_units=2 ;; *) primary_shared_units="$primary_nx" ;; esac
     requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
-    # The provider-wide config mutation limit bounds aggregate updates, while
-    # this reservation owns only this fleet's updates. A narrow fleet cannot
-    # have more config replacements in flight than it has primary Machines.
+    # Retain the historical local replacement-capacity accounting setting;
+    # it is not a measured provider concurrency limit or dispatch batch size.
+    # This fleet reserves no more replacement slots than its primary count.
     [ "$replacement_slots" -gt "$requested_machines" ] \
         && replacement_slots="$requested_machines"
     requested_pool_eligible_machines="$requested_machines"
