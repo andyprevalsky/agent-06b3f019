@@ -11,6 +11,9 @@ import {
   validateWorkerProcessPlan,
   workerPlanIdentity,
   requireEightWorkerProcesses,
+  signWorkerEnvelope,
+  canonicalWorkerJSON,
+  workerSHA256,
   type HostProcessObservation,
   type WorkerProcessPlan,
   type WorkerProcessTransport,
@@ -247,7 +250,72 @@ export async function recoverConfiguredWorkerProcesses(
     throw new Error('Backend service, database or source cannot own this process deployment');
   return recoverExistingWorkerProcesses({
     repository: recoveryRepository(true),
-    transport: options.transport ?? createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? ''),
+    transport:
+      options.transport ??
+      createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? '', fetch, {
+        origin: desired.plan.controlPlane.backendOrigin,
+        planIdentity: desired.identity,
+      }),
     key: process.env.BACKEND_API_KEY ?? '',
   });
+}
+
+/** Private source response only. Native execution remains with the leased controller. */
+export async function getWorkerProcessRuntimeEnvelope(
+  query: Record<string, unknown>,
+  options: { repository?: WorkerProcessRepository; environment?: NodeJS.ProcessEnv } = {}
+): Promise<Record<string, unknown>> {
+  const environment = options.environment ?? process.env;
+  if (!isBackendWorkerRecoveryOwner(environment))
+    throw new Error('Unqualified runtime source service');
+  const keys = [
+    'action',
+    'app',
+    'machineId',
+    'machineVersion',
+    'bootId',
+    'planIdentity',
+    'envelopeSHA256',
+  ];
+  if (
+    Object.keys(query).length !== keys.length ||
+    !keys.every((key) => typeof query[key] === 'string')
+  )
+    throw new Error('Invalid private runtime request');
+  if (
+    !['status', 'ensure'].includes(query.action as string) ||
+    !/^[a-f0-9]{14}$/.test(query.machineId as string) ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,199}$/.test(query.machineVersion as string) ||
+    !/^[a-f0-9-]{36}$/.test(query.bootId as string) ||
+    !/^[a-f0-9]{64}$/.test(query.planIdentity as string) ||
+    !/^[a-f0-9]{64}$/.test(query.envelopeSHA256 as string)
+  )
+    throw new Error('Invalid private runtime identity');
+  const desired = await (options.repository ?? repository).read();
+  if (
+    !desired ||
+    desired.version !== 1 ||
+    desired.identity !== query.planIdentity ||
+    workerPlanIdentity(desired.plan) !== desired.identity ||
+    !isBackendWorkerRecoveryOwner(environment, desired.plan)
+  )
+    throw new Error('Private runtime intent is not owned by this service');
+  const plan = desired.plan;
+  validateWorkerProcessPlan(plan);
+  if (query.app !== plan.app || !plan.hosts.some((host) => host.id === query.machineId))
+    throw new Error('Private runtime host is outside retained custody');
+  const key = environment.BACKEND_API_KEY;
+  if (!key) throw new Error('Private runtime authentication is unavailable');
+  const id = query.machineId as string,
+    version = query.machineVersion as string;
+  const envelope = signWorkerEnvelope(
+    plan,
+    { id, version, state: 'started', config: null },
+    { machineId: id, machineVersion: version, bootId: query.bootId as string },
+    query.action as 'status' | 'ensure',
+    key
+  );
+  if (workerSHA256(canonicalWorkerJSON(envelope)) !== query.envelopeSHA256)
+    throw new Error('Private runtime request differs from the retained envelope');
+  return envelope;
 }

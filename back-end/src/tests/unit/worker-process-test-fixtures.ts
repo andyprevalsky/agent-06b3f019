@@ -17,6 +17,7 @@ export function fixture() {
     attempt: 'qualified-attempt-1',
     controlPlane: {
       serviceId: 'srv-local-fixture',
+      backendOrigin: 'https://navi-j9a9.onrender.com',
       databaseHost: 'qualified.remote.test',
       databaseName: 'production',
     },

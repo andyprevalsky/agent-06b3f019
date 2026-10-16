@@ -22,6 +22,7 @@ import {
 import { createWorkerProcessTransport } from '../src/providers/workerProcessTransport';
 import {
   canonicalWorkerJSON,
+  WORKER_PROCESS_BACKEND_ORIGIN,
   requireEightWorkerProcesses,
   validateWorkerProcessPlan,
   workerSHA256,
@@ -37,8 +38,14 @@ function argument(flag: string): string {
   if (!value || value.startsWith('--')) throw new Error(`Missing ${flag}`);
   return value;
 }
-function transport() {
-  return createWorkerProcessTransport(process.env.FLY_API_TOKEN ?? '');
+function transport(plan?: WorkerProcessPlan) {
+  return createWorkerProcessTransport(
+    process.env.FLY_API_TOKEN ?? '',
+    fetch,
+    plan
+      ? { origin: plan.controlPlane.backendOrigin, planIdentity: workerPlanIdentity(plan) }
+      : undefined
+  );
 }
 export function requireCandidateRuntimeValidation(
   value: unknown,
@@ -152,6 +159,7 @@ async function capturePlan(): Promise<void> {
     previousQueue: pointer.taskQueue,
     controlPlane: {
       serviceId: argument('--backend-service-id'),
+      backendOrigin: WORKER_PROCESS_BACKEND_ORIGIN,
       databaseHost: new URL(process.env.DATABASE_URL ?? '').hostname,
       databaseName: new URL(process.env.DATABASE_URL ?? '').pathname.slice(1),
     },
@@ -179,7 +187,7 @@ async function observe(
   lease?: Awaited<ReturnType<typeof acquireWorkflowDeploymentLease>>
 ): Promise<HostProcessObservation[]> {
   return recoverExistingWorkerProcesses({
-    transport: transport(),
+    transport: transport(plan),
     key: process.env.BACKEND_API_KEY ?? '',
     expectedIdentity: workerPlanIdentity(plan),
     ...(lease ? { lease } : {}),

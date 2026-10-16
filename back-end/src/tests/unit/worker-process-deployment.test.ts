@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import {
   reconcileWorkerProcesses,
+  canonicalWorkerJSON,
   requireEightWorkerProcesses,
   signWorkerEnvelope,
   validateWorkerProcessPlan,
@@ -221,24 +222,33 @@ async function main() {
   });
   await test('native transport exposes only exact-ID GET and bounded exec, never allocation or Machine controls', async () => {
     const calls: { url: string; method: string; body: unknown }[] = [];
-    const transport = createWorkerProcessTransport('private-test-key', (async (url, options) => {
-      calls.push({
-        url: String(url),
-        method: options?.method ?? '',
-        body: options?.body ? JSON.parse(String(options.body)) : undefined,
-      });
-      return new Response(
-        JSON.stringify(
-          options?.method === 'GET'
-            ? { id: '00000000000000', instance_id: 'existing-instance' }
-            : { exit_code: 0, exit_signal: 0, stdout: '{}' }
-        )
-      );
-    }) as typeof fetch);
+    const transport = createWorkerProcessTransport(
+      'private-test-key',
+      (async (url, options) => {
+        calls.push({
+          url: String(url),
+          method: options?.method ?? '',
+          body: options?.body ? JSON.parse(String(options.body)) : undefined,
+        });
+        return new Response(
+          JSON.stringify(
+            options?.method === 'GET'
+              ? { id: '00000000000000', instance_id: 'existing-instance' }
+              : { exit_code: 0, exit_signal: 0, stdout: '{}' }
+          )
+        );
+      }) as typeof fetch,
+      { origin: 'https://backend.example', planIdentity: 'b'.repeat(64) }
+    );
     await transport.getMachine('owned-production-app', '00000000000000');
     await transport.readFacts('owned-production-app', '00000000000000');
     await transport.execBootstrap('owned-production-app', '00000000000000', '# trusted bootstrap', {
       signature: 'signed',
+      action: 'status',
+      app: 'owned-production-app',
+      machineId: '00000000000000',
+      machineVersion: 'existing-instance',
+      bootId: 'existing-boot',
     });
     assert.equal(calls[0].method, 'GET');
     assert(
@@ -249,31 +259,51 @@ async function main() {
         )
     );
     assert(calls.every((call) => !/clone|update|destroy|start|stop/.test(call.url)));
+    assert(calls.slice(1).every((call) => !Object.hasOwn(call.body as object, 'stdin')));
     const count = calls.length;
     await assert.rejects(transport.getMachine('../another-app', '00000000000000'));
     assert.equal(calls.length, count);
   });
   await test('actual native instance_id traverses the transport and qualifies all eight runtimes', async () => {
     const f = fixture();
-    const transport = createWorkerProcessTransport('private-test-key', (async (url, options) => {
-      const id = String(url).split('/machines/')[1].split('/')[0];
-      if (options?.method === 'GET') {
-        const { version, ...machine } = await f.transport.getMachine(f.plan.app, id);
-        return new Response(JSON.stringify({ ...machine, instance_id: version }));
-      }
-      const body = JSON.parse(String(options?.body));
-      const output = body.stdin
-        ? await f.transport.execBootstrap(
+    const transport = createWorkerProcessTransport(
+      'private-test-key',
+      (async (url, options) => {
+        const id = String(url).split('/machines/')[1].split('/')[0];
+        if (options?.method === 'GET') {
+          const { version, ...machine } = await f.transport.getMachine(f.plan.app, id);
+          return new Response(JSON.stringify({ ...machine, instance_id: version }));
+        }
+        const body = JSON.parse(String(options?.body));
+        assert.equal('stdin' in body, false);
+        const facts = await f.transport.readFacts(f.plan.app, id);
+        const runtime = String(body.command[4]).match(
+          /req=urllib\.request\.Request\((".*?"),headers=/
+        );
+        let output;
+        if (runtime) {
+          const request = new URL(JSON.parse(runtime[1]));
+          const host = await f.transport.getMachine(f.plan.app, id);
+          const action = request.searchParams.get('action') as 'status' | 'ensure';
+          const envelope = signWorkerEnvelope(f.plan, host, facts, action, 'private-test-key');
+          assert.equal(request.searchParams.get('planIdentity'), workerPlanIdentity(f.plan));
+          assert.equal(
+            request.searchParams.get('envelopeSHA256'),
+            workerSHA256(canonicalWorkerJSON(envelope))
+          );
+          output = await f.transport.execBootstrap(
             f.plan.app,
             id,
             f.plan.artifact.bootstrapSource,
-            JSON.parse(body.stdin)
-          )
-        : await f.transport.readFacts(f.plan.app, id);
-      return new Response(
-        JSON.stringify({ exit_code: 0, exit_signal: 0, stdout: JSON.stringify(output) })
-      );
-    }) as typeof fetch);
+            envelope
+          );
+        } else output = facts;
+        return new Response(
+          JSON.stringify({ exit_code: 0, exit_signal: 0, stdout: JSON.stringify(output) })
+        );
+      }) as typeof fetch,
+      { origin: f.plan.controlPlane.backendOrigin, planIdentity: workerPlanIdentity(f.plan) }
+    );
     const rows = await reconcileWorkerProcesses(
       f.plan,
       transport,

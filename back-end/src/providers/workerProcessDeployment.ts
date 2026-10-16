@@ -1,5 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 
+export const WORKER_PROCESS_BACKEND_ORIGIN = 'https://navi-j9a9.onrender.com';
+
 /** A second, owned runtime on an existing host. Machine image identity stays unchanged. */
 export interface WorkerSourceFile {
   path: string;
@@ -38,7 +40,12 @@ export interface WorkerProcessPlan {
   app: string;
   attempt: string;
   previousQueue: string;
-  controlPlane: { serviceId: string; databaseHost: string; databaseName: string };
+  controlPlane: {
+    serviceId: string;
+    databaseHost: string;
+    databaseName: string;
+    backendOrigin: string;
+  };
   artifact: WorkerProcessArtifact;
   hosts: ExistingWorkerHost[];
   healthPort: number;
@@ -139,6 +146,10 @@ export function validateWorkerProcessPlan(plan: WorkerProcessPlan): void {
     /^[a-zA-Z0-9.-]+$/.test(plan.controlPlane?.databaseHost ?? '') &&
       /^[a-zA-Z0-9_-]+$/.test(plan.controlPlane?.databaseName ?? ''),
     'Missing database custody'
+  );
+  requireValue(
+    plan.controlPlane.backendOrigin === WORKER_PROCESS_BACKEND_ORIGIN,
+    'Unqualified private runtime origin'
   );
   requireValue(plan.hosts.length === 8, 'Exactly eight existing worker hosts are required');
   requireValue(new Set(plan.hosts.map((host) => host.id)).size === 8, 'Duplicate existing host');

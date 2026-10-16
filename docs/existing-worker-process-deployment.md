@@ -77,6 +77,12 @@ benchmark evidence.
    ```
 
    Registration durably saves the complete source and plan in `ToolSideEffect`.
+   The plan also binds the production backend HTTPS origin. A small pinned loader
+   retrieves the exact signed envelope from its internal-key-only, no-store
+   `/api/worker-process-runtime` route. The loader rejects redirects and checks
+   the complete canonical envelope digest before invoking the unchanged bootstrap.
+   Bulk source never travels in Machine exec stdin or command arguments: the
+   observed native endpoint ignored stdin and rejected oversized commands.
    The backend and CLI use the existing global deployment lease. Only a positive
    locked MISSING status permits ensure. BOOTING, BLOCKED or UNKNOWN is not a
    successful stage. The supervisor may restart only its retained exited child.
