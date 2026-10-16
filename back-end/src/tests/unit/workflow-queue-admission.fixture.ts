@@ -329,23 +329,23 @@ export async function withFixtureDatabase<T>(
     effects: prisma.toolSideEffect.findMany,
   };
   try {
-    prisma.$transaction = f.transaction as typeof prisma.$transaction;
-    prisma.agent.findUnique = f.tx.agent.findUnique as typeof prisma.agent.findUnique;
-    prisma.agent.findFirst = f.tx.agent.findUnique as typeof prisma.agent.findFirst;
-    prisma.agent.update = f.tx.agent.update as typeof prisma.agent.update;
-    prisma.agent.updateMany = f.tx.agent.updateMany as typeof prisma.agent.updateMany;
+    prisma.$transaction = f.transaction as unknown as typeof prisma.$transaction;
+    prisma.agent.findUnique = f.tx.agent.findUnique as unknown as typeof prisma.agent.findUnique;
+    prisma.agent.findFirst = f.tx.agent.findUnique as unknown as typeof prisma.agent.findFirst;
+    prisma.agent.update = f.tx.agent.update as unknown as typeof prisma.agent.update;
+    prisma.agent.updateMany = f.tx.agent.updateMany as unknown as typeof prisma.agent.updateMany;
     prisma.agent.findMany = (async ({ where }: { where: { temporalWorkflowId?: unknown } }) =>
       where.temporalWorkflowId === null
         ? []
-        : [...f.agents.values()]) as typeof prisma.agent.findMany;
+        : [...f.agents.values()]) as unknown as typeof prisma.agent.findMany;
     prisma.agentQueuePointer.findUnique = (async () => ({
       taskQueue: SOURCE,
-    })) as typeof prisma.agentQueuePointer.findUnique;
+    })) as unknown as typeof prisma.agentQueuePointer.findUnique;
     prisma.toolSideEffect.findMany = f.tx.toolSideEffect
-      .findMany as typeof prisma.toolSideEffect.findMany;
+      .findMany as unknown as typeof prisma.toolSideEffect.findMany;
     prisma.toolSideEffect.findFirst = f.tx.toolSideEffect
-      .findFirst as typeof prisma.toolSideEffect.findFirst;
-    prisma.message.findMany = (async () => []) as typeof prisma.message.findMany;
+      .findFirst as unknown as typeof prisma.toolSideEffect.findFirst;
+    prisma.message.findMany = (async () => []) as unknown as typeof prisma.message.findMany;
     return await operation();
   } finally {
     prisma.$transaction = original.transaction;
@@ -368,7 +368,7 @@ export async function withFixtureDatabase<T>(
             where.AND.every((part) => row.request[part.request.path[0]] === part.request.equals)
         ) ?? null
       );
-    }) as typeof prisma.toolSideEffect.findFirst;
+    }) as unknown as typeof prisma.toolSideEffect.findFirst;
     prisma.message.findMany = original.messages;
     prisma.toolSideEffect.findFirst = original.effect;
     prisma.toolSideEffect.findMany = original.effects;

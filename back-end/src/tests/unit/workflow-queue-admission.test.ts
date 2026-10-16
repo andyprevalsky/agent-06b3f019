@@ -58,7 +58,7 @@ function storage() {
   });
   const tx = {
     $executeRaw: async () => 1,
-    $queryRaw: async () => [],
+    $queryRaw: async (_sql: unknown, _key: string) => [],
     agentQueuePointer: {
       findUnique: async () => ({ taskQueue: targetQueue, surfaceHash: 'target-hash' }),
       upsert: async (args: unknown) => args,

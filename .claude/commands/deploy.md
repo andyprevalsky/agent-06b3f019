@@ -2417,9 +2417,12 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
 fi
 ```
 
-Under cooperative cutover, workers drain at activity boundaries (SIGTERM +
-35m `kill_timeout`) and workflows hand off via `continue_as_new` at safe
-`run_agent` checkpoints. Force-migrate runs only after the 45-minute SLO
+Under cooperative cutover, workers receive SIGTERM with the committed Fly
+`kill_timeout` (currently 5m), and workflows can hand off via `continue_as_new`
+at safe `run_agent` checkpoints. The grace timeout does not prove retirement
+safety: a long activity can exceed it. Keep protected work served until the
+exact admission and drain checks establish that stopping its workers is safe.
+Force-migrate runs only after the 45-minute SLO
 (break-glass). The monitor script is the authoritative post-merge proof that
 routing flipped and the old generation drained without leaving stragglers.
 

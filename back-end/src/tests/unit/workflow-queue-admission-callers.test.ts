@@ -51,7 +51,7 @@ function agent(f: ReturnType<typeof fixture>, id: string) {
     busId: null,
     workflowStartPhase: null,
     workflowTaskQueue: null,
-    source: 'API',
+    source: 'WEB',
     responseSchema: null,
   });
 }
@@ -168,7 +168,8 @@ async function main() {
                 goal: 'Original authored goal',
                 model: 'rose-labs/rose-1-ultra',
                 reasoning_max_tokens: 2048,
-                source: 'API',
+                source: 'WEB',
+                pause_state: false,
                 depth: 0,
                 price_limit_cents: 100,
               },
