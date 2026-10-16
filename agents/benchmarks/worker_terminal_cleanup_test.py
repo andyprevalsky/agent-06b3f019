@@ -620,3 +620,50 @@ def test_worker_archive_rejects_mismatched_original_contract(tmp_path, monkeypat
     packet['source_hold']['originals_sha256'] = h['sha'](h['canonical'](packet['originals']))
     with pytest.raises(ValueError, match='owner/task ordinal/primary'):
         h['validate'](packet, packet['target'])
+
+
+@pytest.mark.parametrize('fault', ['native', 'volume', 'proof'])
+def test_legacy_worker_post_claim_failure_is_not_capacity_wait(tmp_path, monkeypatch, fault):
+    """An owned-but-unverified legacy worker is unresolved, not an empty pool."""
+    from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function
+    h, packet, common, registry = worker_packet(tmp_path, monkeypatch)
+    h['export'](packet, common, registry, tmp_path / 'export.json')
+    target = Path(packet['target']['common'])
+    h['import_packet'](packet, target, packet['target'])
+    out = tmp_path / 'current-output'; out.mkdir()
+    native_value = copy.deepcopy(packet['native'])
+    if fault == 'proof':
+        native_value['instance_id'] = 'foreign-instance'
+    native = tmp_path / 'current-native.json'; native.write_text(json.dumps(native_value))
+    volume = tmp_path / 'current-volume.json'; volume.write_text(json.dumps(packet['native_volume']))
+    source = FLEET_SCRIPT.read_text()
+    functions = '\n'.join(_extract_fleet_function(source, name + '() {') for name in
+        ('pool_claim_fs_transaction', 'write_pool_claim', 'pool_claim_cleanup_unconfirmed',
+         'pool_claim_mark_cleanup_unconfirmed', 'claim_explicit_idle_worker',
+         'claim_reusable_worker', 'provision_worker'))
+    functions = _extract_fleet_function((ROOT / 'scripts/lib/cloudbench-inventory.sh').read_text(), 'registry_meta_value() {') + '\n' + functions
+    script = '''set -uo pipefail
+ROOT_DIR="$1"; GIT_COMMON_DIR="$2"; OUT="$3"; NATIVE="$4"; VOLUME="$5"; FAULT="$6"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+CLOUDBENCH_SCRIPT_SNAPSHOT="$ROOT_DIR/scripts"
+POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
+APP=fixture-app; FLEET_OWNER_TOKEN=11111111111111111111111111111111
+FLEET_OWNER_HOST="$(hostname)"; FLEET_OWNER_PID_START=fixture-birth
+BENCH_REF=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+CURRENT_NODE_FP=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+CURRENT_PY_FP=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+FLEET_WORKER_VM_SIZE=performance-1x; FLEET_WORKER_VM_MEMORY=2048; POOL_REUSE_ONLY=1
+fleet_preconfig_native_read() { [ "$FAULT" != native ] || return 1; cp "$NATIVE" "$2"; }
+fleet_cold_handoff_volume_read() { [ "$FAULT" != volume ] || return 1; cp "$VOLUME" "$2"; }
+machine_creation_admission() { echo forbidden > "$OUT/allocation-attempted"; return 1; }
+''' + functions + '\nprovision_worker task workspace 87654321 fdaa::2 0 "$OUT" new-token\n'
+    result = subprocess.run(['bash', '-c', script, 'unresolved-worker', str(ROOT), str(target),
+        str(out), str(native), str(volume), fault], env=dict(os.environ, FLY_MACHINE_ID=packet['target']['machine']), capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1, result.stderr
+    assert 'Existing worker admission is unresolved' in (out / 'autoscaler.failed').read_text()
+    assert not (out / 'allocation-attempted').exists()
+    assert not (out / 'worker-clones.ids').exists()
+    claim = target / 'cloudbench-pool-claims/1234abcd'
+    assert claim.is_file()
+    assert h['fields'](claim.read_bytes())['cleanup_state'] == 'unconfirmed'
+    assert (target / 'cloudbench-worker-pools/workers.cold.ids').read_text() == '1234abcd\n'
