@@ -378,6 +378,7 @@ async def build_browser_verifier_context(
     session_id: str,
     payment_card_evidence: Optional[Dict[str, Any]] = None,
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
+    verification_goal: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -512,7 +513,9 @@ async def build_browser_verifier_context(
         )
 
     user_prompt = (
-        f"Goal: {goal}\n\n"
+        f"Goal: {verification_goal or goal}\n\n"
+        + (f"Original browser task: {goal}\n\n" if verification_goal else "")
+        +
         "## Browser Ground Truth (FINAL STATE)\n"
         "Read the DOM independently and decide whether the goal is satisfied. "
         "Do NOT rely on what the agent reported - only on what the page actually shows. "

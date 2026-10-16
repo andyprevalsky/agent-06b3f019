@@ -8730,6 +8730,61 @@ async def _spawn_browser_agent_activity_v3_real(
                     auth_options=auth_options, auth_realm=auth_realm, current_url=current_url,
                     action_history=action_history.get_entries(),
                 )
+                if assessment_result is None:
+                    from .handoff_verification import AUTH_HANDOFF_VERIFICATION_GOAL, build_auth_handoff_verifier_context
+                    try:
+                        observed_state = await asyncio.wait_for(
+                            dom_service.get_browser_state(include_screenshot=True),
+                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                        )
+                        review_context = await build_browser_verifier_context(
+                            goal=goal, current_url=current_url, browser_state=observed_state,
+                            action_history=action_history, config=config, session_id=session_id,
+                            browser_checkpoints=verifier_checkpoints,
+                            verification_goal=AUTH_HANDOFF_VERIFICATION_GOAL,
+                        )
+                        review = await call_temporal_activity_from_activity(
+                            check_progress,
+                            args=[build_auth_handoff_verifier_context(
+                                review_context, auth_options=auth_options,
+                                assessment=(unified_action.get("params") or {}).get("auth_assessment"),
+                            ), build_verifier_prompt(), VERIFIER_ULTRA_MODEL, None,
+                                token_state.access_token, "verifier_browser_auth_handoff", agent_id,
+                                None, None, user_id, gpt_token, gpt_account_id,
+                                gpt_token_source, gpt_token_pool_id, user_id, None, None,
+                                ({"browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                                  "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                  "browser_recording_task_id": browser_recorder.task_id,
+                                  "browser_session_metadata": browser_session_metadata} if browser_recorder else None),
+                                bool(fast_mode_cache_enabled), goal if fast_mode_cache_enabled else None, int(iteration or 0)],
+                            start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
+                        )
+                        review_usage = review.get("usage") or {}
+                        total_input_tokens += review_usage.get("prompt_tokens", 0) or 0
+                        total_output_tokens += review_usage.get("completion_tokens", 0) or 0
+                        accumulate_model_usage(
+                            usage_by_model, review_usage.get("actual_model"),
+                            review_usage.get("prompt_tokens", 0) or 0,
+                            review_usage.get("completion_tokens", 0) or 0,
+                            cache_read_input_tokens=int(review_usage.get("cache_read_input_tokens") or 0),
+                            cache_creation_input_tokens=int(review_usage.get("cache_creation_input_tokens") or 0),
+                            from_fast_cache=bool(review_usage.get("from_fast_cache")),
+                            cache_sequence_id=review_usage.get("cache_sequence_id"),
+                        )
+                        await save_browser_action_message(
+                            agent_id=agent_id, title="Authentication handoff verification", task_id=task_id,
+                            message=review.get("reasoning") or "No verification reasoning returned.",
+                            status=MessageStatus.FINISHED, browser_url=browser_url, action_type="system",
+                            tool_call_id=str(uuid_module.uuid4()),
+                        )
+                        if not review.get("verdict_available", True) or review.get("score") != 1.0:
+                            assessment_result = {"success": False, "error": "authentication_handoff_unverified",
+                                                 "reason": review.get("reasoning") or "Independent verification did not establish the handoff preconditions."}
+                    except WorkflowGenerationSealed:
+                        raise
+                    except Exception:
+                        assessment_result = {"success": False, "error": "authentication_handoff_unverified",
+                                             "reason": "Independent verification was unavailable; no handoff was committed."}
                 if assessment_result is not None:
                     await action_history.record_action(
                         dom_service=dom_service, action=action_name, thinking=thinking,
