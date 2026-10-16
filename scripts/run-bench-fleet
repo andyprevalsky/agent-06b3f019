@@ -2112,6 +2112,10 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
     local state="" command_rc=0
     [ -n "$id" ] || return 0
+    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        echo "❌ reuse-only retains Machine and Volume identity; refusing destroy of $id" >&2
+        return 1
+    fi
     if [ -n "${GIT_COMMON_DIR:-}" ] && [ -e "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json" ]; then
         echo "❌ borrowed worker requires verified stop-and-return; refusing destroy" >&2; return 1
     fi
@@ -2486,6 +2490,12 @@ cloudbench_collect_remaining_runtime_evidence() {
                 cleanup_failed_worker "$out" "$wid" || failed=1
             fi
         done
+        if [ "${POOL_REUSE_ONLY:-0}" = 1 ] && [ -f "$out/worker-clones.ids" ]; then
+            while IFS= read -r wid; do
+                [ -n "$wid" ] || continue
+                cleanup_failed_worker "$out" "$wid" || failed=1
+            done < <(cat "$out/worker-clones.ids")
+        fi
         if [ -e "$out/runtime-evidence.pending" ] || [ -L "$out/runtime-evidence.pending" ]; then
             echo "❌ primary runtime evidence remains incomplete: $out" >&2
             failed=1
@@ -5360,6 +5370,23 @@ fleet_with_native_reap_permit() {
     )
 }
 
+stop_current_owned_machine_retained() {  # <output> <machine> <primary|worker>
+    [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 1
+    [ "$2" != "${WARM_ID:-}" ] && [ "$2" != "${SHARED_WARM_ID:-}" ] || return 1
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-original-volume-capture.py" \
+        "$APP" "$FLEET_REGISTRY_DIR" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_DIR" \
+        "$1" "$2" "$3" "$FLEET_OWNER_TOKEN" "$$" "$FLEET_OWNER_PID_START" <<'PYIDLE'
+import json,os,runpy,sys
+from pathlib import Path
+helper=runpy.run_path(sys.argv[1])
+result=helper['billing_stop_current_owned'](helper['Fly'](sys.argv[2],os.environ['FLY_API_TOKEN']),
+    Path(sys.argv[3]),Path(sys.argv[4]),Path(sys.argv[5]),Path(sys.argv[6]),sys.argv[7],sys.argv[8],
+    sys.argv[9],int(sys.argv[10]),sys.argv[11])
+print(json.dumps(result,sort_keys=True))
+raise SystemExit(0 if result['status'] in ('STOPPED_RETAINED','ALREADY_STOPPED_RETAINED') else 1)
+PYIDLE
+}
+
 fleet_retire_sealed_primary() {  # <collector-output>; leave workers on the final fleet path
     local out="$1" machine clone token pid birth state deadline wid owner
     [ "${FLEET_NATIVE_REAP_ENABLED:-0}" = 1 ] || return 0
@@ -5491,8 +5518,13 @@ PY
         wid="${owner%/owner.json}"; wid="${wid##*/}"
         cloudbench_capture_worker_runtime_evidence "$out" "$wid" || return 0
     done
-    fleet_reap_registry_record "$FLEET_REGISTRY_DIR" current 2 0 \
-        "$FLEET_REGISTRY_DIR/clones/$clone"
+    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        # Keep the original registry record for final live-owner pool return.
+        stop_current_owned_machine_retained "$out" "$machine" primary
+    else
+        fleet_reap_registry_record "$FLEET_REGISTRY_DIR" current 2 0 \
+            "$FLEET_REGISTRY_DIR/clones/$clone"
+    fi
 }
 
 fleet_validate_reap_cohort() {
@@ -15673,7 +15705,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_log="$1/worker-$2.cleanup.log"
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
     local claim_token claim_line claim_pid claim_owner claim_started
-    local machine_reap_status=-1 terminal_disposition borrowed_worker=0
+    local machine_reap_status=-1 terminal_disposition borrowed_worker=0 retained_worker=0
     claim_token="$self_pid.$(date +%s).$RANDOM"
     local now age attempt=0 claimed=0
     local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
@@ -15746,7 +15778,15 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         echo "❌ worker $cleanup_wid runtime evidence was not preserved; retaining exact ownership" >&2
         rc=1
     fi
-    if [ "$rc" = 0 ] && [ "$borrowed_worker" = 1 ]; then
+    if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        # A failed evidence copy still retains its error and all ownership.
+        # Current idle proof may stop compute independently of admission.
+        if stop_current_owned_machine_retained "$cleanup_out" "$cleanup_wid" worker; then
+            retained_worker=1
+        else
+            rc=1
+        fi
+    elif [ "$rc" = 0 ] && [ "$borrowed_worker" = 1 ]; then
         return_reusable_worker "$cleanup_out" "$cleanup_wid" || rc=1
     elif [ "$rc" = "0" ]; then
         if reap_machine "$cleanup_wid" "$cleanup_log" "$volume_id"; then
@@ -15761,7 +15801,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && terminal_disposition=destroyed-provider-retained
     # reap_machine already carries the exact Volume through its terminal
     # lifecycle. A second destroy/read loop cannot strengthen that receipt.
-    if [ "$borrowed_worker" = 0 ]; then
+    if [ "$borrowed_worker" = 0 ] && [ "$retained_worker" = 0 ]; then
         [ "$rc" = "0" ] \
             && fleet_audit_update_fresh_clone_by_id "$cleanup_wid" "$terminal_disposition" \
             || rc=1

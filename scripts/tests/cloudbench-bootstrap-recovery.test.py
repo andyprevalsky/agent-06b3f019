@@ -3011,6 +3011,76 @@ class BillingStopRetainTests(unittest.TestCase):
                 self.assertEqual(self.call(joins_verified=kind!='unjoined')['status'],'PENDING')
                 self.assertEqual((self.fly.probes,self.fly.posts),(0,[]))
 
+    def configure_current_role(self, role):
+        self.configure_owned_boot()
+        if role == 'primary':
+            write(self.task/'guest-shutdown.confirmed', self.run.name+'\n')
+            write(self.task/'benchmark-child.finished', '0\n')
+            write(self.task/'autoscaler.completed-after-child', '0\n')
+        else:
+            primary='c'*14
+            write(self.task/'.cid','clone '+primary+'\n')
+            write(self.task/'worker-runtime-evidence'/self.mid/'owner.json',json.dumps(
+                dict(version=1,machine_id=self.mid,primary_machine_id=primary,
+                     run_token=self.owner+'-0',workspace='test-workspace')))
+            self.machine['config']['init']={'cmd':['sleep','infinity']}
+            self.machine['config'].pop('env',None)
+        self.original=self.files()
+
+    def call_current(self, role='worker'):
+        with patch.dict(self.ns['billing_stop_current_owned'].__globals__,pid_birth_state=lambda *args:'live'):
+            return self.ns['billing_stop_current_owned'](self.fly,self.registry,self.audit,
+                self.run,self.task,self.mid,role,self.owner,os.getppid(),'fixture-birth')
+
+    def test_current_worker_stop_retains_owner_and_volume(self):
+        self.configure_current_role('worker')
+        result=self.call_current()
+        self.assertEqual(result['status'],'STOPPED_RETAINED',result)
+        self.assertEqual(self.fly.posts,['/machines/'+self.mid+'/stop'])
+        self.assertEqual(self.files(),self.original)
+        self.assertTrue(result['stopped_only']);self.assertEqual(result['pool_credit'],0)
+        self.assertEqual(result['runtime_run_token'],self.owner+'-0')
+
+    def test_current_primary_stop_defers_pool_return(self):
+        self.configure_current_role('primary')
+        result=self.call_current('primary')
+        self.assertEqual(result['status'],'STOPPED_RETAINED',result)
+        self.assertEqual(self.files(),self.original)
+        self.assertFalse(result['native_release'])
+
+    def test_current_worker_foreign_owner_token_or_source_refuses(self):
+        for key in ('run_token','primary_machine_id','machine_id'):
+            with self.subTest(key=key):
+                self.setUp();self.configure_current_role('worker')
+                path=self.task/'worker-runtime-evidence'/self.mid/'owner.json'
+                row=json.loads(path.read_text());row[key]='foreign'
+                write(path,json.dumps(row))
+                self.assertEqual(self.call_current()['status'],'PENDING')
+                self.assertEqual(self.fly.posts,[])
+
+    def test_current_role_unknown_process_and_source_drift_refuse(self):
+        for drift in (False,True):
+            with self.subTest(drift=drift):
+                self.setUp();self.configure_current_role('worker')
+                if drift:
+                    old=self.fly.machine_exec_json
+                    def changed(*args,**kwargs):
+                        value=old(*args,**kwargs);write(self.task/'.cid','pool '+('e'*14)+'\n');return value
+                    self.fly.machine_exec_json=changed
+                else:self.fly.unknown=True
+                self.assertEqual(self.call_current()['status'],'PENDING')
+                self.assertEqual(self.fly.posts,[])
+
+    def test_current_role_never_repeats_stop_intent(self):
+        self.configure_current_role('worker')
+        self.assertEqual(self.call_current()['status'],'STOPPED_RETAINED')
+        self.assertEqual(self.call_current()['status'],'PENDING')
+        self.assertEqual(len(self.fly.posts),1)
+
+    def test_current_role_requires_actual_ancestor_chain(self):
+        self.assertTrue(self.ns['_billing_caller_descends_from'](os.getppid()))
+        self.assertFalse(self.ns['_billing_caller_descends_from'](999999999))
+
     def test_exact_inert_primary_or_worker_stops_once_retains_every_record(self):
         result=self.call()
         self.assertEqual(result['status'],'COMPLETE',result)
@@ -3366,6 +3436,58 @@ run(){
         for stop_failure,return_failure in [(True,False),(False,True)]:
             with self.subTest(stop_failure=stop_failure):
                 events,result=self.callsite(stop_failure,return_failure);self.assertNotIn('reap',events);self.assertEqual(result,'1 1 1')
+
+class ReuseOnlyRetirementTests(unittest.TestCase):
+    def worker_branch(self, *, failed=False, capture_failed=False, borrowed=False):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        start=source.index('    if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then',source.index('cleanup_failed_worker()')) if '    if [ "$borrowed_worker" = 0 ] && [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then' in source else source.index('    if [ "$rc" = 0 ] && [ "$borrowed_worker" = 1 ]; then',source.index('cleanup_failed_worker()'))
+        end=source.index('    worker_ledger_lock_acquire "$cleanup_out"',start)
+        with tempfile.TemporaryDirectory() as td:
+            script=r'''
+set -u
+rc="$CAPTURE_FAIL";borrowed_worker="$BORROWED";retained_worker=0;POOL_REUSE_ONLY=1
+cleanup_out=out;cleanup_wid=machine;cleanup_log=log;volume_id=volume;machine_reap_status=-1
+stop_current_owned_machine_retained(){ echo stop >> "$EVENTS";return "$STOP_FAIL"; }
+return_reusable_worker(){ echo borrowed >> "$EVENTS"; }
+reap_machine(){ echo destroy >> "$EVENTS"; }
+fleet_audit_update_fresh_clone_by_id(){ echo audit-release >> "$EVENTS"; }
+fleet_registry_release_id(){ echo registry-release >> "$EVENTS"; }
+'''+source[start:end]+'\necho "$rc $retained_worker"\n'
+            events=Path(td)/'events'
+            r=subprocess.run(['bash','-c',script],env={**os.environ,'EVENTS':str(events),'STOP_FAIL':str(int(failed)),'CAPTURE_FAIL':str(int(capture_failed)),'BORROWED':str(int(borrowed))},capture_output=True,text=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            return events.read_text().splitlines() if events.exists() else [],r.stdout.strip()
+
+    def test_fresh_worker_stops_without_releasing_registry(self):
+        events,result=self.worker_branch();self.assertEqual(events,['stop']);self.assertEqual(result,'0 1')
+
+    def test_failed_stop_or_capture_retains_failure_without_delete(self):
+        for flags in ({'failed':True},{'capture_failed':True}):
+            with self.subTest(flags=flags):
+                events,result=self.worker_branch(**flags);self.assertEqual(events,['stop']);self.assertTrue(result.startswith('1 '))
+
+    def test_borrowed_worker_return_unchanged(self):
+        events,result=self.worker_branch(borrowed=True);self.assertEqual(events,['borrowed']);self.assertEqual(result,'0 0')
+
+    def test_early_primary_routes_stop_and_defers_reap(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text();a=source.index('fleet_retire_sealed_primary()');b=source.index('\nfleet_validate_reap_cohort()',a);body=source[a:b]
+        start=body.rfind('    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then')
+        if start<0:start=body.rfind('    fleet_reap_registry_record ')
+        tail=body[start:body.rfind('\n}')]
+        script=r'''
+POOL_REUSE_ONLY=1;out=output;machine=machine;clone=clone;FLEET_REGISTRY_DIR=registry
+stop_current_owned_machine_retained(){ echo stop; }
+fleet_reap_registry_record(){ echo destroy; }
+'''+tail
+        r=subprocess.run(['bash','-c',script],capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.strip(),'stop')
+
+    def test_reuse_only_destroy_boundary_refuses_before_native(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text();start=source.index('reap_machine() {');end=source.index('\n}\n',start)+3
+        script='POOL_REUSE_ONLY=1; FLY(){ echo FORBIDDEN; };\n'+source[start:end]+'\nreap_machine machine\n'
+        r=subprocess.run(['bash','-c',script],capture_output=True,text=True)
+        self.assertNotEqual(r.returncode,0);self.assertNotIn('FORBIDDEN',r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

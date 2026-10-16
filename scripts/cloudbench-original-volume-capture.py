@@ -1233,7 +1233,7 @@ def _billing_lock(path):
         raise
 
 
-def _billing_local(registry, audit, run_dir, owner, owner_pid, owner_birth, joins_verified):
+def _billing_local(registry, audit, run_dir, owner, owner_pid, owner_birth, joins_verified, *, allow_descendant=False):
     _billing_require(joins_verified is True, 'producer joins are unconfirmed')
     registry, audit, run_dir = [exact_directory(Path(p), 'billing owner path')
                                 for p in (registry, audit, run_dir)]
@@ -1254,7 +1254,9 @@ def _billing_local(registry, audit, run_dir, owner, owner_pid, owner_birth, join
                      and pid_birth_state(str(owner_pid), owner_birth) == 'live', 'caller birth mismatch')
     # The caller is the current joined controller, not a successor guessing that
     # an old PID is idle. Recovery and migration authority must remain separate.
-    _billing_require(int(owner_pid) == os.getppid(), 'not the current cleanup caller')
+    _billing_require(int(owner_pid) == os.getppid() or
+                     (allow_descendant and _billing_caller_descends_from(int(owner_pid))),
+                     'not the current cleanup caller')
     for name in ('recovery-lock', 'cold-handoff-outgoing'):
         _billing_require(not lexists(registry/name), 'recovery/migration authority present')
     _billing_require(am.get('status') == 'incomplete', 'audit is not current')
@@ -1421,7 +1423,128 @@ def _billing_configured_source(registry, meta, mid, config):
     return files
 
 
-def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result):
+def _billing_caller_descends_from(owner_pid):
+    """A live controller may delegate to its exact collector/autoscaler child."""
+    pid = os.getppid()
+    for _ in range(128):
+        if pid == owner_pid:
+            return True
+        if pid <= 1:
+            return False
+        if sys.platform == 'linux':
+            path = Path('/proc', str(pid), 'stat')
+            first = path.read_text().rsplit(') ', 1)[1].split()
+            second = path.read_text().rsplit(') ', 1)[1].split()
+            _billing_require((first[1], first[19]) == (second[1], second[19]),
+                             'caller ancestor birth changed')
+            pid = int(first[1])
+        else:
+            command = ['ps', '-o', 'ppid=,lstart=', '-p', str(pid)]
+            first = subprocess.check_output(command, timeout=2).strip()
+            _billing_require(first == subprocess.check_output(command, timeout=2).strip(),
+                             'caller ancestor birth changed')
+            pid = int(first.split(None, 1)[0])
+    return False
+
+
+def _billing_current_source(registry, meta, output, mid, role):
+    run = Path(meta['runs_root'])/meta['run_id']
+    _billing_require(output.parent == run and role in ('primary', 'worker'), 'foreign idle-stop output')
+    source = {}
+    def read(path, limit=1048576):
+        raw = _billing_file(path, limit)
+        source[str(path)] = sha(raw)
+        return raw
+    contract = sibling('cloudbench_execution_provenance.py')
+    provenance = json.loads(read(run/'execution-provenance.json'))
+    matrix = json.loads(read(run/'execution-task-matrix.json'))
+    _billing_require(not contract['validate_task_matrix_binding'](provenance, matrix)
+                     and provenance['config']['values'].get('app') == meta['app'], 'idle-stop source mismatch')
+    names = [r['name'] for r in matrix['tasks']]
+    _billing_require(output.name in names, 'idle-stop task missing')
+    token = registry.name+'-'+str(names.index(output.name))
+    kind, primary = read(output/'.cid', 4096).decode().split()
+    _billing_require(kind in ('clone', 'pool') and re.fullmatch('[0-9a-f]+', primary), 'idle-stop primary mismatch')
+    if role == 'primary':
+        _billing_require(kind == 'clone' and primary == mid, 'not the owned primary')
+        _billing_require(read(output/'guest-shutdown.confirmed') == (meta['run_id']+'\n').encode(),
+                         'primary shutdown unconfirmed')
+        finished = read(output/'benchmark-child.finished')
+        _billing_require(finished in (b'0\n', b'1\n')
+                         and read(output/'autoscaler.completed-after-child') == finished,
+                         'primary producer completion unconfirmed')
+        owner = json.loads(read(output/'runtime-evidence.owner.json', 65536))
+        _billing_require(owner == {'version':1, 'machine_id':mid, 'run_token':token}, 'primary runtime owner mismatch')
+    else:
+        owner = json.loads(read(output/'worker-runtime-evidence'/mid/'owner.json', 65536))
+        _billing_require(set(owner) == {'version','machine_id','primary_machine_id','run_token','workspace'}
+                         and owner['version'] == 1 and owner['machine_id'] == mid
+                         and owner['primary_machine_id'] == primary and primary != mid
+                         and owner['run_token'] == token and isinstance(owner['workspace'], str)
+                         and SAFE_TOKEN.fullmatch(owner['workspace']), 'worker runtime owner mismatch')
+    name = read(Path(meta['audit_dir'])/'by-machine-id'/mid, 4096).decode().strip()
+    _billing_require(re.fullmatch('cloudbench-[A-Za-z0-9._-]+', name), 'idle-stop clone name')
+    record = _billing_fields(Path(meta['audit_dir'])/'fresh'/name)
+    _billing_require(record.get('version') == '1' and record.get('disposition') == 'owned'
+                     and record.get('source') == 'fresh-clone' and record.get('fleet_owner_token') == registry.name
+                     and record.get('run_id') == meta['run_id'] and record.get('app') == meta['app']
+                     and record.get('clone_name') == name and record.get('machine_id') == mid,
+                     'idle-stop allocation owner mismatch')
+    if role == 'worker':
+        _billing_require(record.get('source_machine_id') == primary, 'worker source primary mismatch')
+    volume = record.get('volume_id', '')
+    _billing_require(re.fullmatch('vol_[A-Za-z0-9]+', volume)
+                     and _billing_fields(registry/'clones'/name)
+                     == {'name':name,'id':mid,'volume_id':volume}, 'idle-stop registry binding mismatch')
+    source[str(Path(meta['audit_dir'])/'fresh'/name)] = sha(_billing_file(Path(meta['audit_dir'])/'fresh'/name))
+    return name, volume, token, source
+
+
+def billing_stop_current_owned(fly, registry, audit, run_dir, output, mid, role,
+                               expected_owner, owner_pid, owner_birth):
+    """Stop one exact current-owned role; preserve custody for later admission."""
+    result = {'schema':BILLING_SCHEMA, 'role':role, 'machine':mid, 'status':'PENDING',
+              'stop_issued':False, 'stopped_only':True, 'pool_credit':0, 'current_owner':expected_owner}
+    guard = -1
+    prior, handler = signal.getitimer(signal.ITIMER_REAL), signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
+    try:
+        import threading
+        _billing_require(threading.current_thread() is threading.main_thread() and prior[1] == 0,
+                         'idle-stop requires main-thread bounded clock')
+        budget = min(180, prior[0]) if prior[0] > 0 else 180
+        def expired(*unused):
+            raise TimeoutError('current idle-stop deadline')
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, budget)
+        registry, audit, run_dir, meta = _billing_local(registry, audit, run_dir, expected_owner,
+            owner_pid, owner_birth, True, allow_descendant=True)
+        _billing_require(getattr(fly, 'app', None) == meta['app'], 'idle-stop client app mismatch')
+        output = exact_directory(Path(output), 'idle-stop output')
+        name, vol, token, binding = _billing_current_source(registry, meta, output, mid, role)
+        result.update(record=name, volume_id=vol, runtime_run_token=token)
+        guard = _billing_lock(registry.parent.parent/'cloudbench-fleet-recovery-locks'/expected_owner)
+        original = (_billing_tree(registry), _billing_tree(audit))
+        receipts = private_capture_dir(run_dir/'_batch'/'current-idle-stop'/role, True)
+        def unchanged():
+            current = _billing_current_source(registry, meta, output, mid, role)
+            _billing_require(current == (name, vol, token, binding), 'idle-stop source changed')
+            return binding
+        _billing_stop_one(fly, registry, audit, meta, original, registry.parent.parent,
+                          mid, vol, name, receipts, result, source_check=unchanged)
+    except (Refusal, OSError, ValueError, TimeoutError, CaptureFailure, NotFound) as error:
+        result.update(status='PENDING', reason_class=type(error).__name__)
+    finally:
+        if guard >= 0:
+            os.close(guard)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, handler)
+        if prior[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(.000001, prior[0]-(time.monotonic()-started)))
+    return result
+
+
+def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, name, receipts, result, *, source_check=None):
     import secrets
     # This shared per-Machine inode prevents concurrent claim publication. Any
     # existing claim, even a dead one, is left to its ordinary recovery owner.
@@ -1444,6 +1567,9 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
         fsync_directory(receipts)
         nonce = secrets.token_hex(16)
         publish_bytes(target/'owner-snapshot.private.json', canonical(original))
+        source_binding = source_check() if source_check else None
+        if source_binding is not None:
+            publish_bytes(target/'source-binding.private.json', canonical(source_binding))
         intent = canonical({'schema': BILLING_SCHEMA,
             'machine': mid, 'volume': vol, 'owner': registry.name, 'nonce': nonce,
             'owner_records_sha256': sha(canonical(original)), 'epoch': time.time(),
@@ -1510,6 +1636,8 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
             final_pair = {'machine': machine, 'volume': volume}
             return machine
         def local_unchanged():
+            if source_check:
+                _billing_require(source_check() == source_binding, 'idle-stop source changed')
             if configured_source is not None:
                 _billing_require(_billing_configured_source(registry, meta, mid, configured_config)
                                  == configured_source, 'configured source changed')
@@ -1563,6 +1691,9 @@ def _billing_stop_one(fly, registry, audit, meta, original, common, mid, vol, na
                       guest_source_sha256=sha(BILLING_GUEST.encode()))
         if lexists(target/'quiescence.private.json'):
             result['quiescence_sha256'] = sha(_billing_file(target/'quiescence.private.json'))
+        if source_binding is not None:
+            result.update(source_binding_sha256=sha(canonical(source_binding)),
+                          native_instance_id=pinned[2], native_config_sha256=pinned[3])
         if configured_source is not None:
             result['configured_source_sha256'] = sha(_billing_file(target/'configured-source.private.json'))
         publish_bytes(target/'result.private.json', canonical(result))
