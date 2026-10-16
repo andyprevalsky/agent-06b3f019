@@ -17,14 +17,15 @@ def function(name):
 
 
 class ExactShapeReuse(unittest.TestCase):
-    def run_case(self, *, shape='shared 4 8192', hints=True, claimed=False, reuse_only=False):
+    def run_case(self, *, shape='shared 4 8192', hints=True, claimed=False, reuse_only=False,
+                 candidates=None, default_branch=False, transport='config'):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'claims').mkdir()
             (root / 'out').mkdir()
-            (root / 'pool.ids').write_text('abcd\n')
+            (root / 'pool.ids').write_text(''.join(mid + '\n' for mid, _ in (candidates or [('abcd', shape)])))
             if hints:
-                (root / 'pool-shapes.tsv').write_text('abcd ' + shape + '\n')
+                (root / 'pool-shapes.tsv').write_text(''.join(mid + ' ' + value + '\n' for mid, value in (candidates or [('abcd', shape)])))
             if claimed:
                 (root / 'claims/abcd').write_text('quarantined\n')
             script = '''
@@ -49,9 +50,12 @@ clone_machine_target() { echo clone >> "$CASE_DIR/actions"; echo cdef; }
 primary_clone_storage_mode() { echo default; }
 '''
             script += function('claim_pool_machine') + function('provision_primary_machine')
+            if default_branch:
+                script += '\nbench_uses_default_pool_shape() { return 0; }\n'
             script += '\nprovision_primary_machine large "$CASE_DIR/out"\n'
             result = subprocess.run(['bash', '-c', script], env={**os.environ, 'CASE_DIR': directory,
-                                    'POOL_REUSE_ONLY': '1' if reuse_only else '0'}, capture_output=True, text=True)
+                                    'POOL_REUSE_ONLY': '1' if reuse_only else '0',
+                                    'CLOUDBENCH_BOOT_TRANSPORT': transport}, capture_output=True, text=True)
             cid = (root / 'out/.cid').read_text() if (root / 'out/.cid').exists() else None
             actions = (root / 'actions').read_text().splitlines() if (root / 'actions').exists() else []
             return result, cid, actions
@@ -140,6 +144,41 @@ unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, '6 0 2')
 
+
+
+class StagedPrimaryExactShape(unittest.TestCase):
+    def case(self, **kwargs):
+        return ExactShapeReuse().run_case(default_branch=True, reuse_only=True, transport='staged', **kwargs)
+
+    def test_staged_default_mismatch_is_not_claimed(self):
+        result, cid, actions = self.case(shape='shared 2 4096')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(cid)
+        self.assertEqual(actions, [])
+
+    def test_staged_matching_behind_mismatch_is_selected(self):
+        result, cid, actions = self.case(candidates=[('cdef', 'shared 2 4096'), ('abcd', 'shared 4 8192')])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(cid, 'pool abcd\n')
+        self.assertEqual(actions, ['audit', 'proof'])
+
+    def test_staged_busy_exact_never_falls_back(self):
+        result, cid, actions = self.case(candidates=[('abcd', 'shared 4 8192'), ('cdef', 'shared 2 4096')], claimed=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(cid)
+        self.assertEqual(actions, [])
+
+    def test_staged_missing_hints_is_not_claimed(self):
+        result, cid, actions = self.case(hints=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(cid)
+        self.assertEqual(actions, [])
+
+    def test_nonstaged_default_fallback_unchanged(self):
+        result, cid, actions = ExactShapeReuse().run_case(default_branch=True, reuse_only=True, transport='config', shape='shared 2 4096')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(cid, 'pool abcd\n')
+        self.assertEqual(actions, ['audit', 'proof'])
 
 if __name__ == '__main__':
     unittest.main()

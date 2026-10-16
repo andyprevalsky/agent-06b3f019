@@ -13203,7 +13203,12 @@ provision_primary_machine() {  # <bench> <output>; actual claim-or-clone boundar
     elif bench_uses_default_pool_shape "$bench"; then
         # A lost/raced/quarantined claim is a miss, never permission to create
         # under reuse-only. The existing claimer retains its exact owner FSM.
-        pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")" || pcid=""
+        if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then
+            # Staged launch cannot resize; reject mismatches before claiming.
+            pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory" 1)" || pcid=""
+        else
+            pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")" || pcid=""
+        fi
     else
         # A distinct shape still has reusable Machines. Keep the existing
         # claim guards, but do not resize a different shape without opt-in.
