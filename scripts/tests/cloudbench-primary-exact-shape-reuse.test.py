@@ -87,5 +87,59 @@ primary_clone_storage_mode() { echo default; }
         self.assertEqual(actions, [])
 
 
+class ReuseOnlyDefaults(unittest.TestCase):
+    def run_shell(self, body, explicit=None, reuse=True):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'pool.ids').write_text('abcd\n')
+            script = "set -e\n" + "\n".join(function(name) for name in (
+                'reuse_pool_only_admission', 'bench_needs_large_primary',
+                'primary_vm_size_for_bench', 'primary_vm_memory_for_bench',
+                'bench_uses_default_pool_shape', 'shared_cpu_units_for_vm_size',
+                'pool_machine_shape_from_json', 'normalize_current_pool_shape'))
+            script += r'''
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x; FLEET_PRIMARY_VM_MEMORY=4096
+FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x; FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
+POOL_IDS_FILE="$CASE_DIR/pool.ids"; FLEET_DIR="$CASE_DIR"
+POOL_INVENTORY_JSON='[{"id":"abcd","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
+CATALOG_BROWSER_REQUIRED_TASKS=(browser-task)
+PROVISION_POOL=''; FRESH_VOLUMES_REQUESTED=0; RECOVER_STALE_ONLY=0
+unset CLOUDBENCH_FRESH_TARGET_REGION CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+'''
+            if explicit is not None:
+                script += 'CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=' + explicit + '\n'
+            script += 'reuse_pool_only_admission\n' + body
+            return subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                                  env={**os.environ, 'CASE_DIR': directory, 'POOL_REUSE_ONLY': '1' if reuse else '0'})
+
+    def test_reuse_only_defaults_to_supported_dynamic_mode(self):
+        result = self.run_shell('printf "%s" "$CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '1')
+
+    def test_explicit_zero_is_preserved(self):
+        result = self.run_shell('printf "%s" "$CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE"', explicit='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '0')
+
+    def test_ordinary_cli_does_not_change_unset_option(self):
+        result = self.run_shell('printf "%s" "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE-unset}"', reuse=False)
+        self.assertEqual(result.stdout, 'unset')
+
+    def test_default_reuse_normalizer_does_not_resize_large_machine(self):
+        result = self.run_shell('resize_pool_machine() { echo unexpected-resize >&2; return 9; }; normalize_current_pool_shape')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('unexpected-resize', result.stderr)
+
+    def test_existing_capacity_plan_counts_requested_large_cpu_and_zero_creates(self):
+        source = function('enforce_app_capacity_guard')
+        start = source.index('    primary_nx=')
+        end = source.index('    capacity_parse_status=0')
+        result = self.run_shell('BENCHES=(plain browser-task); replacement_slots=2; warm_json="[]"; available_stopped_pool_machine_count() { echo 2; };\n' + source[start:end] + 'printf "%s %s %s" "$requested_shared" "$requested_fresh_machines" "$requested_pool_eligible_machines"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '6 0 2')
+
+
 if __name__ == '__main__':
     unittest.main()

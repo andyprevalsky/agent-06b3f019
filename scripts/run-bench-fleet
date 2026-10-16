@@ -1256,6 +1256,11 @@ reuse_pool_only_admission() {
         echo "❌ existing-Machine reuse conflicts with provisioning or explicit fresh-only policy; no measured new-Machine admission is available" >&2
         return 1
     fi
+    # Reuse-only must retain admitted large shapes and use the existing
+    # shape-aware boot update path. An explicit operator setting wins.
+    if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE+x}" != x ]; then
+        export CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+    fi
     echo "🏊 reuse existing primary Machines; additional workers require an existing eligible worker path (new allocation is withheld)" >&2
 }
 reuse_pool_only_admission || exit 2
