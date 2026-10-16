@@ -131,20 +131,38 @@ def fence(repo, parent, expected_birth, ref, campaign):
 @contextmanager
 def owned_parent(args, repo, env, destination, ref, epoch):
     """Keep this supervisor alive through exact parent cleanup after local failure."""
-    parent = subprocess.Popen(args, cwd=repo, env=env)
+    parent = None
     expected_birth = None
-    try:
-        expected_birth = birth(parent.pid)
-        yield parent, expected_birth
-    finally:
-        if parent.poll() is None and expected_birth is not None:
+    stop_requested = False
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    def stop(signum, frame):
+        nonlocal stop_requested
+        stop_requested = True
+        if parent is not None and expected_birth is not None and parent.poll() is None:
             try:
                 if birth(parent.pid) == expected_birth:
                     parent.send_signal(signal.SIGTERM)
             except (FileNotFoundError, ProcessLookupError, ValueError):
                 pass
+    for sig in previous:
+        signal.signal(sig, stop)
+    try:
+        parent = subprocess.Popen(args, cwd=repo, env=env)
+        expected_birth = birth(parent.pid)
+        if stop_requested:
+            stop(signal.SIGTERM, None)
+        yield parent, expected_birth
+    finally:
+        if parent is not None and parent.poll() is None and expected_birth is not None:
+            stop(signal.SIGTERM, None)
         # No group signal or kill. A source-owned parent joins its controllers.
-        status = parent.wait()
+        try:
+            status = parent.wait() if parent is not None else None
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        if parent is None:
+            raise RuntimeError('campaign parent was not created')
         value = dict(parent_pid=parent.pid, parent_birth=expected_birth,
                      parent_exit_code=status, parent_joined=True,
                      source_ref=ref, original_epoch=epoch)

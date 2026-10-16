@@ -85,4 +85,23 @@ while True:time.sleep(.01)
     for child in children:
      if child.poll()is None:child.terminate();child.wait(timeout=5)
     for sig,handler in handlers.items():signal.signal(sig,handler)
+ def test_term_during_popen_is_forwarded_after_birth(self):
+  with tempfile.TemporaryDirectory()as d:
+   root=Path(d);done=root/'cleaned';ready=root/'ready';children=[];original_popen=subprocess.Popen
+   child_code="import signal,time,sys;from pathlib import Path;signal.signal(signal.SIGTERM,lambda *a:(Path(sys.argv[1]).write_text('joined'),sys.exit(7)));Path(sys.argv[2]).write_text('ready');time.sleep(60)"
+   def spawn(*unused,**kwargs):
+    child=original_popen([sys.executable,'-c',child_code,str(done),str(ready)]);children.append(child)
+    end=time.monotonic()+5
+    while not ready.exists()and time.monotonic()<end:time.sleep(.01)
+    self.assertTrue(callable(signal.getsignal(signal.SIGTERM)),'TERM handler not armed before Popen')
+    os.kill(os.getpid(),signal.SIGTERM)
+    return child
+   try:
+    with patch.object(subprocess,'Popen',side_effect=spawn):
+     with S['owned_parent'](['unused'],root,{},root,'a'*40,1)as(parent,identity):
+      self.assertEqual(parent.wait(timeout=5),7)
+    self.assertTrue(done.exists());self.assertTrue(json.loads((root/'supervisor-parent-joined.safe.json').read_text())['parent_joined'])
+   finally:
+    for child in children:
+     if child.poll()is None:child.terminate();child.wait(timeout=5)
 if __name__=='__main__':unittest.main()
