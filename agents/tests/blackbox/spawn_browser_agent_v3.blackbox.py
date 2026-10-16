@@ -21322,7 +21322,14 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
+    import helpers.llm as fixture_llm
+    original_progress = fixture_llm.check_progress
+    async def declared_handoff_review(*args, **kwargs):
+        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
+            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
+        return await original_progress(*args, **kwargs)
     targets = [
+        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -21334,6 +21341,7 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
         patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
         patch(handler + "_observe_step_page", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you"})),
+        patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "https://admin.google.com/ac/users/fixture", "title": "Verify it is you"})),
         patch(handler + "prepare_browser_auth", AsyncMock(side_effect=RuntimeError("credential inventory read failed"))),
         patch(handler + "create_user_auth_assistance_request", create_auth),
         patch(handler + "extract_session_files", AsyncMock(return_value=[])),
@@ -21784,7 +21792,14 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
+    import helpers.llm as fixture_llm
+    original_progress = fixture_llm.check_progress
+    async def declared_handoff_review(*args, **kwargs):
+        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
+            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
+        return await original_progress(*args, **kwargs)
     targets = [
+        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -21890,7 +21905,14 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."
+    import helpers.llm as fixture_llm
+    original_progress = fixture_llm.check_progress
+    async def declared_handoff_review(*args, **kwargs):
+        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
+            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
+        return await original_progress(*args, **kwargs)
     targets = [
+        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(handler + "load_config", return_value=_fake_config()),
         patch(handler + "activity.heartbeat"),
         patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -22051,7 +22073,14 @@ async def _run_realm_transition_action_fixture(action_name, *, redirect=True, re
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     fake_playwright = _FakePlaywright(fake_browser)
     prefix = "domains.spawn_browser_agent_v3.handler."
+    import helpers.llm as fixture_llm
+    original_progress = fixture_llm.check_progress
+    async def declared_handoff_review(*args, **kwargs):
+        if len(args) > 5 and args[5] == "verifier_browser_auth_handoff":
+            return {"score": 1.0, "reasoning": "Scripted supported transfer in this inventory-transition fixture", "usage": {}}
+        return await original_progress(*args, **kwargs)
     targets = [
+        patch("helpers.llm.check_progress", declared_handoff_review),
         patch(prefix + "load_config", return_value=_fake_config()),
         patch(prefix + "activity.heartbeat"),
         patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
