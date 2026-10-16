@@ -140,6 +140,29 @@ cloudbench_controller_lock_release() { printf released > "$FIXTURE_COMMON/lock-r
         self.assertEqual(result.returncode,2);self.assertIn('requires exactly 32 lowercase hex',result.stderr)
         self.assertFalse(Path(self.request['consumer']['pool_ids_file']).exists())
 
+    @unittest.skipUnless(os.geteuid()==0,'actual mixed-owner boundary requires root')
+    def test_root_claim_producer_directory_allows_workspace_owned_publisher(self):
+        os.chown(self.common,1001,1001)
+        claims=self.common/'cloudbench-pool-claims';claims.mkdir(mode=0o755);os.chown(claims,1001,1001)
+        pool=Path(self.request['consumer']['pool_ids_file']);pool.parent.mkdir(mode=0o700);os.chown(pool.parent,1001,1001)
+        Path(str(pool)+'.deps').write_text(self.dep['node']+' '+self.dep['python']+' cold-image-bootstrap\n')
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();fn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group()
+        result=subprocess.run(['bash','-c',fn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(claims/'22222222222222'),'22222222222222','vol_other','fixture-host',str(os.getpid()),'fixture-birth','f'*32,str(pool),str(pool)+'.deps','e'*64],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        locks=claims/'.locks'
+        self.test_actual_cli_admission_dispatch_reaches_canonical_publisher()
+        self.assertEqual((locks.stat().st_uid,locks.stat().st_gid),(1001,1001))
+    @unittest.skipUnless(os.geteuid()==0,'actual mixed-owner boundary requires root')
+    def test_existing_root_lock_directory_is_not_silently_repaired(self):
+        os.chown(self.common,1001,1001)
+        claims=self.common/'cloudbench-pool-claims';claims.mkdir(mode=0o755);os.chown(claims,1001,1001)
+        locks=claims/'.locks';locks.mkdir(mode=0o700);pilot=locks/'870613f04272d8.lock';pilot.write_bytes(b'preserved pilot lock')
+        before=(locks.stat().st_ino,locks.stat().st_uid,locks.stat().st_gid,pilot.stat().st_ino,pilot.read_bytes())
+        req,auth,fd=self.authority()
+        with self.assertRaisesRegex(ValueError,'unsafe output directory'):mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
+        self.assertEqual((locks.stat().st_ino,locks.stat().st_uid,locks.stat().st_gid,pilot.stat().st_ino,pilot.read_bytes()),before)
+        self.assertFalse(Path(self.request['consumer']['pool_ids_file']).exists())
+
     @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
     def test_real_module_publish_verify_and_exclusive_repeat(self):
         req,auth,fd=self.authority()

@@ -6796,15 +6796,26 @@ def parse_exact_owner(payload, digest, host, pid, pid_start, owner):
         raise SystemExit(1)
 
 try:
+    created_locks = False
     try:
         os.mkdir(".locks", 0o700, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        created_locks = True
     except FileExistsError:
         pass
     lock_root = os.stat(".locks", dir_fd=parent_fd, follow_symlinks=False)
     if not stat.S_ISDIR(lock_root.st_mode):
         raise SystemExit(1)
     locks_fd = os.open(".locks", os.O_RDONLY | directory | nofollow, dir_fd=parent_fd)
+    if created_locks:
+        # Root maintenance must create the same workspace-owned mutex directory
+        # as the ordinary owner. Never repair an existing directory implicitly.
+        opened = os.fstat(locks_fd)
+        if (opened.st_dev, opened.st_ino) != (lock_root.st_dev, lock_root.st_ino):
+            raise SystemExit(1)
+        parent = os.fstat(parent_fd)
+        os.fchown(locks_fd, parent.st_uid, parent.st_gid)
+        os.fsync(locks_fd)
+        os.fsync(parent_fd)
     lock_name = f"{machine_id}.lock"
     lock_fd = os.open(
         lock_name,
