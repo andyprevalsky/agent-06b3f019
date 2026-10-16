@@ -52,6 +52,7 @@ git -C "$ROOT" archive "$BUILD_ID:agents" |
 cd "$ARTIFACT_DIR/worker"
 # Local build: neither the builder nor the rollout creates a Fly Machine.
 flyctl deploy --local-only --build-only --push --image-label "$IMAGE_LABEL" -a "$APP"
+flyctl auth docker
 IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .Manifest.Digest}}')
 IMAGE_DIGEST=$(node -p 'JSON.parse(process.argv[1])' "$IMAGE_DIGEST")
 if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then

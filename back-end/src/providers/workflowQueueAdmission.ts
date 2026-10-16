@@ -1,3 +1,4 @@
+import { WorkflowNotFoundError } from '@temporalio/client';
 import { CONTINUATION_OPERATION, type ContinuationTicket } from './workflowQueueContinuation';
 import { claimPhysicalRootStart, type RootTerminalWitness } from './workflowPhysicalStart';
 import { managedQueue } from './workflowManagedQueue';
@@ -273,10 +274,43 @@ export async function requireQueueRetirementReady(
     });
     return { gate, rows, tickets };
   });
+  // Absence is a typed latest-ID observation, never fabricated terminal/queue data.
+  async function observe(execution: TemporalWorkflowExecutionRef) {
+    try {
+      return await reconcile(execution);
+    } catch (error) {
+      if (
+        !(error instanceof WorkflowNotFoundError) ||
+        error.workflowId !== execution.workflowId ||
+        error.runId !== undefined
+      )
+        throw error;
+      return { absent: true as const };
+    }
+  }
   // Native reconciliation runs outside every transaction/advisory lock.
   for (const row of snapshot.rows) {
     const intent = row.request as unknown as StartAdmission;
-    const current = await reconcile(intent.accepted!);
+    const current = await observe(intent.accepted!);
+    if ('absent' in current) {
+      if (
+        !snapshot.rows.every((member) => {
+          const saved = member.request as unknown as StartAdmission;
+          return (
+            saved.rejectDuplicate === true &&
+            typeof saved.workflowId === 'string' &&
+            saved.workflowId.length > 0 &&
+            saved.workflowId === saved.accepted?.workflowId &&
+            typeof saved.accepted.firstExecutionRunId === 'string' &&
+            saved.accepted.firstExecutionRunId.length > 0
+          );
+        })
+      )
+        throw new WorkflowStartAdmissionPendingError(
+          'Absent native chain has no immutable settled identity'
+        );
+      continue;
+    }
     if (
       current.firstExecutionRunId !== intent.accepted!.firstExecutionRunId ||
       typeof current.queue !== 'string' ||
@@ -290,10 +324,21 @@ export async function requireQueueRetirementReady(
   }
   for (const row of snapshot.tickets) {
     const ticket = row.request as unknown as ContinuationTicket;
-    const current = await reconcile({
+    if (
+      ticket.incarnation !== snapshot.gate.incarnation ||
+      typeof ticket.workflowId !== 'string' ||
+      !ticket.workflowId ||
+      typeof ticket.runId !== 'string' ||
+      !ticket.runId ||
+      typeof ticket.firstExecutionRunId !== 'string' ||
+      !ticket.firstExecutionRunId
+    )
+      throw new WorkflowStartAdmissionPendingError('Continuation identity is incomplete');
+    const current = await observe({
       workflowId: ticket.workflowId,
       firstExecutionRunId: ticket.firstExecutionRunId,
     });
+    if ('absent' in current) continue;
     if (
       ticket.incarnation !== snapshot.gate.incarnation ||
       typeof ticket.workflowId !== 'string' ||

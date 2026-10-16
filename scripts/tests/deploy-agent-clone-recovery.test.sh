@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/bin"
+mkdir -p "$TMP/bin" "$TMP/docker-config"
+export DOCKER_CONFIG="$TMP/docker-config"
 export TEST_REAL_NODE="$(command -v node)"
 export TEST_QUEUE_DIR="$TMP"
 cat > "$TMP/bin/node" <<'PY'
@@ -39,6 +40,13 @@ PY
 cat > "$TMP/bin/flyctl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == 'auth docker' ]]; then
+  printf 'auth\n' >> "$TEST_QUEUE_DIR/journal"
+  if [[ "${TEST_AUTH_FAILURE:-0}" != 0 ]]; then exit "$TEST_AUTH_FAILURE"; fi
+  [[ "$FLY_API_TOKEN" == fixture-token ]]
+  printf '{"auths":{"registry.fly.io":{"auth":"offline-fixture"}}}\n' > "$DOCKER_CONFIG/config.json"
+  exit 0
+fi
 [[ "$*" == 'deploy --local-only --build-only --push --image-label '* ]] || exit 90
 [[ "$*" == *' -a test-prod' ]] || exit 91
 printf 'build\n' >> "$TEST_QUEUE_DIR/journal"
@@ -48,6 +56,17 @@ cat > "$TMP/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$*" == 'buildx imagetools inspect registry.fly.io/test-prod:cutover-'* ]] || exit 92
+if ! python3 - <<'PYAUTH'
+import json, os, pathlib
+path = pathlib.Path(os.environ['DOCKER_CONFIG']) / 'config.json'
+assert path.is_file(), 'clean Docker config has no Fly registry credential'
+assert json.loads(path.read_text())['auths']['registry.fly.io']['auth'] == 'offline-fixture'
+PYAUTH
+then
+  echo 'offline registry inspect rejected unauthenticated Docker (401)' >&2
+  exit 93
+fi
+printf 'inspect\n' >> "$TEST_QUEUE_DIR/journal"
 printf '"sha256:%064d"\n' 0 | tr 0 d
 SH
 cat > "$TMP/bin/npm" <<'SH'
@@ -77,10 +96,17 @@ export BUILD_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export SURFACE_HASH=bbbbbbbbbbbb DEPLOYMENT_TOKEN=attempt-one
 export DEPLOY_REUSE_ONLY=1
 : > "$TMP/journal"
-bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/normal.log" 2>&1
-[[ "$(cat "$TMP/journal")" == $'build\nenqueue\nrun' ]]
+if bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/normal.log" 2>&1; then
+  :
+else
+  result=$?
+  cat "$TMP/normal.log" >&2
+  exit "$result"
+fi
+[[ "$(cat "$TMP/journal")" == $'build\nauth\ninspect\nenqueue\nrun' ]]
 FIRST_JOB=$(cat "$TMP/job-id")
 export BUILD_ID=cccccccccccccccccccccccccccccccccccccccc
+rm "$DOCKER_CONFIG/config.json"
 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/next.log" 2>&1
 [[ "$FIRST_JOB" != "$(cat "$TMP/job-id")" ]]
 : > "$TMP/journal"
@@ -109,4 +135,11 @@ if TEST_BUILD_FAILURE=31 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.s
   echo 'failed build was admitted' >&2; exit 1
 fi
 [[ "$(cat "$TMP/journal")" == build ]]
+: > "$TMP/journal"
+rm "$DOCKER_CONFIG/config.json"
+if TEST_AUTH_FAILURE=33 bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/auth-failure.log" 2>&1; then
+  echo 'failed registry authentication was admitted' >&2; exit 1
+fi
+[[ "$(cat "$TMP/journal")" == $'build\nauth' ]]
+[[ ! -e "$DOCKER_CONFIG/config.json" ]]
 echo 'worker pool entry: PASS (allocation-free build, immutable enqueue, shared runner, failures before admission)'

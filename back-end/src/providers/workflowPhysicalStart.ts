@@ -1,3 +1,4 @@
+import { WorkflowNotFoundError } from '@temporalio/client';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import {
@@ -9,6 +10,26 @@ export interface RootTerminalWitness {
   workflowId: string;
   firstExecutionRunId?: string;
   status: 'TERMINAL' | 'ABSENT';
+}
+/** Only latest-ID absence is evidence; a missing old run cannot settle a live chain. */
+export async function observePhysicalRootWitness(
+  ref: TemporalWorkflowExecutionRef,
+  observe: () => Promise<{ firstRunId?: string | null; terminal: boolean }>
+): Promise<RootTerminalWitness> {
+  try {
+    const current = await observe();
+    if (current.firstRunId !== ref.firstExecutionRunId || !current.terminal)
+      throw new WorkflowStartAdmissionPendingError('Prior physical root is not natively terminal');
+    return { ...ref, status: 'TERMINAL' };
+  } catch (error) {
+    if (
+      !(error instanceof WorkflowNotFoundError) ||
+      error.workflowId !== ref.workflowId ||
+      error.runId !== undefined
+    )
+      throw error;
+    return { ...ref, status: 'ABSENT' };
+  }
 }
 export class PhysicalRootReconciliationRequired extends Error {
   constructor(
@@ -82,12 +103,32 @@ export async function claimPhysicalRootStart(
     const response = row.response as Prisma.JsonObject | null;
     const saved = response?.nativeTerminalWitness as unknown as RootTerminalWitness | undefined;
     const savedValid =
-      saved?.status === 'TERMINAL' &&
+      (saved?.status === 'TERMINAL' || saved?.status === 'ABSENT') &&
       saved.workflowId === ref.workflowId &&
       saved.firstExecutionRunId === ref.firstExecutionRunId;
     const proof = savedValid ? saved : witnesses.get(physicalWitnessKey(ref));
+    const absentSafe =
+      proof?.status === 'ABSENT' &&
+      rows.every((member) => {
+        const intent = member.request as {
+          wireCoverage?: string;
+          rejectDuplicate?: boolean;
+          workflowId?: string;
+          accepted?: TemporalWorkflowExecutionRef;
+        };
+        return (
+          member.status === 'COMPLETED' &&
+          intent.wireCoverage === 'IMMUTABLE_ID' &&
+          intent.rejectDuplicate === true &&
+          intent.accepted?.workflowId === intent.workflowId &&
+          typeof intent.accepted?.firstExecutionRunId === 'string' &&
+          intent.accepted.firstExecutionRunId.length > 0 &&
+          typeof intent.workflowId === 'string' &&
+          intent.workflowId.length > 0
+        );
+      });
     if (
-      proof?.status !== 'TERMINAL' ||
+      (proof?.status !== 'TERMINAL' && !absentSafe) ||
       proof.workflowId !== ref.workflowId ||
       proof.firstExecutionRunId !== ref.firstExecutionRunId
     )

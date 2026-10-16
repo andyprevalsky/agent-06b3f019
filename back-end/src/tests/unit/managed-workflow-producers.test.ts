@@ -1,3 +1,4 @@
+import { runAbsenceCases } from './managed-workflow-absence.cases';
 /* eslint-disable no-console */
 import assert from 'node:assert/strict';
 import { WorkflowNotFoundError } from '@temporalio/client';
@@ -118,6 +119,16 @@ async function main() {
       taskQueue: queue,
       surfaceHash: 'a'.repeat(12),
     })) as never;
+    await runAbsenceCases(
+      test,
+      rows,
+      agent,
+      queue,
+      () => pointer,
+      (value) => {
+        pointer = value;
+      }
+    );
     await test('managed pointer never exposes a continuation destination without native source identity', async () => {
       await assert.rejects(getAgentQueuePointerPayload(), /identity/i);
     });

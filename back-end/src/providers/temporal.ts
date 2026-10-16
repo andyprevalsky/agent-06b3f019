@@ -1,6 +1,7 @@
 import {
   PhysicalRootReconciliationRequired,
   physicalWitnessKey,
+  observePhysicalRootWitness,
   type RootTerminalWitness,
 } from './workflowPhysicalStart';
 import { createHash } from 'node:crypto';
@@ -490,24 +491,18 @@ export async function startAgentWorkflowExecutionWithClient(
           const witnesses = new Map<string, RootTerminalWitness>();
           try {
             for (const ref of error.executions) {
-              const description = await withTemporalControlDeadline(
-                client,
-                () =>
-                  client.workflow
-                    .getHandle(ref.workflowId, undefined, {
-                      firstExecutionRunId: ref.firstExecutionRunId,
-                    })
-                    .describe(),
-                admissionDeadline
-              );
-              if (
-                description.raw.workflowExecutionInfo?.firstRunId !== ref.firstExecutionRunId ||
-                !nativeWorkflowTerminal(description.status.name)
-              )
-                throw new WorkflowStartAdmissionPendingError(
-                  'Prior physical root is not natively terminal'
+              const proof = await observePhysicalRootWitness(ref, async () => {
+                const description = await withTemporalControlDeadline(
+                  client,
+                  () => client.workflow.getHandle(ref.workflowId).describe(),
+                  admissionDeadline
                 );
-              witnesses.set(physicalWitnessKey(ref), { ...ref, status: 'TERMINAL' });
+                return {
+                  firstRunId: description.raw.workflowExecutionInfo?.firstRunId,
+                  terminal: nativeWorkflowTerminal(description.status.name),
+                };
+              });
+              witnesses.set(physicalWitnessKey(ref), proof);
             }
           } catch (nativeError) {
             if (nativeError instanceof WorkflowStartAdmissionPendingError) throw nativeError;
