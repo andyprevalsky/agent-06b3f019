@@ -334,7 +334,7 @@ REMOTE_CURRENT_ENV
   fi
   echo 'echo "GATE_ENV backend_env=$([ -s back-end/.env ] && echo yes || echo no) agents_env=$([ -s agents/.env ] && echo yes || echo no)"'
   echo 'chown -R rose:rose /tmp/gate 2>/dev/null || true'
-  echo 'export PATH="/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
+  echo 'export PATH="/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:$PATH" HOME=/home/rose'
   if [ "$EXPORT_HOST" = 1 ]; then
     echo 'mkdir -m 700 /tmp/gate/controller-host-custody'
     cat <<'REMOTE_BOUND_EXPORT'
@@ -375,7 +375,7 @@ REMOTE_WORKSPACE_CUSTODY
     printf 'n=$((n+1)); printf "GATE_STEP_START #%%s %%s\\n" "$n" %q\n' "$suite"
     # bash -l re-reads the profile and resets PATH, so the gate's Node and venv go on PATH inside the command.
     if [ -n "$DISPOSABLE_AUTHORITY" ]; then
-      printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1 & command_pid=$!\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+      printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1 & command_pid=$!\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && python3 -I -B scripts/cloudbench-install-controller-client.py --directory /tmp/gate/bin && $suite"
       cat <<'REMOTE_COMMAND_IDENTITY'
 python3 -I -B - "$command_pid" <<'PY_COMMAND_IDENTITY'
 import json,os,sys,time
@@ -390,7 +390,7 @@ PY_COMMAND_IDENTITY
 wait "$command_pid"; rc=$?
 REMOTE_COMMAND_IDENTITY
     else
-    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
+    printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
     fi
     printf 'printf "GATE_STEP %%s exit=%%s\\n" %q "$rc"; [ $rc -eq 0 ] || { overall=1; failed_steps="$failed_steps $n"; echo "GATE_STEP_FAILED $n"; echo "GATE_FAIL_TAIL_START $n"; tail -n 60 "/tmp/gate/step-$n.log"; echo "GATE_FAIL_TAIL_END $n"; }\n' "$suite"
   done
