@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import copy
+import ast
+from unittest import mock
 import fcntl
 import importlib.util
 import json
@@ -36,8 +38,8 @@ class Admission(unittest.TestCase):
         own_desc=save(own)
         target=dict(machine=self.controller,volume='vol_controller',workspace=str(self.repo),common=str(self.common),source_ref=ref,ownership_sha256=own_desc['sha256'],controller_config_sha256=mod.sha(mod.canonical(control_config)),preservation='rootfs-always',pool_name='repo-sourcehash.cold.ids',pool_ids_file=str(self.common/'cloudbench-pools/repo-sourcehash.cold.ids'),pool_meta_file=str(self.common/'cloudbench-pools/repo-sourcehash.cold.ids.deps'),dependencies=self.dep)
         ready=dict(id='vs_snapshot',status='created',created_at='2026-10-16T00:00:00Z',size=100,digest='e'*64)
-        scan=dict(kind='exact-inert-quiescence-v1',machine=self.mid,boot='01234567-1234-1234-1234-123456789abc',unknown=[],inert_sleepers=[{'pid':1,'birth':'1'}],idle_pinned_agents=[],idle_platform_hallpass=[],observed_epoch=1)
-        obs=dict(schema='cloudbench-explicit-idle-observation-v1',origin=mod.ORIGIN,machine_id=self.mid,native_instance='instance',admission_nonce=self.nonce,historical_task_credit=0,collector_sha256=mod.sha(SCRIPT.read_bytes()),predicate_sha256=mod.sha(SCRIPT.with_name('cloudbench-startup-failure-archive.py').read_bytes()),workspace={'kind':'existing-git','head':'f'*40,'status_sha256':'1'*64},data_mount={'device':1,'inode':2,'mount_device':'1:1'},dependencies=self.dep,before=scan,after=dict(scan,observed_epoch=2),started_epoch=1,finished_epoch=2)
+        scan=dict(kind='exact-inert-quiescence-v1',machine=self.mid,nonce=self.nonce,boot='01234567-1234-1234-1234-123456789abc',unknown=[],inert_sleepers=[{'pid':1,'birth':'1'}],idle_pinned_agents=[],idle_platform_hallpass=[],observed_epoch=1)
+        obs=dict(schema='cloudbench-explicit-idle-observation-v1',origin=mod.ORIGIN,machine_id=self.mid,native_instance='instance',admission_nonce=self.nonce,historical_task_credit=0,collector_sha256=mod.sha(SCRIPT.read_bytes()),predicate_sha256=mod.sha(mod.billing_predicate().encode()),workspace={'kind':'existing-git','head':'f'*40,'status_sha256':'1'*64},data_mount={'device':1,'inode':2,'mount_device':'1:1'},dependencies=self.dep,before=scan,after=dict(scan,observed_epoch=2),started_epoch=1,finished_epoch=2)
         obs_desc=save(obs)
         self.request=dict(schema='cloudbench-explicit-idle-request-v1',origin=mod.ORIGIN,historical_task_credit=0,admission_nonce=self.nonce,allowed_future_roles=['primary','worker'],resource=self.resource,consumer=target,controller_before=save(ctrl),controller_after=save(ctrl),workspace_ownership=own_desc,native_before=save(native),native_after=save(native),volume=save(dict(id=self.vol,attached_machine_id=self.mid,state='created')),protected_overlay=save(dict(machines=[self.controller],volumes=['vol_controller'])),preservation=dict(snapshot_id='vs_snapshot',receipt=save(dict(volume_id=self.vol,snapshot_id='vs_snapshot',available=ready,machine_id=self.mid,source_instance='instance',source_config_sha256=self.resource['config_sha256'],capture_state='stopped',verified_epoch=0)),available_read=save(dict(volume_id=self.vol,snapshots=[ready]))),observation=obs_desc,observer_terminal=save(dict(status='OBSERVED_AND_STOPPED',machine_id=self.mid,admission_nonce=self.nonce,observation_sha256=obs_desc['sha256'],finished_epoch=3)),workspace_policy='existing-git-reset-v1')
         self.env=dict(FLY_MACHINE_ID=self.controller,FLY_APP_NAME='app',CLOUDBENCH_IDLE_WORKSPACE=str(self.repo),CLOUDBENCH_IDLE_COMMON=str(self.common),CLOUDBENCH_IDLE_POOL_IDS=target['pool_ids_file'],CLOUDBENCH_IDLE_POOL_META=target['pool_meta_file'])
@@ -101,6 +103,21 @@ class Admission(unittest.TestCase):
             return match.group()
         verify=self.root/'verify.py'
         verify.write_text('import json,runpy,sys\nh=runpy.run_path('+repr(str(SCRIPT))+')\nr=json.load(open('+repr(str(req))+'))\nh["verify_pool"](sys.argv[1],r["consumer"]["common"],r["native_before"],r["native_after"],r["consumer"]["source_ref"],h["described"](r["volume"]))\n')
+        start=fleet.index('# A newer snapshot is not proof')
+        end=fleet.index('# Recover only positively owned ephemeral clones',start)
+        preflight=fleet[start:end]
+        preflight+='\n'+'\n'.join(function(n) for n in ('pool_machine_state_from_json','reconcile_pool','pool_machine_shape_from_json','normalize_current_pool_shape','pool_write_shape_hints'))
+        native_file=self.root/'current-native.json';native_file.write_text(json.dumps([mod.described(self.request['native_before'])]))
+        preflight+='''
+FLY() { cat "$NATIVE_FILE"; }
+resize_pool_machine() { echo unexpected-resize >&2; return 9; }
+reconcile_pool && normalize_current_pool_shape && pool_write_shape_hints
+'''
+        preflight_env={**os.environ,'GIT_COMMON_DIR':str(self.common),'POOL_IDS_FILE':self.request['consumer']['pool_ids_file'],'POOL_META_FILE':self.request['consumer']['pool_meta_file'],'POOL_COLD_BOOTSTRAP':'1','CURRENT_NODE_FP':self.dep['node'],'CURRENT_PY_FP':self.dep['python'],'FLEET_PRIMARY_VM_SIZE':'shared-cpu-2x','FLEET_PRIMARY_VM_MEMORY':'4096','FLEET_BUNDLED_FRONTEND_VM_SIZE':'shared-cpu-4x','FLEET_BUNDLED_FRONTEND_VM_MEMORY':'8192','CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE':'1','FLEET_DIR':str(self.root),'NATIVE_FILE':str(native_file)}
+        accepted=subprocess.run(['bash','-c',preflight],env=preflight_env,capture_output=True,text=True)
+        self.assertEqual(accepted.returncode,0,accepted.stderr)
+        self.assertIn('cold pool image manifest baseline matches',accepted.stdout)
+        self.assertNotIn('unexpected-resize',accepted.stderr)
         shell='\n'.join(function(n) for n in ('pool_claim_fs_transaction','write_pool_claim','claim_pool_machine'))
         shell+='''
 registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
@@ -139,6 +156,23 @@ provision_primary_machine task "$OUT" && primary_cold_bootstrap_requested "$OUT"
         (claims/self.mid).unlink();os.environ['CLOUDBENCH_IDLE_POOL_IDS']=str(self.common/'cloudbench-pools/other.cold.ids')
         with self.assertRaises(ValueError):mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
     @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
+    def test_new_directory_parent_fsync_and_ownership_precede_claim(self):
+        req,auth,fd=self.authority();events=[];original=os.fsync;common_inode=self.common.stat().st_ino
+        def synced(descriptor):
+            events.append(os.fstat(descriptor).st_ino);return original(descriptor)
+        def checkpoint(phase):
+            if phase=='claimed':self.assertIn(common_inode,events)
+        with mock.patch.object(mod.os,'fsync',side_effect=synced):
+            mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd,checkpoint=checkpoint)
+        for name in ('cloudbench-pool-claims','cloudbench-pool-claims/.locks','cloudbench-pool-reuse','cloudbench-explicit-idle','cloudbench-pools'):
+            info=(self.common/name).stat();self.assertEqual(info.st_uid,self.common.stat().st_uid);self.assertEqual(info.st_mode & 0o777,0o700)
+    @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
+    def test_existing_writable_directory_is_refused_without_repair(self):
+        req,auth,fd=self.authority();bad=self.common/'cloudbench-pool-reuse';bad.mkdir();bad.chmod(0o777)
+        with self.assertRaises(ValueError):mod.publish(req,mod.sha(req.read_bytes()),auth,mod.sha(auth.read_bytes()),fd)
+        self.assertEqual(bad.stat().st_mode & 0o777,0o777)
+        self.assertFalse((self.common/'cloudbench-pool-claims'/self.mid).exists())
+    @unittest.skipUnless(os.geteuid()==0,'root publication boundary; execute this registered test as root')
     def test_partial_publication_stays_claimed_unusable(self):
         req,auth,fd=self.authority()
         def stop(phase):
@@ -147,6 +181,26 @@ provision_primary_machine task "$OUT" && primary_cold_bootstrap_requested "$OUT"
         self.assertTrue((self.common/'cloudbench-pool-claims'/self.mid).exists())
         proof=self.common/'cloudbench-pool-reuse'/(self.mid+'.json')
         with self.assertRaises(FileNotFoundError):mod.verify_pool(proof,self.common,self.request['native_before'],self.request['native_after'],self.request['consumer']['source_ref'],mod.described(self.request['volume']))
+
+
+class CanonicalBillingPredicate(unittest.TestCase):
+    def test_actual_captured_hallpass_is_accepted_by_collector_predicate(self):
+        captured=json.loads(SCRIPT.with_name('tests').joinpath('hallpass-platform-descriptor.fixture.json').read_text())
+        node=next(n for n in ast.parse(mod.billing_predicate()).body if isinstance(n,ast.FunctionDef) and n.name=='hallpass_identity')
+        env={};exec(compile(ast.Module(body=[node],type_ignores=[]),'canonical-billing','exec'),env)
+        values=[captured['uid'],captured['ppid'],captured['pgid'],[captured['exe'].encode()],captured['exe'],captured['exe_sha256'],captured['birth_stable'],captured['exe_regular'],captured['exe_owner']]
+        self.assertTrue(env['hallpass_identity'](*values))
+        for index,wrong in ((0,1001),(1,2),(2,1),(4,'/tmp/hallpass'),(5,'0'*64),(6,False),(7,False),(8,1001)):
+            changed=list(values);changed[index]=wrong
+            self.assertFalse(env['hallpass_identity'](*changed))
+
+    def test_collector_executes_exact_current_predicate_with_existing_bindings(self):
+        machine='0123456789abcd';nonce='a'*32
+        with mock.patch.object(mod.subprocess,'check_output',return_value=b'{}') as call:
+            mod.observe_processes(machine,nonce,mod.time.monotonic()+35)
+        args=call.call_args.args[0]
+        self.assertEqual(args,[mod.sys.executable,'-c',mod.billing_predicate().replace('TARGET',repr(machine)).replace('NONCE',repr(nonce))])
+        self.assertLessEqual(call.call_args.kwargs['timeout'],20)
 
 
 if __name__=='__main__':unittest.main()

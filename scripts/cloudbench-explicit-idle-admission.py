@@ -12,6 +12,7 @@ import re
 import runpy
 import stat
 import subprocess
+import sys
 import time
 
 SCHEMA = 'cloudbench-explicit-idle-admission-v1'
@@ -59,9 +60,23 @@ def sibling(name):
     return runpy.run_path(str(Path(__file__).with_name(name)))
 
 
+def billing_predicate():
+    return sibling('cloudbench-original-volume-capture.py')['BILLING_GUEST']
+
+
+def observe_processes(machine, nonce, deadline):
+    # Execute the canonical current billing predicate byte-for-byte apart from
+    # its existing explicit TARGET/NONCE bindings. Never change old archives.
+    code=billing_predicate().replace('TARGET',repr(machine)).replace('NONCE',repr(nonce))
+    remaining=deadline-time.monotonic()
+    require(remaining>0,'observation deadline')
+    return json.loads(subprocess.check_output([sys.executable,'-c',code],timeout=min(20,remaining)))
+
+
 def observation(data, machine, instance, nonce):
     """Guest read-only collector; caller owns existing bounded START/STOP lifecycle."""
     base = sibling('cloudbench-startup-failure-archive.py')
+    deadline=time.monotonic()+35
     data = Path(data); repo = data / 'repo'
     require(data == Path('/data'), 'noncanonical data root')
     def workspace():
@@ -73,18 +88,19 @@ def observation(data, machine, instance, nonce):
             return {'kind':'empty', 'device':repo.stat().st_dev, 'inode':repo.stat().st_ino}
         require((repo / '.git').is_dir() and not (repo / '.git').is_symlink(), 'non-Git data needs retained-worktree preparation')
         def git(*args):
-            return subprocess.check_output(['git','-c','safe.directory='+str(repo),'-C',str(repo),*args], timeout=5)
+            remaining=deadline-time.monotonic();require(remaining>0,'workspace observation deadline')
+            return subprocess.check_output(['git','-c','safe.directory='+str(repo),'-C',str(repo),*args], timeout=min(5,remaining))
         return dict(kind='existing-git', device=repo.stat().st_dev, inode=repo.stat().st_ino,
                     head=git('rev-parse','HEAD').decode().strip(), status_sha256=sha(git('status','--porcelain=v1','--untracked-files=all')))
-    start = time.time(); first = base['observe_current_cold_processes'](); mount = base['current_cold_mount'](data)
+    start = time.time(); first = observe_processes(machine,nonce,deadline); mount = base['current_cold_mount'](data)
     before = workspace(); deps = base['current_cold_dependencies'](); after = workspace()
-    last = base['observe_current_cold_processes']()
+    last = observe_processes(machine,nonce,deadline)
     require(before == after and mount == base['current_cold_mount'](data), 'workspace/mount changed')
     require({k:v for k,v in first.items() if k != 'observed_epoch'} ==
             {k:v for k,v in last.items() if k != 'observed_epoch'}, 'guest changed')
     return dict(schema='cloudbench-explicit-idle-observation-v1', origin=ORIGIN, machine_id=machine,
                 native_instance=instance, admission_nonce=nonce, historical_task_credit=0,
-                collector_sha256=sha(Path(__file__).read_bytes()), predicate_sha256=sha(Path(__file__).with_name('cloudbench-startup-failure-archive.py').read_bytes()),
+                collector_sha256=sha(Path(__file__).read_bytes()), predicate_sha256=sha(billing_predicate().encode()),
                 workspace=before, data_mount=mount, dependencies=deps, before=first, after=last,
                 started_epoch=start, finished_epoch=time.time())
 
@@ -149,10 +165,10 @@ def validate_request(request, reader=described):
     require(set(mounted)=={'device','inode','mount_device'} and type(mounted['device']) is int and mounted['device']>0
             and type(mounted['inode']) is int and mounted['inode']>0 and re.fullmatch('[0-9]+:[0-9]+',mounted['mount_device']), 'data mount identity')
     require(guest['collector_sha256'] == sha(Path(__file__).read_bytes())
-            and guest['predicate_sha256'] == sha(Path(__file__).with_name('cloudbench-startup-failure-archive.py').read_bytes()), 'guest source')
+            and guest['predicate_sha256'] == sha(billing_predicate().encode()), 'guest source')
     for side in ('before','after'):
         scan = guest[side]
-        require(set(scan)=={'kind','machine','boot','unknown','inert_sleepers','idle_pinned_agents','idle_platform_hallpass','observed_epoch'}, 'guest scan fields')
+        require(set(scan)=={'kind','machine','nonce','boot','unknown','inert_sleepers','idle_pinned_agents','idle_platform_hallpass','observed_epoch'}, 'guest scan fields')
         pids=set()
         for role in ('inert_sleepers','idle_pinned_agents','idle_platform_hallpass'):
             require(isinstance(scan[role],list),'guest role rows')
@@ -162,7 +178,7 @@ def validate_request(request, reader=described):
                 pids.add(row['pid'])
         require(len(scan['idle_platform_hallpass'])<=1,'guest platform duplicate')
         require(scan['kind'] == 'exact-inert-quiescence-v1' and scan['machine'] == resource['machine_id']
-                and scan['unknown'] == [] and scan['inert_sleepers'], 'guest quiescence')
+                and scan['nonce']==request['admission_nonce'] and scan['unknown'] == [] and scan['inert_sleepers'], 'guest quiescence')
     require({k:v for k,v in guest['before'].items() if k != 'observed_epoch'} ==
             {k:v for k,v in guest['after'].items() if k != 'observed_epoch'}, 'guest process identity changed')
     require(guest['dependencies'] == target['dependencies'], 'guest dependencies')
@@ -207,13 +223,24 @@ def publish(request_path, request_sha, authority_path, authority_sha, custody_fd
         request['workspace_ownership']['path'],target['source_ref'],Path(target['pool_ids_file']).name)
     require(all(target[key]==value for key,value in endpoint.items()), 'actual consumer endpoint')
     base = sibling('cloudbench-startup-failure-archive.py'); claims=common/'cloudbench-pool-claims'; uid=common.stat().st_uid; gid=common.stat().st_gid
+    def sync_directory(path):
+        fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
     def directory(path):
-        if not path.exists(): path.mkdir(mode=0o700); os.chown(path,uid,gid)
-        require(path.resolve(strict=True)==path and path.is_dir(), 'linked output directory')
+        if not path.exists():
+            path.mkdir(mode=0o700);os.chown(path,uid,gid)
+            sync_directory(path);sync_directory(path.parent)
+        info=path.lstat()
+        require(path.resolve(strict=True)==path and stat.S_ISDIR(info.st_mode) and info.st_uid==uid
+                and not stat.S_IMODE(info.st_mode)&0o022, 'unsafe output directory')
     directory(claims); directory(claims/'.locks')
     lock_path=claims/'.locks'/(resource['machine_id']+'.lock'); new_lock=not lock_path.exists()
     with os.fdopen(os.open(lock_path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600),'r+b') as lock:
         if new_lock:os.fchown(lock.fileno(),uid,gid)
+        info=os.fstat(lock.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==uid,'unsafe pool lock inode')
+        os.fsync(lock.fileno());sync_directory(lock_path.parent)
         fcntl.flock(lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
         hold=claims/resource['machine_id']; require(not os.path.lexists(hold), 'resource already claimed')
         directory(common/'cloudbench-explicit-idle'); directory(common/'cloudbench-pool-reuse'); directory(common/'cloudbench-pools')
@@ -222,7 +249,11 @@ def publish(request_path, request_sha, authority_path, authority_sha, custody_fd
         completion=admission.with_suffix('.complete.json')
         require(not os.path.lexists(admission) and not os.path.lexists(proof_path), 'resource already admitted')
         def save(path,value):
-            base['durable_handoff_json'](path,value); os.chown(path,uid,gid)
+            base['durable_handoff_json'](path,value);os.chown(path,uid,gid)
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+            sync_directory(path.parent)
         save(hold,dict(schema=SCHEMA,origin=ORIGIN,admission_nonce=request['admission_nonce'],request_sha256=request_sha,status='PENDING'))
         checkpoint('claimed')
         ledger=Path(target['pool_ids_file']); meta=Path(target['pool_meta_file'])
@@ -231,14 +262,19 @@ def publish(request_path, request_sha, authority_path, authority_sha, custody_fd
             if meta.exists():require(read(meta)==baseline,'pool baseline mismatch')
             else:
                 with open(meta,'xb') as stream:stream.write(baseline);stream.flush();os.fsync(stream.fileno())
-                os.chown(meta,uid,gid)
+                os.chown(meta,uid,gid);meta.chmod(0o600)
+                fd=os.open(meta,os.O_RDONLY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
+                sync_directory(meta.parent)
             ids=read(ledger).decode().splitlines() if ledger.exists() else []
             require(resource['machine_id'] not in ids,'duplicate pool credit')
             evidence={}
             def seal(value):
                 if isinstance(value,dict):
                     if set(value)=={'path','sha256','bytes','device','inode'}:
-                        evidence[value['sha256']]=base64.b64encode(read(value['path'])).decode()
+                        described(value)
+                        raw_evidence=read(value['path'])
+                        require(sha(raw_evidence)==value['sha256'] and len(raw_evidence)==value['bytes'],'evidence changed during seal')
+                        evidence[value['sha256']]=base64.b64encode(raw_evidence).decode()
                     else:
                         for child in value.values():seal(child)
                 elif isinstance(value,list):
@@ -253,7 +289,9 @@ def publish(request_path, request_sha, authority_path, authority_sha, custody_fd
             save(proof_path,proof); checkpoint('proved')
             tmp=ledger.with_name('.'+ledger.name+'.'+request['admission_nonce'])
             with open(tmp,'xb') as stream:stream.write(('\n'.join(ids+[resource['machine_id']])+'\n').encode());stream.flush();os.fsync(stream.fileno())
-            os.chown(tmp,uid,gid);os.replace(tmp,ledger)
+            os.chown(tmp,uid,gid);tmp.chmod(0o600)
+            fd=os.open(tmp,os.O_RDONLY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
+            os.replace(tmp,ledger)
             fd=os.open(ledger.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);os.fsync(fd);os.close(fd)
             checkpoint('published')
             save(completion,dict(schema=SCHEMA,status='COMPLETE',admission_sha256=sha(read(admission)),
