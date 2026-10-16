@@ -748,6 +748,61 @@ def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass()
     assert any("not all passing" in error for error in pass_errors)
 
 
+
+# Original operator boundary regressions, shared with script-only maintenance.
+def test_controller_maintenance_process_identity():
+    from controller_maintenance_cases import test_process_identity
+    test_process_identity()
+
+
+def test_controller_maintenance_optional_inventory():
+    from controller_maintenance_cases import test_optional_inventory
+    test_optional_inventory()
+
+
+def test_controller_maintenance_privilege_separation():
+    from controller_maintenance_cases import test_privilege_separation
+    test_privilege_separation()
+
+
+def test_controller_maintenance_typed_inventory():
+    from controller_maintenance_cases import test_typed_inventory
+    test_typed_inventory()
+
+
+def test_controller_maintenance_operation_directory():
+    from controller_maintenance_cases import test_operation_directory
+    test_operation_directory()
+
+
+def test_controller_maintenance_stop_transition():
+    from controller_maintenance_cases import test_stop_transition
+    test_stop_transition()
+
+
+def test_controller_maintenance_retained_path():
+    from controller_maintenance_cases import test_retained_path
+    test_retained_path()
+
+
+
+
+def test_controller_v39_full_native_pair():
+    from controller_v39_cases import test_v39_full_native_pair
+    test_v39_full_native_pair()
+
+
+def test_controller_v39_cleanup_all_uid_writers():
+    from controller_v39_cases import test_v39_cleanup_all_uid_writers
+    test_v39_cleanup_all_uid_writers()
+
+
+def test_controller_v39_receipt_bound_runtime():
+    from controller_v39_cases import test_v39_receipt_bound_runtime
+    test_v39_receipt_bound_runtime()
+
+
+
 def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success():
     repo_root = Path(__file__).resolve().parents[3]
     driver = (repo_root / "scripts" / "cloudbench-run.sh").read_text()
@@ -22008,6 +22063,16 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("controller_v39_full_native_pair", test_controller_v39_full_native_pair)
+    r.record("controller_v39_cleanup_all_uid_writers", test_controller_v39_cleanup_all_uid_writers)
+    r.record("controller_v39_receipt_bound_runtime", test_controller_v39_receipt_bound_runtime)
+    r.record("controller_maintenance_process_identity", test_controller_maintenance_process_identity)
+    r.record("controller_maintenance_optional_inventory", test_controller_maintenance_optional_inventory)
+    r.record("controller_maintenance_privilege_separation", test_controller_maintenance_privilege_separation)
+    r.record("controller_maintenance_typed_inventory", test_controller_maintenance_typed_inventory)
+    r.record("controller_maintenance_operation_directory", test_controller_maintenance_operation_directory)
+    r.record("controller_maintenance_stop_transition", test_controller_maintenance_stop_transition)
+    r.record("controller_maintenance_retained_path", test_controller_maintenance_retained_path)
     await r.record_async("agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown)
     await r.record_async("agentcard_release_skip_catalog_ci", test_agentcard_release_skip_catalog_ci_rejects_production_and_unknown)
     await r.record_async("agentcard_release_skip_catalog_task_catch", test_agentcard_release_skip_catalog_task_catch_stays_strict)

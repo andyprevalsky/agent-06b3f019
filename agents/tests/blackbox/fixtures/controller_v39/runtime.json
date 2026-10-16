@@ -1,0 +1,6 @@
+{
+  "source_sha256": "9f7fbf93b02f8b0658abaf17bc8fd5039b790442b6105cdafbacbc59d7c1d39b",
+  "selection": "AST venv assignment plus following exact /app assertion; no modifications",
+  "fragment": "venv = R / 'agents/venv'\nassert venv.is_symlink() and os.readlink(venv) == '/app/agents/venv' and (venv.resolve(strict=True) == Path('/app/agents/venv'))",
+  "fragment_sha256": "60dbc5046d2818e097412afc001a0fb55babc8dd277d2cca0c3074d73dd54cf3"
+}

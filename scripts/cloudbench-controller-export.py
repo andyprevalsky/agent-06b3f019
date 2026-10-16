@@ -17,6 +17,7 @@ import subprocess
 import tarfile
 import tempfile
 import sys
+import shutil
 
 os.umask(0o077)
 
@@ -529,6 +530,206 @@ def verify(args):
                 if not member.issym() or member.linkname != row["target"]: raise ValueError("archive link differs")
             else: raise ValueError("unsupported archive member kind")
     return 0
+
+
+def maintenance_observe_runtime(repo, output, child_identity):
+    """Canonical retained V39 runtime validation, lifted without weakening probes."""
+    R, P = Path(repo), Path(output)
+    fly = R / '.context/stress200-host/toolchain/flyctl'
+    git_identity = child_identity
+    runtime={}
+    def info(path):
+     path=Path(path);value={'path':str(path),'exists':path.exists(),'symlink':path.is_symlink()}
+     try:
+      st=path.lstat();value.update(mode=st.st_mode,uid=st.st_uid,gid=st.st_gid,inode=st.st_ino,link=os.readlink(path)if path.is_symlink()else None,resolved=str(path.resolve(strict=True)))
+     except OSError as error:value['error']=type(error).__name__
+     return value
+    def sha_regular(path):
+     path=Path(path);assert path.resolve(strict=True)==path and not path.is_symlink()
+     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+     try:
+      st=os.fstat(fd);assert stat.S_ISREG(st.st_mode);h=hashlib.sha256()
+      while True:
+       chunk=os.read(fd,1048576)
+       if not chunk:break
+       h.update(chunk)
+      after=os.fstat(fd);assert (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns)
+      return h.hexdigest()
+     finally:os.close(fd)
+    venv=R/'agents/venv';runtime['venv']=info(venv);runtime['python']=info(venv/'bin/python3')
+    try:
+     bindings_path=R/'.context/stress200-host/controller-venv-bindings.private.json';runtime['bindings']=info(bindings_path)
+     bindings=json.loads(bindings_path.read_bytes());runtime['bindings_sha256']=sha_regular(bindings_path)
+     actual_venv=maintenance_runtime_directory(venv,bindings,R/'.context/stress200-host/toolchain')
+     python=(venv/'bin/python3').resolve(strict=True);python_entry=(venv/'bin/python').resolve(strict=True)
+     assert python_entry==python and os.access(python,os.X_OK)
+     runtime['python_sha256']=sha_regular(python)
+     assert runtime['python_sha256']=='d1483a82342508f2ec2b172b788d5b676a59eaf70ed01ae846a0f84f63a3a82a','retained Python binary differs from original native gate pin'
+     lib=R/'.context/stress200-host/toolchain/python-runtime/python/lib/libpython3.11.so.1.0'
+     runtime['libpython_sha256']=sha_regular(lib)
+     assert runtime['libpython_sha256']=='2f252bc01e97da2248a5b9ce063c0b9bf02b216f84c2c1bbebb5673d29e3197b'
+     private_site=actual_venv/'lib/python3.11/site-packages';bridge=private_site/'image-packages.pth'
+     bridge_raw=bridge.read_bytes();assert bridge_raw==b"import site; site.addsitedir('/app/agents/venv/lib/python3.11/site-packages')\n"
+     assert sha_regular(bridge)==bindings['package_bridge_sha256']
+     assert set(private_site.glob('*.pth'))=={bridge}
+     assert not (private_site/'sitecustomize.py').exists() and not (private_site/'usercustomize.py').exists()
+     maintenance_path=str(fly.parent)+':'+str(venv/'bin')+':/usr/local/bin:/usr/bin:/bin'
+     env=dict(os.environ,PATH=maintenance_path,HOME='/home/rose')
+     probe="import hashlib,importlib.metadata,json,sys,sysconfig;from pathlib import Path;p=Path('/app/agents/venv/lib/python3.11/site-packages');rows=[]\nfor d in importlib.metadata.distributions(path=[str(p)]) if sys.argv[1]=='image' else importlib.metadata.distributions():\n rows.append({'name':d.metadata['Name'],'version':d.version,'metadata':{n:hashlib.sha256((Path(d._path)/n).read_bytes()).hexdigest() for n in ('METADATA','RECORD','entry_points.txt','top_level.txt','direct_url.json') if (Path(d._path)/n).is_file()}})\nprint(json.dumps({'soabi':sysconfig.get_config_var('SOABI'),'distributions':sorted(rows,key=lambda x:(x['name'],x['version']))}))"
+     observed=[]
+     for mode in ('image','effective'):
+      result=subprocess.run([str(venv/'bin/python'),'-I','-B','-c',probe,mode],env=env,preexec_fn=git_identity,capture_output=True,timeout=8)
+      runtime[mode+'_probe_returncode']=result.returncode;assert result.returncode==0
+      observed.append(json.loads(result.stdout));runtime[mode+'_inventory_sha256']=hashlib.sha256(result.stdout).hexdigest()
+     assert observed[0]==observed[1]==bindings['image_package_inventory'],'retained runtime package/ABI inventory differs from original binding'
+     result=subprocess.run([str(venv/'bin/python'),'-I','-B','-c','import sys,ssl,json,hashlib,tarfile,fcntl,subprocess,base64,zlib;import dotenv,httpx,temporalio,pydantic,pydantic_core,numpy;assert sys.version_info[:3]==(3,11,9);print("runtime-ok")'],env=env,preexec_fn=git_identity,capture_output=True,timeout=8)
+     runtime['stdlib_and_compiled_probe_returncode']=result.returncode;assert result.returncode==0 and result.stdout==b'runtime-ok\n'
+     for name in ['bash','git','flock','sha256sum','tar','python3','flyctl']:
+      path=shutil.which(name,path=maintenance_path);assert path and os.access(path,os.X_OK),'required existing runtime missing: '+name
+     version=subprocess.run([str(fly),'version'],env=env,preexec_fn=git_identity,capture_output=True,timeout=5);runtime['flyctl_version_returncode']=version.returncode
+     assert version.returncode==0,'pinned existing flyctl is not runnable as rose'
+    except BaseException as error:
+     runtime['failure']=type(error).__name__;raise
+    finally:
+     with (P/'runtime-observed.private.json').open('x')as out:json.dump(runtime,out,sort_keys=True);out.flush();os.fsync(out.fileno())
+    return dict(runtime=runtime, maintenance_path=maintenance_path, python=python)
+
+
+def maintenance_runtime_directory(venv, binding, toolchain_root):
+    """Select only the directory in the original runtime receipt; no ABI credit."""
+    venv, toolchain_root = Path(venv), Path(toolchain_root)
+    expected = Path(binding['private_venv_target'])
+    actual = venv.resolve(strict=True)
+    if (not expected.is_absolute() or expected.resolve(strict=True) != actual
+            or toolchain_root.resolve(strict=True) != toolchain_root
+            or not actual.is_relative_to(toolchain_root) or not actual.is_dir()):
+        raise ValueError('retained runtime directory differs from original binding')
+    return actual
+
+
+def maintenance_process_identity(observed, expected, *, states=('R', 'S', 'T')):
+    """Process ownership is independent of the workspace owner's UID."""
+    keys = ('pid', 'birth', 'ppid', 'uid', 'argv')
+    if (any(observed.get(k) != expected.get(k) for k in keys)
+            or observed.get('state') not in states
+            or (observed.get('uids') is not None and observed['uids'] != [expected['uid']] * 4)):
+        raise ValueError('maintenance process identity/state differs: ' + json.dumps(observed, sort_keys=True))
+    return observed
+
+
+def maintenance_inventory(required, optional, trees):
+    """Capture exact presence and typed entries without following links or FIFOs."""
+    entries, presence = {}, {}
+    def entry(path):
+        path = Path(path)
+        if not path.is_absolute() or path.parent.resolve(strict=True) != path.parent:
+            raise ValueError('redirected preservation parent')
+        before = path.lstat()
+        value = dict(mode=before.st_mode, uid=before.st_uid, gid=before.st_gid,
+                     device=before.st_dev, inode=before.st_ino, size=before.st_size,
+                     mtime_ns=before.st_mtime_ns)
+        if stat.S_ISREG(before.st_mode):
+            value.update(kind='regular', sha256=sealed_bytes(path)[0])
+        elif stat.S_ISLNK(before.st_mode):
+            value.update(kind='symlink', link=os.readlink(path))
+        elif stat.S_ISDIR(before.st_mode): value['kind'] = 'directory'
+        elif stat.S_ISFIFO(before.st_mode): value['kind'] = 'fifo'
+        elif stat.S_ISSOCK(before.st_mode): value['kind'] = 'socket'
+        else: raise ValueError('unsupported preservation entry')
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError('preservation entry changed while read')
+        entries[str(path)] = value
+    for path in map(Path, required):
+        if path.is_symlink() or not path.is_file(): raise ValueError('required original missing or redirected')
+        entry(path)
+    for path in map(Path, optional):
+        if path.is_symlink(): raise ValueError('optional original redirected')
+        presence[str(path)] = path.exists()
+        if path.exists(): entry(path)
+    def walk(path):
+        entry(path)
+        if stat.S_ISDIR(path.lstat().st_mode):
+            for child in sorted(path.iterdir()): walk(child)
+    for path in map(Path, trees):
+        if str(path) in presence and not presence[str(path)]: continue
+        if path.is_symlink() or not path.is_dir(): raise ValueError('preservation root missing or redirected')
+        walk(path)
+    return dict(entries=entries, presence=presence)
+
+
+def maintenance_run_child(argv, uid, gid, **kwargs):
+    """Only the forked Git/token child drops privilege; coordinator keeps seals."""
+    if type(uid) is not int or type(gid) is not int or min(uid, gid) < 0 or 'preexec_fn' in kwargs:
+        raise ValueError('explicit child identity required')
+    return subprocess.run(argv, preexec_fn=maintenance_child_identity(uid, gid), **kwargs)
+
+
+def maintenance_child_identity(uid, gid):
+    if type(uid) is not int or type(gid) is not int or min(uid, gid) < 0:
+        raise ValueError('explicit child identity required')
+    def identity():
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+    return identity
+
+
+def maintenance_operation_directory(parent, child):
+    parent, child = Path(parent), Path(child)
+    if (not parent.is_absolute() or child.parent != parent or child.name in ('', '.', '..')
+            or parent.parent.resolve(strict=True) != parent.parent):
+        raise ValueError('operation must be a direct child of the physical fixed parent')
+    try: parent.mkdir(mode=0o700)
+    except FileExistsError: pass
+    info = parent.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700 or parent.resolve(strict=True) != parent):
+        raise ValueError('operation parent must be private, owned and unlinked')
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError('operation parent changed')
+        os.mkdir(child.name, mode=0o700, dir_fd=fd)
+        os.fsync(fd)
+    finally: os.close(fd)
+    return child
+
+
+def maintenance_wait_stopped(expected, observe, children, stop, clock, sleep, *, timeout=2):
+    """Request STOP only for exact idle init; scheduler states may precede T."""
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('positive finite stop deadline required')
+    observed = maintenance_process_identity(observe(expected['pid']), expected)
+    for child in children():
+        if (child.get('ppid') != expected['pid'] or child.get('uid') != expected['uid']
+                or child.get('argv') not in (['sleep','60'],['/bin/sleep','60'],['/usr/bin/sleep','60'])):
+            raise ValueError('unexpected idle-init child')
+    observed = maintenance_process_identity(observe(expected['pid']), expected)
+    if observed['state'] != 'T': stop(expected['pid'])
+    deadline = clock() + timeout
+    while True:
+        observed = maintenance_process_identity(observe(expected['pid']), expected, states=('R','S','D','T'))
+        if observed['state'] == 'T': return observed
+        if clock() >= deadline: raise TimeoutError('init did not stop: ' + json.dumps(observed, sort_keys=True))
+        sleep(0.05)
+
+
+def maintenance_tool_environment(binary, digest, size, environment):
+    """Verify the retained tool and prepend only the child environment PATH."""
+    binary = Path(binary)
+    if binary.resolve(strict=True) != binary: raise ValueError('retained tool redirected')
+    before = binary.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size != size or not os.access(binary, os.X_OK):
+        raise ValueError('retained tool is not the recorded executable regular file')
+    actual, _ = sealed_bytes(binary)
+    after = binary.lstat()
+    if actual != digest or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+        raise ValueError('retained tool digest or identity differs')
+    env = dict(environment)
+    env['PATH'] = str(binary.parent) + os.pathsep + env.get('PATH', os.defpath)
+    return env
 
 
 def main():

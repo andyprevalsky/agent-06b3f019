@@ -1,0 +1,14 @@
+{
+  "source_sha256": "61123aa67d6eda1777515b5c50a1fe829bef25e3ef77c6ec56da739e75e49442",
+  "source_location": "preserved root tool call4498 heredoc",
+  "selection": "original guest code assert + writer call + assert, only protected root sanitized",
+  "fragment": "assert Path('/proc/1/cmdline').read_bytes().rstrip(b'\\x00').split(b'\\x00') == [b'/bin/sleep', b'180']\nv = writers([Path('/fixture-gate')], {os.getpid(), 1})\nassert not v, str(v)",
+  "fragment_sha256": "7416ad1a4b04180533d30d416ed9b175a9eaddc074d465da4aec70543d7d6adf",
+  "observed_pid1_argv": [
+    "/fly/init"
+  ],
+  "observation_provenance": {
+    "original_sha256": "277c55d6fc2833e418158df6edca132698990be732e38dbda96c5297273d29ff",
+    "selection": "PID1 argv_hex=2f666c792f696e697400 from retained reconcile guest response"
+  }
+}
