@@ -87,7 +87,7 @@ def private_json(path):
 def save(path, value, replace=False):
     path=Path(path);path.parent.mkdir(mode=0o700,parents=True,exist_ok=True);physical(path.parent,True)
     target=path.with_name('.'+path.name+'.'+uuid.uuid4().hex)if replace else path
-    raw=(json.dumps(value,sort_keys=True)+'\n').encode()
+    raw=value if isinstance(value,bytes)else(json.dumps(value,sort_keys=True)+'\n').encode()
     with os.fdopen(os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as stream:
         stream.write(raw);stream.flush();os.fsync(stream.fileno())
     if replace:os.replace(target,path)
@@ -135,7 +135,7 @@ class Broker:
         direct=peer==self.auth['parent_pid']or parent_of(peer)==self.auth['parent_pid']
         owner_live=birth(pid)==stamp
         need((owner_live and ancestor(peer,pid)and(closing or ancestor(pid,self.auth['parent_pid'])))or(closing and direct and not owner_live),'foreign/reused relay caller')
-        need(isinstance(request.get('token'),str)and 1<=len(request['token'])<=256,'invalid relay lease token')
+        need(isinstance(request.get('token'),str)and 1<=len(request['token'])<=256 and re.fullmatch(r'[A-Za-z0-9_.:-]+',request['token']),'invalid relay lease token')
         return pid,stamp,direct
     def inventory(self, mid, address):
         directory=Path(self.auth['inventory_directory']);physical(directory,True)
@@ -230,7 +230,7 @@ class Broker:
             if not all(old[k]==v for k,v in fields.items()):raise Collision('relay local port already owned')
             await self.routes[self.ports[local]]['ready'].wait()
             need(old['state']=='active','relay route admission failed')
-            return dict(lease=old['lease'],local_port=local)
+            return self.grant(old)
         lease=uuid.uuid4().hex
         try:server=await asyncio.start_server(lambda r,w:self.stream(lease,r,w),'127.0.0.1',local,limit=BUFFER,start_serving=False)
         except OSError as exc:
@@ -246,12 +246,23 @@ class Broker:
             self.parent_live()
             need(time.monotonic()<self.auth['deadline'],'original campaign admission deadline exhausted')
             await server.start_serving()
+            await asyncio.to_thread(save,self.directory/'leases'/(lease+'.live'),self.live(record).encode())
             self.routes[lease]['ready'].set()
         except BaseException:
             record['state']='failed';self.routes[lease]['ready'].set()
-            server.close();await server.wait_closed();self.ports.pop(port,None);raise
+            server.close()
+            tasks=list(self.routes[lease]['tasks'])
+            for task in tasks:task.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+            await server.wait_closed();self.ports.pop(port,None)
+            (self.directory/'leases'/(lease+'.live')).unlink(missing_ok=True)
+            raise
         finally:lock.release()
-        return dict(lease=lease,local_port=port)
+        return self.grant(record)
+    def live(self, record):
+        return f"{record['owner_pid']}|{record['owner_start']}|{record['token']}|{record['lease']}\n"
+    def grant(self, record):
+        return dict(lease=record['lease'],local_port=record['local_port'],live_path=str(self.directory/'leases'/(record['lease']+'.live')),live_value=self.live(record).rstrip('\n'))
     async def route_action(self, request, peer):
         pid,stamp,_=self.requester(request,peer,closing=True)
         lease=request.get('lease');need(isinstance(lease,str)and re.fullmatch('[0-9a-f]{32}',lease),'invalid relay lease')
@@ -265,6 +276,7 @@ class Broker:
     async def retire(self, route, terminal):
         record=route['record']
         if record['state'] in ('closed','abandoned'):return
+        (self.directory/'leases'/(record['lease']+'.live')).unlink(missing_ok=True)
         record['state']='closing';await asyncio.to_thread(save,self.directory/'leases'/(record['lease']+'.json'),dict(record),True)
         route['server'].close()
         pending=list(route['tasks'])
