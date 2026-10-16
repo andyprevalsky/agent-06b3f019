@@ -352,6 +352,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Cleanup Admission Parallel" python3 scripts/tests/cloudbench-cleanup-admission-parallel.test.py
   run_suite "Cloud Benchmark Clone Rate Response" python3 scripts/tests/cloudbench-clone-rate-response.test.py
   run_suite "Cloud Benchmark Controller Client" python3 scripts/tests/cloudbench-controller-client-path.test.py
+  run_suite "Cloud Benchmark Disposable Hub Finalization" python3 scripts/tests/cloudbench-disposable-hub-finalize.test.py
   run_suite "Cloud Benchmark Disposable Controller" python3 scripts/tests/cloudbench-disposable-controller.test.py
   run_suite "Cloud Benchmark Disposable Volume Backups" python3 scripts/tests/cloudbench-disposable-volume.test.py
   run_suite "Cloud Benchmark Parallel Mutation Admission" python3 scripts/tests/cloudbench-parallel-mutation.test.py

@@ -362,6 +362,66 @@ def retained_controller_endpoint(record_path, repo, ref, native, original_native
     return record
 
 
+def retire_disposable_hubs(repo, directory, *, timeout=10):
+    """Retire only immutable exact local Hub owners on an exiting disposable host."""
+    import signal
+    import time
+    runs = repo / '.context/fleet/runs'
+    hub = runs / '_hub'
+    if not hub.exists(): return
+    if hub.is_symlink() or hub.resolve() != hub: raise ValueError('unsafe local Hub root')
+    selected = []
+    try:
+        for path in hub.glob('agent-link-server.*.owner'):
+            _, raw = sealed_bytes(path, 1048576)
+            pairs = [line.split('=', 1) for line in raw.decode().splitlines()]
+            owner = dict(pairs)
+            if len(pairs) != len(owner): raise ValueError('duplicate Hub ownership fields')
+            pid = int(owner['pid'])
+            if pid <= 1: raise ValueError('unsafe Hub PID')
+            expected = repo / 'agents/benchmarks/agent_link_server.py'
+            if (owner['repo_root'] != str(repo) or owner['root'] != str(runs)
+                    or owner['runs_root'] != str(runs) or owner['context_dir'] != str(hub)
+                    or owner['command'] != str(expected) or owner['status'] != 'live-transfer-required'
+                    or owner['host'] != '127.0.0.1'
+                    or not re.fullmatch('[0-9a-f]{32}', owner['owner_token'])
+                    or path.name != f"agent-link-server.{owner['port']}.{owner['owner_token']}.owner"):
+                raise ValueError('foreign local Hub ownership')
+            if path.stat().st_mode & 0o222: raise ValueError('mutable Hub owner receipt')
+            current = birth(pid)
+            if current is None or current != owner['pid_start']: continue
+            if Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z': continue
+            if path.stat().st_uid != Path(f'/proc/{pid}').stat().st_uid:
+                raise ValueError('Hub receipt owner differs')
+            fd = os.pidfd_open(pid)
+            selected.append((pid, fd, owner, raw, path))
+            if birth(pid) != current: raise ValueError('Hub birth changed')
+            argv = process_argv(pid)
+            if str(expected) not in argv: raise ValueError('Hub command changed')
+            argv = argv[argv.index(str(expected)):]
+            if hashlib.sha256(b'\0'.join(os.fsencode(x) for x in argv)).hexdigest() != owner['argv_sha256']:
+                raise ValueError('Hub argv changed')
+            if Path(f'/proc/{pid}/task/{pid}/children').read_text().strip():
+                raise ValueError('Hub descendants require exact disposition')
+        end = time.monotonic() + timeout
+        for pid, fd, owner, raw, path in selected:
+            if birth(pid) != owner['pid_start'] or path.read_bytes() != raw:
+                raise ValueError('Hub ownership changed before retirement')
+            intent = directory / f'disposable-hub-{pid}.term.intent.json'
+            if not intent.exists():
+                sync_json(intent, dict(pid=pid, birth=owner['pid_start'], owner_sha256=hashlib.sha256(raw).hexdigest()))
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        for pid, fd, owner, raw, path in selected:
+            while birth(pid) == owner['pid_start']:
+                try:
+                    if Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z': break
+                except FileNotFoundError: break
+                if time.monotonic() >= end: raise ValueError('exact owned Hub retirement pending')
+                time.sleep(.02)
+    finally:
+        for _, fd, _, _, _ in selected: os.close(fd)
+
+
 def export(args):
     record_raw = sealed_bytes(args.record,67108864)[1]
     record = json.loads(record_raw)
@@ -395,6 +455,21 @@ def export(args):
         old = continuation_binding(binding,repo,record['source_ref'],record['driver_pid'],
                                    Path(binding['new_caller_path']),record['image'],record['epoch'])
         permitted.add(old['driver_pid'])  # exact verified init only; descendants remain ordinary writers
+    if getattr(args, 'finalize_disposable_hubs', False):
+        if not record.get('workspace_ownership_sha256'):
+            raise ValueError('Hub finalization requires sealed disposable workspace')
+        command_path = args.record.parent.parent / 'controller-command.json'
+        joined_path = args.record.parent.parent / 'controller-command.joined.json'
+        command_sha, command_raw = sealed_bytes(command_path, 1048576)
+        _, joined_raw = sealed_bytes(joined_path, 1048576)
+        command, joined = json.loads(command_raw), json.loads(joined_raw)
+        if (command['machine_id'] != record['machine_id'] or command['source_ref'] != record['source_ref']
+                or joined['command_sha256'] != command_sha or joined['driver_pid'] != record['driver_pid']
+                or joined['driver_birth'] != record['driver_birth'] or type(joined['exit_code']) is not int):
+            raise ValueError('disposable command join differs')
+        if not command.get('already_joined') and birth(command['pid']) == command['birth']:
+            raise ValueError('disposable command remains live')
+        retire_disposable_hubs(repo, args.record.parent)
     active = controller_active_writers(common, roots, permitted)
     if active:
         sync_json(args.pending, {"status":"pending", "reason":"live controller writers", "writers":active,
@@ -737,6 +812,7 @@ def main():
     parser.add_argument("action", choices=("caller","launch","export","verify","continue"))
     for name in ("repo","record","caller","archive","manifest","pending","continuation","old-record","old-manifest","old-archive"): parser.add_argument("--"+name,type=Path)
     parser.add_argument("--capture-tool-ref")
+    parser.add_argument("--finalize-disposable-hubs", action="store_true")
     parser.add_argument("--epoch", type=float)
     parser.add_argument("--driver-pid", type=int); parser.add_argument("--ref"); parser.add_argument("--image")
     parser.add_argument("--machine"); parser.add_argument("--app")

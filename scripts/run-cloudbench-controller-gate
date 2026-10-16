@@ -388,6 +388,13 @@ except FileNotFoundError:value=dict(pid=pid,already_joined=True,machine_id=os.en
 with os.fdopen(os.open('/tmp/gate/controller-command.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
 PY_COMMAND_IDENTITY
 wait "$command_pid"; rc=$?
+python3 -I -B - "$$" "$rc" <<'PY_COMMAND_JOINED'
+import hashlib,json,os,sys
+from pathlib import Path
+pid=int(sys.argv[1]);fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+value=dict(driver_pid=pid,driver_birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+fields[19],exit_code=int(sys.argv[2]),command_sha256=hashlib.sha256(Path('/tmp/gate/controller-command.json').read_bytes()).hexdigest())
+with os.fdopen(os.open('/tmp/gate/controller-command.joined.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:json.dump(value,stream);stream.flush();os.fsync(stream.fileno())
+PY_COMMAND_JOINED
 REMOTE_COMMAND_IDENTITY
     else
     printf 'gosu rose bash -lc %q > "/tmp/gate/step-$n.log" 2>&1; rc=$?\n' "export PATH=/tmp/gate/bin:/tmp/gate/node/bin:/tmp/gate/repo/agents/venv/bin:\$PATH; cd /tmp/gate/repo && node --version && $suite"
@@ -396,7 +403,9 @@ REMOTE_COMMAND_IDENTITY
   done
   echo 'echo "GATE_FAILED_STEPS${failed_steps}"'
   if [ "$EXPORT_HOST" = 1 ]; then
-    echo 'bound_controller_export export --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"'
+    finalize_hubs=""
+    [ -z "$DISPOSABLE_AUTHORITY" ] || finalize_hubs=" --finalize-disposable-hubs"
+    printf '%s\n' 'bound_controller_export export'"$finalize_hubs"' --record /tmp/gate/controller-host-custody/launch.json --archive /tmp/gate/controller-host-custody/originals.tar.gz --manifest /tmp/gate/controller-host-custody/manifest.json --pending /tmp/gate/controller-host-custody/pending.json; export_rc=$?; echo "GATE_EXPORT exit=$export_rc"' 
   fi
   echo 'echo "GATE_RESULT exit=$overall"'
   echo '# Fly returns ~100 log lines per read, so a failed suite'"'"'s tail is lost in the'
