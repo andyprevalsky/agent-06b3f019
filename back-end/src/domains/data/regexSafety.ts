@@ -158,19 +158,25 @@ export function stripNamedGroups(pattern: string): string {
 
 /**
  * Patterns are validated as JS RegExp but run as Postgres ARE, where `\b` is a
- * backspace and `\B` a synonym for `\`. Map JS word-boundary escapes to ARE's
- * `\y` / `\Y` outside bracket expressions so `\bpassport\b` keeps its JS
- * meaning instead of silently matching nothing. Escaped backslashes and `[\b]`
- * (backspace in both dialects) are left alone.
+ * backspace and `\B` a synonym for `\`. ARE's `\y` / `\Y` use locale-aware
+ * word characters, whereas JS (without Unicode mode) uses ASCII letters,
+ * digits and underscore. Express the adjacent-character transition explicitly;
+ * both alternatives are zero-width, including at either end of the string.
+ * Spell out class members so locale-dependent ranges cannot include accented
+ * letters. Escaped backslashes and `[\b]` are left alone.
  */
 export function translateWordBoundaries(pattern: string): string {
+  const word = '[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]';
+  const boundary = `(?:(?<!${word})(?=${word})|(?<=${word})(?!${word}))`;
+  const nonBoundary = `(?:(?<=${word})(?=${word})|(?<!${word})(?!${word}))`;
   let out = '';
   let inClass = false;
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i];
     if (ch === '\\' && i + 1 < pattern.length) {
       const next = pattern[i + 1];
-      out += !inClass && next === 'b' ? '\\y' : !inClass && next === 'B' ? '\\Y' : ch + next;
+      out +=
+        !inClass && next === 'b' ? boundary : !inClass && next === 'B' ? nonBoundary : ch + next;
       i++;
       continue;
     }

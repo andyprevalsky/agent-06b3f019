@@ -15,10 +15,22 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
-import { applyAnthropicToolConfig } from '../../providers/rose/transforms';
+import { applyAnthropicToolConfig, withNativeToolContract } from '../../providers/rose/transforms';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import type { CompletionChunk } from '../../providers/rose/types';
-import { SUPERVISOR_RESPONSE_MODEL } from '../../providers/smsSupervisor/schema';
+import {
+  SUPERVISOR_RESPONSE_MODEL,
+  SUPERVISOR_RESPONSE_SCHEMA,
+} from '../../providers/smsSupervisor/schema';
+import {
+  buildOpenRouterCerebrasBody,
+  exclusiveOpenRouterCerebrasCompletion,
+} from '../../providers/rose/openrouterCerebrasRoute';
+import {
+  buildOpenRouterFastChatBody,
+  exclusiveOpenRouterFastChatCompletion,
+  OPENROUTER_CHAT_LATENCY_PROVIDER,
+} from '../../providers/rose/openrouterFastRoute';
 
 const FOUNDRY_URL = 'https://a-4989-resource.openai.azure.com/openai/v1/responses';
 const SUPERVISOR_TOOLS = [
@@ -80,7 +92,133 @@ function test(name: string): void {
   process.stdout.write(`PASS rose-native-tool-contract: ${name}\n`);
 }
 
+async function verifyExclusiveOpenRouterTools(): Promise<void> {
+  const options = withNativeToolContract({
+    model: 'rose-labs/rose-1-flash',
+    messages: [{ role: 'user' as const, content: 'Search and reply' }],
+    response_model: SUPERVISOR_RESPONSE_MODEL,
+    response_format: SUPERVISOR_RESPONSE_SCHEMA,
+  });
+  const variants = (
+    SUPERVISOR_RESPONSE_SCHEMA.json_schema.schema.properties as {
+      tool_calls: { items: { anyOf: Array<{ properties: Record<string, unknown> }> } };
+    }
+  ).tool_calls.items.anyOf;
+  const originalFetch = globalThis.fetch;
+  try {
+    let requests = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      assert.equal(String(input), OPENROUTER_API_URL);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      assert.deepEqual(toolNames(body.tools), SUPERVISOR_TOOLS);
+      const tools = body.tools as Array<{
+        type: string;
+        function: { name: string; parameters: unknown; strict: boolean };
+      }>;
+      for (const [index, tool] of tools.entries()) {
+        assert.equal(tool.type, 'function');
+        assert.deepEqual(tool.function.parameters, variants[index].properties.arguments);
+        assert.equal(tool.function.strict, true);
+        assert.equal('input_schema' in tool.function, false);
+      }
+      assert.equal(body.tool_choice, 'required');
+      assert.equal(body.response_format, undefined);
+      requests++;
+      const event = (delta: unknown, finish_reason?: string) =>
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+      return new Response(
+        event({
+          tool_calls: [
+            {
+              index: 1,
+              id: 'reply-id',
+              function: { name: 'send_user_message', arguments: '{"message":"' },
+            },
+            {
+              index: 0,
+              id: 'search-id',
+              function: { name: 'web_search', arguments: '{"query":"' },
+            },
+          ],
+        }) +
+          event(
+            {
+              tool_calls: [
+                { index: 0, function: { arguments: 'canada eta"}' } },
+                { index: 1, function: { arguments: 'Found it"}' } },
+              ],
+            },
+            'tool_calls'
+          ) +
+          'data: [DONE]\n\n'
+      );
+    }) as typeof fetch;
+    for (const stream of [
+      exclusiveOpenRouterCerebrasCompletion({
+        options,
+        openrouterKey: 'offline-key',
+        requestId: 'offline-cerebras',
+      }),
+      exclusiveOpenRouterFastChatCompletion({
+        options,
+        openrouterKey: 'offline-key',
+        requestId: 'offline-fast',
+      }),
+    ]) {
+      const calls = [];
+      for await (const chunk of stream) {
+        if (chunk.kind === 'tool_call') calls.push(chunk.data);
+      }
+      assert.deepEqual(calls, [
+        { id: 'search-id', name: 'web_search', arguments: '{"query":"canada eta"}' },
+        { id: 'reply-id', name: 'send_user_message', arguments: '{"message":"Found it"}' },
+      ]);
+    }
+    assert.equal(requests, 2);
+    test('both exclusive OpenRouter routes carry all nine SMS tools and fragmented parallel calls');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(buildOpenRouterCerebrasBody(options).provider, {
+    only: ['cerebras'],
+    allow_fallbacks: false,
+    require_parameters: true,
+  });
+  assert.deepEqual(
+    buildOpenRouterCerebrasBody(options, { allowProviderFallback: true }).provider,
+    OPENROUTER_CHAT_LATENCY_PROVIDER
+  );
+  const builders = [
+    buildOpenRouterCerebrasBody,
+    (value: typeof options) => buildOpenRouterFastChatBody(value, 'offline'),
+  ];
+  for (const build of builders) {
+    const explicit = build({
+      ...options,
+      tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+      tool_choice: { name: 'lookup' },
+    });
+    assert.deepEqual(explicit.tools, [
+      {
+        type: 'function',
+        function: {
+          name: 'lookup',
+          description: '',
+          parameters: { type: 'object' },
+        },
+      },
+    ]);
+    assert.deepEqual(explicit.tool_choice, { type: 'function', function: { name: 'lookup' } });
+    const empty = build({ ...options, tools: [], tool_choice: 'any' });
+    assert.equal('tools' in empty, false);
+    assert.equal('tool_choice' in empty, false);
+  }
+  test('exclusive routes preserve provider policy, named tools and tool-free requests');
+}
+
 async function main(): Promise<void> {
+  await verifyExclusiveOpenRouterTools();
   const originalFetch = globalThis.fetch;
   const envKeys = [
     'AZURE_FOUNDRY_ENDPOINT',

@@ -11,6 +11,19 @@ config();
 export const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 export const API_KEY = process.env.BACKEND_API_KEY || '';
 
+export const WORD_BOUNDARY_MESSAGES = [
+  'Josépassport',
+  'épassport',
+  'αpassport',
+  'passporté',
+  'passportα',
+  'xpassport',
+  'passport_',
+  '9passport',
+  'αpassport_',
+  'PASSPORT',
+];
+
 export const GrepMatch = z.object({
   source: z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents']),
   path: z.string(),
@@ -259,6 +272,15 @@ export async function seedFixture() {
         timestamp: new Date(`2026-01-03T10:${String(idx).padStart(2, '0')}:00Z`),
         externalId: `ledger-${idx + 1}-${randomUUID()}`,
         message: `Ledger entry ${idx + 1}: ${idx + 1 === 21 ? 'offset target confirmed' : 'ordinary ledger row'}`,
+      })),
+      ...WORD_BOUNDARY_MESSAGES.map((message, index) => ({
+        personId: lighthouse.id,
+        channel: 'EMAIL' as const,
+        from: 'boundary@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date(`2026-01-04T10:${String(index).padStart(2, '0')}:00Z`),
+        externalId: `word-boundary-${randomUUID()}`,
+        message,
       })),
     ],
   });

@@ -266,9 +266,16 @@ export async function handleSmsSupervisorMessage(config: {
         return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      const results = await commitPendingWrites(queued, userId, channel, media.filePointers);
-      results.forEach((result, index) => {
-        const operation = queued[index];
+      const results: ToolResult[] = [];
+      for (const operation of queued) {
+        const [result] = await commitPendingWrites(
+          [operation],
+          userId,
+          channel,
+          media.filePointers,
+          (agentId) => log.info('[SmsSupervisor] ROOT_ALLOCATED', { userId, mySeq, agentId })
+        );
+        results.push(result);
         recordToolTrace(
           round,
           {
@@ -278,7 +285,16 @@ export async function handleSmsSupervisorMessage(config: {
           result,
           'commit'
         );
-      });
+        // Publish custody before another write or LLM round can stall. The final
+        // TOOL_TRACE remains unchanged; this record carries no user content.
+        if (operation.kind === 'start_new_agent' && result.success) {
+          log.info('[SmsSupervisor] ROOT_COMMITTED', {
+            userId,
+            mySeq,
+            agentId: operation.provisionalId,
+          });
+        }
+      }
       return results;
     });
   };

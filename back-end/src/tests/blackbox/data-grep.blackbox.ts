@@ -13,6 +13,7 @@ import {
   forbidLineNumbers,
   cleanup,
   seedFixture,
+  WORD_BOUNDARY_MESSAGES,
 } from './data-grep.helpers';
 import {
   testSourceSpecificFilterValidation,
@@ -305,6 +306,34 @@ async function testDialectNormalization(userId: string): Promise<void> {
   }
 }
 
+async function testAsciiWordBoundaries(userId: string): Promise<void> {
+  for (const pattern of ['\\bpassport\\b', '\\Bpassport', 'passport\\B']) {
+    for (const caseInsensitive of [false, true]) {
+      const expected = WORD_BOUNDARY_MESSAGES.filter((message) =>
+        new RegExp(pattern, caseInsensitive ? 'i' : '').test(message)
+      );
+      const res = await requestGrep(userId, {
+        pattern,
+        source: 'messages',
+        '-i': caseInsensitive,
+      });
+      assertStatus(res.status, 200, res.data);
+      const body = assertBody(res.data);
+      const actual = body.matches.flatMap((match) =>
+        (match.records ?? [])
+          .filter((record) => record.relation === 'match')
+          .map((record) => record.message)
+      );
+      if (
+        body.total_matches !== expected.length ||
+        JSON.stringify(actual.sort()) !== JSON.stringify(expected.sort())
+      ) {
+        throw new Error(`ASCII JS boundary mismatch for ${pattern}, -i=${caseInsensitive}`);
+      }
+    }
+  }
+}
+
 // Realistic, safe (degree ≤ 2) regexes the model actually emits must NOT be
 // caught by the ReDoS guard — guards against false-positives nerfing the model.
 async function testRealisticPatternsAllowed(userId: string): Promise<void> {
@@ -524,6 +553,10 @@ async function runAll(): Promise<void> {
     ['invalid regex returns 400', () => testInvalidRegex(userId)],
     ['ReDoS-catastrophic patterns rejected with 400', () => testRedosGuardRejects(userId)],
     ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
+    [
+      'word boundaries preserve ASCII JS semantics beside Unicode',
+      () => testAsciiWordBoundaries(userId),
+    ],
     ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
     ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
     ['source-specific filters are validated', () => testSourceSpecificFilterValidation(userId)],

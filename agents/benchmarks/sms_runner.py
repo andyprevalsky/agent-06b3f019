@@ -484,23 +484,43 @@ def _backend_log_after(marker: int) -> str:
         return ""
 
 
-def _completion_accepted_after(marker: int) -> bool:
-    """Read the supervisor's own END line for this turn.
+def _owning_sms_log_lines(marker: int, user_id: str, inbound_seq: int, event: str) -> list[str]:
+    """Select only this webhook's exact user/sequence audit records."""
+    matches = []
+    for raw in _backend_log_after(marker).splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+        if f"[SmsSupervisor] {event}" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+            same = (isinstance(entry, dict) and entry.get("message") == f"[SmsSupervisor] {event}"
+                    and entry.get("userId") == user_id and entry.get("mySeq") == inbound_seq)
+        except json.JSONDecodeError:
+            same = (re.search(r"(?:^|\s)userId=" + re.escape(user_id) + r"(?=\s|$)", line) is not None
+                    and re.search(r"(?:^|\s)mySeq=" + str(inbound_seq) + r"(?=\s|$)", line) is not None)
+        if same:
+            matches.append(line)
+    return matches
 
-    `attempt_completion` leaves no DB trace, so silence after one SMS is
-    ambiguous — a run that hit the round cap or died in the terminal net looks
-    identical from the transcript. The backend logs the answer directly.
-    Absent a readable log the check abstains (returns True) rather than failing
-    a run for a harness gap.
-    """
-    text = _backend_log_after(marker)
-    if not text:
-        return True
-    ends = re.findall(r"=== END ===.*?completionAccepted=(\w+)", text)
-    return ends[-1] == "true" if ends else True
+
+def _completion_accepted_after(marker: int, user_id: str, inbound_seq: int) -> bool | None:
+    """None means still running or unobserved; a missing END never grants a pass."""
+    ends = _owning_sms_log_lines(marker, user_id, inbound_seq, "=== END ===")
+    if not ends:
+        return None
+    if len(ends) != 1:
+        raise RuntimeError("SMS terminal record is ambiguous for the owning turn")
+    try:
+        accepted = json.loads(ends[0]).get("completionAccepted")
+    except json.JSONDecodeError:
+        match = re.search(r"(?:^|\s)completionAccepted=(true|false)(?=\s|$)", ends[0])
+        accepted = match.group(1) == "true" if match else None
+    if not isinstance(accepted, bool):
+        raise RuntimeError("SMS terminal record lacks completion status")
+    return accepted
 
 
-def _parse_tool_trace_log(text: str) -> list[dict]:
+def _parse_tool_trace_log(text: str, *, strict: bool = False) -> list[dict]:
     """Read the last stable TOOL_TRACE record from dev or production logs."""
     latest: list[dict] = []
     ansi = re.compile(r"\x1b\[[0-9;]*m")
@@ -518,13 +538,19 @@ def _parse_tool_trace_log(text: str) -> list[dict]:
             if match:
                 encoded = match.group(1)
         if not isinstance(encoded, str):
+            if strict:
+                raise RuntimeError("SMS owning tool trace is unreadable")
             continue
         try:
             parsed = json.loads(encoded)
         except json.JSONDecodeError:
+            if strict:
+                raise RuntimeError("SMS owning tool trace is unreadable")
             continue
         if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
             latest = parsed
+        elif strict:
+            raise RuntimeError("SMS owning tool trace is unreadable")
     return latest
 
 
@@ -540,28 +566,45 @@ def _remember_sms_committed_roots(deps: SmsRunnerDeps, ids: set[str]) -> None:
             deps.on_agent_created(deps.task_name, agent_id)
 
 
-def _committed_sms_root_ids_after(marker: int, user_id: str, inbound_seq: int) -> set[str]:
-    """Read full committed IDs only from this user's exact persisted webhook sequence."""
-    matches = []
-    for raw in _backend_log_after(marker).splitlines():
-        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
-        if "[SmsSupervisor] TOOL_TRACE" not in line:
-            continue
+def _incremental_sms_root_ids_after(
+    marker: int, user_id: str, inbound_seq: int, event: str = "ROOT_COMMITTED"
+) -> set[str]:
+    """Positive allocation/commit receipts precede the final supervisor trace."""
+    owned = set()
+    for line in _owning_sms_log_lines(marker, user_id, inbound_seq, event):
         try:
-            entry = json.loads(line)
-            same = entry.get("userId") == user_id and entry.get("mySeq") == inbound_seq
+            agent_id = json.loads(line).get("agentId")
         except json.JSONDecodeError:
-            same = (re.search(r"(?:^|\s)userId=" + re.escape(user_id) + r"(?=\s|$)", line) is not None
-                    and re.search(r"(?:^|\s)mySeq=" + str(inbound_seq) + r"(?=\s|$)", line) is not None)
-        if same:
-            matches.append(_parse_tool_trace_log(line))
+            match = re.search(r"(?:^|\s)agentId=([^\s]+)(?=\s|$)", line)
+            agent_id = match.group(1) if match else None
+        if not isinstance(agent_id, str) or str(uuid.UUID(agent_id)) != agent_id or agent_id in owned:
+            raise RuntimeError("SMS incremental committed-root identity is invalid or ambiguous")
+        owned.add(agent_id)
+    return owned
+
+
+def _owning_tool_trace_after(marker: int, user_id: str, inbound_seq: int) -> list[dict]:
+    matches = _owning_sms_log_lines(marker, user_id, inbound_seq, "TOOL_TRACE")
     if len(matches) != 1:
         raise RuntimeError("SMS committed-root trace is missing or ambiguous for the owning turn")
+    return _parse_tool_trace_log(matches[0], strict=True)
+
+
+def _committed_sms_root_ids_after(
+    marker: int, user_id: str, inbound_seq: int, *, allow_partial: bool = False
+) -> set[str]:
+    """Final trace for normal results; exact successful commits suffice on interruption."""
+    incremental = _incremental_sms_root_ids_after(marker, user_id, inbound_seq)
+    allocated = _incremental_sms_root_ids_after(marker, user_id, inbound_seq, "ROOT_ALLOCATED")
+    if allow_partial and not _owning_sms_log_lines(marker, user_id, inbound_seq, "TOOL_TRACE") and (incremental or allocated):
+        return incremental | allocated
     owned = set()
-    for entry in matches[0]:
+    for entry in _owning_tool_trace_after(marker, user_id, inbound_seq):
         if entry.get("tool") != "start_new_agent" or entry.get("phase") != "commit":
             continue
         if entry.get("success") is not True or entry.get("resultTruncated") is True:
+            if allow_partial and allocated and entry.get("success") is False:
+                continue  # Allocation is custody, never proof of a successful start.
             raise RuntimeError("SMS root creation outcome is not fully proved")
         tracks = [line[len("Track: "):] for line in str(entry.get("result", "")).splitlines()
                   if line.startswith("Track: ")]
@@ -571,7 +614,9 @@ def _committed_sms_root_ids_after(marker: int, user_id: str, inbound_seq: int) -
         if len(ids) != 1 or str(uuid.UUID(ids[0])) != ids[0]:
             raise RuntimeError("SMS committed root tracking identity is invalid")
         owned.add(ids[0])
-    return owned
+    if incremental and incremental != owned:
+        raise RuntimeError("SMS final trace disagrees with successful incremental commits")
+    return owned | allocated
 
 
 def _backend_log_size() -> int:
@@ -682,6 +727,7 @@ async def _drive_turn(
     spend_before = _read_spend_state(deps, user_id)
     agents_before = _live_agent_ids(deps, user_id)
     started = time.monotonic()
+    deadline = started + turn_timeout_seconds
 
     inbound_seq = None
     ownership_captured = False
@@ -703,7 +749,9 @@ async def _drive_turn(
         lifecycle: list[str] = []
         last_change = time.monotonic()
         while True:
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
             # Both kinds of text reach the same phone, but they answer different
             # questions. `outbound` is what the SUPERVISOR chose to say — that is
             # what the per-turn budget governs. `lifecycle` is an agent announcing
@@ -718,10 +766,13 @@ async def _drive_turn(
                 last_change = time.monotonic()
             elapsed = time.monotonic() - started
             quiet_for = time.monotonic() - last_change
-            if outbound and quiet_for >= settle_seconds:
+            _remember_sms_committed_roots(deps, _incremental_sms_root_ids_after(log_marker, user_id, inbound_seq))
+            _remember_sms_committed_roots(deps, _incremental_sms_root_ids_after(log_marker, user_id, inbound_seq, "ROOT_ALLOCATED"))
+            completion_accepted = _completion_accepted_after(log_marker, user_id, inbound_seq)
+            if completion_accepted is not None and (quiet_for >= settle_seconds or elapsed >= turn_timeout_seconds):
                 break
             if elapsed >= turn_timeout_seconds:
-                break
+                raise TimeoutError("SMS owning turn did not emit a terminal record before its existing deadline")
 
         owned_ids = _committed_sms_root_ids_after(log_marker, user_id, inbound_seq)
         _remember_sms_committed_roots(deps, owned_ids)
@@ -730,14 +781,14 @@ async def _drive_turn(
             inbound=inbound,
             outbound=outbound,
             lifecycle=lifecycle,
-            completion_accepted=_completion_accepted_after(log_marker),
+            completion_accepted=completion_accepted,
             duration_seconds=time.monotonic() - started,
             max_outbound=int(turn.get("max_outbound", DEFAULT_MAX_OUTBOUND)),
             min_outbound=int(turn.get("min_outbound", 1)),
             spend_before=spend_before,
             spend_after=_read_spend_state(deps, user_id),
             allow_spend=bool(turn.get("allow_spend", False)),
-            tool_calls=_tool_trace_after(log_marker),
+            tool_calls=_owning_tool_trace_after(log_marker, user_id, inbound_seq),
             started_agent_goals=_started_agent_goals(deps, user_id, agents_before),
             owned_agent_ids=owned_ids,
         )
@@ -752,7 +803,8 @@ async def _drive_turn(
                     if len(inbound_rows) != 1 or not isinstance(inbound_rows[0].get("inboundSeq"), int):
                         raise RuntimeError("SMS interrupted webhook sequence is unproved")
                     inbound_seq = inbound_rows[0]["inboundSeq"]
-                _remember_sms_committed_roots(deps, _committed_sms_root_ids_after(log_marker, user_id, inbound_seq))
+                _remember_sms_committed_roots(deps, _committed_sms_root_ids_after(
+                    log_marker, user_id, inbound_seq, allow_partial=True))
             except Exception as exc:
                 deps.root_provenance_errors.append(str(exc) or type(exc).__name__)
 

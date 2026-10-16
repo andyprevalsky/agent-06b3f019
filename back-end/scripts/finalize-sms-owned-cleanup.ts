@@ -30,9 +30,7 @@ export type SmsCleanupRequest = {
 };
 export type SmsCleanupDependencies = {
   prisma: typeof import('../src/providers/database').prisma;
-  describe: (
-    binding: Binding
-  ) => Promise<{
+  describe: (binding: Binding) => Promise<{
     taskQueue: string;
     raw: { workflowExecutionInfo?: { firstRunId?: string | null } | null };
     status: { name: string };

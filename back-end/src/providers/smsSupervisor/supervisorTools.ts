@@ -242,7 +242,8 @@ export async function commitPendingWrites(
   userId: string,
   channel: SupervisorChannel = 'SMS',
   /** Current-turn inbound MMS FilePointers — auto-forwarded onto start_new_agent. */
-  inboundAttachments: readonly FilePointer[] = []
+  inboundAttachments: readonly FilePointer[] = [],
+  onAgentAllocated?: (agentId: string) => void
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
   for (const op of pendingWrites) {
@@ -260,7 +261,13 @@ export async function commitPendingWrites(
           result = await commitIncreaseBudget(op);
           break;
         case 'start_new_agent':
-          result = await commitStartNewAgent(op, userId, channel, inboundAttachments);
+          result = await commitStartNewAgent(
+            op,
+            userId,
+            channel,
+            inboundAttachments,
+            onAgentAllocated
+          );
           break;
       }
       log.info('Pending op committed', {

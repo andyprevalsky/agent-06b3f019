@@ -401,11 +401,11 @@ export function extractToolsFromResponseFormat(
     // down. Native tools take them flat, as every Python tool model does, and
     // the caller replays history with the flat arguments object.
     const nested = variantProps.arguments as JsonSchema | undefined;
-    const inputSchema: JsonSchema =
-      Object.keys(variantProps).length === 1 && isObjectSchema(nested)
-        ? { ...nested, properties: nested.properties ?? {}, required: nested.required ?? [] }
-        : { type: 'object', properties: variantProps, required };
-    if (!isObjectSchema(nested) && 'additionalProperties' in variantObj) {
+    const flattenArguments = Object.keys(variantProps).length === 1 && isObjectSchema(nested);
+    const inputSchema: JsonSchema = flattenArguments
+      ? { ...nested, properties: nested.properties ?? {}, required: nested.required ?? [] }
+      : { type: 'object', properties: variantProps, required };
+    if (!flattenArguments && 'additionalProperties' in variantObj) {
       inputSchema.additionalProperties = variantObj.additionalProperties;
     }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 /** Model contract → native projection → provider wire schema, without network I/O. */
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 
 import { createStreamingCompletion } from '../../providers/rose';
 import { openAiChatTools, responsesTools } from '../../providers/rose/toolContract';
@@ -14,6 +15,7 @@ import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 import { registerUserDataGrep, type UserDataGrepParams } from '../../providers/userDataSearch';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
+import { buildOpenAiResponseFormat, responseModel } from '../../providers/rose/schema';
 import {
   SUPERVISOR_RESPONSE_MODEL,
   SUPERVISOR_RESPONSE_SCHEMA,
@@ -96,6 +98,50 @@ function verifyProjection(): void {
     assert.equal(Object.hasOwn(body, 'anthropicTools'), false);
   }
   assert.equal(JSON.stringify(options), original, 'provider steps must not mutate caller schemas');
+}
+
+function verifyNestedArgumentsWithSibling(): void {
+  const model = responseModel(
+    'nested_tool_with_sibling',
+    z.object({
+      tool_calls: z.array(
+        z.union([
+          z.object({
+            tool: z.literal('lookup'),
+            arguments: z.object({ query: z.string() }),
+            request_id: z.string(),
+          }),
+          z.object({ tool: z.literal('done'), arguments: z.object({}) }),
+        ])
+      ),
+    })
+  );
+  const format = buildOpenAiResponseFormat(model);
+  const original = JSON.stringify(format);
+  const projected = withNativeToolContract({
+    model: options.model,
+    messages: options.messages,
+    response_model: model,
+    response_format: format,
+  });
+  for (const tool of [
+    responsesTools(projected.tools)![0],
+    record(openAiChatTools(projected.tools)![0].function),
+    extractToolsFromResponseFormat(format)!.tools[0],
+  ]) {
+    const parameters = record(tool.parameters ?? tool.input_schema);
+    assert.equal(parameters.additionalProperties, false, 'sibling wrapper must remain closed');
+    assert.deepEqual(parameters.required, ['arguments', 'request_id']);
+    const properties = record(parameters.properties);
+    assert.deepEqual(Object.keys(properties), ['arguments', 'request_id']);
+    assert.deepEqual(properties.arguments, {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    });
+  }
+  assert.equal(JSON.stringify(format), original, 'projection must preserve the caller schema');
 }
 
 async function verifyResponsesWire(): Promise<void> {
@@ -382,6 +428,7 @@ async function verifyCerebrasDerivedProjection(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  verifyNestedArgumentsWithSibling();
   await verifyCerebrasDerivedProjection();
   verifyProjection();
   await verifyResponsesWire();

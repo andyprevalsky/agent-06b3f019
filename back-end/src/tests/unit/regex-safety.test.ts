@@ -3,9 +3,59 @@
 import assert from 'node:assert/strict';
 import { checkSync } from 'recheck';
 
-import { checkPatternSafety } from '../../domains/data/regexSafety';
+import { checkPatternSafety, translateWordBoundaries } from '../../domains/data/regexSafety';
 
 function run(): void {
+  for (const pattern of [
+    String.raw`\\bpassport\\b`,
+    String.raw`[\b]`,
+    String.raw`[\B]`,
+    String.raw`[\\b]`,
+    String.raw`\[b\]`,
+  ]) {
+    assert.equal(
+      translateWordBoundaries(pattern),
+      pattern,
+      `literal escape/class changed: ${pattern}`
+    );
+  }
+  const boundaryCases = [
+    '',
+    'passport',
+    'Josépassport',
+    'αpassport',
+    'passporté',
+    'passport_',
+    'xpassport',
+    '9passport',
+    'PASSPORT',
+    'passport passport',
+    '\\passport',
+    '\bpassport',
+  ];
+  for (const pattern of [
+    String.raw`\bpassport\b`,
+    String.raw`\Bpassport`,
+    String.raw`passport\B`,
+    String.raw`\b`,
+    String.raw`\B`,
+    String.raw`^\B$`,
+    String.raw`\b(passport)\b\1`,
+    String.raw`\b(passport)\b \1\b`,
+    String.raw`\\\bpassport`,
+  ]) {
+    for (const flags of ['', 'i']) {
+      for (const text of boundaryCases) {
+        const actual = new RegExp(translateWordBoundaries(pattern), flags).exec(text);
+        const expected = new RegExp(pattern, flags).exec(text);
+        assert.deepEqual(
+          actual,
+          expected,
+          `word-boundary conversion changed ${pattern} /${flags} on ${JSON.stringify(text)}`
+        );
+      }
+    }
+  }
   assert.equal(checkPatternSafety('(.*a){20}$', '').ok, false);
   assert.equal(checkPatternSafety('meeting.*tomorrow', '').ok, true);
   assert.equal(

@@ -1490,6 +1490,236 @@ def test_commit_provenance_uses_exact_user_sequence_and_full_root_uuid(monkeypat
         sms._committed_sms_root_ids_after(0,OWNER,7)
 
 
+def _sms_audit_line(event, *, user=OWNER, seq=7, **fields):
+    return json.dumps({'message':f'[SmsSupervisor] {event}', 'userId':user, 'mySeq':seq, **fields})
+
+
+@pytest.mark.parametrize('settle_seconds',[16,20])
+def test_sms_progress_gap_waits_for_exact_terminal_within_original_deadline(monkeypatch,settle_seconds):
+    from benchmarks import sms_runner as sms
+    clock={'now':0.0,'posted':False}
+    monkeypatch.setattr(sms.time,'monotonic',lambda:clock['now'])
+    async def sleep(seconds):clock['now']+=seconds
+    monkeypatch.setattr(sms.asyncio,'sleep',sleep)
+    def transcript(*args):
+        if not clock['posted']:return []
+        messages=[{'role':'user','content':'hi','inboundSeq':7}]
+        if clock['now']>=1.5:messages.append({'role':'assistant','content':'Checking the details.'})
+        if clock['now']>=45:messages.append({'role':'assistant','content':'Here is the result.'})
+        return messages
+    monkeypatch.setattr(sms,'_read_transcript',transcript)
+    monkeypatch.setattr(sms,'_backend_log_size',lambda:0)
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _: '\n'.join([
+        _sms_audit_line('=== END ===',seq=8,completionAccepted=True),
+        _sms_audit_line('=== END ===',user=FOREIGN,completionAccepted=True),
+    ]+([
+        _sms_audit_line('TOOL_TRACE',toolTrace='[]'),
+        _sms_audit_line('=== END ===',completionAccepted=True),
+    ] if clock['now']>=45 else [])))
+    monkeypatch.setattr(sms,'_read_spend_state',lambda *args:SpendState(0,0))
+    monkeypatch.setattr(sms,'_live_agent_ids',lambda *args:set())
+    monkeypatch.setattr(sms,'_started_agent_goals',lambda *args:[])
+    class Response:
+        status=200
+        async def __aenter__(self):clock['posted']=True;return self
+        async def __aexit__(self,*args):pass
+    deps=SmsRunnerDeps(lambda _: '',repr,lambda _:True,lambda:OWNER)
+    result=asyncio.run(sms._drive_turn(SimpleNamespace(post=lambda *a,**k:Response()),
+        'http://localhost:39999',deps,OWNER,'+15550000000',{'inbound':'hi'},settle_seconds,120))
+    assert result.outbound==['Checking the details.','Here is the result.']
+    assert result.completion_accepted is True
+    assert 45<=result.duration_seconds<=120 and clock['now']<=120
+    assert not deps.root_provenance_errors
+
+
+@pytest.mark.parametrize('own_trace_without_END',[False,True])
+def test_sms_missing_own_terminal_expires_at_original_turn_deadline(monkeypatch,own_trace_without_END):
+    from benchmarks import sms_runner as sms
+    clock={'now':0.0,'posted':False}
+    monkeypatch.setattr(sms.time,'monotonic',lambda:clock['now'])
+    async def sleep(seconds):clock['now']+=seconds
+    monkeypatch.setattr(sms.asyncio,'sleep',sleep)
+    monkeypatch.setattr(sms,'_read_transcript',lambda *args:[
+        {'role':'user','content':'hi','inboundSeq':7},
+        {'role':'assistant','content':'Still working.'},
+    ] if clock['posted'] else [])
+    monkeypatch.setattr(sms,'_backend_log_size',lambda:0)
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _: '\n'.join([
+        _sms_audit_line('=== END ===',seq=8,completionAccepted=True),
+        _sms_audit_line('=== END ===',user=FOREIGN,completionAccepted=True),
+    ]+([_sms_audit_line('TOOL_TRACE',toolTrace='[]')] if own_trace_without_END else [])))
+    monkeypatch.setattr(sms,'_read_spend_state',lambda *args:SpendState(0,0))
+    monkeypatch.setattr(sms,'_live_agent_ids',lambda *args:set())
+    class Response:
+        status=200
+        async def __aenter__(self):clock['posted']=True;return self
+        async def __aexit__(self,*args):pass
+    deps=SmsRunnerDeps(lambda _:'',repr,lambda _:True,lambda:OWNER)
+    with pytest.raises(TimeoutError,match='existing deadline'):
+        asyncio.run(sms._drive_turn(SimpleNamespace(post=lambda *a,**k:Response()),
+            'http://localhost:39999',deps,OWNER,'+15550000000',{'inbound':'hi'},20,120))
+    assert clock['now']==120
+    assert not deps.committed_agent_ids
+
+
+@pytest.mark.parametrize('dev',[False,True])
+def test_sms_terminal_and_incremental_custody_are_exact_owner_and_sequence(monkeypatch,dev):
+    from benchmarks import sms_runner as sms
+    foreign=[_sms_audit_line('ROOT_COMMITTED',user=FOREIGN,agentId=FOREIGN),
+             _sms_audit_line('ROOT_COMMITTED',seq=8,agentId=CHILD),
+             _sms_audit_line('=== END ===',seq=8,completionAccepted=True)]
+    own=('[SmsSupervisor] ROOT_COMMITTED userId='+OWNER+' mySeq=7 agentId='+ROOT if dev
+         else _sms_audit_line('ROOT_COMMITTED',agentId=ROOT))
+    terminal=('[SmsSupervisor] === END === userId='+OWNER+' mySeq=7 completionAccepted=false' if dev
+              else _sms_audit_line('=== END ===',completionAccepted=False))
+    lines=foreign+[own]
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:'\n'.join(lines))
+    assert sms._incremental_sms_root_ids_after(0,OWNER,7)=={ROOT}
+    assert sms._committed_sms_root_ids_after(0,OWNER,7,allow_partial=True)=={ROOT}
+    assert sms._completion_accepted_after(0,OWNER,7) is None
+    lines.append(terminal)
+    assert sms._completion_accepted_after(0,OWNER,7) is False
+    lines.append(terminal)
+    with pytest.raises(RuntimeError,match='ambiguous'):
+        sms._completion_accepted_after(0,OWNER,7)
+    lines[:]=foreign+[own,own]
+    with pytest.raises(RuntimeError,match='ambiguous'):
+        sms._committed_sms_root_ids_after(0,OWNER,7,allow_partial=True)
+
+
+@pytest.mark.parametrize('trace',['not-json','{}',None])
+def test_sms_malformed_final_trace_never_grants_empty_root_custody(monkeypatch,trace):
+    from benchmarks import sms_runner as sms
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:_sms_audit_line('TOOL_TRACE',toolTrace=trace))
+    with pytest.raises(RuntimeError,match='unreadable'):
+        sms._committed_sms_root_ids_after(0,OWNER,7)
+
+
+def test_sms_incremental_commit_must_agree_with_final_trace(monkeypatch):
+    from benchmarks import sms_runner as sms
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:'\n'.join([
+        _sms_audit_line('ROOT_COMMITTED',agentId=ROOT),_sms_audit_line('TOOL_TRACE',toolTrace='[]')]))
+    with pytest.raises(RuntimeError,match='disagrees'):
+        sms._committed_sms_root_ids_after(0,OWNER,7)
+
+
+@pytest.mark.parametrize('custody_event',['ROOT_COMMITTED','ROOT_ALLOCATED'])
+def test_sms_cancellation_before_END_retires_only_successfully_committed_root(monkeypatch,custody_event):
+    from benchmarks import sms_runner as sms
+    state={'posted':False,'sql':[],'cleanup_calls':[],'registered':[]}
+    def sql(query):
+        state['sql'].append(query)
+        return '\n'.join([FOREIGN,CHILD,ROOT]) if state['posted'] and query.startswith('SELECT id FROM') else ''
+    deps=SmsRunnerDeps(sql,repr,lambda _:True,lambda:OWNER,
+        other_task_roots=lambda:{CHILD},on_agent_created=lambda name,aid:state['registered'].append((name,aid)),task_name='owning-offline')
+    monkeypatch.setattr(sms,'parse_sms_script',lambda _:{'turns':[{'inbound':'hi'}]})
+    monkeypatch.setattr(sms,'_user_phone',lambda *args:'+15550000000')
+    monkeypatch.setattr(sms,'_apply_web_search_fixture',lambda *args:None)
+    monkeypatch.setattr(sms,'_read_user_profile',lambda *args:{})
+    monkeypatch.setattr(sms,'_reset_session',lambda *args:None)
+    monkeypatch.setattr(sms,'_seed_transcript',lambda *args:None)
+    monkeypatch.setattr(sms,'_seed_agents',lambda *args:None)
+    monkeypatch.setattr(sms,'_live_agent_ids',lambda *args:{FOREIGN,CHILD,ROOT} if state['posted'] else {FOREIGN})
+    monkeypatch.setattr(sms,'_read_transcript',lambda *args:[{'role':'user','content':'hi','inboundSeq':7}] if state['posted'] else [])
+    monkeypatch.setattr(sms,'_read_spend_state',lambda *args:SpendState(0,0))
+    monkeypatch.setattr(sms,'_backend_log_size',lambda:0)
+    # No final TOOL_TRACE or END exists; only the producer's successful commit.
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:'\n'.join([
+        _sms_audit_line(custody_event,agentId=ROOT),
+        _sms_audit_line('ROOT_COMMITTED',seq=8,agentId=CHILD),
+        _sms_audit_line('ROOT_COMMITTED',user=FOREIGN,agentId=FOREIGN),
+    ]) if state['posted'] else '')
+    class Response:
+        status=200
+        async def __aenter__(self):state['posted']=True;return self
+        async def __aexit__(self,*args):pass
+    class Session:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        def post(self,*args,**kwargs):return Response()
+    monkeypatch.setattr(sms.aiohttp,'ClientSession',Session)
+    cancellation=asyncio.CancelledError('cancel after committed root before END')
+    async def sleep(*args):raise cancellation
+    monkeypatch.setattr(sms.asyncio,'sleep',sleep)
+    async def retire(url,user,owned,seeded,outcome):
+        state['cleanup_calls'].append((user,owned,seeded))
+        return {'verified':True,'owned_agent_ids':sorted(owned),'root_agent_ids':sorted(owned),'after_rows':[{'id':ROOT}]}
+    deps.cleanup_agents=retire
+    task=SimpleNamespace(name='owning-offline',timeout_seconds=420,evaluators=[])
+    with pytest.raises(asyncio.CancelledError) as caught:
+        asyncio.run(sms.run_sms_task('http://localhost:39999',task,deps))
+    assert caught.value is cancellation and cancellation.owned_cleanup_receipt['verified'] is True
+    assert state['cleanup_calls']==[(OWNER,{ROOT},set())]
+    assert state['registered']==[('owning-offline',ROOT)] and not deps.root_provenance_errors
+    deletes=[q for q in state['sql'] if q.startswith('DELETE FROM "Agent"')]
+    assert len(deletes)==1 and ROOT in deletes[0] and CHILD not in deletes[0] and FOREIGN not in deletes[0]
+
+
+def test_sms_handler_publishes_each_successful_root_before_next_queued_commit():
+    import subprocess
+    # Execute the actual nested handler function without importing application
+    # modules: a later write must see the first root's already-published custody.
+    script=r'''
+const fs=require('node:fs'),ts=require('typescript'),assert=require('node:assert/strict');
+const text=fs.readFileSync('src/providers/smsSupervisor/supervisorHandler.ts','utf8');
+const source=ts.createSourceFile('handler.ts',text,ts.ScriptTarget.Latest,true);
+let arrow;function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='flushPendingWrites')arrow=node.initializer;ts.forEachChild(node,visit)}visit(source);
+assert.ok(arrow);
+const js=ts.transpileModule('const flushPendingWrites='+arrow.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+async function check(success){
+  const pending=[{kind:'start_new_agent',provisionalId:'own-root',args:{}},{kind:'reply_to_agent',args:{}}],events=[],calls=[],trace=[];
+  const commit=async(ops,user,channel,attachments,onAllocated)=>{calls.push(ops.map(op=>op.kind));if(calls.length===1&&success)onAllocated('own-root');if(calls.length===2)assert.equal(events.length,success?2:0);return ops.map(op=>({tool:op.kind,success,result:''}))};
+  const log={info:(event,fields)=>events.push({event,...fields})};
+  const make=new Function('withCommitLock','runStillOwnsReply','pendingWrites','commitPendingWrites','userId','channel','media','recordToolTrace','log','mySeq',js+';return flushPendingWrites');
+  const flush=make(async(_,fn)=>fn(),async()=>true,pending,commit,'owner','SMS',{filePointers:[]},(...args)=>trace.push(args),log,7);
+  const results=await flush(0);assert.equal(results.length,2);assert.equal(trace.length,2);assert.equal(pending.length,0);
+  assert.deepEqual(calls,[['start_new_agent'],['reply_to_agent']]);
+  if(success)assert.deepEqual(events,[{event:'[SmsSupervisor] ROOT_ALLOCATED',userId:'owner',mySeq:7,agentId:'own-root'},{event:'[SmsSupervisor] ROOT_COMMITTED',userId:'owner',mySeq:7,agentId:'own-root'}]);
+}check(true).then(()=>check(false)).catch(error=>{console.error(error);process.exitCode=1});
+'''
+    result=subprocess.run(['node','-e',script],cwd=REPO_ROOT_FOR_TEST/'back-end',capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
+def test_sms_allocation_custody_does_not_turn_failed_start_into_success(monkeypatch):
+    from benchmarks import sms_runner as sms
+    failed={'tool':'start_new_agent','phase':'commit','success':False,'result':'','error':'native start indeterminate'}
+    monkeypatch.setattr(sms,'_backend_log_after',lambda _:'\n'.join([
+        _sms_audit_line('ROOT_ALLOCATED',agentId=ROOT),
+        _sms_audit_line('TOOL_TRACE',toolTrace=json.dumps([failed]))]))
+    with pytest.raises(RuntimeError,match='creation outcome'):
+        sms._committed_sms_root_ids_after(0,OWNER,7)
+    assert sms._committed_sms_root_ids_after(0,OWNER,7,allow_partial=True)=={ROOT}
+
+
+def test_sms_actual_allocation_receipt_precedes_deferred_workflow_start_and_ignores_callback_failure():
+    import subprocess
+    script=r'''
+const fs=require('node:fs'),ts=require('typescript'),assert=require('node:assert/strict');
+function extract(path,name){const source=ts.createSourceFile(path,fs.readFileSync(path,'utf8'),ts.ScriptTarget.Latest,true);let fn;function visit(node){if(ts.isFunctionDeclaration(node)&&node.name?.text===name)fn=node;ts.forEachChild(node,visit)}visit(source);assert.ok(fn);return ts.transpileModule(fn.getText(source).replace(/^export\s+/,''),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText}
+const startJS=extract('src/providers/smsSupervisor/supervisorTools.startAgent.ts','commitStartNewAgent');
+const commitJS=extract('src/providers/smsSupervisor/supervisorTools.ts','commitPendingWrites');
+async function check(mode){
+  const events=[];let release,started=0;
+  const row={id:'own-root',userId:mode==='foreign'?'foreign':'owner',temporalWorkflowId:'existing-workflow',fastModeCacheEnabled:true,memoryEnabled:false};
+  const tx={agent:{create:async()=>row},verifier:{create:async()=>({})},message:{create:async()=>({})}};
+  const transaction=async fn=>{if(['existing','foreign'].includes(mode))throw {code:'P2002'};const result=await fn(tx);events.push('transaction-committed');return result};
+  const nativeStart=async()=>{started++;assert.ok(events.includes('allocated'));await new Promise(resolve=>release=resolve);return {workflowId:'own-root',firstExecutionRunId:'first'}};
+  const log={info(){},warn(){},error(){}};
+  const start=new Function('runTransactionWithRetry','prisma','plannerMemoryEnabledByDefault','startAgentWorkflowExecution','recordAgentWorkflowExecution','reconcileWorkflowStart','getAgentUrl','log',startJS+';return commitStartNewAgent')(transaction,{agent:{findUnique:async()=>row}},()=>false,nativeStart,async()=>true,async()=>({kind:'lookup_failed'}),id=>'https://fixture.invalid/?agent-id='+id,log);
+  const commit=new Function('commitStartNewAgent','log',commitJS+';return commitPendingWrites')(start,log);
+  const pending=commit([{kind:'start_new_agent',provisionalId:'own-root',args:{goal:'fixture'}}],'owner','SMS',[],id=>{assert.equal(id,'own-root');events.push('allocated');if(mode==='throwing-callback')throw new Error('audit sink unavailable')});
+  await new Promise(resolve=>setImmediate(resolve));
+  if(mode==='foreign'){assert.equal(events.includes('allocated'),false);assert.equal(started,0);assert.equal((await pending)[0].success,false);return}
+  assert.equal(events.filter(x=>x==='allocated').length,1);
+  if(mode!=='existing'){assert.deepEqual(events.slice(0,2),['transaction-committed','allocated']);assert.equal(started,1);release()}
+  assert.equal((await pending)[0].success,true);
+}check('new').then(()=>check('throwing-callback')).then(()=>check('existing')).then(()=>check('foreign')).catch(error=>{console.error(error);process.exitCode=1});
+'''
+    result=subprocess.run(['node','-e',script],cwd=REPO_ROOT_FOR_TEST/'back-end',capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
 def test_cleanup_failure_keeps_receipt_in_the_actual_sms_result(monkeypatch):
     from benchmarks import sms_runner as sms
     evidence={'verified':False,'owned_agent_ids':[ROOT],'root_agent_ids':[ROOT],

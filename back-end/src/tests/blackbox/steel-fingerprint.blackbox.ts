@@ -123,14 +123,6 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
   );
 }
 
-async function testFingerprintTimezoneFormatUsesUserLocation(): Promise<void> {
-  await runTimezoneFormatUsesUserLocation(makeFingerprint);
-}
-
-async function testWorkerHardwareConcurrencyMatchesPage(): Promise<void> {
-  await runWorkerHardwareConcurrencyMatchesPage(makeFingerprint);
-}
-
 function testProxySettingsDropCityFallsBackToStateLevel(): void {
   const prevServer = process.env.STEEL_PROXY_SERVER;
   const prevEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
@@ -577,11 +569,11 @@ async function main(): Promise<void> {
     },
     {
       name: 'fingerprint timezone format uses user location not host TZ',
-      fn: testFingerprintTimezoneFormatUsesUserLocation,
+      fn: () => runTimezoneFormatUsesUserLocation(makeFingerprint),
     },
     {
       name: 'Worker hardwareConcurrency matches page spoof (FCaptcha mismatch)',
-      fn: testWorkerHardwareConcurrencyMatchesPage,
+      fn: () => runWorkerHardwareConcurrencyMatchesPage(makeFingerprint),
     },
     {
       name: 'proxy settings drop unsupported city and fall back to country+state',
