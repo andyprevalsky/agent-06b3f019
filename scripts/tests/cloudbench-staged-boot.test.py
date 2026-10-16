@@ -33,6 +33,7 @@ class Tests(unittest.TestCase):
     if 'tarfile'in command:
      if mode=='launch':raise TimeoutError('ambiguous launch')
      r=json.loads((outer.out/'intent.json').read_text());p=json.loads((outer.out/'payload.json').read_text());v={k:r[k]for k in ('app','nonce','machine','volume_id','instance_id','run_token','source_ref','config_sha256')};v.update(schema='cloudbench-staged-boot-launch-v1',archive_sha256=p['archive_sha256'],intent_sha256=S.digest((outer.out/'intent.json').read_bytes()),guest_once='/tmp/cloudbench-staged-boot/'+TOKEN,supervisor_pid=123,supervisor_birth='456',dispatched=True,runtime_success=False)
+     if 'evidence_kind'in r:v['evidence_kind']=r['evidence_kind']
     else:
      self.command=command;assert __import__('shlex').split(command)[:4]==['python3','-I','-S','-B'];v=dict(kind='exact-inert-quiescence-v1',machine=MID,nonce=json.loads((outer.out/'intent.json').read_text())['nonce'],unknown=[],inert_sleepers=[1])
     if mode=='realprobe'and 'tarfile'not in command:v=json.loads(subprocess.check_output(__import__('shlex').split(command),timeout=2))
@@ -73,7 +74,7 @@ class Tests(unittest.TestCase):
   with self.assertRaises(FileNotFoundError):self.launch()
   self.assertEqual(self.calls,[])
  def test_boot_branch_selected_before_update_and_evidence_unchanged(self):
-  code=(ROOT/'run-bench-cloud').read_text();start=code.index('if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]');end=code.index('fi  # end launch: boot-launch vs legacy ssh path',start);branch=code[start:end].split('    else\n',1)[0]
+  code=(ROOT/'run-bench-cloud').read_text();start=code.index('if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then');end=code.index('fi  # end launch: boot-launch vs legacy ssh path',start);branch=code[start:end].split('    else\n',1)[0]
   self.assertNotIn('machine update',branch);self.assertIn('cloudbench-staged-boot.py',branch);self.assertIn('stage_explicit_codex_auth',branch);self.assertLess(code.index('cloudbench_prepare_runtime_evidence ||'),start)
  @unittest.skipUnless(os.geteuid()==0,'guest file identity requires root fixture')
  def test_archive_corruption_is_rejected_before_guest_write(self):
@@ -144,12 +145,36 @@ python3(){ cat >/dev/null; echo STAGED; }
   (lib/'cloudbench-github-token.sh').write_text('cloudbench_export_controller_github_token(){ return 0; }\n')
   binp=self.root/'fixture-bin';binp.mkdir();fly=binp/'flyctl';receipt=self.root/'fly-call.json'
   fly.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==["secrets","list","-a","navi-whisper-lux-bench","--json"]\nPath(os.environ["FIXTURE_FLY_CALL"]).write_text(json.dumps(sys.argv[1:]))\nprint(json.dumps([{"Name":n} for n in "AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN".split()]))\n');fly.chmod(0o755)
-  env={k:v for k,v in os.environ.items()if not k.startswith(('CLOUDBENCH_','FLY_'))};env.update(CLOUDBENCH_FLEET_ROOT=str(repo),CLOUDBENCH_BOOT_TRANSPORT='staged',FLY_BENCH_API_TOKEN='offline-fixture-selected-token',PATH=str(binp)+':'+os.environ['PATH'],HOME=str(self.root),FIXTURE_FLY_CALL=str(receipt))
+  env={k:v for k,v in os.environ.items()if not k.startswith(('CLOUDBENCH_','FLY_'))};env.update(CLOUDBENCH_FLEET_ROOT=str(repo),CLOUDBENCH_BOOT_TRANSPORT='staged',FLY_BENCH_API_TOKEN='offline-fixture-selected-token',PATH=str(binp)+':'+os.environ['PATH'],FIXTURE_FLY_CALL=str(receipt))
   return subprocess.run(['bash',str(ROOT/'run-bench-cloud'),*args],env=env,capture_output=True,text=True,timeout=5),receipt
  def test_actual_verify_secrets_ignores_inherited_launch_transport(self):
   result,receipt=self.environment_entry(['--verify-secrets']);self.assertEqual(result.returncode,0,result.stderr);self.assertTrue(receipt.exists());self.assertIn('verified (read-only)',result.stdout)
  def test_actual_task_still_requires_explicit_staged_boot_flags(self):
   result,receipt=self.environment_entry(['fixture-task','--machine',MID]);self.assertEqual(result.returncode,2);self.assertIn('requires explicitly admitted cold BOOT_LAUNCH',result.stderr);self.assertFalse(receipt.exists())
+ def probe_owner(self):
+  for n in ('runtime-evidence.owner.json','runtime-evidence.pending'):(self.root/n).unlink()
+  self.env['CLOUDBENCH_INFRA_PROBE']='1'
+  return S.prepare_probe_owner(self.root,'navi-whisper-lux-bench',MID,TOKEN,REF)
+ def test_probe_owner_is_distinct_and_exclusive(self):
+  owner=self.probe_owner();self.assertTrue(owner['infra_probe']);self.assertFalse(owner['runtime_success']);self.assertFalse((self.root/'runtime-evidence.owner.json').exists());self.assertFalse((self.root/'runtime-evidence.pending').exists())
+  with self.assertRaises(FileExistsError):S.prepare_probe_owner(self.root,'navi-whisper-lux-bench',MID,TOKEN,REF)
+ def test_typed_probe_launch_has_no_runtime_credit(self):
+  self.probe_owner();ack=self.launch();self.assertEqual(ack['evidence_kind'],'infra-probe');self.assertFalse(ack['runtime_success']);self.assertEqual(json.loads((self.out/'terminal.json').read_text())['evidence_kind'],'infra-probe');self.assertFalse((self.root/'runtime-evidence.pending').exists())
+ def test_probe_refuses_real_runtime_owner(self):
+  self.env['CLOUDBENCH_INFRA_PROBE']='1'
+  S.save(self.root/'staged-probe.owner.json',dict(schema='cloudbench-staged-probe-owner-v1',app='navi-whisper-lux-bench',machine_id=MID,run_token=TOKEN,source_ref=REF,infra_probe=True,runtime_success=False))
+  with self.assertRaisesRegex(ValueError,'impersonate'):self.launch()
+  self.assertEqual(self.calls,[])
+ def test_real_mode_cannot_use_probe_owner(self):
+  self.probe_owner();self.env['CLOUDBENCH_INFRA_PROBE']='0'
+  with self.assertRaises(FileNotFoundError):self.launch()
+  self.assertEqual(self.calls,[])
+ def test_actual_probe_producer_uses_distinct_owner(self):
+  for n in ('runtime-evidence.owner.json','runtime-evidence.pending'):(self.root/n).unlink()
+  source=Path(os.environ.get('ROSE_STAGED_TEST_SOURCE',str(ROOT/'run-bench-cloud'))).read_text();start=source.index('cloudbench_prepare_runtime_evidence() {');end=source.index('\ncloudbench_collect_runtime_evidence()',start);function=source[start:end]
+  shell='set -e\ncloudbench_skip_held_driver_teardown_race(){ return 0; }\n'+function+'\ncloudbench_prepare_runtime_evidence\n'
+  env=dict(os.environ,CLOUDBENCH_BOOT_LAUNCH='1',CLOUDBENCH_BOOT_TRANSPORT='staged',CLOUDBENCH_INFRA_PROBE='1',CLOUDBENCH_RUNTIME_SCRIPT_ROOT=str(ROOT),APP='navi-whisper-lux-bench',FLEET_MACHINE_ID=MID,RUN_LOG_TOKEN=TOKEN,BENCH_REF=REF,OUT_DIR=str(self.root))
+  result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True,timeout=5);self.assertEqual(result.returncode,0,result.stderr);self.assertTrue((self.root/'staged-probe.owner.json').exists());self.assertFalse((self.root/'runtime-evidence.pending').exists())
  @unittest.skipUnless(os.geteuid()==0,'actual guest file ownership contract requires root fixture')
  def test_actual_guest_installer_boot_supervisor_and_once(self):
   root=self.root/'guest';root.mkdir();data=root/'data';data.mkdir();binp=root/'bin';binp.mkdir()

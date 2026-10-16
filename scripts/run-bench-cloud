@@ -3756,6 +3756,12 @@ confirm_guest_shutdown() {
 }
 cloudbench_prepare_runtime_evidence() {  # before boot config/start; no guest work admitted on failure
     [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] || return 0
+    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ] && [ "${CLOUDBENCH_INFRA_PROBE:-0}" = 1 ]; then
+        python3 "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-staged-boot.py" \
+            --prepare-probe-owner --app "$APP" --machine "${FLEET_MACHINE_ID:-$mid}" \
+            --run-token "$RUN_LOG_TOKEN" --source-ref "$BENCH_REF" --output "$OUT_DIR"
+        return $?
+    fi
     cloudbench_skip_held_driver_teardown_race && return 0
     # Fleet supplies its shared credential; a standalone boot run owns a fresh
     # credential for the same authenticated status endpoint before guest config.

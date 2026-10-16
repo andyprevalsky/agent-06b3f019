@@ -32,6 +32,14 @@ def regular(path,maximum=16*1024*1024):
         b=os.fstat(fd);require((a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns)==(b.st_dev,b.st_ino,b.st_size,b.st_mtime_ns),'source drift');return data
     finally:os.close(fd)
 
+def prepare_probe_owner(output,app,machine,token,source_ref):
+    """Record probe dispatch ownership without inventing runtime evidence."""
+    output=Path(output);require(output.is_absolute()and output.resolve(strict=True)==output,'physical probe output')
+    require(re.fullmatch('[0-9a-f]{14}',machine)and re.fullmatch('[A-Za-z0-9._-]+',token)and token not in ('.','..')and re.fullmatch('[0-9a-f]{40}',source_ref),'probe identity')
+    require(not any(os.path.lexists(output/name)for name in ('runtime-evidence.owner.json','runtime-evidence.pending')),'probe cannot replace runtime evidence')
+    value=dict(schema='cloudbench-staged-probe-owner-v1',app=app,machine_id=machine,run_token=token,source_ref=source_ref,infra_probe=True,runtime_success=False)
+    save(output/'staged-probe.owner.json',value);return value
+
 def native_binding(machine,volume,size,memory):
     require(machine['state']=='stopped'and machine['config'].get('init')=={'cmd':['sleep','infinity']}and machine['config'].get('env')in ({},None),'staged boot requires stopped inert empty-env source')
     c=machine['config'];require(c.get('restart')=={'policy':'no'}and c.get('auto_destroy',False)is False,'unsafe restart/autodestroy')
@@ -71,6 +79,7 @@ def install(archive,expected,budget=20):
  request=json.loads(files.pop('request.json'));env=json.loads(files.pop('env.json'));files.pop('launch.py')
  need(request['machine']==os.environ.get('FLY_MACHINE_ID'),'guest Machine mismatch')
  need(env['CLOUDBENCH_RUN_TOKEN']==request['run_token']and env['REF']==request['source_ref']and env['CLOUDBENCH_BOOT']=='1','guest run identity')
+ need(request.get('evidence_kind')in(None,'infra-probe')and (request.get('evidence_kind')=='infra-probe')==(env.get('CLOUDBENCH_INFRA_PROBE')=='1'),'probe payload mode')
  expected_files=request['files'];need(set(files)==set(expected_files),'unexpected payload')
  for n,b in files.items():need(sha(b)==expected_files[n]['sha256']and len(b)==expected_files[n]['bytes'],'file digest')
  # Same canonical all-UID probe used to admit the stopped source. It runs before
@@ -100,6 +109,8 @@ def install(archive,expected,budget=20):
  finally:os.close(output)
  birth=Path('/proc',str(child.pid),'stat').read_text().rsplit(') ',1)[1].split()[19]
  ack=dict(schema='cloudbench-staged-boot-launch-v1',app=request['app'],nonce=request['nonce'],machine=request['machine'],volume_id=request['volume_id'],instance_id=request['instance_id'],run_token=request['run_token'],source_ref=request['source_ref'],archive_sha256=expected,intent_sha256=sha(json.dumps(request,sort_keys=True,separators=(',',':')).encode()+b'\n'),config_sha256=request['config_sha256'],guest_once=str(once),supervisor_pid=child.pid,supervisor_birth=birth,dispatched=True,runtime_success=False)
+ if request.get('evidence_kind')=='infra-probe':
+  ack['evidence_kind']='infra-probe'
  dump(once/'launch.ack.json',ack);return ack
 if __name__=='__main__':print(json.dumps(install(sys.argv[1],sys.argv[2],int(sys.argv[3])),sort_keys=True))
 '''
@@ -123,8 +134,13 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
     require(type(ready_seconds)is int and 0<ready_seconds<=600,'readiness bound')
     require(re.fullmatch('[0-9a-f]{14}',machine)and re.fullmatch('[A-Za-z0-9._-]+',token)and token not in ('.','..'),'invalid staged identity')
     require(env.get('CLOUDBENCH_BOOT')=='1'and env.get('CLOUDBENCH_RUN_TOKEN')==token and re.fullmatch('[0-9a-f]{40}',env.get('REF','')),'exact boot identity required')
-    owner=json.loads(regular(output.parent/'runtime-evidence.owner.json'));require(owner==dict(version=1,machine_id=machine,run_token=token),'runtime evidence owner required')
-    require(json.loads(regular(output.parent/'runtime-evidence.pending'))==owner,'matching pending evidence required')
+    is_probe=env.get('CLOUDBENCH_INFRA_PROBE','0')=='1'
+    if is_probe:
+        owner=json.loads(regular(output.parent/'staged-probe.owner.json'));require(owner==dict(schema='cloudbench-staged-probe-owner-v1',app=fly.app,machine_id=machine,run_token=token,source_ref=env['REF'],infra_probe=True,runtime_success=False),'typed probe owner required')
+        require(not any(os.path.lexists(output.parent/name)for name in ('runtime-evidence.owner.json','runtime-evidence.pending')),'probe cannot impersonate runtime evidence')
+    else:
+        owner=json.loads(regular(output.parent/'runtime-evidence.owner.json'));require(owner==dict(version=1,machine_id=machine,run_token=token),'runtime evidence owner required')
+        require(json.loads(regular(output.parent/'runtime-evidence.pending'))==owner,'matching pending evidence required')
     require(type(barrier_seconds)is int and 0<barrier_seconds<=1800,'config barrier bound')
     output.mkdir(mode=0o700);sync(output.parent)
     prior=signal.getitimer(signal.ITIMER_REAL);handler=signal.getsignal(signal.SIGALRM);require(prior==(0.0,0.0),'isolated staged transport required')
@@ -145,6 +161,7 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
         require(before==after,'native pair drift');native_binding(before,volume,size,memory)
         save(output/'native-before.json',before);save(output/'volume-before.json',volume)
         request=dict(schema='cloudbench-staged-boot-request-v1',app=fly.app,machine=machine,volume_id=volid,instance_id=before['instance_id'],update_attempted=False,run_token=token,source_ref=env['REF'],nonce=os.urandom(16).hex(),config_sha256=digest(canonical(before['config'])))
+        if is_probe:request['evidence_kind']='infra-probe'
         request['idle_probe']=idle_probe.replace('TARGET',repr(machine)).replace('NONCE',repr(request['nonce']))
         archive=output/'boot.tar.gz';archive_sha,request=bundle(archive,env,files,request);save(output/'intent.json',request);save(output/'payload.json',dict(archive_sha256=archive_sha,bytes=archive.stat().st_size))
         # Exactly one START, before staging and before any task process exists.
@@ -175,8 +192,11 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
         bootstrap="import hashlib,io,tarfile,os,stat,sys; p="+repr(remote)+"; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and s.st_size=="+str(archive.stat().st_size)+"; b=os.read(f,s.st_size+1); assert hashlib.sha256(b).hexdigest()=="+repr(archive_sha)+"; t=tarfile.open(fileobj=io.BytesIO(b),mode='r:gz'); c=t.extractfile('launch.py').read(); sys.argv=['staged-boot',p,"+repr(archive_sha)+","+repr(str(launch_cap))+"]; exec(compile(c,'bound-staged-boot','exec'))"
         command='python3 -I -S -B -c '+shlex.quote(bootstrap);require(len(command.encode())<=7000,'launch command limit')
         save(output/'dispatch.intent.json',dict(archive_sha256=archive_sha,machine=machine,run_token=token,epoch=time.time()))
-        ack=bound(launch_cap,lambda cap:fly.machine_exec_json(max(1,int(cap)),machine,command,max_command_bytes=7000,max_response_bytes=65536,validate_ack=lambda v:isinstance(v,dict)and all(v.get(k)==request[k]for k in ('app','nonce','machine','volume_id','instance_id','run_token','source_ref','config_sha256'))and v.get('intent_sha256')==digest(regular(output/'intent.json')) and v.get('archive_sha256')==archive_sha and v.get('dispatched')is True and v.get('runtime_success')is False))
-        save(output/'launch.ack.json',ack);save(output/'terminal.json',dict(status='BOOT_DISPATCHED',intent_sha256=digest(regular(output/'intent.json')),launch_ack_sha256=digest(regular(output/'launch.ack.json')),runtime_success=False,update_attempted=False));return ack
+        ack=bound(launch_cap,lambda cap:fly.machine_exec_json(max(1,int(cap)),machine,command,max_command_bytes=7000,max_response_bytes=65536,validate_ack=lambda v:isinstance(v,dict)and all(v.get(k)==request[k]for k in ('app','nonce','machine','volume_id','instance_id','run_token','source_ref','config_sha256'))and v.get('evidence_kind')==request.get('evidence_kind')and v.get('intent_sha256')==digest(regular(output/'intent.json')) and v.get('archive_sha256')==archive_sha and v.get('dispatched')is True and v.get('runtime_success')is False))
+        save(output/'launch.ack.json',ack)
+        terminal=dict(status='BOOT_DISPATCHED',intent_sha256=digest(regular(output/'intent.json')),launch_ack_sha256=digest(regular(output/'launch.ack.json')),runtime_success=False,update_attempted=False)
+        if is_probe:terminal['evidence_kind']='infra-probe'
+        save(output/'terminal.json',terminal);return ack
     except BaseException as error:
         for name in ('stdout','stderr'):
             partial=getattr(error,name,None)
@@ -188,7 +208,9 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
         for sig,old in old_signals.items():signal.signal(sig,old)
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--machine',required=True);p.add_argument('--app',required=True);p.add_argument('--run-token',required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--vm-size',required=True);p.add_argument('--vm-memory',required=True);p.add_argument('--ready-seconds',type=int,default=600);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--machine',required=True);p.add_argument('--app',required=True);p.add_argument('--run-token',required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--vm-size');p.add_argument('--vm-memory');p.add_argument('--ready-seconds',type=int,default=600);p.add_argument('--prepare-probe-owner',action='store_true');p.add_argument('--source-ref');a=p.parse_args()
+    if a.prepare_probe_owner:prepare_probe_owner(a.output,a.app,a.machine,a.run_token,a.source_ref or '');return
+    require(a.vm_size is not None and a.vm_memory is not None,'explicit target shape required')
     values=sys.stdin.buffer.read(32*1024*1024).split(b'\0');require(values[-1]==b'','NUL argument input');args=[v.decode()for v in values[:-1]];require(len(args)%2==0,'argument pairs');env={};files={}
     for flag,value in zip(args[::2],args[1::2]):
         key,val=value.split('=',1)
