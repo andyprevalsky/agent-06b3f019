@@ -412,6 +412,11 @@ def sealed_original_reader(originals):
 
 
 CURRENT_COLD_SCHEMA = "allocated-current-cold-v1"
+# Exact 6189 capture producer. Its sealed capsules predate separate destination
+# native reads; retain byte-bound compatibility without executing archived code.
+CURRENT_COLD_APPROVED_CAPTURE_HELPERS = frozenset({
+    "852abb705880ada9f5b6d931dd4285de3f49e2003e2ba5d479dab0e920d6b6c9",
+})
 
 
 def observe_current_cold_processes():
@@ -747,7 +752,7 @@ def validate_recorded_current_guest(value,machine,token,collector_bytes,expected
         raise ValueError('original guest collector source binding differs')
     # Exact executed/recovered pilot collector, independently approved before the
     # current host-only intake changes. Caller-provided digests add no authority.
-    approved_historical={'6ec98ff9d0e748843da1219dba61f745830c0e2212b780e3305cbeda345914c3'}
+    approved_historical={'6ec98ff9d0e748843da1219dba61f745830c0e2212b780e3305cbeda345914c3'} | CURRENT_COLD_APPROVED_CAPTURE_HELPERS
     if expected_sha not in approved_historical | {digest(Path(__file__).read_bytes())}:
         raise ValueError('original collector guest semantics lack approved source binding')
     names={'validate_current_cold_guest','capture_current_cold_guest','observe_current_cold_processes',
@@ -952,7 +957,7 @@ def verify_current_cold_receipt(registry,output,machine,token,receipt,before,aft
             or phase.get('historical_runtime')!='UNKNOWN' or phase.get('runtime_evidence_complete') is not False
             or phase.get('native_release_verified') is not False or phase.get('proof_credit')!=0 or phase.get('current_isolation_verified') is not True
             or manifest['machine_id']!=machine or manifest['run_token']!=token
-            or digest(files['capture-helper.py'])!=digest(Path(__file__).read_bytes())):
+            or digest(files['capture-helper.py']) not in CURRENT_COLD_APPROVED_CAPTURE_HELPERS | {digest(Path(__file__).read_bytes())}):
         raise ValueError('current phase custody binding differs')
     meta,original=validate_current_cold_semantics(files,registry,output,machine,token)
     validate_source_latches(phase.get('source_latches'),files)
@@ -963,7 +968,14 @@ def verify_current_cold_receipt(registry,output,machine,token,receipt,before,aft
     values=json.loads(files['run/execution-provenance.json'])['config']['values']
     if guest['dependencies']!=dict(node=values['node_dependency_fingerprint'],python=values['python_dependency_fingerprint']):
         raise ValueError('imported current image dependencies differ')
-    native=current_cold_native(machine,original,before,after,phase['archive_path'],lambda p,n=MAXIMUM: files['current/volume.json'] if p==phase['archive_path'] else reader(p,n))
+    # The receipt's native originals belong to the source seal. Destination
+    # observations never become sealed originals or fall back through its reader.
+    source_native=current_cold_native(machine,original,phase['native_before_path'],phase['native_after_path'],
+        phase['archive_path'],lambda p,n=MAXIMUM: files['current/volume.json'] if p==phase['archive_path'] else reader(p,n))
+    if any(source_native[key]!=phase.get(key) for key in source_native):
+        raise ValueError('sealed current allocated config changed')
+    native=current_cold_native(machine,original,before,after,phase['archive_path'],
+        lambda p,n=MAXIMUM: files['current/volume.json'] if p==phase['archive_path'] else read(p,n))
     if native['config_sha256']!=phase['config_sha256'] or native['instance_id']!=phase['instance_id']:
         raise ValueError('current allocated config changed')
     if originals is None:

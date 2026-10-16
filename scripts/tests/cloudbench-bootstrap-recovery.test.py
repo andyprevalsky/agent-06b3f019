@@ -2018,6 +2018,100 @@ class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
                 finally:case.doCleanups()
 
 
+
+class CurrentColdImportedNativeTests(unittest.TestCase):
+    """Sealed source custody and fresh destination observations are separate inputs."""
+    def fixture(self, legacy=False):
+        case=AllocatedCurrentColdTests('test_current_phase_source_import_and_actual_claim_preserve_unknown_history')
+        case.setUp();self.addCleanup(case.doCleanups)
+        verifier=case.helper
+        if legacy:
+            # Exact approved 6189 capture source, not a rewritten sealed capsule.
+            source=gzip.decompress((ROOT/'tests/fixtures/current-cold-capture-6189.py.gz').read_bytes())
+            self.assertEqual(digest(source),'852abb705880ada9f5b6d931dd4285de3f49e2003e2ba5d479dab0e920d6b6c9')
+            helper=case.base/'legacy/cloudbench-startup-failure-archive.py';write(helper,source)
+            write(helper.with_name('cloudbench_execution_provenance.py'),(ROOT/'cloudbench_execution_provenance.py').read_bytes())
+            case.helper=runpy.run_path(str(helper))
+        case.prepare_current()
+        case.helper['export_cold_handoff'](case.source,case.registry,case.out,MACHINE,TOKEN,case.receipt,
+            case.before,case.after,case.target,'2'*32,case.packet,source_endpoint=case.source_endpoint)
+        before=case.destination/'observations/child-before.json';after=case.destination/'observations/child-after.json'
+        write(before,case.before.read_bytes());write(after,case.after.read_bytes())
+        packet=json.loads(case.packet.read_bytes())
+        self.assertNotIn(str(before),packet['originals']);self.assertNotIn(str(after),packet['originals'])
+        return case,verifier,before,after,packet
+
+    def test_current_capsule_import_uses_distinct_destination_native_paths(self):
+        case,helper,before,after,packet=self.fixture()
+        original=case.packet.read_bytes();events=[]
+        helper['import_cold_handoff'](case.destination,case.target,case.packet,before,after,events.append)
+        self.assertEqual(events,['destination-claimed','destination-ledger','destination-audit','destination-terminal'])
+        self.assertEqual(case.packet.read_bytes(),original)
+        self.assertEqual((case.destination/'cloudbench-pools'/case.target['pool_name']).read_text(),MACHINE+'\n')
+        self.assertFalse((case.destination/'cloudbench-pool-claims'/MACHINE).exists())
+
+    def test_6189_capsule_import_preserves_approved_original_helper(self):
+        case,helper,before,after,packet=self.fixture(legacy=True)
+        original=case.packet.read_bytes()
+        helper['import_cold_handoff'](case.destination,case.target,case.packet,before,after)
+        self.assertEqual(case.packet.read_bytes(),original)
+        self.assertEqual(helper['sealed_original_reader'](packet['originals'])(case.receipt),case.receipt.read_bytes())
+        with patch.dict(os.environ,FLY_MACHINE_ID=case.target['machine']):
+            helper['verify_imported_pool_proof'](case.destination/'cloudbench-pool-reuse'/(MACHINE+'.json'),
+                case.destination,before,after,case.target['source_ref'],native_volume=json.loads(case.volume.read_bytes()))
+
+    def test_source_seal_missing_native_never_falls_back_to_local_file(self):
+        case,helper,before,after,packet=self.fixture()
+        del packet['originals'][str(case.before)]
+        # The source file still exists locally; the seal must remain authoritative.
+        self.assertTrue(case.before.exists())
+        with self.assertRaises(KeyError) as error:
+            helper['verify_imported_cold_handoff'](packet,case.target,before,after)
+        self.assertEqual(error.exception.args,(str(case.before),))
+        self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+    def test_source_native_bytes_remain_bound_to_original_receipt(self):
+        case,helper,before,after,packet=self.fixture()
+        for path in (case.before,case.after):
+            value=json.loads(base64.b64decode(packet['originals'][str(path)]['data']))
+            value['unrecorded_native_field']='changed'
+            raw=json.dumps(value).encode()
+            packet['originals'][str(path)]={'bytes':len(raw),'sha256':digest(raw),'data':base64.b64encode(raw).decode()}
+        with self.assertRaisesRegex(ValueError,'sealed current allocated config changed'):
+            helper['verify_imported_cold_handoff'](packet,case.target,before,after)
+        self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+    def test_fresh_native_drift_refuses_before_any_destination_claim(self):
+        case,helper,before,after,packet=self.fixture(legacy=True)
+        for field in ('instance_id','config'):
+            changed=copy.deepcopy(case.native)
+            if field=='config':changed['config']['guest']['memory_mb']=8192
+            else:changed[field]='different-instance'
+            write(before,json.dumps(changed));write(after,json.dumps(changed))
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                helper['import_cold_handoff'](case.destination,case.target,case.packet,before,after)
+            self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+    def test_unapproved_source_helper_still_refuses(self):
+        case,helper,before,after,packet=self.fixture(legacy=True)
+        # Repack a self-consistent archive with an unapproved helper, keeping the
+        # packet hash references valid so rejection tests the source trust boundary.
+        phase_path=str(case.receipt);archive_path=str(case.archive)
+        _,files,manifest=helper['read_current_cold_archive'](case.archive)
+        files['capture-helper.py']+=b'\n# unapproved source change\n'
+        manifest['files']['capture-helper.py']={'bytes':len(files['capture-helper.py']),'sha256':digest(files['capture-helper.py'])}
+        stream=io.BytesIO()
+        with tarfile.open(fileobj=stream,mode='w:gz') as archive:
+            for name,raw in {**files,'capture-manifest.json':json.dumps(manifest,sort_keys=True).encode()}.items():
+                info=tarfile.TarInfo(name);info.size=len(raw);info.mode=0o600;archive.addfile(info,io.BytesIO(raw))
+        raw=stream.getvalue();packet['originals'][archive_path]={'bytes':len(raw),'sha256':digest(raw),'data':base64.b64encode(raw).decode()}
+        phase=json.loads(base64.b64decode(packet['originals'][phase_path]['data']));phase['archive_sha256']=digest(raw)
+        raw=json.dumps(phase).encode();packet['originals'][phase_path]={'bytes':len(raw),'sha256':digest(raw),'data':base64.b64encode(raw).decode()};packet['phase_sha256']=digest(raw)
+        with self.assertRaisesRegex(ValueError,'current phase custody binding differs'):
+            helper['verify_imported_cold_handoff'](packet,case.target,before,after)
+        self.assertFalse((case.destination/'cloudbench-pool-claims').exists())
+
+
 class CrossControllerColdHandoffTests(PreconfigStartupArchiveTests):
     def setUp(self):
         super().setUp()
