@@ -455,7 +455,7 @@ class AuthAssistanceAssessment(BaseModel):
         description="Previously attempted recipients, including an address/phone from the task rather than Auth Options. Cite actual input and result action_step receipts; these past observations do not authorize another identity."
     )
     recipient_options: List[AuthRecipientAssessment] = Field(
-        description="For automated_options_exhausted, assess EACH supplied email/phone separately. One recipient failure does not exhaust a method. Mark other accounts not_applicable when the goal names an account or the current verification cannot switch identities. Mark unreadable/unknown channels unavailable rather than assuming delivery. User-only verification and account lockout may use an empty list."
+        description="For EVERY blocker, assess EACH supplied email/phone separately; use an empty list only when none are supplied. One recipient failure does not exhaust a method. Mark alternatives not_applicable for explicit task/account restrictions or an observed accepted challenge that cannot switch identities, including user-only verification or lockout. Distinguish these from profile-derived account assumptions: unknown registration is not observed rejection. Mark unreadable/unknown channels unavailable rather than assuming delivery. Accounting does not authorize switching identities."
     )
 
 

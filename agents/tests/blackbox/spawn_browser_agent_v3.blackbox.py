@@ -21659,7 +21659,14 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     async def model_step(**kwargs):
         model_contexts.append(copy.deepcopy(kwargs))
         action = "read_browser_state" if len(model_contexts) == 1 else "request_user_assistance_for_authentication"
-        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": _scripted_handoff_assessment("admin.google.com", "https://admin.google.com/ac/users/fixture", user_only=True, reason="The fixture page explicitly asks for approval in the account authenticator app on another device") if action == "request_user_assistance_for_authentication" else {}},
+        params = {}
+        if action == "request_user_assistance_for_authentication":
+            params = _scripted_handoff_assessment("admin.google.com", "https://admin.google.com/ac/users/fixture", user_only=True, reason="The fixture page explicitly asks for approval in the account authenticator app on another device")
+            params["auth_assessment"]["recipient_options"] = [{
+                "method": "email_otp", "recipient": "fixture@workspace.example", "status": "not_applicable",
+                "evidence": "The accepted account challenge requires approval on another device, not an email code.",
+            }]
+        return {"action": {"action": action, "thinking": "Google sign-in blocks admin access", "params": params},
                 "usage": {}, "mode": "waterfall"}
 
     handler = "domains.spawn_browser_agent_v3.handler."

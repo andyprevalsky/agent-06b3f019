@@ -17,6 +17,34 @@ def handoff(a):
 
 async def assert_auth_assessment_controls(owning_fixture):
     observations = []
+    # Every blocker uses the same inventory-accounting boundary. A label alone
+    # cannot make supplied recipients disappear; no alternate action is forced.
+    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result as uniform_check
+    for blocker in ("automated_options_exhausted", "user_only_verification", "account_locked"):
+        missing_rows = assessment(phone="unavailable", blocker=blocker)
+        missing_rows["recipient_options"] = []
+        rejected = uniform_check(missing_rows, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[])
+        corrected = assessment(phone="unavailable", blocker=blocker, reason="Current named account requires user action; no permitted readable channel remains.")
+        r = {"inventory": deepcopy(INVENTORY), "actions": [handoff(missing_rows), handoff(corrected)]}
+        with _offline_activity_edges():
+            await owning_fixture("empty", auth_review=r)
+        assert len(r["contexts"]) == 2
+        assert rejected and rejected["error"] == "authentication_assessment_incomplete", "blocker must not bypass supplied-recipient accounting"
+        assert "authentication_assessment_incomplete" in str(r["contexts"][1]["turn_messages"])
+        assert not r.get("executed"), "accounting must not submit an alternate identity"
+        assert r["result"]["auth_assessment"] == corrected
+        # Exceptional blocker labels also retain the existing binding controls.
+        for mutate in (lambda a: a["recipient_options"].append(deepcopy(a["recipient_options"][0])),
+                       lambda a: a["recipient_options"][0].update(recipient="foreign@example.test"),
+                       lambda a: a["recipient_options"][1].update(status="exhausted", evidence_steps=[999])):
+            invalid = deepcopy(corrected)
+            mutate(invalid)
+            assert uniform_check(invalid, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[])["error"] == "authentication_assessment_incomplete"
+        # A genuinely empty inventory still permits an empty disposition list.
+        assert uniform_check(missing_rows, auth_options={}, auth_realm="shop.example", current_url=URL, action_history=[]) is None
+        remaining = assessment(phone="remaining", blocker=blocker)
+        assert uniform_check(remaining, auth_options=INVENTORY, auth_realm="shop.example", current_url=URL, action_history=[])["error"] == "authentication_options_remaining"
+        observations.append({"case": "uniform_accounting_" + blocker, "decisions": 2, "inputs": 0})
     # The old real activity pauses immediately at the first declaration, even
     # though that same declaration says an applicable supplied operation remains.
     before_other_recipient = assessment(phone="remaining")
@@ -45,8 +73,8 @@ async def assert_auth_assessment_controls(owning_fixture):
     for a in [
         assessment(phone="not_applicable", reason="The actual goal names a different account; these recipients cannot satisfy it."),
         assessment(phone="unavailable", reason="No permitted readable channel is established for this recipient."),
-        assessment(phone="remaining", blocker="account_locked", reason="The current named account is locked."),
-        assessment(phone="remaining", blocker="user_only_verification", reason="Password was accepted; approve on the separate device."),
+        assessment(phone="not_applicable", blocker="account_locked", reason="The current named account is locked."),
+        assessment(phone="not_applicable", blocker="user_only_verification", reason="Password was accepted; approve on the separate device."),
     ]:
         r = {"inventory": deepcopy(INVENTORY), "goal": ("Read the member number for named@example.test only" if a["recipient_options"][1]["status"] == "not_applicable" else "Read my member number"), "actions": [handoff(a)]}
         with _offline_activity_edges():

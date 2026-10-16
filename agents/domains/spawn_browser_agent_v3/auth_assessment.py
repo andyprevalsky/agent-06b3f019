@@ -79,10 +79,10 @@ def auth_assistance_assessment_result(
         if not _recipient_receipts_bound(attempt.get("recipient"), steps, entries_by_step):
             return incomplete("A past recipient lacks its cited input and later observation receipts.")
     blocker = assessment.get("blocker")
-    # Never require trying another identity during an accepted/user-only step.
-    if blocker in {"user_only_verification", "account_locked"}:
-        return None
-    if blocker != "automated_options_exhausted":
+    # All blockers account for the same supplied inventory. A restricted or
+    # accepted challenge can make alternatives not_applicable/unavailable; it
+    # does not remove them from the assessment or authorize switching accounts.
+    if blocker not in {"automated_options_exhausted", "user_only_verification", "account_locked"}:
         return incomplete("The assessment has no recognized authentication blocker.")
     rows = assessment.get("recipient_options")
     if not isinstance(rows, list):
