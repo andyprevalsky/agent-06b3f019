@@ -13658,13 +13658,21 @@ cleanup() {
     # per-machine inventory polling added N teardown latency after an otherwise
     # perfectly parallel batch. Keep every global lease until a shared inventory
     # read proves its machine stopped (or absent).
-    if { [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; } \
+    if { [ "$guest_shutdown_failed" = "1" ] || [ "$billing_owned_joins" != "1" ]; } \
         && [ -s "$CLAIMED_POOL_FILE" ]; then
-        echo "⚠️  retaining claimed pool machines and ownership claims: guest cleanup or runtime evidence is unconfirmed" >&2
+        echo "⚠️  retaining claimed pool machines and ownership claims: guest cleanup or owned process joins are unconfirmed" >&2
     elif [ -s "$CLAIMED_POOL_FILE" ]; then
         while read -r id; do
             [ -n "$id" ] || continue
-            if grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null; then
+            claim_path="$POOL_CLAIMS_DIR/$id"
+            if ! pool_claim_owned_by_current "$claim_path"; then
+                echo "❌ claimed pool machine $id lost exact ownership; retaining it untouched" >&2
+                ec=1
+                teardown_failed=1
+                continue
+            fi
+            if [ "$runtime_evidence_failed" = "0" ] \
+                && grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null; then
                 echo "☣️  destroying quarantined pool machine $id instead of returning it"
                 claim_path="$POOL_CLAIMS_DIR/$id"
                 claim_digest="$(cloudbench_env_sha256 "$claim_path")" || {
@@ -13776,6 +13784,12 @@ cleanup() {
                     | machine_volume_id_from_json "$id" 2>/dev/null)" = "$pool_volume_id" ] \
                 && [ -n "$claim_digest" ] \
                 && pool_claim_owned_by_current "$claim_path"; then
+                if [ "$runtime_evidence_failed" = "1" ]; then
+                    # Guest shutdown and producer joins were positively confirmed.
+                    # Preserve the evidence latch, claim and data while ending compute.
+                    echo "↩️  claimed pool machine $id verified stopped; retaining claim for missing runtime evidence" >&2
+                    continue
+                fi
                 if fleet_audit_record_pool_machine "$id" "$pool_volume_id" \
                     returned-stopped-claim-released \
                     && pool_claim_release_exact "$claim_path" "$claim_digest" \

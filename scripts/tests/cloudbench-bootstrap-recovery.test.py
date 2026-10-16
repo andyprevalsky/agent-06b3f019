@@ -3133,5 +3133,71 @@ class BillingStopRetainTests(unittest.TestCase):
         self.assertEqual(guest_limits,[1],'integer guest timeout must fit remaining original clock')
 
 
+class ClaimedPoolRetainedEvidenceStopTests(unittest.TestCase):
+    """A missing evidence copy retains custody, not a verified idle VM's CPU."""
+    def branch(self, *, runtime_failed=1, guest_failed=0, joins=1, never_stopped=False, tainted=False, owned=True):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        start=source.index('    # Return only machines this fleet actually claimed.')
+        stop=source.index('    # Claims are independent recovery roots',start)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'claims').mkdir();(root/'claims/machine').write_text('exact claim')
+            (root/'claimed').write_text('machine\n');(root/'tainted').write_text('machine\n' if tainted else '')
+            script=r'''
+set -u
+CLAIMED_POOL_FILE="$ROOT/claimed";POOL_CLAIMS_DIR="$ROOT/claims";TAINTED_POOL_FILE="$ROOT/tainted"
+FLEET_TEARDOWN_OWNERSHIP_DIR="$ROOT/audit";APP=offline;FLEET_OWNER_TOKEN=owner;FLEET_OWNER_HOST=host;FLEET_OWNER_PID_START=birth
+CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS=1;CLOUDBENCH_POOL_STOP_ATTEMPTS=3
+sleep(){ :; }
+fly_with_timeout(){ echo stop >> "$ROOT/stops"; return 0; }
+FLY(){
+ count=0;[ ! -f "$ROOT/reads" ] || count=$(cat "$ROOT/reads");count=$((count+1));echo "$count" > "$ROOT/reads"
+ state=stopping;[ "$count" -lt 2 ] || state=stopped;[ "$NEVER" = 0 ] || state=started
+ printf '{"state":"%s"}\n' "$state"
+}
+pool_machine_state_from_json(){ python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])'; }
+machine_volume_id_from_json(){ cat >/dev/null; echo volume; }
+registry_meta_value(){ echo volume; }
+cloudbench_env_sha256(){ echo digest; }
+pool_claim_owned_by_current(){ [ "$OWNED" = 1 ]; }
+fleet_audit_record_pool_machine(){ echo released >> "$ROOT/audit-release"; }
+pool_claim_release_exact(){ rm "$ROOT/claims/machine"; }
+reap_machine(){ echo destroyed > "$ROOT/destroyed";return 0; }
+pool_ledger_remove_id(){ :; }
+run(){
+ local ec=1 teardown_failed=1 guest_shutdown_failed="$GUEST" runtime_evidence_failed="$RUNTIME" billing_owned_joins="$JOINS"
+ local id i out claim_path st presence machines round stop_pid pool_volume_id claim_digest machine_reap_status
+ local -a claimed_pool_ids=() pending_pool_ids=() next_pending_pool_ids=() stop_pids=() CHILD_MACHINE=() CHILD_OUT=()
+''' + source[start:stop] + '\n echo "$ec" > "$ROOT/ec"\n}\nrun\n'
+            result=subprocess.run(['bash','-c',script],env={**os.environ,'ROOT':str(root),'RUNTIME':str(runtime_failed),'GUEST':str(guest_failed),'JOINS':str(joins),'NEVER':str(int(never_stopped)),'OWNED':str(int(owned))},capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return {'stops':(root/'stops').read_text().splitlines() if (root/'stops').exists() else [],'reads':int((root/'reads').read_text()) if (root/'reads').exists() else 0,'claim':(root/'claims/machine').exists(),'release':(root/'audit-release').exists(),'destroyed':(root/'destroyed').exists(),'stdout':result.stdout,'stderr':result.stderr}
+
+    def test_missing_runtime_copy_stops_and_confirms_but_retains_claim(self):
+        row=self.branch()
+        self.assertTrue(row['stops'],'idle claimed VM must be stopped even when evidence copy failed')
+        self.assertGreaterEqual(row['reads'],2,'STOP ACK is not a stopped-state observation')
+        self.assertTrue(row['claim']);self.assertFalse(row['release'])
+
+    def test_unconfirmed_guest_or_owned_join_never_stops(self):
+        for flags in ({'guest_failed':1},{'joins':0},{'joins':0,'runtime_failed':0}):
+            with self.subTest(flags=flags):self.assertFalse(self.branch(**flags)['stops'])
+
+    def test_stop_ack_without_stopped_keeps_claim_and_reports_failure(self):
+        row=self.branch(never_stopped=True)
+        self.assertTrue(row['stops']);self.assertTrue(row['claim']);self.assertFalse(row['release'])
+        self.assertIn('did not verify stopped',row['stderr'])
+
+    def test_missing_evidence_tainted_claim_is_stopped_without_destroy(self):
+        row=self.branch(tainted=True)
+        self.assertTrue(row['stops']);self.assertFalse(row['destroyed']);self.assertTrue(row['claim'])
+
+    def test_confirmed_normal_return_still_releases_claim(self):
+        row=self.branch(runtime_failed=0)
+        self.assertTrue(row['stops']);self.assertFalse(row['claim']);self.assertTrue(row['release'])
+
+    def test_foreign_claim_never_stops(self):
+        row=self.branch(owned=False)
+        self.assertFalse(row['stops']);self.assertTrue(row['claim'])
+
 if __name__ == "__main__":
     unittest.main()
