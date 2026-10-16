@@ -11418,9 +11418,12 @@ PYBASE
 current_registry_primaries_to_pool_plan() {  # <joined> <guest-failed> <runtime-failed>; read-only exact live owner plan
     local registry="$FLEET_REGISTRY_DIR" meta="$FLEET_REGISTRY_DIR/meta"
     local node_fp py_fp
-    [ "$1:$2:$3" = "1:0:0" ] && [ "${KEEP_CLONES:-0}" = 0 ] \
-        && [ "${FLEET_EXECUTION_COMPLETED:-0}" = 1 ] \
-        && [ "${POOL_COLD_BOOTSTRAP:-0}" = 0 ] || return 1
+    [ "$1:$2:$3" = "1:0:0" ] && [ "${KEEP_CLONES:-0}" = 0 ] || return 1
+    case "${POOL_COLD_BOOTSTRAP:-0}" in
+        0) [ "${FLEET_EXECUTION_COMPLETED:-0}" = 1 ] || return 1 ;;
+        1) ;;  # An empty cold cohort is a verified no-op, never a fresh transfer.
+        *) return 1 ;;
+    esac
     [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] || return 1
     [ "$(registry_meta_value "$meta" fleet_owner_token)" = "$FLEET_OWNER_TOKEN" ] \
         && [ "$(registry_meta_value "$meta" host)" = "$FLEET_OWNER_HOST" ] \
@@ -11432,6 +11435,46 @@ current_registry_primaries_to_pool_plan() {  # <joined> <guest-failed> <runtime-
     [ ! -e "$registry/recovery-lock" ] && [ ! -L "$registry/recovery-lock" ] || return 1
     [ "$(fleet_registry_cleanup_state "$registry" "$(registry_meta_value "$meta" cleanup_policy)")" = reap ] || return 1
     fleet_validate_reap_cohort "$registry" || return 1
+    if [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        python3 - "$registry" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$POOL_CLAIMS_DIR" "${CLAIMED_POOL_FILE:-}" <<'PYEMPTY' || return 1
+import os, re, stat, sys
+from pathlib import Path
+registry, audit, claims = map(Path, sys.argv[1:4])
+def plain(path):
+    assert path.resolve(strict=True) == path and stat.S_ISREG(path.lstat().st_mode)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_size <= 1048576
+        raw = stream.read(1048577)
+    assert len(raw) <= 1048576
+    return raw.decode()
+def fields(path):
+    rows = [line.split('=', 1) for line in plain(path).splitlines()]
+    assert all(len(row) == 2 for row in rows) and len(dict(rows)) == len(rows)
+    return dict(rows)
+meta = fields(registry / 'meta')
+for path in (registry / 'clones', audit / 'fresh', audit / 'expected-fresh', audit / 'by-machine-id'):
+    assert path.resolve(strict=True) == path and path.is_dir() and not list(path.iterdir())
+for name in ('owned-clones.ids', 'owned-clones.names'):
+    assert plain(audit / name) == ''
+pool = audit / 'pool'
+assert pool.resolve(strict=True) == pool and pool.is_dir()
+for path in pool.iterdir():
+    row = fields(path); mid = row.get('machine_id', '')
+    assert set(row) == {'version', 'fleet_owner_token', 'run_id', 'app', 'source', 'machine_id', 'volume_id', 'pool_ledger_file', 'pool_meta_file', 'pool_meta_sha256', 'disposition'}
+    assert row['version'] == '1' and re.fullmatch('vol_[A-Za-z0-9_-]+', row['volume_id'])
+    assert re.fullmatch('[0-9a-f]+', mid) and path.name == mid
+    assert all(row.get(k) == meta.get(k) for k in ('fleet_owner_token', 'app', 'run_id'))
+    assert row.get('source') == 'borrowed-pool' and row.get('disposition') == 'returned-stopped-claim-released'
+    assert not os.path.lexists(claims / mid)
+if sys.argv[4]:
+    ledger = Path(sys.argv[4])
+    assert ledger == Path(meta['runs_root']) / meta['run_id'] / 'claimed-pool.ids'
+    if os.path.lexists(ledger):
+        for mid in plain(ledger).splitlines():
+            assert re.fullmatch('[0-9a-f]+', mid) and not os.path.lexists(claims / mid)
+PYEMPTY
+    fi
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
     pool_recovery_primary_plan "$registry" "$node_fp" "$py_fp" current

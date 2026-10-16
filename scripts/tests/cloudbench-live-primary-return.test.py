@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Local control-flow tests for current-owner return; native proof stays canonical."""
 import os
+import json
+import runpy
 from pathlib import Path
 import re
 import subprocess
@@ -11,7 +13,7 @@ SOURCE = Path(__file__).resolve().parents[1] / 'run-bench-fleet'
 
 
 def function(name):
-    match = re.search(r'^' + name + r'\(\).*?^}\n', SOURCE.read_text(), re.M | re.S)
+    match = re.search(r'^' + name + r'\(\).*?^}\n', Path(os.environ.get('LIVE_RETURN_SOURCE',str(SOURCE))).read_text(), re.M | re.S)
     assert match, name
     return match.group()
 
@@ -98,8 +100,8 @@ transfer_owned_stopped_machine_to_pool() {
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(actions, [])
 
-    def test_retained_incomplete_or_cold_run_refuses(self):
-        for change in ('KEEP_CLONES=1', 'FLEET_EXECUTION_COMPLETED=0', 'POOL_COLD_BOOTSTRAP=1'):
+    def test_retained_or_incomplete_run_refuses(self):
+        for change in ('KEEP_CLONES=1', 'FLEET_EXECUTION_COMPLETED=0'):
             with self.subTest(change=change):
                 result, actions = self.run_case(change)
                 self.assertNotEqual(result.returncode, 0)
@@ -159,6 +161,77 @@ class ActualPrimaryPlan(unittest.TestCase):
     def test_current_clone_missing_runtime_still_refuses(self):
         self.assertNotEqual(self.run_plan('current', 'clone').returncode, 0)
 
+
+
+class ColdEmptyReturn(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        self.owner='a'*32;self.registry=self.root/self.owner;self.audit=self.root/'audits'/self.owner;self.run=self.root/'.context/runs/run';self.claims=self.root/'claims'
+        for p in (self.registry/'clones',self.audit/'fresh',self.audit/'expected-fresh',self.audit/'by-machine-id',self.audit/'pool',self.run/'task',self.claims):p.mkdir(parents=True,exist_ok=True)
+        for n in ('owned-clones.ids','owned-clones.names'):(self.audit/n).write_text('')
+        self.fields(self.audit/'meta',dict(fleet_owner_token=self.owner,app='app'))
+        self.fields(self.audit/'pool/abcd',dict(version='1',fleet_owner_token=self.owner,app='app',run_id='run',source='borrowed-pool',machine_id='abcd',volume_id='vol_fixture',pool_ledger_file=str(self.root/'pool.ids'),pool_meta_file=str(self.root/'pool.ids.deps'),pool_meta_sha256='d'*64,disposition='returned-stopped-claim-released'))
+        (self.run/'task/.cid').write_text('pool abcd\n');(self.run/'claimed-pool.ids').write_text('abcd\n')
+        c=runpy.run_path(str(SOURCE.with_name('cloudbench_execution_provenance.py')));matrix=c['build_task_matrix'](['task=real']);cfg=c['build_config'](c['CONFIG_SCHEMA_VERSION'],['task_count=1','task_matrix_sha256='+matrix['sha256'],'app=app','node_dependency_fingerprint='+'a'*64,'python_dependency_fingerprint='+'b'*64,'volume_snapshot_id=snap'])
+        self.prov=dict(schema_version=c['EXECUTION_SCHEMA_VERSION'],base_sha='c'*40,workspace_patch_sha256='none',controller_snapshot=dict(schema_version=c['SNAPSHOT_SCHEMA_VERSION'],sha256='f'*64),config=cfg)
+        (self.run/'execution-provenance.json').write_text(json.dumps(self.prov));(self.run/'execution-task-matrix.json').write_text(json.dumps(matrix))
+    def fields(self,path,row):path.write_text(''.join(k+'='+v+'\n'for k,v in row.items()))
+    def invoke(self,changes=''):
+        shell=r'''set -e
+FLEET_REGISTRY_DIR="$CASE_DIR/$OWNER";FLEET_TEARDOWN_OWNERSHIP_DIR="$CASE_DIR/audits/$OWNER";FLEET_AUDIT_ROOT="$CASE_DIR/audits";ROOT_DIR="$CASE_DIR"
+FLEET_OWNER_TOKEN="$OWNER";FLEET_OWNER_HOST=host;FLEET_OWNER_PID_START=birth;RUN_ID=run;APP=app
+POOL_CLAIMS_DIR="$CASE_DIR/claims";CLAIMED_POOL_FILE="$CASE_DIR/.context/runs/run/claimed-pool.ids"
+FLEET_REGISTRY_PUBLISHED=1;FLEET_EXECUTION_COMPLETED=1;KEEP_CLONES=0;POOL_COLD_BOOTSTRAP=1
+CLOUDBENCH_SCRIPT_SNAPSHOT="$SCRIPTS";CLOUDBENCH_PYTHON_MANIFESTS=()
+cat > "$FLEET_REGISTRY_DIR/meta" <<EOF
+version=2
+fleet_owner_token=$OWNER
+app=app
+host=host
+pid=$$
+pid_start=birth
+run_id=run
+workspace_root=$CASE_DIR
+runs_root=$CASE_DIR/.context/runs
+audit_dir=$CASE_DIR/audits/$OWNER
+cleanup_policy=reap
+EOF
+registry_meta_value(){ sed -n "s/^$2=//p" "$1"; }
+registry_owner_alive(){ return 0; }
+cloudbench_node_dependency_fingerprint(){ printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; }
+cloudbench_manifest_fingerprint(){ printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'; }
+registry_machine_details(){ echo native >> "$CASE_DIR/events";return 1; }
+pool_source_image_digest(){ echo image >> "$CASE_DIR/events";return 1; }
+'''
+        for name in ('fleet_registry_cleanup_state','fleet_validate_reap_cohort','pool_recovery_primary_plan','current_registry_primaries_to_pool_plan','return_current_registry_primaries_to_pool','stop_current_registry_primaries_for_pool'):shell+='\n'+function(name)
+        shell+='\n'+changes+'\nstop_current_registry_primaries_for_pool 1 0 0\nreturn_current_registry_primaries_to_pool 1 0 0\n'
+        result=subprocess.run(['bash','-c',shell],env=dict(os.environ,CASE_DIR=str(self.root),OWNER=self.owner,SCRIPTS=str(SOURCE.parent)),capture_output=True,text=True)
+        self.assertFalse((self.root/'events').exists(),'empty cohort must not read/stop/transfer native resources');return result
+    def test_returned_borrowed_cold_cohort_is_noop(self):
+        r=self.invoke();self.assertEqual(r.returncode,0,r.stderr)
+    def test_aborted_parent_without_any_claim_or_task_is_noop(self):
+        (self.audit/'pool/abcd').unlink();(self.run/'task/.cid').unlink();(self.run/'claimed-pool.ids').unlink()
+        r=self.invoke('FLEET_EXECUTION_COMPLETED=0');self.assertEqual(r.returncode,0,r.stderr)
+    def test_unfinished_borrowed_audit_refuses(self):
+        p=self.audit/'pool/abcd';p.write_text(p.read_text().replace('returned-stopped-claim-released','claimed'))
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_shared_claim_or_unmapped_claimed_id_refuses(self):
+        (self.claims/'abcd').write_text('owned claim');self.assertNotEqual(self.invoke().returncode,0)
+        (self.claims/'abcd').unlink();(self.claims/'orphan').write_text('owned claim');(self.run/'claimed-pool.ids').write_text('orphan\n');self.assertNotEqual(self.invoke().returncode,0)
+    def test_any_fresh_ownership_refuses(self):
+        for p in (self.registry/'clones/x',self.audit/'fresh/x',self.audit/'expected-fresh/x',self.audit/'by-machine-id/x',self.audit/'owned-clones.ids'):
+            old=p.read_bytes()if p.exists()else None;p.write_text('unexpected')
+            self.assertNotEqual(self.invoke().returncode,0)
+            if old is None:p.unlink()
+            else:p.write_bytes(old)
+    def test_wrong_live_owner_and_unjoined_refuse(self):
+        for changes in ('FLEET_OWNER_PID_START=wrong','KEEP_CLONES=1'):
+            self.assertNotEqual(self.invoke(changes).returncode,0)
+    def test_dependency_contract_still_required(self):
+        self.prov['config']['values']['node_dependency_fingerprint']='0'*64;(self.run/'execution-provenance.json').write_text(json.dumps(self.prov))
+        self.assertNotEqual(self.invoke().returncode,0)
+    def test_unrecorded_clone_cid_cannot_be_treated_as_empty(self):
+        (self.run/'task/.cid').write_text('clone abcd\n');self.assertNotEqual(self.invoke().returncode,0)
 
 if __name__ == '__main__':
     unittest.main()
