@@ -2021,6 +2021,10 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0
     [ -n "$vol" ] || return 0
+    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        echo "❌ reuse-only retains Volume identity; refusing destroy of $vol" >&2
+        return 1
+    fi
     if [ -n "${GIT_COMMON_DIR:-}" ] && { [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$vol" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$vol" ]; }; then
         echo "❌ permanent outgoing handoff retains this source allocation" >&2; return 1
     fi
@@ -6590,6 +6594,12 @@ if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or
 reconcile_stale_fleet_registries() {
     FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=0
     export -n FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED 2>/dev/null || true
+    if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
+        # A new reuse run owns no historical registry. Keep old records and
+        # resources intact; per-Machine claims and inventory still gate reuse.
+        echo "↪️  reuse-only leaves historical fleet registries untouched"
+        return 0
+    fi
     local registry meta version app policy cleanup_state host owner_status recovery_lock_status unresolved=0
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
     for registry in "$FLEET_OWNERSHIP_ROOT"/*; do

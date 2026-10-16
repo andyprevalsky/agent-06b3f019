@@ -3567,6 +3567,70 @@ printf '%s %s %s\n' "$result" "$calls" "$sleeps"
         result,stderr,log=self.run_update('Error: 429 Too Many Requests')
         self.assertEqual(result,(0,2,1));self.assertNotIn('Machine limit',stderr)
 
+class ReuseOnlyVolumeGuardTests(unittest.TestCase):
+    def run_recovery(self,reuse):
+        source=(REPO/'scripts/run-bench-fleet').read_text()
+        def function(name):
+            start=source.index(name+'() {');end=source.index('\n}\n',start)+3
+            return source[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);claim=root/'abcdef12345678';ledger=root/'pool.ids';ledger.write_text('abcdef12345678\n');(root/'pool.ids.deps').write_text('baseline')
+            claim.write_text('fleet_owner_token=owner\nhost=host\npid=123\npid_start=birth\nvolume_id=vol_retained\npool_ledger_file='+str(ledger)+'\npool_meta_sha256=baseline\n')
+            script=function('reap_volume')+'\n'+function('recover_one_exact_pool_claim')+'''
+registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
+cloudbench_env_sha256() { if [ "$1" = "$LEDGER.deps" ]; then printf baseline; else printf claimdigest; fi; }
+fleet_audit_update_recovered_pool_machine() { return 0; }
+pool_machine_state() { return 1; }
+FLY() { printf '%s\n' "$*" >> "$CALLS"; }
+volume_inventory_contains_id() { return 1; }
+pool_ledger_remove_id_from() { printf removed >> "$MUTATIONS"; }
+pool_claim_release_exact() { printf released >> "$MUTATIONS"; }
+recover_one_exact_pool_claim "$CLAIM" owner host 123 birth
+rc=$?
+printf 'rc=%s\n' "$rc"
+'''
+            env={**os.environ,'POOL_REUSE_ONLY':str(reuse),'GIT_COMMON_DIR':td,'FLEET_AUDIT_ROOT':td,'LEDGER':str(ledger),'CLAIM':str(claim),'CALLS':str(root/'calls'),'MUTATIONS':str(root/'mutations')}
+            result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return result,(root/'calls').read_text() if (root/'calls').exists() else '',(root/'mutations').read_text() if (root/'mutations').exists() else '',ledger.read_text(),claim.read_text()
+
+    def test_absent_machine_recovery_retains_volume_claim_and_ledger_in_reuse_mode(self):
+        result,calls,mutations,ledger,claim=self.run_recovery(1)
+        self.assertIn('rc=1',result.stdout);self.assertEqual(calls,'');self.assertEqual(mutations,'')
+        self.assertEqual(ledger,'abcdef12345678\n');self.assertIn('vol_retained',claim)
+        self.assertIn('refusing destroy',result.stderr)
+
+    def test_explicit_nonreuse_recovery_retains_existing_destroy_contract(self):
+        result,calls,mutations,ledger,claim=self.run_recovery(0)
+        self.assertIn('rc=0',result.stdout);self.assertIn('volumes destroy vol_retained',calls)
+        self.assertIn('removed',mutations);self.assertIn('released',mutations)
+
+    def test_direct_reuse_volume_destroy_refuses_before_provider(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text();start=source.index('reap_volume() {');end=source.index('\n}\n',start)+3
+        script='POOL_REUSE_ONLY=1; FLY(){ echo FORBIDDEN; };\n'+source[start:end]+'\nreap_volume vol_retained\n'
+        result=subprocess.run(['bash','-c',script],capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0);self.assertNotIn('FORBIDDEN',result.stdout)
+
+
+    def test_normal_reuse_stale_scan_preserves_all_historical_records(self):
+        source=(REPO/'scripts/run-bench-fleet').read_text();start=source.index('reconcile_stale_fleet_registries() {');end=source.index('\n}\n',start)+3
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);old=root/'old';old.mkdir();meta=old/'meta';meta.write_text('version=2\napp=app\ncleanup_policy=reap\nhost=host\n')
+            before=(meta.stat().st_ino,meta.read_bytes())
+            script=source[start:end]+"""
+registry_meta_value() { sed -n "s/^$2=//p" "$1"; }
+fleet_registry_cleanup_state() { printf reap; }
+registry_owner_alive() { return 1; }
+release_cleanup_disk_reserve() { echo FORBIDDEN; return 1; }
+reconcile_stale_fleet_registries
+rc=$?
+printf 'rc=%s mutated=%s\n' "$rc" "$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED"
+"""
+            env={**os.environ,'POOL_REUSE_ONLY':'1','FLEET_OWNERSHIP_ROOT':td,'FLEET_REGISTRY_DIR':str(root/'current'),'FLEET_OWNER_HOST':'host','APP':'app'}
+            result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertNotIn('FORBIDDEN',result.stdout)
+            self.assertIn('rc=0 mutated=0',result.stdout);self.assertEqual((meta.stat().st_ino,meta.read_bytes()),before)
+
 
 if __name__ == "__main__":
     unittest.main()
