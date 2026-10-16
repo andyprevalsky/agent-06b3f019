@@ -41,6 +41,9 @@ def http(request, timeout):
             and failure.exists() and int(failure.read_text()) > 0):
         failure.write_text(str(int(failure.read_text()) - 1))
         raise URLError('fixture metadata failure after native rolling deploy')
+    if (action == 'reuse' and request.method == 'POST'
+            and request.full_url.endswith('/' + os.environ.get('FAKE_FLY_POOL_FAIL_ID', 'never'))):
+        raise URLError('fixture retained update refused')
     try:
         result = native(request, timeout)
         if request.method == 'POST' and request.full_url.endswith('/' + native.machine['id']):
@@ -100,6 +103,7 @@ def save():
     path.write_text(json.dumps(machines))
 
 if args[0] == 'deploy':
+    journal.write_text(journal.read_text() + ('local-build\n' if '--local-only' in args else 'remote-build\n'))
     if '--build-only' not in args:
         # Model the native selection contract: an unscoped app deploy also
         # updates stopped Machines; explicit IDs limit its target set.
@@ -232,6 +236,7 @@ run_cutover() {
     FAKE_FLY_START_REFUSALS="$TMP/start-refusals" \
     FAKE_FLY_LIST_FAILURES="$TMP/list-failures" \
     FLY_API_TOKEN=fake APP=test \
+    DEPLOY_REUSE_ONLY="${FAKE_FLY_REUSE_ONLY:-1}" \
     SURFACE_HASH=abc GENERATION_QUEUE=navi-agent-tasks@abc \
     BUILD_ID=build DEPLOYMENT_TOKEN="${FAKE_FLY_DEPLOYMENT_TOKEN:-token}" \
     bash "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" > "$TMP/output" 2>&1
@@ -262,7 +267,49 @@ open(sys.argv[2], 'w').write(json.dumps(rows))
 PY
 }
 
-case "${1:-all}" in all|retention|reuse|idle-name|cwd|rolling) ;; *) echo 'Unknown test selection' >&2; exit 2 ;; esac
+case "${1:-all}" in all|retention|reuse|idle-name|cwd|rolling|reuse-only) ;; *) echo 'Unknown test selection' >&2; exit 2 ;; esac
+if [ "${1:-all}" = all ] || [ "${1:-all}" = reuse-only ]; then
+  for source_case in empty partial update_failure; do
+    seed_released_spares
+    if [ "$source_case" != update_failure ]; then
+      "$REAL_PYTHON" - "$TMP/state.json" "$source_case" <<'PY'
+import copy,json,sys
+p=sys.argv[1]; rows=json.load(open(p)); keep=1 if sys.argv[2]=='empty' else 5
+if sys.argv[2]=='empty':
+ rows=rows[:1]
+ for index in range(7):
+  row=copy.deepcopy(rows[0]); row.update(id=f'{100+index:014x}',instance_id=f'old-live-{index}',name=f'old-live-{index}')
+  rows.append(row)
+ keep=len(rows)
+open(p,'w').write(json.dumps(rows[:keep]))
+PY
+    else
+      export FAKE_FLY_POOL_FAIL_ID=00000000000003
+    fi
+    cp "$TMP/state.json" "$TMP/before-reuse-only.json"
+    export FAKE_FLY_POINTER_HASH=old
+    result=0
+    run_cutover || result=$?
+    "$REAL_PYTHON" - "$TMP/state.json" "$TMP/before-reuse-only.json" "$TMP/journal" "$source_case" "$result" <<'PY'
+import json,sys
+after=json.load(open(sys.argv[1]));before=json.load(open(sys.argv[2]));journal=open(sys.argv[3]).read();mode=sys.argv[4]
+assert 'clone\n' not in journal and 'create-refused' not in journal, ('reuse-only attempted fresh allocation',mode,journal)
+assert 'local-build\n' in journal and 'remote-build\n' not in journal, ('reuse-only must not request a Fly remote builder',mode,journal)
+assert {r['id'] for r in after}=={r['id'] for r in before},(mode,journal)
+assert int(sys.argv[5])!=0 and 'flip\n' not in journal and 'stop ' not in journal and 'destroy ' not in journal,(mode,journal)
+assert after[0]==before[0], 'live old worker/data must remain intact'
+if mode=='empty': assert after==before and len(after)==8
+else:
+ if mode=='partial': assert journal.count('pool-update ')==4,journal
+ if mode=='update_failure': assert journal.count('pool-update ')==1,journal
+ for row in after[1:]:
+  assert row['config']['mounts']==[{'volume':'vol-'+row['id'],'path':'/evidence'}]
+PY
+    unset FAKE_FLY_POINTER_HASH FAKE_FLY_POOL_FAIL_ID
+  done
+  echo 'PASS: reuse-only forbids fresh creation after empty, partial or failed reuse'
+  if [ "${1:-all}" = reuse-only ]; then exit 0; fi
+fi
 if [ "${1:-all}" = all ] || [ "${1:-all}" = rolling ]; then
   for rolling_case in success undersized metadata_failure partial_failure; do
     live_count=8
@@ -465,7 +512,7 @@ run_case() {
   local start_refusals="${4:-0}"
   local list_failures="${5:-0}"
   seed_state "$orphans" "${2:-old}" "$update_failures" "$start_refusals" "$list_failures"
-  run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
+  FAKE_FLY_REUSE_ONLY=0 run_cutover || { cat "$TMP/output" >&2; echo "FAIL: cutover exited non-zero" >&2; exit 1; }
   python3 - "$TMP/state.json" "$TMP/journal" "$orphans" "$update_failures" <<'PY'
 import json, sys
 machines = json.load(open(sys.argv[1]))
@@ -504,7 +551,7 @@ assert journal.count('flip\n') == 1, journal
 PY
 
 seed_state 0 old 4
-if run_cutover; then
+if FAKE_FLY_REUSE_ONLY=0 run_cutover; then
   echo "FAIL: cutover succeeded although every machine update attempt failed" >&2
   exit 1
 fi

@@ -29,6 +29,14 @@ SURFACE_HASH="${SURFACE_HASH:?SURFACE_HASH is required}"
 GENERATION_QUEUE="${GENERATION_QUEUE:?GENERATION_QUEUE is required}"
 BUILD_ID="${BUILD_ID:?BUILD_ID is required}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:?DEPLOYMENT_TOKEN is required}"
+# Reuse-only is the production default. An insufficient pool must never turn
+# into an implicit allocation; fresh provisioning needs a separate opt-in.
+DEPLOY_REUSE_ONLY="${DEPLOY_REUSE_ONLY:-1}"
+case "$DEPLOY_REUSE_ONLY" in
+  1) BUILD_LOCATION=--local-only ;; # Reuse the CI host, not a new Fly builder.
+  0) BUILD_LOCATION=--remote-only ;;
+  *) echo "DEPLOY_REUSE_ONLY must be 0 or 1" >&2; exit 2 ;;
+esac
 # 45 minutes cooperative drain SLO before force-migrate.
 DRAIN_TIMEOUT_SECONDS="${DRAIN_TIMEOUT_SECONDS:-2700}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-30}"
@@ -193,7 +201,7 @@ if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
       --hash "$SURFACE_HASH" --build "$BUILD_ID" --token "$DEPLOYMENT_TOKEN"
   done
   cd "$ROOT/agents"
-  flyctl deploy --remote-only -a "$APP" --strategy rolling \
+  flyctl deploy "$BUILD_LOCATION" -a "$APP" --strategy rolling \
     --only-machines "$ROLLING_CSV" --update-only --ha=false \
     --env TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
     --env TEMPORAL_WORKER_SURFACE_HASH="$SURFACE_HASH" \
@@ -219,7 +227,7 @@ cd "$ROOT/agents"
 # Build+push only. Do NOT replace old-gen machines; they must keep serving the
 # old queue until agents hand off (or the 45m force-migrate fires).
 IMAGE_LABEL="cutover-${SURFACE_HASH}-${DEPLOYMENT_TOKEN}"
-if ! flyctl deploy --remote-only --build-only --push \
+if ! flyctl deploy "$BUILD_LOCATION" --build-only --push \
     --image-label "$IMAGE_LABEL" \
     -a "$APP" \
     --env TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
@@ -274,6 +282,11 @@ if [ "$NEED" -gt 0 ] && [ -n "$CURRENT_HASH" ]; then
   done
 fi
 echo "New-gen machines present=$EXISTING_NEW need_create=$NEED (min=$MIN)"
+
+if [ "$DEPLOY_REUSE_ONLY" = 1 ] && [ "$NEED" -gt 0 ]; then
+  echo "❌ reuse-only: $NEED more eligible existing worker IDs are required; refusing creation" >&2
+  exit 1
+fi
 
 for ((i = 1; i <= NEED; i++)); do
   NAME="gen-${SURFACE_HASH}-$(date +%s)-$i"
