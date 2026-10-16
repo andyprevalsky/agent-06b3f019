@@ -93,6 +93,12 @@ AI agent platform.
 
 ## Sub-agent delegation
 
+- Explicit user default for all sub-agents: **medium reasoning effort and
+  ultrafast speed**. This overrides inherited effort/speed unless the user
+  explicitly requests otherwise. Pass both settings through supported execution
+  controls and verify them; a prompt instruction is not configuration. Prefer
+  managed threads when native sub-agents cannot select or expose speed. Never
+  claim ultrafast was applied when the platform cannot confirm it.
 - Sub-agents must inherit the parent agent's model, reasoning/effort level, and
   speed/service-tier settings. Do not silently substitute a lower-effort model
   or a different speed setting. Use automatic inheritance when supported;
