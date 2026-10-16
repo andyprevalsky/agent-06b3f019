@@ -279,13 +279,14 @@ provision_primary_machine task "$OUT" && primary_cold_bootstrap_requested "$OUT"
         nested=scripts/'run-bench-fleet'
         nested.write_text('''set -uo pipefail
 POOL_COLD_BOOTSTRAP=0; POOL_REUSE_ONLY=1; BENCHES=(); INFRA_PROBE=0
+BENCH_REF=0000000000000000000000000000000000000000
 '''+parser+'\n'+function('pool_verify_reuse_proof')+'''
 pool_reuse_proof_file() { printf '%s' "$FIXTURE_PROOF"; }
 fleet_preconfig_native_read() { cp "$FIXTURE_NATIVE" "$2"; }
 fleet_cold_handoff_volume_read() { cp "$FIXTURE_VOLUME" "$2"; }
 [ "$INFRA_PROBE" = 1 ] || exit 91
 [ "${#BENCHES[@]}" = 2 ] || exit 92
-printf 'nested_cold=%s\n' "$POOL_COLD_BOOTSTRAP"
+printf 'nested_cold=%s nested_ref=%s\n' "$POOL_COLD_BOOTSTRAP" "$BENCH_REF"
 pool_verify_reuse_proof "$FIXTURE_MID" vol_fixture
 ''')
         parent=self.root/'parent-fleet.sh'
@@ -300,7 +301,7 @@ INFRA_CANARY_PREFLIGHT_SCRIPT="$FIXTURE_SCRIPTS/cloudbench-infra-canary-prefligh
         env={**os.environ,'RUN_BENCH_FLEET_BIN_UNDER_TEST':str(parent),'FIXTURE_REPO':str(self.repo),'FIXTURE_SCRIPTS':str(scripts),'FIXTURE_PROOF':str(proof),'FIXTURE_MID':self.mid,'FIXTURE_NATIVE':self.request['native_before']['path'],'FIXTURE_VOLUME':self.request['volume']['path'],'GIT_COMMON_DIR':str(self.common),'BENCH_REF':self.request['consumer']['source_ref'],'CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP':inherited}
         for key in ('CLOUDBENCH_FAKE_DIR','CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT','CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE','RUN_BENCH_CAMPAIGN_BARRIER_DIR'):
             env.pop(key,None)
-        argv=['bash',str(SCRIPT.with_name('run-bench')),'parallel-tool-calls','--reuse-pool-only','--autoscale-max','2','--foreground']
+        argv=['bash',str(SCRIPT.with_name('run-bench')),'parallel-tool-calls','--reuse-pool-only','--autoscale-max','2','--foreground','--ref',self.request['consumer']['source_ref']]
         if cold:argv.append('--cold-primary-bootstrap')
         result=subprocess.run(argv,env=env,capture_output=True,text=True,timeout=15)
         return result,self.repo/'.context/fleet-infra-canary.last-pass'
@@ -309,7 +310,7 @@ INFRA_CANARY_PREFLIGHT_SCRIPT="$FIXTURE_SCRIPTS/cloudbench-infra-canary-prefligh
     def test_cold_parent_cli_preflight_reaches_real_explicit_pool_proof(self):
         result,stamp=self.cold_preflight_fixture(True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-        self.assertIn('nested_cold=1',result.stdout);self.assertTrue(stamp.is_file())
+        self.assertIn('nested_cold=1',result.stdout);self.assertIn('nested_ref='+self.request['consumer']['source_ref'],result.stdout);self.assertTrue(stamp.is_file())
 
     @unittest.skipUnless(os.geteuid()==0,'canonical local publication needs root')
     def test_no_cold_opt_in_still_refuses_explicit_pool(self):
