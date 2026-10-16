@@ -21925,6 +21925,7 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
         patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
         patch(handler + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
+        patch.object(_FakeDomService, "get_browser_state", AsyncMock(side_effect=lambda **_kwargs: dict(active_page))),
         patch(handler + "prepare_browser_auth", preparation),
         patch(handler + "create_user_auth_assistance_request", create_auth),
         patch(handler + "extract_session_files", AsyncMock(return_value=[])),
