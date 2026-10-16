@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { createTestHarness, withEnv } from './trace-archive-test-utils';
 import { prisma } from '../../providers/database';
-import { fixture } from './worker-process-test-fixtures';
+import { fixture, config } from './worker-process-test-fixtures';
 import {
   canonicalWorkerJSON,
+  validateWorkerProcessPlan,
   reconcileWorkerProcesses,
   signWorkerEnvelope,
   workerPlanIdentity,
@@ -142,11 +145,86 @@ async function withRecoveryRows(
   }
 }
 async function main() {
+  await test('signed broker origin reaches only candidate environment and rejects invalid handoffs before effects', () => {
+    const f = fixture();
+    const host = { id: f.plan.hosts[0].id, version: 'instance', state: 'started', config };
+    const facts = { machineId: host.id, machineVersion: host.version, bootId: randomUUID() };
+    const identity = workerPlanIdentity(f.plan);
+    for (const value of [
+      undefined,
+      null,
+      '',
+      'https://foreign.example',
+      'https://navi-j9a9.onrender.com/',
+    ]) {
+      const bad = structuredClone(f.plan);
+      Object.assign(bad, { peopleCredentialBrokerOrigin: value });
+      assert.notEqual(workerPlanIdentity(bad), identity);
+      assert.throws(() => validateWorkerProcessPlan(bad), /broker origin/);
+      assert.throws(
+        () => signWorkerEnvelope(bad, host, facts, 'ensure', 'fixture-key'),
+        /broker origin/
+      );
+    }
+    for (const action of ['ensure', 'status'] as const) {
+      const envelope = signWorkerEnvelope(f.plan, host, facts, action, 'fixture-key');
+      const output = execFileSync(
+        'python3',
+        [
+          '-I',
+          '-B',
+          '-c',
+          `
+import copy,hmac,hashlib,json,os,runpy,sys
+from pathlib import Path
+from unittest.mock import patch
+m=runpy.run_path(sys.argv[1]); request=json.load(sys.stdin); before=dict(os.environ)
+m['authenticate'](request,'fixture-key')
+for inherited in ({}, {'PEOPLE_CREDENTIAL_BROKER_URL':'https://foreign.example','TEMPORAL_TASK_QUEUE':'old'}):
+ original=dict(inherited)
+ candidate=m['worker_environment'](request,Path('/owned/runtime'),inherited)
+ assert candidate['PEOPLE_CREDENTIAL_BROKER_URL']=='https://navi-j9a9.onrender.com'
+ assert inherited==original and os.environ==before
+for value in (None, '', 'https://foreign.example', 'https://navi-j9a9.onrender.com/', {'url':'https://navi-j9a9.onrender.com'}):
+ bad=copy.deepcopy(request); bad['peopleCredentialBrokerOrigin']=value
+ for signed in (False,True):
+  if signed: bad['signature']=hmac.new(b'fixture-key',m['canonical']({k:v for k,v in bad.items() if k!='signature'}),hashlib.sha256).hexdigest()
+  try: m['authenticate'](bad,'fixture-key')
+  except ValueError as error: assert str(error) in ('signature mismatch','people credential broker origin')
+  else: raise AssertionError('invalid broker authenticated')
+  with patch.dict(os.environ,{'BACKEND_API_KEY':'fixture-key'}), patch.dict(m['dispatch'].__globals__,prepare_slot=lambda *_: (_ for _ in ()).throw(AssertionError('staged before auth'))):
+   try: m['dispatch'](bad)
+   except ValueError: pass
+   else: raise AssertionError('invalid broker admitted')
+missing=copy.deepcopy(request); del missing['peopleCredentialBrokerOrigin']
+try: m['authenticate'](missing,'fixture-key')
+except ValueError: pass
+else: raise AssertionError('missing broker accepted')
+if request['action']=='status':
+ compact=copy.deepcopy(request); del compact['bundleBase64']
+ compact['signature']=hmac.new(b'fixture-key',m['canonical']({k:v for k,v in compact.items() if k!='signature'}),hashlib.sha256).hexdigest()
+ m['authenticate'](compact,'fixture-key')
+assert m['intent_digest'](request)!=m['intent_digest']({**request,'peopleCredentialBrokerOrigin':'https://foreign.example'})
+print('authenticated isolated candidate broker')
+`,
+          resolve(__dirname, '../../../../scripts/production_worker_process.py'),
+        ],
+        {
+          input: JSON.stringify(envelope),
+          encoding: 'utf8',
+          env: { PATH: process.env.PATH },
+        }
+      );
+      assert.match(output, /authenticated isolated candidate broker/);
+    }
+  });
+
   await test('exact retained ensure and compact status return unchanged authenticated envelopes', async () => {
     for (const action of ['ensure', 'status'] as const) {
       const f = envelopeFixture(action);
       const result = await getWorkerProcessRuntimeEnvelope(f.query, f);
       assert.deepEqual(result, f.expected);
+      assert.equal(result.peopleCredentialBrokerOrigin, f.plan.peopleCredentialBrokerOrigin);
       assert.equal(result.bundleBase64, action === 'status' ? null : f.plan.artifact.bundleBase64);
       assert.equal(f.reads(), 1);
       assert(!JSON.stringify(result).includes(f.key));
@@ -252,6 +330,21 @@ async function main() {
       getWorkerProcessRuntimeEnvelope(f.query, {
         ...f,
         repository: { ...f.repository, read: async () => undefined },
+      })
+    );
+  });
+  await test('changed broker origin cannot reuse retained plan identity or private envelope digest', async () => {
+    const f = envelopeFixture();
+    const changed = structuredClone(f.plan);
+    Object.assign(changed, { peopleCredentialBrokerOrigin: 'https://foreign.example' });
+    assert.notEqual(workerPlanIdentity(changed), f.query.planIdentity);
+    await assert.rejects(
+      getWorkerProcessRuntimeEnvelope(f.query, {
+        ...f,
+        repository: {
+          ...f.repository,
+          read: async () => ({ version: 1, identity: f.query.planIdentity, plan: changed }),
+        },
       })
     );
   });

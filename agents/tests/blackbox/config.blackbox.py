@@ -206,6 +206,24 @@ def test_load_config_parallel_keeps_legacy_spelling_precedence():
     assert result.parallel.api_key == "legacy-parallel-key"
 
 
+def test_lantern_connection_config_and_redaction():
+    _reset_config_cache()
+    with patch.dict(os.environ, _MINIMAL_ENV, clear=True):
+        from config import load_config
+
+        assert load_config().lantern.api_url == "https://people.lantern.md"
+        assert load_config().lantern.api_token == ""
+    with patch.dict(
+        os.environ,
+        {**_MINIMAL_ENV, "PEOPLE_API_URL": "https://lantern.example", "PEOPLE_API_TOKEN": "test-private-token"},
+        clear=True,
+    ):
+        configured = load_config()
+        assert configured.lantern.api_url == "https://lantern.example"
+        assert configured.lantern.api_token == "test-private-token"
+        assert "test-private-token" not in repr(configured.lantern)
+
+
 async def run_all_tests():
     print("config blackbox tests:")
     r = BlackboxResult()
@@ -224,6 +242,7 @@ async def run_all_tests():
     )
     r.record("parallel_correct_spelling", test_load_config_parallel_accepts_correct_spelling)
     r.record("parallel_legacy_spelling_precedence", test_load_config_parallel_keeps_legacy_spelling_precedence)
+    r.record("lantern_connection_config", test_lantern_connection_config_and_redaction)
     teardown_mock()
     return r.summary()
 

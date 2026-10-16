@@ -6424,21 +6424,37 @@ async def test_fetch_claude_token_no_api_key_returns_none():
     assert await fetch_claude_token(cfg, "user-1") is None
 
 async def test_fetch_claude_token_with_force_pool_and_excludes():
+    import httpx
+    from _test_utils import setup_mock_fn
     from domains.spawn_browser_agent_v3.repo import fetch_claude_token
 
-    setup_mock(
-        {
-            "/api/integrations/claude-code/credentials/token": {
-                "status": 200,
-                "json": {"accessToken": "t", "source": "pool", "poolTokenId": "p1"},
-            }
-        }
-    )
     cfg = _fake_config()
+    requests = []
+    payload = {"accessToken": "fixture-browser-token", "source": "pool", "poolTokenId": "p1"}
+
+    def handler(request: httpx.Request):
+        assert request.method == "GET"
+        assert request.url.path == "/api/integrations/claude-code/credentials/token"
+        assert request.headers["x-api-key"] == cfg.backend.api_key
+        assert request.headers["x-user-id"] == "u1"
+        assert request.headers["x-force-pool"] == "true"
+        assert request.headers["x-exclude-pool-tokens"] == "a,b"
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    teardown_mock()
+    setup_mock_fn(handler)
     out = await fetch_claude_token(cfg, "u1", force_pool=True, exclude_pool_ids=["a", "b"])
-    assert out["poolTokenId"] == "p1"
-    call = assert_captured_call(url_contains="/credentials/token")
-    assert call["requestHeaders"].get("X-Force-Pool") == "true" or call["requestHeaders"].get("x-force-pool") == "true"
+    assert out == payload
+    assert len(requests) == 1
+    assert len(get_captured_requests()) == 1
+    call = assert_captured_call(url_contains="/api/integrations/claude-code/credentials/token", method="GET")
+    assert "?" not in call["url"]
+    assert call["requestHeaders"] == {}
+    assert call["requestBody"] is None
+    assert call["responseBody"] is None
+    assert call["responseStatus"] == 200
+    assert payload["accessToken"] not in json.dumps(call)
 
 async def test_fetch_claude_token_network_error_returns_none():
     from domains.spawn_browser_agent_v3.repo import fetch_claude_token

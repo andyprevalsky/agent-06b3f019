@@ -131,6 +131,8 @@ async function main() {
     assert.equal(status.bundleBase64, null);
     assert.equal(ensure.bundleBase64, f.plan.artifact.bundleBase64);
     assert.notEqual(status.signature, ensure.signature);
+    assert.equal(status.peopleCredentialBrokerOrigin, 'https://navi-j9a9.onrender.com');
+    assert.equal(ensure.peopleCredentialBrokerOrigin, status.peopleCredentialBrokerOrigin);
     assert.equal(status.bootId, facts.bootId);
     assert.deepEqual(status.limits, f.plan.limits);
   });

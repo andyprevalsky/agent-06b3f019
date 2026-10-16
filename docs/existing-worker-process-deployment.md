@@ -158,3 +158,10 @@ promotion of a second process generation.
 A successful process cutover completes only the worker lane. Run all remaining
 production backend, workflow replacement, semantic frontend, evidence publication
 and AgentCard lifecycle gates before declaring the deployment finished.
+
+The captured plan requires `peopleCredentialBrokerOrigin` with the exact public origin
+`https://navi-j9a9.onrender.com`. Ensure/status envelopes authenticate this field
+and bind it to the retained plan identity; only the candidate environment receives
+`PEOPLE_CREDENTIAL_BROKER_URL`. No inherited/local fallback or credential grant
+is carried in the plan. An older plan missing this field must be regenerated
+before registration; an existing retained identity cannot be edited in place.

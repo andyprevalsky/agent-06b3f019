@@ -274,6 +274,10 @@ export async function syncIntegrationCredentials(
   localIntegration: IntegrationModel,
   integrations: Integration[]
 ): Promise<string[]> {
+  // Reject before any writes: silently dropping an input would shift caller pool IDs.
+  if (integrations.some((integration) => integration.name === 'lantern_people')) {
+    throw new Error('Rotating Lantern credentials cannot be replicated by seed sync');
+  }
   const syncedIds: string[] = [];
   for (const integration of integrations) {
     const { id: remoteId, ...updateData } = integration;

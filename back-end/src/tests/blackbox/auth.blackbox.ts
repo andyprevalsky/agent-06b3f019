@@ -1032,8 +1032,8 @@ async function testBoundary_sendOtpTwilioCall() {
     `Expected Content-Type: application/x-www-form-urlencoded, got: ${call.requestHeaders['Content-Type']}`
   );
   assert(
-    call.requestHeaders['Authorization']?.startsWith('Basic '),
-    `Expected Basic auth, got: ${call.requestHeaders['Authorization']?.slice(0, 20)}`
+    call.requestHeaders['Authorization'] === '[redacted]',
+    'Expected captured authorization to be fully redacted'
   );
 
   assert(call.requestBody !== null, 'Expected non-null request body');
@@ -1129,8 +1129,8 @@ async function testBoundary_verifyOtpTwilioCall() {
     `Expected Content-Type: application/x-www-form-urlencoded`
   );
   assert(
-    checkCall!.requestHeaders['Authorization']?.startsWith('Basic '),
-    'Expected Basic auth header'
+    checkCall!.requestHeaders['Authorization'] === '[redacted]',
+    'Expected captured authorization to be fully redacted'
   );
 
   assert(checkCall!.requestBody !== null, 'Expected non-null request body');

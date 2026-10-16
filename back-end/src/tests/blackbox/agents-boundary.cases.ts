@@ -220,29 +220,11 @@ function isAgentBoundaryOutbound(call: CapturedCall): boolean {
   );
 }
 
-/** Wait until prior create-agent fire-and-forget traffic stops writing captures. */
-async function drainAgentBoundaryOutbound(maxAttempts = 8): Promise<void> {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await clearCaptures();
-    await sleep(500);
-    const leftover = (await readCaptures()).filter(isAgentBoundaryOutbound);
-    if (leftover.length === 0) return;
-  }
-  const stillBusy = (await readCaptures()).filter(isAgentBoundaryOutbound);
-  assert(
-    stillBusy.length === 0,
-    `Agent boundary capture buffer did not drain before validation short-circuit: ${JSON.stringify(
-      stillBusy.map((c) => c.url)
-    ).slice(0, 500)}`
-  );
-}
-
 export async function testBoundary_validationShortCircuitNoOutbound(): Promise<void> {
   const session = await createAnonymousSession('boundary-validation');
   // Prior create-agent cases (and parallel blackbox domains under coverage) share the
   // global capture buffer. Scope this assertion with X-Capture-Token so only outbound
   // attributed to THIS request can fail the zero-call check.
-  await drainAgentBoundaryOutbound();
   const captureToken = `validation-${randomUUID()}`;
 
   // Missing goal → 400: should not make any outbound calls

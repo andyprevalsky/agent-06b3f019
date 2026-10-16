@@ -52,6 +52,7 @@ async function main() {
   };
   const plan: WorkerProcessPlan = {
     version: 1,
+    peopleCredentialBrokerOrigin: 'https://navi-j9a9.onrender.com',
     app: 'owned-production-app',
     attempt: 'pg-attempt',
     controlPlane: {

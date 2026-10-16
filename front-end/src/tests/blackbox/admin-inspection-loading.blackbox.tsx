@@ -27,7 +27,10 @@ const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 's
 beforeEach(() => {
   viewportWidth = window.innerWidth;
   window.innerWidth = 390;
-  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
   mockSession();
   handlers = {};
   vi.mocked(realtime.subscribeToAgent).mockReset();
@@ -41,41 +44,58 @@ afterEach(() => {
   window.innerWidth = viewportWidth;
   localStorage.clear();
   window.history.replaceState({}, '', '/');
-  if (scrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView);
+  if (scrollIntoView)
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView);
   else delete HTMLElement.prototype.scrollIntoView;
 });
 
 function delayedForeignDetail(fail = false) {
   let release: () => void = () => {};
-  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   const reads = { count: 0 };
-  server.use(http.get(`${API_BASE}/agents/:agentId`, async ({ params }) => {
-    const isForeign = params.agentId === AGENT_ID;
-    if (isForeign) {
-      reads.count += 1;
-      await pending;
-    }
-    if (isForeign && fail) return HttpResponse.json({ error: 'Detail unavailable' }, { status: 500 });
-    return HttpResponse.json({
-      agent: makeTerminalHookAgent({ agent_id: String(params.agentId) }),
-      messages: [],
-      pagination: { has_more: false, oldest_timestamp: null },
-      inspection_context: isForeign
-        ? { user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', name: 'Tamara' }
-        : null,
-    });
-  }));
+  server.use(
+    http.get(`${API_BASE}/agents/:agentId`, async ({ params }) => {
+      const isForeign = params.agentId === AGENT_ID;
+      if (isForeign) {
+        reads.count += 1;
+        await pending;
+      }
+      if (isForeign && fail)
+        return HttpResponse.json({ error: 'Detail unavailable' }, { status: 500 });
+      return HttpResponse.json({
+        agent: makeTerminalHookAgent({ agent_id: String(params.agentId) }),
+        messages: [],
+        pagination: { has_more: false, oldest_timestamp: null },
+        inspection_context: isForeign
+          ? { user_id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', name: 'Tamara' }
+          : null,
+      });
+    }),
+  );
   return { reads, release };
 }
 
 function insertBrowser(agentId: string, id: string) {
-  act(() => handlers.onInsert?.({
-    agentId, id, timestamp: '2026-10-14T17:33:50Z', role: 'TOOL', text: 'Browser session connected',
-    metadata: {
-      toolName: 'spawn_browser_agent', toolCallId: TASK_ID, toolStatus: 'IN_PROGRESS',
-      action_type: 'session_init', task_id: TASK_ID, subAgentId: TASK_ID, browser_url: BROWSER_URL,
-    },
-  }));
+  act(() =>
+    handlers.onInsert?.({
+      agentId,
+      id,
+      timestamp: '2026-10-14T17:33:50Z',
+      role: 'TOOL',
+      text: 'Browser session connected',
+      metadata: {
+        toolName: 'spawn_browser_agent',
+        toolCallId: TASK_ID,
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'session_init',
+        task_id: TASK_ID,
+        subAgentId: TASK_ID,
+        browser_url: BROWSER_URL,
+      },
+    }),
+  );
 }
 
 async function selectOwnedRun() {
@@ -98,7 +118,9 @@ it('keeps the composer read-only until selected detail establishes ownership, th
     await user.click(screen.getByRole('button', { name: 'Open menu' }));
     await user.click(await screen.findByText('Test agent'));
     expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
-    expect(screen.getByTestId('terminal-input-area').querySelector('svg.lucide-square')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('terminal-input-area').querySelector('svg.lucide-square'),
+    ).toBeInTheDocument();
   } finally {
     detail.release();
     view.unmount();
@@ -114,12 +136,17 @@ it('keeps realtime browser inserts passive while selected detail is unresolved',
     http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () => {
       liveReads.count += 1;
       return HttpResponse.json({
-        taskId: TASK_ID, sessionId: 'inspection-loading', debugUrl: BROWSER_URL,
-        status: 'ACTIVE', live: true, asOf: 1,
+        taskId: TASK_ID,
+        sessionId: 'inspection-loading',
+        debugUrl: BROWSER_URL,
+        status: 'ACTIVE',
+        live: true,
+        asOf: 1,
       });
     }),
     http.get(`${API_BASE}/browser-session/task/:taskId/control`, () =>
-      HttpResponse.json({ state: 'requested', agentPaused: false, debugUrl: BROWSER_URL })),
+      HttpResponse.json({ state: 'requested', agentPaused: false, debugUrl: BROWSER_URL }),
+    ),
     http.post(`${API_BASE}/browser-session/task/:taskId/control`, ({ request }) => {
       mutations.push(request.url);
       return HttpResponse.json({ state: 'user', agentPaused: false, debugUrl: BROWSER_URL });
@@ -133,19 +160,27 @@ it('keeps realtime browser inserts passive while selected detail is unresolved',
     await waitFor(() => expect(liveReads.count).toBeGreaterThan(0));
     const iframe = await screen.findByTitle('Browser');
     // Let the control read and its dependent automatic lease settle.
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
     expect(mutations).toEqual([]);
     expect(new URL(iframe.getAttribute('src')!).searchParams.get('interactive')).toBe('false');
-    expect(screen.queryByRole('button', { name: /Take control|Hand back|Start Agent/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Take control|Hand back|Start Agent/ }),
+    ).not.toBeInTheDocument();
     await act(async () => detail.release());
     await screen.findByText(/Read-only account inspection/);
     expect(mutations).toEqual([]);
     await selectOwnedRun();
     await screen.findByPlaceholderText('Type your message...');
-    await waitFor(() => expect(realtime.subscribeToAgent).toHaveBeenLastCalledWith('agent-001', expect.anything()));
+    await waitFor(() =>
+      expect(realtime.subscribeToAgent).toHaveBeenLastCalledWith('agent-001', expect.anything()),
+    );
     window.history.replaceState({}, '', `/?agent-id=agent-001&browser-id=${TASK_ID}`);
     insertBrowser('agent-001', 'owned-browser-init');
-    await waitFor(() => expect(mutations).toEqual([`${API_BASE}/browser-session/task/${TASK_ID}/control`]));
+    await waitFor(() =>
+      expect(mutations).toEqual([`${API_BASE}/browser-session/task/${TASK_ID}/control`]),
+    );
     expect(await screen.findByRole('button', { name: /Hand back control/ })).toBeInTheDocument();
   } finally {
     detail.release();
@@ -164,12 +199,19 @@ it('does not acquire a retained browser after selected detail fails', async () =
   const detail = delayedForeignDetail(true);
   const mutations: string[] = [];
   server.use(
-    http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () => HttpResponse.json({
-      taskId: TASK_ID, sessionId: 'inspection-loading', debugUrl: BROWSER_URL,
-      status: 'ACTIVE', live: true, asOf: 1,
-    })),
+    http.get(`${API_BASE}/browser-session/task/:taskId/live-view`, () =>
+      HttpResponse.json({
+        taskId: TASK_ID,
+        sessionId: 'inspection-loading',
+        debugUrl: BROWSER_URL,
+        status: 'ACTIVE',
+        live: true,
+        asOf: 1,
+      }),
+    ),
     http.get(`${API_BASE}/browser-session/task/:taskId/control`, () =>
-      HttpResponse.json({ state: 'requested', agentPaused: false, debugUrl: BROWSER_URL })),
+      HttpResponse.json({ state: 'requested', agentPaused: false, debugUrl: BROWSER_URL }),
+    ),
     http.post(`${API_BASE}/browser-session/task/:taskId/control`, ({ request }) => {
       mutations.push(request.url);
       return HttpResponse.json({ state: 'user', agentPaused: false, debugUrl: BROWSER_URL });
@@ -183,8 +225,12 @@ it('does not acquire a retained browser after selected detail fails', async () =
     await screen.findByTitle('Browser');
     expect(mutations).toEqual([]);
     await act(async () => detail.release());
-    await waitFor(() => expect(new URL(window.location.href).searchParams.get('agent-id')).toBeNull());
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); });
+    await waitFor(() =>
+      expect(new URL(window.location.href).searchParams.get('agent-id')).toBeNull(),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
     expect(mutations).toEqual([]);
     expect(screen.queryByTestId('browser-status-chip')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-input-area')).toBeInTheDocument();
