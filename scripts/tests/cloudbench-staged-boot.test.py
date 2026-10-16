@@ -87,6 +87,24 @@ class Tests(unittest.TestCase):
   barrier=self.root/'barrier';barrier.mkdir();(barrier/'release').write_text('release')
   ack=S.launch(self.fly(),self.out,MID,TOKEN,self.env,self.files,'shared-cpu-2x','4096','probe',ready_seconds=2,barrier=barrier,barrier_seconds=1)
   self.assertTrue(ack['dispatched']);self.assertTrue((barrier/'ready'/MID).is_file())
+ def test_started_response_after_readiness_deadline_refuses(self):
+  clock=[0.0];fly=self.fly();original=fly.api
+  def api(method,path,timeout):
+   value=original(method,path,timeout)
+   if fly.started and method=='GET'and '/machines/'in path:clock[0]=3.0
+   return value
+  fly.api=api
+  with patch.object(S.time,'monotonic',side_effect=lambda:clock[0]),self.assertRaisesRegex(ValueError,'deadline|late'):
+   S.launch(fly,self.out,MID,TOKEN,self.env,self.files,'shared-cpu-2x','4096',PROBE,ready_seconds=2)
+  self.assertFalse(any(m=='SFTP'for m,p in self.calls))
+ def test_release_observed_after_barrier_deadline_refuses(self):
+  clock=[0.0];barrier=self.root/'barrier';barrier.mkdir();(barrier/'release').write_text('release');original=Path.is_file
+  def is_file(path):
+   if path==barrier/'release':clock[0]=2.0
+   return original(path)
+  with patch.object(S.time,'monotonic',side_effect=lambda:clock[0]),patch.object(Path,'is_file',is_file),self.assertRaisesRegex(ValueError,'barrier expired'):
+   S.launch(self.fly(),self.out,MID,TOKEN,self.env,self.files,'shared-cpu-2x','4096',PROBE,ready_seconds=2,barrier=barrier,barrier_seconds=1)
+  self.assertEqual(sum(m=='EXEC'for m,p in self.calls),1)
  def test_actual_shell_branch_never_calls_config_update(self):
   source=Path(os.environ.get('ROSE_STAGED_TEST_SOURCE',str(ROOT/'run-bench-cloud'))).read_text()
   marker='    if [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ]; then'

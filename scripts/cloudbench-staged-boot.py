@@ -135,7 +135,7 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
         try:
             value=fn(cap);require(time.monotonic()-at<cap,'late staged operation');return value
         finally:signal.setitimer(signal.ITIMER_REAL,0)
-    def api(method,path):return bound(20,lambda cap:fly.api(method,path,timeout=cap))
+    def api(method,path,limit=20):return bound(limit,lambda cap:fly.api(method,path,timeout=cap))
     old_signals={sig:signal.getsignal(sig)for sig in (signal.SIGTERM,signal.SIGINT)}
     def cancelled(signum,frame):raise Cancelled('staged boot cancelled')
     for sig in old_signals:signal.signal(sig,cancelled)
@@ -151,7 +151,8 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
         save(output/'start.intent.json',dict(machine=machine,epoch=time.time()));save(output/'start.ack.json',api('POST','/machines/'+machine+'/start'))
         ready_deadline=min(deadline,time.monotonic()+ready_seconds)
         while True:
-            n=api('GET','/machines/'+machine);require(n['id']==machine and n['instance_id']==before['instance_id']and n['config']==before['config']and n['image_ref']==before['image_ref'],'native changed after START')
+            remaining=ready_deadline-time.monotonic();require(remaining>0,'START readiness deadline')
+            n=api('GET','/machines/'+machine,min(20,remaining));require(time.monotonic()<ready_deadline,'START readiness deadline');require(n['id']==machine and n['instance_id']==before['instance_id']and n['config']==before['config']and n['image_ref']==before['image_ref'],'native changed after START')
             if n['state']=='started':break
             require(n['state']in ('starting','stopped')and time.monotonic()<ready_deadline,'START did not become ready');time.sleep(min(1,max(0,ready_deadline-time.monotonic())))
         started_volume=api('GET','/volumes/'+volid);require(started_volume==volume,'Volume changed across START')
@@ -168,6 +169,7 @@ def launch(fly,output,machine,token,env,files,size,memory,idle_probe,*,ready_sec
             barrier_deadline=min(deadline,time.monotonic()+barrier_seconds)
             while not (barrier/'release').is_file():
                 require(time.monotonic()<barrier_deadline,'staged config barrier expired');time.sleep(.2)
+            require(time.monotonic()<barrier_deadline,'staged config barrier expired')
         # Read only this exact archive; never shell-expand filenames or env.
         launch_cap=int(min(20,deadline-time.monotonic()));require(launch_cap>0,'launch budget exhausted')
         bootstrap="import hashlib,io,tarfile,os,stat,sys; p="+repr(remote)+"; f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK); s=os.fstat(f); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and s.st_size=="+str(archive.stat().st_size)+"; b=os.read(f,s.st_size+1); assert hashlib.sha256(b).hexdigest()=="+repr(archive_sha)+"; t=tarfile.open(fileobj=io.BytesIO(b),mode='r:gz'); c=t.extractfile('launch.py').read(); sys.argv=['staged-boot',p,"+repr(archive_sha)+","+repr(str(launch_cap))+"]; exec(compile(c,'bound-staged-boot','exec'))"
