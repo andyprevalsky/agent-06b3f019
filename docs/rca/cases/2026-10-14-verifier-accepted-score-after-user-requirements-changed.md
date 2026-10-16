@@ -704,3 +704,15 @@ case confirms that the old closed run becomes a distinct live follow-up and
 receives neither FAILED nor cleanup. The final caller owner passes twelve
 cases. A liveness-source-only367 replay retains the new helper and final
 fixtures to prove the interleaving; it is not a whole367 build.
+
+
+The final bounded audit found acknowledgement was still a membership writer
+outside Agent-generation serialization. A terminal transaction could compare
+STARTED membership, then see a concurrent ACK at its next Read Committed
+statement. The follow-up adds the same existing keyed lock before ACK reads
+and writes, with no native RPC inside that transaction. The registered
+ACK-owner fixture holds that external lock: unchanged6b bypasses it and fails
+the assertion, while the follow-up waits and retains STARTED until release.
+All twelve owner cases then pass. This is an offline lock-boundary fixture;
+the deployment owner separately owns real PostgreSQL contention/commit proof.
+The published6b proposal remains preserved as the before snapshot.

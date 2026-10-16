@@ -416,6 +416,57 @@ async function main() {
         assert.equal(nativeWorkflowTerminal(status), true);
       assert.equal(nativeWorkflowTerminal('RUNNING'), false);
     });
+
+    await test('ACK persistence waits for the terminal owner generation lock before mutating membership', async () => {
+      const { tx, rows } = storage();
+      prisma.$transaction = (async (fn: (tx: unknown) => unknown) => fn(tx)) as never;
+      const intent = await claimWorkflowStart(
+        'ack-lock-agent',
+        'immutable-lock-child',
+        oldQueue,
+        true,
+        Date.now() + 5000
+      );
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered = false;
+      tx.$queryRaw = async (_sql: unknown, key: string) => {
+        assert.equal(key, 'ack-lock-agent:workflow-generation');
+        entered = true;
+        await held;
+        return [];
+      };
+      const ack = acknowledgeWorkflowStart(
+        intent,
+        { workflowId: 'immutable-lock-child', firstExecutionRunId: 'lock-first-run' },
+        Date.now() + 5000
+      );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(
+          entered,
+          true,
+          'ACK bypassed the same keyed generation lock used by final terminal comparison'
+        );
+        const member = [...rows.values()].find(
+          (row) => row.operationType === START_ADMISSION_OPERATION
+        )!;
+        assert.equal(
+          member.status,
+          'STARTED',
+          'ACK changed membership while terminal owner still holds its lock'
+        );
+      } finally {
+        release();
+        await ack;
+      }
+      assert.equal(
+        [...rows.values()].find((row) => row.operationType === START_ADMISSION_OPERATION)!.status,
+        'COMPLETED'
+      );
+    });
   } finally {
     prisma.$transaction = original;
     await prisma.$disconnect();

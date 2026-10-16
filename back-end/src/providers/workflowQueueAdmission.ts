@@ -136,6 +136,7 @@ export async function acknowledgeWorkflowStart(
 ): Promise<void> {
   await transaction(
     async (tx) => {
+      await lockAgentWorkflowGeneration(tx, intent.agentId);
       const row = await tx.toolSideEffect.findUnique({
         where: { operationKey: startAdmissionKey(intent.id) },
       });
