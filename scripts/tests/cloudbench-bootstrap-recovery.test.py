@@ -3656,5 +3656,50 @@ id="$(claim_pool_machine shared-cpu-2x 4096)" || exit 10
 
 
 
+class ColdBootstrapSingleOwnerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
+        self.origin=self.root/'origin.git';self.source=self.root/'source';self.destination=self.root/'checkout'
+        self.config=self.root/'gitconfig';self.config.write_text('')
+        self.env={k:v for k,v in os.environ.items() if not k.startswith('CLOUDBENCH_')}
+        self.env.update(GIT_CONFIG_GLOBAL=str(self.config),GIT_CONFIG_NOSYSTEM='1',CLOUDBENCH_GIT_MIN_FREE_KB='1',CLOUDBENCH_FRESH_VOLUME='1')
+        self.git('init','--bare','-q',str(self.origin));self.git('init','-q',str(self.source))
+        (self.source/'payload.txt').write_text('exact task source\n');self.git('-C',str(self.source),'add','payload.txt')
+        self.git('-C',str(self.source),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','task source')
+        self.ref=self.git('-C',str(self.source),'rev-parse','HEAD').strip();self.git('-C',str(self.source),'push','-q',str(self.origin),'HEAD:main')
+        self.git('config','--file',str(self.config),'url.file://'+str(self.origin)+'.insteadOf','https://github.com/Rose-Ai-Labs/rose.git')
+    def git(self,*args):
+        return subprocess.check_output(['git',*args],env=self.env,text=True,stderr=subprocess.DEVNULL)
+    def invoke(self,cold=True):
+        (self.root/'boot.log').touch() # actual boot publishes RUNSTAMP before this boundary
+        boot=(ROOT/'cloudbench-boot.sh').read_text();a=boot.index('bootstrap_checkout_ref() {');b=boot.index('\n# Run the controller-injected driver',a)
+        driver=(ROOT/'cloudbench-run.sh').read_text();c=driver.index('if [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" = 1 ] ||');d=driver.index('\nif [ ! -d "$REPO_DIR/.git" ]',c)
+        e=driver.index('step git_sync');f=driver.index('\n# The controller credential',e)
+        shell='''set -euo pipefail
+log(){ printf '%s\\n' "$*"; }
+finish(){ exit "$1"; }
+step(){ :; }
+'''+boot[a:b]+'\n'+driver[c:d]+'\n'+driver[e:f]
+        env=dict(self.env,REPO=str(self.destination),REPO_DIR=str(self.destination),REF=self.ref,FETCH_REF_SCRIPT=str(ROOT/'cloudbench-fetch-ref.sh'),APP_USER='',BENCH_SIMULATE='0',LOG=str(self.root/'boot.log'),CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP='1'if cold else'0')
+        r=subprocess.run(['bash','-c',shell],env=env,text=True,capture_output=True,timeout=15)
+        return r,(self.root/'boot.log').read_text()
+    def test_cold_actual_boot_then_driver_has_one_empty_checkout_owner(self):
+        r,log=self.invoke();self.assertEqual(r.returncode,0,r.stderr+'\n'+log+r.stdout)
+        self.assertEqual(self.git('-C',str(self.destination),'rev-parse','HEAD').strip(),self.ref)
+        self.assertEqual((log+r.stdout).count('[cloudbench] git-fetch '),1)
+        self.assertIn('[cloudbench] already-at '+self.ref,log+r.stdout)
+    def test_populated_cold_destination_still_refuses_without_rewriting(self):
+        self.destination.mkdir();(self.destination/'preserve').write_text('prior data')
+        r,log=self.invoke();self.assertNotEqual(r.returncode,0);self.assertIn('absent or empty unlinked destination',r.stdout+log)
+        self.assertEqual((self.destination/'preserve').read_text(),'prior data');self.assertFalse((self.destination/'.git').exists())
+    def test_warm_boot_prefetch_and_driver_verify_unchanged(self):
+        r,log=self.invoke(cold=False);self.assertEqual(r.returncode,0,r.stderr+'\n'+log+r.stdout)
+        self.assertIn('bootstrap-checkout '+self.ref,log);self.assertEqual((log+r.stdout).count('[cloudbench] git-fetch '),1)
+        self.assertEqual(self.git('-C',str(self.destination),'rev-parse','HEAD').strip(),self.ref)
+    def test_symlink_cold_destination_still_refuses(self):
+        target=self.root/'kept';target.mkdir();(target/'preserve').write_text('prior data');self.destination.symlink_to(target,target_is_directory=True)
+        r,log=self.invoke();self.assertNotEqual(r.returncode,0);self.assertIn('absent or empty unlinked destination',r.stdout+log)
+        self.assertEqual((target/'preserve').read_text(),'prior data');self.assertFalse((target/'.git').exists())
+
 if __name__ == "__main__":
     unittest.main()
