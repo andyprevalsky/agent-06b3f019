@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import runpy
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,6 +59,48 @@ def digest(data):
 
 
 class BootstrapRecoveryTest(unittest.TestCase):
+    @contextmanager
+    def controller_snapshot(self):
+        """Exercise the real immutable-copy producer, stopping before CLI work."""
+        with tempfile.TemporaryDirectory(dir=self.base) as temporary:
+            directory = Path(temporary)
+            ready, release = directory / "entry-ready", directory / "entry-release"
+            environment = os.environ.copy()
+            for key in tuple(environment):
+                if key.startswith("CLOUDBENCH_SCRIPT_SNAPSHOT"):
+                    environment.pop(key)
+            environment.update(
+                TMPDIR=str(directory),
+                PYTHONDONTWRITEBYTECODE="1",
+                CLOUDBENCH_FAKE_DIR=str(directory / "fake-provider"),
+                CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY=str(ready),
+                CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE=str(release),
+            )
+            with tempfile.TemporaryFile() as output:
+                controller = subprocess.Popen(
+                    ["bash", str(ROOT / "run-bench-fleet"), "--help"],
+                    env=environment,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+                try:
+                    deadline = time.monotonic() + 30
+                    while (
+                        not ready.exists()
+                        and controller.poll() is None
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.02)
+                    self.assertTrue(ready.exists(), "controller did not enter its immutable snapshot")
+                    snapshots = list(directory.glob("cloudbench-scripts.*"))
+                    self.assertEqual(len(snapshots), 1)
+                    yield snapshots[0]
+                finally:
+                    release.touch()
+                    controller.wait(timeout=30)
+                self.assertEqual(controller.returncode, 0)
+                self.assertFalse(snapshots[0].exists(), "exact snapshot owner did not retire")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -176,25 +220,100 @@ class BootstrapRecoveryTest(unittest.TestCase):
         self.configure_bound_source()
         self.update_review()
 
+    def test_bound_source_uses_private_snapshot_during_checkout_cache_churn(self):
+        cache = ROOT / "tests" / "__pycache__" / (
+            self.base.name + ".cpython-311.pyc.140402480162944"
+        )
+        write(cache, b"transient interpreter output")
+        self.addCleanup(cache.unlink, missing_ok=True)
+        original_rglob = Path.rglob
+        mutable_walks = []
+
+        def disappearing_cache(path, pattern):
+            paths = list(original_rglob(path, pattern))
+            if path == ROOT:
+                mutable_walks.append(path)
+                cache.unlink(missing_ok=True)
+            return iter(paths)
+
+        with patch.object(Path, "rglob", disappearing_cache):
+            try:
+                self.configure_bound_source()
+            except ValueError as error:
+                self.fail("fixture sealed mutable checkout instead of private controller source: " + str(error))
+        self.assertEqual(mutable_walks, [], "source binding enumerated the mutable checkout")
+
+    def test_private_snapshot_rejects_changed_source_and_added_bytecode(self):
+        for mutation in ("changed-source", "added-bytecode", "added-unknown-source"):
+            with self.subTest(mutation=mutation), self.controller_snapshot() as snapshot:
+                owner = runpy.run_path(str(snapshot / "cloudbench_execution_provenance.py"))
+                manifest = owner["build_snapshot_manifest"](snapshot)
+                self.assertEqual(
+                    manifest,
+                    json.loads((snapshot / owner["SNAPSHOT_MANIFEST_NAME"]).read_text()),
+                )
+                source = snapshot / "cloudbench_catalog.py"
+                original = source.read_bytes()
+                added = snapshot / "__pycache__" / "cloudbench_catalog.cpython-311.pyc"
+                if mutation == "changed-source":
+                    source.write_bytes(original + b"\n# changed dependency\n")
+                elif mutation == "added-bytecode":
+                    write(added, b"unattested bytecode")
+                else:
+                    added = snapshot / "unlisted-source.py"
+                    write(added, b"print('unattested dependency')\n")
+                try:
+                    with self.assertRaisesRegex(ValueError, "snapshot digest mismatch"):
+                        owner["verify_snapshot"](snapshot, manifest)
+                finally:
+                    source.write_bytes(original)
+                    added.unlink(missing_ok=True)
+
+    def test_private_snapshot_rejects_source_disappearing_during_hash(self):
+        with self.controller_snapshot() as snapshot:
+            owner = runpy.run_path(str(snapshot / "cloudbench_execution_provenance.py"))
+            source = snapshot / "cloudbench_catalog.py"
+            original = source.read_bytes()
+            original_rglob = Path.rglob
+
+            def disappearing_source(path, pattern):
+                paths = list(original_rglob(path, pattern))
+                if path == snapshot:
+                    source.unlink(missing_ok=True)
+                return iter(paths)
+
+            try:
+                with (
+                    patch.object(Path, "rglob", disappearing_source),
+                    self.assertRaisesRegex(ValueError, "snapshot changed while hashing"),
+                ):
+                    owner["build_snapshot_manifest"](snapshot)
+            finally:
+                source.write_bytes(original)
+
     def configure_bound_source(self):
         self.config["env"]["REF"] = REF
         self.source = {p: digest(git_blob(p)) for p in recovery.RECIPE_PATHS}
         with (self.registry / "meta").open("a") as stream:
             stream.write("workspace_root=" + str(REPO) + "\n")
-        owner_spec = importlib.util.spec_from_file_location(
-            "fixture_provenance_owner", ROOT / "cloudbench_execution_provenance.py"
-        )
-        owner = importlib.util.module_from_spec(owner_spec)
-        owner_spec.loader.exec_module(owner)
-        config = owner.build_config(
-            "cloudbench-fleet-config-v1", ["app=" + APP, "task_count=1"]
-        )
-        document = owner.build_provenance(
-            base_sha=REF,
-            workspace_patch_sha256="none",
-            snapshot_manifest=owner.build_snapshot_manifest(ROOT),
-            config=config,
-        )
+        # Bind the same private, complete dependency copy used by the controller.
+        # The mutable scripts checkout also contains unrelated test/cache writes.
+        with self.controller_snapshot() as snapshot:
+            owner = runpy.run_path(str(snapshot / "cloudbench_execution_provenance.py"))
+            manifest = owner["build_snapshot_manifest"](snapshot)
+            self.assertEqual(
+                manifest,
+                json.loads((snapshot / owner["SNAPSHOT_MANIFEST_NAME"]).read_text()),
+            )
+            config = owner["build_config"](
+                "cloudbench-fleet-config-v1", ["app=" + APP, "task_count=1"]
+            )
+            document = owner["build_provenance"](
+                base_sha=REF,
+                workspace_patch_sha256="none",
+                snapshot_manifest=manifest,
+                config=config,
+            )
         write(self.run / "execution-provenance.json", json.dumps(document))
         names = (
             "process-identity.py",
