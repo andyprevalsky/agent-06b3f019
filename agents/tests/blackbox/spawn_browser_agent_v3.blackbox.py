@@ -12636,6 +12636,108 @@ async def test_execute_action_navback():
     out = await execute_action(dom, ah, {"action": "navback"})
     assert out == {"success": True, "message": ""}
 
+async def test_observed_action_result_is_retained_in_its_receipt():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    url = "https://example.test/verify"
+    dom = SimpleNamespace(
+        session=_fake_session_with_event_bus(), selector_map={},
+        get_page_identity=AsyncMock(return_value={"url": url}),
+    )
+    history = ActionHistory()
+    await history.record_action(
+        dom_service=dom, action="input_text", params={"text": "+15550000002"},
+        result={"success": True},
+    )
+    assessment = {
+        "auth_realm": "example.test", "page_url": url,
+        "blocker": "automated_options_exhausted", "reason": "The requested code did not arrive.",
+        "recipient_options": [],
+        "attempted_recipient_options": [{
+            "method": "sms_otp", "recipient": "+15550000002", "status": "exhausted",
+            "evidence": "Input followed by the observed verification page.", "evidence_steps": [1, 2],
+        }],
+    }
+    result = await execute_action(
+        dom, history, {"action": "wait", "params": {"time_ms": 0}},
+        current_url=url, auth_context_for_url=AsyncMock(return_value={"auth_realm": "example.test"}),
+    )
+    assert result["current_url"] == url
+    assert history.get_entries()[-1]["result"].get("current_url") == result["current_url"]
+    assert auth_assistance_assessment_result(
+        assessment, auth_options={}, auth_realm="example.test", current_url=url,
+        action_history=history.get_entries(),
+    ) is None
+    # A bare acknowledgement still is not an observation, and a failed
+    # observation must not acquire the last page's identity.
+    unobserved = ActionHistory()
+    await unobserved.record_action(
+        dom_service=dom, action="input_text", params={"text": "+15550000002"},
+        result={"success": True},
+    )
+    await execute_action(dom, unobserved, {"action": "wait", "params": {"time_ms": 0}})
+    assert auth_assistance_assessment_result(
+        assessment, auth_options={}, auth_realm="example.test", current_url=url,
+        action_history=unobserved.get_entries(),
+    )["error"] == "authentication_assessment_incomplete"
+    failed_observation = ActionHistory()
+    await failed_observation.record_action(
+        dom_service=dom, action="input_text", params={"text": "+15550000002"},
+        result={"success": True},
+    )
+    dom.get_page_identity.side_effect = RuntimeError("No observed page")
+    failed = await execute_action(
+        dom, failed_observation, {"action": "wait", "params": {"time_ms": 0}},
+        current_url=url, auth_context_for_url=AsyncMock(),
+    )
+    assert failed["current_url"] == ""
+    assert "current_url" not in failed_observation.get_entries()[-1]["result"]
+    assert auth_assistance_assessment_result(
+        assessment, auth_options={}, auth_realm="example.test", current_url=url,
+        action_history=failed_observation.get_entries(),
+    )["error"] == "authentication_assessment_incomplete"
+    before = history.get_entries()
+    await execute_action(dom, history, {"action": "unknown_action"})
+    assert history.get_entries() == before
+    try:
+        history.attach_observed_result(1, {"current_url": "https://foreign.example/"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("A completed action rewrote a different action's receipt")
+    assert history.get_entries() == before
+
+
+def test_sms_action_receipts_match_presentation_only_phone_changes():
+    from domains.spawn_browser_agent_v3.auth_assessment import auth_assistance_assessment_result
+
+    url = "https://example.test/verify"
+    assessment = {
+        "auth_realm": "example.test", "page_url": url,
+        "blocker": "automated_options_exhausted", "reason": "No code after a resend and wait.",
+        "recipient_options": [{
+            "method": "sms_otp", "recipient": "+15550000002", "status": "exhausted",
+            "evidence": "This exact number was typed and the page was later observed.",
+            "evidence_steps": [1, 2],
+        }],
+    }
+    inventory = {"minted": {"phone": "+15550000002"}}
+    def check(text):
+        return auth_assistance_assessment_result(
+            assessment, auth_options=inventory, auth_realm="example.test", current_url=url,
+            action_history=[
+                {"step": 1, "action": "input_text", "params": {"text": text}},
+                {"step": 2, "action": "read_browser_state", "result": {"url": url}},
+            ],
+        )
+    for text in ("+15550000002", "15550000002", "+1 (555) 000-0002"):
+        assert check(text) is None, text
+    for text in ("5550000002", "+25550000002", "15550000002 extension 9", "text 15550000002"):
+        assert check(text)["error"] == "authentication_assessment_incomplete", text
+
+
 async def test_execute_action_wait():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -27344,6 +27446,8 @@ async def run_all_tests():
     )
     await r.record_async("execute_action_navback", test_execute_action_navback)
     await r.record_async("execute_action_wait", test_execute_action_wait)
+    await r.record_async("observed_action_result_retained_in_receipt", test_observed_action_result_is_retained_in_its_receipt)
+    r.record("sms_receipts_match_presentation_only_phone_changes", test_sms_action_receipts_match_presentation_only_phone_changes)
     await r.record_async(
         "execute_action_wait_coerces_numeric_string",
         test_execute_action_wait_coerces_numeric_string,

@@ -1691,6 +1691,7 @@ async def execute_action(
         return {"success": False, "error": "Browser not connected"}
 
     action_name = action.get("action", "")
+    previous_action_step = action_history.last_action_step()
     index = action.get("index")
     params = action.get("params", {})
     thinking = action.get("thinking")
@@ -1791,6 +1792,9 @@ async def execute_action(
         result = await _attach_observed_auth_context(
             dom_service, action_name, result, auth_context_for_url, previous_url=current_url,
         )
+        completed_action_step = action_history.last_action_step()
+        if completed_action_step is not None and completed_action_step != previous_action_step:
+            action_history.attach_observed_result(completed_action_step, result)
     return result
 
 

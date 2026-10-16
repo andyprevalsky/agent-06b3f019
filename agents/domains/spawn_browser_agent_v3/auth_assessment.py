@@ -31,10 +31,23 @@ def auth_recipient_options(options: Dict[str, Any]) -> list[dict[str, str]]:
             for method, recipient in dict.fromkeys((x["method"], x["recipient"]) for x in recipients)]
 
 
-def _recipient_receipts_bound(recipient: str, steps: list[int], entries: Dict[int, Any]) -> bool:
+def _recipient_receipts_bound(recipient: str, steps: list[int], entries: Dict[int, Any], *, method: str) -> bool:
     """Bind cited input and later observation, not the semantic site verdict."""
+    def same_recipient(text: Any) -> bool:
+        if text == recipient:
+            return True
+        if method != "sms_otp" or not isinstance(text, str) or not isinstance(recipient, str):
+            return False
+        # Formatting may change while typing a known phone number. Do not infer
+        # a country code, match a suffix, or extract digits from arbitrary text.
+        if not all(re.fullmatch(r"\+?[0-9() .\-]+", value) for value in (text, recipient)):
+            return False
+        def digits(value: str) -> str:
+            return re.sub(r"\D", "", value)
+        return bool(digits(recipient)) and digits(text) == digits(recipient)
+
     inputs = [step for step in steps if entries[step].get("action") == "input_text"
-              and (entries[step].get("params") or {}).get("text") == recipient]
+              and same_recipient((entries[step].get("params") or {}).get("text"))]
     def has_observation(entry: Dict[str, Any]) -> bool:
         result = entry.get("result") or {}
         return isinstance(result, dict) and any(
@@ -76,7 +89,7 @@ def auth_assistance_assessment_result(
         steps = attempt.get("evidence_steps") or []
         if not isinstance(steps, list) or not steps or any(type(step) is not int or step not in entries_by_step for step in steps):
             return incomplete("A past attempt has no valid action receipts.")
-        if not _recipient_receipts_bound(attempt.get("recipient"), steps, entries_by_step):
+        if not _recipient_receipts_bound(attempt.get("recipient"), steps, entries_by_step, method=attempt["method"]):
             return incomplete("A past recipient lacks its cited input and later observation receipts.")
     blocker = assessment.get("blocker")
     # All blockers account for the same supplied inventory. A restricted or
@@ -103,7 +116,7 @@ def auth_assistance_assessment_result(
         evidence_steps = row.get("evidence_steps") or []
         if not isinstance(evidence_steps, list) or any(type(step) is not int or step not in observed_steps for step in evidence_steps):
             return incomplete("An outcome cites an action receipt that is absent from this browser history.")
-        if row["status"] == "exhausted" and not _recipient_receipts_bound(row["recipient"], evidence_steps, entries_by_step):
+        if row["status"] == "exhausted" and not _recipient_receipts_bound(row["recipient"], evidence_steps, entries_by_step, method=row["method"]):
             return incomplete("An exhausted recipient option lacks its own input and later observation receipts.")
         if row["status"] == "remaining":
             remaining.append({"method": key[0], "recipient": key[1], "evidence": row["evidence"]})

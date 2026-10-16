@@ -630,6 +630,15 @@ class ActionHistory:
         """Return the latest recorded receipt ID without copying DOM history."""
         return self._entries[-1].step if self._entries else None
 
+    def attach_observed_result(self, step: int, result: Dict[str, Any]) -> None:
+        """Keep the delivered page observation on its exact action receipt."""
+        if not self._entries or self._entries[-1].step != step:
+            raise ValueError("Observed result does not belong to the latest action")
+        for key in ("url", "current_url", "title"):
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                self._entries[-1].result[key] = value
+
     def get_entries(self) -> List[Dict[str, Any]]:
         """Get all entries as dicts for Rose API request."""
         return [entry.to_dict() for entry in self._entries]
