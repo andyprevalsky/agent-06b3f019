@@ -238,15 +238,19 @@ class Broker:
             raise
         port=server.sockets[0].getsockname()[1];record=dict(fields,local_port=port,lease=lease,state='active',authority_sha256=self.digest)
         record['state']='preparing'
-        self.routes[lease]=dict(record=record,server=server,tasks=set(),ready=asyncio.Event(),lock=asyncio.Lock());self.ports[port]=lease
+        lock=asyncio.Lock();await lock.acquire()
+        self.routes[lease]=dict(record=record,server=server,tasks=set(),ready=asyncio.Event(),lock=lock);self.ports[port]=lease
         try:
             record['state']='active'
             await asyncio.to_thread(save,self.directory/'leases'/(lease+'.json'),dict(record))
+            self.parent_live()
+            need(time.monotonic()<self.auth['deadline'],'original campaign admission deadline exhausted')
             await server.start_serving()
             self.routes[lease]['ready'].set()
         except BaseException:
             record['state']='failed';self.routes[lease]['ready'].set()
             server.close();await server.wait_closed();self.ports.pop(port,None);raise
+        finally:lock.release()
         return dict(lease=lease,local_port=port)
     async def route_action(self, request, peer):
         pid,stamp,_=self.requester(request,peer,closing=True)
