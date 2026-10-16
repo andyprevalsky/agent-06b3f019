@@ -11220,6 +11220,10 @@ PYWRITE
 pool_verify_reuse_proof() {  # <machine> <volume> [refresh after canonical return]
     local id="$1" volume="$2" mode="${3:-verify}" path fields name image prior current cold imported_attempt
     path="$(pool_reuse_proof_file "$id")" || return 1
+    if [ "$mode" = refresh ] && [ "${CLOUDBENCH_BOOT_TRANSPORT:-update}" = staged ]; then
+        fleet_verify_staged_primary_return "$id" "$volume" refresh
+        return $?
+    fi
     if [ "$mode" != refresh ] && [ -f "$path" ] && python3 - "$path" <<'PYEXPLICIT'
 import json,sys
 raise SystemExit(0 if 'explicit_idle' in json.load(open(sys.argv[1])) else 1)
@@ -13787,6 +13791,8 @@ PYBILLING
 
 fleet_verify_staged_primary_return() {  # <machine> <volume>; before exact claim release
     local id="$1" volume="$2" index out="" attempt
+    local -a refresh_args=()
+    [ "${3:-record}" != refresh ] || refresh_args=(--refresh-existing)
     for index in "${!CHILD_MACHINE[@]}"; do
         if [ "${CHILD_MACHINE[$index]}" = "$id" ]; then
             [ -z "$out" ] || return 1
@@ -13806,7 +13812,7 @@ fleet_verify_staged_primary_return() {  # <machine> <volume>; before exact claim
         --output "$out" --registry "$FLEET_REGISTRY_DIR" --common "$GIT_COMMON_DIR" \
         --source "$BENCH_REF" --machine "$id" --volume "$volume" \
         --before "$attempt/before.json" --after "$attempt/after.json" \
-        --volume-path "$attempt/volume.json" > "$attempt/verified.json"
+        --volume-path "$attempt/volume.json" "${refresh_args[@]}" > "$attempt/verified.json"
 }
 
 fleet_record_staged_primary_release() {  # <machine>; exact claim was just released

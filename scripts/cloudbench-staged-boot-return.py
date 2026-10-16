@@ -187,6 +187,21 @@ def verify(output, registry, common, source, machine, volume, before, after, vol
     return result
 
 
+def verify_existing_return(result, common):
+    """Refresh current evidence without replacing the first immutable return."""
+    output = Path(result['output']); target = output / 'staged-boot/return.json'
+    index = json.loads(read(Path(common) / 'cloudbench-staged-boot-returns' / (result['machine'] + '.json')))
+    need(index['receipt'] == H['descriptor'](target), 'saved return binding changed')
+    original = H['described'](index['receipt'])
+    observations = {'before', 'after', 'volume'}
+    for key in observations:
+        H['described'](original[key])
+    need({k: v for k, v in result.items() if k not in observations}
+         == {k: v for k, v in original.items() if k not in observations}, 'saved return identity changed')
+    need(not os.path.lexists(output / 'staged-boot/released.json'), 'return already released')
+    return result
+
+
 def current_policy(proof_path):
     proof_path = Path(proof_path)
     index = proof_path.parent.parent / 'cloudbench-staged-boot-returns' / (proof_path.stem + '.json')
@@ -297,9 +312,13 @@ def main():
     p = argparse.ArgumentParser()
     for key in ('output', 'registry', 'common', 'source', 'machine', 'volume', 'before', 'after', 'volume-path'):
         p.add_argument('--' + key, required=True)
-    args = vars(p.parse_args())
+    p.add_argument('--refresh-existing', action='store_true')
+    args = vars(p.parse_args()); refresh = args.pop('refresh_existing')
     result = verify(**{k.replace('-', '_'): v for k, v in args.items()})
-    record(result,args['common'])
+    if refresh:
+        verify_existing_return(result, args['common'])
+    else:
+        record(result,args['common'])
     print(json.dumps(result, sort_keys=True))
 
 

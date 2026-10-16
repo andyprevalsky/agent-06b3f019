@@ -821,6 +821,58 @@ class StagedPrimaryReturn(unittest.TestCase):
     def test_usage_is_not_required_when_absent_in_both_old_records(self):
         self.h['validate_return_volume'](self.f.volume,self.f.volume)
 
+    def audit_refresh(self, corrupt=None, transport="staged"):
+        value=self.verify();self.h['record'](value,self.f.common)
+        immutable=(self.stage/'return.json').read_bytes();proof_before=self.f.proof.read_bytes()
+        if corrupt:corrupt()
+        fleet=Path(os.environ.get('STAGED_REFRESH_FLEET_SOURCE',str(SCRIPT.with_name('run-bench-fleet')))).read_text()
+        names=('pool_verify_reuse_proof','pool_native_reuse_proof','fleet_verify_staged_primary_return','fleet_audit_record_pool_machine','pool_claim_fs_transaction','fleet_record_staged_primary_release')
+        functions='\n'.join(re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S).group() for name in names)
+        inventory=SCRIPT.with_name('lib')/'cloudbench-inventory.sh'
+        functions+='\n'+re.search(r'^registry_meta_value\(\).*?^}\n',inventory.read_text(),re.M|re.S).group()
+        fake=self.f.root/'fake-campaign.py';fake.write_text('import os\ndef fetch(*args):\n return open(os.environ["BEFORE"]).read()\n')
+        functions=functions.replace('"$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-machines.py"',str(fake))
+        audit=self.f.root/'refresh-audit';audit.mkdir()
+        claim=dict(line.split('=',1)for line in self.f.claim.read_text().splitlines())
+        shell=r'''set -e
+CHILD_MACHINE=("$MID"); CHILD_OUT=("$OUT")
+fleet_preconfig_native_read(){ cp "$BEFORE" "$2"; }
+fleet_cold_handoff_volume_read(){ cp "$VOLUME" "$2"; }
+cloudbench_env_sha256(){ sha256sum "$1" | cut -d' ' -f1; }
+pool_reuse_proof_file(){ printf '%s/cloudbench-pool-reuse/%s.json' "$GIT_COMMON_DIR" "$1"; }
+'''+functions+r'''
+fleet_audit_record_pool_machine "$MID" "$VOL" claimed
+fleet_audit_record_pool_machine "$MID" "$VOL" returned-stopped-claim-released
+pool_claim_fs_transaction release "$CLAIM" "$MID" "$CLAIM_SHA" "$CLAIM_HOST" "$CLAIM_PID" "$CLAIM_BIRTH" "$FLEET_OWNER_TOKEN"
+fleet_record_staged_primary_release "$MID"
+'''
+        env=dict(os.environ,MID=self.f.mid,VOL=self.f.vol,OUT=str(self.out),BEFORE=str(self.before),VOLUME=str(self.vol),CLAIM=str(self.f.claim),CLAIM_SHA=mod.sha(self.f.claim.read_bytes()),CLAIM_HOST=claim['host'],CLAIM_PID=claim['pid'],CLAIM_BIRTH=claim['pid_start'],CLOUDBENCH_BOOT_TRANSPORT=transport,POOL_COLD_BOOTSTRAP='1',APP='app',CLOUDBENCH_SCRIPT_SNAPSHOT=str(SCRIPT.parent),FLEET_REGISTRY_DIR=str(self.registry),GIT_COMMON_DIR=str(self.f.common),BENCH_REF=self.source,FLEET_OWNER_TOKEN=self.f.owner,FLEET_TEARDOWN_OWNERSHIP_DIR=str(audit),RUN_ID='current',POOL_IDS_FILE=self.f.request['consumer']['pool_ids_file'],POOL_META_FILE=self.f.request['consumer']['pool_meta_file'])
+        result=subprocess.run(['bash','-c',shell],env=env,capture_output=True,text=True)
+        self.assertEqual((self.stage/'return.json').read_bytes(),immutable);self.assertEqual(self.f.proof.read_bytes(),proof_before)
+        return result,claim
+    def test_actual_audit_refresh_release_and_next_claim(self):
+        result,claim=self.audit_refresh();self.assertEqual(result.returncode,0,result.stderr);self.assertFalse(self.f.claim.exists())
+        self.assertEqual(self.h['current_policy'](self.f.proof),'existing-git-reset-v1')
+        fleet=SCRIPT.with_name('run-bench-fleet').read_text();fn=re.search(r'^pool_claim_fs_transaction\(\).*?^}\n',fleet,re.M|re.S).group()
+        args=['bash','-c',fn+'\npool_claim_fs_transaction publish-ordinary "$@"','claim',str(self.f.claim),self.f.mid,self.f.vol,claim['host'],claim['pid'],claim['pid_start'],'a'*32,self.f.request['consumer']['pool_ids_file'],self.f.request['consumer']['pool_meta_file'],mod.sha(Path(self.f.request['consumer']['pool_meta_file']).read_bytes())]
+        next_claim=subprocess.run(args,capture_output=True,text=True);self.assertEqual(next_claim.returncode,0,next_claim.stderr)
+    def test_refresh_changed_native_keeps_claim_and_return(self):
+        result,_=self.audit_refresh(lambda:self.write(self.before,dict(self.f.native,state='started')))
+        self.assertNotEqual(result.returncode,0);self.assertTrue(self.f.claim.exists())
+    def test_refresh_changed_runtime_keeps_claim_and_return(self):
+        result,_=self.audit_refresh(lambda:(self.out/'remote-logs/runtime-evidence/logs/worker.log').write_bytes(b'changed'))
+        self.assertNotEqual(result.returncode,0);self.assertTrue(self.f.claim.exists())
+    def test_refresh_changed_claim_keeps_claim_and_return(self):
+        result,_=self.audit_refresh(lambda:self.f.claim.write_text(self.f.claim.read_text().replace(self.f.owner,'e'*32)))
+        self.assertNotEqual(result.returncode,0);self.assertTrue(self.f.claim.exists())
+    def test_nonstaged_refresh_keeps_normal_config_guard(self):
+        result,_=self.audit_refresh(transport='update')
+        self.assertNotEqual(result.returncode,0);self.assertIn('line 32',result.stderr);self.assertTrue(self.f.claim.exists())
+    def test_refresh_saved_receipt_tamper_refuses(self):
+        result=self.verify();self.h['record'](result,self.f.common)
+        saved=self.stage/'return.json';saved.write_bytes(saved.read_bytes()+b' ')
+        with self.assertRaises(ValueError):self.h['verify_existing_return'](self.verify(),self.f.common)
+
     def test_nonstaged_provenance_cannot_borrow_new_proof(self):
         c=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')))
         values=self.provenance['config']['values'];values.pop('boot_transport')
@@ -905,6 +957,10 @@ class StagedProbeReturn(unittest.TestCase):
         card=json.loads(subprocess.run(['python3','-c',code],input='parallel-tool-calls\n',text=True,capture_output=True,check=True).stdout);self.write(self.out/'cloudbench-report-card.json',card)
         for name,value in [('benchmark-child.finished','0\n'),('barrier.ready.observed',''),('autoscaler.completed-after-child',''),('desired-worker-count','0\n')]:
             (self.out/name).write_text(value)
+    audit_refresh=StagedPrimaryReturn.audit_refresh
+    def test_probe_actual_audit_refresh_release(self):
+        result,_=self.audit_refresh();self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.h['current_policy'](self.f.proof),'existing-git-reset-v1');self.assertFalse(self.f.claim.exists())
     def test_actual_probe_artifacts_return_without_real_task_credit(self):
         value=self.verify();self.assertEqual(value['schema'],'cloudbench-staged-probe-return-v1');self.assertEqual(value['real_task_credit'],0);self.assertNotIn('runtime_manifest',value)
         self.h['record'](value,self.f.common)
