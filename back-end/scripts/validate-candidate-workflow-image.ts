@@ -2,6 +2,7 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from '../src/providers/database';
 import { getTemporalClient, startAgentWorkflowExecution } from '../src/providers/temporal';
@@ -26,6 +27,17 @@ let lease: WorkflowDeploymentLease | null = null;
 let workflowStarted = false;
 
 function requireProductionOptIn(): string {
+  const receiptIndex = process.argv.indexOf('--runtime-receipt');
+  if (receiptIndex >= 0) {
+    const path = process.argv[receiptIndex + 1];
+    if (!path || existsSync(path))
+      throw new Error('Recover the existing candidate receipt instead of replaying validation');
+    if (
+      !/^[a-f0-9]{40}$/.test(process.env.TEMPORAL_WORKER_BUILD_ID ?? '') ||
+      !/^[a-f0-9]{64}$/.test(process.env.TEMPORAL_WORKER_BUNDLE_SHA256 ?? '')
+    )
+      throw new Error('Runtime receipt requires exact source and bundle identities');
+  }
   if (
     !process.argv.includes('--execute') ||
     process.env.PRODUCTION_WORKFLOW_MIGRATION_VALIDATION !== '1'
@@ -261,7 +273,28 @@ main()
         });
       }
     }
-    process.stdout.write(`${JSON.stringify({ runId, results }, null, 2)}\n`);
+    const report = {
+      runId,
+      results,
+      runtime: {
+        version: 1,
+        sourceCommit: process.env.TEMPORAL_WORKER_BUILD_ID ?? null,
+        bundleSHA256: process.env.TEMPORAL_WORKER_BUNDLE_SHA256 ?? null,
+        deploymentToken: process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN ?? null,
+        namespace: process.env.TEMPORAL_NAMESPACE ?? null,
+        taskQueue: process.env.TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE ?? null,
+        recordedAt: new Date().toISOString(),
+      },
+    };
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     await prisma.$disconnect();
     if (results.some((result) => result.status === 'FAIL')) process.exitCode = 1;
+    else {
+      const index = process.argv.indexOf('--runtime-receipt');
+      if (index >= 0)
+        writeFileSync(process.argv[index + 1], `${JSON.stringify(report, null, 2)}\n`, {
+          mode: 0o600,
+          flag: 'wx',
+        });
+    }
   });

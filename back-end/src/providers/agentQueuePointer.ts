@@ -75,10 +75,20 @@ export async function getCurrentAgentQueue(now: number = Date.now()): Promise<st
 export async function setCurrentAgentQueue(
   taskQueue: string,
   surfaceHash: string,
-  updatedBy?: string
+  updatedBy?: string,
+  options?: { expectedCurrentQueue: string }
 ): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
     await lockQueueAdmission(tx);
+    if (options) {
+      const current = await tx.agentQueuePointer.findUnique({ where: { id: SINGLETON_ID } });
+      if (
+        !current ||
+        (current.taskQueue !== options.expectedCurrentQueue && current.taskQueue !== taskQueue) ||
+        (current.taskQueue === taskQueue && current.surfaceHash !== surfaceHash)
+      )
+        throw new Error('Current queue changed before the qualified process cutover');
+    }
     const key = queueAdmissionKey(taskQueue);
     const prior = await tx.toolSideEffect.findUnique({ where: { operationKey: key } });
     const saved = prior?.request as unknown as QueueAdmission | undefined;
