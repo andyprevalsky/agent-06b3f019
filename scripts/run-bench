@@ -345,7 +345,7 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --admit-existing-idle)
+        --admit-existing-idle|--admit-fixed-native-worker)
             [ "$#" -ge 6 ] || exit 2
             INTERNAL_OPERATION=1; FLEET_ARGS+=("$1" "$2" "$3" "$4" "$5" "$6"); shift 6 ;;
         --cold-handoff-request)

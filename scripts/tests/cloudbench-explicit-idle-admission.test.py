@@ -482,7 +482,7 @@ owner=dict(version=1,machine_id=r['machine_id'],primary_machine_id=r['primary_ma
         fleet=SCRIPT.with_name('run-bench-fleet').read_text()
         def function(name):return re.search(r'^'+name+r'\(\).*?^}\n',fleet,re.M|re.S).group()
         # Historical fallback remains present and unchanged; explicit path must win first.
-        shell='\n'.join(function(n) for n in ('pool_claim_fs_transaction','write_pool_claim','pool_claim_release_exact','claim_explicit_idle_worker','claim_reusable_worker','return_reusable_worker'))
+        shell='\n'.join(function(n) for n in ('pool_claim_fs_transaction','write_pool_claim','pool_claim_release_exact','explicit_worker_helper','claim_explicit_idle_worker','claim_reusable_worker','return_reusable_worker'))
         shell+='''
 set -e
 python3() {

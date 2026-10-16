@@ -168,6 +168,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
     Gate(
+        "cloudbench-fixed-native-worker",
+        ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
+    ),
+    Gate(
         "cloudbench-protected-resources",
         ("python3", "scripts/tests/cloudbench-protected-resources.test.py"),
     ),

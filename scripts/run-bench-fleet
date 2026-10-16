@@ -739,6 +739,9 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-reuse.py" \
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-admission.py" \
+       "$ROOT_DIR/scripts/cloudbench-fixed-native-worker.py" \
+       "$ROOT_DIR/scripts/cloudbench-fixed-native-worker-guard.py" \
+       "$ROOT_DIR/scripts/cloudbench-fixed-native-worker-baseline.json" \
        "$ROOT_DIR/scripts/cloudbench-explicit-idle-preconfig.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot.py" \
        "$ROOT_DIR/scripts/cloudbench-staged-boot-return.py" \
@@ -1033,6 +1036,7 @@ STRICT_BARRIER="${CLOUDBENCH_STRICT_BARRIER:-0}"
 COLD_HANDOFF_REQUEST=""
 COLD_HANDOFF_REQUEST_SHA=""
 EXPLICIT_IDLE_ARGS=()
+EXPLICIT_IDLE_HELPER=cloudbench-explicit-idle-admission.py
 RECOVER_STALE_ONLY="0"
 RECOVER_PRIMARY_TO_POOL="0"
 RECOVER_OWNER_TOKEN=""
@@ -1209,8 +1213,9 @@ while [ $# -gt 0 ]; do
         --detach)         DETACH="1"; shift ;;
         --wait)           DETACH="1"; WAIT_FOR_DETACHED="1"; shift ;;
         --foreground)     DETACH="0"; WAIT_FOR_DETACHED="0"; shift ;;
-        --admit-existing-idle)
+        --admit-existing-idle|--admit-fixed-native-worker)
             [ "$#" -ge 6 ] || exit 2
+            [ "$1" != --admit-fixed-native-worker ] || EXPLICIT_IDLE_HELPER=cloudbench-fixed-native-worker.py
             EXPLICIT_IDLE_ARGS=("$2" "$3" "$4" "$5" "$6")
             RECOVER_STALE_ONLY=1; POOL_COLD_BOOTSTRAP=1; DETACH=0; shift 6 ;;
         --cold-handoff-request)
@@ -12973,6 +12978,13 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
     [ "$exact_shape_only" != 1 ] || [ "$shape_pass" = exact ] || continue
     while read -r id; do
         [ -n "$id" ] || continue
+        if [ -f "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" ]; then
+            python3 - "$GIT_COMMON_DIR/cloudbench-pool-reuse/$id.json" <<'PYROLE' || continue
+import json,sys
+p=json.load(open(sys.argv[1]));x=p.get('explicit_idle')
+if x is not None: assert 'primary' in x['allowed_future_roles']
+PYROLE
+        fi
         if [ -e "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ] || [ -L "$GIT_COMMON_DIR/cloudbench-cold-handoffs/outgoing/$id" ]; then continue; fi
         if [ -n "$desired_cpus" ] && [ -f "$hints" ]; then
             candidate_shape="$(awk -v id="$id" '$1 == id { print $2, $3, $4; exit }' "$hints")"
@@ -13187,7 +13199,7 @@ fi
 if [ "${#EXPLICIT_IDLE_ARGS[@]}" -gt 0 ]; then
     CLOUDBENCH_IDLE_WORKSPACE="$ROOT_DIR" CLOUDBENCH_IDLE_COMMON="$GIT_COMMON_DIR" \
     CLOUDBENCH_IDLE_POOL_IDS="$POOL_IDS_FILE" CLOUDBENCH_IDLE_POOL_META="$POOL_META_FILE" \
-    FLY_APP_NAME="$APP" python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-explicit-idle-admission.py" admit \
+    FLY_APP_NAME="$APP" python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/${EXPLICIT_IDLE_HELPER:-cloudbench-explicit-idle-admission.py}" admit \
         --request "${EXPLICIT_IDLE_ARGS[0]}" --sha256 "${EXPLICIT_IDLE_ARGS[1]}" \
         --authority "${EXPLICIT_IDLE_ARGS[2]}" --authority-sha256 "${EXPLICIT_IDLE_ARGS[3]}" \
         --custody-fd "${EXPLICIT_IDLE_ARGS[4]}"
@@ -15585,6 +15597,21 @@ mandatory_autoscaler_process_acceptable() {  # <bench-output-dir> <autoscaler-pi
 # The worker-clones id-file is the SOURCE OF TRUTH for the pool size: a machine
 # is recorded the instant Fly creates it (BEFORE staging), so a slow/failed stage
 # can never make the reconcile think the pool is empty and re-clone in a loop.
+explicit_worker_helper() {  # <proof>; metadata routing only, full validator still mandatory
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}" "$1" <<'PYWORKERHELPER'
+import json,runpy,sys
+from pathlib import Path
+p=Path(sys.argv[1]);h=runpy.run_path(str(p/'cloudbench-explicit-idle-admission.py'))
+proof=json.loads(h['read'](sys.argv[2]));a=h['described'](proof['explicit_idle']['admission'])
+if a['schema']=='cloudbench-fixed-native-worker-admission-v1':
+ assert a['resource']['machine_id']=='86549d6aed9358'
+ print(p/'cloudbench-fixed-native-worker.py')
+else:
+ assert a['schema']==h['SCHEMA']
+ print(p/'cloudbench-explicit-idle-admission.py')
+PYWORKERHELPER
+}
+
 claim_explicit_idle_worker() {  # shared primary/worker pool, one exclusive MID claim
     local out="$1" primary="$2" workspace="$3" token="$4" pip="$5"
     local id proof volume digest attempt claim_owner current_owner="${FLEET_OWNER_TOKEN:-}"
@@ -15754,7 +15781,7 @@ PY
     fleet_preconfig_native_read "$wid" "$attempt/final.json" \
         && fleet_cold_handoff_volume_read "$volume" "$attempt/volume.json" || return 1
     if [ "$origin" = explicit-user-idle-resource ]; then
-        python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-explicit-idle-admission.py" worker-return \
+        python3 "$(explicit_worker_helper "$proof")" worker-return \
             --assignment "$authority" --before "$attempt/after.json" --after "$attempt/final.json" \
             --volume "$attempt/volume.json" > "$attempt/verified" || return 1
     else
@@ -15775,7 +15802,7 @@ receipt=dict(version=1,role='borrowed-worker',machine_id=r['machine_id'],run_tok
 h['sibling']('cloudbench-startup-failure-archive.py')['durable_handoff_json'](__import__('pathlib').Path(sys.argv[3]),receipt)
 PY
     if [ "$origin" = explicit-user-idle-resource ]; then
-        python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-explicit-idle-admission.py" worker-return \
+        python3 "$(explicit_worker_helper "$proof")" worker-return \
             --assignment "$authority" --before "$attempt/after.json" --after "$attempt/final.json" \
             --volume "$attempt/volume.json" --record > "$attempt/state-recorded" || return 1
     else
@@ -16295,6 +16322,13 @@ PY
     rm -f "$out/worker-$wid.cancelled"
     stage_log="$out/worker-$wid.stage.log"
     : >> "$stage_log" 2>/dev/null || true
+    local worker_launch_prefix="bash /tmp/rbw.sh" worker_selected_helper
+    if [ "$borrowed_worker" = 1 ] && [ -n "${explicit_policy:-}" ]; then
+        worker_selected_helper="$(explicit_worker_helper "$GIT_COMMON_DIR/cloudbench-pool-reuse/$wid.json")" || return 1
+        if [ "${worker_selected_helper##*/}" = cloudbench-fixed-native-worker.py ]; then
+            worker_launch_prefix="$(python3 "$worker_selected_helper" worker-launch-prefix "$GIT_COMMON_DIR/cloudbench-pool-reuse/$wid.json")" || return 1
+        fi
+    fi
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
@@ -16457,7 +16491,7 @@ PY
               : > "$out/worker-$wid.launch-attempted" || exit 1
               if run_worker_stage_cmd "launch worker wrapper" \
                   fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\""; then
+                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid $worker_launch_prefix >> /data/worker.log 2>&1 < /dev/null &\""; then
                   launched=1
                   break
               fi

@@ -240,6 +240,12 @@ def worker_shape_matches(proof_path, size, memory):
 
 
 def worker_stage(assignment_path, source, node, python_fp, size, memory, api, *, seconds=120):
+    assignment=json.loads(read(assignment_path));proof=json.loads(read(assignment['proof']))
+    admitted=H['described'](proof['explicit_idle']['admission'])
+    if admitted['schema']=='cloudbench-fixed-native-worker-admission-v1':
+        fixed=runpy.run_path(str(Path(__file__).with_name('cloudbench-fixed-native-worker.py')))
+        return fixed['stage_worker'](assignment_path,source,node,python_fp,size,memory,api,seconds=seconds)
+
     # Preserve the original stage/shape/claim/API predicates, while letting a
     # released staged primary carry its verified reset policy into a worker.
     original = H['stage_worker'].__globals__['current_policy']
