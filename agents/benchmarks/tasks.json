@@ -8532,7 +8532,7 @@
     "name": "sms-supervisor-open-spawns-agent",
     "title": "SMS Supervisor: Open \u2192 Spawn Then Stop",
     "description": "The restaurant is open. One text must produce one reply, one spawned agent, and then silence -- the agent reports its own lifecycle from there.",
-    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "prompt": "SMS 1: \"Order me a lok lak Togo from the ferry building asap\"",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
@@ -8553,7 +8553,7 @@
       "turn_timeout_seconds": 120,
       "turns": [
         {
-          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "inbound": "Order me a lok lak Togo from the ferry building asap",
           "min_outbound": 1,
           "max_outbound": 1,
           "allow_spend": true
@@ -8604,7 +8604,7 @@
     "name": "sms-supervisor-closed-no-spawn",
     "title": "SMS Supervisor: Closed \u2192 Answer, Spawn Nothing",
     "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop \u2014 no agent started, no budget raised.",
-    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "prompt": "SMS 1: \"Order me a lok lak Togo from the ferry building asap\"",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
@@ -8625,7 +8625,7 @@
       "turn_timeout_seconds": 120,
       "turns": [
         {
-          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "inbound": "Order me a lok lak Togo from the ferry building asap",
           "min_outbound": 1,
           "max_outbound": 1,
           "allow_spend": false

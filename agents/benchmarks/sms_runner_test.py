@@ -355,7 +355,7 @@ def test_catalog_task_is_a_runnable_daily_sms_slice():
     # Starts at transcript [100] — the request itself, no prior history and no
     # pre-seeded agent. The supervisor has to start the work, not describe it.
     assert [t["inbound"] for t in script["turns"]] == [
-        "Order me a lum lok Togo from the ferry building asap"
+        "Order me a lok lak Togo from the ferry building asap"
     ]
     assert script["seed_agents"] == []
     assert script["turns"][0]["allow_spend"] is True
