@@ -789,6 +789,38 @@ class StagedPrimaryReturn(unittest.TestCase):
         with self.assertRaises(ValueError):self.verify()
         self.write(self.vol,self.f.volume);self.f.claim.write_text(self.f.claim.read_text().replace(self.f.owner,'0'*32))
         with self.assertRaises(ValueError):self.verify()
+    def usage_pairs(self):
+        return json.loads(SCRIPT.with_name('tests').joinpath('staged-return-volume-usage.fixture.json').read_text()).values()
+    def test_actual_return_volume_usage_pairs(self):
+        for pair in self.usage_pairs():
+            self.h['validate_return_volume'](pair['original'], pair['current'])
+    def test_usage_change_reaches_real_runtime_and_preserves_claim(self):
+        pair=next(iter(self.usage_pairs()))
+        original=dict(pair['original'], id=self.f.vol, attached_machine_id=self.f.mid)
+        current=dict(pair['current'], id=self.f.vol, attached_machine_id=self.f.mid)
+        self.write(self.stage/'volume-before.json',original);self.write(self.vol,current)
+        before=self.f.claim.read_bytes()
+        self.assertEqual(self.verify()['status'],'STOPPED_RUNTIME_VERIFIED')
+        self.assertEqual(self.f.claim.read_bytes(),before)
+        (self.out/'remote-logs/runtime-evidence/logs/worker.log').write_bytes(b'corrupt')
+        with self.assertRaises(AssertionError):self.verify()
+        self.assertEqual(self.f.claim.read_bytes(),before)
+    def test_usage_counter_type_range_and_partial_refuse(self):
+        pair=next(iter(self.usage_pairs()))
+        for key,value in [('bytes_used',True),('blocks_free',-1),('blocks_avail',pair['original']['blocks']+1),('bytes_used',pair['original']['bytes_total']+1),('blocks_free',1.5)]:
+            current=dict(pair['current']);current[key]=value
+            with self.assertRaises(ValueError):self.h['validate_return_volume'](pair['original'],current)
+        original=dict(pair['original']);current=dict(pair['current'])
+        del original['bytes_used'];del current['bytes_used']
+        with self.assertRaises(ValueError):self.h['validate_return_volume'](original,current)
+    def test_volume_identity_capacity_and_unknown_fields_stay_exact(self):
+        pair=next(iter(self.usage_pairs()))
+        for key,value in [('id','other'),('attached_machine_id','other'),('blocks',1),('bytes_total',1),('encrypted',False),('state','destroyed'),('region','other'),('future_field',1)]:
+            current=dict(pair['current']);current[key]=value
+            with self.assertRaises(ValueError):self.h['validate_return_volume'](pair['original'],current)
+    def test_usage_is_not_required_when_absent_in_both_old_records(self):
+        self.h['validate_return_volume'](self.f.volume,self.f.volume)
+
     def test_nonstaged_provenance_cannot_borrow_new_proof(self):
         c=runpy.run_path(str(SCRIPT.with_name('cloudbench_execution_provenance.py')))
         values=self.provenance['config']['values'];values.pop('boot_transport')

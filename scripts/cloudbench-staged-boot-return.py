@@ -23,6 +23,25 @@ def fields(path):
     return dict(pairs)
 
 
+def validate_return_volume(original, current):
+    # These allocation counters change when the boot payload writes to the
+    # retained filesystem. Every other field, including capacity and identity,
+    # remains an exact comparison; unknown/new fields are not ignored.
+    counters = {'blocks_free', 'blocks_avail', 'bytes_used'}
+    need(isinstance(original, dict) and isinstance(current, dict)
+         and original.keys() == current.keys(), 'return Volume fields changed')
+    need({k: v for k, v in original.items() if k not in counters}
+         == {k: v for k, v in current.items() if k not in counters}, 'return Volume changed')
+    present = counters & original.keys()
+    if present:
+        need(present == counters, 'incomplete Volume usage counters')
+        for value in (original, current):
+            need(all(type(value.get(k)) is int and value[k] >= 0
+                     for k in (*counters, 'blocks', 'bytes_total')), 'invalid Volume usage counters')
+            need(value['blocks_avail'] <= value['blocks_free'] <= value['blocks']
+                 and value['bytes_used'] <= value['bytes_total'], 'Volume usage counters out of range')
+
+
 def validate_runtime(output, machine, token):
     # Execute the canonical validator verbatim from this same sealed script
     # snapshot, rather than maintaining a second runtime-evidence predicate.
@@ -146,7 +165,7 @@ def verify(output, registry, common, source, machine, volume, before, after, vol
     need(all(first.get(k) == last.get(k) == original.get(k) for k in ('id', 'name', 'instance_id', 'config', 'image_ref'))
          and first['state'] == last['state'] == 'stopped', 'return native changed')
     current_volume = json.loads(read(volume_path))
-    need(current_volume == original_volume, 'return Volume changed')
+    validate_return_volume(original_volume, current_volume)
     proof = common / 'cloudbench-pool-reuse' / (machine + '.json')
     H['verify_pool'](proof, common, H['descriptor'](before), H['descriptor'](after), source, current_volume)
     probe_evidence = validate_probe(output, machine, token, meta['app'], source) if is_probe else None
